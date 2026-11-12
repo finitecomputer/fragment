@@ -21,6 +21,21 @@ export function untilSaid(u, now) {
   return `${u.said} in ${h} h${minutes % 60 ? ` ${minutes % 60} min` : ""}.`;
 }
 
+// A platform path's image (a notice's `image`) on `img`: read as the shell
+// reads the API, with its header (the session's cookie alone is no caller
+// for `/api/…`), and shown from its bytes; one that won't load goes.
+export function platformImage(img, path) {
+  img.dataset.src = path;
+  if (!globalThis.location || typeof fetch !== "function") return;
+  fetch(path, { headers: { "x-fragment-shell": "1" }, credentials: "same-origin" })
+    .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+    .then((b) => {
+      img.onload = () => URL.revokeObjectURL(img.src);
+      img.src = URL.createObjectURL(b);
+    })
+    .catch(() => img.remove?.());
+}
+
 export function createComputer({ api, el, seg, named, section, line, actionLine, computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, openPage, timers = globalThis, now = () => Date.now() }) {
   // ---- the computer: awake while the person is here, and its updates ----
   let woke = 0;
@@ -109,6 +124,57 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // off until that action's read is done, whatever draws it meanwhile, and
   // asks nothing (an invite's Accept and Decline are one answer)
   const pending = new Set();
+  // While a notice must be answered (`drawAsked`), the page's own keys take
+  // nothing (its shortcuts open the launcher, toggle the desktop): a key in
+  // the cover acts on it and stops there; any other is taken here first.
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      const cover = document.getElementById("must-answer");
+      if (!cover?.open || cover.contains(e.target)) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    },
+    true,
+  );
+  // A dialog the page opens while a notice must be answered (a frame's ask
+  // to add an agent, an answer's continuation) waits under the cover: the
+  // cover is shown again over it, the top of the page's top layer, so it
+  // keeps the keys, and the other is the page's once the cover goes.
+  const raised = new MutationObserver((changes) => {
+    const cover = document.getElementById("must-answer");
+    if (cover?.open && changes.some((c) => c.target !== cover && c.target.open)) {
+      cover.close();
+      reshow(cover);
+      focusChosen(cover, false);
+    }
+  });
+  raised.observe(document, { subtree: true, attributes: true, attributeFilter: ["open"] });
+  // The answer that has the cover's focus, by what it does (`dataset.answer`;
+  // the page's own buttons by their `action`), as the person moves it: kept
+  // through a redraw of the same notice, a rename of it, while it is off,
+  // and over a dialog opened meanwhile. The cover never gives an answer the
+  // focus the person didn't: shown, and when theirs is gone, the focus is
+  // the cover's own, where Enter answers nothing.
+  let chosen = null;
+  const keyOf = (b) => b.dataset.action ?? b.dataset.answer ?? null;
+  document.getElementById("must-answer")?.addEventListener("focusin", (e) => (chosen = keyOf(e.target)));
+  // The cover shown (again), the person's answer kept: `showModal` focuses
+  // its first button, which `focusin` would take for their choice.
+  function reshow(cover) {
+    const kept = chosen;
+    cover.showModal();
+    chosen = kept;
+  }
+  function focusChosen(cover, fresh) {
+    const kept = chosen && [...cover.querySelectorAll("button, a")].find((b) => keyOf(b) === chosen);
+    if (kept) {
+      if (!kept.disabled) kept.focus();
+    } else if (fresh || chosen || !cover.contains(document.activeElement)) {
+      chosen = null;
+      cover.focus();
+    }
+  }
   // the countdowns as last drawn, each its line and its time (`countdown`)
   let counting = [];
   let tick = null;
@@ -130,19 +196,33 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (failed.has(n.id)) copy.append(el("p", null, failed.get(n.id).said));
     if (n.detail) copy.append(el("p", "notice-detail", n.detail));
     (n.actions ?? []).forEach((a, i) => actions.append(actionOf(n, a, i === 0)));
+    // its picture (an agent's), a platform path; one that won't load goes
+    if (n.image) {
+      const pic = el("img", "notice-image");
+      pic.alt = "";
+      platformImage(pic, n.image);
+      row.append(pic);
+    }
     row.append(copy, actions);
     return row;
   }
   function actionOf(n, a, main) {
     if (a.open) {
-      const link = el("a", null, a.label);
+      const link = el("a", main ? "primary" : null, a.label);
       link.href = a.open;
-      link.target = "_blank";
-      link.rel = "noopener";
+      // a page of the platform's own opens here (`/move`), any other apart
+      const here = globalThis.location?.origin;
+      if (!here || new URL(a.open, here).origin !== here) {
+        link.target = "_blank";
+        link.rel = "noopener";
+      }
+      link.dataset.answer = `open ${a.open}`;
       return link;
     }
     const b = el("button", main ? "primary" : null, a.label);
     b.type = "button";
+    // what it does, whatever its label says (the cover keeps the focus by it)
+    b.dataset.answer = `post ${a.post} ${JSON.stringify(a.body ?? {})}`;
     b.disabled = pending.has(n.id);
     b.onclick = () => act(n, a);
     return b;
@@ -264,21 +344,72 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const box = document.getElementById("computer-notices");
     const t = now();
     const all = notices() ?? [];
-    // a failure whose notice is gone: a refusal stays, a line of its own; a
-    // call that never reached the server goes with it
-    const gone = [...failed].filter(([id]) => !all.some((n) => n.id === id));
-    for (const [id, f] of gone) if (!f.refused) failed.delete(id);
+
     // a notice a restart answers waits while it runs; one whose time passed is gone
     const told = all.filter((n) => !(n.until && n.until.at <= t) && !(restart && (n.actions ?? []).some(restarts)));
+    // a failure whose notice is not drawn (the read has it no more, or its
+    // time passed): a refusal stays, a line of its own; a call that never
+    // reached the server goes with it
+    const gone = [...failed].filter(([id]) => !told.some((n) => n.id === id));
+    for (const [id, f] of gone) if (!f.refused) failed.delete(id);
     counting = [];
     // a read that failed, its notices' too: what the last said stays, under its line
     const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed || reads().noticesFailed ? ["refresh"] : [];
     const refusals = gone.filter(([, f]) => f.refused).map(([id, f]) => refusalRow(id, f));
-    const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.map(noticeRow), ...refusals];
+    const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.filter((n) => !n.mustAnswer).map(noticeRow), ...refusals];
     box.replaceChildren(...rows);
     box.hidden = !rows.length;
+    drawAsked(told.find((n) => n.mustAnswer && !answeredHere(n)), own);
     countdown();
     paintSettings();
+  }
+  // On the platform's page one of its answers opens (the move's `/move`),
+  // a notice that must be answered is answered there: its cover stands
+  // aside while that page shows, and is back on any other.
+  function answeredHere(n) {
+    const here = globalThis.location;
+    if (!here) return false;
+    return (n.actions ?? []).some((a) => {
+      if (!a.open) return false;
+      const to = new URL(a.open, here.href);
+      return to.origin === here.origin && to.pathname === here.pathname;
+    });
+  }
+  // One that must be answered (`mustAnswer`) shows alone, over everything,
+  // a guest's welcome too (`#must-answer`, a modal dialog: the page behind
+  // takes nothing), drawn as its row is, until the read after an answer of
+  // it has it no more: the first in the list first (its owner's oldest).
+  // Escape, or a browser that shuts it anyway, leaves it as it was. The
+  // page's own rows (`own`: a read that failed, with Try again; a deploy)
+  // are drawn over it too, as the band behind it can't be reached.
+  function drawAsked(n, own) {
+    const cover = document.getElementById("must-answer");
+    if (!cover) return;
+    if (!n) {
+      delete cover.dataset.id;
+      chosen = null;
+      cover.replaceChildren();
+      if (cover.open) cover.close();
+      return;
+    }
+    const fresh = cover.dataset.id !== n.id;
+    if (fresh) chosen = null;
+    cover.dataset.id = n.id;
+    // shown, the cover's own focus (its first answer's otherwise)
+    cover.tabIndex = -1;
+    cover.autofocus = true;
+    cover.oncancel = (e) => e.preventDefault();
+    cover.onkeydown = (e) => e.stopPropagation();
+    cover.onclose = () => {
+      if (cover.dataset.id && !cover.open) {
+        reshow(cover);
+        focusChosen(cover, false);
+      }
+    };
+    cover.setAttribute("aria-label", n.title);
+    cover.replaceChildren(...own.map(pageRow), noticeRow(n));
+    if (!cover.open) reshow(cover);
+    focusChosen(cover, fresh);
   }
   // The restart, done: awake on a newer start, or a newer start that won't
   // (its notice then says so, with Try again). Settings' Computer, shown,
@@ -423,6 +554,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     document.removeEventListener("visibilitychange", prewake);
     document.removeEventListener("visibilitychange", followVisibility);
     if (tick !== null) timers.clearTimeout(tick);
+    raised.disconnect();
     follow.dispose();
   } };
 }

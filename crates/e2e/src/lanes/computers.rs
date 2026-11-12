@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 use super::jobs::{events, records};
 use super::ledger::{charged, entries, quiet, usage};
 use crate::api::{Api, Call, Socket};
-use super::credentials::{model_checks, placeholder, swap_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS};
+use super::credentials::{model_checks, placeholder, swap_checks, vault_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
@@ -946,7 +946,7 @@ struct Doors<'a> {
 /// agent, which joins as a viewer); then a direct message from the paired
 /// account reaches the agent as its owner's (asked as them), and the
 /// agent's reply goes back to Telegram, its interim words not, its file
-/// named. Only its owner's words are its owner's: the agent, acting for its
+/// named, the bot typing there while it works. Only its owner's words are its owner's: the agent, acting for its
 /// owner, sets none of its secrets, writes it no page, gets no token to
 /// push its code, and shares it no way (visibility, invite, share link),
 /// as it still shares its owner's other fragments; a delivery without the webhook's secret, a stranger's
@@ -1073,6 +1073,21 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     deliver(Telegram::message(13, PAUL, "Paul", "draw me something"), Some(HOOK))?;
     let named = s.eventually(wake, || sent("could not be attached").is_some());
     s.ok("a reply whose file a viewer cannot attach goes with its words, saying so", named, json!(tg.sent()));
+    // while its agent works on a message from Telegram (a slow tool call),
+    // Telegram shows the bot typing, and no longer once its answer went
+    let relay = ran(&deliver(Telegram::message(14, PAUL, "Paul", "tool please, slowly"), Some(HOOK))?);
+    let answered = s.eventually(wake, || sent("tool please, slowly").is_some());
+    let typing = super::jobs::settle(api, c.owner, &name, relay["output"]["typing"].as_i64().unwrap_or(0), &["succeeded", "held"], wake);
+    let answer = tg.sent().iter().position(|m| m["chat_id"] == PAUL && m["text"].as_str().is_some_and(|t| t.contains("tool please, slowly")));
+    let actions: Vec<Value> = tg.actions().into_iter().filter(|a| a["chat_id"] == PAUL).collect();
+    s.ok(
+        "its agent working on a message from Telegram shows the bot typing there until its answer goes, and not after",
+        answered
+            && typing["status"] == "succeeded"
+            && typing["output"]["why"] == "answered"
+            && answer.is_some_and(|at| actions.iter().any(|a| a["after"] == at) && actions.iter().all(|a| a["action"] == "typing" && a["after"].as_u64().is_some_and(|n| n <= at as u64))),
+        json!({ "relay": relay, "typing": typing, "answer": answer, "actions": actions, "sent": tg.sent() }),
+    );
 
     // only its owner edits it: the agent, acting for its owner, sets none of
     // its secrets (it would know the webhook's and forge a delivery), writes
@@ -1256,16 +1271,20 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     let ticket = |who: &crate::Keys, act: &str| api.signed(who, "POST", &path, Some(&json!({ "door": "simplex", "act": act })));
     let r = ticket(c.stranger, "link")?;
     s.ok("no one but its owner is given a ticket to the agent's door", r.status == 404, &r);
-    // an agent shared beyond its owner and their agents is given no door
-    // (FIN-352): an invite waiting, its link refused; revoked, it is given
+    // an agent its link opens is given no door (FIN-352); members only
+    // again, it is, and an invite waiting (someone named) refuses none
+    let visibility = |v: &str| api.signed(c.owner, "PUT", &format!("/api/f/{}/visibility", c.agent), Some(&json!({ "visibility": v })));
+    let linked = visibility("link")?;
+    let shared = ticket(c.owner, "link")?;
+    let narrowed = visibility("members")?;
     let outsider = format!("door-outsider-{}@e2e.test", &crate::Keys::generate().pubkey_hex()[..8]);
     let invited = api.signed(c.owner, "POST", &format!("/api/f/{}/invites", c.agent), Some(&json!({ "email": outsider, "role": "viewer" })))?;
-    let shared = ticket(c.owner, "link")?;
+    let named = ticket(c.owner, "link")?;
     let revoked = api.signed(c.owner, "DELETE", &format!("/api/f/{}/invites/{outsider}", c.agent), None)?;
     s.ok(
-        "an agent with an invite waiting is given no link ticket to a door (403 unshare_first), and once it is revoked, it is",
-        invited.status == 200 && shared.status == 403 && shared.body["reason"] == "unshare_first" && revoked.status == 200,
-        json!({ "invited": invited.body, "ticket": shared.body, "revoked": revoked.status }),
+        "an agent its link opens is given no link ticket to a door (403 unshare_first); members only again, with an invite waiting, it is",
+        linked.status == 200 && shared.status == 403 && shared.body["reason"] == "unshare_first" && narrowed.status == 200 && invited.status == 200 && named.status == 200 && revoked.status == 200,
+        json!({ "linked": linked.status, "ticket": shared.body, "narrowed": narrowed.status, "invited": invited.body, "named": named.status, "revoked": revoked.status }),
     );
     let t = ticket(c.owner, "link")?;
     let key = fragment_core::npub::parse(c.identity).unwrap_or_default();
@@ -1895,7 +1914,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON))]);
     s.deploy(&agent);
     // members only, as one made from the agent template is: a door is
-    // linked only on an agent no one else is in (FIN-352)
+    // linked only on an agent its link does not open (FIN-352)
     let r = api.signed(&owner, "PUT", &format!("/api/f/{agent_name}/visibility"), Some(&json!({ "visibility": "members" })))?;
     anyhow::ensure!(r.status == 200, "the agent made members-only: {r}");
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
@@ -2087,7 +2106,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
+        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(VAULT_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
@@ -2106,6 +2125,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             json!({ "quoted": quoted, "rows": spoken }),
         );
         replies_so_far += model_checks(s, api, &swapping, &fetched)?;
+        replies_so_far += vault_checks(s, api, &swapping, &fetched)?;
         let r = allow(&stranger, json!([]))?;
         s.ok("no one else narrows its agents' providers", r.status == 404, &r);
         let r = allow(&owner, json!(["notion"]))?;

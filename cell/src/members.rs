@@ -124,6 +124,7 @@ fn member_json(r: &Value) -> CellResult<Member> {
         added_at: r["added_at"].as_i64().unwrap_or(0),
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
         owner: r["owner"].as_str().map(str::to_string),
+        email: None,
     })
 }
 
@@ -493,9 +494,22 @@ impl FragmentCell {
         Ok(out)
     }
 
-    pub(crate) fn members(&self, caller: &Caller) -> CellResult<Response> {
+    /// The API's list (`fragment members list`): to the owner, and their
+    /// agent for them, each person by their email too, as the share sheet
+    /// shows them (decision 48). A page's (`__members`) and a job's name no
+    /// one: they ask `__people` (`job.people`), which decides by who asks.
+    pub(crate) async fn members(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        json_response(&self.member_list()?)
+        let mut list = self.member_list()?;
+        if self.shares(caller) {
+            // bounded: at most MEMBERS_MAX, asked PROFILES_MAX at a time
+            let people = list.members.iter().filter(|m| m.kind != Some(IdentityKind::Agent)).map(|m| m.principal.clone()).collect();
+            let profiles = crate::share::profiles(&self.env, people).await;
+            for m in &mut list.members {
+                m.email = profiles.get(&m.principal).and_then(|p| p.email.clone());
+            }
+        }
+        json_response(&list)
     }
 
     /// Every member, the first added first (a chat's lead is its first
@@ -623,11 +637,6 @@ impl FragmentCell {
             }));
         }
         self.connector_role(body.role)?;
-        // anyone but the owner's own agents, added or given a role, is
-        // sharing (reach.rs)
-        if target.owner.as_deref() != Some(self.must(MetaKey::Owner)?.as_str()) {
-            self.share_while_private()?;
-        }
         if current.is_some() && body.role < Role::Editor && self.chat_agent()?.as_deref() == Some(target.id.as_str()) {
             return Err(refusal(true, CHAT_AGENT_STAYS_EDITOR));
         }
@@ -825,8 +834,6 @@ impl FragmentCell {
             Err(e) => return Err(e),
         }
         self.drop_spent_invites().await?;
-        // an invite is sharing (reach.rs), decided in the write's own turn
-        self.share_while_private()?;
         let before = self.rows("SELECT email, role, expires_at, created_by, created_at FROM invites WHERE email = ?", vec![email.as_str().into()])?;
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
@@ -960,10 +967,6 @@ impl FragmentCell {
         let kept = current.is_some_and(|c| c >= role);
         // the owner is in already, with their agents as they chose them
         let owner = current == Some(Role::Owner);
-        // anyone else's yes is sharing (reach.rs): the invite waits on
-        if !owner {
-            self.share_while_private()?;
-        }
         let agents: &[String] = if owner { &[] } else { &claim.agents };
         self.room_for(u64::from(current.is_none()) + self.not_members(agents)?)?;
         self.exec("DELETE FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
@@ -1122,7 +1125,7 @@ impl FragmentCell {
 
     pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        // members only narrows it; a link or public is sharing (reach.rs)
+        // members only narrows it; its link or public, not with reach (reach.rs)
         if body.visibility != Visibility::Members {
             self.share_while_private()?;
         }
@@ -1188,25 +1191,40 @@ impl FragmentCell {
         if !fragment_proto::valid_secret_name(key) {
             return Err(CellError::invalid("a secret's name must match ^[A-Z][A-Z0-9_]{0,63}$"));
         }
-        let put: PutSecret = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts}}: {e}")))?;
+        let mut put: PutSecret = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts}} or {{fromVault, hosts}}: {e}")))?;
+        let hosts = secret_hosts(&put.hosts)?;
+        // a secret of the caller's own Vault, moved here (FIN-466): theirs
+        // alone to move, never an agent's. Its take claims it for this
+        // fragment's KEY (`fragment_core::vault::Claimed`), so what would
+        // refuse it here refuses it first
+        let moved = match put.from_vault.take() {
+            Some(_) if !put.value.is_empty() => return Err(CellError::invalid("a secret is its value or fromVault, not both")),
+            Some(name) => {
+                let person = caller.signed.as_ref().filter(|s| s.identity.kind == fragment_proto::IdentityKind::Person).map(|s| s.identity.id.clone());
+                let person = person.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only a person moves a secret of their vault, from their own session or key"))?;
+                self.reach_while_private()?;
+                self.secret_room(key)?;
+                let to = format!("{}/{key}", self.name()?);
+                let crate::vault::Taken(value, revision) = crate::vault::take(&self.env, &person, &name, &to).await?;
+                put.value = value;
+                Some((person, name, to, revision))
+            }
+            None => None,
+        };
         if put.value.is_empty() {
             return Err(CellError::invalid("a secret's value is empty"));
         }
         if put.value.len() > limits::SECRET_MAX_BYTES {
             return Err(CellError::too_large("a secret", put.value.len(), limits::SECRET_MAX_BYTES));
         }
-        let hosts = secret_hosts(&put.hosts)?;
         // sealed first (reading the host secret may yield): the checks and
         // the write below share one turn
         let sealed = crate::keys::seal(&self.env, &self.scope(), put.value.as_bytes()).await?;
         self.require(caller, false, Role::Editor)?;
-        // a key is reach: none while it is shared beyond its owner and
-        // their agents (reach.rs), decided in the write's own turn
+        // a key is reach: none while its link opens it (reach.rs), decided
+        // in the write's own turn
         self.reach_while_private()?;
-        let exists = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![key.into()])?.is_empty();
-        if !exists && self.count("SELECT COUNT(*) AS n FROM secrets")? >= limits::SECRETS_MAX as u64 {
-            return Err(CellError::invalid(format!("a fragment has at most {} secrets", limits::SECRETS_MAX)));
-        }
+        let exists = self.secret_room(key)?;
         let by = self.caller_id(caller)?;
         self.exec(
             "INSERT INTO secrets (name, sealed, set_by, set_at) VALUES (?, ?, ?, ?)
@@ -1226,7 +1244,26 @@ impl FragmentCell {
         if !exists {
             self.sharing_changed()?;
         }
+        // kept here: gone from the Vault, so it has one home. Should that
+        // fail, it stays there too, claimed for this KEY: the same move
+        // again finishes it (only the value taken: one its person set
+        // since stays theirs there)
+        if let Some((person, name, to, revision)) = moved {
+            if let Err(e) = crate::vault::moved(&self.env, &person, &name, &to, &revision).await {
+                console_error!("{}", json!({ "secret": key, "moved": name, "vault": "kept", "error": e.message }));
+            }
+        }
         json_response(&json!({ "ok": true, "name": key, "hosts": hosts }))
+    }
+
+    /// Whether `key` is held already; a new one refused at
+    /// `SECRETS_MAX`.
+    fn secret_room(&self, key: &str) -> CellResult<bool> {
+        let exists = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![key.into()])?.is_empty();
+        if !exists && self.count("SELECT COUNT(*) AS n FROM secrets")? >= limits::SECRETS_MAX as u64 {
+            return Err(CellError::invalid(format!("a fragment has at most {} secrets", limits::SECRETS_MAX)));
+        }
+        Ok(exists)
     }
 
     pub(crate) fn list_secrets(&self, caller: &Caller) -> CellResult<Response> {

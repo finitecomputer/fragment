@@ -20,6 +20,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use fragment_bridge::simplex::link::{Action, Inbound, Input, Link, Notice, Phase};
+use fragment_bridge::simplex::stage;
 use fragment_bridge::simplex::wire::{self, Resp};
 use serde_json::{json, Value};
 use support::simplex::*;
@@ -898,6 +899,87 @@ async fn messages_go_both_ways_through_the_chat() {
     fake.with(|w| assert_eq!(w.made.as_slice(), std::slice::from_ref(&chat), "its SimpleX chat found again, never made twice"));
 }
 
+/// What the person's app heard of `sent` (their message, by its sender's
+/// id), in order, until `done` holds: `+` and `-` for the agent's
+/// `WORKING` reaction on it put on and taken off, and each text received.
+async fn heard(person: &mut Api, sent: &str, within: Duration, heard: &mut Vec<String>, done: impl Fn(&[String]) -> bool) {
+    let t0 = Instant::now();
+    // bounded by `within`
+    loop {
+        while let Some(e) = person.events.pop_front() {
+            match tag(&e).as_str() {
+                "chatItemReaction" if e.to_string().contains(sent) && e["reaction"]["chatReaction"]["reaction"]["emoji"] == "🚀" => {
+                    heard.push(if e["added"] == true { "+".into() } else { "-".into() });
+                }
+                "newChatItems" => {
+                    for ci in e["chatItems"].as_array().into_iter().flatten() {
+                        let item = &ci["chatItem"];
+                        if item["chatDir"]["type"] == "directRcv" && item["content"]["type"] == "rcvMsgContent" {
+                            heard.push(item["content"]["msgContent"]["text"].as_str().unwrap_or("").to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if done(heard) {
+            return;
+        }
+        assert!(t0.elapsed() < within, "the person heard only {heard:?} within {within:?}");
+        person.drain(Duration::from_millis(200)).await;
+    }
+}
+
+/// Goal (Paul, 2026-11-11: their app shows the agent working), against the
+/// real core: while the agent's turn runs on its owner's SimpleX message,
+/// their app shows `WORKING` on that message, from before its reply comes
+/// until its turn ends; and a turn that ends with no reply (an error) takes
+/// it off too. Nothing else is said for it: no message of its own.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn the_owners_app_shows_the_agent_working() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("working", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    c.link(&fake);
+    let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_until(Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+    let at_person = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+
+    // a slow turn (a tool call of two seconds): on before its reply, off once it ends
+    let sent = say(&mut person, at_person, "tool please, slowly").await;
+    let mut got = vec![];
+    let answer = |t: &String| t.starts_with("echo: [paul]") && t.contains("tool please, slowly");
+    heard(&mut person, &sent, Duration::from_secs(90), &mut got, |h| h.iter().any(answer) && h.iter().any(|t| t == "-")).await;
+    let on = got.iter().position(|t| t == "+");
+    let reply = got.iter().position(answer);
+    assert!(on.is_some_and(|on| reply.is_some_and(|r| on < r)), "shown working before its reply: {got:?}");
+    assert_eq!(got.iter().filter(|t| *t == "+" || *t == "-").collect::<Vec<_>>(), vec!["+", "-"], "on once, then off: {got:?}");
+    assert!(!got.iter().any(|t| t.contains('🚀')), "no message of its own: {got:?}");
+
+    // a turn that ends with no reply (an error): off all the same
+    let sent = say(&mut person, at_person, "the message that fails").await;
+    let mut got = vec![];
+    heard(&mut person, &sent, Duration::from_secs(90), &mut got, |h| h.iter().any(|t| t == "-")).await;
+    assert_eq!(got.iter().filter(|t| *t == "+" || *t == "-").collect::<Vec<_>>(), vec!["+", "-"], "on, then off with no reply: {got:?}");
+    // its app's item agrees: no reaction left on either message
+    let items = person.cmd(&format!("/_get chat @{at_person} count=20")).await;
+    let reacted: Vec<Value> = items["chat"]["chatItems"].as_array().into_iter().flatten().filter(|i| i["reactions"].as_array().is_some_and(|r| !r.is_empty())).cloned().collect();
+    assert!(reacted.is_empty(), "nothing left on: {reacted:?}");
+    c.stop();
+}
+
 /// The scripted agent's answer to "speak and draw", in the person's app: its
 /// text, then a voice message (its length, playable: the host's ffprobe
 /// decodes it) and a file, each the chat's own attachment byte for byte;
@@ -1119,4 +1201,352 @@ async fn a_rename_reaches_the_owners_app() {
     let last = person.events.iter().rev().find(|e| tag(e) == "contactUpdated").map(shown);
     assert_eq!(last.as_ref().and_then(|p| p["displayName"].as_str()), Some("Waffle Bot"), "the person's app shows its name now");
     println!("frames in {}", lab.dir.display());
+}
+
+/// The move's routine, as the platform appends it to an agent's own
+/// `tasks` (fragment_core::migrations::routine_text), naming `stage`.
+fn move_routine(fake: &support::fake::Fake, label: &str, stage: &str) {
+    let text = format!("Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage {stage}.");
+    fake.with(|w| w.append(&format!("{label}--k3x9"), "tasks", &format!("npub1{label}"), json!({ "kind": "routine", "text": text })));
+}
+
+/// A stage's zip as the mover writes one (Python's `zipfile`: deflated,
+/// zip64), holding a bit of home and `files` (its path in the zip, from).
+fn stage_zip(dir: &Path, files: &[(&str, &Path)]) -> bytes::Bytes {
+    let notes = dir.join("notes.md");
+    std::fs::write(&notes, "# my notes\n").expect("written");
+    let mut args: Vec<String> = vec![format!("{}=workspace/notes.md", notes.display())];
+    args.extend(files.iter().map(|(name, from)| format!("{}={name}", from.display())));
+    let out = dir.join("stage.zip");
+    let script = "import sys, zipfile\nwith zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:\n    for a in sys.argv[2:]:\n        src, name = a.split('=', 1)\n        with open(src, 'rb') as f, z.open(name, 'w', force_zip64=True) as w:\n            w.write(f.read())\n";
+    assert!(Command::new("python3").arg("-I").arg("-c").arg(script).arg(&out).args(&args).status().expect("python3 runs").success());
+    bytes::Bytes::from(std::fs::read(&out).expect("its zip"))
+}
+
+/// What the person's app received from the agent, by text.
+async fn phone_got(person: &mut Api, text: &str, within: Duration) {
+    received(person, within, |got| got.iter().any(|t| t == text)).await;
+}
+
+/// Goal (FIN-463): an owner's SimpleX conversation with their old
+/// finite.computer agent (simplex-chat v7.0.2: its contact address, the
+/// owner and a friend connected, a group joined) goes on with their new
+/// agent, with no code to scan, against the real cores. Its stage is set
+/// aside as the move's routine names it; only the owner's adoption ticket
+/// adopts it, once; what the phone sent while the agent moved is carried
+/// and nothing older is (what was delivered is right); both ways work;
+/// the friend, the group and the address are let go; it survives a
+/// restart. A stage whose owner is no contact of it is refused, and Link
+/// SimpleX works then as before; a stage of no SQLite is never staged.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn an_old_agents_conversation_is_adopted() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("adopt", true);
+    let mut person = lab.start("phone", false).await;
+    let mut friend = lab.start("friend", false).await;
+    let mut old = lab.start_old("old").await;
+
+    // the old agent, as finite.computer ran it: an address, auto-accepted
+    let a = old.cmd("/address").await;
+    let address = a["connLinkContact"]["connShortLink"].as_str().or(a["connLinkContact"]["connFullLink"].as_str()).expect("its address").to_string();
+    assert_eq!(tag(&old.cmd("/auto_accept on").await), "userContactLinkUpdated");
+    let mut at = vec![];
+    for c in [&mut person, &mut friend] {
+        c.cmd(&format!("/c {address}")).await;
+        at.push(c.wait(Duration::from_secs(90), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the old agent, at theirs"));
+    }
+    let (at_person, at_friend) = (at[0], at[1]);
+    let owner = old.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected" && e["contact"]["profile"]["displayName"] == "phone").await["contact"]["contactId"].as_i64().expect("the owner, at the old agent's");
+    assert_eq!(tag(&friend.cmd("/g team").await), "groupCreated");
+    friend.cmd("/a team FiniteAgent").await;
+    let g = old.wait(Duration::from_secs(60), |e| tag(e) == "receivedGroupInvitation").await["groupInfo"]["groupId"].as_i64().expect("a group");
+    old.cmd(&format!("/_join #{g}")).await;
+    friend.wait(Duration::from_secs(60), |e| tag(e) == "joinedGroupMember").await;
+    for i in 0..3 {
+        say(&mut person, at_person, &format!("before the move {i}")).await;
+        old.wait(Duration::from_secs(30), |e| tag(e) == "newChatItems" && e.to_string().contains(&format!("before the move {i}"))).await;
+        let body = json!([{ "msgContent": { "type": "text", "text": format!("old answer {i}") } }]);
+        old.cmd(&format!("/_send @{owner} json {body}")).await;
+        phone_got(&mut person, &format!("old answer {i}"), Duration::from_secs(30)).await;
+    }
+
+    // the move: the old agent stopped (whole: no journal), the phone writes on
+    drop(old);
+    lab.stop("old");
+    let olddir = lab.db_dir("old");
+    let files: Vec<String> = std::fs::read_dir(&olddir).expect("its data").flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    assert!(!files.iter().any(|f| f.ends_with("-wal") || f.ends_with("-journal")), "a clean stop: {files:?}");
+    for i in 0..2 {
+        say(&mut person, at_person, &format!("while moving {i}")).await;
+    }
+    let owner_json = lab.dir.join("owner.json");
+    std::fs::write(&owner_json, format!("{{\"contact\":{owner}}}")).expect("written");
+    let zip = stage_zip(&lab.dir, &[(stage::CHAT, &olddir.join("identity_chat.db")), (stage::AGENT, &olddir.join("identity_agent.db")), (stage::OWNER, &owner_json)]);
+
+    // its new agent's computer, always on, a chat of its owner's as home
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper", "fred"]).await;
+    fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    fake.chat_named("fred-chat--h6j7", &["fred"]);
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+        w.stages.insert("old1.p1.1".into(), ("juniper--k3x9".into(), zip.clone()));
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    let v = c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    assert_eq!(v.get("staged"), None, "nothing staged before its routine");
+    // invalid: no stage set aside, no adoption
+    let (code, _) = c.http_with("POST", "/simplex/adopt?agent=juniper--k3x9", Some(&fake.ticket("juniper", "adopt")));
+    assert_eq!(code, 404, "nothing to keep yet");
+
+    // the routine names its stage: set aside, nothing run
+    move_routine(&fake, "juniper", "old1.p1.1");
+    c.state_until(Duration::from_secs(60), "staged", |v| v["staged"] == true).await;
+    assert_eq!(c.cores(), 0, "setting aside runs nothing");
+    assert_eq!(c.exec("stat -c %a /data/simplex/juniper--k3x9/staged").trim(), "700");
+    // only its owner's ticket adopts it: none, or a forged one, is refused
+    let (code, _) = c.http("POST", "/simplex/adopt?agent=juniper--k3x9");
+    assert_eq!(code, 403, "no ticket");
+    let mut forged = fake.ticket("juniper", "adopt");
+    forged["sig"] = json!("ab".repeat(64));
+    assert_eq!(c.http_with("POST", "/simplex/adopt?agent=juniper--k3x9", Some(&forged)).0, 403, "forged");
+    let link_ticket = fake.ticket("juniper", "link");
+    assert_eq!(c.http_with("POST", "/simplex/adopt?agent=juniper--k3x9", Some(&link_ticket)).0, 403, "a link's ticket adopts nothing");
+
+    let ticket = fake.ticket("juniper", "adopt");
+    let t0 = Instant::now();
+    let (code, v) = c.http_with("POST", "/simplex/adopt?agent=juniper--k3x9", Some(&ticket));
+    assert_eq!((code, v["phase"].as_str(), v["name"].as_str()), (200, Some("linked"), Some("phone")), "{v}\n{}", wire::cut(&logs(&c.name), 6_000));
+    println!("adopted in {} ms", t0.elapsed().as_millis());
+    assert!(fake.with(|w| w.doors.contains_key("juniper--k3x9")), "its door's key, registered with the ticket");
+    assert_eq!(c.http_with("POST", "/simplex/adopt?agent=juniper--k3x9", Some(&ticket)).0, 403, "the same ticket twice adopts once");
+    assert_eq!(c.http_with("POST", "/simplex/adopt?agent=juniper--k3x9", Some(&fake.ticket("juniper", "adopt"))).0, 409, "linked: another ticket adopts nothing");
+    assert!(c.exec("ls /data/simplex/juniper--k3x9").lines().all(|f| f != "staged"), "the staged copy let go");
+
+    // what the phone sent while it moved is carried, and nothing older
+    c.state_until(Duration::from_secs(60), "running", |v| v["running"] == true).await;
+    fake.until(60_000, "its SimpleX chat made", |w| w.made.iter().any(|m| m.starts_with("juniper-simplex--"))).await;
+    let chat = fake.with(|w| w.made.iter().find(|m| m.starts_with("juniper-simplex--")).cloned()).expect("its chat");
+    fake.until(60_000, "what came while it moved", |w| w.records(&chat, "chat").iter().filter(|r| r["body"]["relayed"]["via"] == "simplex").count() >= 2).await;
+    // told once that it moved, by its name, before it answers what came meanwhile
+    let got = received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] while moving 1")).await;
+    assert_eq!(got.iter().filter(|t| t.starts_with("Hi, it's Juniper. I've moved")).count(), 1, "{got:?}");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let texts = |fake: &support::fake::Fake| relayed_on(fake, &chat).iter().map(|r| r["body"]["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    assert_eq!(texts(&fake), ["while moving 0", "while moving 1"], "no message of the old conversation carried again");
+    // both ways, its new name in their app
+    say(&mut person, at_person, "hello new home").await;
+    phone_got(&mut person, "echo: [paul] hello new home", Duration::from_secs(60)).await;
+    let contacts = person.cmd("/_contacts 1").await;
+    let shown = contacts["contacts"].as_array().into_iter().flatten().find(|c| c["contactId"] == at_person).map(|c| c["profile"]["displayName"].clone());
+    assert_eq!(shown, Some(json!("Juniper")), "the same contact, by the agent's name now");
+    // the old agent's friend, group and address, let go
+    friend.wait(Duration::from_secs(60), |e| tag(e) == "contactDeletedByContact" && e["contact"]["contactId"] == at_friend).await;
+    friend.wait(Duration::from_secs(60), |e| tag(e) == "leftMember").await;
+    let t0 = Instant::now();
+    // bounded by 60 s
+    while c.exec("cat /data/simplex/juniper--k3x9/link.json").contains("leftovers") {
+        assert!(t0.elapsed() < Duration::from_secs(60), "every leftover let go: {}", c.exec("cat /data/simplex/juniper--k3x9/link.json"));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // a restart: still its link, nothing carried twice
+    c.stop();
+    fake.with(|w| w.computer["generation"] = json!(2));
+    let c = Computer::start(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "linked and running after a restart", |v| v["phase"] == "linked" && v["running"] == true).await;
+    say(&mut person, at_person, "after the restart").await;
+    phone_got(&mut person, "echo: [paul] after the restart", Duration::from_secs(60)).await;
+    assert_eq!(texts(&fake), ["while moving 0", "while moving 1", "hello new home", "after the restart"], "each once");
+
+    // invalid stages: one of no SQLite is never staged; one whose owner is
+    // no contact of it is refused at adoption; then Link SimpleX, as before
+    let junk = lab.dir.join("junk.db");
+    std::fs::write(&junk, b"not a database").expect("written");
+    let bad = stage_zip(&lab.dir, &[(stage::CHAT, &junk), (stage::AGENT, &olddir.join("identity_agent.db")), (stage::OWNER, &owner_json)]);
+    fake.with(|w| w.stages.insert("old2.p1.1".into(), ("fred--k3x9".into(), bad)));
+    move_routine(&fake, "fred", "old2.p1.1");
+    let t0 = Instant::now();
+    // bounded by 30 s
+    while !c.events("simplex.stage_let_go").iter().any(|e| e["agent"] == "fred--k3x9") {
+        assert!(t0.elapsed() < Duration::from_secs(30), "a stage of no SQLite is let go");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(c.state_of_until("fred--k3x9", Duration::from_secs(5), "off", |v| v["phase"] == "off").await.get("staged"), None);
+    let nobody = lab.dir.join("nobody.json");
+    std::fs::write(&nobody, "{\"contact\":99}").expect("written");
+    let wrong = stage_zip(&lab.dir, &[(stage::CHAT, &olddir.join("identity_chat.db")), (stage::AGENT, &olddir.join("identity_agent.db")), (stage::OWNER, &nobody)]);
+    fake.with(|w| w.stages.insert("old3.p1.1".into(), ("fred--k3x9".into(), wrong)));
+    move_routine(&fake, "fred", "old3.p1.1");
+    c.state_of_until("fred--k3x9", Duration::from_secs(60), "staged", |v| v["staged"] == true).await;
+    let (code, v) = c.http_with("POST", "/simplex/adopt?agent=fred--k3x9", Some(&fake.ticket("fred", "adopt")));
+    assert_eq!(code, 422, "its owner is no contact of it: {v}");
+    let v = c.state_of_until("fred--k3x9", Duration::from_secs(10), "off again", |v| v["phase"] == "off").await;
+    assert_eq!(v.get("staged"), None, "let go");
+    assert!(fake.with(|w| !w.doors.contains_key("fred--k3x9")), "no door opened for it");
+    assert_eq!(c.link_as(&fake, "fred").0, 200);
+    let v = c.state_of_until("fred--k3x9", Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    let mut fresh = lab.start("fresh", false).await;
+    fresh.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_of_until("fred--k3x9", Duration::from_secs(90), "linked by its invitation", |v| v["phase"] == "linked").await;
+}
+
+/// Goal (FIN-483): a second core started on a copy of a linked agent's
+/// databases (an old agent run again after its conversation moved) takes
+/// its contact's queues, and the bridge's core, told so
+/// (`contactAnotherClient`), is started again by the bridge, which takes
+/// them back: the phone is heard and answered again with no restart of the
+/// computer and no relink.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn a_second_core_on_its_databases_is_outlasted() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("another", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    c.link(&fake);
+    let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_until(Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+    let at_person = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+    say(&mut person, at_person, "before the fork").await;
+    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] before the fork")).await;
+
+    // a copy of its databases, taken under a hold (whole), as an old
+    // agent's are; its core started again after
+    c.exec("touch /run/computer/hold");
+    let t0 = Instant::now();
+    // bounded: 20 s, the platform's wait for an answer
+    while c.exec("test -e /run/computer/held && echo yes").trim() != "yes" {
+        assert!(t0.elapsed() < Duration::from_secs(20), "the hold answered");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let fork = lab.db_dir("fork");
+    std::fs::create_dir_all(&fork).expect("its folder");
+    for f in ["sx_chat.db", "sx_agent.db"] {
+        std::fs::copy(data.join("simplex/juniper--k3x9").join(f), fork.join(f)).expect("copied");
+    }
+    c.exec("rm -f /run/computer/hold /run/computer/held");
+    c.state_until(Duration::from_secs(30), "running again", |v| v["running"] == true).await;
+
+    // the second core takes the queues; the bridge's is told, and starts again
+    let mut second = lab.start("fork", true).await;
+    let t0 = Instant::now();
+    // bounded by 60 s
+    while c.events("simplex.taken").is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(60), "its core was told another client took its chat\n{}", wire::cut(&logs(&c.name), 6_000));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    c.state_until(Duration::from_secs(60), "started again", |v| v["running"] == true && v["phase"] == "linked").await;
+    second.drain(Duration::from_secs(2)).await;
+    drop(second);
+    lab.stop("fork");
+
+    // heard and answered again, its computer never restarted, nothing relinked
+    let t0 = Instant::now();
+    say(&mut person, at_person, "after the fork").await;
+    received(&mut person, Duration::from_secs(120), |got| got.iter().any(|t| t == "echo: [paul] after the fork")).await;
+    println!("answered again {} ms after the second core stopped", t0.elapsed().as_millis());
+    assert_eq!(c.events("simplex.core_up").iter().filter(|e| e["rollback"] == true).count(), 0, "no rollback read into it");
+    say(&mut person, at_person, "and again").await;
+    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] and again")).await;
+}
+
+/// Goal: a scan cut short is made anew (preview, 2026-11-11: an owner
+/// linked a second agent beside one linked already, scanned its code, and
+/// nothing came of it, said nowhere). The core takes the phone's
+/// confirmation (`requested`), then accepts it; a core stopped between the
+/// two (here a hold, as a save is, while the core is frozen right there)
+/// never accepts it, in any later start. So the next start makes a new
+/// code beside it and its page says why; the person scans that, and the
+/// agent is linked, with its SimpleX chat, and the stalled scan let go.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker, python3 and sqlite3; run by hand"]
+async fn a_scan_cut_short_is_made_anew() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("scan-cut", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["xbt", "juniper"]).await;
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    // one agent linked already
+    c.state_of_until("xbt--k3x9", Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    assert_eq!(c.link_as(&fake, "xbt").0, 200);
+    let v = c.state_of_until("xbt--k3x9", Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_of_until("xbt--k3x9", Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+
+    // the second: its core frozen as it takes the phone's confirmation
+    let agent = "juniper--k3x9";
+    assert_eq!(c.link_as(&fake, "juniper").0, 200);
+    let v = c.state_of_until(agent, Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    let first = v["short"].as_str().expect("its short link, as its code says").to_string();
+    let top = docker(&["top", &c.name, "-eo", "pid,args"]).expect("its processes");
+    let pid = top.lines().find(|l| l.contains("simplex-chat") && l.contains(agent)).and_then(|l| l.split_whitespace().next()).expect("its core").to_string();
+    let db = data.join("simplex").join(agent).join("sx_chat.db");
+    let status = format!("sqlite3 -readonly '{}' 'select conn_status from connections' 2>/dev/null", db.display());
+    // a tight read of its database (the window is milliseconds), then SIGSTOP
+    let watch = r#"
+import os, signal, sqlite3, sys, time
+db, pid = sys.argv[1], int(sys.argv[2])
+end = time.time() + 60
+while time.time() < end:
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0)
+        while time.time() < end:
+            row = con.execute("select conn_status from connections").fetchone()
+            if row and row[0] == "requested":
+                os.kill(pid, signal.SIGSTOP)
+                sys.exit(0)
+            if row and row[0] != "new":
+                sys.exit(f"missed it: {row[0]}")
+    except sqlite3.Error:
+        time.sleep(0.001)
+sys.exit("never requested")
+"#;
+    let mut watcher = Command::new("python3").args(["-I", "-c", watch, &db.to_string_lossy(), &pid]).spawn().expect("the watcher runs");
+    let r = person.cmd(&format!("/connect {first}")).await;
+    assert_eq!(tag(&r), "sentConfirmation", "{r}");
+    assert!(watcher.wait().expect("it ends").success(), "the core took the confirmation");
+    let held = Command::new("bash").args(["-c", &status]).output().expect("read");
+    assert_eq!(String::from_utf8_lossy(&held.stdout).trim(), "requested", "frozen between taking the confirmation and accepting it");
+    // the hold stops it there (its SIGTERM waits on the frozen core, then
+    // SIGKILL), and its next start is a new life
+    c.exec("touch /run/computer/hold");
+    let t0 = Instant::now();
+    // bounded: 20 s, the platform's wait for an answer
+    while c.exec("test -e /run/computer/held && echo yes").trim() != "yes" {
+        assert!(t0.elapsed() < Duration::from_secs(20), "the hold answered within 20 s");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    c.exec("rm -f /run/computer/hold /run/computer/held");
+    let v = c.state_of_until(agent, Duration::from_secs(60), "a new code, and why", |v| v["phase"] == "inviting" && v["short"].as_str().is_some_and(|s| s != first)).await;
+    assert_eq!(v["why"], "That scan didn't finish. Scan the new code.", "{v}");
+    let r = person.cmd(&format!("/connect {}", v["short"].as_str().expect("its new code"))).await;
+    assert_eq!(tag(&r), "sentConfirmation", "{r}");
+    let v = c.state_of_until(agent, Duration::from_secs(90), "linked by the new code", |v| v["phase"] == "linked").await;
+    assert!(v.get("why").is_none(), "nothing left to say: {v}");
+    // the stalled scan, kept beside it until then, is let go
+    let t0 = Instant::now();
+    // bounded by 30 s
+    while String::from_utf8_lossy(&Command::new("bash").args(["-c", &status]).output().expect("read").stdout).lines().any(|l| l == "requested") {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the stalled scan let go");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    fake.until(30_000, "its SimpleX chat made", |w| w.made.iter().any(|m| m.starts_with("juniper-simplex--"))).await;
+    assert_eq!(c.events("simplex.told").iter().filter(|e| e["agent"] == agent && e["notice"] == "ScanLost").count(), 1, "told once");
 }

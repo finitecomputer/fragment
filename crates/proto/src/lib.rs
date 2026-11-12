@@ -780,13 +780,14 @@ pub enum Reason {
     OffersPerDay,
     /// The org's last paid seat: its subscription is canceled instead.
     LastPaidSeat,
-    /// It holds a secret or a door (it has reach), so for now it stays its
-    /// owner's and their own agents': no one else is added, invited or
-    /// given its link (Paul, 2026-11-01, FIN-352; `Sharing::reach`).
+    /// It holds a secret or a door (it has reach), so for now it is not
+    /// given its link and not made public; people named by its owner may
+    /// still be added or invited (Paul, 2026-11-01 and 2026-11-11,
+    /// FIN-352; `Sharing::reach`).
     PrivateWhileReaching,
-    /// It is shared beyond its owner and their own agents (its link, someone
-    /// else in it, an invite waiting), so for now it takes no secret and no
-    /// door: it is made private first (FIN-352; `Sharing::beyond`).
+    /// Its link opens it (`link` or `public` visibility), so for now it
+    /// takes no secret and no door: it is made members only first (FIN-352;
+    /// `Sharing::beyond`).
     UnshareFirst,
     /// A shared key's calls are paused: its charges this last hour reached
     /// the cap its person holds them to (FIN-448, `fragment_core::key_hour`).
@@ -1165,9 +1166,10 @@ pub struct FragmentStatus {
     /// sharing for them, but on a connector), as the share sheet shows it. A member does not
     /// share by link: they ask its owner.
     pub view_token: Option<String>,
-    /// It holds a secret or a door, so it is shared with no one but its
-    /// owner and their own agents (FIN-352, `Sharing::reach`): the share
-    /// sheet says so. Add-only: left out when false.
+    /// It holds a secret or a door, so it has no share link and is not
+    /// public, and the people its owner adds can use its keys (FIN-352,
+    /// `Sharing::reach`): the share sheet says so. Add-only: left out when
+    /// false.
     #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub reach: bool,
@@ -1428,8 +1430,8 @@ pub struct Sharing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub invites: Option<u64>,
-    /// It holds a secret or a door, so it is shared with no one but its
-    /// owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`,
+    /// It holds a secret or a door, so it has no share link and is not
+    /// public (FIN-352: `Reason::PrivateWhileReaching`,
     /// `Reason::UnshareFirst`). Add-only: left out when false, and a row
     /// from before it reads none.
     #[serde(default, skip_serializing_if = "is_default")]
@@ -1444,10 +1446,11 @@ impl Sharing {
         self.guests > 0 || self.invites.is_none_or(|n| n > 0)
     }
 
-    /// Whether it is shared beyond its owner and their own agents: anyone
-    /// with its link, or anyone else in it or invited (FIN-352).
+    /// Whether it is shared beyond the people named in it: its link opens
+    /// it, or it is public (FIN-352; Paul, 2026-11-11: people named, at any
+    /// role, are not beyond).
     pub fn beyond(&self) -> bool {
-        self.visibility != Visibility::Members || self.with_others()
+        self.visibility != Visibility::Members
     }
 }
 
@@ -1578,6 +1581,12 @@ pub struct Member {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub owner: Option<String>,
+    /// A person member's email, as the share sheet shows it (decision
+    /// 48): in `GET members` to the owner and their agent for them, and in
+    /// no other list (add-only: absent from an older platform).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub email: Option<String>,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
@@ -1863,10 +1872,16 @@ pub struct Rotated {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PutSecret {
+    /// The value; empty with `fromVault`.
+    #[serde(default)]
     pub value: String,
     /// At least one, at most `SECRET_HOSTS_MAX`, each as a URL names it
     /// (`fragment_core::secrets::secret_host`).
     pub hosts: Vec<String>,
+    /// In place of `value`: a secret of the caller's own Vault (FIN-466),
+    /// moved here: kept here, gone from the Vault. A person's alone.
+    #[serde(default, rename = "fromVault", skip_serializing_if = "Option::is_none")]
+    pub from_vault: Option<String>,
 }
 
 /// A secret as `GET /api/f/<name>/secrets` (editor) shows it: its name and
@@ -2530,11 +2545,13 @@ pub mod computer;
 pub mod export;
 pub mod ledger;
 pub mod live;
+pub mod migrations;
 pub mod notice;
 pub mod org;
 #[cfg(feature = "schema")]
 pub mod routes;
 pub mod search;
+pub mod vault;
 pub mod wipe;
 
 #[cfg(test)]
@@ -2875,13 +2892,16 @@ mod tests {
         assert!(!Sharing { invites: Some(0), ..old }.with_others());
         assert!(Sharing { invites: Some(1), ..old }.with_others());
         assert!(Sharing { guests: 1, invites: Some(0), ..old }.with_others());
-        // FIN-352: beyond its owner and their agents is a link, someone
-        // else, or an invite; reach is sent only when true, and a row from
-        // before it reads none
+        // FIN-352: beyond the people named in it is its link or public,
+        // never someone else in it or invited (2026-11-11); reach is sent
+        // only when true, and a row from before it reads none
         let private = Sharing { visibility: Visibility::Members, members: 2, guests: 0, invites: Some(0), reach: true };
         assert!(!private.beyond());
         assert_eq!(value(&private), serde_json::json!({ "visibility": "members", "members": 2, "guests": 0, "invites": 0, "reach": true }));
-        for shared in [Sharing { visibility: Visibility::Link, ..private }, Sharing { visibility: Visibility::Public, ..private }, Sharing { guests: 1, members: 3, ..private }, Sharing { invites: Some(1), ..private }, Sharing { invites: None, ..private }] {
+        for named in [Sharing { guests: 1, members: 3, ..private }, Sharing { invites: Some(1), ..private }, Sharing { invites: None, ..private }] {
+            assert!(!named.beyond(), "{named:?}");
+        }
+        for shared in [Sharing { visibility: Visibility::Link, ..private }, Sharing { visibility: Visibility::Public, ..private }] {
             assert!(shared.beyond(), "{shared:?}");
         }
         assert!(!old.reach && value(&Sharing { reach: false, ..private }).get("reach").is_none());

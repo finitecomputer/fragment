@@ -86,7 +86,7 @@
 //!   <the refusal>`;
 //! - `door link <ticket>`, `door say <text>`, `door forge <text>`, `door
 //!   other <text>`: an agent's door as SimpleX's is (fragment_core::door),
-//!   for the platform's lanes: a link's ticket (its JSON, as the owner's
+//!   for the platform's lanes: a link's or an adoption's ticket (its JSON, as the owner's
 //!   Settings made it) checked as the bridge checks one, then redeemed with
 //!   a door key the script makes (kept while it runs); a relayed record
 //!   that key signs, posted on this chat; one with no door's signature
@@ -585,7 +585,9 @@ async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<S
     if verb == "link" {
         let ticket: Ticket = serde_json::from_str(said.trim()).map_err(|e| format!("not a ticket: {e}"))?;
         let computer = api.computer(false).await.map_err(|e| e.to_string())?.computer;
-        door::check(&ticket, "link", &agent.fragment, &computer, agent.key.as_deref().unwrap_or(""), now).map_err(str::to_string)?;
+        // a link's ticket, or an adoption's (FIN-463), redeemed as the bridge's are
+        let act = if ticket.act == "adopt" { "adopt" } else { "link" };
+        door::check(&ticket, act, &agent.fragment, &computer, agent.key.as_deref().unwrap_or(""), now).map_err(str::to_string)?;
         let key = Key::generate().map_err(|e| e.to_string())?;
         api.door(&agent.fragment, door::DOOR, &ticket.nonce, &key.public_hex()).await.map_err(|e| e.to_string())?;
         DOORS.lock().expect("not poisoned").insert(agent.fragment.clone(), key);

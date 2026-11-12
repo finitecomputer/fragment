@@ -42,7 +42,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_core::catalog::{ConnectionOAuth, Kind, KeyOAuth};
+use fragment_core::catalog::{ConnectionAccess, ConnectionOAuth, Kind, KeyOAuth};
 use fragment_core::connection_accounts::{self as accounts, Held, Intent};
 use fragment_core::own_signin;
 use fragment_core::roundtrip::{self, Trip};
@@ -252,15 +252,17 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     account: account.and_then(|a| a.label.clone()),
                     granted: account.and_then(|a| a.scopes.clone()),
                     missing: account.and_then(|a| missing(p.connection_oauth.as_ref(), a)),
+                    access: account.and_then(|a| access(p.connection_oauth.as_ref(), a)),
+                    accesses: p.connection_oauth.as_ref().map(|o| o.access.offered()),
                     note: p.note.clone(),
                     accounts: p.several().then(|| {
                         held.iter()
                             .filter_map(|a| {
-                                let (granted, missing) = match a.fenced {
-                                    true => (None, None),
-                                    false => (a.scopes.clone(), missing(p.connection_oauth.as_ref(), a)),
+                                let (granted, missing, access) = match a.fenced {
+                                    true => (None, None, None),
+                                    false => (a.scopes.clone(), missing(p.connection_oauth.as_ref(), a), access(p.connection_oauth.as_ref(), a)),
                                 };
-                                Some(ConnectionAccount { id: a.id.clone()?, account: a.label.clone(), state: a.state, granted, missing, disconnecting: a.fenced })
+                                Some(ConnectionAccount { id: a.id.clone()?, account: a.label.clone(), state: a.state, granted, missing, access, disconnecting: a.fenced })
                             })
                             .collect()
                     }),
@@ -293,7 +295,10 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             reachable(cfg, &o.exchange)?;
             let session = crate::auth::platform_session_token(req, url)?.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign in before connecting"))?;
             let asked: Value = if body.iter().all(u8::is_ascii_whitespace) { Value::Null } else { serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
-            let intent = Intent::asked(&asked).map_err(CellError::invalid)?;
+            let (intent, access) = Intent::asked(&asked).map_err(CellError::invalid)?;
+            // an access its row offers: read only is none where the provider
+            // has no read-only scope (the account's own permissions are the limit)
+            let grant = o.access.of(access).ok_or_else(|| CellError::invalid(format!("{provider} offers read and write alone: its provider has no read-only access, so what your agents may do is what the account you sign in as may (connect it with {{\"access\": \"write\"}})")))?;
             if intent != Intent::Connect {
                 if !p.several() {
                     return Err(CellError::invalid(format!("{provider} connects one account here: connect it with no body")));
@@ -310,9 +315,9 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     _ => {}
                 }
             }
-            let begun = crate::ask_registry(env, &crate::registry::calls::BeginConnection { session, provider: provider.to_string(), intent }).await?;
+            let begun = crate::ask_registry(env, &crate::registry::calls::BeginConnection { session, provider: provider.to_string(), intent, access }).await?;
             if !roundtrip::valid_state(&begun.state) || !own_signin::valid_token(&begun.challenge) { return Err(CellError::host("invalid connection challenge")); }
-            let to = fragment_core::connection_signin::authorize_url(o, &callback_url(cfg, provider), &begun.challenge, &begun.state);
+            let to = fragment_core::connection_signin::authorize_url(o, grant, &callback_url(cfg, provider), &begun.challenge, &begun.state);
             let mut resp = json_response(&json!({ "provider": provider, "url": to }))?;
             resp.headers_mut().append("set-cookie", &crate::auth::trip_begun(Trip::Connection, &begun.state, url))?;
             Ok(resp)
@@ -399,10 +404,19 @@ fn reachable(cfg: &Config, url: &str) -> CellResult<()> {
     Err(CellError::new(ErrorCode::HostFailed, format!("{url} is a local fleet's, and this one's egress may not reach local addresses")))
 }
 
-/// What `account`'s row asks for that the person did not allow it (none
-/// said where Pipes names no scopes, or the row asks for none).
+/// What `account`'s grant lets its agents do (`connection_signin::access_of`;
+/// none said where Pipes names no scopes, or the row has no authorization).
+fn access(o: Option<&ConnectionOAuth>, account: &PipesAccount) -> Option<ConnectionAccess> {
+    o.zip(account.scopes.as_deref()).and_then(|(o, granted)| fragment_core::connection_signin::access_of(o, granted))
+}
+
+/// What `account`'s access asks for that the person did not allow it (none
+/// said where Pipes names no scopes, or the row asks for none): of read and
+/// write where the row names it alone.
 fn missing(o: Option<&ConnectionOAuth>, account: &PipesAccount) -> Option<Vec<String>> {
-    o.zip(account.scopes.as_deref()).map(|(o, granted)| fragment_core::connection_signin::missing(&o.scopes, granted))
+    let (o, granted) = o.zip(account.scopes.as_deref())?;
+    let grant = access(Some(o), account).and_then(|a| o.access.of(a)).unwrap_or(&o.access.write);
+    Some(fragment_core::connection_signin::missing(&grant.scopes, granted))
 }
 
 /// Where the provider sends the person's browser back.
@@ -435,14 +449,15 @@ async fn disconnect(env: &Env, cfg: &Config, provider: &str, o: Option<&Connecti
 /// The grant behind `user`'s account at `provider` (of several, the one
 /// `account` names), revoked with an access token Pipes mints for it (one
 /// Pipes refuses, the account inactive or gone, has no grant left to
-/// revoke here).
+/// revoke here), its client authenticating as its row says
+/// (`keys::connection_revoke`).
 async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: &str, account: Option<&str>, revoke: &str) -> CellResult<bool> {
     reachable(cfg, revoke)?;
     let (status, answer) = crate::keys::pipes_token(env, api, provider, user, account).await?;
     let Some(token) = (status == 200 && answer["active"] == true).then(|| answer["access_token"]["access_token"].as_str()).flatten().filter(|t| !t.is_empty()) else {
         return Ok(false);
     };
-    crate::keys::connection_revoke(revoke, &fragment_core::connection_signin::revoke_form(token)).await
+    crate::keys::connection_revoke(env, provider, revoke, &fragment_core::connection_signin::revoke_form(token)).await
 }
 
 /// The person's computer told their connections' states after a

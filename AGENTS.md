@@ -65,6 +65,9 @@ supports wasm32 (Apple's does not; `brew install llvm`, Nix, or
   Default vendors are fakes. `--real-agent` calls real text models using
   `FRAGMENT_DEV_MODEL_KEY_FILE`. CLI: set `FRAGMENT_HOST=http://127.0.0.1:8790`
   and run `fragment login`.
+- `--runtime celld` on `cargo xtask dev`, and `FRAGMENT_E2E_RUNTIME=celld`
+  on the e2e (both with `CELLD_BIN`): the self-hosted lane's runtime,
+  no computers there (`docs/self-host.md`).
 - `cargo xtask try <todo|inbox|notes|doc> [name]`: deploy a scratch app
   while dev runs. `fragment new|init|create --template` for other templates.
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:

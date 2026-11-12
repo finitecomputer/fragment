@@ -55,6 +55,17 @@ facet's own transaction. The app has no network (`globalOutbound: null`):
 a job reaches out only through `job.fetch` steps, which the supervisor
 takes.
 
+Where a fetch, a push endpoint or a subscription may go
+(`fragment_core::egress::check`): public addresses only, unless the
+deployment's `egress_allow` lists a local host (a self-hosted org's
+intranet: names, `*.` globs, addresses, networks). The list never opens
+loopback, link-local, unspecified, multicast or broadcast addresses,
+`localhost`, or the platform's own host and fragment suffix; an entry
+that names one is refused at the deploy and at the cell's start. The
+cell judges the URL; a self-hosted node's resolver judges where a name
+lands, from the same list (`Allow::celld`, its `CELLD_EGRESS_ALLOW`).
+Empty, the default, it changes nothing.
+
 ## Where each fact lives
 
 Every change is checked against this table.
@@ -78,6 +89,7 @@ Every change is checked against this table.
 | Public addresses | the registry's `public_addresses`: one label, one fragment npub, never reassigned | the router resolves them there and the fragment checks the npub; a delete or wipe keeps the reservation |
 | A person's wipe | the registry's `wipes` (docs/api.md, "Operators: wiping a person") | a wiped person's ledger, list and computer each keep one row saying so |
 | Secrets | the object that owns each, sealed; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
+| A person's secrets for their agents (FIN-466) | their `Vault` object, each value sealed for it (docs/secrets.md, "A person's Vault") | none: no answer, list, log or export names a value |
 | A person's connections | WorkOS Pipes (one account a provider, or several: `accounts_max`); one being made, the registry's `connection_signins` (docs/pipes-browser-binding.md) | which account each agent uses, its computer's `agent_accounts`; a guest holds placeholders only |
 | Orgs, their admins and seats | the registry (docs/billing.md) | each holder's plan and standing pushed to their ledger in the registry's order (`SetSeat.seq`); the registry is the seat's one writer |
 | An org's credit and monthly budget (decisions 66 to 68) | its ledger (`org:<id>`) | none: operators grant and set them; its billing admins read them |
@@ -112,6 +124,7 @@ Every change is checked against this table.
 | What members are doing: each one's newest listed record | the channel's records | the fragment's `listed`, and each member's list row (docs/api.md, Listed records) |
 | Native iPhone drafts and pending sends | protected, backup-excluded Application Support files, scoped to platform and person (`ios/Sources/ChatDraftStore.swift`) | bounded to 32 saved chats, 16 pending sends each; a send is saved before HTTP, retried only with the same id and body, never once refused; editing, saving and loading hold one set of bounds (`SavedChat`), and no saved file stops a chat; device keys live only in Keychain |
 | A person's own view of their fragments (archived, docked, read up to) | their list, the `Principal` cell | none |
+| A finite.computer old agent's move: its roster row, its person's answers, its state and deadlines, the mover's command | the `Migrations` object (docs/migrations.md; removable with the move) | none: the mover acts on its commands alone, and staff read and act through its operators' routes |
 | A person's export | their list, the `Principal` cell, and its archive in R2 | the archive is a copy as read, never updated, deleted after seven days (docs/api.md, Export) |
 
 ## Schemas: the platform objects' steps

@@ -1,5 +1,6 @@
 import { KIND } from "./frame-messages.js";
 import { icon } from "./icons.js";
+import { providerMark } from "./provider-marks.js";
 
 // A provider's name for people: the platform's (`ProviderView.name`), or
 // its id where an older release answered without one (a deploy going out,
@@ -29,11 +30,19 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     "gmail.modify": "Gmail (manage)",
     "gmail.send": "Gmail (send)",
     drive: "Drive",
+    "drive.readonly": "Drive (read)",
     spreadsheets: "Sheets",
+    "spreadsheets.readonly": "Sheets (read)",
     documents: "Docs",
+    "documents.readonly": "Docs (read)",
     calendar: "Calendar",
+    "calendar.readonly": "Calendar (read)",
     "contacts.readonly": "Contacts",
   };
+  // what a connection's account lets its agents do, picked as the person
+  // connects it (`access`): its name for people, on a button and as said
+  const ACCESS = { read: "read only", write: "read and write" };
+  const ACCESS_NAME = { read: "Read only", write: "Read and write" };
   const scopeName = (scope) => {
     const last = scope.split("/").pop();
     return SCOPE_NAMES[last] ?? last;
@@ -73,6 +82,42 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     };
     return go;
   }
+  // The accesses a connection offers (`accesses`): read only and read and
+  // write, or, where its provider has no read-only scope, read and write
+  // alone, the account's own permissions its limit.
+  const offered = (p) => p.accesses ?? ["read", "write"];
+  // an account's access to connect it again with: its own, else the one
+  // its row offers, else read only (the lesser)
+  const accessFor = (p, access) => access ?? (offered(p).length === 1 ? offered(p)[0] : "read");
+  // A connect for each access the person may pick, read only and read and
+  // write (the platform never picks for them): `verb` and the access in
+  // words, each its own press (its window opened by that press); of a row
+  // that offers one, one press, `verb` alone. `body` as `connectButton`'s;
+  // each button's `data-access` is its access.
+  function accessButtons(p, verb, said, body = {}, action = "connect") {
+    const accesses = offered(p);
+    return accesses.map((access) => {
+      const go = connectButton(p, accesses.length > 1 ? `${verb} ${ACCESS[access]}` : verb, said, { ...body, access });
+      go.dataset.action = action;
+      go.dataset.access = access;
+      return go;
+    });
+  }
+  // What a connected account lets its agents do, said beside its state.
+  const accessSaid = (access) => {
+    const said = el("span", "provider-access", ACCESS_NAME[access]);
+    said.dataset.access = access;
+    return said;
+  };
+  // A read-only account's Allow changes: a reconnect asking for read and
+  // write (of several, that account). Going back to read only is a
+  // disconnect and a connect: a provider may keep what it granted before.
+  function allowChanges(p, said, body = {}) {
+    const go = connectButton(p, "Allow changes", said, { ...body, access: "write" });
+    go.dataset.action = "allow-changes";
+    return go;
+  }
+  const readOnlyHow = () => el("span", "muted provider-detail provider-access-how", "To make it read only again, disconnect it, then connect it read only.");
   // The own keys whose last Disconnect or Remove did not go through, each
   // with the visit of settings it was pressed in: said in their row by
   // whichever load of settings renders in that visit, while the row still
@@ -122,6 +167,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       const who = el("div", "provider-identity");
       const stateName = a.disconnecting ? "Disconnecting didn't finish" : PROVIDER_STATE[a.state] ?? a.state;
       who.append(el("span", "provider-account", accountLabel(p, a)), el("span", `provider-state ${a.disconnecting ? "disconnecting" : a.state}`, stateName));
+      if (!a.disconnecting && a.access) who.append(accessSaid(a.access));
       const actions = el("div", "settings-actions");
       const said = el("span", "muted provider-detail provider-said");
       const details = [];
@@ -134,13 +180,16 @@ export function createConnections({ api, el, section, named, seg, computer, getA
         list.append(item);
         continue;
       }
-      if (a.state !== "connected") actions.append(connectButton(p, "Connect again", said, { account: a.id }));
+      // connected again as it was, or, its access unknown, as the person picks
+      if (a.state !== "connected") actions.append(...(a.access ? [connectButton(p, "Connect again", said, { account: a.id, access: a.access })] : accessButtons(p, "Connect again", said, { account: a.id })));
       if (a.state === "connected" && a.missing?.length) {
-        const again = connectButton(p, "Reconnect to add", said, { account: a.id });
+        const again = connectButton(p, "Reconnect to add", said, { account: a.id, access: accessFor(p, a.access) });
         again.dataset.action = "reconnect";
         actions.append(again);
         details.push(notAllowed(a.missing));
       }
+      if (a.state === "connected" && a.access === "read") actions.append(allowChanges(p, said, { account: a.id }));
+      if (a.state === "connected" && a.access === "write") details.push(readOnlyHow());
       actions.append(disconnectButton(p, said, a));
       head.append(who, actions);
       item.append(head, ...details, said);
@@ -251,7 +300,13 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     const calls = mine.reduce((n, u) => n + u.calls, 0);
     const micros = mine.reduce((n, u) => n + u.micros, 0);
     const charge = p.kind === "operator" && calls ? ` · ${money(micros)}` : "";
-    const tile = (big) => el("span", `provider-tile${big ? " big" : ""}`, name.slice(0, 1));
+    // its mark (provider-marks.js), else its name's first letter
+    const tile = (big) => {
+      const mark = providerMark(p.provider);
+      const t = el("span", `provider-tile${big ? " big" : ""}`, mark ? "" : name.slice(0, 1));
+      if (mark) t.append(mark);
+      return t;
+    };
     const light = () => {
       const st = el("span", "provider-state");
       st.append(el("span", `provider-light ${lightOf(p)}`));
@@ -309,6 +364,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       account.dataset.account = p.account;
       words.append(account);
     }
+    if (!several && p.kind === "connection" && p.state === "connected" && p.access) words.append(accessSaid(p.access));
     const actions = el("div", "settings-actions");
     status.append(light(), words, actions);
     const details = [];
@@ -334,8 +390,11 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       }
       await reopenSettings();
     };
+    // Connect, read only or read and write, as the person picks; connected
+    // again as it was where its access is known
     if (p.kind === "connection" && p.state !== "connected" && !(several && p.accounts.some((a) => !a.disconnecting))) {
-      actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
+      const again = p.state === "needs_reauthorization";
+      actions.append(...(again && p.access ? [connectButton(p, "Connect again", said, { access: p.access })] : accessButtons(p, again ? "Connect again" : "Connect", said)));
       details.push(said);
     }
     // of several, another while the platform takes more; each account is
@@ -343,19 +402,23 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     // theirs to use: none they disconnected (which Pipes may hold still)
     const theirs = several ? p.accounts.filter((a) => !a.disconnecting) : [];
     if (several && theirs.length && theirs.length < (p.accountsMax ?? 1)) {
-      const add = connectButton(p, `Add another ${name} account`, said, { add: true });
-      add.dataset.action = "add-account";
-      actions.append(add);
+      actions.append(...accessButtons(p, `Add another ${name} account`, said, { add: true }, "add-account"));
       details.push(said);
     }
     // what the person left unticked when they connected it: a reconnect
     // asks for it again (the provider keeps what they allowed before)
     if (!several && p.kind === "connection" && p.state === "connected" && p.missing?.length) {
-      const again = connectButton(p, "Reconnect to add", said);
+      const again = connectButton(p, "Reconnect to add", said, { access: accessFor(p, p.access) });
       again.dataset.action = "reconnect";
       actions.append(again);
       details.push(notAllowed(p.missing), said);
     }
+    // read only: Allow changes; read and write: how to go back
+    if (!several && p.kind === "connection" && p.state === "connected" && p.access === "read") {
+      actions.append(allowChanges(p, said));
+      if (!details.includes(said)) details.push(said);
+    }
+    if (!several && p.kind === "connection" && p.state === "connected" && p.access === "write") details.push(readOnlyHow());
     if (!several && p.kind === "connection" && p.state !== "not_connected") {
       const off = disconnectButton(p, said);
       const press = off.onclick;
@@ -709,7 +772,8 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
       frame.contentWindow?.postMessage({ fragment: KIND.simplex, agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
     } catch {}
   }
-  // The link page asks for a ticket to link or unlink its agent (`{fragment:
+  // The link page asks for a ticket to link, unlink or adopt (FIN-463: keep
+  // its owner's SimpleX chat with their old agent) for its agent (`{fragment:
   // "simplex", agent, want}`): only a frame of Settings' dialog onto its computer's
   // port, for its own agent. The platform makes it for the agent's owner
   // alone, signed (an unlink's closes the agent's door at once), and the
@@ -720,7 +784,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
   // unlink's takes its home back to its own chat.
   const onMessage = async (e) => {
     const m = e.data;
-    if (m?.fragment !== KIND.simplex || !["link", "unlink"].includes(m.want) || !computer()?.simplex) return;
+    if (m?.fragment !== KIND.simplex || !["link", "unlink", "adopt"].includes(m.want) || !computer()?.simplex) return;
     const frame = [...document.querySelectorAll("iframe[data-simplex]")].find((f) => f.contentWindow === e.source);
     if (!frame || frame.dataset.simplex !== m.agent || e.origin !== new URL(frame.dataset.src).origin) return;
     const reply = { fragment: KIND.simplex, agent: m.agent, for: m.want };
@@ -729,7 +793,8 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
     } catch (err) {
       reply.error = err.message;
     }
-    const home = m.want === "link" ? (typeof m.home === "boolean" ? m.home : null) : false;
+    // an adoption (its chat with their old agent kept) leaves its home be
+    const home = m.want === "link" ? (typeof m.home === "boolean" ? m.home : null) : m.want === "unlink" ? false : null;
     if (reply.ticket && home !== null) {
       await setHome(m.agent, home).then(() => { reply.home = home; }, (err) => { reply.homeError = err.message; });
     }
@@ -859,7 +924,15 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
   }
   // the connector bound as `agent`'s Telegram door, if any
   const boundOf = (agent) => [...(doors ?? [])].find(([, b]) => b?.door === DOOR && b.agent === agent)?.[0] ?? null;
-  const openConnector = (pressed, name, agent) => openSetup({ pressed, src: framed(name, SETUP), name, agent, title: TITLE, onClose: () => refreshTelegram(true) });
+  // its setup page, offering the bot token its owner's Vault holds for
+  // `agent` (a bot moved from finite.computer, FIN-463 F11): a secret bound
+  // to it toward api.telegram.org alone. A Vault not read offers none
+  async function openConnector(pressed, name, agent) {
+    const vault = await api("GET", "/api/vault").then((v) => v.secrets ?? [], () => []);
+    const bot = vault.find((v) => v.hosts?.length === 1 && v.hosts[0] === "api.telegram.org" && v.agents?.includes(agent));
+    const src = bot ? `${SETUP}?vault=${encodeURIComponent(bot.name)}` : SETUP;
+    openSetup({ pressed, src: framed(name, src), name, agent, title: TITLE, onClose: () => refreshTelegram(true) });
+  }
   // Its binding, as `POST …/door` answers or, its answer lost, as its door
   // reads: the binding to `agent`; a refusal, or no binding, throws (the
   // connector deleted), and so do a read that fails and a binding to
@@ -889,7 +962,7 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
       if (!(await readTelegram())) throw new Error("Couldn't read your Telegram chats. Try again.");
       const connector = boundOf(agent);
       if (connector) {
-        openConnector(pressed, connector, agent);
+        await openConnector(pressed, connector, agent);
         return;
       }
       made = await api("POST", "/api/fragments", { label: connectorLabel(agent, DOOR), template: DOOR });
@@ -900,7 +973,7 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
       doors.set(made.name, { door: door.door, agent: door.agent });
       // the list read first, so its chat is under its agent as its setup opens
       await load().catch(() => {});
-      openConnector(pressed, made.name, agent);
+      await openConnector(pressed, made.name, agent);
     } catch (e) {
       if (made && !e.keep) {
         bound.delete(made.name);

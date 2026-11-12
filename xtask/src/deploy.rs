@@ -91,6 +91,9 @@ struct Deployment {
     /// (`--operator-key-file`), never here: the key is the runner's.
     #[serde(default)]
     operators: Vec<String>,
+    /// The finite.computer move (docs/migrations.md; `FRAGMENT_MIGRATIONS_MOVER`, `FRAGMENT_MIGRATIONS_CUTOFF_MS`).
+    /// Without it, none of its routes answer.
+    migrations: Option<Migrations>,
     /// The AI Gateway the model route calls through (its id, named: never
     /// `default`, which makes one that logs). Without it, models are off.
     ai_gateway: Option<String>,
@@ -118,6 +121,14 @@ struct Deployment {
     /// zone's request body limit on its Cloudflare plan, at most
     /// `BLOB_MAX_BYTES`. Clients read it from the platform.
     upload_max_bytes: Option<u64>,
+    /// The local hosts an operator opens to jobs, push endpoints and
+    /// subscriptions beside the public internet (`FRAGMENT_EGRESS_ALLOW`;
+    /// `fragment_core::egress::Allow`): host names, one-level `*.` globs,
+    /// IP addresses and networks, at most `egress::ALLOW_MAX`. An entry
+    /// naming loopback, link-local, localhost or the platform's own hosts
+    /// is refused before a deploy. Empty, the default: public only.
+    #[serde(default)]
+    egress_allow: Vec<String>,
     /// The address the platform's mail comes from (`FRAGMENT_MAIL_FROM`;
     /// cell/src/mail.rs), on a domain onboarded to Cloudflare Email
     /// Sending (`wrangler email sending enable <domain>`). Without it, the
@@ -275,7 +286,7 @@ pub(crate) type SlotKeys = Vec<(String, String)>;
 /// The deployment's models (`models`, `models_cell`), when it names them.
 fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
     let Some(models) = &d.models else { return Ok((None, vec![])) };
-    let (cell, keys) = models_cell(models)?;
+    let (cell, keys) = models_cell(models, false)?;
     Ok((Some(cell), keys))
 }
 
@@ -283,9 +294,10 @@ fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
 /// slot's upstream less its key) and the store secret each slot on an
 /// OpenAI-compatible API names for its key. Such a slot names one; a
 /// Workers AI slot names none. Checked as the cell checks them
-/// (`fragment_core::models::Models::parse`), on no local address. `cargo
-/// xtask dev --real-agent` reads one too (dev_agent.rs).
-pub(crate) fn models_cell(models: &Value) -> Result<(Value, SlotKeys)> {
+/// (`fragment_core::models::Models::parse`), on no local address unless
+/// `local` (a local fleet's models file, whose egress reaches this
+/// machine). `cargo xtask dev --real-agent` reads one too (dev_agent.rs).
+pub(crate) fn models_cell(models: &Value, local: bool) -> Result<(Value, SlotKeys)> {
     let Some(slots) = models.as_object() else { bail!("models is an object: the slots it names ({}), each where it runs", fragment_core::models::SLOTS.join(", ")) };
     let mut cell = serde_json::Map::new();
     let mut keys = vec![];
@@ -307,7 +319,7 @@ pub(crate) fn models_cell(models: &Value) -> Result<(Value, SlotKeys)> {
     }
     let cell = Value::Object(cell);
     let text = cell.to_string();
-    fragment_core::models::Models::parse(Some(&text), &fragment_core::price::PriceBook::defaults(), false).map_err(|e| anyhow::anyhow!("{e}"))?;
+    fragment_core::models::Models::parse(Some(&text), &fragment_core::price::PriceBook::defaults(), local).map_err(|e| anyhow::anyhow!("{e}"))?;
     if text.len() > WORKER_VAR_MAX_BYTES {
         bail!("models is {} bytes as the cell's FRAGMENT_MODELS, past a Workers variable's {WORKER_VAR_MAX_BYTES}: shorten the slots' bodies", text.len());
     }
@@ -507,6 +519,58 @@ fn read_secret(path: &Path) -> Result<String> {
     Ok(text)
 }
 
+/// The move's stage bucket is private: no r2.dev URL and no custom domain
+/// (docs/migrations.md, "Who may read a stage"), read from Cloudflare's
+/// own answer. A deploy refuses one that is not, before its Worker goes out.
+fn stage_is_private(api: &crate::cloudflare::Api, bucket: &str) -> Result<()> {
+    let ask = |path: String| -> Result<Value> {
+        let (status, body) = api.call(reqwest::Method::GET, &path, None).map_err(|e| anyhow::anyhow!(e))?;
+        anyhow::ensure!(status == 200 && body["success"] == true, "the move's stage bucket {bucket} ({path}): {}", crate::cloudflare::errors(status, &body));
+        Ok(body["result"].clone())
+    };
+    let managed = ask(format!("/r2/buckets/{bucket}/domains/managed"))?;
+    let custom = ask(format!("/r2/buckets/{bucket}/domains/custom"))?;
+    private(&managed, &custom).map_err(|why| anyhow::anyhow!("the move's stage bucket {bucket} {why}: only the platform may read it (`wrangler r2 bucket dev-url disable`, `wrangler r2 bucket domain remove`), then deploy again"))
+}
+
+/// Whether a bucket's r2.dev URL (`managed`) and custom domains (`custom`),
+/// as Cloudflare answers them, leave it private. Anything else is not.
+fn private(managed: &Value, custom: &Value) -> std::result::Result<(), String> {
+    if managed["enabled"] != false {
+        return Err(format!("has its r2.dev URL on, or says not that it is off ({})", managed["enabled"]));
+    }
+    let domains = custom["domains"].as_array().ok_or("names no list of its custom domains")?;
+    match domains.is_empty() {
+        true => Ok(()),
+        false => Err(format!("has custom domains ({})", domains.iter().map(|d| d["domain"].as_str().unwrap_or("?")).collect::<Vec<_>>().join(", "))),
+    }
+}
+
+/// The move's stage bucket's lifecycle rules (docs/migrations.md,
+/// "Deletion"): its own deletion's backstop. A phase 1 stage goes 16 days
+/// after it was written (its keep is 14), a phase 2 one after 100 (its keep
+/// is 90 past the cutoff), and an upload left unfinished after a day.
+fn stage_lifecycle() -> Value {
+    const DAY_S: u64 = 24 * 60 * 60;
+    let expire = |id: &str, prefix: &str, days: u64| json!({ "id": id, "enabled": true, "conditions": { "prefix": prefix }, "deleteObjectsTransition": { "condition": { "type": "Age", "maxAge": days * DAY_S } } });
+    json!({ "rules": [
+        expire("p1-after-16-days", "p1/", 16),
+        expire("p2-after-100-days", "p2/", 100),
+        { "id": "unfinished-uploads-after-a-day", "enabled": true, "conditions": { "prefix": "" }, "abortMultipartUploadsTransition": { "condition": { "type": "Age", "maxAge": DAY_S } } },
+    ] })
+}
+
+/// The finite.computer move's settings (docs/migrations.md): the mover's
+/// key, which alone signs its routes (it holds the key; the deployment
+/// holds only this npub), and phase 2's cutoff, if set.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Migrations {
+    mover: String,
+    #[serde(default)]
+    cutoff_ms: Option<i64>,
+}
+
 /// The names and hosts one deployment has.
 struct Names {
     /// `fragment` or `fragment-<branch>`: the platform Worker's.
@@ -517,6 +581,9 @@ struct Names {
     /// The meters' queue (cell/src/meter.rs).
     ledger: String,
     bucket: String,
+    /// The finite.computer move's stages (docs/migrations.md): made and
+    /// bound only when the config names `migrations`.
+    stage: String,
     platform_host: String,
     suffix: String,
     /// `--<branch>`, for a branch.
@@ -547,6 +614,7 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
                 dead: format!("fragment-deliveries-dead-{b}"),
                 ledger: format!("fragment-ledger-{b}"),
                 bucket: format!("fragment-blobs-{b}"),
+                stage: format!("fragment-migrations-stage-{b}"),
                 platform_host: format!("{b}.{zone}"),
                 suffix: zone.to_string(),
                 label_suffix: Some(format!("--{b}")),
@@ -567,6 +635,7 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
                 dead: "fragment-deliveries-dead".into(),
                 ledger: "fragment-ledger".into(),
                 bucket: "fragment-blobs".into(),
+                stage: "fragment-migrations-stage".into(),
                 platform_host: platform.clone(),
                 suffix: suffix.clone(),
                 label_suffix: None,
@@ -673,6 +742,15 @@ fn checked(d: Deployment) -> Result<Deployment> {
         fragment_core::connectors::Policy::new(c.clone()).map_err(|e| anyhow::anyhow!("connectors: {e}"))?;
     }
     Ok(d)
+}
+
+/// The operator's egress allowlist as the cell's `FRAGMENT_EGRESS_ALLOW`,
+/// checked against this deployment's own hosts (which it never opens), or
+/// none when it lists nothing.
+fn egress_allow(d: &Deployment, n: &Names) -> Result<Option<String>> {
+    use fragment_core::egress::Allow;
+    Allow::parse(&d.egress_allow, &n.platform_host, &n.suffix).map_err(|e| anyhow::anyhow!("egress_allow: {e}"))?;
+    Ok((!d.egress_allow.is_empty()).then(|| Allow::var(&d.egress_allow)))
 }
 
 /// A deploy's or a teardown's arguments.
@@ -1108,6 +1186,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         pinned_only(&d)?;
     }
     let n = names(&d, branch.as_deref())?;
+    egress_allow(&d, &n)?;
     // the two local files are read before anything is built or made
     let dns_token = d.dns_token_file.as_deref().map(read_secret).transpose()?;
     let test_secret = test_secret_file(&d, branch.as_deref())?.map(read_test_secret).transpose()?;
@@ -1147,6 +1226,16 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         None => println!("dns: no dns_token_file, so these must be proxied by hand: {}", n.dns.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")),
     }
     ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "create", &n.bucket]), "the bucket")?;
+    if d.migrations.is_some() {
+        // the move's stages, and the rules that expire them should its own
+        // deletion miss one (set whole each deploy: idempotent)
+        ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "create", &n.stage]), "the move's stage bucket")?;
+        let rules = dir.join("stage-lifecycle.json");
+        fs::write(&rules, stage_lifecycle().to_string())?;
+        let rules = rules.to_string_lossy().into_owned();
+        ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "lifecycle", "set", &n.stage, "--file", &rules, "--force"]), "the move's stage bucket's lifecycle rules")?;
+        stage_is_private(&api, &n.stage)?;
+    }
     for q in [&n.dead, &n.deliveries, &n.ledger] {
         ensure(wrangler(&tools, &d.account_id)?.args(["queues", "create", q]), "a queue")?;
     }
@@ -1249,7 +1338,11 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     c.insert("observability".into(), json!({ "enabled": true, "traces": { "enabled": false } }));
     c.insert("routes".into(), json!(n.routes.iter().map(|r| json!({ "pattern": r.pattern, "zone_name": r.zone })).collect::<Vec<_>>()));
     c.insert("workflows".into(), json!([{ "name": n.jobs, "binding": "JOBS", "class_name": "Job" }]));
-    c.insert("r2_buckets".into(), json!([{ "binding": "BLOBS", "bucket_name": n.bucket }]));
+    let mut buckets = vec![json!({ "binding": "BLOBS", "bucket_name": n.bucket })];
+    if d.migrations.is_some() {
+        buckets.push(json!({ "binding": "STAGE", "bucket_name": n.stage }));
+    }
+    c.insert("r2_buckets".into(), json!(buckets));
     // every queue the checked-in config names, renamed for this deployment
     let renamed = |q: &Value| -> Result<Value> {
         match q.as_str() {
@@ -1318,6 +1411,14 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     if !d.operators.is_empty() {
         v.insert("FRAGMENT_OPERATORS".into(), json!(d.operators.join(",")));
     }
+    if let Some(m) = &d.migrations {
+        anyhow::ensure!(fragment_core::npub::parse(&m.mover).is_some(), "migrations.mover is the mover's npub, not {:?}", m.mover);
+        anyhow::ensure!(m.cutoff_ms.is_none_or(|c| c > 0), "migrations.cutoff_ms is ms since the epoch");
+        v.insert("FRAGMENT_MIGRATIONS_MOVER".into(), json!(m.mover));
+        if let Some(c) = m.cutoff_ms {
+            v.insert("FRAGMENT_MIGRATIONS_CUTOFF_MS".into(), json!(c.to_string()));
+        }
+    }
     if let Some(g) = &d.ai_gateway {
         v.insert("AI_GATEWAY_ID".into(), json!(g));
     }
@@ -1329,6 +1430,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     }
     if let Some(n) = d.upload_max_bytes {
         v.insert("FRAGMENT_UPLOAD_MAX_BYTES".into(), json!(n.to_string()));
+    }
+    if let Some(allow) = egress_allow(d, n)? {
+        v.insert("FRAGMENT_EGRESS_ALLOW".into(), json!(allow));
     }
     if let Some(f) = &d.mail_from {
         v.insert("FRAGMENT_MAIL_FROM".into(), json!(f.trim()));
@@ -1466,6 +1570,9 @@ pub fn teardown(rest: &[String]) -> Result<()> {
         ensure(wrangler(&tools, &d.account_id)?.args(["queues", "delete", q]), "a queue")?;
     }
     println!("removed {}; its bucket {} stays (empty it, then `wrangler r2 bucket delete {}`)", n.cell, n.bucket, n.bucket);
+    if d.migrations.is_some() {
+        println!("its move's stage bucket {} stays too (its lifecycle rules empty it)", n.stage);
+    }
     Ok(())
 }
 
@@ -1645,11 +1752,13 @@ mod tests {
             stripe: None,
             observability_read: None,
             operators: vec![],
+            migrations: None,
             ai_gateway: None,
             models: None,
             default_plan: None,
             support_url: None,
             upload_max_bytes: None,
+            egress_allow: vec![],
             mail_from: None,
             computers: None,
             connectors: None,
@@ -1674,7 +1783,7 @@ mod tests {
         d.providers.push(serde_json::json!({
             "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"],
             "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"],
-            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "scopes": ["scope"] },
+            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "access": { "read": { "scopes": ["scope.readonly"] }, "write": { "scopes": ["scope"] } } },
             "key": "fragment-google-oauth-secret"
         }));
         let (catalog, _) = catalog_of(&d).unwrap();
@@ -1682,6 +1791,13 @@ mod tests {
         let bound = bound_for(&d, None).unwrap();
         assert!(bound.operator_keys.is_empty());
         assert!(bound.cell().contains(&("CONNECTION_SECRET_GOOGLE".into(), "fragment-google-oauth-secret")));
+        // how its client authenticates reaches the cell's catalog as its row says it
+        assert!(!serde_json::to_string(catalog.providers()).unwrap().contains("client_auth"), "a row that names none is as it was");
+        d.providers[0]["client_auth"] = "basic".into();
+        assert!(serde_json::to_string(catalog_of(&d).unwrap().0.providers()).unwrap().contains(r#""client_auth":"basic""#));
+        d.providers[0]["client_auth"] = "digest".into();
+        assert!(catalog_of(&d).is_err(), "a way to authenticate the catalog does not know");
+        d.providers[0].as_object_mut().unwrap().remove("client_auth");
         d.providers[0].as_object_mut().unwrap().remove("key");
         assert!(catalog_of(&d).is_err(), "configured OAuth needs its secret binding");
         d.providers[0].as_object_mut().unwrap().remove("connection_oauth");
@@ -1780,12 +1896,49 @@ mod tests {
         assert!(args(&["--hosted", "--branch", "p5"]).is_err(), "a config is named");
     }
 
+    /// The move's stage bucket is private only with its r2.dev URL off and
+    /// no custom domain, as Cloudflare says them; anything else, or an
+    /// answer that says neither, is not.
+    #[test]
+    fn the_stage_bucket_is_private_only_when_cloudflare_says_so() {
+        let off = json!({ "bucketId": "b", "domain": "pub-x.r2.dev", "enabled": false });
+        let none = json!({ "domains": [] });
+        assert_eq!(private(&off, &none), Ok(()));
+        assert!(private(&json!({ "enabled": true }), &none).is_err(), "r2.dev on");
+        assert!(private(&json!({}), &none).is_err(), "r2.dev unsaid");
+        assert!(private(&off, &json!({ "domains": [{ "domain": "stage.example.com", "enabled": true }] })).unwrap_err().contains("stage.example.com"));
+        assert!(private(&off, &json!({})).is_err(), "no list");
+    }
+
+    /// The move's stage bucket is bound, and its settings written, only on a
+    /// deployment whose config names `migrations`; a mover that is no npub
+    /// is refused before anything is made; and the bucket's rules expire
+    /// what the move's own deletion misses (docs/migrations.md, "Deletion").
+    #[test]
+    fn the_move_is_bound_only_where_configured() {
+        let n = names(&deployment(None, None), Some("dev")).unwrap();
+        let plain = worker_config(&deployment(None, None), &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        assert_eq!(plain["r2_buckets"], json!([{ "binding": "BLOBS", "bucket_name": "fragment-blobs-dev" }]));
+        assert!(plain["vars"].get("FRAGMENT_MIGRATIONS_MOVER").is_none());
+        let npub = fragment_core::npub::encode(&"ab".repeat(32));
+        let mut d = deployment(None, None);
+        d.migrations = Some(Migrations { mover: npub.clone(), cutoff_ms: Some(4_102_444_800_000) });
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        assert_eq!(cell["r2_buckets"], json!([{ "binding": "BLOBS", "bucket_name": "fragment-blobs-dev" }, { "binding": "STAGE", "bucket_name": "fragment-migrations-stage-dev" }]));
+        assert_eq!((&cell["vars"]["FRAGMENT_MIGRATIONS_MOVER"], &cell["vars"]["FRAGMENT_MIGRATIONS_CUTOFF_MS"]), (&json!(npub), &json!("4102444800000")));
+        d.migrations = Some(Migrations { mover: "npub1nope".into(), cutoff_ms: None });
+        assert!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).is_err(), "a mover that is no npub");
+        let rules = stage_lifecycle();
+        let ages: Vec<(String, u64)> = rules["rules"].as_array().unwrap().iter().map(|r| (r["conditions"]["prefix"].as_str().unwrap().to_string(), r.pointer("/deleteObjectsTransition/condition/maxAge").or(r.pointer("/abortMultipartUploadsTransition/condition/maxAge")).unwrap().as_u64().unwrap() / 86_400)).collect();
+        assert_eq!(ages, [("p1/".to_string(), 16), ("p2/".to_string(), 100), (String::new(), 1)]);
+    }
+
     /// A branch is a copy of its own beside the others: every name is
     /// marked, and its hosts are single labels under the zone.
     #[test]
     fn a_branch_names_everything_for_itself() {
         let n = names(&deployment(None, None), Some("dev")).unwrap();
-        assert_eq!((n.cell.as_str(), n.bucket.as_str()), ("fragment-dev", "fragment-blobs-dev"));
+        assert_eq!((n.cell.as_str(), n.bucket.as_str(), n.stage.as_str()), ("fragment-dev", "fragment-blobs-dev", "fragment-migrations-stage-dev"));
         assert_eq!((n.deliveries.as_str(), n.dead.as_str(), n.ledger.as_str()), ("fragment-deliveries-dev", "fragment-deliveries-dead-dev", "fragment-ledger-dev"));
 
         assert_eq!(n.platform_host, "dev.finite.place");
@@ -1858,7 +2011,18 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            assert_eq!(names, ["x", "firecrawl", "fal", "browser-use", "google", "perplexity", "google-places", "xai", "elevenlabs", "openrouter"], "{file}");
+            // the example offers Linear beside Google, and Salesforce; the hosted e2e's preview, not yet
+            let example = file == "deploy/example.jsonc";
+            let connections: &[&str] = if example { &["google", "linear"] } else { &["google"] };
+            let orgs: &[&str] = if example { &["salesforce"] } else { &[] };
+            let expected: Vec<&str> = ["x", "firecrawl", "fal", "browser-use"]
+                .into_iter()
+                .chain(connections.iter().copied())
+                .chain(["perplexity", "google-places", "xai", "elevenlabs"])
+                .chain(orgs.iter().copied())
+                .chain(["openrouter"])
+                .collect();
+            assert_eq!(names, expected, "{file}");
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
@@ -1868,6 +2032,56 @@ mod tests {
             let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
+    }
+
+    /// The example's Linear row, its commented connect uncommented (a client
+    /// id and the secret's store name filled in), loads: its one scope, its
+    /// revocation, and its client secret bound as the cell's.
+    #[test]
+    fn the_example_linear_connect_loads_once_uncommented() {
+        let example = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let start = example.find(r#"{ "name": "linear""#).expect("the example's linear row");
+        let row = &example[start..start + example[start..].find(r#""env": ["LINEAR_OAUTH_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-linear-oauth-secret").replace("<the app's client id>", "linear-client");
+        let dir = devstack::repo_root().join("target/xtask-tests/linear-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let o = catalog.get("linear").and_then(|p| p.connection_oauth.as_ref()).expect("its connect");
+        let scopes = |a: fragment_core::catalog::ConnectionAccess| o.access.of(a).map(|g| g.scopes.clone()).unwrap_or_default();
+        assert_eq!((o.client_id.as_str(), o.revoke.as_deref()), ("linear-client", Some("https://api.linear.app/oauth/revoke")));
+        assert_eq!((scopes(fragment_core::catalog::ConnectionAccess::Read), scopes(fragment_core::catalog::ConnectionAccess::Write)), (vec!["read".to_string()], vec!["write".to_string()]), "read only asks for read, read and write for write");
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_LINEAR".into(), "fragment-linear-oauth-secret")));
+    }
+
+    /// The example's Salesforce row, its commented connect uncommented (a
+    /// consumer key and the secret's store name filled in), loads: its
+    /// scopes, its revocation, its account host, and its client secret
+    /// bound as the cell's.
+    #[test]
+    fn the_example_salesforce_connect_loads_once_uncommented() {
+        let example = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let start = example.find(r#"{ "name": "salesforce""#).expect("the example's salesforce row");
+        let row = &example[start..start + example[start..].find(r#""env": ["SALESFORCE_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-salesforce-oauth-secret").replace("<the app's consumer key>", "salesforce-client");
+        let dir = devstack::repo_root().join("target/xtask-tests/salesforce-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let p = catalog.get("salesforce").expect("its row");
+        let o = p.connection_oauth.as_ref().expect("its connect");
+        assert_eq!((o.client_id.as_str(), o.access.write.scopes.join(" "), o.revoke.as_deref()), ("salesforce-client", "api refresh_token openid email".to_string(), Some("https://login.salesforce.com/services/oauth2/revoke")));
+        assert_eq!(o.access.offered(), [fragment_core::catalog::ConnectionAccess::Write], "Salesforce has no read-only scope: read and write alone, the user's permissions its limit");
+        assert_eq!(p.account_host.as_ref().map(|a| (a.metadata.as_str(), a.under.as_str())), Some(("instance_url", "my.salesforce.com")));
+        assert!(p.note.as_deref().is_some_and(|n| n.contains("dedicated integration user")), "Settings says how to limit what agents may do: {:?}", p.note);
+        assert!(catalog.intercepts().contains(&"*.my.salesforce.com".to_string()));
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_SALESFORCE".into(), "fragment-salesforce-oauth-secret")));
     }
 
     /// A provider's note: the example's (its google row's, commented out)
@@ -1890,7 +2104,7 @@ mod tests {
         let d = with(note).unwrap();
         let (catalog, _) = catalog_of(&d).unwrap();
         assert_eq!(catalog.get("google").unwrap().note.as_deref(), Some(note));
-        assert!(catalog.providers().iter().filter(|p| p.name != "google").all(|p| p.note.is_none()), "the other rows have none");
+        assert!(catalog.providers().iter().filter(|p| !["google", "salesforce"].contains(&p.name.as_str())).all(|p| p.note.is_none()), "the other rows have none but Salesforce's");
         let over = "a".repeat(fragment_core::catalog::NOTE_MAX_CHARS + 1);
         let refused = with(&over).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(refused.contains("providers: google's note: 1 to 280 characters"), "{refused}");
@@ -2458,5 +2672,30 @@ mod tests {
         v["upload_max_bytes"] = json!(200_000_000);
         let d = load(&config_file("upload-named", &v)).unwrap();
         assert_eq!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_UPLOAD_MAX_BYTES"], "200000000");
+    }
+
+    /// The operator's egress allowlist: none by default (no variable), and
+    /// one that would open the deployment's own hosts or loopback refused
+    /// before a deploy; named, it is the cell's `FRAGMENT_EGRESS_ALLOW`.
+    #[test]
+    fn an_egress_allowlist_is_checked_and_rendered() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let d = load(&config_file("egress-default", &v)).unwrap();
+        let n = names(&d, Some("p5")).unwrap();
+        assert!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].get("FRAGMENT_EGRESS_ALLOW").is_none(), "the default names none");
+        v["egress_allow"] = json!(["*.corp.internal", "10.20.0.0/16", "100.101.102.103"]);
+        let d = load(&config_file("egress-named", &v)).unwrap();
+        let rendered = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_EGRESS_ALLOW"].clone();
+        assert_eq!(rendered, "*.corp.internal,10.20.0.0/16,100.101.102.103");
+        // as the cell reads it back at its start
+        let read = fragment_core::egress::Allow::from_var(rendered.as_str(), &n.platform_host, &n.suffix).unwrap();
+        assert!(!read.is_empty() && read.celld().starts_with("*.corp.internal,10.20.0.0/16,100.101.102.103/32,!"), "{}", read.celld());
+        for (entry, said) in [("127.0.0.0/8", "loopback"), ("p5.finite.place", "the platform's own"), ("*.finite.place", "the platform's own"), ("wiki:80", "no host name")] {
+            v["egress_allow"] = json!([entry]);
+            let d = load(&config_file("egress-refused", &v)).unwrap();
+            let refused = egress_allow(&d, &n).err().map(|e| format!("{e:#}")).unwrap_or_default();
+            assert!(refused.starts_with("egress_allow: ") && refused.contains(said), "{entry}: {refused}");
+        }
     }
 }

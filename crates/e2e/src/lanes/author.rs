@@ -757,8 +757,12 @@ fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Re
         titles.push(json!({ "wanted": title, "main": manifest.body["meta"]["title"], "live": status.body["title"] }));
     }
     s.ok("CLI rename A to B to A and an immediate repeat each change main and the live display name", titles.iter().all(|r| r["wanted"] == r["main"] && r["wanted"] == r["live"]), json!(titles));
-    let receipt = s.cli_json(api, home, &["preview", &name, "--json"])?;
-    s.ok("CLI preview asks for a screenshot and returns its completion receipt", receipt["since"].is_i64() && receipt["live"].is_string(), &receipt);
+    if s.shoots_cards() {
+        let receipt = s.cli_json(api, home, &["preview", &name, "--json"])?;
+        s.ok("CLI preview asks for a screenshot and returns its completion receipt", receipt["since"].is_i64() && receipt["live"].is_string(), &receipt);
+    } else {
+        s.skip_card("CLI preview asks for a screenshot and returns its completion receipt");
+    }
     let label = name.split_once("--").expect("the name has a suffix").0;
     let claimed = s.cli_json(api, home, &["address", &name, label, "--json"])?;
     let read = s.cli_json(api, home, &["address", &name, "--json"])?;
@@ -1073,6 +1077,13 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         "fragment members add: someone in already is refused (invalid_request, saying `fragment members role`), which changes their role",
         again == Some(1) && v["error"]["code"] == "invalid_request" && v["error"]["message"].as_str().is_some_and(|m| m.contains("fragment members role")) && changed["role"] == "editor",
         json!([v, changed]),
+    );
+    let listed = s.cli(api, &home, &["members", "list", &name]);
+    let text = String::from_utf8_lossy(&listed.stdout).to_string();
+    s.ok(
+        "fragment members list shows its owner each person by email too, as the share sheet does (decision 48)",
+        listed.status.success() && text.lines().any(|l| l.starts_with("editor\t") && l.ends_with(&format!("\t{bea_email}"))),
+        &text,
     );
     // the invites waiting for the CLI's person's yes: listed, accepted by
     // label, declined by name (decision 63)

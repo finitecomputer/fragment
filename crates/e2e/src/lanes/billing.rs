@@ -393,9 +393,15 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("a pack's Checkout")?;
     let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
     s.ok(
-        "a seat's holder opens a pack's Checkout: a payment at the pack's price, for their own ledger",
-        r.status == 200 && f("mode") == "payment" && f("metadata[fragment_person]") == ann_id && f("metadata[fragment_buyer]") == ann_id && f("metadata[fragment_pack]") == "25",
-        format!("{:?}", asked.form),
+        "a seat's holder opens a pack's Checkout: a payment at the pack's price, for their own ledger, its answer naming the page to open (a notice's Buy credit opens it)",
+        r.status == 200
+            && f("mode") == "payment"
+            && f("metadata[fragment_person]") == ann_id
+            && f("metadata[fragment_buyer]") == ann_id
+            && f("metadata[fragment_pack]") == "25"
+            && r.body["url"].is_string()
+            && r.body["open"] == r.body["url"],
+        format!("{:?} | {}", asked.form, r.body),
     );
     s.stripe.complete(&pack1).map_err(anyhow::Error::msg)?;
     let granted = s.eventually(PUSHED, || purchased(&ann) == before + 25_000_000);
@@ -1458,7 +1464,7 @@ fn sells_nothing(s: &mut Suite, b: &mut Lease, api: &Api, guest: &dyn Fn(&Api, &
 /// nothing is a FAIL saying where the page is and what it has, not an
 /// error thrown in the page.
 pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("billing-page", &[Need::Chrome, Need::Fakes, Need::Deployment, Need::Node]) {
+    if !s.section("billing-page", &[Need::Chrome, Need::Fakes, Need::Deployment, Need::Node, Need::Computers]) {
         return Ok(());
     }
     let Some(mut b) = s.browser()? else {
@@ -1686,6 +1692,33 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         managed && alone == true && warned == json!([]) && has("Payment and invoices") && has("Add seats for others") && !has("Make your first agent") && !has(&format!("Buy an always-on seat, {seat_price} a month")),
         json!({ "shown": shown, "buttons": buttons, "warned": warned }),
     );
+    // ---- their seat lapsed (FIN-458): the band over their Settings says so
+    // in Settings' words, Pay again theirs (their org's admin, seats sold),
+    // told live; its subscription unpaid a moment, then paid again
+    let gus_org = seat(api, &gus)["seat"]["org"]["id"].as_str().unwrap_or("").to_string();
+    let gus_sub = subscription_of(s, &gus_org).context("their subscription")?;
+    s.stripe.set_status(&gus_sub, "unpaid").map_err(anyhow::Error::msg)?;
+    let row = "#computer-notices .computer-notice[data-id='seat']";
+    let told = b.until(&page, &format!("!!document.querySelector({row:?})"), wait);
+    let said = b.eval(&page, &format!("document.querySelector({row:?})?.innerText ?? ''"))?;
+    for (w, h, mobile) in [(1280, 800, false), (390, 844, true)] {
+        for scheme in ["light", "dark"] {
+            b.viewport(&page, w, h, mobile)?;
+            b.color_scheme(&page, scheme)?;
+            std::thread::sleep(Duration::from_millis(400));
+            let _ = b.screenshot(&page, &shots.join(format!("seat-lapsed-{w}-{scheme}.png")));
+        }
+    }
+    b.viewport(&page, 1280, 800, false)?;
+    b.color_scheme(&page, "light")?;
+    s.ok(
+        "their seat lapsed (unpaid): the band over their Settings says so, told live, in Settings' words, with Pay again",
+        told && said.as_str().is_some_and(|t| t.contains("Your seat lapsed") && t.contains("Your agents are stopped. Nothing of yours is gone.") && t.contains("Pay again")),
+        &said,
+    );
+    s.stripe.set_status(&gus_sub, "active").map_err(anyhow::Error::msg)?;
+    let back = b.until(&page, &format!("!document.querySelector({row:?})"), wait);
+    s.ok("paid again, it is told no more", back, b.eval(&page, "document.getElementById('computer-notices').innerText")?);
     if !act(s, &mut b, &page, "Billing's Add seats for others", &click_text("#settings-page button", "Add seats for others"))? {
         return Ok(());
     }

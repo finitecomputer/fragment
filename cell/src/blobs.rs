@@ -46,6 +46,30 @@ pub(crate) fn maybe_pointer(size: u64) -> bool {
     (POINTER_MIN_BYTES..=blob::POINTER_MAX_BYTES as u64).contains(&size)
 }
 
+/// An object's bytes as an answer: whole (200), or the range asked (206,
+/// `content-range`), streamed; `etag` its SHA-256, when it is named by it
+/// (a blob; the move's stage zip, migrations.rs, is not).
+pub(crate) fn ranged(b: js::BlobBody, mime: &str, etag: Option<&str>) -> CellResult<Response> {
+    let h = Headers::new();
+    h.set("content-type", mime)?;
+    if let Some(sha) = etag {
+        h.set("etag", &format!("\"{sha}\""))?;
+    }
+    h.set("accept-ranges", "bytes")?;
+    let status = match b.range {
+        Some((offset, length)) => {
+            h.set("content-range", &format!("bytes {offset}-{}/{}", offset + length.max(1) - 1, b.size))?;
+            h.set("content-length", &length.to_string())?;
+            206
+        }
+        None => {
+            h.set("content-length", &b.size.to_string())?;
+            200
+        }
+    };
+    Ok(Response::from_body(ResponseBody::Stream(b.body))?.with_status(status).with_headers(h))
+}
+
 impl FragmentCell {
     pub(crate) fn blob_key(&self, sha: &str) -> CellResult<String> {
         Ok(format!("{}/{sha}", self.must(MetaKey::Npub)?))
@@ -88,7 +112,7 @@ impl FragmentCell {
                 let size = req.headers().get("content-length")?.and_then(|l| l.parse::<u64>().ok()).filter(|n| *n <= limits::BLOB_MAX_BYTES).ok_or_else(|| CellError::invalid("a blob upload declares its content-length"))?;
                 let digest = js::blob_put(&self.env, &key, body, size).await?;
                 if digest != sha {
-                    js::blob_delete(&self.env, &[key]).await?;
+                    js::blob_delete(&self.env, js::BLOBS, &[key]).await?;
                     return Err(CellError::invalid(format!("the bytes hash to {digest}, not {sha}")));
                 }
                 (size, true)
@@ -139,7 +163,7 @@ impl FragmentCell {
         let key = self.blob_key(sha)?;
         let size = bytes.len() as u64;
         if js::blob_head(&self.env, &key).await?.is_none() {
-            js::blob_put_bytes(&self.env, &key, &bytes).await?;
+            js::blob_put_bytes(&self.env, js::BLOBS, &key, &bytes).await?;
         }
         self.record_blob(sha, size, mime)
     }
@@ -159,24 +183,9 @@ impl FragmentCell {
 
     /// A blob as a response: its bytes (or the asked range), immutable.
     pub(crate) async fn stream_blob(&self, sha: &str, mime: &str, range: Option<&str>) -> CellResult<Response> {
-        let found = js::blob_get(&self.env, &self.blob_key(sha)?, range).await?;
+        let found = js::blob_get(&self.env, js::BLOBS, &self.blob_key(sha)?, range).await?;
         let b = found.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("the bytes of blob {sha} are gone")))?;
-        let h = Headers::new();
-        h.set("content-type", mime)?;
-        h.set("etag", &format!("\"{sha}\""))?;
-        h.set("accept-ranges", "bytes")?;
-        let status = match b.range {
-            Some((offset, length)) => {
-                h.set("content-range", &format!("bytes {offset}-{}/{}", offset + length.max(1) - 1, b.size))?;
-                h.set("content-length", &length.to_string())?;
-                206
-            }
-            None => {
-                h.set("content-length", &b.size.to_string())?;
-                200
-            }
-        };
-        Ok(Response::from_body(ResponseBody::Stream(b.body))?.with_status(status).with_headers(h))
+        ranged(b, mime, Some(sha))
     }
 
     /// The blob a file at a pin points to: (sha, size).
@@ -256,7 +265,7 @@ impl FragmentCell {
         let stale: Vec<String> = self.rows(query, vec![SqlStorageValue::Integer(before)])?.into_iter().filter_map(|r| r["sha"].as_str().map(str::to_string)).collect();
         if !stale.is_empty() {
             let keys = stale.iter().map(|sha| self.blob_key(sha)).collect::<CellResult<Vec<_>>>()?;
-            js::blob_delete(&self.env, &keys).await?;
+            js::blob_delete(&self.env, js::BLOBS, &keys).await?;
             for sha in &stale {
                 self.exec("DELETE FROM blobs WHERE sha = ?", vec![sha.as_str().into()])?;
             }
@@ -268,7 +277,7 @@ impl FragmentCell {
     /// `prefix` (its key's), at most `pages` pages of them a call. Whether
     /// none is left.
     pub(crate) async fn delete_blobs_under(&self, prefix: &str, pages: usize) -> CellResult<bool> {
-        let (_, more) = js::blob_delete_under(&self.env, prefix, pages).await?;
+        let (_, more) = js::blob_delete_under(&self.env, js::BLOBS, prefix, pages).await?;
         Ok(!more)
     }
 

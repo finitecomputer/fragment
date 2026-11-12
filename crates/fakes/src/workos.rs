@@ -34,6 +34,13 @@
 //! the stand-in OAuth provider (`POST /test-oauth/revoke token=`, a token
 //! Pipes handed out).
 //!
+//! The stand-in provider has a second client (`BASIC_CLIENT`), one that
+//! authenticates with HTTP Basic alone (RFC 6749 §2.3.1), as Zoom's and
+//! Airtable's do: its code is exchanged at `/test-oauth/basic/token` and
+//! its grant revoked at `/test-oauth/basic/revoke`, each refusing a
+//! request without its `Authorization: Basic` header (401
+//! `invalid_client`), or one that also names the client in its body.
+//!
 //! The stand-in provider's consent grants what it was asked for, or, as a
 //! person who unticks boxes on Google's consent screen, only those of the
 //! asked-for scopes its `grant` names (a test's, on the authorize URL).
@@ -108,7 +115,8 @@ struct State {
     /// Connected accounts' states read (each with no token).
     states_read: u64,
     /// Independent OAuth provider boundary for browser-bound Pipes tests.
-    oauth_codes: HashMap<String, (String, String, String, String)>,
+    /// code → (challenge, callback, scopes granted, account, client id).
+    oauth_codes: HashMap<String, (String, String, String, String, String)>,
     oauth_grants: HashMap<String, (String, String)>,
     oauth_exchanges: usize,
     imports: Vec<(String, String, String)>,
@@ -121,6 +129,10 @@ struct State {
     /// Connected accounts deleted (user id, provider), each asked once.
     deleted: Vec<(String, String)>,
     omit_id_token: bool,
+    omit_expires_in: bool,
+    /// Access tokens Pipes refreshed: each asked for after its import's
+    /// `expires_at`.
+    refreshes: usize,
     /// An `add` for a person with an account already is refused, as Pipes
     /// does until WorkOS enables additional connections.
     refuse_additional: bool,
@@ -145,7 +157,11 @@ const ACCOUNTS_LIMIT: usize = 25;
 /// A connected account at Pipes: the compatibility connection, or a
 /// standard one an `add` made; whether it is still authorized, its label
 /// (`account_display_name`), scopes and identifier as imported, and the
-/// stand-in provider's account its grant is (none: a test's lever made it).
+/// stand-in provider's account its grant is (none: a test's lever made it),
+/// what Pipes keeps of its provider's token answers (`metadata`: an
+/// import's that made it, or a test's lever), and when its access token
+/// expires as imported (none: never imported), which Pipes refreshes at the
+/// first token asked for after it.
 #[derive(Clone, Debug)]
 struct Account {
     id: String,
@@ -156,6 +172,8 @@ struct Account {
     identifier: Option<String>,
     created_at: String,
     grant: Option<String>,
+    metadata: Value,
+    expires_at: Option<String>,
 }
 
 /// A connected account as a test reads it, with no token.
@@ -185,7 +203,8 @@ enum Target {
 /// An import as it lands: (user id, provider), its label as sent (absent:
 /// an update keeps the one there), the scopes it names (none: none kept),
 /// its identifier (absent: an update keeps it), the account it lands on,
-/// and the provider's account its grant is.
+/// the provider's account its grant is, its metadata (a create's alone), and
+/// when its access token expires.
 struct Import {
     user: String,
     provider: String,
@@ -194,6 +213,8 @@ struct Import {
     identifier: Option<String>,
     target: Target,
     account: String,
+    metadata: Option<Value>,
+    expires_at: String,
 }
 
 impl Account {
@@ -224,7 +245,7 @@ impl State {
         let id = self.next("data_installation");
         let created_at = crate::codestorage::iso(crate::codestorage::now_ms());
         let list = self.accounts.entry((user.to_string(), provider.to_string())).or_default();
-        list.push(Account { id, compatibility, authorized: true, label: None, scopes: None, identifier: None, created_at, grant: None });
+        list.push(Account { id, compatibility, authorized: true, label: None, scopes: None, identifier: None, created_at, grant: None, metadata: json!({}), expires_at: None });
         list.last_mut().expect("just made")
     }
 
@@ -270,6 +291,10 @@ impl State {
             a.identifier = Some(identifier);
         }
         a.grant = Some(i.account.clone());
+        if let Some(m) = i.metadata {
+            a.metadata = m;
+        }
+        a.expires_at = Some(i.expires_at);
         let answer = a.json(&i.user, &i.provider);
         self.imports.push((i.user, i.provider, i.account));
         Some(answer)
@@ -419,16 +444,80 @@ fn now_s() -> i64 {
     crate::codestorage::now_ms() / 1000
 }
 
-/// What the stand-in provider's connection asks for (`connection_oauth`).
+/// What the stand-in provider's connection asks for as read only
+/// (`connection_oauth.access.read`).
 pub const CONNECTION_SCOPES: [&str; 3] = ["mail.read", "files.read", "openid"];
+/// What it asks for as read and write: read only's, and sending mail.
+pub const CONNECTION_WRITE_SCOPES: [&str; 4] = ["mail.read", "files.read", "mail.send", "openid"];
+
+/// The stand-in provider's client that authenticates with HTTP Basic, and
+/// never in a request's body: its id and its secret.
+pub const BASIC_CLIENT: (&str, &str) = ("mock-basic-client", "mock-basic-secret");
+
+/// Whether `req` authenticates as the stand-in provider's Basic client:
+/// its `Authorization` header alone (RFC 6749 §2.3.1), with neither its id
+/// nor its secret in the form beside it.
+fn basic_client(req: &Request, form: &HashMap<String, String>) -> bool {
+    let expected = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", BASIC_CLIENT.0, BASIC_CLIENT.1)));
+    req.header("authorization") == Some(expected.as_str()) && !form.contains_key("client_id") && !form.contains_key("client_secret")
+}
+
+/// The suffix the stand-in provider's accounts' own hosts are under: its
+/// token answer names `https://<account>.<this>` (`instance_url`), as
+/// Salesforce's names its org's.
+pub const ACCOUNT_HOSTS_UNDER: &str = "my.oauth.test";
 
 impl WorkOs {
     pub fn connection_oauth(&self) -> Value {
-        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "scopes": CONNECTION_SCOPES, "revoke": format!("{}/test-oauth/revoke", self.url) })
+        let access = json!({ "read": { "scopes": CONNECTION_SCOPES }, "write": { "scopes": CONNECTION_WRITE_SCOPES } });
+        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "access": access, "revoke": format!("{}/test-oauth/revoke", self.url) })
+    }
+
+    /// The stand-in provider's connection through its client that
+    /// authenticates with HTTP Basic (`BASIC_CLIENT`; its row names
+    /// `"client_auth": "basic"` beside this): the same consent, its own
+    /// token and revocation endpoints.
+    pub fn basic_connection_oauth(&self) -> Value {
+        let mut o = self.connection_oauth();
+        o["client_id"] = BASIC_CLIENT.0.into();
+        o["exchange"] = format!("{}/test-oauth/basic/token", self.url).into();
+        o["revoke"] = format!("{}/test-oauth/basic/revoke", self.url).into();
+        o
+    }
+
+    /// The stand-in provider's connection as a provider with no read-only
+    /// scope has it (Salesforce's): read and write alone, asking for read
+    /// only's scopes (`CONNECTION_SCOPES`).
+    pub fn one_access_connection_oauth(&self) -> Value {
+        let mut o = self.connection_oauth();
+        o["access"] = json!({ "write": { "scopes": CONNECTION_SCOPES } });
+        o
     }
 
     /// The next code exchange answers no ID token, as a provider asked for no `openid`.
     pub fn omit_next_id_token(&self) { self.state.lock().expect("workos state").omit_id_token = true; }
+
+    /// What Pipes keeps of `email`'s account at `provider` (its compatibility
+    /// connection, made if there is none), as a refresh of it would.
+    pub fn keep_metadata(&self, email: &str, provider: &str, metadata: Value) {
+        let mut s = self.state.lock().expect("workos state");
+        let user = s.user_for(email).expect("the fake keeps its users");
+        s.compatibility(&user.id, provider).metadata = metadata;
+    }
+
+    /// What Pipes keeps of `email`'s compatibility connection at `provider`.
+    pub fn metadata(&self, email: &str, provider: &str) -> Option<Value> {
+        let s = self.state.lock().expect("workos state");
+        let user = s.users.iter().find(|u| u.email.eq_ignore_ascii_case(email))?.id.clone();
+        s.named(&user, provider, None).map(|a| a.metadata.clone())
+    }
+
+    /// The next code exchange names no `expires_in`, as Salesforce's never does.
+    pub fn omit_next_expires_in(&self) { self.state.lock().expect("workos state").omit_expires_in = true; }
+
+    /// How many access tokens Pipes refreshed: each asked for once its
+    /// import's `expires_at` had passed.
+    pub fn refreshes(&self) -> usize { self.state.lock().expect("workos state").refreshes }
 
     /// The next import is answered 504, as one whose outcome its caller
     /// cannot know, and lands only at `land_deferred_import`.
@@ -546,7 +635,7 @@ impl WorkOs {
         let handler: Handler = Arc::new(move |req: &Request| {
             let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
             match (req.method.as_str(), req.path.as_str()) {
-                ("POST", "/test-oauth/token") => {
+                ("POST", "/test-oauth/token" | "/test-oauth/basic/token") => {
                     let code = url::form_urlencoded::parse(&req.body).find(|(k, _)| k == "code").map(|(_, v)| v.into_owned()).unwrap_or_default();
                     gated.pass(&[Gate::Exchange, Gate::ExchangeOf(code)]);
                 }
@@ -556,7 +645,7 @@ impl WorkOs {
             let mut s = st.lock().expect("workos state");
             match (req.method.as_str(), req.path.as_str()) {
                 ("GET", "/test-oauth/authorize") => {
-                    if q("client_id") != "mock-connection-client" || q("response_type") != "code" || q("code_challenge_method") != "S256" { return problem(400, "invalid_request", "OAuth parameters"); }
+                    if !["mock-connection-client", BASIC_CLIENT.0].contains(&q("client_id").as_str()) || q("response_type") != "code" || q("code_challenge_method") != "S256" { return problem(400, "invalid_request", "OAuth parameters"); }
                     let Ok(mut back) = url::Url::parse(&q("redirect_uri")) else { return problem(400, "invalid_request", "callback"); };
                     if q("decline") != "yes" {
                         let code = s.next("oauth_code");
@@ -569,40 +658,54 @@ impl WorkOs {
                         // `you`, as a person pressing Connect on the dev stack
                         // names none (their account `you@oauth.test`)
                         let account = Some(q("account")).filter(|a| !a.is_empty()).unwrap_or_else(|| "you".into());
-                        s.oauth_codes.insert(code.clone(), (q("code_challenge"), q("redirect_uri"), granted, account));
+                        s.oauth_codes.insert(code.clone(), (q("code_challenge"), q("redirect_uri"), granted, account, q("client_id")));
                         back.query_pairs_mut().append_pair("code", &code);
                     }
                     back.query_pairs_mut().append_pair("state", &q("state"));
                     redirect(back.as_str())
                 }
-                ("POST", "/test-oauth/token") => {
+                ("POST", path @ ("/test-oauth/token" | "/test-oauth/basic/token")) => {
                     s.oauth_exchanges += 1;
                     let form: HashMap<String, String> = url::form_urlencoded::parse(&req.body).into_owned().collect();
                     let f = |k: &str| form.get(k).map(String::as_str).unwrap_or("");
-                    let Some((challenge, callback, scopes, account)) = s.oauth_codes.remove(f("code")) else { return problem(400, "invalid_grant", "code"); };
+                    // the Basic client's endpoint: its header, before anything of the code is read
+                    let basic = path == "/test-oauth/basic/token";
+                    if basic && !basic_client(req, &form) { return problem(401, "invalid_client", "this client authenticates with HTTP Basic alone"); }
+                    let Some((challenge, callback, scopes, account, client)) = s.oauth_codes.remove(f("code")) else { return problem(400, "invalid_grant", "code"); };
                     use sha2::Digest;
                     let actual = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(f("code_verifier").as_bytes()));
-                    if challenge != actual || callback != f("redirect_uri") || f("client_id") != "mock-connection-client" || f("client_secret") != "mock-connection-secret" || f("grant_type") != "authorization_code" {
+                    // a code is its client's: exchanged as that client authenticates, at its endpoint
+                    let authenticated = match basic {
+                        true => client == BASIC_CLIENT.0,
+                        false => client == "mock-connection-client" && f("client_id") == "mock-connection-client" && f("client_secret") == "mock-connection-secret",
+                    };
+                    if challenge != actual || callback != f("redirect_uri") || !authenticated || f("grant_type") != "authorization_code" {
                         return problem(400, "invalid_grant", "binding");
                     }
                     let access = s.next("mock_access");
                     let refresh = s.next("mock_refresh");
-                    let mut grant = json!({ "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": scopes });
+                    // its account's own host, as Salesforce's answer names its org's (`instance_url`)
+                    let mut grant = json!({ "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": scopes, "instance_url": format!("https://{account}.{ACCOUNT_HOSTS_UNDER}") });
                     // OpenID Connect's ID token beside the grant when `openid` was asked
                     // for, unsigned as the fake's AuthKit tokens are: its account's
                     // email, for this client
                     if scopes.split(' ').any(|s| s == "openid") && !std::mem::take(&mut s.omit_id_token) {
                         let b64 = |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
-                        let claims = json!({ "iss": "https://oauth.test", "aud": "mock-connection-client", "sub": account, "email": format!("{account}@oauth.test"), "email_verified": true });
+                        let claims = json!({ "iss": "https://oauth.test", "aud": client, "sub": account, "email": format!("{account}@oauth.test"), "email_verified": true });
                         grant["id_token"] = format!("{}.{}.fake", b64(json!({ "alg": "none", "typ": "JWT" })), b64(claims)).into();
+                    }
+                    if std::mem::take(&mut s.omit_expires_in) {
+                        grant.as_object_mut().expect("a grant").remove("expires_in");
                     }
                     s.oauth_grants.insert(access.clone(), (refresh.clone(), account));
                     Response::json(200, &grant)
                 }
                 // RFC 7009 as Google answers it: a token Pipes or the provider handed out, or 400
-                ("POST", "/test-oauth/revoke") => {
+                ("POST", path @ ("/test-oauth/revoke" | "/test-oauth/basic/revoke")) => {
                     if std::mem::take(&mut s.fail_revoke) { return problem(503, "unavailable", "test revocation failure"); }
                     let form: HashMap<String, String> = url::form_urlencoded::parse(&req.body).into_owned().collect();
+                    // the Basic client's: as Zoom's, which refuses a revocation its client does not authenticate
+                    if path == "/test-oauth/basic/revoke" && !basic_client(req, &form) { return problem(401, "invalid_client", "this client authenticates with HTTP Basic alone"); }
                     let token = form.get("token").cloned().unwrap_or_default();
                     let ours = s.tokens.values().flatten().any(|t| *t == token) || s.oauth_grants.contains_key(&token);
                     if form.len() != 1 || !ours { return problem(400, "invalid_token", "not a token handed out here"); }
@@ -641,7 +744,11 @@ impl WorkOs {
                     if body["refresh_token"] != refresh || !body["expires_at"].is_string() || body["state"] != "connected" { return problem(422, "invalid_tokens", "token combination"); }
                     let scopes = serde_json::from_value::<Vec<String>>(body["scopes"].clone()).ok();
                     let identifier = body["account_identifier"].as_str().map(str::to_string);
-                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), scopes, identifier, target, account };
+                    // WorkOS: metadata is "not accepted on update"
+                    if body.get("metadata").is_some() && req.method == "PUT" { return pipes_problem(422, "invalid_request", "metadata is not accepted on update"); }
+                    let metadata = body.get("metadata").cloned();
+                    let expires_at = body["expires_at"].as_str().unwrap_or_default().to_string();
+                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), scopes, identifier, target, account, metadata, expires_at };
                     if std::mem::take(&mut s.defer_import) {
                         s.deferred = Some(import);
                         return problem(504, "gateway_timeout", "test import deferred: it lands later");
@@ -813,11 +920,14 @@ impl WorkOs {
                     s.deleted.push(key);
                     Response::bytes(204, "text/plain", vec![])
                 }
-                ("POST", p) if p.starts_with("/data-integrations/") && p.ends_with("/token") => {
+                // a token (`/token`), or a credential with what Pipes keeps of
+                // the account's provider answers (`/credentials`)
+                ("POST", p) if p.starts_with("/data-integrations/") && (p.ends_with("/token") || p.ends_with("/credentials")) => {
                     if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
                         return problem(401, "unauthorized", "the API key is wrong");
                     }
-                    let provider = p["/data-integrations/".len()..p.len() - "/token".len()].to_string();
+                    let credential = p.ends_with("/credentials");
+                    let provider = p["/data-integrations/".len()..p.rfind('/').expect("a vend's path")].to_string();
                     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
                     let Some(user) = body["user_id"].as_str().filter(|u| s.users.iter().any(|x| x.id == *u)).map(str::to_string) else {
                         return problem(404, "not_found", "no such user");
@@ -838,6 +948,14 @@ impl WorkOs {
                         Some(false) => Response::json(200, &json!({ "active": false, "error": "needs_reauthorization" })),
                         Some(true) => {
                             let account = account.expect("matched");
+                            // an access token past its import's expiry is refreshed first
+                            let now = fragment_core::export::rfc3339(crate::codestorage::now_ms());
+                            if account.expires_at.as_ref().is_some_and(|e| *e <= now) {
+                                s.refreshes += 1;
+                                let later = fragment_core::export::rfc3339(crate::codestorage::now_ms() + 3_600_000);
+                                let held = s.accounts.get_mut(&(user.clone(), provider.clone())).and_then(|l| l.iter_mut().find(|a| a.id == account.id));
+                                held.expect("the account vended").expires_at = Some(later);
+                            }
                             let token = s.next(&format!("pipes_{provider}"));
                             s.pipes_tokens.insert(token.clone(), (user.clone(), provider.clone(), account.id.clone()));
                             // what the account holds, and what of the connection's asks it lacks
@@ -845,10 +963,11 @@ impl WorkOs {
                             let missing: Vec<&str> = if scopes.is_empty() { vec![] } else { CONNECTION_SCOPES.into_iter().filter(|c| !scopes.iter().any(|s| s == c)).collect() };
                             s.tokens.entry(provider).or_default().push(token.clone());
                             let expires = crate::codestorage::iso(crate::codestorage::now_ms() + 3_600_000);
-                            Response::json(
-                                200,
-                                &json!({ "active": true, "access_token": { "object": "access_token", "access_token": token, "expires_at": expires, "scopes": scopes, "missing_scopes": missing } }),
-                            )
+                            let answer = match credential {
+                                true => json!({ "active": true, "credential": { "object": "credential", "auth_method": "oauth", "value": token, "expires_at": expires, "scopes": scopes, "missing_scopes": missing, "metadata": account.metadata, "config": {} } }),
+                                false => json!({ "active": true, "access_token": { "object": "access_token", "access_token": token, "expires_at": expires, "scopes": scopes, "missing_scopes": missing } }),
+                            };
+                            Response::json(200, &answer)
                         }
                     }
                 }

@@ -1065,6 +1065,14 @@ impl FragmentCell {
         Ok(blessed::data_file(template, path))
     }
 
+    /// The icon of the blessed template live runs (blessed.rs `icon`), when
+    /// it carries one: the fragment's own, until it has one of its own.
+    pub(crate) fn release_icon(&self) -> CellResult<Option<&'static File>> {
+        let Some(installed) = self.meta(MetaKey::Blessed)? else { return Ok(None) };
+        let template = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
+        Ok(blessed::icon(template))
+    }
+
     /// A release's data file as a file route answers one, its bytes
     /// streamed from the release's Static Assets (a HEAD reads none).
     pub(crate) async fn release_response(&self, d: &File, head: bool) -> CellResult<Response> {

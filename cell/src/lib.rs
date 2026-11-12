@@ -61,6 +61,7 @@ mod live;
 mod mail;
 mod members;
 mod meter;
+mod migrations;
 mod models;
 mod notices;
 mod ops;
@@ -76,6 +77,7 @@ mod schema;
 mod search;
 mod searchable;
 mod search_index;
+mod vault;
 mod runs_on;
 mod serve;
 mod share;
@@ -255,7 +257,7 @@ fn registry_unavailable(why: String) -> CellError {
 }
 
 /// One call to the registry at `path`: its 200's body, or its refusal.
-async fn registry_round_trip(env: &Env, path: &str, body: String) -> CellResult<Vec<u8>> {
+pub(crate) async fn registry_round_trip(env: &Env, path: &str, body: String) -> CellResult<Vec<u8>> {
     let make = || {
         let headers = Headers::new();
         headers.set("content-type", "application/json")?;
@@ -602,7 +604,7 @@ async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
         let fragment = agent.and_then(|p| p.fragment.clone()).ok_or_else(none)?;
         return routed::fetch_object(env, "FRAGMENT", &fragment, "computer/picture").await;
     };
-    let blob = js::blob_get(env, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
+    let blob = js::blob_get(env, js::BLOBS, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
     let headers = Headers::new();
     headers.set("content-type", &picture.mime)?;
     headers.set("cache-control", "public, max-age=300")?;
@@ -625,7 +627,7 @@ fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellRe
     Ok(key)
 }
 
-pub(crate) use json_response::json_answer;
+pub(crate) use json_response::{json_answer, json_passed};
 
 /// An identity's fragments, as its `Principal` cell lists them.
 pub(crate) async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
@@ -832,7 +834,7 @@ async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest:
             // registry names them, so no one it does not know stores any.
             ask_registry(env, &calls::View { identity: None, by: by() }).await?;
             let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body));
-            js::blob_put_bytes(env, &format!("pictures/{sha}"), &body).await?;
+            js::blob_put_bytes(env, js::BLOBS, &format!("pictures/{sha}"), &body).await?;
             json_answer(&ask_registry(env, &calls::SetPicture { by: by(), sha, mime: mime.to_string() }).await?)
         }
         (Method::Get, [id]) => {
@@ -1231,9 +1233,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
         },
         // the shell, for everyone: signed out it asks them to sign in;
-        // `/settings` opens its settings, `/apps` the person's apps, `/history`
-        // every chat they have had, `/welcome` a new person's welcome
-        (Method::Get, [""] | ["settings"] | ["apps"] | ["history"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
+        // `/settings` opens its settings, `/apps` the person's apps, `/brains`
+        // their brains, `/history` every chat they have had, `/schedules` every scheduled job of theirs,
+        // `/welcome` a new person's welcome
+        (Method::Get, [""] | ["settings"] | ["apps"] | ["brains"] | ["history"] | ["schedules"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
         // the operators' admin page: to anyone else, the 404 below
         (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
         // Finite's about page, privacy policy and terms, for anyone (signed out too)
@@ -1271,7 +1274,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             json_answer(&share::access(env, &url, &who).await?)
         }
         // what the signer is told now, each owner's in its own words (notices.rs)
-        (Method::Get, ["api", "notices"]) => notices::route(&req, env, &url).await,
+        (Method::Get, ["api", "notices"]) => notices::route(&req, env, cfg, &url).await,
         // the invites waiting on the signer's emails, theirs to answer (share.rs)
         (_, ["api", "invites", rest @ ..]) => {
             let rest = rest.to_vec();
@@ -1383,6 +1386,11 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let rest = rest.to_vec();
             orgs::admin(req, env, cfg, &url, &rest).await
         }
+        // the finite.computer move's mover (migrations.rs)
+        (_, ["api", "migrations", rest @ ..]) => {
+            let rest = rest.to_vec();
+            migrations::route(req, env, cfg, &url, &rest).await
+        }
         (_, ["api", "ledger", rest @ ..]) => {
             let rest = rest.to_vec();
             ledger_route(req, env, cfg, &url, &rest).await
@@ -1405,17 +1413,19 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let provider = provider.to_string();
             connections::callback(&req, env, &url, &provider).await
         }
-        (method, ["api", "connections", rest @ ..]) => {
+        // a signer's own connections, computers and Vault (vault.rs: theirs
+        // alone, never an agent's): one body read and one signature checked
+        // for the three, each its module's to answer
+        (method, ["api", area @ ("connections" | "computers" | "vault"), rest @ ..]) => {
+            let area = *area;
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let who = signer(env, &req, &url, &body).await?;
             let rest = rest.to_vec();
-            connections::route(&req, env, &url, &who, method, &rest, &body).await
-        }
-        (method, ["api", "computers", rest @ ..]) => {
-            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            let who = signer(env, &req, &url, &body).await?;
-            let rest = rest.to_vec();
-            computer::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await
+            match area {
+                "connections" => connections::route(&req, env, &url, &who, method, &rest, &body).await,
+                "computers" => computer::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await,
+                _ => vault::route(env, &who, method, &rest, &body).await,
+            }
         }
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();

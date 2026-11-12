@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Seventeen skills. Eight are Fragment platform contracts:
+Twenty skills. Ten are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -44,6 +44,8 @@ Seventeen skills. Eight are Fragment platform contracts:
 | git-finite | Fragment repositories, sync, deploys and rollback |
 | brain-finite | The brain template's files, search and wiki contract |
 | google-workspace-finite | Connected Google access through per-agent placeholders; gws, no local OAuth |
+| linear-finite | Connected Linear access through per-agent placeholders; no API key or local OAuth |
+| salesforce-finite | Connected Salesforce access through per-agent placeholders, to the connected org's own host alone; no session id or local OAuth |
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
 | chat-attachments-finite | A file sent in a Fragment chat as an attachment (`MEDIA:` in a reply), not by email or a path |
@@ -66,6 +68,13 @@ It follows the project's visual system and checks contrast for readable text,
 including placeholders. `apps-finite` points to it for art direction and keeps
 the Fragment build, publish and sharing contract. Image generation follows
 `image-generation-finite` and its platform limits.
+
+`import-agent-home` brings an agent's home over from where it ran (a
+folder, a zip, or a stage): the judgment around `fragment home` and
+`fragment session import` (its SOUL, memories, skills and routines). A
+platform's own paths and habits are a profile beside it,
+`profiles/<layout>.md` and `profiles/<layout>.layout.json`, removed with
+that platform's move.
 
 `gws-docs` is Google Workspace CLI's Docs command guide,
 pinned to v0.22.5 like the image's CLI (source and Apache-2.0 license in

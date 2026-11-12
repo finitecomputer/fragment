@@ -310,7 +310,7 @@ from their label instead of a template placeholder such as "Blank".
 fragment rename meal-planner "Meals this week"     # changes meta.title, deploys; address stays put
 fragment icon generate meal-planner --hint "a cooking pot"   # generates and sets the best candidate
 fragment icon set meal-planner pot.png             # or upload an image
-fragment icon remove meal-planner                  # restore the default glyph
+fragment icon remove meal-planner                  # restore the default (a brain's icon, or the glyph)
 fragment preview meal-planner                     # request a new screenshot, returns immediately
 fragment address meal-planner                     # read its optional public address
 fragment address meal-planner family-meals        # claim one, first come first served
@@ -376,6 +376,10 @@ fragment verify my-thing --dir .            # full-content audit
 - **Mass-deletion guard**: a pass that would delete more than
   max(3, 30%) of known files, or all of them, is refused (exit 4) until
   `--apply-mass-delete`.
+- **Folders refused**: sync and `deploy --dir` refuse `/`, `/tmp`, your
+  home folder or one above it, and a folder with a browser profile
+  (`Default/Cookies`, `Local State`, `org.chromium.Chromium.*`) in it or
+  one level down. Point `--dir` at the folder you mean, by its full path.
 - **Deletions converge**; a locally modified copy wins over a remote
   delete.
 - **Viewers** sync read-only, and so does an agent acting for one (it
@@ -662,6 +666,17 @@ it gets none of it.
 
 Visitors without a key call as an anonymous principal (a cookie), so
 `public` operations work on a public fragment with no login.
+
+**Who did it.** Store `call.principal` with what someone did, and show
+them by email when the page draws: `fetch("./__people?id=" + id)` →
+`{profiles: {[id]: {kind, email?, name?, picture}}}` (at most 64 ids a
+time; `job.people(ids)` in a job). People show as their email to the
+fragment's members (they were invited by it), an agent by its name, and
+an anonymous visitor or link holder as no one. `await fragment.me()`
+says who this page is: `{id, principal, role}`; `fragment.me({ email:
+true })` adds `email` for a signed-in member (one more ask). Keep no table of names in your app: nobody can pick
+someone else's, and none goes stale. A mutation's `call` carries no
+name or email (it is the app's own transaction); ask when you draw.
 `await fragment.push.register(who)` (from a click) subscribes the
 browser to web push; `call.push(who, payload)` or `job.push(...)` reaches
 every browser registered with that `who` (`*` for all).
@@ -851,7 +866,7 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
 
 ```
 fragment visibility my-thing [public|link|members]
-fragment members list my-thing
+fragment members list my-thing                            # each person by email too, to the owner (and their agent)
 fragment members add my-thing bea@example.com --role editor   # a person, by email
 fragment members add my-thing <npub> --role viewer            # one of your own agents (or any key of one)
 fragment members role my-thing bea@example.com editor         # someone in already: their role
@@ -973,10 +988,13 @@ from Hermes' own `state.db` (or the Hermes home holding it), read-only:
 fragment session import ~/finite-import/export              # the old Finite's export, unpacked
 fragment session import ~/.hermes                           # a Hermes home, or its state.db
 fragment session import ~/.hermes --kind chat               # only chats (also: cron, subagent)
+fragment session import stage.zip --layout ./layouts/x.json  # an agent's home, zipped: its Hermes home where its layout says
 ```
 
 A `state.db` copied from elsewhere needs its `state.db-wal` beside it, or
-its newest messages are not in it. On an agent's computer here, its own
+its newest messages are not in it. A zip of an agent's home (`fragment
+home`) is read in place: its database, and its WAL, are copied out to a
+temporary folder for the read and deleted after. On an agent's computer here, its own
 Hermes databases are refused: their conversations are your chats here
 already.
 
@@ -999,6 +1017,40 @@ tool, tool_calls, reasoning, summary, attachments}`; `kind` is `chat`,
 `cron` (a scheduled job's run) or `subagent` (a side task); times are UTC.
 A file a message held is under `~/archive/media/`, named in its
 `attachments`.
+
+## Bringing an agent's home
+
+`fragment home` reads an agent's home from wherever it ran: its folder,
+or a zip of it, read in place and never changed. A layout says where
+that home keeps things: `hermes` (a bare Hermes home, the default), or a
+layout file a platform's import skill carries.
+
+```
+fragment home survey ~/old-home --json                         # what an import would bring, and what stays
+fragment home survey stage.zip --layout ./layouts/x.json       # a zip, read through a platform's layout
+fragment home extract stage.zip agent/SOUL.md skills/ --to ~/import   # files and folders, copied out as they are
+fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9   # its own files, into a fragment of files
+fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9 --plan   # only what it would bring
+```
+
+The survey lists the chats' database (`fragment session import` brings
+them), the SOUL, memories and a few public settings, each skill with
+where it came from (its own come over; a platform's are replaced by
+this one's, and an edit to one is kept), each scheduled job as a
+routine in UTC (weekdays by name), and its files: what an import brings
+(photos, video, audio and documents first, newest first, then the rest,
+up to 10 GiB) and what stays behind, and why. A file that may hold a
+password or key (`.env`, `auth.json`, a private key) is left out unread,
+and named: nothing an import makes holds it. A zip naming a file by a
+path that is not plain (`..`, `a/./b`) is refused whole. `extract`
+copies into a folder apart from the home, never through a link.
+
+`fragment home files` brings the home's own files (its layout's work
+folder) into a fragment you edit, under `files/`, each file of 1 MiB or
+more as a blob, and writes `left-behind.md` beside them: every file or
+folder left out, its size, and why. A fragment with no `fragment.json`
+gets one whose page is the files view (`fragment deploy` shows it).
+Running it again sends only what is missing.
 
 ## Agents
 
@@ -1096,12 +1148,12 @@ variable of its name, else stdin, never the command line. A secret set
 before secrets named hosts fills nowhere until it is set again with
 `--to`. Never write secret values into files.
 
-A fragment holding a secret (or a door) stays its owner's and their own
-agents' for now: make it private first (`fragment visibility my-thing
-members`, no one else in it, no invite waiting), and while it holds one
-it gets no share link, no one else, and no invite (403
-`private_while_reaching`; a secret on a shared one is 403
-`unshare_first`).
+A fragment holding a secret (or a door) has no share link and is not
+public for now: make it members only first (`fragment visibility
+my-thing members`), and while it holds one it gets no link and is not
+made public (403 `private_while_reaching`; a secret on one its link
+opens is 403 `unshare_first`). People you add by name, at any role, are
+fine, and they can use its keys.
 
 ## Rules of the road
 
@@ -1122,7 +1174,10 @@ fragment keys [list|rotate|revoke <npub>]
 fragment ledger [grant <who> <usd> --why W [--id ID] | key-cap <key> <usd>|default]
 fragment quote [<name> <amount>…]        # what a job would cost, and what is left
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
-fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
+fragment session import <path> [--kind K] [--layout L]   # an agent's past conversations, into your Session Archive
+fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
+fragment home extract <source> <path>... --to <dir> [--layout L]
+fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>
@@ -1148,7 +1203,9 @@ fragment invites                         # the invites waiting for your yes
 fragment invites accept|decline <name>   # an agent: its owner's, acting for them
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret list|rm ...
-fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, else stdin
+fragment secret set <name> <KEY> --to HOST [--to HOST] [--from-vault SECRET]   # the value from $KEY, else stdin; or moved from your Vault
+fragment vault set <secret> --agent A [--to HOST] [--header H [--format F] | --query Q | --basic user|password | --sign nip98]   # a person's own (an agent 403): the value from a hidden prompt, else stdin
+fragment vault list                      fragment vault rm <secret>
 fragment deploy <name> [--dir D] [--note N]
 fragment read <name> <path>              # one file at main, as a viewer may
 fragment write <name> <path> --text T | --from FILE|- [--message M]
@@ -1166,7 +1223,7 @@ fragment schedule list [<name>]          fragment schedule pause|resume|rm [<nam
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]
-fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many shared beyond (counts only)
+fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many open by link or public (counts only)
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
 fragment operator orgs [--after A] [--key-file F]
@@ -1179,6 +1236,9 @@ fragment operator log [--before N] [--key-file F]
 fragment operator credit <org> <usd> --why W --id REF [--key-file F]
 fragment operator budget <org> <usd> [--id I] [--key-file F]
 fragment operator payer <org> <email|npub> [--id I] [--key-file F]
+fragment operator moves [--withdrawn] [--key-file F]   # the finite.computer move; --withdrawn: the will-not-move list, each with its why
+fragment operator withdraw <old> --why W [--key-file F]   # keep an old agent out of the move (ahead of the roster too)
+fragment operator include <old> [--key-file F]   # take a withdrawal back
 ```
 
 `fragment operator …` is the deployment's operators' alone: each signs

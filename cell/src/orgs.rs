@@ -272,11 +272,13 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Get, ["orgs", org]) => json_answer(&ask_registry(env, &OrgOf { by: None, org: Some(org.to_string()) }).await?),
         (Method::Get, ["people"]) => json_answer(&ask_registry(env, &admin::People { q: param(url, "q"), after: param(url, "after") }).await?),
         (Method::Get, ["people", person]) => json_answer(&person_page(env, person).await?),
-        // FIN-352's census: reach shared beyond, counted (reach.rs)
+        // FIN-352's census: reach open by link or public, counted (reach.rs)
         (Method::Get, ["people", person, "reach"]) => json_answer(&crate::reach::census(env, person).await?),
         (Method::Put, ["people", person, "computer", "image"]) => json_answer(&pin(env, &by, person, &bytes).await?),
         (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
         (Method::Get, ["glance"]) => json_answer(&crate::glance::glance(env, cfg, url).await?),
+        // the finite.computer move's moves, and staff's acts on one
+        (m, ["migrations", rest @ ..]) => crate::migrations::admin(env, cfg, &by, m, rest, url, &bytes).await,
         (Method::Post, ["objects", class, "wake"]) => json_answer(&crate::routed::wake(env, class, body(&bytes)?).await?),
         (Method::Get, ["log"]) => {
             let before = param(url, "before").map(|b| b.parse::<u64>().map_err(|_| CellError::invalid("`before` is an entry's number"))).transpose()?;

@@ -818,6 +818,17 @@ impl Engine {
         self.relaying.get(agent)?.as_deref()
     }
 
+    /// What `agent` works on in its owner's phone's chat (`mirror`) now: the
+    /// `chat` seqs of the messages there its running turns answer, which
+    /// their SimpleX app shows working (simplex/link.rs, `Link::react`).
+    /// Its own turns' phase, runtime-neutral: a turn waiting on its owner
+    /// (`Waiting`), or queued behind another, is no work of its.
+    pub fn working(&self, agent: &str) -> BTreeSet<u64> {
+        let Some(chat) = self.mirror(agent) else { return BTreeSet::new() };
+        let ours = |t: &&Turn| t.agent == agent && t.phase == Phase::Running && t.fragment == chat && t.cause.fragment == chat && t.cause.channel == records::CHAT;
+        self.state.turns.values().filter(ours).map(|t| t.cause.seq).collect()
+    }
+
     pub fn cursor(&self, agent: &str, fragment: &str, channel: &str) -> u64 {
         self.state.cursors.get(&cursor_key(agent, fragment, channel)).copied().unwrap_or(0)
     }

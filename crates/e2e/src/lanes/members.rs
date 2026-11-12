@@ -9,7 +9,7 @@ use fragment_nip98::Keys;
 use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
-use crate::api::{self, Api};
+use crate::api::{self, Api, Reply};
 use crate::Suite;
 
 fn listed(api: &Api, keys: &Keys, name: &str) -> Result<Option<String>> {
@@ -85,6 +85,18 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a stranger cannot list members", r.status == 403, &r);
     let r = api.signed(&bob, "GET", &path("members"), None)?;
     s.ok("a member lists members", r.status == 200 && r.body["members"].as_array().map_or(0, |a| a.len()) == 2, &r);
+    // each person by email, to the owner and their agent for them, as the
+    // share sheet shows them (decision 48); to anyone else, by npub alone
+    let emails = |r: &Reply| -> Vec<String> { r.body["members"].as_array().into_iter().flatten().filter_map(|m| m["email"].as_str().map(str::to_string)).collect() };
+    let want = vec![Api::email_of(&owner), Api::email_of(&bob)];
+    let owners = api.signed(&owner, "GET", &path("members"), None)?;
+    let (hand, _) = super::delegation::agent_of(api, &owner)?;
+    let for_owner = api.signed(&hand, "GET", &format!("{}?for={}", path("members"), api.identity(&owner)?), None)?;
+    s.ok(
+        "the owner's list names each person by email too, and so does their agent's for them; a member's names none",
+        emails(&owners) == want && emails(&for_owner) == want && emails(&r).is_empty(),
+        format!("{owners} {for_owner} {r}"),
+    );
 
     // invites by email (decision 48), each waiting for its person's yes (decision 63)
     let invite = |email: &str, role: &str| api.signed(&owner, "POST", &path("invites"), Some(&json!({ "email": email, "role": role })));
@@ -604,15 +616,16 @@ fn access_past_its_bound(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
-/// FIN-352 (Paul, 2026-11-01): a fragment with reach (a key, a door) is
-/// shared with no one but its owner and their own agents, for now (cell
-/// reach.rs). Valid: a key on a private app, its owner's own agent in it,
-/// narrowing it. Invalid: each way of sharing it further while it holds a
-/// key (403 `private_while_reaching`), and a key or a door on one shared
-/// beyond them (403 `unshare_first`), each leaving it as it was. Replay:
-/// the same refused again is refused the same. One from before the rule
-/// (the `legacy-reach` lever) keeps serving and shares no further. The
-/// restart lane's sealed key keeps it across a restart.
+/// FIN-352 (Paul, 2026-11-01, narrowed 2026-11-11): a fragment with reach
+/// (a key, a door) has no share link and is not public, for now (cell
+/// reach.rs). Valid: a key on a members-only app, its owner's own agent in
+/// it, people named while it holds the key (an invite, its yes, an editor's
+/// role), narrowing it. Invalid: its link or public while it holds a key
+/// (403 `private_while_reaching`), and a key or a door on one its link
+/// opens (403 `unshare_first`), each leaving it as it was. Replay: the same
+/// refused again is refused the same. One from before the rule (the
+/// `legacy-reach` lever) keeps serving and gets no wider. The restart
+/// lane's sealed key keeps it across a restart.
 pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("reach", &[crate::Need::Levers]) {
         return Ok(());
@@ -643,7 +656,7 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
 
     // a key on an app its link opens (as it is made) waits for it to be private
     let r = put_key(&name)?;
-    s.ok("a key on an app whose link opens it is refused (403 unshare_first): it is made private first", refused(&r, "unshare_first") && r.text.contains("make it private first"), &r);
+    s.ok("a key on an app whose link opens it is refused (403 unshare_first): it is made members only first", refused(&r, "unshare_first") && r.text.contains("make it members only first"), &r);
     anyhow::ensure!(visibility(&name, "members")?.status == 200, "made private");
     hold_rows(&name, true)?;
     let r = put_key(&name)?;
@@ -661,41 +674,89 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
     let waited = crate::api::timing_parts(&r.header("server-timing"));
     s.ok("and the answer says what it waited on (Server-Timing): the identity, the lists, its computer told", ["identity", "list", "joined"].iter().all(|p| waited.iter().any(|w| w == p)), r.header("server-timing"));
 
-    // each way of sharing it further, refused, and the same again
-    for (what, r) in [("its link", visibility(&name, "link")?), ("public", visibility(&name, "public")?), ("an invite", invite(&name, &bea)?), ("anyone else added", api.share(&name, &npub::encode(bea.pubkey_hex()), "viewer")?)] {
-        s.ok(&format!("with a key, {what} is refused (403 private_while_reaching)"), refused(&r, "private_while_reaching"), &r);
+    // people named are in while it holds the key (Paul, 2026-11-11): an
+    // invite, its yes, an editor's role, another invite waiting
+    let bea_id = npub::encode(bea.pubkey_hex());
+    let bea_identity = api.identity(&bea)?;
+    let ivy = api.person()?;
+    let invited = invite(&name, &bea)?;
+    let yes = api.signed(&bea, "POST", &format!("/api/invites/{name}/accept"), Some(&json!({})))?;
+    let editor = api.signed(&owner, "PUT", &at(&name, &format!("members/{bea_id}")), Some(&json!({ "role": "editor" })))?;
+    let waiting = invite(&name, &ivy)?;
+    s.ok(
+        "with a key, people named are in: an invite, its yes, an editor's role, and another invite waiting",
+        invited.status == 200 && yes.status == 200 && editor.status == 200 && waiting.status == 200,
+        json!({ "invited": invited.body, "yes": yes.body, "editor": editor.body, "waiting": waiting.body }),
+    );
+    // its link and public, refused, and the same again
+    for (what, r) in [("its link", visibility(&name, "link")?), ("public", visibility(&name, "public")?)] {
+        s.ok(&format!("with a key and people in, {what} is refused (403 private_while_reaching)"), refused(&r, "private_while_reaching") && r.text.contains("add people by name instead"), &r);
     }
-    let again = invite(&name, &bea)?;
+    let again = visibility(&name, "link")?;
+    let members = api.signed(&owner, "GET", &at(&name, "members"), None)?;
     let invites = api.signed(&owner, "GET", &at(&name, "invites"), None)?;
     let status = api.status(&owner, &name)?;
+    let bea_role = members.body["members"].as_array().and_then(|a| a.iter().find(|m| m["principal"] == bea_identity.as_str()).map(|m| m["role"].clone()));
     s.ok(
-        "refused again the same, and it is as it was: members only, its owner and their agent, no invite",
-        refused(&again, "private_while_reaching") && status.body["visibility"] == "members" && status.body["counts"]["members"] == 2 && invites.body["invites"] == json!([]),
-        json!({ "again": again.status, "status": status.body, "invites": invites.body }),
+        "refused again the same, and it is as it was: members only, its key held, its named editor in, its invite waiting",
+        refused(&again, "private_while_reaching")
+            && status.body["visibility"] == "members"
+            && status.body["reach"] == true
+            && bea_role == Some(json!("editor"))
+            && invites.body["invites"].as_array().is_some_and(|a| a.len() == 1 && a[0]["email"] == Api::email_of(&ivy).as_str()),
+        json!({ "again": again.status, "status": status.body, "members": members.body, "invites": invites.body }),
     );
     let r = visibility(&name, "members")?;
     s.ok("narrowing it (members only) is never refused", r.status == 200, &r);
-
-    // its key gone, it is shared again; shared, it takes no key until it is not
-    let gone = api.signed(&owner, "DELETE", &at(&name, "secrets/API_KEY"), None)?;
-    let invited = invite(&name, &bea)?;
-    let waiting = put_key(&name)?;
-    let revoked = api.signed(&owner, "DELETE", &at(&name, &format!("invites/{}", Api::email_of(&bea))), None)?;
-    let taken = put_key(&name)?;
+    // its owner's sheet shows With link and Public, unavailable, saying
+    // why: never hidden, and no form sends them
+    let session = api.sign_in(&Api::email_of(&owner))?;
+    let sheet = super::signin::with_session(api, "GET", &format!("/share/{name}"), &session)?;
+    let locked = |v: &str| sheet.text.contains(&format!("<button type=\"button\" value=\"{v}\" aria-pressed=\"false\" aria-disabled=\"true\""));
     s.ok(
-        "its key deleted, it is shared again; an invite waiting, a key is refused (unshare_first); revoked, it is taken",
-        gone.status == 200 && invited.status == 200 && refused(&waiting, "unshare_first") && revoked.status == 200 && taken.status == 200,
-        json!({ "gone": gone.status, "invited": invited.status, "waiting": waiting.body, "revoked": revoked.status, "taken": taken.status }),
+        "with a key, its owner's sheet shows With link and Public unavailable, with the reason, and offers neither",
+        sheet.status == 200
+            && locked("link")
+            && locked("public")
+            && sheet.text.contains("With link")
+            && sheet.text.contains("can't be shared by link or made public for now")
+            && !sheet.text.contains("name=\"visibility\" value=\"link\"")
+            && !sheet.text.contains("name=\"visibility\" value=\"public\""),
+        sheet.status,
     );
 
-    // a connector shared beyond its owner is bound as no door (refused
-    // before its agent is asked)
+    // its key gone, its link opens it again; so opened, it takes no key until it is not
+    let gone = api.signed(&owner, "DELETE", &at(&name, "secrets/API_KEY"), None)?;
+    let linked = visibility(&name, "link")?;
+    let refused_key = put_key(&name)?;
+    let narrowed = visibility(&name, "members")?;
+    let taken = put_key(&name)?;
+    s.ok(
+        "its key deleted, its link opens it again; so opened, a key is refused (unshare_first); members only again, it is taken, its people still in",
+        gone.status == 200 && linked.status == 200 && refused(&refused_key, "unshare_first") && narrowed.status == 200 && taken.status == 200,
+        json!({ "gone": gone.status, "linked": linked.status, "key": refused_key.body, "narrowed": narrowed.status, "taken": taken.status }),
+    );
+
+    // a connector its link opens is bound as no door (refused before its
+    // agent is asked)
     let connector = s.named(api, &owner, "reachdoor")?;
     let made = api.create_with(&owner, json!({ "name": connector, "template": "telegram" }))?;
     anyhow::ensure!(made.status == 200, "a connector: {made}");
-    anyhow::ensure!(invite(&connector, &bea)?.status == 200, "invited to the connector");
+    anyhow::ensure!(visibility(&connector, "link")?.status == 200, "the connector opened by its link");
     let r = api.signed(&owner, "POST", &at(&connector, "door"), Some(&json!({ "act": "link", "agent": s.named(api, &owner, "anyagent")? })))?;
-    s.ok("a connector with an invite waiting is bound as no door (403 unshare_first)", refused(&r, "unshare_first"), &r);
+    if s.on_celld() {
+        // a self-hosted stack's connectors are SimpleX alone (Telegram's
+        // webhook needs the platform reachable from the internet): its
+        // policy refuses Telegram's door first, saying so
+        s.ok(
+            "a self-hosted stack links no Telegram: its door is refused, 403, as a connector the deployment does not allow",
+            r.status == 403 && r.message().contains("does not allow"),
+            &r,
+        );
+        s.skip("a connector its link opens is bound as no door (403 unshare_first)", "its connector is Telegram's, which a self-hosted stack does not allow (docs/self-host.md)");
+    } else {
+        s.ok("a connector its link opens is bound as no door (403 unshare_first)", refused(&r, "unshare_first"), &r);
+    }
 
     // one from before the rule: shared, with a key from then
     let old = s.named(api, &owner, "reachold")?;
@@ -714,34 +775,36 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
     hold_rows(&old, false)?;
     s.ok("one from before the release tells its owner's row its reach on its first request after it", unaware && told, json!({ "unaware": unaware, "row": row(&old)["sharing"] }));
     let yes = api.signed(&ivy, "POST", &format!("/api/invites/{old}/accept"), None)?;
-    let further = [visibility(&old, "public")?, invite(&old, &api.person()?)?];
+    let named = invite(&old, &api.person()?)?;
+    let public = visibility(&old, "public")?;
     let key_again = put_key(&old)?;
     s.ok(
-        "one shared from before the rule keeps serving its people, and shares no further: an old invite's yes, public, a new invite, and a key, refused",
-        serves.status == 200 && yes.status == 403 && further.iter().all(|r| refused(r, "private_while_reaching")) && refused(&key_again, "unshare_first"),
-        json!({ "serves": serves.status, "yes": yes.body, "further": further.iter().map(|r| r.body.clone()).collect::<Vec<_>>(), "key": key_again.body }),
+        "one opened by its link from before the rule keeps serving its people, and its people named are in (an old invite's yes, a new invite); public and a key, refused",
+        serves.status == 200 && yes.status == 200 && named.status == 200 && refused(&public, "private_while_reaching") && refused(&key_again, "unshare_first"),
+        json!({ "serves": serves.status, "yes": yes.body, "named": named.body, "public": public.body, "key": key_again.body }),
     );
-    // its owner's sheet, locked: the line, New link (it ends the old one),
-    // and a Copy link that gives its address, never the share link
+    // its owner's sheet: the invite form with the keys line under it, the
+    // link line, New link (it ends the old one), and a Copy link that
+    // gives its address, never the share link
     let session = api.sign_in(&Api::email_of(&owner))?;
     let sheet = super::signin::with_session(api, "GET", &format!("/share/{old}"), &session)?;
     s.ok(
-        "its owner's sheet is locked: the line, New link, and Copy link its address alone, never the share link",
+        "its owner's sheet: the invite form, the keys line once, the link line, New link, and Copy link its address alone, never the share link",
         sheet.status == 200
-            && sheet.text.contains("stay private to you and your agents for now")
+            && sheet.text.contains("type=\"email\"")
+            && sheet.text.matches("People you add can use this app's keys.").count() == 1
+            && sheet.text.contains("can't be shared by link or made public for now")
             && sheet.text.contains("New link")
             && sheet.text.contains(&format!("data-copy=\"{}\"", api.site_url(&old, "")))
             && !sheet.text.contains("?view="),
         sheet.status,
     );
-    let removed = api.signed(&owner, "DELETE", &at(&old, &format!("members/{}", npub::encode(bea.pubkey_hex()))), None)?;
-    let uninvited = api.signed(&owner, "DELETE", &at(&old, &format!("invites/{}", Api::email_of(&ivy))), None)?;
     let private = visibility(&old, "members")?;
     let key_now = put_key(&old)?;
     s.ok(
-        "narrowed (its people removed, its invite revoked, members only), it takes a key",
-        removed.status == 200 && uninvited.status == 200 && private.status == 200 && key_now.status == 200,
-        json!({ "removed": removed.status, "uninvited": uninvited.status, "private": private.status, "key": key_now.body }),
+        "made members only, its people still in, it takes a key",
+        private.status == 200 && key_now.status == 200,
+        json!({ "private": private.status, "key": key_now.body }),
     );
     Ok(())
 }
@@ -764,7 +827,7 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
         api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/BOT_TOKEN"), body: Some(body.to_string().into_bytes()), content_type: Some(content_type), cookie: Some(cookie.to_string()), extra, ..api::Call::default() })
     };
     // a viewer lists and sets none (their role), from its page neither; and
-    // while they are in, its owner's key waits (FIN-352: `reach`, below)
+    // while its link opens it, its owner's key waits (FIN-352: `reach`, below)
     let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok("a viewer cannot list secrets", r.status == 403, &r);
     let r = put(&viewer, "X", json!({ "value": "v", "hosts": ["openrouter.ai"] }))?;
@@ -772,7 +835,7 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     let r = page_put_from(&site(&viewer)?, "application/json", None, "123456:a-viewers")?;
     s.ok("a viewer's page sets none", r.status == 403, &r);
     let r = put(&owner, "OPENROUTER_API_KEY", json!({ "value": value, "hosts": ["openrouter.ai"] }))?;
-    s.ok("its owner's key waits while someone else is in (403 unshare_first)", r.status == 403 && r.body["reason"] == "unshare_first", &r);
+    s.ok("its owner's key waits while its link opens it (403 unshare_first)", r.status == 403 && r.body["reason"] == "unshare_first", &r);
     // private, its owner's own agent its viewer now
     let gone = api.signed(&owner, "DELETE", &format!("/api/f/{name}/members/{}", npub::encode(viewer.pubkey_hex())), None)?;
     let private = api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
@@ -861,7 +924,126 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     let r = page_put_from(&editor_site, "application/json", Some("cross-site"), "123456:from-elsewhere")?;
     let after = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     s.ok("and changes no secret (no secret.set event)", r.status != 200 && after.text.matches("secret.set").count() == set_count, &r);
+
+    // a secret of its owner's Vault moved here (FIN-466): kept here, gone
+    // from the Vault, never in an answer; theirs alone to move
+    let bot = format!("123456:vault-moved-{}", &Keys::generate().pubkey_hex()[..16]);
+    let vault = |keys: &Keys, method: &'static str, path: &str, body: Option<Value>| api.signed(keys, method, path, body.as_ref());
+    let parked = vault(&owner, "PUT", "/api/vault/telegram-e2e", Some(json!({ "value": bot, "hosts": [], "agents": [agent_id_name(&name)] })))?;
+    let signer = vault(&owner, "PUT", "/api/vault/nostr-e2e", Some(json!({ "value": Keys::generate().secret_hex(), "hosts": ["finite.site"], "place": { "sign": "nip98" }, "agents": [agent_id_name(&name)] })))?;
+    anyhow::ensure!(parked.status == 200 && signer.status == 200, "the owner's vault: {parked} {signer}");
+    // its agent an editor here, so only its being an agent refuses it
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{agent_id}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the owner's agent its editor: {r}");
+    let both = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "value": "123456:x", "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
+    let by_agent = put(&viewer, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
+    let a_signer = put(&owner, "NOSTR_KEY", json!({ "fromVault": "nostr-e2e", "hosts": ["finite.site"] }))?;
+    let held = vault(&owner, "GET", "/api/vault", None)?;
+    s.ok(
+        "a value and fromVault both, an agent's move, and a Nostr key's move are each refused, the Vault keeping both",
+        both.status == 400 && by_agent.status == 403 && by_agent.text.contains("only a person") && a_signer.status == 400 && a_signer.text.contains("never leaves") && held.text.contains("telegram-e2e") && held.text.contains("nostr-e2e"),
+        format!("{both} {by_agent} {a_signer}"),
+    );
+    // a name outside a Vault name's grammar never reaches a Vault's route:
+    // dot segments and separators, literal or percent-encoded, a slash, from
+    // the API and from the fragment's own page, aimed at a key that signs
+    // and at a token, are each refused (400), the Vault keeping both and
+    // the fragment given nothing (Alex's review of #1184: `../delete/…`)
+    let escapes = [
+        "../delete/nostr-e2e",
+        "../delete/telegram-e2e",
+        "%2e%2e/delete/nostr-e2e",
+        "%2E%2E%2Fdelete%2Fnostr-e2e",
+        "..%2fdelete%2ftelegram-e2e",
+        "telegram-e2e/../../delete/nostr-e2e",
+        "nostr-e2e/x",
+    ];
+    let before = vault(&owner, "GET", "/api/vault", None)?;
+    let mut refused = escapes.iter().map(|from| put(&owner, "PATH_E2E", json!({ "fromVault": from, "hosts": ["api.telegram.org"] }))).collect::<Result<Vec<_>>>()?;
+    let body = json!({ "fromVault": "../delete/nostr-e2e", "hosts": ["api.telegram.org"] }).to_string().into_bytes();
+    refused.push(api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/PATH_E2E"), body: Some(body), content_type: Some("application/json"), cookie: Some(editor_site.clone()), ..api::Call::default() })?);
+    let held = vault(&owner, "GET", "/api/vault", None)?;
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
+    s.ok(
+        "a fromVault outside a Vault name's grammar (../, %2e%2e, %2F, a slash; from the API or its page) is refused (400) before any Vault route: the Vault keeps its token and its key that signs, each as it was (hosts, place, agents, when set), and the fragment is given nothing",
+        refused.iter().all(|r| r.status == 400 && r.text.contains("is not one"))
+            && held.text.contains("\"telegram-e2e\"")
+            && held.text.contains("\"nostr-e2e\"")
+            && held.status == 200
+            && held.body == before.body
+            && listed.status == 200
+            && !listed.text.contains("PATH_E2E"),
+        json!({ "statuses": refused.iter().map(|r| r.status).collect::<Vec<_>>(), "first": refused.first().map(|r| r.text.clone()), "vault": held.text, "listed": listed.text }),
+    );
+    let moved = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
+    let held = vault(&owner, "GET", "/api/vault", None)?;
+    let again = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
+    s.ok(
+        "its person moves a Vault secret into their fragment: its secret now, gone from the Vault, its value in no answer; again, nothing is there (404)",
+        moved.status == 200
+            && listed.body["secrets"].as_array().is_some_and(|l| l.iter().any(|x| x == &json!({ "name": "TELEGRAM_BOT_TOKEN", "hosts": ["api.telegram.org"] })))
+            && !held.text.contains("telegram-e2e")
+            && again.status == 404
+            && ![&moved, &listed, &held, &again].iter().any(|r| r.text.contains(&bot)),
+        format!("{moved} {held} {again}"),
+    );
+    // moved at once into three fragments of theirs, each move reading it
+    // before any keeps it: one keeps it, the others are refused (409
+    // while it is claimed, 404 once it is gone), and it leaves the Vault
+    let mut homes = vec![name.clone()];
+    for which in ["move-a", "move-b"] {
+        let home = s.named(api, &owner, which)?;
+        s.create(api, &owner, &home)?;
+        // private, as a key needs (`reach`, above)
+        let private = api.signed(&owner, "PUT", &format!("/api/f/{home}/visibility"), Some(&json!({ "visibility": "members" })))?;
+        anyhow::ensure!(private.status == 200, "{home} made private: {private}");
+        homes.push(home);
+    }
+    let (owner_keys, homes) = (&owner, &homes);
+    let raced = (0..3)
+        .map(|trial| -> Result<Value> {
+            let (secret, key, value) = (format!("raced-e2e-{trial}"), format!("RACED_{trial}"), format!("{bot}-raced-{trial}"));
+            let parked = vault(owner_keys, "PUT", &format!("/api/vault/{secret}"), Some(json!({ "value": value, "hosts": [], "agents": [agent_id_name(&name)] })))?;
+            anyhow::ensure!(parked.status == 200, "the owner's vault: {parked}");
+            let body = json!({ "fromVault": secret, "hosts": ["api.telegram.org"] });
+            let answers = std::thread::scope(|scope| {
+                let each: Vec<_> = homes
+                    .iter()
+                    .map(|home| {
+                        let (path, body) = (format!("/api/f/{home}/secrets/{key}"), &body);
+                        scope.spawn(move || api.signed(owner_keys, "PUT", &path, Some(body)))
+                    })
+                    .collect();
+                each.into_iter().map(|h| h.join().expect("a move's thread")).collect::<Result<Vec<_>>>()
+            })?;
+            let kept = homes.iter().map(|home| api.signed(owner_keys, "GET", &format!("/api/f/{home}/secrets"), None)).collect::<Result<Vec<_>>>()?;
+            let held = vault(owner_keys, "GET", "/api/vault", None)?;
+            let refused = answers.iter().filter(|r| r.status != 200).all(|r| (r.status == 409 && r.code() == Some(ErrorCode::Conflict)) || r.status == 404);
+            Ok(json!({
+                "statuses": answers.iter().map(|r| r.status).collect::<Vec<_>>(),
+                "moved": answers.iter().filter(|r| r.status == 200).count(),
+                "refused": refused,
+                "homes": kept.iter().filter(|r| r.text.contains(&key)).count(),
+                "inVault": held.text.contains(&secret),
+                "shown": answers.iter().chain(&kept).chain([&held]).any(|r| r.text.contains(&value)),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    s.ok(
+        "a Vault secret moved into three fragments at once, three times: each time one keeps it, the others are refused (409 claimed, or 404 gone), and the Vault holds it no more",
+        raced.iter().all(|t| t["moved"] == 1 && t["refused"] == true && t["homes"] == 1 && t["inVault"] == false && t["shown"] == false),
+        json!(raced),
+    );
+    vault(&owner, "DELETE", "/api/vault/nostr-e2e", None)?;
     Ok(())
+}
+
+/// A name a Vault secret binds to: an agent fragment's form, this lane's
+/// own (the move checks bind no agent that runs).
+fn agent_id_name(name: &str) -> String {
+    let (_, suffix) = fragment_proto::split_fragment_name(name).expect("a fragment's name");
+    format!("agent--{suffix}")
 }
 
 const FIRST_ROW: &str = "a chat made with its agent while its seed is held (code.storage slow): every row its owner's list shows of it, the first while the seed runs, names its agent";

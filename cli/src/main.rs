@@ -4,6 +4,7 @@ mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod home;
 mod mcp;
 mod notice;
 mod operator;
@@ -279,6 +280,13 @@ enum Cmd {
         #[command(subcommand)]
         sub: SecretCmd,
     },
+    /// Your Vault: secrets your agents use without holding them (a token,
+    /// a bot's, a Nostr key). A value is read from a hidden prompt or
+    /// stdin, never the command line, and never shown again
+    Vault {
+        #[command(subcommand)]
+        sub: VaultCmd,
+    },
     /// A fragment's members: list, add, remove, or leave
     Members {
         #[command(subcommand)]
@@ -432,6 +440,12 @@ enum Cmd {
         #[command(subcommand)]
         sub: ScheduleCmd,
     },
+    /// An agent's home brought here from wherever it ran: what an import
+    /// would bring (`survey`), and its files copied out (`extract`)
+    Home {
+        #[command(subcommand)]
+        sub: home::HomeCmd,
+    },
     /// An agent's past conversations, in your Session Archive
     Session {
         #[command(subcommand)]
@@ -520,8 +534,8 @@ enum OperatorCmd {
         key_file: Option<PathBuf>,
     },
     /// FIN-352's census: of everyone's fragments, how many of each kind
-    /// hold a key or a door, and how many of those are shared beyond their
-    /// owner and their agents. Counts only, no names
+    /// hold a key or a door, and how many of those are open by their link
+    /// or public. Counts only, no names
     Reach {
         #[arg(long)]
         key_file: Option<PathBuf>,
@@ -648,6 +662,56 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// The finite.computer move's old agents (FIN-463), each by its old id:
+    /// its state, whose it is, and staff's why. --withdrawn lists the
+    /// will-not-move list alone: the moves staff withdrew
+    Moves {
+        #[arg(long)]
+        withdrawn: bool,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Keep an old agent out of the move, saying why: never offered, never
+    /// archived at the cutoff, whatever the roster says. An old id no
+    /// roster has listed yet is kept out ahead of it
+    Withdraw {
+        old: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Take back staff's withdrawal of an old agent: offered again. One
+    /// withdrawn ahead of any roster is forgotten; one the roster dropped
+    /// stays withdrawn until a roster lists it
+    Include {
+        old: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+}
+
+/// Pages of moves `fragment operator moves` reads at most (100 a page).
+const MOVES_PAGES_MAX: usize = 100;
+
+/// One move as `fragment operator moves` prints it.
+fn move_line(m: &Value) -> String {
+    let or_dash = |k: &str| m[k].as_str().filter(|v| !v.is_empty()).unwrap_or("-").to_string();
+    let state = match m["reason"].as_str() {
+        Some(reason) => format!("{} ({reason})", or_dash("state")),
+        None => or_dash("state"),
+    };
+    let why = m["why"].as_str().map(|w| format!("  withdrawn by staff: {w}")).unwrap_or_default();
+    format!("{}  {state}  {}  {}{why}", or_dash("old"), or_dash("workos_id"), or_dash("person"))
+}
+
+/// Staff's act on one move (`AdminAct`): the move after it, or null when
+/// it is gone.
+fn move_act(c: &api::Client, old: &str, op: &str, why: Option<String>) -> Result<Value> {
+    if !fragment_proto::migrations::valid_old(old) {
+        return Err(usage(format!("{old:?} is no old agent's id: 1 to 64 of A-Z, a-z, 0-9, _ and -")));
+    }
+    admin_answer(c, c.post_json(&format!("/api/admin/migrations/{old}"), &fragment_proto::migrations::AdminAct { op: op.into(), why })?)
 }
 
 /// An org's id as an operator names it: `org-…`, or its ledger's name
@@ -932,9 +996,76 @@ enum SecretCmd {
         /// `--host`: that names the fragment host)
         #[arg(long = "to", required = true, value_name = "HOST")]
         hosts: Vec<String>,
+        /// Move this secret of your Vault here instead (`fragment vault
+        /// list`): kept here, gone from your Vault, no value read
+        #[arg(long = "from-vault", value_name = "SECRET", value_parser = vault_name)]
+        from_vault: Option<String>,
     },
     List { name: String },
     Rm { name: String, key: String },
+}
+
+#[derive(Subcommand)]
+enum VaultCmd {
+    /// Set a secret, whole: its value (from a hidden prompt, or stdin),
+    /// the agents that may use it, the hosts it may go to, and where it
+    /// goes on a request (`Authorization: Bearer` unless named). Its hosts,
+    /// place and agents change only with its value
+    Set {
+        #[arg(value_parser = vault_name)]
+        name: String,
+        /// An agent that may use it, by its fragment's name (repeat for more)
+        #[arg(long = "agent", required = true, value_name = "AGENT")]
+        agents: Vec<String>,
+        /// A host it may be sent to (repeat for more): `api.example.com`,
+        /// no scheme, port, or path. None: kept, and sent nowhere
+        #[arg(long = "to", value_name = "HOST")]
+        hosts: Vec<String>,
+        /// In this header, as `--format` says (`{}` the value)
+        #[arg(long, conflicts_with_all = ["query", "basic", "sign"])]
+        header: Option<String>,
+        #[arg(long, requires = "header")]
+        format: Option<String>,
+        /// In this query parameter
+        #[arg(long, conflicts_with_all = ["basic", "sign"])]
+        query: Option<String>,
+        /// As basic auth's `user` or `password`
+        #[arg(long, value_parser = ["user", "password"], conflicts_with = "sign")]
+        basic: Option<String>,
+        /// A Nostr key (64 hex) that signs each request (`nip98`), never sent
+        #[arg(long, value_parser = ["nip98"])]
+        sign: Option<String>,
+    },
+    /// Your secrets, by name: never a value
+    List,
+    Rm {
+        #[arg(value_parser = vault_name)]
+        name: String,
+    },
+}
+
+/// A Vault secret's name, of its form (`fragment_core::vault::name_form`)
+/// before it goes in any URL: none chooses another route (`../…`).
+fn vault_name(name: &str) -> Result<String, String> {
+    fragment_core::vault::name_form(name).map(|()| name.to_string()).map_err(|e| e.to_string())
+}
+
+/// A Vault secret's value: from a hidden prompt at a terminal, else stdin
+/// whole, its line end trimmed. Never argv or the environment, which `ps`,
+/// shell history and child processes keep.
+fn vault_value(name: &str) -> Result<String> {
+    use std::io::IsTerminal;
+    let value = if std::io::stdin().is_terminal() {
+        rpassword::prompt_password(format!("value for {name} (hidden): ")).context("reading the value from the terminal")?
+    } else {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        buf.trim_end_matches(['\r', '\n']).to_string()
+    };
+    if value.is_empty() {
+        return Err(usage(format!("empty value for {name}: type it at the prompt, or pipe it on stdin")));
+    }
+    Ok(value)
 }
 
 /// Where `fragment inbox` reads its token, before stdin.
@@ -1430,7 +1561,7 @@ fn run(cli: Cli) -> Result<()> {
             let say = |m: &std::collections::BTreeMap<String, u64>| if m.is_empty() { "none".to_string() } else { m.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ") };
             println!("{people} people, {owned} fragments owned ({unanswered} did not answer)");
             println!("with a key or a door: {}", say(&reaching));
-            println!("of those, shared beyond their owner and their agents: {}", say(&beyond));
+            println!("of those, open by link or public: {}", say(&beyond));
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::People { q, after, key_file } } => {
@@ -1635,6 +1766,49 @@ fn run(cli: Cli) -> Result<()> {
             println!("{org}'s credit is invoiced to {} ({})", v["email"].as_str().unwrap_or("?"), v["person"].as_str().unwrap_or("?"));
             return Ok(());
         }
+        Cmd::Operator { sub: OperatorCmd::Moves { withdrawn, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let mut moves = vec![];
+            let mut after = String::new();
+            for _ in 0..MOVES_PAGES_MAX {
+                let v = admin_answer(&c, c.get(&format!("/api/admin/migrations?after={}", api::encode_q(&after)))?)?;
+                moves.extend(v["moves"].as_array().into_iter().flatten().filter(|m| !withdrawn || m["why"].is_string()).cloned());
+                match v["next"].as_str() {
+                    Some(next) => after = next.to_string(),
+                    None => {
+                        after.clear();
+                        break;
+                    }
+                }
+            }
+            if !after.is_empty() {
+                return Err(anyhow!("more than {MOVES_PAGES_MAX} pages of moves: read them with --json from the route, a page at a time"));
+            }
+            json_exit(j, &json!({ "moves": moves }));
+            for m in &moves {
+                println!("{}", move_line(m));
+            }
+            println!("{} {}", moves.len(), if withdrawn { "withdrawn by staff" } else { "moves" });
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Withdraw { old, why, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = move_act(&c, &old, "withdraw", Some(why))?;
+            json_exit(j, &v);
+            println!("{}", move_line(&v));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Include { old, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = move_act(&c, &old, "include", None)?;
+            json_exit(j, &v);
+            match v["state"].as_str() {
+                None => println!("{old}: withdrawn ahead of any roster, now forgotten"),
+                Some("withdrawn") if v["why"].is_null() => println!("{}  (the roster dropped it: offered again once a roster lists it)", move_line(&v)),
+                Some(_) => println!("{}", move_line(&v)),
+            }
+            return Ok(());
+        }
         Cmd::Operator { sub: OperatorCmd::Log { before, key_file } } => {
             let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
             let path = match before {
@@ -1668,6 +1842,13 @@ fn run(cli: Cli) -> Result<()> {
             println!("scaffolded '{tpl_name}' into {} ({created} files{})", dir.display(), if skipped > 0 { format!(", {skipped} existing left alone") } else { String::new() });
             println!("next:");
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
+            return Ok(());
+        }
+        // read here, changing nothing: no platform, no key
+        Cmd::Home { sub } if !sub.calls() => {
+            let done = home::run(sub, None)?;
+            json_exit(j, &done);
+            home::print(&done);
             return Ok(());
         }
         _ => {}
@@ -1829,6 +2010,9 @@ fn run(cli: Cli) -> Result<()> {
             if j && watch {
                 return Err(usage("sync --watch streams progress lines continuously, so --json does not apply: run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch"));
             }
+            // every pass refuses it too (`read_local`); this one is before
+            // the watcher takes the folder or anything is asked of the host
+            sync::refuse_dir(&dir, dirs::home_dir().as_deref()).map_err(|e| usage(e.to_string()))?;
             let opts = SyncOptions {
                 mode: match mode.as_deref() {
                     _ if live => Mode::Pull,
@@ -2010,6 +2194,11 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &result);
             println!("{}: {}", result["name"].as_str().unwrap_or(&name), result["title"].as_str().unwrap_or(&title));
         }
+        Cmd::Home { sub } => {
+            let done = home::run(sub, Some(&c))?;
+            json_exit(j, &done);
+            home::print(&done);
+        }
         Cmd::Session { sub } => {
             let imported = session::run(&c, sub)?;
             json_exit(j, &imported);
@@ -2119,11 +2308,12 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Export { out } => {
             use fragment_proto::export::{ExportState, ExportView};
             let mut v: ExportView = c.call_as(c.post_json("/api/export", &json!({}))?)?;
-            // bounded: a build fails past its own time (6 hours), and so does this wait
+            // bounded: a build fails past its own time (`BUILD_MAX_MS`), and so does this wait
             let t0 = std::time::Instant::now();
+            let most = std::time::Duration::from_millis(fragment_core::export::limits::BUILD_MAX_MS as u64 + 600_000);
             while v.state == ExportState::Building {
-                if t0.elapsed() > std::time::Duration::from_secs(6 * 3600 + 600) {
-                    return Err(anyhow!("export {} is still building after six hours", v.id));
+                if t0.elapsed() > most {
+                    return Err(anyhow!("export {} is still building after {} hours", v.id, most.as_secs() / 3600));
                 }
                 if !j {
                     eprint!("\rbuilding export {}: {} of {} parts, {} bytes   ", v.id, v.progress.done, v.progress.total, v.progress.bytes);
@@ -2141,7 +2331,7 @@ fn run(cli: Cli) -> Result<()> {
             };
             let day = fragment_core::export::rfc3339(v.started_at)[..10].to_string();
             let out = out.unwrap_or_else(|| PathBuf::from(format!("fragment-export-{day}.tar")));
-            let n = c.download(&download, &out)?;
+            let n = c.download(&download, &out, v.size.unwrap_or(0))?;
             if Some(n) != v.size {
                 return Err(anyhow!("{} holds {n} bytes, not the export's {}: download it again", out.display(), v.size.unwrap_or(0)));
             }
@@ -2270,9 +2460,12 @@ fn run(cli: Cli) -> Result<()> {
             println!("New share link: {}", share_link(&st.urls.canonical, &v.view_token));
         }
         Cmd::Secret { sub } => match sub {
-            SecretCmd::Set { name, key, hosts } => {
-                let value = from_env_or_stdin(&key, &format!("value for {key}"))?;
-                let set = c.call(c.put_json(&format!("/api/f/{name}/secrets/{key}"), &PutSecret { value, hosts })?)?;
+            SecretCmd::Set { name, key, hosts, from_vault } => {
+                let value = match &from_vault {
+                    Some(_) => String::new(),
+                    None => from_env_or_stdin(&key, &format!("value for {key}"))?,
+                };
+                let set = c.call(c.put_json(&format!("/api/f/{name}/secrets/{key}"), &PutSecret { value, hosts, from_vault })?)?;
                 // names and hosts only — values never travel back
                 json_exit(j, &json!({ "name": name, "key": key, "set": true, "hosts": set["hosts"] }));
                 println!("secret {key} set on {name}, for {}", set["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));
@@ -2291,6 +2484,33 @@ fn run(cli: Cli) -> Result<()> {
                 c.call(c.delete(&format!("/api/f/{name}/secrets/{key}"))?)?;
                 json_exit(j, &json!({ "name": name, "key": key, "removed": true }));
                 println!("secret {key} removed");
+            }
+        },
+        Cmd::Vault { sub } => match sub {
+            VaultCmd::Set { name, agents, hosts, header, format, query, basic, sign } => {
+                use fragment_proto::vault::{Place, PutSecret as PutVault, Secret};
+                let place = Place { header, format, query, basic, sign };
+                let value = vault_value(&name)?;
+                let set: Secret = c.call_as(c.put_json(&format!("/api/vault/{name}"), &PutVault { value, hosts, place, agents })?)?;
+                // what was set, never the value
+                json_exit(j, &set);
+                match set.hosts.is_empty() {
+                    true => println!("secret {name} set for {}: parked, sent to no host", set.agents.join(", ")),
+                    false => println!("secret {name} set for {}, toward {}", set.agents.join(", "), set.hosts.join(", ")),
+                }
+            }
+            VaultCmd::List => {
+                let v: fragment_proto::vault::SecretList = c.call_as(c.get("/api/vault")?)?;
+                json_exit(j, &v);
+                for s in &v.secrets {
+                    let to = if s.hosts.is_empty() { "(parked)".to_string() } else { s.hosts.join(" ") };
+                    println!("{}  {}  for {}", s.name, to, s.agents.join(" "));
+                }
+            }
+            VaultCmd::Rm { name } => {
+                let v: fragment_proto::vault::SecretRemoved = c.call_as(c.delete(&format!("/api/vault/{name}"))?)?;
+                json_exit(j, &v);
+                println!("{}", if v.removed { format!("secret {name} removed") } else { format!("no secret {name}") });
             }
         },
         Cmd::Inbox { name, payload, source } => {
@@ -2343,7 +2563,9 @@ fn run(cli: Cli) -> Result<()> {
                         (Some(o), None) => format!("\towned by {o}"),
                         (None, _) => String::new(),
                     };
-                    println!("{}\t{}{owned}", m.role.as_str(), m.principal);
+                    // a person by their email too, to the owner and their agent (decision 48)
+                    let email = m.email.as_deref().map(|e| format!("\t{e}")).unwrap_or_default();
+                    println!("{}\t{}{email}{owned}", m.role.as_str(), m.principal);
                 }
             }
             MembersCmd::Add { name, who, role } => {
@@ -2773,6 +2995,7 @@ fn cs_anyhow(e: impl Into<crate::sync::SyncError>) -> anyhow::Error {
         crate::sync::SyncError::Cs(CsError::OutcomeUnknown(_)) => anyhow::Error::new(CodedError { code: Code::OutcomeUnknown, msg: e.to_string() }),
         // the host's refusal keeps its code (a viewer's sync is forbidden)
         crate::sync::SyncError::Cs(CsError::Host(refused)) | crate::sync::SyncError::Host(refused) => anyhow::Error::new(refused),
+        crate::sync::SyncError::Refused(folder) => anyhow::Error::new(CodedError::from(folder)),
         other => anyhow!("{other}"),
     }
 }
@@ -3110,6 +3333,20 @@ mod tests {
         assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY"]), "a secret names its hosts");
         assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY", "sk-live-value", "--to", "api.example.com"]), "no value on argv");
         assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY", "sk-live-value"]));
+        assert!(parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--to", "api.linear.app"]));
+        assert!(parses(&["fragment", "vault", "set", "nostr-ada", "--agent", "ada--k3x9", "--to", "finite.site", "--sign", "nip98"]));
+        assert!(!parses(&["fragment", "vault", "set", "linear", "--to", "api.linear.app"]), "a Vault secret names its agents");
+        assert!(!parses(&["fragment", "vault", "set", "linear", "lin_api_value", "--agent", "ada--k3x9"]), "no value on argv");
+        // a Vault name of its form alone goes in a URL: none chooses another route
+        for bad in ["../computers/x", "%2e%2e/delete/nostr", "..%2fdelete%2fnostr", "linear/x", "Linear"] {
+            assert!(!parses(&["fragment", "vault", "set", bad, "--agent", "ada--k3x9"]), "vault set {bad}");
+            assert!(!parses(&["fragment", "vault", "rm", bad]), "vault rm {bad}");
+            assert!(!parses(&["fragment", "secret", "set", "bot", "TOKEN", "--to", "api.telegram.org", "--from-vault", bad]), "--from-vault {bad}");
+        }
+        assert!(parses(&["fragment", "vault", "rm", "linear"]) && parses(&["fragment", "secret", "set", "bot", "TOKEN", "--to", "api.telegram.org", "--from-vault", "telegram-bot"]), "a name of its form");
+        assert!(!parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--header", "x-key", "--query", "key"]), "one place");
+        assert!(!parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--format", "Bearer {}"]), "a format is a header's");
+        assert!(parses(&["fragment", "vault", "list"]) && parses(&["fragment", "vault", "rm", "linear"]));
         assert!(parses(&["fragment", "inbox", "x--k3x9", "--payload", "{}"]));
         assert!(!parses(&["fragment", "inbox", "x--k3x9", "--token", "t0ken", "--payload", "{}"]), "no inbox token on argv");
     }

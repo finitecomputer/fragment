@@ -835,6 +835,21 @@ pub(crate) async fn tell_changed(env: &Env, identity: &str) -> CellResult<()> {
     tell_pages(env, identity, "changed").await
 }
 
+/// `people`'s pages told their notices changed (`tell_changed`), after the
+/// answer (`wait_until`), never on its path: best effort, a page not told
+/// reads them next time. One future type for every owner that tells so
+/// (the ledger, the registry), so the cell's Wasm carries one.
+pub(crate) fn tell_later(state: &State, env: &Env, people: Vec<String>, event: &'static str) {
+    let env = env.clone();
+    state.wait_until(async move {
+        for person in people {
+            if let Err(e) = tell_changed(&env, &person).await {
+                console_error!("{}", serde_json::json!({ "event": event, "person": person, "failed": e.message }));
+            }
+        }
+    });
+}
+
 async fn tell_pages(env: &Env, identity: &str, route: &str) -> CellResult<()> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post);

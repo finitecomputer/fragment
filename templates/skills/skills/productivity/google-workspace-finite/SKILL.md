@@ -62,10 +62,19 @@ The deployment's Google connection (`google`) is swapped for the hosts
 `slides.googleapis.com` only. An API on any other host (Tasks, Chat, Forms,
 Apps Script, and the `gws workflow` helpers that use them) gets the
 placeholder itself, which Google refuses (401): do not use those. The
-scopes the connection asks for are in
-`references/google-workspace-scopes.json`.
+scopes the connection asks for, read only and read and write, are in
+`references/google-workspace-access.json`.
 
 ## Not allowed
+
+Your owner picks, as they connect Google, whether you may only read
+(search and read mail, files, sheets, docs, calendars and contacts) or
+read and write (also send and change mail, and create and change files,
+sheets, docs and events). Connected read only, every change is refused by
+Google with a 403 like the ones below: tell your owner, in plain words,
+that they connected Google read only, and that they can allow changes in
+Settings → Connections → Allow changes. Do not retry it until they say they
+have.
 
 Your owner may have allowed only part of Google when they connected it:
 Google's consent screen lets them untick Gmail, Drive, Sheets and the rest
@@ -114,7 +123,7 @@ gws people people connections list --params '{"resourceName": "people/me", "pers
 ## References
 
 - `references/gmail-search-syntax.md`: Gmail search operators (is:unread, from:, newer_than:, etc.)
-- `references/google-workspace-scopes.json`: the scopes the connection asks for
+- `references/google-workspace-access.json`: the scopes the connection asks for, read only and read and write
 
 The helper reads Docs and Slides only; `gws docs +write` appends to a doc,
 and `gws slides presentations batchUpdate` edits a deck (`gws schema

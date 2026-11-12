@@ -34,6 +34,7 @@ mod governance;
 mod frames;
 mod icons;
 pub mod hermes;
+mod home;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
@@ -43,11 +44,13 @@ mod ledger;
 mod limits;
 mod members;
 mod migrations;
+mod moves;
 mod native;
 mod notes;
 mod orgs;
 mod plane;
 mod posts;
+mod schedules;
 mod restart;
 mod sessions;
 mod share;
@@ -60,6 +63,7 @@ mod sync;
 mod telegram_settings;
 mod templates;
 mod trials;
+mod vault;
 mod wipe;
 
 use std::panic::{self, AssertUnwindSafe};
@@ -85,6 +89,7 @@ const LANES: &[Lane] = &[
     signin::signin,
     native::native,
     connections::connections,
+    vault::vault,
     levers::levers,
     members::secrets,
     members::reach,
@@ -128,6 +133,8 @@ const LANES: &[Lane] = &[
     blobs::blobs,
     sessions::sessions,
     sessions::sessions_ui,
+    schedules::schedules_ui,
+    home::home,
     notes::notes,
     brain::brain,
     brain::brain_release,
@@ -165,6 +172,10 @@ const LANES: &[Lane] = &[
     checkout::checkout,
     sync::folder_sync,
     migrations::migrations,
+    moves::moves,
+    moves::move_import,
+    moves::move_ui,
+    moves::move_comp,
     restart::restart,
 ];
 
@@ -195,13 +206,13 @@ pub const SHARDS: [&[&str]; 5] = [
     &["shell-ui"],
     &[
         "lockdown", "templates", "faces", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
-        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
+        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
         "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "transcribe",
     ],
-    &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "ai", "admin", "shell", "chat", "chat-history"],
+    &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
-        "identities", "signin", "native", "connections", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
-        "members", "billing", "governance", "billing-page",
+        "identities", "signin", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
+        "members", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp",
     ],
 ];
 

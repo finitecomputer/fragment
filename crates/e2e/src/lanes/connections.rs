@@ -9,13 +9,25 @@ mod several;
 
 const PROVIDER: &str = "e2e-oauth";
 
+/// A connect begun as the person picks it read only.
 fn begin(api: &Api, session: &str, provider: &str) -> Result<Reply> {
-    shell(api, session, "POST", &format!("/api/connections/{provider}/authorize"))
+    begin_as(api, session, provider, json!({ "access": "read" }))
+}
+
+/// A connect begun with `body` (the access picked, and what else it asks).
+fn begin_as(api: &Api, session: &str, provider: &str, body: serde_json::Value) -> Result<Reply> {
+    shell_with(api, session, "POST", &format!("/api/connections/{provider}/authorize"), Some(&body))
 }
 
 /// A call from the shell, signed in by its session.
 fn shell(api: &Api, session: &str, method: &'static str, path: &str) -> Result<Reply> {
+    shell_with(api, session, method, path, None)
+}
+
+/// `shell`'s, with a JSON body.
+fn shell_with(api: &Api, session: &str, method: &'static str, path: &str, body: Option<&serde_json::Value>) -> Result<Reply> {
     api.call(Call { method, url: format!("{}{path}", api.base), cookie: Some(format!("fragment_session={session}")),
+        body: body.map(|b| b.to_string().into_bytes()), content_type: body.map(|_| "application/json"),
         extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into()), ("origin", api.base.clone())], ..Call::default() })
 }
 
@@ -38,7 +50,17 @@ fn pending(api: &Api, session: &str, account: &str) -> Result<(String, String, S
 /// An attempt through the provider's consent, as `pending`, where the
 /// person leaves only `grant`'s boxes ticked (of the scopes asked for).
 fn granting(api: &Api, session: &str, account: &str, grant: Option<&str>) -> Result<(String, String, String)> {
-    let r = begin(api, session, PROVIDER)?;
+    granting_as(api, session, account, grant, "read")
+}
+
+/// `granting`'s, the person picking `access` (`read` or `write`).
+fn granting_as(api: &Api, session: &str, account: &str, grant: Option<&str>, access: &str) -> Result<(String, String, String)> {
+    granting_at(api, session, PROVIDER, account, grant, access)
+}
+
+/// `granting_as`'s, at `provider`.
+fn granting_at(api: &Api, session: &str, provider: &str, account: &str, grant: Option<&str>, access: &str) -> Result<(String, String, String)> {
+    let r = begin_as(api, session, provider, json!({ "access": access }))?;
     anyhow::ensure!(r.status == 200, "begin connection: {r}");
     let cookie = r.cookies().into_iter().find(|c| c.starts_with("fragment_connection=")).context("connection cookie")?;
     let mut to = reqwest::Url::parse(r.body["url"].as_str().context("authorize URL")?)?;
@@ -59,7 +81,79 @@ fn back(api: &Api, url: &str, session: Option<&str>, cookie: Option<&str>) -> Re
     api.call(Call { method: "GET", url: url.into(), cookie: Some(cookies.join("; ")), ..Call::default() })
 }
 
+/// The access a person picks as they connect (docs/pipes-browser-binding.md,
+/// Access): never assumed; read and write asks the provider for its own
+/// scopes, and the list says it; a grant of read and write with every
+/// write scope unticked is said read only, as the grant holds it. The
+/// person's account is left connected read only, all of it granted.
+fn access_picked(s: &mut Suite, api: &Api, a: &str) -> Result<()> {
+    let counts = s.workos.connection_counts();
+    let mut refusals = vec![];
+    for body in [json!({}), json!({ "add": true }), json!({ "access": "admin" }), json!({ "access": "Write" }), json!({ "access": null })] {
+        let r = begin_as(api, a, PROVIDER, body.clone())?;
+        refusals.push((body, r.status, r.body["message"].clone()));
+    }
+    let none = shell(api, a, "POST", &format!("/api/connections/{PROVIDER}/authorize"))?;
+    refusals.push((json!(null), none.status, none.body["message"].clone()));
+    s.ok("a connect names the access its person picked: none, or one not offered, is refused (400) before any provider is asked",
+        refusals.iter().all(|(_, status, _)| *status == 400) && s.workos.connection_counts() == counts, json!(refusals));
+    let r = begin_as(api, a, PROVIDER, json!({ "access": "write" }))?;
+    let asked = reqwest::Url::parse(r.body["url"].as_str().unwrap_or("http://none.invalid/"))?.query_pairs().find(|(k, _)| k == "scope").map(|(_, v)| v.into_owned()).unwrap_or_default();
+    s.ok("read and write asks the provider for its own scopes: read only's and the write one", r.status == 200 && asked == "mail.read files.read mail.send openid", &asked);
+    let (wrote, cookie, _) = granting_as(api, a, "partial-a", None, "write")?;
+    let r = back(api, &wrote, Some(a), Some(&cookie))?;
+    let listed = row(api, a, PROVIDER)?;
+    s.ok("connected read and write, Pipes holds its scopes and the list says read and write, nothing missing",
+        r.status == 200 && s.workos.scopes("connection-a@e2e.test", PROVIDER) == ["mail.read", "files.read", "mail.send", "openid"] && listed["access"] == "write" && listed["missing"] == json!([]), &listed);
+    let (unticked, cookie, _) = granting_as(api, a, "partial-a", Some("mail.read files.read openid"), "write")?;
+    let r = back(api, &unticked, Some(a), Some(&cookie))?;
+    let listed = row(api, a, PROVIDER)?;
+    s.ok("read and write with its write scope unticked is said read only, as the grant holds it, with nothing missing of read only",
+        r.status == 200 && listed["access"] == "read" && listed["missing"] == json!([]) && listed["granted"] == json!(["mail.read", "files.read", "openid"]), &listed);
+    // the callback checks the grant against the access picked, kept by its
+    // pending row: a grant of read and write's own scope alone is no grant
+    // of read only's (which would refuse it as no-scopes)
+    let (only_write, cookie, _) = granting_as(api, a, "partial-a", Some("mail.send"), "write")?;
+    let r = back(api, &only_write, Some(a), Some(&cookie))?;
+    let listed = row(api, a, PROVIDER)?;
+    s.ok("a grant of read and write's write scope alone connects as asked: read and write, read only's scopes missing",
+        r.status == 200 && listed["access"] == "write" && listed["granted"] == json!(["mail.send"]) && listed["missing"] == json!(["mail.read", "files.read"]), &listed);
+    let (all, cookie, _) = granting(api, a, "partial-a", None)?;
+    let r = back(api, &all, Some(a), Some(&cookie))?;
+    anyhow::ensure!(r.status == 200, "connected read only again for the checks after: {r}");
+    Ok(())
+}
+
 fn refused(r: &Reply, word: &str) -> bool { r.status == 303 && r.header("location").ends_with(&format!("?refused={word}")) }
+
+/// A row whose client authenticates with HTTP Basic (`client_auth`: RFC
+/// 6749 §2.3.1, as Zoom's, Airtable's, Xero's and Notion's token endpoints
+/// ask), through the stand-in provider's client that takes its header
+/// alone (`fragment_fakes::workos::BASIC_CLIENT`: it refuses a secret in
+/// the body, and a revocation its client does not authenticate). A person
+/// connects and disconnects there as at any other connection.
+fn basic_client(s: &mut Suite, api: &Api) -> Result<()> {
+    let provider = crate::BASIC_CONNECTION;
+    let email = "connection-basic@e2e.test";
+    let session = api.sign_in(email)?;
+    let counts = s.workos.connection_counts();
+    let (url, cookie, _) = granting_at(api, &session, provider, "basic-a", None, "read")?;
+    let r = back(api, &url, Some(&session), Some(&cookie))?;
+    let listed = row(api, &session, provider)?;
+    s.ok("a connection whose client authenticates with HTTP Basic connects: its code exchanged with the header alone, its grant imported as any other's",
+        r.status == 200 && listed["state"] == "connected" && listed["account"] == "basic-a@oauth.test" && listed["access"] == "read"
+            && s.workos.connection_counts() == (counts.0 + 1, counts.1 + 1, counts.2) && s.workos.scopes(email, provider) == fragment_fakes::workos::CONNECTION_SCOPES,
+        format!("callback {r}; listed {listed}"));
+    let (revoked, deleted) = (s.workos.revoked().len(), s.workos.deleted().len());
+    let off = shell(api, &session, "DELETE", &format!("/api/connections/{provider}"))?;
+    let minted = s.workos.tokens(provider).last().cloned().unwrap_or_default();
+    s.ok("and its disconnect revokes the grant with the same header, then deletes the account at Pipes",
+        off.status == 200 && off.body["revoked"] == true && off.body["state"] == "not_connected" && !minted.is_empty()
+            && s.workos.revoked().len() == revoked + 1 && s.workos.revoked().last() == Some(&minted)
+            && s.workos.deleted().len() == deleted + 1 && !s.workos.holds(email, provider),
+        &off);
+    Ok(())
+}
 
 pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("connections", &[Need::Fakes, Need::Node, Need::Levers]) { return Ok(()); }
@@ -172,9 +266,20 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let (all, cookie, _) = pending(&api, &a, "partial-a")?;
     let r = back(&api, &all, Some(&a), Some(&cookie))?;
     let listed_a = row(&api, &a, PROVIDER)?;
-    s.ok("connected again allowing what was left out, the update records the new grant: nothing is missing",
+    s.ok("connected again allowing what was left out, the update records the new grant: nothing is missing, and it is read only, as picked",
         r.status == 200 && s.workos.scopes("connection-a@e2e.test", PROVIDER) == ["mail.read", "files.read", "openid"]
-            && listed_a["granted"] == json!(["mail.read", "files.read", "openid"]) && listed_a["missing"] == json!([]), &listed_a);
+            && listed_a["granted"] == json!(["mail.read", "files.read", "openid"]) && listed_a["missing"] == json!([]) && listed_a["access"] == "read", &listed_a);
+    // the access picked (its connects before the one of no lifetime, which
+    // the disconnect's revocation below reads as the latest)
+    access_picked(s, &api, &a)?;
+    // a token endpoint that names no lifetime (Salesforce's never does)
+    s.workos.omit_next_expires_in();
+    let refreshes = s.workos.refreshes();
+    let (unknown, cookie, _) = pending(&api, &a, "partial-a")?;
+    let r = back(&api, &unknown, Some(&a), Some(&cookie))?;
+    let listed_a = row(&api, &a, PROVIDER)?;
+    s.ok("a grant naming no lifetime connects all the same, imported as expired: Pipes refreshes it at the first token asked for, not before",
+        r.status == 200 && listed_a["state"] == "connected" && listed_a["missing"] == json!([]) && s.workos.refreshes() == refreshes, format!("{r}; {listed_a}"));
 
     let (concurrent, cookie, _) = pending(&api, &b, "concurrent-b")?;
     let counts = s.workos.connection_counts();
@@ -214,8 +319,10 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let user_a = s.workos.user("connection-a@e2e.test").id;
     let (revoked, deleted) = (s.workos.revoked().len(), s.workos.deleted().len());
     let was = listed(&api, &a, PROVIDER)?;
+    let refreshes = s.workos.refreshes();
     let r = shell(&api, &a, "DELETE", &path)?;
     let minted = s.workos.tokens(PROVIDER).last().cloned().unwrap_or_default();
+    s.ok("the first token Pipes mints for a grant that named no lifetime (the revocation's) is a refreshed one", s.workos.refreshes() == refreshes + 1, s.workos.refreshes());
     s.ok("disconnecting revokes the grant at the provider with a token Pipes mints for it, then deletes the account at Pipes: not connected, the token in no answer",
         was == "connected" && r.status == 200 && r.body["revoked"] == true && r.body["state"] == "not_connected"
             && !minted.is_empty() && !r.body.to_string().contains(&minted)
@@ -335,5 +442,6 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let counts = s.workos.connection_counts();
     let statuses: Vec<u16> = (0..=fragment_core::connection_signin::PENDING_PER_SESSION_MAX).map(|_| begin(&api, &capped, PROVIDER).map(|r| r.status)).collect::<Result<_>>()?;
     s.ok("pending attempts are bounded without exchanging or importing", statuses[..8] == [200; 8] && statuses[8] == 429 && s.workos.connection_counts() == counts, format!("{statuses:?}"));
+    basic_client(s, &api)?;
     several::several(s, &api)
 }

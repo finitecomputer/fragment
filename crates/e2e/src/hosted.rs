@@ -315,6 +315,8 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         cron: None,
         chrome: browser::Shared::new(&scratch),
         tools: None,
+        celld: None,
+        openbao: None,
         node: None,
         listener: None,
         port: 0,
@@ -334,11 +336,13 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         // no operator the deployment names: a section that needs one declares Need::Deployment
         operator: Keys::generate(),
         // read as the run starts (`sections`): a dry run reads no secret
+        mover: Keys::generate(),
         wiper: None,
         cli,
         scratch,
         project: PathBuf::new(),
         shape: Shape::Plain,
+        secrets: devstack::Secrets::Store,
         containers_removed: false,
     }
 }

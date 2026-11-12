@@ -46,6 +46,18 @@ pub struct StripeConfig {
     pub tax: bool,
 }
 
+/// The finite.computer move's settings (`FRAGMENT_MIGRATIONS_MOVER`,
+/// `FRAGMENT_MIGRATIONS_CUTOFF_MS`: plain values, read with no decoder).
+pub struct MigrationsConfig {
+    /// The mover's key, 64 hex (`mover`, an npub): its NIP-98 signature
+    /// alone reaches the mover's routes. The mover holds the key; this
+    /// deployment holds no secret for it.
+    pub mover: String,
+    /// Phase 2's cutoff, ms since the epoch (`cutoff_ms`): unanswered moves
+    /// are staged and retired from then on. None: no phase 2 yet.
+    pub cutoff_ms: Option<i64>,
+}
+
 /// The account's Workers Logs, which the operators' glance reads
 /// (`fragment_core::glance`): configured when its read-only key is bound
 /// (`secrets_store::OBSERVABILITY_READ`) and the account and this
@@ -104,6 +116,12 @@ pub struct Config {
     /// addresses (dev and e2e fleets, which call local fakes). Never on a
     /// shared fleet.
     pub egress_local: bool,
+    /// `FRAGMENT_EGRESS_ALLOW` (the deploy config's `egress_allow`, comma
+    /// separated): the local hosts an operator opens to jobs, push
+    /// endpoints and subscriptions (a self-hosted org's intranet), never
+    /// loopback, link-local, localhost or the platform's own
+    /// (`fragment_core::egress::Allow`). Unset: none, public only.
+    pub egress_allow: fragment_core::egress::Allow,
     /// `FRAGMENT_BLOB_GRACE_S`: how long a blob no branch names is kept
     /// (default 7 days: a rollback within it still has its bytes).
     pub blob_grace_ms: i64,
@@ -147,6 +165,10 @@ pub struct Config {
     /// (`parse_list` reads each as 64 hex), that grant credit and set
     /// plans, seats and overdrafts.
     operators: Option<Result<Vec<String>, String>>,
+    /// `FRAGMENT_MIGRATIONS_*` (the deploy config's `migrations`): the
+    /// finite.computer move (docs/migrations.md). Without it, none of its
+    /// routes answer.
+    pub migrations: Option<MigrationsConfig>,
     /// `FRAGMENT_SIGNINS_PENDING_MAX`: sign-ins begun and not finished that
     /// the Registry keeps before it lets the oldest go (default
     /// `SIGNINS_PENDING_MAX_DEFAULT`).
@@ -336,6 +358,13 @@ impl Config {
         assert!(fragment_core::frames::is_origin(&platform_url), "FRAGMENT_PLATFORM_URL (required) is an origin (scheme://host[:port], lower case, no path)");
         assert!(fragment_core::frames::is_origin(&format!("https://{host_suffix}")), "FRAGMENT_HOST_SUFFIX is a host name");
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
+        // its raw value, read whole by the core (`Allow::from_var`: absent or
+        // blank, none); the deploy checked it: one out of shape is a broken deploy
+        let egress_allow = {
+            let platform = url::Url::parse(&platform_url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            let raw = env.var("FRAGMENT_EGRESS_ALLOW").ok().map(|v| v.to_string());
+            fragment_core::egress::Allow::from_var(raw.as_deref(), &platform, &host_suffix).unwrap_or_else(|e| panic!("FRAGMENT_EGRESS_ALLOW: {e}"))
+        };
         let providers = providers(env);
         let models = fragment_core::models::Models::parse(var(env, "FRAGMENT_MODELS").as_deref(), &fragment_core::price::PriceBook::defaults(), egress_local)
             .unwrap_or_else(|e| panic!("FRAGMENT_MODELS: {e}"));
@@ -373,6 +402,7 @@ impl Config {
             },
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
+            egress_allow,
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
             delivery_retry_s: pinned_retry_s.unwrap_or(10),
             delivery_retry_max_s: pinned_retry_s.unwrap_or(3600),
@@ -407,6 +437,11 @@ impl Config {
             }),
             mail_url: var(env, "FRAGMENT_MAIL_URL").map(|u| u.trim_end_matches('/').to_string()),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
+            // deploy checked both: a value that is not one is a broken deploy
+            migrations: var(env, "FRAGMENT_MIGRATIONS_MOVER").map(|m| MigrationsConfig {
+                mover: fragment_core::npub::parse(&m).unwrap_or_else(|| panic!("FRAGMENT_MIGRATIONS_MOVER is an npub, not {m:?}")),
+                cutoff_ms: var(env, "FRAGMENT_MIGRATIONS_CUTOFF_MS").map(|c| c.parse::<i64>().ok().filter(|c| *c > 0).unwrap_or_else(|| panic!("FRAGMENT_MIGRATIONS_CUTOFF_MS is ms since the epoch, not {c:?}"))),
+            }),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|n| *n >= 1)

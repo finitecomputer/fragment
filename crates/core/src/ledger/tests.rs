@@ -261,6 +261,27 @@ fn a_grant_adds_purchased_credit_once() {
     assert_eq!(g.balance(), USD);
 }
 
+/// Goal: the finite.computer move's credit (F5) is granted once a person,
+/// ever, as the cell asks it (`migrations::comp_grant_id`): asked again,
+/// after a restart, and months later (past `REF_KEEP_MS`: a command is
+/// never forgotten), it grants nothing more; another person's is theirs.
+#[test]
+fn the_moves_credit_is_granted_once_a_person_ever() {
+    use crate::migrations::{comp_grant_id, COMP_GRANT_MICROS};
+    let comp = |person: &str| Op::Grant(GrantCredit { id: comp_grant_id(person), micros: COMP_GRANT_MICROS, by: "migrations".into(), why: "the finite.computer move's credit".into() });
+    let mut w = World::guest();
+    w.replays(comp("npub1ada"));
+    assert_eq!((w.status().purchased_micros, COMP_GRANT_MICROS), (25 * USD, 25 * USD));
+    let mut later = w.restarted();
+    later.replays(comp("npub1ada"));
+    later.now += 400 * 24 * 60 * 60 * 1000;
+    later.ok(comp("npub1ada"));
+    assert_eq!(later.ledger.totals().purchased, 25 * USD, "once, whenever it is asked again");
+    let mut other = World::guest();
+    other.ok(comp("npub1bea"));
+    assert_eq!(other.status().purchased_micros, 25 * USD);
+}
+
 #[test]
 fn a_grant_outside_its_rules_is_refused() {
     let mut w = World::seat();
@@ -1397,4 +1418,26 @@ fn a_refusal_is_named_by_a_string_alone() {
         let e = serde_json::from_slice::<Refused>(object.as_bytes()).map(|r| format!("{r:?}")).expect_err(&object).to_string();
         assert!(e.contains("invalid type: map"), "{object}: {e}");
     }
+}
+
+/// Goal (FIN-458, a reviewer's): what a ledger keeps as told is what it
+/// says, so a seat that ends or comes back is news though the standing
+/// holds (overdrawn): Buy credit goes, or comes back, and the page that
+/// read before the seat's push is told again.
+#[test]
+fn a_seat_that_ends_or_comes_back_is_news_though_its_standing_holds() {
+    let mut w = World::seat();
+    w.ok(seat("seat:1", SeatState::Active, 1));
+    w.spend("b1", 52 * USD);
+    let overdrawn = Standing::ReadOnly { why: Why::Overdrawn };
+    assert_eq!(w.ledger.standing(T0), overdrawn);
+    let with_buy = w.ledger.told_key(T0, true);
+    w.ok(seat("seat:2", SeatState::Canceled, 2));
+    assert_eq!(w.ledger.standing(T0), overdrawn, "its standing holds");
+    let without = w.ledger.told_key(T0, true);
+    assert!(said::news(Some(&with_buy), &without), "the seat gone: Buy credit goes, and that is news");
+    w.ok(seat("seat:3", SeatState::Active, 3));
+    let back = w.ledger.told_key(T0, true);
+    assert!(said::news(Some(&without), &back), "the seat back: Buy credit is back, news too");
+    assert!(!said::news(Some(&with_buy), &back), "the same notices as before: nothing new");
 }

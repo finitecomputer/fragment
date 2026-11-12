@@ -621,7 +621,8 @@ provider's own hosts.
   deploy/example.jsonc has the platform's. Connecting one is
   docs/api.md's, Connections; its consent is browser-bound
   (docs/pipes-browser-binding.md), and a connection holds only the scopes
-  its person allowed.
+  its person allowed: read only or read and write, as they picked, and
+  of those what they left ticked.
 - **A placeholder** is `fcx_<provider>_<tag>` for a connection and
   `fck_<provider>_<tag>` for a key, its tag a MAC of (computer, agent
   fragment, provider) under a key only the platform holds (`swap`). It
@@ -642,6 +643,15 @@ provider's own hosts.
   when its owner's gate refuses (402, 403). A body goes as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
+- **An account's own host.** A connection whose accounts each live at a
+  host of their own (a Salesforce org at its My Domain) names the suffix
+  they are under and the Pipes metadata field naming each account's
+  (`account_host`). The intercept also catches the suffix's glob
+  (`*.my.salesforce.com`); a request to a host under it is swapped only
+  when Pipes' credential for the account names that very host
+  (`AccountHost::of_metadata`), since anyone may own a host under the
+  suffix. Another account's host is refused (403), naming the account's
+  own; an account whose metadata names none is refused too.
 - **Who may use what.** An agent may use every provider its owner has
   (decision 44); its owner may narrow it to a list, a specialization
   rather than a wall. Where a connection takes several accounts, each
@@ -649,6 +659,14 @@ provider's own hosts.
   placeholder is the same.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
+- **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
+  each secret bound to an agent, with a host, is one of its credentials,
+  kind `own`, named by the secret, with no variable. Its hosts join the
+  catalog's in the egress's intercepts (the computer arms them again as
+  its guest reads its view). The intercept asks the Vault for it per
+  request, plans it beside the catalog's rows, and names each value it
+  filled in the answer (`{{name}}`); a Nostr key's is a signature the
+  Vault makes. A Vault's calls are not counted in `uses`.
 
 ### An agent's own model
 

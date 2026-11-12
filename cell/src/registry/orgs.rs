@@ -245,7 +245,11 @@ impl RegistryCell {
             "INSERT INTO plan_syncs (person, since, due, tries) VALUES (?, ?, ?, 0)
              ON CONFLICT (person) DO UPDATE SET since = excluded.since, due = excluded.due, tries = 0",
             vec![person.into(), now.clone(), now],
-        )
+        )?;
+        // their seat changed: what the registry tells them of it may have,
+        // though their ledger's standing has not (a lapsed seat removed)
+        self.tell_after(vec![person.to_string()]);
+        Ok(())
     }
 
     /// Arms the alarm for the earliest queued push, unless it is armed
@@ -312,7 +316,7 @@ impl RegistryCell {
                 if named.as_ref().is_some_and(|o| o.id != m.org) {
                     return Err(conflict(format!("{email} is in another org already")));
                 }
-                return self.comp_member(&b.by, m, kind, &email);
+                return self.comp_member(&b.by, m, kind, &email).and_then(|c| self.ending(c, b.comp.until_ms));
             }
         }
         // an offer waiting on the email: in the org named, or a comp's own org of one
@@ -354,7 +358,41 @@ impl RegistryCell {
             None => offer,
         };
         let org_row = self.stored_org(&seat.org)?;
-        Ok(Comped { seat: seat.wire(None)?, org: org_row.reference(), created, mailed: false })
+        self.ending(Comped { seat: seat.wire(None)?, org: org_row.reference(), created, mailed: false }, b.comp.until_ms)
+    }
+
+    /// A new comp's end, when its comp names one (`CompSeat.until_ms`): a
+    /// comp held already keeps its own.
+    fn ending(&self, c: Comped, until_ms: Option<i64>) -> CellResult<Comped> {
+        if let (true, Some(at)) = (c.created, until_ms) {
+            self.exec("UPDATE org_members SET until_ms = ? WHERE id = ?", vec![SqlStorageValue::Integer(at), c.seat.id.as_str().into()])?;
+        }
+        Ok(c)
+    }
+
+    /// Comps whose end came (`until_ms`), ended as an operator's end is, a
+    /// batch a pass; then the alarm armed for what that queued, and for
+    /// the next end.
+    pub(super) async fn comps_alarm(&self) -> CellResult<()> {
+        let due = self.rows::<super::IdRow>(
+            "SELECT id FROM org_members WHERE until_ms IS NOT NULL AND until_ms <= ? AND comped = 1 ORDER BY until_ms LIMIT ?",
+            vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(SYNC_BATCH as i64)],
+        )?;
+        for r in due {
+            self.end_comp(EndComp { by: "until".into(), seat: r.id })?;
+        }
+        self.arm_syncs().await?;
+        self.arm_quantities().await?;
+        self.arm_comps().await
+    }
+
+    /// The alarm for the next comp's end, if any.
+    pub(super) async fn arm_comps(&self) -> CellResult<()> {
+        let due = self.row::<DueRow>("SELECT MIN(until_ms) AS due FROM org_members WHERE until_ms IS NOT NULL AND comped = 1", vec![])?.and_then(|r| r.due);
+        match due {
+            Some(due) => self.arm_at(due).await,
+            None => Ok(()),
+        }
     }
 
     /// An operator's comp for a member of an org (theirs, by their yes):
@@ -403,7 +441,7 @@ impl RegistryCell {
     fn end_comp(&self, b: EndComp) -> CellResult<OrgMember> {
         let (m, _) = self.comped(&b.seat)?;
         if m.admin != 0 && m.person.is_some() {
-            self.exec("UPDATE org_members SET seat = NULL, comped = 0, sleeps = 0 WHERE id = ?", vec![m.id.as_str().into()])?;
+            self.exec("UPDATE org_members SET seat = NULL, comped = 0, sleeps = 0, until_ms = NULL WHERE id = ?", vec![m.id.as_str().into()])?;
         } else {
             self.exec("DELETE FROM org_members WHERE id = ?", vec![m.id.as_str().into()])?;
         }
@@ -631,6 +669,7 @@ impl RegistryCell {
         let answer = change()?;
         self.arm_syncs().await?;
         self.arm_quantities().await?;
+        self.arm_comps().await?;
         Ok(answer)
     }
 

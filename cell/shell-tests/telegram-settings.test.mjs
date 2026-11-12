@@ -40,7 +40,8 @@ const listOf = () => [
 const DOORS = { "maple-telegram--e5f6": { door: "telegram", agent: "maple--a1b2" }, "keyed-chat--j9k2": null };
 
 // `link(name, body, doors)`: the binding's answer (its default binds it)
-function world({ refuse = new Set(), listed = true, link = (name, body, doors) => (doors[name] = { door: "telegram", agent: body.agent }) } = {}) {
+// `vault`: the person's Vault as its list answers it (none: its read fails)
+function world({ refuse = new Set(), listed = true, link = (name, body, doors) => (doors[name] = { door: "telegram", agent: body.agent }), vault } = {}) {
   const doors = { ...DOORS };
   // the person's list as the platform holds it, and as this page last read it
   const server = listOf();
@@ -56,6 +57,10 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
       if (refuse.has(door)) throw Object.assign(new Error("refused"), { status: 500 });
       if (!(door in doors)) throw Object.assign(new Error("not found"), { status: 404 });
       return { bound: doors[door] };
+    }
+    if (method === "GET" && path === "/api/vault") {
+      if (!vault) throw Object.assign(new Error("refused"), { status: 500 });
+      return { secrets: vault };
     }
     if (method === "POST" && path === "/api/fragments") {
       const name = `${body.label}--n${++at.made}p4`;
@@ -162,6 +167,26 @@ test("Set up opens a bound chat's setup page, making nothing", async () => {
   assert.equal(w.opened.length, 1);
   assert.deepEqual({ ...w.opened[0], onClose: undefined }, { pressed: 1, src: "/auth/frame?name=maple-telegram--e5f6&return=/setup.html", name: "maple-telegram--e5f6", agent: "maple--a1b2", title: "Telegram", onClose: undefined });
   assert.ok(!w.asked.some((a) => a.startsWith("POST")));
+});
+
+test("Set up names the bot its person's Vault holds for that agent, toward api.telegram.org alone, to its setup page (FIN-463 F11); none else", async () => {
+  const vault = [
+    { name: "telegram-wren--c3d4", hosts: ["api.telegram.org"], agents: ["wren--c3d4"] },
+    { name: "two-hosts", hosts: ["api.telegram.org", "example.com"], agents: ["maple--a1b2"] },
+    { name: "linear", hosts: ["api.linear.app"], agents: ["maple--a1b2"] },
+    { name: "telegram-maple--a1b2", hosts: ["api.telegram.org"], agents: ["maple--a1b2"] },
+  ];
+  const w = world({ vault });
+  await w.telegram.readTelegram();
+  w.draw();
+  await w.press(0, "Set up");
+  assert.equal(w.opened[0].src, "/auth/frame?name=maple-telegram--e5f6&return=/setup.html?vault=telegram-maple--a1b2");
+  // none of its: the page as before; nor with a Vault not read
+  const none = world({ vault: vault.slice(0, 3) });
+  await none.telegram.readTelegram();
+  none.draw();
+  await none.press(0, "Set up");
+  assert.equal(none.opened[0].src, "/auth/frame?name=maple-telegram--e5f6&return=/setup.html");
 });
 
 test("Set up reads the list and its doors anew first: a chat another tab made since, which this page's list does not show yet, is opened, and none made", async () => {

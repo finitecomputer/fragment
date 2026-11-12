@@ -17,6 +17,9 @@
 //   door.
 // - `mirror` (each reply an agent posts here) sends it to that account,
 //   while the door is open.
+// - `typing`, started by `intake` as it relays a message, shows that
+//   account the bot typing until `mirror` sends the agent's answer, or
+//   for at most TYPING_ROUNDS_MAX rounds.
 //
 // No one but its owner edits this chat: its secrets, its code, its pages
 // and the operations here that are an editor's are theirs alone, the
@@ -37,6 +40,13 @@ const SEEN_MAX = 2000;
 // Connect attempts whose answer is kept, the latest last, so a page sees its
 // own however many answered between its polls.
 const ANSWERED_MAX = 16;
+// Telegram shows a chat action for 5 s at most, or until the bot's next
+// message, so `typing` says it again this often while the agent works.
+const TYPING_EVERY_MS = 4000;
+// Its hard cap: about five minutes of "typing", three steps a round (a
+// look, the action, a sleep) within a job's JOB_STEPS_MAX of 256. A turn
+// that ends with no answer here (an error, a card, silence) stops it.
+const TYPING_ROUNDS_MAX = 60;
 
 const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 const nameOf = (from) => [from?.first_name, from?.last_name].filter((s) => typeof s === "string" && s).join(" ").slice(0, 64) || (from?.username ? `@${from.username}` : "someone");
@@ -93,7 +103,9 @@ export class App extends DurableObject {
     // `answered`: the attempts `connect` answered lately (each a page's own
     // word), so a page that asked sees its own answer come, the same bot's
     // token again included, whatever other connects answered meanwhile
-    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing, answered: this.get("answered") ?? [] };
+    // `held`: its owner took the bot their Vault held for this chat
+    // (`hold`), and it has not connected since
+    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing, answered: this.get("answered") ?? [], held: this.get("held") === true };
   }
 
   async connect({ platform, api = TELEGRAM, attempt } = {}, job) {
@@ -133,6 +145,16 @@ export class App extends DurableObject {
     }
     this.put("bot", { id: bot.id, username: String(bot.username).slice(0, 64) });
     this.put("api", api);
+    this.put("held", null);
+    return { ok: true };
+  }
+
+  // its owner takes the bot their Vault holds for this chat (setup.js),
+  // said before the token moves here: a page that lost the move's answer,
+  // or one opened again, offers that bot again until it connects
+  hold(_, call) {
+    if (call.agent) throw new Error("its owner sets it up, in person");
+    this.put("held", true);
     return { ok: true };
   }
 
@@ -188,6 +210,26 @@ export class App extends DurableObject {
     return { fresh };
   }
 
+  // a relayed message the agent owes an answer: `typing` shows it working
+  // while this one is the latest owed and unanswered (a newer message
+  // takes over; the next answer `mirror` sends ends it)
+  owe() {
+    const id = (this.get("typing")?.id ?? 0) + 1;
+    this.put("typing", { id, answered: false });
+    return { id };
+  }
+
+  owed({ id }) {
+    const t = this.get("typing");
+    return { typing: t?.id === id && !t.answered };
+  }
+
+  answered() {
+    const t = this.get("typing");
+    if (t) this.put("typing", { ...t, answered: true });
+    return { ok: true };
+  }
+
   // where its runs talk to Telegram, and with whom
   route() {
     const paired = this.get("paired");
@@ -221,8 +263,33 @@ export class App extends DurableObject {
       await tell(job, api, m.chat.id, "This chat isn't linked to your agent.");
       return { ignored: "not linked" };
     }
+    // owed before it is published, so an answer however quick ends it
+    const { id } = await job.call("owe", {});
     await job.publish("chat", { text: [...text].slice(0, TEXT_MAX).join(""), to: [job.door.to], relayed: job.door.relayed }, "message");
-    return { relayed: true };
+    const typing = await job.call("typing", { chat: m.chat.id, id });
+    return { relayed: true, typing: typing.run };
+  }
+
+  // "typing…" in the paired chat while the agent owes message `id` its
+  // answer: a look, the action, a sleep, a round; bounded by
+  // TYPING_ROUNDS_MAX, and by Telegram refusing it (a shut door fetches
+  // nothing). A look then the action, so an answer sent leaves at most one
+  // action already on its way.
+  async typing({ chat, id } = {}, job) {
+    if (job.via !== "job") return { rounds: 0, why: "only intake starts it" };
+    const { api } = await job.call("route", {});
+    for (let rounds = 0; rounds < TYPING_ROUNDS_MAX; rounds += 1) {
+      if (!(await job.call("owed", { id })).typing) return { rounds, why: "answered" };
+      let said;
+      try {
+        said = await telegram(job, api, "sendChatAction", { body: { chat_id: chat, action: "typing" } });
+      } catch {
+        return { rounds, why: "not sent" };
+      }
+      if (!said.ok) return { rounds, why: "not sent" };
+      await job.sleep(TYPING_EVERY_MS);
+    }
+    return { rounds: TYPING_ROUNDS_MAX, why: "cap" };
   }
 
   async mirror({ record } = {}, job) {
@@ -240,6 +307,8 @@ export class App extends DurableObject {
     if (!text) return { sent: 0, why: "nothing said" };
     const { api, paired } = await job.call("route", {});
     if (!paired) return { sent: 0, why: "no account paired" };
+    // its answer: "typing…" stops, before the answer goes
+    await job.call("answered", {});
     const chars = [...text];
     let parts = 0;
     // bounded: PARTS_MAX messages; what is past them stays in the chat
