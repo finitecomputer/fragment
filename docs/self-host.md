@@ -284,11 +284,12 @@ New in this phase:
     to fix first: the minimal change is to arm a far deadline at the
     queue's bound and re-arm it when it fires. The move is off on
     self-host (`Need::Move`), so the e2e on celld sets none.
-53. **celld spreads a Worker's requests over a pool of isolates**
-    (`CELLD_MAX_STATELESS_ISOLATES`, one a core by default), where local
-    workerd runs one. What one isolate's memory holds (the router's
-    ledger gate, which the levers forget and read) is then another
-    isolate's on the next request, as on Cloudflare. On celld the e2e
+53. **celld runs each object in an isolate of its own,** and the Worker
+    over a pool of them (`CELLD_MAX_STATELESS_ISOLATES`, one a core),
+    where local workerd runs the Worker and every object in one. What one
+    isolate's memory holds (the ledger gate, which the levers forget and
+    read) is then another isolate's, as on Cloudflare; one stateless
+    isolate does not change it. On celld the e2e
     keeps what callers see (the next call refused, 402) and skips what a
     lever reads of the gate (`Suite::one_isolate`).
 54. **A slides presenter's Stop is lost on celld** (the `slides` section,
