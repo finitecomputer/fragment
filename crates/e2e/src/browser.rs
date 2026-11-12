@@ -28,12 +28,12 @@ use serde_json::{json, Value};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
-/// How long a starting Chrome may do nothing (no CPU time, no page fault,
-/// in any of its processes) before its DevTools port is up: one idle that
-/// long is stuck. One still working is waited on, however slow: a CI
-/// runner's first Chrome reads its install from a cold disk, 7 to 19 s
-/// on half of shard 1's runs and past 30 s once (FIN-496). Where its
-/// processes can't be read (no `/proc`), the bound runs from its start.
+/// How long a starting Chrome's browser main thread, where its start runs,
+/// may do nothing (no CPU time, no page fault) before its DevTools port is
+/// up: one idle that long is stuck. One still working is waited on,
+/// however slow: a CI runner's first Chrome is 7 to 19 s on half of shard
+/// 1's runs and was past 30 s once, alive and starting (FIN-496). Where
+/// its thread can't be read (no `/proc`), the bound runs from its start.
 const CHROME_IDLE_MAX: Duration = Duration::from_secs(30);
 /// How long a reloaded page has to load its new document, resources and
 /// all (`reload`), and how many reloads it is given.
@@ -292,6 +292,11 @@ struct Process {
 }
 
 impl Process {
+    /// A process's (or one thread's) `stat` file, read.
+    fn read(path: &str) -> Option<Process> {
+        Process::parse(&std::fs::read_to_string(path).ok()?)
+    }
+
     /// `pid (name) state ppid …`: the name may hold spaces and parentheses,
     /// so the fields are counted from its last `)`.
     fn parse(stat: &str) -> Option<Process> {
@@ -339,7 +344,7 @@ impl Tree {
         let all = std::fs::read_dir("/proc").ok()?.filter_map(|e| {
             let e = e.ok()?;
             e.file_name().to_str()?.parse::<u32>().ok()?;
-            Process::parse(&std::fs::read_to_string(e.path().join("stat")).ok()?)
+            Process::read(e.path().join("stat").to_str()?)
         });
         Tree::of(root, all.collect())
     }
@@ -477,8 +482,11 @@ impl Browser {
         let t0 = Instant::now();
         let said = || std::fs::read_to_string(profile.join("chrome.log")).unwrap_or_default().lines().rev().take(5).collect::<Vec<_>>().join(" | ");
         let pid = child.id();
-        // what its processes had done when they last did more
-        let (mut done, mut since) = (Tree::read(pid).map(|t| t.work()), Instant::now());
+        // its browser's main thread, where its start runs (its other threads
+        // and processes may stay busy while that is stuck): what it had done
+        // when it last did more
+        let main = || Process::read(&format!("/proc/{pid}/task/{pid}/stat")).map(|p| (p.ticks, p.faults, p.reads));
+        let (mut done, mut since) = (main(), Instant::now());
         loop {
             let found = devtools_port(&profile).and_then(|port| {
                 reqwest::blocking::get(format!("http://127.0.0.1:{port}/json/version"))
@@ -495,17 +503,17 @@ impl Browser {
             if let Ok(Some(status)) = child.try_wait() {
                 bail!("Chrome exited ({status}) {:.1?} after it started, before its DevTools endpoint came up: it said: {}; its profile held: {}", t0.elapsed(), said(), held(&profile));
             }
-            let tree = Tree::read(pid);
-            let now = tree.as_ref().map(Tree::work);
+            let now = main();
             if now != done {
                 (done, since) = (now, Instant::now());
             }
             if since.elapsed() > CHROME_IDLE_MAX {
+                // read while they still are: what each waits in goes when it is killed
+                let processes = Tree::read(pid).map_or_else(|| "unread (no /proc)".to_string(), |t| t.to_string());
                 let _ = child.kill();
                 let _ = child.wait();
-                let processes = tree.map_or_else(|| "unread (no /proc)".to_string(), |t| t.to_string());
                 bail!(
-                    "Chrome did nothing for {CHROME_IDLE_MAX:?} ({:.1?} after it started) and its DevTools endpoint is not up (its port: {:?}): its processes: {processes}; it said: {}; its profile held: {}",
+                    "Chrome's main thread did nothing for {CHROME_IDLE_MAX:?} ({:.1?} after it started) and its DevTools endpoint is not up (its port: {:?}): its processes: {processes}; it said: {}; its profile held: {}",
                     t0.elapsed(),
                     devtools_port(&profile),
                     said(),
@@ -1430,23 +1438,31 @@ mod tests {
     }
 
     /// Read from `/proc`, a process's tree holds the children it started,
-    /// and one at work (a CPU-bound grandchild) shows its work growing.
+    /// and a process at work (a shell's busy loop) shows its main thread's
+    /// CPU time growing; a stopped one's stays as it was.
     #[test]
     #[cfg(target_os = "linux")]
-    fn a_working_tree_shows_its_work() {
-        let mut child = Command::new("sh").args(["-c", "sh -c 'while :; do :; done' & wait"]).spawn().expect("sh");
-        let tree = |pid| Tree::read(pid).expect("its tree");
-        let mut before = tree(child.id());
-        while before.0.len() < 2 {
-            before = tree(child.id());
+    fn a_working_thread_shows_its_work() {
+        struct Killed(std::process::Child);
+        impl Drop for Killed {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
         }
-        assert!(Tree::read(std::process::id()).expect("ours").0.iter().any(|p| p.pid == child.id()), "ours holds the child");
-        while tree(child.id()).work() == before.work() {}
-        for p in before.0.iter().filter(|p| p.pid != child.id()) {
-            let _ = Command::new("kill").arg(p.pid.to_string()).status();
+        let child = Killed(Command::new("sh").args(["-c", "while :; do :; done"]).spawn().expect("sh"));
+        let pid = child.0.id();
+        assert!(Tree::read(std::process::id()).expect("ours").0.iter().any(|p| p.pid == pid), "ours holds the child");
+        let main = || Process::read(&format!("/proc/{pid}/task/{pid}/stat")).expect("its main thread");
+        let before = main();
+        let t0 = Instant::now();
+        while main().ticks == before.ticks {
+            assert!(t0.elapsed() < Duration::from_secs(10), "a busy loop's CPU time never grew");
         }
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = Command::new("kill").args(["-STOP", &pid.to_string()]).status();
+        while main().state != 'T' {}
+        let stopped = main();
+        assert_eq!((main().ticks, main().faults), (stopped.ticks, stopped.faults), "a stopped thread does nothing");
     }
 
     /// Chromes started together each answer on the port each picked and
