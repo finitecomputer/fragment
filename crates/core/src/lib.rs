@@ -55,6 +55,7 @@ pub mod models;
 pub mod multipart;
 pub mod names;
 pub mod notice;
+pub mod oidc;
 pub mod npub;
 pub mod own_signin;
 pub mod connection_accounts;

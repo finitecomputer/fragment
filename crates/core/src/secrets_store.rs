@@ -22,6 +22,10 @@ pub const CODESTORAGE_KEY: &str = "CODESTORAGE_KEY";
 /// The WorkOS environment sign-in and Pipes use: its client id and API key.
 pub const WORKOS_CLIENT: &str = "WORKOS_CLIENT";
 pub const WORKOS_KEY: &str = "WORKOS_KEY";
+/// An OpenID Connect provider's client secret (docs/self-host.md, seam 4),
+/// where one signs people in in WorkOS's place: bound only then, and not
+/// at all for a public client.
+pub const OIDC_CLIENT_SECRET: &str = "OIDC_CLIENT_SECRET";
 /// Stripe (docs/billing.md): the account's restricted key, and this
 /// deployment's webhook endpoint's signing secret.
 pub const STRIPE_KEY: &str = "STRIPE_KEY";
@@ -44,11 +48,11 @@ pub fn connection_secret(provider: &str) -> String {
 /// a value changed in the store (`cargo xtask secret set`) reaches every
 /// warm isolate within this, with no deploy.
 pub const CACHE_MS_MAX: i64 = 60_000;
-/// The bindings one Worker has: the eight above, a model's key per slot a
+/// The bindings one Worker has: the nine above, a model's key per slot a
 /// deployment's `models` may name (`models::SLOTS_MAX`, and its
 /// embeddings slot's), and an operator key per provider of the catalog, at
 /// most.
-pub const CACHE_ENTRIES_MAX: usize = 8 + crate::models::SLOTS_MAX + 1 + catalog::PROVIDERS_MAX;
+pub const CACHE_ENTRIES_MAX: usize = 9 + crate::models::SLOTS_MAX + 1 + catalog::PROVIDERS_MAX;
 
 /// The binding that holds operator key `provider` (`perplexity` →
 /// `OPERATOR_KEY_PERPLEXITY`, `google-places` → `OPERATOR_KEY_GOOGLE_PLACES`).

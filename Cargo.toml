@@ -10,3 +10,12 @@ license = "MIT"
 
 [profile.release]
 strip = true
+
+# RSA key generation (the OpenID Connect fake's keys in `cargo xtask dev`,
+# core's and the fakes' tests) takes seconds unoptimised: these two alone
+# are built optimised in the dev profile.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3
