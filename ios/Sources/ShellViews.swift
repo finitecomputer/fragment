@@ -13,14 +13,17 @@ struct DesktopWallpaper: View {
 struct AgentAvatar: View {
     let agent: FragmentSummary?
     var size: CGFloat = 32
+    /// A circle (on a capsule's end) rather than the rounded square.
+    var round = false
+    private var radius: CGFloat { round ? size / 2 : size * 0.28 }
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: size * 0.28).fill(color.gradient)
+            RoundedRectangle(cornerRadius: radius).fill(color.gradient)
             if let picture = agent?.picture, let url = URL(string: picture) {
                 AuthenticatedImage(url: url) { image in
                     if let image { image.resizable().scaledToFill() } else { Color.clear }
                 }
-                    .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.28))
+                    .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: radius))
             } else {
             Text(String((agent?.displayTitle ?? "?").prefix(1))).font(.system(size: size * 0.46, weight: .semibold)).foregroundStyle(.white)
             }
@@ -119,7 +122,7 @@ struct SidebarView: View {
     let close: () -> Void
     /// The height of its glass controls: an agent's pill and the round
     /// buttons beside it and at its foot, drawn alike so they stay one size.
-    static let control: CGFloat = 48
+    static let control: CGFloat = 44
     @State private var renamingChat: FragmentSummary?
     @State private var chatTitle = ""
     @State private var managingChat: FragmentSummary?
@@ -154,7 +157,7 @@ struct SidebarView: View {
                                 }
                             } label: {
                                 HStack(spacing: 12) {
-                                    AgentAvatar(agent: agent)
+                                    AgentAvatar(agent: agent, round: true)
                                     Text(agent.displayTitle).font(.headline)
                                     if agent.pinned == true {
                                         Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.tertiary).accessibilityLabel("Pinned")
