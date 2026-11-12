@@ -27,7 +27,10 @@ struct SpikeConfig: Codable {
     static let key = "spikeConfig"
     static func load() -> SpikeConfig {
         let d = UserDefaults.standard
-        var c = (d.data(forKey: key)).flatMap { try? JSONDecoder().decode(SpikeConfig.self, from: $0) } ?? SpikeConfig()
+        // saved (a deep link) > bundled SpikeDefaults.json (the phone build) > empty
+        let bundled = Bundle.main.url(forResource: "SpikeDefaults", withExtension: "json")
+            .flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode(SpikeConfig.self, from: $0) }
+        var c = (d.data(forKey: key)).flatMap { try? JSONDecoder().decode(SpikeConfig.self, from: $0) } ?? bundled ?? SpikeConfig()
         // `-url …` style launch arguments override (UserDefaults argument domain).
         for (k, apply) in [("url", { c.url = $0 }), ("mode", { c.mode = $0 }), ("proxy", { c.proxy = $0 }),
                            ("pass", { c.pass = $0 }), ("ca", { c.ca = $0 }), ("pin", { c.pin = $0 }),
