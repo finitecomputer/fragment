@@ -10,11 +10,60 @@ Versions:
 - Headscale 0.29.7; Go 1.27.4; lego 5.6.0;
 - Xcode 26.5; iOS Simulator 26.5 (iPhone Air 6C481C2B); macOS 26.6.2.
 
-The tailnet runs used a local, rootless **Headscale**, because the box's
-login to the real tailnet was still pending. Headscale used Tailscale's
-public DERP map, and the clients ran the real tailscaled and tsnet code. Its
-policy granted `dns-subdomain-resolve` to every node through `nodeAttrs`,
-which makes it a preview of Tailscale's rollout.
+Runs, in order:
+- a logging SOCKS probe with no tailnet;
+- a local, rootless **Headscale** (Tailscale's public DERP map, real
+  tailscaled and tsnet code, `dns-subdomain-resolve` granted to every node:
+  a preview of Tailscale's rollout);
+- the **hosted** tailnet, with a real domain (`finite.house`) and a real
+  Let's Encrypt wildcard;
+- a real iPhone.
+
+## Summary
+
+**Recommendation (client path per platform):**
+- **Option A**, the org's own domain with a public wildcard certificate, is
+  the path. It needs no app or CLI changes for trust or names: no ATS keys,
+  no pinned CA, no `SSL_CERT_FILE`. It passed 15/15 on Safari, the macOS
+  app, the iOS simulator and a real iPhone, and the CLI's TLS passed.
+- **Option B** has no fragment names on hosted Tailscale today (NXDOMAIN, no
+  wildcard certs). Even after the rollout, embedded tsnet can't resolve
+  subdomains. It also needs an ATS exception for `ts.net` and a pinned CA.
+  Keep it as the zone-config fallback; don't build for it.
+- **iOS:** embed TailscaleKit (tsnet) and route the WKWebView through
+  `WKWebsiteDataStore.proxyConfigurations` (SOCKS5 to `Loopback()`). Every
+  Fragment behaviour passed on a real phone. Cost: +21.7 MB installed
+  (+7.8 MB download), +25–30 MB memory, connected only in the foreground.
+  Staff who already run the Tailscale app need nothing from us.
+- **Desktop (macOS):** the same Swift code embeds tsnet (sandbox needs
+  `network.client` + `network.server`), or rely on the system Tailscale,
+  which passed 15/15 with no app changes.
+- **CLI:** the system Tailscale, no changes. On a box with only a rootless
+  tailscaled, `HTTPS_PROXY` to its HTTP proxy works for HTTP; the CLI's live
+  socket (tungstenite) ignores proxies.
+
+**App work found:**
+- Gate the first load after tsnet's `up()` on a probe of the box, with a
+  retry. On the phone `up()` returned at 0.13 s, but the box was unreachable
+  for about 4–5 s and the first navigation never committed.
+- Handle the first request after a long background. On resume, probe and
+  retry; if the loopback SOCKS listener died ("SOCKS5 server exited"),
+  rebuild the node. Phone after 127 s: 17 ms. LONG_BACKGROUND_RESULT
+- Use interactive login (a person's node, untagged) for tsidp.
+- Never let a config fall back silently (the decode trap below).
+
+**Install-order lessons:**
+- Create the DNS records, and wait for a new domain's delegation, before
+  anything looks the names up. A name looked up too early stays dead for up
+  to the negative TTL: 3600 s from the `.house` registry, 1800 s from the
+  zone.
+- Caching happens on both the router and the client: the Mac's resolver
+  still said "not found" after the router had recovered.
+- Check the records against the authoritative servers, not the local
+  resolver. A platform host under the suffix (`home.<suffix>`) avoids the
+  bare name entirely, and one single-level wildcard covers it.
+- The box needs `tailscale serve --tcp 443 --proxy-protocol 2` (rootless)
+  to keep client addresses.
 
 ## Feature status (source + issue tracker + live runs)
 
@@ -355,3 +404,16 @@ assumes one site: `__Host-` cookies, Origin checks on POST, Sec-Fetch-Site.
 ## Gaps
 
 - No real tsidp sign-in through the embedded node (WhoIs only).
+- Phone: battery not measured. Whether iOS showed the Local Network prompt
+  (tsnet pings LAN peers; the path went direct over Wi-Fi) is not recorded.
+- The cold-relaunch stall's cause (4–5 s after `up()`) is not pinned.
+- App Review for an app embedding a tailnet: not tried.
+- WebKit on iOS 18 not tested (simulators are 26.x; the Fragment app needs
+  26.0 anyway).
+- No pass against the real dev stack (xtask hard-codes its suffix and
+  ports); the test origin mimics its cookies, frame and sockets.
+- Enterprise resolvers with DNS-rebind filtering of 100.64/10: not tested.
+- The CLI's live socket (tungstenite) over a rootless box proxy: it ignores
+  `HTTPS_PROXY`; not exercised end to end.
+- When Tailscale enables `dns-subdomain-resolve` and wildcard certs: unknown
+  (no timeline).
