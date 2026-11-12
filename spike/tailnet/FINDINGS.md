@@ -28,6 +28,21 @@ which makes it a preview of Tailscale's rollout.
 | tailscale-rs | v0.7.1 (11-06): no iOS, MagicDNS, hostname lookup, Tailnet Lock or certs; pre-1.0 | not viable |
 | Public Suffix List | `ts.net` is listed: each `<tailnet>.ts.net` is one site | n/a |
 
+## Hosted Tailscale, live (the box on the real tailnet, 11-12 ~20:45Z)
+
+- The box's CapMap has **no** `dns-subdomain-resolve`. Quad-100 answers
+  `<box>.<tailnet>.ts.net` → 100.x but `chat.<box>.<tailnet>.ts.net` →
+  **NXDOMAIN**. Through the box's SOCKS, the platform host gives 200 and
+  `chat.<box>` gives rc=97.
+- `tailscale cert <box>.<tailnet>.ts.net`: a Let's Encrypt (YE1) cert in
+  36 s, 90 days. `tailscale cert '*.<box>…'`: "wildcard certificates are not
+  enabled for this node". `tailscale cert chat.<box>…`: "must be one of
+  [<box>…]".
+- So hosted Tailscale today offers B one publicly trusted name, the
+  platform host's, and nothing for fragments.
+- A-shaped names (`<x>.100-a-b-c-d.sslip.io` → the box) work through the
+  real tailnet; `serve --tcp 443 --proxy-protocol 2` was the front door.
+
 ## 1. Names
 
 - MagicDNS subdomains: not live on Tailscale today (the box joining the real
