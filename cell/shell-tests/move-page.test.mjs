@@ -305,3 +305,23 @@ test("a read the person left before it answered is not this opening's: an import
   assert.deepEqual(p.opened, [], "importing as they came back: the page stays");
   assert.deepEqual(p.rows()[0].buttons, ["Open chat"]);
 });
+
+test("an opening the person left before its first read answered goes no further: no read again on its behalf", async (t) => {
+  const p = page(t);
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" })] });
+  await settle();
+  p.ui.close();
+  p.timers.due = null;
+  p.ui.open();
+  const stale = p.next("GET", "/api/migrations/offers");
+  p.ui.close();
+  p.ui.open();
+  const fresh = p.next("GET", "/api/migrations/offers");
+  stale.ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" })] });
+  await settle();
+  assert.equal(p.timers.due, null, "nothing read again on the old opening's word");
+  fresh.ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" })] });
+  await settle();
+  assert.ok(p.timers.due, "the opening's own read follows the move");
+});

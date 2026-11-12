@@ -262,7 +262,7 @@ export function createMovePage(root, h) {
     opening += 1;
     importingAtOpen = null;
     draw();
-    await read();
+    if (!(await read())) return;
     draw();
     follow();
   }
