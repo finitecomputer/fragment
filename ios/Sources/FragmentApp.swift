@@ -29,6 +29,8 @@ final class Library {
     var creating = false
     var unfinishedChat: FragmentSummary?
     @ObservationIgnored private var readying: (agent: String, chat: Task<FragmentSummary, Error>)?
+    /// A chat made to write in, whose composer takes the keyboard as it opens.
+    @ObservationIgnored var focusOnOpen: String?
     /// What the home screen's prompt holds (`HomeDraft`).
     let home = HomeDraft()
     /// A launch not sent yet: its chat, made for it and still empty, and
@@ -168,6 +170,7 @@ final class Library {
         readying = nil; unfinishedChat = nil
         if !fragments.contains(where: { $0.name == chat.name }) { fragments.insert(chat, at: 0) }
         try session(for: chat, api: api).beginEmpty()
+        focusOnOpen = chat.name
         return chat
     }
 

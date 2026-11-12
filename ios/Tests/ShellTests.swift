@@ -79,6 +79,7 @@ struct ShellTests {
         let chat = try await library.startChat(with: agent, api: api)
         #expect(chat.name == "mobile-chat--x1" && chat.agents == ["npub1moss"])
         #expect(library.fragments.first?.name == chat.name && library.unfinishedChat == nil)
+        #expect(library.focusOnOpen == chat.name, "it opens ready to write in")
         #expect(try library.session(for: chat, api: api).read)
         #expect(stub.seen.filter { $0.route == "POST /api/fragments" }.count == 1)
     }

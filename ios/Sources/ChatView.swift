@@ -15,6 +15,8 @@ struct ChatView: View {
     /// The row the chat keeps in place as pages come in above it, while it
     /// is read back from its newest (`heldRow`).
     @State private var anchor: String?
+    /// The composer has the keyboard: given it as a chat just made opens.
+    @State private var composerFocused = false
     /// Messages heard (`ChatSession.heard`) when it last left the newest.
     @State private var heardAtLeave = 0
     let library: Library
@@ -180,7 +182,8 @@ struct ChatView: View {
                     },
                     send: { await session.send() }, stop: { await session.stop() },
                     steer: { recording in session.steers(recording: recording) ? { await session.steer(recording: recording) } : nil },
-                    quote: session.replyTo.map { quoted in (quoted.text, { session.replyTo = nil }) })
+                    quote: session.replyTo.map { quoted in (quoted.text, { session.replyTo = nil }) },
+                    focused: $composerFocused)
             }.background(FragmentStyle.background)
         }
         // Seen only once its newest messages are on screen: read, the window
@@ -192,6 +195,8 @@ struct ChatView: View {
             catch { /* A later live cursor or foreground visit retries the read marker. */ }
         }
         .onDisappear { session.flushDraft() }
+        // a chat made to write in (the sidebar's New chat) opens ready to write in
+        .onAppear { if library.focusOnOpen == session.fragment.name { library.focusOnOpen = nil; composerFocused = true } }
         // the person's own agents: whose menus they may use, whose routines are theirs
         .onChange(of: library.ownedIdentities, initial: true) { _, owned in session.owned = owned }
         // and the words that @mention the agents they know, for whom a message is
