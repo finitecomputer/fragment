@@ -48,7 +48,11 @@ Runs, in order:
   for about 4–5 s and the first navigation never committed.
 - Handle the first request after a long background. On resume, probe and
   retry; if the loopback SOCKS listener died ("SOCKS5 server exited"),
-  rebuild the node. Phone after 127 s: 17 ms. LONG_BACKGROUND_RESULT
+  rebuild the node. Phone after 127 s: 17 ms. After 34 min in the
+  background the app was gone (cold relaunch, new disco key on the box).
+  iOS ended it, or it was swiped away; the app can't tell which. So plan for
+  a cold start: on the phone the second cold start took 2.18 s to the
+  signed-in page, with no stall.
 - Use interactive login (a person's node, untagged) for tsidp.
 - Never let a config fall back silently (the decode trap below).
 
@@ -58,7 +62,9 @@ Runs, in order:
   to the negative TTL: 3600 s from the `.house` registry, 1800 s from the
   zone.
 - Caching happens on both the router and the client: the Mac's resolver
-  still said "not found" after the router had recovered.
+  still said "not found" after the router had recovered (22:48Z). By
+  23:27Z the bare name resolved on the Mac too, and TLS verified in curl,
+  URLSession and the CLI.
 - Check the records against the authoritative servers, not the local
   resolver. A platform host under the suffix (`home.<suffix>`) avoids the
   bare name entirely, and one single-level wildcard covers it.
@@ -150,7 +156,15 @@ no pinned CA):
     listener was not reclaimed in those 2 minutes.
   - The page's own tick count failed only because its timers froze while
     suspended.
-- **Cold relaunch on the phone** (saved node): tsnet reported up **0.13 s**
+- **Long background on the phone:** the app went to the background at
+  22:51:33Z and came back at 23:25:10Z as a **cold relaunch**: the process
+  restarted (launch at 79 ms), and the box saw a new disco key. So after
+  about 34 min the suspended app had been ended, by iOS or by a swipe. The
+  long-resume path (socket reclamation) was not exercised.
+  - That cold start was clean: tsnet up at 1.68 s, the URLSession check 200
+    at 1.92 s, the signed-in page done at **2.18 s**.
+  - The 25 MB upload and both 65 s fetches then completed (server side).
+- **Earlier cold relaunch on the phone** (saved node): tsnet reported up **0.13 s**
   after process start, but nothing reached the box for about 4–5 s. The
   first navigation never committed. A reload at 4.1 s finished the signed-in
   page at 4.28 s; the URLSession check failed (CFNetwork -1000) at 5.2 s.
@@ -404,6 +418,9 @@ assumes one site: `__Host-` cookies, Origin checks on POST, Sec-Fetch-Site.
 ## Gaps
 
 - No real tsidp sign-in through the embedded node (WhoIs only).
+- Phone: the resume path after a long (10+ min) background was not
+  exercised: the app was ended while suspended. iOS socket reclamation
+  remains untested.
 - Phone: battery not measured. Whether iOS showed the Local Network prompt
   (tsnet pings LAN peers; the path went direct over Wi-Fi) is not recorded.
 - The cold-relaunch stall's cause (4–5 s after `up()`) is not pinned.
