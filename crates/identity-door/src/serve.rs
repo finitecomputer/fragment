@@ -262,6 +262,11 @@ async fn authorize(shared: &Shared, req: &Request<Incoming>) -> Response<Full<By
     if param(&pairs, "response_type") != Some("code") {
         return back(callback, state, Err(("unsupported_response_type", "this door answers response_type=code alone".into())));
     }
+    let begun = Begun { client_id: client.id.clone(), callback: index, client_state: state.map(str::to_string), at_s: now_s(), salt: hex::encode(&random_code()[..16]) };
+    let sealed = match shared.state_key.seal(&begun) {
+        Ok(sealed) => sealed,
+        Err(refusal) => return back(callback, None, Err(("invalid_request", refusal.to_string()))),
+    };
     let provider = match shared.provider.provider().await {
         Ok(provider) => provider,
         Err(refusal) => {
@@ -269,8 +274,6 @@ async fn authorize(shared: &Shared, req: &Request<Incoming>) -> Response<Full<By
             return back(callback, state, Err(("temporarily_unavailable", format!("the door could not reach its sign-in provider: {refusal}"))));
         }
     };
-    let begun = Begun { client_id: client.id.clone(), callback: index, client_state: state.map(str::to_string), at_s: now_s(), salt: hex::encode(&random_code()[..16]) };
-    let sealed = shared.state_key.seal(&begun);
     let secrets = SignInSecrets::of(&shared.config.secret, &sealed);
     let hint = param(&pairs, "login_hint").filter(|h| !h.is_empty() && h.len() <= LOGIN_HINT_BYTES_MAX && h.bytes().all(|b| b.is_ascii_graphic()));
     let redirect_uri = shared.config.callback_url();

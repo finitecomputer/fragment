@@ -57,6 +57,8 @@ pub enum StateError {
     Forged,
     #[error("this sign-in began more than {} minutes ago", STATE_TTL_S / 60)]
     Expired,
+    #[error("this sign-in's state is past {STATE_BYTES_MAX} bytes once sealed")]
+    TooLong,
 }
 
 /// The key states are sealed with, derived from the door's secret.
@@ -75,14 +77,19 @@ impl StateKey {
         <Hmac<Sha256> as Mac>::new_from_slice(&self.0).expect("HMAC takes any key")
     }
 
-    /// `begun`, sealed: its JSON in base64url, a dot, its HMAC.
-    pub fn seal(&self, begun: &Begun) -> String {
+    /// `begun`, sealed: its JSON in base64url, a dot, its HMAC. Refused
+    /// past `STATE_BYTES_MAX`: the platform's state is checked printable and
+    /// at most 1 KiB, but JSON escapes each `\` and `"` in it to two bytes,
+    /// so a hostile one can still seal past the bound `open` takes.
+    pub fn seal(&self, begun: &Begun) -> Result<String, StateError> {
         let body = b64url(serde_json::to_string(begun).expect("a state serializes").as_bytes());
         let mut mac = self.mac();
         mac.update(body.as_bytes());
         let sealed = format!("{body}.{}", b64url(&mac.finalize().into_bytes()));
-        assert!(sealed.len() <= STATE_BYTES_MAX, "a state's parts are bounded");
-        sealed
+        if sealed.len() > STATE_BYTES_MAX {
+            return Err(StateError::TooLong);
+        }
+        Ok(sealed)
     }
 
     /// What a sealed state began with, if the door sealed it and it is not
@@ -126,17 +133,29 @@ mod tests {
     #[test]
     fn a_state_opens_only_as_sealed() {
         let key = StateKey::of(SECRET);
-        let sealed = key.seal(&begun());
+        let sealed = key.seal(&begun()).unwrap();
         assert_eq!(StateKey::of(SECRET).open(&sealed, 1_000 + STATE_TTL_S - 1), Ok(begun()), "a restarted door opens it");
         assert_eq!(key.open(&sealed, 1_000 + STATE_TTL_S), Err(StateError::Expired));
         assert_eq!(key.open(&sealed, 999), Err(StateError::Expired), "from the future");
         assert_eq!(StateKey::of(b"another door secret of thirty-two bytes or more").open(&sealed, 1_000), Err(StateError::Forged));
         let (body, tag) = sealed.split_once('.').unwrap();
-        let other = key.seal(&Begun { client_id: "client_other".into(), ..begun() });
+        let other = key.seal(&Begun { client_id: "client_other".into(), ..begun() }).unwrap();
         let (other_body, _) = other.split_once('.').unwrap();
         assert_eq!(key.open(&format!("{other_body}.{tag}"), 1_000), Err(StateError::Forged), "another body under this tag");
         assert_eq!(key.open(&format!("{body}.{}", "A".repeat(43)), 1_000), Err(StateError::Forged));
         assert_eq!(key.open("nothing", 1_000), Err(StateError::Malformed));
         assert_eq!(key.open(&"a".repeat(STATE_BYTES_MAX + 1), 1_000), Err(StateError::Malformed));
+    }
+
+    /// Goal: the platform's state at its bound (1 KiB, printable) seals;
+    /// one that JSON escaping doubles past the sealed bound (`\` and `"`)
+    /// is refused, never a panic.
+    #[test]
+    fn a_state_too_long_once_sealed_is_refused() {
+        let key = StateKey::of(SECRET);
+        let plain = Begun { client_state: Some("a".repeat(1024)), ..begun() };
+        assert_eq!(key.open(&key.seal(&plain).unwrap(), 1_000), Ok(plain));
+        assert_eq!(key.seal(&Begun { client_state: Some("\\".repeat(1024)), ..begun() }), Err(StateError::TooLong));
+        assert_eq!(key.seal(&Begun { client_state: Some("\"".repeat(1024)), ..begun() }), Err(StateError::TooLong));
     }
 }

@@ -132,7 +132,9 @@ pub fn person_of(issuer: &str, v: &Verified, claim: &str, vouched: &Vouched) -> 
     let Some(email) = mailbox_of(raw) else {
         return Err(EmailRefused::NotMailbox(raw.chars().take(EMAIL_BYTES_MAX).collect()));
     };
-    if !(v.email_verified || vouched.vouches(&email)) {
+    // `email_verified` speaks for the `email` claim alone: an address read
+    // from another claim signs in only in a vouched domain
+    if !((v.email_verified && claim == "email") || vouched.vouches(&email)) {
         return Err(EmailRefused::Unverified(email));
     }
     let person = Person { subject: subject_of(issuer, &v.subject), email };
@@ -177,6 +179,16 @@ mod tests {
         assert_eq!(person_of(ISSUER, &token(Some("bob@other.org"), false), "email", &v), Err(EmailRefused::Unverified("bob@other.org".into())));
         assert_eq!(person_of(ISSUER, &token(Some("bob@sub.example.com"), false), "email", &v), Err(EmailRefused::Unverified("bob@sub.example.com".into())), "a parent domain vouches for no subdomain");
         assert_eq!(person_of(ISSUER, &token(Some(&format!("{}@example.com", "a".repeat(LOCAL_PART_BYTES_MAX + 1))), true), "email", &v).map(|p| p.email).ok(), None);
+    }
+
+    /// Goal: `email_verified` speaks for the `email` claim alone. An address
+    /// read from another claim signs in only in a vouched domain, whatever
+    /// the token says it verified.
+    #[test]
+    fn email_verified_speaks_for_email_alone() {
+        let v = vouched();
+        assert_eq!(person_of(ISSUER, &token(Some("jo@other.org"), true), "preferred_username", &v), Err(EmailRefused::Unverified("jo@other.org".into())));
+        assert_eq!(person_of(ISSUER, &token(Some("grace@example.com"), true), "preferred_username", &v).unwrap().email, "grace@example.com", "vouched for");
     }
 
     /// Goal: a vouched domain that is no mail domain is refused at start.

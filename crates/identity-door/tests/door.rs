@@ -280,7 +280,7 @@ fn refusals_go_back_to_the_platform_or_stay_a_page() {
     assert_eq!((page.status, page.header("location")), (400, None), "{}", page.body);
     // well formed, for this client and callback, sealed by another secret
     let begun = state::Begun { client_id: CLIENT.into(), callback: 0, client_state: Some("s1".into()), at_s: now_s(), salt: "00".into() };
-    let other = state::StateKey::of(b"another door's secret, thirty-two bytes or more").seal(&begun);
+    let other = state::StateKey::of(b"another door's secret, thirty-two bytes or more").seal(&begun).unwrap();
     let page = get_at(r.door.addr, &format!("http://door.example.com/oidc/callback?code=abc&state={}", enc(&other)));
     assert_eq!((page.status, page.header("location")), (400, None), "another door's state: {}", page.body);
     assert!(page.body.contains("not the door"), "{}", page.body);
@@ -371,6 +371,8 @@ fn malformed_requests_are_refused() {
     assert_eq!(a.sent()["error"], "unsupported_response_type");
     let a = r.authorize(&format!("client_id={CLIENT}&redirect_uri={}&response_type=code&state=%01", enc(CALLBACK)));
     assert!(a.sent()["error"] == "invalid_request" && !a.sent().contains_key("state"), "an unprintable state is not handed back");
+    let a = r.authorize(&format!("client_id={CLIENT}&redirect_uri={}&response_type=code&state={}", enc(CALLBACK), "%5C".repeat(1024)));
+    assert!(a.sent()["error"] == "invalid_request" && !a.sent().contains_key("state"), "a state too long once sealed is refused, not a panic");
     let a = send(r.door.addr, "POST /user_management/authenticate HTTP/1.1\r\nhost: door\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 4\r\n\r\ncode");
     assert_eq!(a.status, 415);
     let big = "x".repeat(fragment_identity_door::BODY_BYTES_MAX + 1);
