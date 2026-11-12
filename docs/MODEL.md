@@ -55,6 +55,17 @@ facet's own transaction. The app has no network (`globalOutbound: null`):
 a job reaches out only through `job.fetch` steps, which the supervisor
 takes.
 
+Where a fetch, a push endpoint or a subscription may go
+(`fragment_core::egress::check`): public addresses only, unless the
+deployment's `egress_allow` lists a local host (a self-hosted org's
+intranet: names, `*.` globs, addresses, networks). The list never opens
+loopback, link-local, unspecified, multicast or broadcast addresses,
+`localhost`, or the platform's own host and fragment suffix; an entry
+that names one is refused at the deploy and at the cell's start. The
+cell judges the URL; a self-hosted node's resolver judges where a name
+lands, from the same list (`Allow::celld`, its `CELLD_EGRESS_ALLOW`).
+Empty, the default, it changes nothing.
+
 ## Where each fact lives
 
 Every change is checked against this table.

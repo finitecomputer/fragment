@@ -12,7 +12,10 @@
 //!                    behind the model route (its calls spend their payer's
 //!                    ledger; new people are seats with the month's included
 //!                    credit); --real-agent runs computers on our Hermes image
-//!                    and text on real models (xtask/src/dev_agent.rs)
+//!                    and text on real models (xtask/src/dev_agent.rs);
+//!                    FRAGMENT_MODELS_FILE and FRAGMENT_MODEL_KEY_FILE put
+//!                    the text tiers on a deployment's own models, without
+//!                    the image (docs/self-host.md, seam 3)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -227,6 +230,13 @@ fn dev(args: &[String]) -> Result<()> {
     let args = dev_args(args)?;
     // its models and key are read before anything builds
     let real = args.real_agent.then(|| dev_agent::RealAgent::read(args.models.as_deref())).transpose()?;
+    // a self-hosted stack's own models (FRAGMENT_MODELS_FILE; docs/self-host.md, seam 3)
+    let file = dev_agent::ModelsFile::read()?;
+    if real.is_some() && file.is_some() {
+        bail!("--real-agent's models and {}'s are one or the other: unset {} or drop --real-agent", dev_agent::MODELS_FILE_ENV, dev_agent::MODELS_FILE_ENV);
+    }
+    // the text tiers' models and their key: --real-agent's, or the file's
+    let named = real.as_ref().map(|r| (&r.models, &r.slots, &r.key)).or(file.as_ref().map(|f| (&f.models, &f.slots, &f.key)));
     // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
@@ -302,11 +312,10 @@ fn dev(args: &[String]) -> Result<()> {
         // --real-agent puts the text tiers on real models
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
-        models: real.as_ref().map(|r| r.models.clone()),
+        models: named.map(|(models, _, _)| models.clone()),
         // its slots on an OpenAI-compatible API, each on the one key dev binds
-        model_keys: real
-            .as_ref()
-            .map(|r| r.slots.iter().map(|slot| devstack::ModelKey { slot: slot.clone(), name: devstack::store::MODEL_KEY.into(), value: r.key.clone() }).collect())
+        model_keys: named
+            .map(|(_, slots, key)| slots.iter().map(|slot| devstack::ModelKey { slot: slot.clone(), name: devstack::store::MODEL_KEY.into(), value: key.clone() }).collect())
             .unwrap_or_default(),
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
@@ -367,7 +376,10 @@ fn dev(args: &[String]) -> Result<()> {
             println!("  models:       {} on real models, {}'s (paid by {}'s key); the rest on the Workers AI fake at {}", r.slots.join(", "), r.from.display(), dev_agent::KEY_FILE_ENV, ai.url);
             println!("  computers:    our Hermes image, built from the tree (its first build takes a while)");
         }
-        None => println!("  models:       {} (the Workers AI fake: echoes, never a real model; --real-agent for real ones)", ai.url),
+        None => match &file {
+            Some(f) => println!("  models:       {} on {}'s models (its key: {}); the rest on the Workers AI fake at {}", f.slots.join(", "), f.from.display(), dev_agent::MODEL_KEY_FILE_ENV, ai.url),
+            None => println!("  models:       {} (the Workers AI fake: echoes, never a real model; --real-agent for real ones)", ai.url),
+        },
     }
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
 
