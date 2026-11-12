@@ -476,6 +476,15 @@ c9327bda, libkrunfw 5.6.3), a person's Hermes computer (2 vCPU, 6 GiB, its
 | Restart (sleep, then a start that restores the save) | the start to awake 509 ms with the 34 MB restore; Hermes' exit 3.4 s of the rest |
 | Its node silent 31 s under it (the node's process stopped and started) | no restart, no rollback: its watch's `wait` cut, its looks unanswered, then the container still running and waited on again |
 
+Again on celld's `selfhost` tip (cd9c02b4: V8 15.2.124.45, far alarms,
+`facets.abort` fixed), 2026-11-12, with two other sessions' e2e runs
+loading the box (load 4 to 6): first start to awake 226 ms (the engine's
+ready at 155 ms); Hermes' first answer 11 s; sleep 5.2 s (hold 690 ms,
+save of 34 MB 601 ms, Hermes' exit 3.8 s); wake from its snapshot 989 ms
+in the cell (the engine's ready at 179 ms, the guest's first read at 708
+ms), 1,029 ms to its owner; a restart's start to awake 542 ms with the 34
+MB restore; its node silent 31 s under it, the same VM kept, no restart.
+
 The old lane's real-engine column (2026-10-22, the stub) read a wake from
 its save in 245 to 310 ms and from a snapshot in 140 ms; Hermes' guest
 reads its view later than the stub's (the alive check, #362, waits for it).
