@@ -56,7 +56,7 @@ struct SidebarDrawer: View {
                         .onTapGesture { close() }
                         .accessibilityHidden(true)
                         .transition(.opacity)
-                    SidebarView(library: library, page: page, api: api, navigate: navigate, close: close)
+                    SidebarView(library: library, page: page, api: api, navigate: navigate)
                         .frame(width: width)
                         .offset(x: dragOffset)
                         .transition(.move(edge: .leading))
@@ -119,7 +119,6 @@ struct SidebarView: View {
     let page: ShellPage
     let api: FragmentAPI
     let navigate: (ShellPage) -> Void
-    let close: () -> Void
     /// The height of its glass controls: an agent's pill and the round
     /// buttons beside it and at its foot, drawn alike so they stay one size.
     static let control: CGFloat = 44
@@ -138,8 +137,9 @@ struct SidebarView: View {
     }
 
     var body: some View {
-        // The chats run under the header and the foot, which soften them as
-        // they pass (iOS's scroll edge), never a hard cut where the list ends.
+        // The chats run under the foot, which softens them as they pass (iOS's
+        // scroll edge), never a hard cut where the list ends; the first agent
+        // starts at the top, the sidebar closed by a swipe or by going somewhere.
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(library.sidebarAgents) { agent in
@@ -191,19 +191,9 @@ struct SidebarView: View {
                     Text(error).font(.footnote).foregroundStyle(.secondary)
                     Button("Try again") { Task { await library.load(api) } }
                 }
-            }.padding(.horizontal, 12)
+            }.padding(.horizontal, 12).padding(.top, 12)
         }
         .refreshable { await library.load(api) }
-        .safeAreaBar(edge: .top) {
-            HStack {
-                Text("Finite.Computer").font(.headline)
-                Spacer()
-                Button { close() } label: {
-                    Image(systemName: "xmark").font(Self.icon).frame(width: 44, height: 44).contentShape(.rect)
-                }
-                .buttonStyle(.plain).accessibilityLabel("Close").accessibilityIdentifier("sidebarClose")
-            }.padding(20)
-        }
         .safeAreaBar(edge: .bottom) {
             HStack(alignment: .bottom, spacing: 12) {
                 VStack(spacing: 4) {
