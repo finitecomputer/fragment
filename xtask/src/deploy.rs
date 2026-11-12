@@ -397,6 +397,9 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         connection_secrets,
         model_keys,
         observability_read: d.observability_read.clone(),
+        // OpenID Connect is self-host's sign-in (docs/self-host.md, seam 4):
+        // a Cloudflare deploy signs people in through WorkOS alone
+        oidc_client_secret: None,
     })
 }
 

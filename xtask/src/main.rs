@@ -159,6 +159,11 @@ const DEV_STRIPE_PORT: u16 = 8800;
 /// OpenBao, on loopback, where the cell's secrets are (on celld, unless
 /// `FRAGMENT_SECRETS_BACKEND=vars`: `dev_openbao`).
 const DEV_OPENBAO_PORT: u16 = 8802;
+/// The OpenID Connect fake (`FRAGMENT_SIGNIN=oidc|tsidp`: docs/self-host.md,
+/// seam 4), and its client.
+const DEV_OIDC_PORT: u16 = 8804;
+const DEV_OIDC_CLIENT: &str = "fragment-dev";
+const DEV_OIDC_SECRET: &str = "fragment-dev-oidc-secret";
 const DEV_STRIPE_KEY: &str = "sk_test_fragment_dev";
 const DEV_STRIPE_WEBHOOK: &str = "whsec_fragment_dev";
 /// Where dev's mail says it comes from.
@@ -207,6 +212,38 @@ fn build_cmd(args: &[String]) -> Result<()> {
         [dev] if dev == "--dev" => build::cell_as(build::Profile::Dev),
         _ => bail!("build takes --dev alone, not {args:?}"),
     }
+}
+
+/// Dev's sign-in by OpenID Connect (docs/self-host.md, seam 4), when asked:
+/// a real provider (`FRAGMENT_OIDC_ISSUER` and `FRAGMENT_OIDC_CLIENT_ID`, its
+/// secret in `FRAGMENT_OIDC_CLIENT_SECRET_FILE`, and the optional
+/// `FRAGMENT_OIDC_EMAIL_CLAIM`, `FRAGMENT_OIDC_EMAIL_VOUCHED=on`; its
+/// redirect URI `http://127.0.0.1:8790/auth/callback`), or the fake:
+/// `FRAGMENT_SIGNIN=oidc` (a strict provider) or `tsidp` (shaped as tsidp:
+/// no `email_verified`, so vouched for). Neither: WorkOS signs people in.
+/// The fake's subjects come from its people's emails, so it keeps no file.
+fn dev_oidc(read: &dyn Fn(&str) -> Result<Option<String>>) -> Result<(Option<devstack::OidcVars>, Option<fragment_fakes::oidc::Oidc>)> {
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    if let Some(issuer) = env("FRAGMENT_OIDC_ISSUER") {
+        let client_id = env("FRAGMENT_OIDC_CLIENT_ID").context("FRAGMENT_OIDC_ISSUER names a provider: FRAGMENT_OIDC_CLIENT_ID names its client")?;
+        let vouched = match env("FRAGMENT_OIDC_EMAIL_VOUCHED").as_deref() {
+            None | Some("off") => false,
+            Some("on") => true,
+            Some(other) => bail!("FRAGMENT_OIDC_EMAIL_VOUCHED is on or off, not {other:?}"),
+        };
+        let client_secret = read("FRAGMENT_OIDC_CLIENT_SECRET_FILE")?;
+        return Ok((Some(devstack::OidcVars { issuer, client_id, client_secret, email_claim: env("FRAGMENT_OIDC_EMAIL_CLAIM"), vouched }), None));
+    }
+    let tsidp = match env("FRAGMENT_SIGNIN").as_deref() {
+        None | Some("workos") => return Ok((None, None)),
+        Some("oidc") => false,
+        Some("tsidp") => true,
+        Some(other) => bail!("FRAGMENT_SIGNIN is workos, oidc or tsidp, not {other:?}"),
+    };
+    let fake = fragment_fakes::oidc::Oidc::start_on(DEV_OIDC_PORT, DEV_OIDC_CLIENT, DEV_OIDC_SECRET)?;
+    fake.like_tsidp(tsidp);
+    let vars = devstack::OidcVars { issuer: fake.url.clone(), client_id: DEV_OIDC_CLIENT.into(), client_secret: Some(DEV_OIDC_SECRET.into()), email_claim: None, vouched: tsidp };
+    Ok((Some(vars), Some(fake)))
 }
 
 /// What `cargo xtask dev` is asked for: `--clean`, `--real-agent`, and
@@ -325,6 +362,14 @@ fn dev(args: &[String]) -> Result<()> {
         Some(u) => format!("{u} (the fake)"),
         None => format!("WorkOS {}", workos.client_id),
     };
+    // or an OpenID Connect provider in WorkOS's place (WorkOS then serves
+    // Pipes' connections alone)
+    let (oidc, oidc_fake) = dev_oidc(&read)?;
+    let workos_label = match (&oidc, &oidc_fake) {
+        (Some(o), Some(_)) => format!("OpenID Connect at {} (the fake: any email{})", o.issuer, if o.vouched { ", shaped as tsidp" } else { "" }),
+        (Some(o), None) => format!("OpenID Connect at {} (client {})", o.issuer, o.client_id),
+        (None, _) => workos_label,
+    };
     let fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: DEV_ORG.into(),
@@ -354,6 +399,7 @@ fn dev(args: &[String]) -> Result<()> {
         default_plan: Some("seat".into()),
         delivery_retry_s: None,
         workos: Some(workos),
+        oidc,
         stripe: Some(devstack::StripeVars {
             key: DEV_STRIPE_KEY.into(),
             webhook_secret: DEV_STRIPE_WEBHOOK.into(),

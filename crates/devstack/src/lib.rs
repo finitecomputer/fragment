@@ -379,6 +379,11 @@ pub struct Fleet {
     pub delivery_retry_s: Option<u32>,
     /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
     pub workos: Option<WorkOsVars>,
+    /// Sign-in by an OpenID Connect provider in WorkOS's place
+    /// (docs/self-host.md, seam 4: tsidp on a tailnet, an org's own IdP, or
+    /// the fake in `crates/fakes`); WorkOS, if bound beside it, serves
+    /// Pipes' connections alone.
+    pub oidc: Option<OidcVars>,
     /// Seats sold: Stripe (the fake in `crates/fakes`; docs/billing.md).
     pub stripe: Option<StripeVars>,
     /// The account's Workers Logs, which the operators' glance reads (the
@@ -484,6 +489,24 @@ pub struct ModelKey {
     pub value: String,
 }
 
+/// An OpenID Connect provider as the cell reads it (`FRAGMENT_OIDC_*`,
+/// and its client's secret bound as `OIDC_CLIENT_SECRET`).
+pub struct OidcVars {
+    /// The issuer, exactly as its id_tokens' `iss`.
+    pub issuer: String,
+    pub client_id: String,
+    /// `None`: a public client (PKCE its only proof).
+    pub client_secret: Option<String>,
+    /// The claim that is a person's email (`None`: `email`).
+    pub email_claim: Option<String>,
+    /// The provider vouches for that claim's addresses, so no
+    /// `email_verified` is asked for (tsidp gives none).
+    pub vouched: bool,
+}
+
+/// The store name devstack binds an OpenID Connect provider's client secret under.
+pub const OIDC_CLIENT_SECRET_NAME: &str = "fragment-oidc-client-secret";
+
 /// A WorkOS environment as the cell reads it.
 pub struct WorkOsVars {
     pub client_id: String,
@@ -500,6 +523,7 @@ impl Fleet {
         bound.model_keys = self.model_keys.iter().map(|k| (k.slot.clone(), k.name.clone())).collect();
         bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
         bound.observability_read = self.observability.as_ref().map(|_| OBSERVABILITY_READ_NAME.to_string());
+        bound.oidc_client_secret = self.oidc.as_ref().and_then(|o| o.client_secret.as_ref()).map(|_| OIDC_CLIENT_SECRET_NAME.to_string());
         bound
     }
 
@@ -531,6 +555,9 @@ impl Fleet {
         }
         if let (Some(name), Some(o)) = (&bound.observability_read, &self.observability) {
             values.push((name.as_str(), o.key.as_str()));
+        }
+        if let (Some(name), Some(secret)) = (&bound.oidc_client_secret, self.oidc.as_ref().and_then(|o| o.client_secret.as_ref())) {
+            values.push((name.as_str(), secret.as_str()));
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         Ok(values)
@@ -635,6 +662,16 @@ impl Fleet {
         }
         if let Some(u) = self.workos.as_ref().and_then(|w| w.api_url.as_ref()) {
             vars.push(("WORKOS_API_URL", u.as_str()));
+        }
+        if let Some(o) = &self.oidc {
+            vars.push(("FRAGMENT_OIDC_ISSUER", o.issuer.as_str()));
+            vars.push(("FRAGMENT_OIDC_CLIENT_ID", o.client_id.as_str()));
+            if let Some(c) = &o.email_claim {
+                vars.push(("FRAGMENT_OIDC_EMAIL_CLAIM", c.as_str()));
+            }
+            if o.vouched {
+                vars.push(("FRAGMENT_OIDC_EMAIL_VOUCHED", "on"));
+            }
         }
         if let Some(s) = &self.stripe {
             if let Some(u) = &s.api_url {

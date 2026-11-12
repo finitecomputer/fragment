@@ -47,6 +47,7 @@ mod migrations;
 mod moves;
 mod native;
 mod notes;
+mod oidc;
 mod orgs;
 mod plane;
 mod posts;
@@ -87,6 +88,7 @@ const LANES: &[Lane] = &[
     members::members,
     identities::identities,
     signin::signin,
+    oidc::oidc,
     native::native,
     connections::connections,
     vault::vault,
@@ -211,7 +213,7 @@ pub const SHARDS: [&[&str]; 5] = [
     ],
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
-        "identities", "signin", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
+        "identities", "signin", "oidc", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
         "members", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp",
     ],
 ];

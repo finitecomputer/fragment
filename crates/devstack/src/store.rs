@@ -421,6 +421,10 @@ pub struct Bound {
     /// A read-only key to the account's Workers Observability, which the
     /// operators' glance reads its logs with (none: the glance says so).
     pub observability_read: Option<String>,
+    /// An OpenID Connect provider's client secret, where one signs people
+    /// in (docs/self-host.md, seam 4; none: WorkOS signs them in, or the
+    /// provider's client is a public one).
+    pub oidc_client_secret: Option<String>,
 }
 
 /// The model key's name in the store that deploy/example.jsonc's tiers
@@ -443,6 +447,7 @@ impl Bound {
             connection_secrets: vec![],
             model_keys: model_slots.iter().map(|s| (s.to_string(), MODEL_KEY.to_string())).collect(),
             observability_read: None,
+            oidc_client_secret: None,
         }
     }
 
@@ -468,6 +473,9 @@ impl Bound {
         }
         if let Some(name) = &self.observability_read {
             bound.push((bindings::OBSERVABILITY_READ.to_string(), name.as_str()));
+        }
+        if let Some(name) = &self.oidc_client_secret {
+            bound.push((bindings::OIDC_CLIENT_SECRET.to_string(), name.as_str()));
         }
         for (provider, name) in &self.operator_keys {
             bound.push((bindings::operator_key(provider), name.as_str()));

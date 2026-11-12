@@ -86,6 +86,13 @@ enum Shape {
     /// As `Plain`, with no mailer: no mail fake and no sender, as a
     /// self-hosted deployment on celld (no Email Sending) runs.
     NoMailer,
+    /// As `Plain`, people signing in through the OpenID Connect fake in
+    /// WorkOS's place (docs/self-host.md, seam 4), as a strict provider: its
+    /// `email_verified` asked for.
+    Oidc,
+    /// As `Oidc`, the provider shaped as tsidp, the tailnet's default: no
+    /// `email_verified`, so the deployment vouches for its `email`.
+    Tsidp,
 }
 
 /// Finite Private's key on a node shaped as the private tier (`Shape::PrivateTier`):
@@ -210,6 +217,9 @@ pub const UNSAVED_MAX_MS: u64 = 45_000;
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+/// The OpenID Connect fake's client (`Shape::Oidc`, `Shape::Tsidp`).
+pub const OIDC_CLIENT: &str = "fragment-e2e";
+const OIDC_SECRET: &str = "fragment-e2e-oidc-secret";
 /// The Stripe fake's account key, the node's webhook endpoint's signing
 /// secret, and its portal configuration (docs/billing.md).
 pub const STRIPE_KEY: &str = "sk_test_fragment_e2e_stripe";
@@ -443,6 +453,9 @@ pub struct Suite {
     /// Sign-in's stand-in: people sign in through it (`Api::person`), and
     /// Pipes', which hands out connections' tokens.
     pub workos: Fake<fragment_fakes::workos::WorkOs>,
+    /// An OpenID Connect provider: people sign in through it on a node
+    /// shaped so (`Shape::Oidc`, `Shape::Tsidp`; the oidc section).
+    pub oidc: Fake<fragment_fakes::oidc::Oidc>,
     /// The provider APIs a computer's swap sends to.
     pub upstream: Fake<fragment_fakes::upstream::Upstream>,
     /// OpenRouter: an own key's sign-in (the browser's and the cell's
@@ -492,6 +505,7 @@ impl Suite {
             // a line of the PEM's body: found however the PEM was escaped
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
+            ("OpenID Connect client secret", OIDC_SECRET.into()),
             ("test secret", self.test_secret.clone()),
         ]
         .into_iter()
@@ -768,6 +782,16 @@ impl Suite {
         started
     }
 
+    /// Starts the node with people signing in through the OpenID Connect
+    /// fake (`Shape::Oidc`), or that fake shaped as tsidp (`Shape::Tsidp`).
+    pub fn start_signing_in_by_oidc(&mut self, tsidp: bool) -> Result<Api> {
+        self.oidc.node().like_tsidp(tsidp);
+        self.shape = if tsidp { Shape::Tsidp } else { Shape::Oidc };
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     /// Starts the node with no mailer (`Shape::NoMailer`).
     pub fn start_without_mail(&mut self) -> Result<Api> {
         self.shape = Shape::NoMailer;
@@ -820,7 +844,7 @@ impl Suite {
             ai_gateway: None,
             models: match self.shape {
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
-                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::NoMailer => Some(plain_models().to_string()),
+                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::NoMailer | Shape::Oidc | Shape::Tsidp => Some(plain_models().to_string()),
                 Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
             },
             model_keys: {
@@ -847,6 +871,13 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
+            oidc: matches!(self.shape, Shape::Oidc | Shape::Tsidp).then(|| devstack::OidcVars {
+                issuer: self.oidc.node().url.clone(),
+                client_id: OIDC_CLIENT.into(),
+                client_secret: Some(OIDC_SECRET.into()),
+                email_claim: None,
+                vouched: self.shape == Shape::Tsidp,
+            }),
             stripe: (self.shape != Shape::SellsNothing).then(|| devstack::StripeVars {
                 key: STRIPE_KEY.into(),
                 webhook_secret: STRIPE_WEBHOOK.into(),
@@ -862,7 +893,9 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::NoMailer => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::NoMailer | Shape::Oidc | Shape::Tsidp => {
+                    format!("http://127.0.0.1:{}", self.port)
+                }
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -931,7 +964,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::NoMailer => SUFFIX,
+            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::NoMailer | Shape::Oidc | Shape::Tsidp => SUFFIX,
         }
     }
 
@@ -1383,6 +1416,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         host_secret: devstack::random_hex(32),
         test_secret,
         workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
+        oidc: Fake::of(hidden, "OpenID Connect", fragment_fakes::oidc::Oidc::start(OIDC_CLIENT, OIDC_SECRET)?),
         upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start_with(vec![(SWAP_ROUTER_HOST.into(), openrouter.handler())])?),
         openrouter: Fake::of(hidden, "OpenRouter", openrouter),
         operator: Keys::generate(),
