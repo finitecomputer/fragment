@@ -354,12 +354,6 @@ pub async fn delete_app_facet(ctx: &JsValue, name: &str) -> CellResult<()> {
     Ok(())
 }
 
-/// Whether the runtime binds `name`: a runtime without a service has no
-/// binding for it (docs/self-host.md).
-pub fn has_binding(env: &JsValue, name: &str) -> bool {
-    get(env, name).is_ok_and(|b| !b.is_undefined())
-}
-
 /// A binding of the node's; `section` is where wrangler.jsonc declares it.
 fn binding(env: &JsValue, name: &str, section: &str) -> CellResult<JsValue> {
     let binding = get(env, name)?;
@@ -409,21 +403,7 @@ pub async fn jobs_status(env: &JsValue, id: &str) -> Result<Option<serde_json::V
 pub const BLOBS: &str = "BLOBS";
 
 fn blobs(env: &Env) -> CellResult<Bucket> {
-    r2(env, BLOBS)
-}
-
-/// The R2 bucket bound as `name` (`BLOBS`, or the move's `STAGE`).
-fn r2(env: &Env, name: &str) -> CellResult<Bucket> {
-    by_what_it_does(env, name, "r2_buckets")
-}
-
-/// A binding as `T`, read by what it does: workers-rs's typed reads
-/// (`Env::bucket`, `Env::assets`) take one only when its class has
-/// workerd's name, and a self-hosted runtime's R2 and assets bindings'
-/// classes need not (celld's read as `Object`: docs/self-host.md). Absent,
-/// it is an error naming it.
-pub fn by_what_it_does<T: JsCast>(env: &Env, name: &str, section: &str) -> CellResult<T> {
-    Ok(binding(env.as_ref(), name, section)?.unchecked_into())
+    Ok(env.bucket(BLOBS)?)
 }
 
 async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue> {
@@ -508,7 +488,7 @@ pub async fn browser_fetch(env: &JsValue, req: worker::Request) -> CellResult<wo
 
 /// Stores bytes at `key` in `bucket` (a binding's name).
 pub async fn blob_put_bytes(env: &Env, bucket: &str, key: &str, bytes: &[u8]) -> CellResult<()> {
-    r2(env, bucket)?.put(key, bytes.to_vec()).execute().await?;
+    env.bucket(bucket)?.put(key, bytes.to_vec()).execute().await?;
     Ok(())
 }
 
@@ -543,7 +523,7 @@ pub async fn blob_get(env: &Env, bucket: &str, key: &str, range: Option<&str>) -
         headers.set("range", r).map_err(|e| CellError::host(js_message(&e)))?;
         set(&options, "range", JsValue::from(headers));
     }
-    let object = await_js(call(r2(env, bucket)?.as_ref(), "get", &[key.into(), options.into()]), "get").await?;
+    let object = await_js(call(env.bucket(bucket)?.as_ref(), "get", &[key.into(), options.into()]), "get").await?;
     if object.is_null() || object.is_undefined() {
         return Ok(None);
     }
@@ -574,7 +554,7 @@ pub async fn blob_range(env: &Env, key: &str, offset: u64, length: u64) -> CellR
 /// typed `content_type`: its id.
 pub async fn upload_start(env: &Env, bucket: &str, key: &str, content_type: &str) -> CellResult<String> {
     let metadata = worker::HttpMetadata { content_type: Some(content_type.to_string()), ..Default::default() };
-    let upload = r2(env, bucket)?.create_multipart_upload(key).http_metadata(metadata).execute().await?;
+    let upload = env.bucket(bucket)?.create_multipart_upload(key).http_metadata(metadata).execute().await?;
     Ok(upload.upload_id().await)
 }
 
@@ -583,7 +563,7 @@ pub async fn upload_start(env: &Env, bucket: &str, key: &str, content_type: &str
 /// own stream of the length it declared, which R2 reads unbuffered.
 pub async fn upload_part(env: &Env, bucket: &str, key: &str, upload: &str, part: u16, body: impl Into<worker::Data>) -> CellResult<String> {
     assert!(part >= 1, "parts count from 1");
-    let uploaded = r2(env, bucket)?.resume_multipart_upload(key, upload)?.upload_part(part, body).await?;
+    let uploaded = env.bucket(bucket)?.resume_multipart_upload(key, upload)?.upload_part(part, body).await?;
     Ok(uploaded.etag())
 }
 
@@ -592,7 +572,7 @@ pub async fn upload_part(env: &Env, bucket: &str, key: &str, upload: &str, part:
 /// so the list goes as R2's binding takes it.
 pub async fn upload_complete(env: &Env, bucket: &str, key: &str, upload: &str, parts: &[(u16, String)]) -> CellResult<u64> {
     assert!(!parts.is_empty() && parts.windows(2).all(|w| w[0].0 < w[1].0), "a completion names its parts once each, in order");
-    let bucket = r2(env, bucket)?;
+    let bucket = env.bucket(bucket)?;
     let pending = await_js(call(bucket.as_ref(), "resumeMultipartUpload", &[key.into(), upload.into()]), "resumeMultipartUpload").await?;
     let list = Array::new();
     for (n, etag) in parts {
@@ -608,7 +588,7 @@ pub async fn upload_complete(env: &Env, bucket: &str, key: &str, upload: &str, p
 /// Aborts the upload: its parts go. One already gone (completed, aborted,
 /// or expired) is no failure.
 pub async fn upload_abort(env: &Env, bucket: &str, key: &str, upload: &str) -> CellResult<()> {
-    match r2(env, bucket)?.resume_multipart_upload(key, upload)?.abort().await {
+    match env.bucket(bucket)?.resume_multipart_upload(key, upload)?.abort().await {
         Ok(()) => Ok(()),
         Err(e) if e.to_string().contains("NoSuchUpload") || e.to_string().contains("10024") => Ok(()),
         Err(e) => Err(e.into()),
@@ -616,13 +596,13 @@ pub async fn upload_abort(env: &Env, bucket: &str, key: &str, upload: &str) -> C
 }
 
 pub async fn blob_delete(env: &Env, bucket: &str, keys: &[String]) -> CellResult<()> {
-    Ok(r2(env, bucket)?.delete_multiple(keys.to_vec()).await?)
+    Ok(env.bucket(bucket)?.delete_multiple(keys.to_vec()).await?)
 }
 
 /// The first page of keys under `prefix` in `bucket` (a binding's name),
 /// and whether there are more.
 pub async fn blob_list(env: &Env, bucket: &str, prefix: &str) -> CellResult<(Vec<String>, bool)> {
-    let listed = r2(env, bucket)?.list().prefix(prefix).execute().await?;
+    let listed = env.bucket(bucket)?.list().prefix(prefix).execute().await?;
     Ok((listed.objects().iter().map(|o| o.key()).collect(), listed.truncated()))
 }
 

@@ -3,6 +3,8 @@ target/
 .DS_Store
 node_modules/
 cell/.celld/
+# the celld node's secrets file, and the one written before it is moved in
+.celld.secrets.json*
 cell/.dev.vars
 cell/build/
 cell/build.lock

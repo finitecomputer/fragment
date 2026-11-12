@@ -19,9 +19,7 @@ use crate::error::{CellError, CellResult};
 
 /// A file's asset, its answer checked.
 async fn fetch(env: &Env, f: &File) -> CellResult<Response> {
-    // read by what it does (`js::by_what_it_does`): a self-hosted runtime's class need not be workerd's
-    let assets: Fetcher = crate::js::by_what_it_does(env, "ASSETS", "assets")?;
-    let resp = assets.fetch(format!("https://assets.invalid/{}", f.sha256), None).await?;
+    let resp = env.assets("ASSETS")?.fetch(format!("https://assets.invalid/{}", f.sha256), None).await?;
     match resp.status_code() {
         200 => Ok(resp),
         404 => Err(CellError::host(format!("the release's {} ({}) is not among its Static Assets: a cell build writes them (cargo xtask build)", f.path, f.sha256))),

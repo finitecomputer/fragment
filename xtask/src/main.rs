@@ -18,10 +18,10 @@
 //!                    the image (docs/self-host.md, seam 3)
 //!                    --runtime celld runs it on `celld dev` (CELLD_BIN;
 //!                    docs/self-host.md, seam 1): no computers, no cards,
-//!                    the secrets behind the cell's stand-ins for the
-//!                    store's bindings, in OpenBao on :8802, its audit log
-//!                    on, or with FRAGMENT_SECRETS_BACKEND=vars in .dev.vars
-//!                    (seam 12)
+//!                    the secrets bound as on wrangler and read by celld
+//!                    from OpenBao on :8802, its audit log on, or with
+//!                    FRAGMENT_SECRETS_BACKEND=vars from its node's file
+//!                    of their values (seam 12)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -304,8 +304,8 @@ fn dev(args: &[String]) -> Result<()> {
     let operator = devstack::dev_secret("operator-key", || fragment_nip98::Keys::generate().secret_hex())?;
     let operator = fragment_nip98::Keys::from_secret_hex(operator.trim()).with_context(|| format!("{} holds an operator key (64 hex)", operator_file.display()))?;
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
-    // the cell's own secrets: wrangler's local store, or on celld the
-    // stand-ins' variables or OpenBao behind them (docs/self-host.md, seam 12)
+    // the cell's own secrets: wrangler's local store, or on celld its node's
+    // backend, a file of their values or OpenBao (docs/self-host.md, seam 12)
     let openbao = dev_openbao(celld.is_some(), clean, DEV_OPENBAO_PORT)?;
     let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
     let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
@@ -378,14 +378,13 @@ fn dev(args: &[String]) -> Result<()> {
         swap_upstream: None,
         // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
         connectors: celld.as_ref().map(|_| devstack::celld::connectors()),
-        // wrangler's local store under cell/.wrangler/state; celld has none,
-        // and the cell's stand-ins read .dev.vars or OpenBao (seam 12)
+        // wrangler's local store under cell/.wrangler/state; on celld, its
+        // node's backend: a file of their values, or OpenBao (seam 12)
         secrets: match (&celld, &openbao) {
             (None, _) => devstack::Secrets::Store,
-            (Some(_), None) => devstack::Secrets::Shim,
+            (Some(_), None) => devstack::Secrets::Vars,
             (Some(_), Some((bao, _))) => devstack::Secrets::OpenBao(bao.target()),
         },
-        unbound: &[],
     };
     fleet.configure(&tools, &devstack::cell_dir())?;
     // the cell's token, renewed while the stack runs (each start renews it too)
@@ -428,7 +427,7 @@ fn dev(args: &[String]) -> Result<()> {
             bao.layout().dir.display(),
             bao.layout().log().display()
         ),
-        None if celld.is_some() => println!("  secrets:      the cell's variables (.dev.vars, FRAGMENT_SECRETS_BACKEND=vars: a local fleet's alone)"),
+        None if celld.is_some() => println!("  secrets:      celld's file of their values ({}, FRAGMENT_SECRETS_BACKEND=vars: `celld dev`'s alone)", devstack::celld::secrets_file(&devstack::cell_dir()).display()),
         None => println!("  secrets:      wrangler's local Secrets Store"),
     }
 
@@ -464,9 +463,9 @@ fn dev(args: &[String]) -> Result<()> {
 
 /// The dev stack's OpenBao (docs/self-host.md, seam 12), where the cell's
 /// secrets are: on celld, `FRAGMENT_SECRETS_BACKEND` is `openbao` (the
-/// default, as on any self-hosted deployment) or `vars` (the stand-ins'
-/// variables in .dev.vars, a local fleet's convenience); on wrangler, which
-/// has a Secrets Store of its own, unset. The pinned OpenBao (or
+/// default, as on any self-hosted deployment) or `vars` (a file of their
+/// values, which only `celld dev` reads); on wrangler, which has a Secrets
+/// Store of its own, unset. The pinned OpenBao (or
 /// `FRAGMENT_OPENBAO_TARBALL`'s), on loopback at `port`, its audit log on,
 /// its state in `target/devstack/openbao-<port>` (cleared by `--clean`,
 /// after which every secret is seeded again). With it, how long its start

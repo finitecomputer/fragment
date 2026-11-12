@@ -24,9 +24,9 @@
 //! (`CELLD_BIN`; docs/self-host.md, seam 1), on the same fakes: a section
 //! that needs the runtime's own containers is a skip (needs.rs), and so is
 //! a check of what celld has no part in (a card's shot: no Browser
-//! Rendering), each saying why. Its secrets are OpenBao's, behind the
-//! cell's stand-ins (docs/self-host.md, seam 12), unless
-//! `FRAGMENT_E2E_SECRETS=vars` puts them in `.dev.vars`.
+//! Rendering), each saying why. Its secrets are read by celld from OpenBao,
+//! its node's secrets backend (docs/self-host.md, seam 12), unless
+//! `FRAGMENT_E2E_SECRETS=vars` puts them in its node's secrets file.
 
 mod api;
 mod browser;
@@ -83,11 +83,6 @@ enum Shape {
     /// (`repinned_models`): another space, as a deployment that moved its
     /// embeddings model is.
     EmbeddingsRepinned,
-    /// As `Plain`, without the services a self-hosted runtime lacks
-    /// (docs/self-host.md): no Email Sending (no `send_email`, and no mail
-    /// fake: no mailer at all), no Browser Rendering, no Images, and no
-    /// containers (so it makes no computers).
-    Unbound,
 }
 
 /// Finite Private's key on a node shaped as the private tier (`Shape::PrivateTier`):
@@ -422,10 +417,10 @@ pub struct Suite {
     tools: Option<devstack::Tools>,
     /// celld's, when the local node runs on it (`FRAGMENT_E2E_RUNTIME=celld`).
     celld: Option<devstack::celld::CelldTools>,
-    /// OpenBao, the cell's secrets behind its stand-ins (celld's default,
-    /// or `FRAGMENT_E2E_SECRETS=openbao`; `vars` for the stand-ins'
-    /// variables: docs/self-host.md, seam 12), its state and audit log in
-    /// the run's scratch.
+    /// OpenBao, where celld reads the cell's secrets from (celld's default,
+    /// or `FRAGMENT_E2E_SECRETS=openbao`; `vars` for a file of their values:
+    /// docs/self-host.md, seam 12), its state and audit log in the run's
+    /// scratch.
     openbao: Option<devstack::openbao::OpenBao>,
     node: Option<devstack::Node>,
     /// The node's port, held for the whole run: each of the node's lives
@@ -475,7 +470,7 @@ pub struct Suite {
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
     /// Where the node's secrets are (`FRAGMENT_E2E_SECRETS`, `secrets_of`):
-    /// wrangler's local store, or the cell's stand-ins for its bindings.
+    /// wrangler's local store, or celld's secrets backend.
     secrets: devstack::Secrets,
     /// Whether the containers the run's nodes left are removed
     /// (`remove_containers`): at its end, or as it drops.
@@ -513,7 +508,7 @@ impl Suite {
         .collect()
     }
 
-    /// Whether the cell's secrets are OpenBao's, behind its stand-ins.
+    /// Whether the cell's secrets are OpenBao's: celld's node reads them there.
     pub fn has_openbao(&self) -> bool {
         self.openbao.is_some()
     }
@@ -562,8 +557,8 @@ impl Suite {
     }
 
     /// Whether the node shoots preview cards: celld has no Browser
-    /// Rendering, and the cell skips every shot there (`card.skipped`,
-    /// `no_browser`, which the unbound section checks).
+    /// Rendering (its `BROWSER` binding rejects every fetch, so every shot
+    /// fails there).
     pub fn shoots_cards(&self) -> bool {
         !self.on_celld()
     }
@@ -772,15 +767,6 @@ impl Suite {
         started
     }
 
-    /// Starts the node without what a self-hosted runtime lacks
-    /// (`Shape::Unbound`).
-    pub fn start_unbound(&mut self) -> Result<Api> {
-        self.shape = Shape::Unbound;
-        let started = self.start(false);
-        self.shape = Shape::Plain;
-        started
-    }
-
     /// This node boot's log, as written so far (`None`: no node runs).
     pub fn node_log(&self) -> Option<String> {
         self.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default())
@@ -835,7 +821,7 @@ impl Suite {
             ai_gateway: None,
             models: match self.shape {
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
-                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::Unbound => Some(plain_models().to_string()),
+                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore => Some(plain_models().to_string()),
                 Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
             },
             model_keys: {
@@ -853,8 +839,8 @@ impl Suite {
                     _ => vec![],
                 }
             },
-            mail_url: (self.shape != Shape::Unbound).then(|| self.mail.node().url.clone()),
-            mail_from: (self.shape != Shape::Unbound).then(|| MAIL_FROM.into()),
+            mail_url: Some(self.mail.node().url.clone()),
+            mail_from: Some(MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
             workos: Some(devstack::WorkOsVars {
@@ -877,7 +863,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Unbound => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -891,9 +877,8 @@ impl Suite {
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
             // celld runs no computers: they need the runtime's egress
-            // intercepts and snapshots (docs/self-host.md, seam 2); the unbound
-            // section's node has no containers
-            computer_image: (!self.on_celld() && self.shape != Shape::Unbound).then(|| "stub".into()),
+            // intercepts and snapshots (docs/self-host.md, seam 2)
+            computer_image: (!self.on_celld()).then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
             // a run must not depend on public DNS (devstack::Fleet)
@@ -915,15 +900,11 @@ impl Suite {
             swap_upstream: Some(self.upstream.node().url.clone()),
             // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
             connectors: self.on_celld().then(devstack::celld::connectors),
-            // wrangler's local store, the cell's stand-ins over variables, or
-            // over OpenBao (`secrets_of`; celld has no store: seam 12)
+            // wrangler's local store, or celld's backend: a file of the
+            // values, or OpenBao (`secrets_of`; seam 12)
             secrets: match &self.openbao {
                 Some(bao) => devstack::Secrets::OpenBao(bao.target()),
                 None => self.secrets.clone(),
-            },
-            unbound: match self.shape {
-                Shape::Unbound => &["send_email", "browser", "images", "containers"],
-                _ => &[],
             },
         };
         fleet.configure(tools, &self.project)?;
@@ -950,7 +931,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Unbound => SUFFIX,
+            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => SUFFIX,
         }
     }
 
@@ -1294,17 +1275,18 @@ fn make_scratch(dir: &Path) -> Result<()> {
 }
 
 /// The node's secrets by `FRAGMENT_E2E_SECRETS`, and whether OpenBao holds
-/// them: `store`, wrangler's local Secrets Store, as a deploy binds the
-/// account's (wrangler's default); `vars`, the cell's stand-ins for its
-/// bindings (cell/secrets.mjs) over variables; `openbao`, the stand-ins
-/// over OpenBao (celld's default, as a self-hosted deployment's:
-/// docs/self-host.md, seam 12). celld has no store.
+/// them: on wrangler, `store`, its local Secrets Store, as a deploy binds
+/// the account's; on celld, its node's secrets backend: `openbao` (the
+/// default, as a self-hosted deployment's: docs/self-host.md, seam 12), or
+/// `vars`, a file of their values. Either way the cell reads them through
+/// its Secrets Store bindings.
 fn secrets_of(celld: bool, var: Option<&str>) -> Result<(devstack::Secrets, bool)> {
     match (celld, var) {
         (false, None | Some("store")) => Ok((devstack::Secrets::Store, false)),
-        (true, Some("store")) => bail!("FRAGMENT_E2E_SECRETS=store is wrangler's: celld has no Secrets Store"),
-        (_, Some("vars")) => Ok((devstack::Secrets::Shim, false)),
-        (true, None) | (_, Some("openbao")) => Ok((devstack::Secrets::Shim, true)),
+        (false, Some(other @ ("vars" | "openbao"))) => bail!("FRAGMENT_E2E_SECRETS={other} is celld's backend: wrangler reads its own Secrets Store (drop it, or add FRAGMENT_E2E_RUNTIME=celld)"),
+        (true, Some("store")) => bail!("FRAGMENT_E2E_SECRETS=store is wrangler's: celld reads its node's backend, openbao or vars"),
+        (true, Some("vars")) => Ok((devstack::Secrets::Vars, false)),
+        (true, None | Some("openbao")) => Ok((devstack::Secrets::Vars, true)),
         (_, Some(other)) => bail!("FRAGMENT_E2E_SECRETS is store, vars or openbao, not {other:?}"),
     }
 }
@@ -1360,8 +1342,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     if let Some(c) = &celld {
         println!("runtime: celld dev ({})", c.celld.display());
     }
-    // the cell's secrets: the store, or behind its stand-ins, over
-    // variables or OpenBao (celld's default)
+    // the cell's secrets: wrangler's store, or celld's node's backend, a
+    // file of their values or OpenBao (celld's default)
     let (secrets, with_openbao) = secrets_of(celld.is_some(), std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref())?;
     let openbao = with_openbao.then(|| openbao(&scratch)).transpose()?;
     // a local run's people sign in through the WorkOS fake, and pay the fake
@@ -1454,7 +1436,7 @@ fn openbao(scratch: &Path) -> Result<devstack::openbao::OpenBao> {
     let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
     let opts = devstack::openbao::Options { dir: scratch.join("openbao"), port: devstack::free_port()?, audit: true };
     let (bao, took) = devstack::openbao::OpenBao::start(&bin, opts)?;
-    println!("secrets: OpenBao {} at {} (ready in {took:.1?}; every secret behind the cell's stand-ins)", devstack::openbao::OPENBAO_VERSION, bao.target().addr);
+    println!("secrets: OpenBao {} at {} (ready in {took:.1?}; every secret read by the celld node)", devstack::openbao::OPENBAO_VERSION, bao.target().addr);
     Ok(bao)
 }
 
