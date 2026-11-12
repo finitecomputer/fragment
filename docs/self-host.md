@@ -1,8 +1,10 @@
 # fragment self-hosted
 
-Status: **phase 1 of the catch-up, 2026-11-11**: master's cell runs on
-celld on one Linux box. `cargo xtask dev --runtime celld` serves master's
-shell, and the e2e's sections that need no computer pass on celld. The
+Status: **phase 2 of the catch-up, 2026-11-11**: master's cell runs on
+celld on one Linux box, and its computers run on that box's sandcastle
+engine, each a jailed libkrun microVM (seam 2). `cargo xtask dev --runtime
+celld` serves master's shell, a person's first chat makes a Hermes agent
+on a real model, and the e2e's computer sections pass there. The
 branch is `selfhost-2`, re-ported by seam onto master 8bc07e62 (one commit
 or a few per seam), never rebased. Self-host lands on master this time
 (Paul, 2026-11-11): each seam is switched on by configuration, master's
@@ -27,7 +29,7 @@ its bindings. A mode flag is a design bug.
 | # | Seam | This phase |
 |---|---|---|
 | 1 | The runtime: celld | **done** (below) |
-| 2 | Computers on sandcastle nodes | out of scope: no computers on celld here (below) |
+| 2 | Computers on sandcastle nodes | **done** for nodes the platform reaches (below); a node that dials in (the uplink) is the Mac's, later |
 | 3 | Models from a file | **done** (below) |
 | 4, 9 | Sign-in by OpenID Connect; LAN mode and Dex | out of scope: a tailnet front door replaces them; locally, dev's WorkOS fake |
 | 5 | Files: macrofiche, the code-store contract | out of scope: the code.storage fake |
@@ -55,7 +57,7 @@ Every binding and runtime API master's cell uses, against the fork's celld
 | Binding or API | On celld | Class | How the cell runs |
 |---|---|---|---|
 | `durable_objects`: Fragment, Principal, Registry, Ledger, SearchIndex, Vault | yes | works | |
-| `durable_objects`: Computer | the class runs | off | no computers: `FRAGMENT_COMPUTER_IMAGE` unset, so a computer is refused, typed ("this deployment makes no computers"); its container host reads no container as none running, so a person's wipe still empties their computer's rows |
+| `durable_objects`: Computer | the class runs | works, on nodes | its container is a sandcastle node's (`FRAGMENT_NODES`, seam 2); without nodes, `FRAGMENT_COMPUTER_IMAGE` unset and a computer refused, typed ("this deployment makes no computers"), its container host reading no container as none running, so a wipe still empties its rows |
 | `durable_objects`: Migrations, and R2 `STAGE` | yes | off | the finite.computer move: unconfigured (`FRAGMENT_MIGRATIONS_MOVER` unset), as on any deployment but finite.chat's |
 | `migrations` (`new_sqlite_classes`, v1 to v4) | yes | works | |
 | `durable_objects.code_update_strategy` | accepted, no effect | works | celld reads the bindings alone; `celld dev` deploys once (`--no-watch`), and the e2e's reload restarts the node |
@@ -70,12 +72,12 @@ Every binding and runtime API master's cell uses, against the fork's celld
 | `send_email` (`EMAIL`) | refused | degraded, said | no mail: each send logs `mail.unsent` and answers no id, never an error (below) |
 | `browser` (`BROWSER`) | refused | degraded, said | no cards: a live is skipped once, `card.skipped` `no_browser`; asking for a shot again is refused, typed (`host_failed`). Seam 7 brings a renderer |
 | `images` (`IMAGES`) | refused | degraded, typed refusal | no icons drawn: "this node has no IMAGES binding" |
-| `containers` | runs on Docker, but without `interceptOutboundHttp`/`interceptOutboundHttps` or `snapshotContainer` (krun engine only) | off | a computer needs its egress intercepts and its saves: dropped by the render; seam 2 places computers on sandcastle nodes |
+| `containers` | runs on Docker, but without `interceptOutboundHttp`/`interceptOutboundHttps` or `snapshotContainer` (krun engine only) | stood in | dropped by the render: a computer's container is a node's (`NodeContainer`, seam 2), the same API over the node's |
 | `ctx.exports` | yes (`DurableObjectState.exports`) | works | used only by a computer's container host |
-| `interceptOutboundHttp`, `interceptOutboundHttps`, `snapshotContainer` | krun engine only | off | with computers (seam 2) |
-| `connect()` (`cloudflare:sockets`) | yes | off | the XFTP relay is a computer's |
+| `interceptOutboundHttp`, `interceptOutboundHttps`, `snapshotContainer` | krun engine only | stood in | the node's (seam 2): intercepts set in one call, handed back through `/api/nodes/egress` |
+| `connect()` (`cloudflare:sockets`) | yes | works | the XFTP relay, a computer's SimpleX files |
 | `compatibility_flags`: `nodejs_compat` | partial (its `node:` modules) | works | the Sandbox SDK's imports load |
-| `compatibility_flags`: `containers_pid_namespace` | accepted, no effect | off | with computers |
+| `compatibility_flags`: `containers_pid_namespace` | accepted, no effect | n/a | a node's VM is its own machine |
 | `build` | refused | n/a | worker-build has run (`cargo xtask build`) |
 | A streamed request body forwarded to an object | its length is not carried | works | the router forwards the length it checked (found 47) |
 | `CF-Connecting-IP` | not set | degraded | every CLI code's ask counts as one address, `unnamed`, unless a front proxy sets the header (found 48) |
@@ -96,6 +98,132 @@ Every binding and runtime API master's cell uses, against the fork's celld
   mail that says it is not sent, and a streamed upload's length forwarded:
   on wrangler and Cloudflare the bindings are there and the length was
   carried already.
+
+## 2. Computers on sandcastle nodes
+
+A computer's container is `ContainerHost`'s (`cell/entry.mjs`), and every
+runtime call it makes, and every call the Sandbox SDK's `DirectoryBackup`
+makes, is a method of one object: `ctx.container` (Cloudflare's, or
+Docker's under `wrangler dev`), or, where the deployment lists sandcastle
+nodes (`FRAGMENT_NODES`), a `NodeContainer` (`cell/node.mjs`) over the
+node's API (sandcastle's docs/node.md), each call signed with the node's
+secret. computer.rs, the restore gate and the images do not know which.
+celld's render drops `containers` (seam 1): on celld, nodes are the only
+computers. Without `FRAGMENT_NODES` nothing here runs: master's path is
+the runtime's containers, as before.
+
+**The list** (`FRAGMENT_NODES`, checked by `fragment_core::placement` as
+the cell's config is read; a bad one refuses every request, saying why):
+
+```json
+{ "nodes": [ { "id": "box", "url": "http://127.0.0.1:9400", "arch": "x86_64" } ],
+  "images": {
+    "stub":   "docker.io/library/fragment-stub@sha256:<64 hex>",
+    "hermes": { "x86_64": "docker.io/library/fragment-hermes@sha256:<64 hex>" } } }
+```
+
+- A node's secret is the store binding `FRAGMENT_NODE_SECRET_<ID>` (the
+  id upper-cased, `-` as `_`; at least 32 bytes), read through seam 12's
+  stand-ins (OpenBao's `fragment-node-<id>-secret`), never in the list.
+- Every image is **pinned by its digest**: a computer's version is its
+  reference, and a snapshot is reused only under the reference it was
+  taken of, so a tag rebuilt under the same name would start the old
+  image's snapshot and never tell its owner an update is ready. Anything
+  else is refused. `FRAGMENT_COMPUTER_IMAGE` names one of them.
+- `cargo xtask node-images` builds the stub and our Hermes image, `docker
+  save`s each, loads it into this machine's engine over its socket, and
+  names it by the digest the load answers (the OCI manifest of its config
+  and layers as loaded): `docker.io/library/fragment-<name>@sha256:…`,
+  written to `target/devstack/node-images-<arch>.json`.
+
+**Placement** (computer.rs `place`, at a computer's first start): every
+node probed at once (its health within 6 s: the architecture it reports,
+and its engine's VMs now and at most); of those that answer, report the
+architecture they are listed with and have the computer's image for it,
+the one with the most VMs free, a tie to the one listed first. **Pinned
+for life** (its `node` meta row): its container and its snapshots are that
+node's; moving one is not built, and a node the list no longer names
+answers every call typed. Free VMs balance awake computers, not every
+computer placed: a node whose computers all wake at once refuses past its
+`vms_max`, and that start fails, saying so. The old lane counted placed
+computers in a `Node` object shared by all; not ported (a Durable Object
+class more on master, for a fleet of one box today).
+
+**A start is answered once its guest is up** (`?wait=ready`): every later
+call waits for it, as calls to Cloudflare's container follow its start,
+and the engine refuses an exec before its guest is up (409 "still
+starting"). **Its intercepts go in one call** (`intercepting`): a start
+sets one per host the swap catches, on http and on https, then the api,
+model, platform and backup hosts; one PUT of the whole list, not dozens
+through the node to its engine.
+
+**Intercepts come back** to `/api/nodes/egress` (a route only where nodes
+are listed), signed by the node; the router sends each to the computer its
+container names (the container's name on the node is the computer's id,
+so `routed::send` reaches it by name, its release checked), which takes
+its container over first in a new isolate (re-arming it), checks the
+node's signature, and hands it to the binding its start set for that
+intercept: `ComputerEgress`, as the runtime's own egress does.
+
+**A node silent under an awake computer is no exit** (found 39): a
+computer's watch is its node's `wait`; cut (the node's process
+restarting, a blip), the node is asked whether the container still runs,
+and a node that does not answer is asked again, the pause doubling from 1
+s to 30 s, for as long as it is silent. When it answers, a container still
+running is waited on again (no restart, no rollback), and one gone is an
+exit. Silent past two minutes, the computer's view says its node is down
+(`computer/node`, its `why`), and clears it when the node answers; nothing
+else changes. A new isolate whose node is silent takes the container as
+running, and its watch decides the same way. A node down at a start is a
+start's failure like any other: a typed `upstream_failed` naming the node,
+a strike.
+
+**The platform's own hosts** (found 40): an agent builds and deploys an
+app through the API, then opens it at its address with its browser or
+curl. On a self-hosted box that address is the box's own, which the VM
+does not reach. On nodes, each start intercepts the platform's hosts (its
+origin's, and every name under the fragments' suffix, on the platform's
+scheme; `fragment_core::computer::platform_intercepts`), and the router
+answers them as it answers the same request from the internet: as whoever
+the guest's own cookies or signature name, or as no one (`egress_platform`:
+it adds no one, and sets what an edge sets, the platform's scheme and port
+and the computer's id as `CF-Connecting-IP`). On a `.localhost` stack
+Chrome and curl take an app's name for the guest's own loopback (RFC
+6761), so the bridge, which every image runs, listens there on the
+platform's port and forwards each connection whose `Host` is in the zone
+to that name on port 80, where the intercept catches it (images/bridge
+`loopback.rs`); any other host is a 421 reaching nothing. On Cloudflare's
+containers none of this is set: a guest reaches the platform over the
+internet, as any client does.
+
+**Dev:** `FRAGMENT_NODES_FILE=nodes.json` (the list above, each node with a
+`"secret_file"` beside it, read and kept out of the variable) and a
+`sandcastle-node serve --config node.json` in front of the engine (its
+`platform` the dev stack's origin, its `labels` naming the stack). New
+computers run its `hermes` image when the list names one, else `stub`;
+they sleep with snapshots (the engine takes them).
+
+**The e2e:** `FRAGMENT_E2E_NODES=real` (`SANDCASTLE_NODE`, and
+`SANDCASTLE_ENGINE_DIR` unless /var/lib/sandcastle). The run builds its
+staged images (the stub's, and Hermes' when its lane runs) and loads them
+into the engine by digest, starts one node in front of it on a loopback
+port, and every container that node starts carries the run's label
+(`fragment-run=<run>`): at the run's end, on a signal, or as it drops, the
+run destroys those alone, so other stacks' and people's computers on the
+same engine are left alone. The rung (`Rung::Celld { nodes: true }`) has
+computers; a check of a workerd sidecar (public DNS) is a skip saying why.
+
+**sandcastle's part** (its `node` branch, installed as the box's engine
+and node): no new API; two fixes found here, each a PR against `node`
+and installed on this box (the binaries before kept as `*.prev-seam2`):
+the engine's load of an image that names one layer twice (#11, found 56)
+and the node's guest port path (#12, found 57).
+
+**Where an intranet's egress allowlist goes** (fragment#1239's
+`FRAGMENT_EGRESS_ALLOW`, celld#7): sandcastle's VM proxy refuses private
+addresses unless a start's `allow` ranges list them. The cell would pass
+the deployment's allowlist as `NodeContainer.start`'s body `allow` (the
+engine's `StartRequest.allow`), beside `enableInternet`; not built here.
 
 ## 3. Models from a file
 
@@ -299,6 +427,47 @@ New in this phase:
     order without waiting for the one before, where workerd's input gate
     holds the next event while one awaits storage.
 
+New with seam 2:
+
+55. **A sandcastle node reads an intercepted request whole, at most 32
+    MiB** (its node's and its engine's bound), and signs its body's hash;
+    Cloudflare's egress streams a blob's upload (FIN-405). So a file of
+    more than 32 MiB that an agent syncs from a computer on a node is
+    refused, 413 (`computers`' 40 MB sync, a skip on nodes saying so). The
+    fix is sandcastle's: stream a body past a bound, signed as a guest
+    port's is (`UNSIGNED-PAYLOAD`), its length declared.
+56. **The engine refused a saved image that names one layer twice**
+    (Docker lists a layer once per build step that made it, and two of
+    our Hermes image's steps have one diff): every load failed, "hashing a
+    layer: No such file or directory". Fixed in sandcastle (#11,
+    `load-repeated-layer`), installed as this box's engine.
+57. **`sandcastle-node` dropped a guest port's trailing slash**, so a
+    computer's SimpleX link page (`/simplex/`) reached the guest as
+    `/simplex`, another route, and Settings' SimpleX dialog showed a 404.
+    Fixed in sandcastle (#12, `node-port-path`), installed as this box's
+    node.
+
+## Where the time goes on the box's engine, 2026-11-11
+
+The dev stack on celld (`celld-selfhost-deps-2026-11-98d5272`), one node in
+front of this box's engine (sandcastle `node` with #11 and #12, libkrun
+c9327bda, libkrunfw 5.6.3), a person's Hermes computer (2 vCPU, 6 GiB, its
+`/data` 34 MB after it built an app), the box otherwise quiet (load 1 to
+2). From the cell's own log lines and the engine's timings:
+
+| Step | Time |
+|---|---|
+| First start: placement's probe to awake | ~250 ms (the engine: jailed at 7 ms, its guest's hello at 126 ms, ready at 138 ms) |
+| Hermes' first answer after the person's first chat | 10 s, its two steps on the real model |
+| Sleep (hold, save of 34 MB, stop) | 2.5 s: hold 362 ms, save 487 ms, Hermes' exit 1.6 s |
+| Wake from its snapshot, the owner's wake to awake | 649 ms: the engine's ready at 133 ms, the guest's first read of its view at 404 ms |
+| Restart (sleep, then a start that restores the save) | the start to awake 509 ms with the 34 MB restore; Hermes' exit 3.4 s of the rest |
+| Its node silent 31 s under it (the node's process stopped and started) | no restart, no rollback: its watch's `wait` cut, its looks unanswered, then the container still running and waited on again |
+
+The old lane's real-engine column (2026-10-22, the stub) read a wake from
+its save in 245 to 310 ms and from a snapshot in 140 ms; Hermes' guest
+reads its view later than the stub's (the alive check, #362, waits for it).
+
 ## What a self-hosted org won't have, and its setup steps
 
 **A working list** (2026-11-11), of master at 8bc07e62, for one box on a
@@ -315,7 +484,7 @@ optional) and the iOS row (the app's own trust and tailnet).
 | Web push alerts | each fragment's VAPID key; the browsers' push services | Queues work on celld |
 | Claude runtime | the person's own Claude plan | its code-paste sign-in needs nothing inbound |
 | Own OpenRouter key (`own` provider, PKCE) | a browser redirect to `/api/connections/openrouter/callback` | the tailnet is enough |
-| SimpleX door | simplex-chat in the computer; SMP and XFTP on 443 | needs an always-on computer (seam 2) |
+| SimpleX door | simplex-chat in the computer; SMP and XFTP on 443 | needs an always-on computer; the door's platform side and its link page run on the box's engine (the e2e's `computers`), a real SimpleX core reaching SMP servers from a VM is not checked yet |
 | code.storage sync | polling | the account itself needs setup (below) |
 | Jobs' `fetch` to public hosts | outbound | |
 | CLI approval at `/cli` | nothing | its "asked from city/country" line is blank (no `request.cf`) |
@@ -347,7 +516,7 @@ optional) and the iOS row (the app's own trust and tailnet).
 | Feature | Inbound need | Alternative |
 |---|---|---|
 | A fragment's inbox (apps' webhooks, the `inbox` template) | `POST /api/f/<name>/inbox` | poll from a cron trigger, or expose that path alone through a tunnel (not checked) |
-| Telegram connector | its webhook into the chat's inbox | **off on self-host:** a self-hosted stack's connectors are SimpleX alone (`FRAGMENT_CONNECTORS`; devstack's `celld::connectors`). `getUpdates` long-polling from the computer is not built. The shell offers Telegram by an agent's runtime, not by the deployment's policy, so once computers come to self-host, hiding its row is a wire change (today no agent runs on celld) |
+| Telegram connector | its webhook into the chat's inbox | **off on self-host:** a self-hosted stack's connectors are SimpleX alone (`FRAGMENT_CONNECTORS`; devstack's `celld::connectors`). `getUpdates` long-polling from the computer is not built. The shell offers Telegram by an agent's runtime, not by the deployment's policy, so Settings still lists Telegram for a Hermes agent on a self-hosted box (seam 2), its link refused; hiding the row is a wire change, not made |
 | Public and "anyone with the link" sharing | visitors outside the tailnet | "public" means the tailnet |
 | Stripe | `/api/stripe/webhook` | left out |
 
@@ -385,8 +554,10 @@ through the person's browser, so the tailnet is enough.
 7. Models: endpoints for every slot, and embeddings.
 8. Plans and operators: `fragment operator key`; `operators`;
    `default_plan`.
-9. Computers: the Hermes image built (with `FRAGMENT_HOST`) and loaded
-   into the engine (seam 2).
+9. Computers: sandcastle's engine installed (root, its own service), a
+   `sandcastle-node` beside it as the engine's client user, its secret in
+   OpenBao (`fragment-node-<id>-secret`); the images loaded by digest
+   (`cargo xtask node-images`) and listed (`FRAGMENT_NODES`) (seam 2).
 10. Providers: rows dropped or keys brought; OAuth clients for Google,
     Linear and Salesforce.
 11. Connectors: SimpleX alone, for now.
@@ -412,13 +583,25 @@ FRAGMENT_SECRETS_BACKEND=vars CELLD_BIN=… cargo xtask dev --runtime celld
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model.key CELLD_BIN=… cargo xtask dev --runtime celld
 # the e2e on celld (OpenBao behind the stand-ins unless FRAGMENT_E2E_SECRETS=vars)
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
+
+# computers on this box's sandcastle engine (seam 2): the stub and Hermes
+# loaded by digest, a node in front of the engine, the stack's list
+cargo xtask node-images                       # prints the list's "images"
+sandcastle-node serve --config node.json       # listen, the engine's sockets, platform, labels
+FRAGMENT_NODES_FILE=nodes.json FRAGMENT_MODELS_FILE=… FRAGMENT_MODEL_KEY_FILE=… CELLD_BIN=… \
+  cargo xtask dev --runtime celld
+# the e2e's computers on the engine (its own node, labelled with the run)
+FRAGMENT_E2E_RUNTIME=celld FRAGMENT_E2E_NODES=real SANDCASTLE_NODE=…/sandcastle-node CELLD_BIN=… \
+  cargo xtask e2e --only computers,chat,hermes
+# and a real agent there (agent-app): FRAGMENT_MODELS_FILE and FRAGMENT_MODEL_KEY_FILE too
 ```
 
 ## Not in this phase
 
-- Computers (seam 2): none on celld here. celld's Docker engine has no
-  egress intercepts or snapshots, which a computer needs; its krun engine
-  (sandcastle's) has both, and is the next phase's.
+- Nodes the platform cannot reach (the uplink: a node that dials in, the
+  Mac's), remote nodes over TLS, and the Docker double's two-node runs
+  (seam 2's later half).
+- The egress allowlist into computers (above).
 - Sign-in by OpenID Connect and the LAN mode (seams 4, 9): a tailnet front
   door replaces them.
 - BYOC pairing, own hardware in points (10), cards (7), macrofiche (5).
