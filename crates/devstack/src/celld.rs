@@ -58,18 +58,27 @@ pub fn secrets_file(project: &Path) -> PathBuf {
 }
 
 /// Writes `config` as the node's secrets file (`secrets_file`), mode 600
-/// (celld refuses one others may read), replacing the one before whole.
+/// (celld refuses one others may read), replacing the one before whole. The
+/// file it writes first (`.json.new`) holds the same secrets: it is removed
+/// when a step fails, and .gitignore covers it for a process killed between
+/// the two.
 pub fn write_secrets_file(project: &Path, config: &serde_json::Value) -> Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let path = secrets_file(project);
     let tmp = path.with_extension("json.new");
     let _ = fs::remove_file(&tmp);
-    let mut f = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-    f.write_all(serde_json::to_string(config)?.as_bytes())?;
-    f.sync_all()?;
-    fs::rename(&tmp, &path).with_context(|| format!("move {} to {}", tmp.display(), path.display()))?;
-    Ok(())
+    let written = (|| -> Result<()> {
+        let mut f = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        f.write_all(serde_json::to_string(config)?.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, &path).with_context(|| format!("move {} to {}", tmp.display(), path.display()))?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// A self-hosted deployment's connectors (`FRAGMENT_CONNECTORS`): the
@@ -308,6 +317,20 @@ mod tests {
             assert_eq!(json(&path)["values"]["s"], value);
             assert!(!path.with_extension("json.new").exists());
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Goal: a write that fails leaves no file of the secrets behind (the
+    /// review's P2 on #1256): here the move fails, the file's place being a
+    /// directory, and the `.json.new` it wrote first is gone.
+    #[test]
+    fn a_failed_secrets_write_leaves_no_secrets_behind() {
+        let dir = std::env::temp_dir().join(format!("celld-secrets-{}", crate::random_hex(6)));
+        let path = secrets_file(&dir);
+        fs::create_dir_all(path.join("in-the-way")).unwrap();
+        let e = write_secrets_file(&dir, &serde_json::json!({ "backend": "vars", "values": { "s": "dummy-secret" } })).unwrap_err();
+        assert!(format!("{e:#}").contains("move"), "{e:#}");
+        assert!(!path.with_extension("json.new").exists(), "no secrets left beside the file");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
