@@ -43,6 +43,52 @@ which makes it a preview of Tailscale's rollout.
 - A-shaped names (`<x>.100-a-b-c-d.sslip.io` → the box) work through the
   real tailnet; `serve --tcp 443 --proxy-protocol 2` was the front door.
 
+## Option A with a real domain and certificate (11-12 ~22:00Z)
+
+Test domain `finite.house` (Cloudflare). Let's Encrypt wildcard for
+`*.spike.finite.house` + `spike.finite.house` by DNS-01 (lego, Cloudflare
+DNS-edit token scoped to the zone). Chain served: leaf ← YE2 ← ISRG Root YE ←
+(cross) ISRG Root X2 ← (cross) X1. Two A records (DNS only) → the box's
+tailnet address. The box's `tailscale serve --tcp 443 --proxy-protocol 2`
+fronts the origin. **No ATS keys, no pinned CA, no SSL_CERT_FILE anywhere.**
+
+Over the Mac's **system Tailscale** (the zero-embedding path):
+
+| Client | Result |
+|---|---|
+| Safari 26.6.2 (safaridriver) | **15/15**, remote = the Mac's tailnet address |
+| The macOS app, direct mode (WKWebView, no ATS keys) | **15/15**; every server-trust challenge took default handling |
+| URLSession, default trust | 200 |
+| `fragment` CLI 0.15.0 (rustls + keychain roots) | TLS ok on the platform host and a fragment host (the origin's 404) |
+| curl (system roots) | verify 0 |
+
+Platform trust on Apple and rustls accepts the new YE chain with no setup.
+
+### Install-order lesson: create the records before anything looks the names up
+
+The bare platform name failed on the home network while every new wildcard
+name resolved. The home router held an NXDOMAIN for it, cached from the
+`.house` registry's SOA: negative TTL 3600 s. Someone looked it up before the
+domain was delegated. The zone's own negative TTL is 1800 s.
+
+The Tailscale app does not avoid this. With no global nameservers set,
+MagicDNS forwards non-tailnet names to the OS resolvers, here that same
+router. Embedded tsnet resolves through the system too.
+
+So an installer must create the records (and wait for delegation of a fresh
+domain) before anything looks the names up. Its first check should query the
+authoritative servers, not the local resolver. A name looked up too early
+stays dead on caching resolvers for up to the negative TTL. The box's own
+Linux resolver also hung on that name.
+
+### A second shape: the platform under the suffix
+
+Fragment's config keeps `FRAGMENT_PLATFORM_URL` separate from
+`FRAGMENT_HOST_SUFFIX`. So the platform can be `home.<suffix>`, with fragments
+`<name>.<suffix>`, all covered by **one single-level wildcard**. The Mac runs
+above used this shape (`home.spike.finite.house`). It also sidesteps the bare
+name, so an apex record is optional.
+
 ## 1. Names
 
 - MagicDNS subdomains: not live on Tailscale today (the box joining the real

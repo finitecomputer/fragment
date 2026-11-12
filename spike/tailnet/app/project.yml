@@ -3,6 +3,9 @@
 # the Tailscale app), through a SOCKS5 probe, or through an embedded tsnet
 # node (libtailscale's TailscaleKit) via WKWebsiteDataStore.proxyConfigurations.
 # TSSpikeBare is the same app without TailscaleKit, for the size delta.
+# Option A builds: no ATS keys at all (platform trust only). The option B runs
+# added NSExceptionDomains {ts.net, tsspike.test, sslip.io: NSIncludesSubdomains
+# + NSExceptionAllowsInsecureHTTPLoads}; see FINDINGS.md and commit 084f42a37.
 name: TSSpike
 options:
   bundleIdPrefix: build.finite
@@ -52,7 +55,6 @@ targets:
         UIApplicationSceneManifest: {UIApplicationSupportsMultipleScenes: false}
         CFBundleURLTypes: [{CFBundleURLSchemes: [tsspike]}]
         NSLocalNetworkUsageDescription: The spike reaches tailnet peers on your network directly.
-        NSAppTransportSecurity: {NSExceptionDomains: {ts.net: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, tsspike.test: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, sslip.io: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}}}
     dependencies:
       - framework: Frameworks/TailscaleKit.xcframework
         embed: true
@@ -87,7 +89,6 @@ targets:
       properties:
         CFBundleDisplayName: TS Spike
         CFBundleURLTypes: [{CFBundleURLSchemes: [tsspike]}]
-        NSAppTransportSecurity: {NSExceptionDomains: {ts.net: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, tsspike.test: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, sslip.io: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}}}
     dependencies:
       - framework: Frameworks/mac/TailscaleKit.framework
         embed: true

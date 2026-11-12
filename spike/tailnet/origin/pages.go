@@ -9,7 +9,7 @@ import (
 func page(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprint(w, strings.ReplaceAll(pageHTML, "{{P}}", platformOf(hostOf(r))))
+	fmt.Fprint(w, strings.NewReplacer("{{P}}", platformOf(hostOf(r)), "{{S}}", suffixOf(hostOf(r))).Replace(pageHTML))
 }
 
 func frame(w http.ResponseWriter, r *http.Request) {
@@ -23,7 +23,7 @@ func frame(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprint(w, strings.ReplaceAll(frameHTML, "{{P}}", platformOf(hostOf(r))))
+	fmt.Fprint(w, strings.NewReplacer("{{P}}", platformOf(hostOf(r)), "{{S}}", suffixOf(hostOf(r))).Replace(frameHTML))
 }
 
 const pageHTML = `<!doctype html><html><head><meta charset="utf-8">
@@ -31,7 +31,7 @@ const pageHTML = `<!doctype html><html><head><meta charset="utf-8">
 <title>tailnet spike</title>
 <link rel="stylesheet" href="/static/a.css">
 <script src="/static/a.js"></script>
-<script src="https://cdn.{{P}}/static/a.js"></script>
+<script src="https://cdn.{{S}}/static/a.js"></script>
 <style>body{font:13px -apple-system,system-ui,sans-serif;margin:12px}td{padding:2px 6px;vertical-align:top}
 .ok{color:#080}.bad{color:#b00}iframe{width:100%;height:60px;border:1px solid #ccc}code{word-break:break-all}</style>
 </head><body>
@@ -39,10 +39,10 @@ const pageHTML = `<!doctype html><html><head><meta charset="utf-8">
 <h3>tailnet spike: {{P}}</h3>
 <div id="state">running…</div>
 <table id="t"></table>
-<img id="img1" src="/static/i.svg"> <img id="img2" src="https://cdn.{{P}}/static/i.svg">
-<iframe id="chat" src="https://chat.{{P}}/frame"></iframe>
+<img id="img1" src="/static/i.svg"> <img id="img2" src="https://cdn.{{S}}/static/i.svg">
+<iframe id="chat" src="https://chat.{{S}}/frame"></iframe>
 <script>
-const P = "{{P}}";
+const P = "{{P}}", S = "{{S}}";
 const q = new URLSearchParams(location.search);
 const LONG = +(q.get("long") || 65), UPMB = +(q.get("up") || 25), RUN = q.get("run") || "";
 if (!document.cookie.includes("sid_js=")) {
@@ -63,7 +63,7 @@ const timeout = (ms, what) => new Promise((_, rej) => setTimeout(() => rej(new E
 async function j(url, opts) { const r = await fetch(url, opts); return r.json(); }
 
 const frameMsg = new Promise(res => addEventListener("message", e => {
-  if (e.origin === "https://chat." + P) res(e.data);
+  if (e.origin === "https://chat." + S) res(e.data);
 }));
 
 async function wsTest(url, seconds) {
@@ -97,7 +97,7 @@ async function main() {
   try { const w = await j("/whoami"); R.remote = w.remote; R.whoami = w;
     rec("fetch same-origin (platform cookies)", w.cookies.includes("sid") && w.cookies.includes("sid_js"), w);
   } catch (e) { rec("fetch same-origin (platform cookies)", false, String(e)); }
-  try { const w = await j("https://api." + P + "/api/cors", {credentials: "include"});
+  try { const w = await j("https://api." + S + "/api/cors", {credentials: "include"});
     rec("fetch cross-origin CORS (fragment host)", true, w);
   } catch (e) { rec("fetch cross-origin CORS (fragment host)", false, String(e)); }
 
@@ -107,7 +107,7 @@ async function main() {
     rec("frame: WebSocket", !!(f.ws && f.ws.echo), f.ws);
     rec("frame: credentialed fetch to platform carries platform cookie (same-site)", !!(f.platform && f.platform.cookies && f.platform.cookies.includes("sid")), f.platform);
   } catch (e) { rec("cross-origin chat frame loaded + reported", false, String(e)); }
-  try { const w = await j("https://chat." + P + "/echo", {credentials: "include"});
+  try { const w = await j("https://chat." + S + "/echo", {credentials: "include"});
     rec("platform → chat host credentialed fetch sees frame cookies", w.cookies.length > 0, w.cookies);
   } catch (e) { rec("platform → chat host credentialed fetch sees frame cookies", false, String(e)); }
 

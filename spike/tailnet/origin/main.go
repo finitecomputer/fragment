@@ -40,7 +40,7 @@ var (
 	plain    = flag.String("plain", "", "optional plaintext listen address (behind a TLS-terminating proxy)")
 	proxyPro = flag.Bool("proxy-protocol", false, "expect a PROXY v1/v2 header on each connection")
 	certDir  = flag.String("certs", "certs", "dir of <name>.crt (full chain) + <name>.key pairs")
-	platform = flag.String("platform", "", "platform hosts P (comma list); fragments are <name>.P")
+	platform = flag.String("platform", "", "platform hosts (comma list): P (fragments <name>.P) or P@S (fragments <name>.S, P may sit under S)")
 	logDir   = flag.String("logs", "logs", "dir for access.jsonl and results.jsonl")
 )
 
@@ -72,7 +72,13 @@ func main() {
 	if *platform == "" {
 		log.Fatal("-platform is required")
 	}
-	platforms = strings.Split(*platform, ",")
+	for _, e := range strings.Split(*platform, ",") {
+		host, suffix, ok := strings.Cut(e, "@")
+		if !ok {
+			suffix = host
+		}
+		platforms = append(platforms, site{host, suffix})
+	}
 	os.MkdirAll(*logDir, 0o755)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", route)
@@ -269,21 +275,40 @@ func hostOf(r *http.Request) string {
 	return strings.ToLower(h)
 }
 
-var platforms []string
+// A platform host and the suffix its fragments live under (Fragment's
+// FRAGMENT_PLATFORM_URL and FRAGMENT_HOST_SUFFIX; the host may sit under it).
+type site struct{ host, suffix string }
 
-// platformOf: the platform host h is, or is a fragment of ("" if neither).
-func platformOf(h string) string {
+var platforms []site
+
+func bare(h string) string {
 	h = strings.ToLower(h)
 	if i := strings.LastIndexByte(h, ':'); i > 0 && !strings.Contains(h[i:], "]") {
 		h = h[:i]
 	}
+	return h
+}
+
+// siteOf: the site host h is the platform of, or a fragment of.
+func siteOf(h string) (site, bool) {
+	h = bare(h)
 	for _, p := range platforms {
-		if h == p || strings.HasSuffix(h, "."+p) {
-			return p
+		if h == p.host {
+			return p, true
 		}
 	}
-	return ""
+	for _, p := range platforms {
+		if strings.HasSuffix(h, "."+p.suffix) {
+			return p, true
+		}
+	}
+	return site{}, false
 }
+
+// platformOf: the platform host of h's site ("" if none).
+func platformOf(h string) string { p, _ := siteOf(h); return p.host }
+
+func suffixOf(h string) string { p, _ := siteOf(h); return p.suffix }
 
 func isFragment(h string) bool { p := platformOf(h); return p != "" && h != p }
 
