@@ -117,9 +117,12 @@ fn gate_checks(s: &mut Suite, api: &Api) -> Result<(Keys, String, String)> {
         Ok((first, heard, question()?))
     };
     let both_allowed = [(reader_id.as_str(), "allowed"), (owner_id.as_str(), "allowed")];
+    let start = rows();
     let ((allowed, allowed_embeds), allowed_heard, (again, again_embeds)) = taught(&both_allowed)?;
     lend(0)?;
-    let before = rows();
+    // those two questions' charges, landed or not yet: a ledger's queue may
+    // deliver past `quiet`'s second (celld's does), so they are not counted
+    let before = start + 2;
     let ((paid, paid_embeds), payer_heard, (payer, payer_embeds)) = taught(&[(reader_id.as_str(), "refused")])?;
     let (replayed, replayed_embeds) = question()?;
     // its row once it lands (a ledger's queue may take past `quiet`'s
