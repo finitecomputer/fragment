@@ -40,6 +40,7 @@ struct SidebarDrawer: View {
     let library: Library
     let page: ShellPage
     let api: FragmentAPI
+    var newChat: (FragmentSummary) -> Void = { _ in }
     let navigate: (ShellPage) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dragOffset: CGFloat = 0
@@ -56,7 +57,7 @@ struct SidebarDrawer: View {
                         .onTapGesture { close() }
                         .accessibilityHidden(true)
                         .transition(.opacity)
-                    SidebarView(library: library, page: page, api: api, navigate: navigate)
+                    SidebarView(library: library, page: page, api: api, newChat: newChat, navigate: navigate)
                         .frame(width: width)
                         .offset(x: dragOffset)
                         .transition(.move(edge: .leading))
@@ -136,6 +137,8 @@ struct SidebarView: View {
     let library: Library
     let page: ShellPage
     let api: FragmentAPI
+    /// A new chat with this agent, opened empty.
+    let newChat: (FragmentSummary) -> Void
     let navigate: (ShellPage) -> Void
     /// The height of its glass controls: an agent's pill and the round
     /// buttons beside it and at its foot, drawn alike so they stay one size.
@@ -193,8 +196,8 @@ struct SidebarView: View {
                                 // it: the rectangle around it showed as the menu went
                                 .contentShape(.contextMenuPreview, .capsule).contentShape(.capsule)
                             }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
-                            // a new chat with this agent: the launcher, its words to come
-                            Button { library.selectedAgent = agent.name; navigate(.launcher) } label: {
+                            // a new chat with this agent, opened empty
+                            Button { newChat(agent) } label: {
                                 Image(systemName: "square.and.pencil").font(Self.icon)
                                     .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
                             }

@@ -61,6 +61,28 @@ struct ShellTests {
 
     /// A chat readied as a memo records is the one its message takes: made
     /// once, and kept across a failed join.
+    /// The sidebar's New chat makes a chat with its agent, listed and shown
+    /// at once as empty, and takes the one readied for them if there is one.
+    @Test func aChatStartedFromTheSidebarIsListedAndShownEmpty() async throws {
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "POST /api/fragments": return (200, #"{"name":"mobile-chat--x1","npub":"npub1c"}"#)
+            case "GET /api/f/moss--a1/status": return (200, #"{"npub":"npub1moss"}"#)
+            case "PUT /api/f/mobile-chat--x1/members/npub1moss": return (200, "{}")
+            default: return (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library(), agent = FragmentSummary(name: "moss--a1", kind: "agent")
+        library.readyChat(with: agent, api: api)
+        let chat = try await library.startChat(with: agent, api: api)
+        #expect(chat.name == "mobile-chat--x1" && chat.agents == ["npub1moss"])
+        #expect(library.fragments.first?.name == chat.name && library.unfinishedChat == nil)
+        #expect(try library.session(for: chat, api: api).read)
+        #expect(stub.seen.filter { $0.route == "POST /api/fragments" }.count == 1)
+    }
+
     @Test func aChatReadiedAheadIsMadeOnceAndOutlastsAFailedJoin() async throws {
         let joins = Mutex(0)
         let stub = Stub { seen, _ in
