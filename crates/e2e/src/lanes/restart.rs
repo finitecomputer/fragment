@@ -24,6 +24,9 @@ use super::signin::{site_cookie, who};
 use crate::api::{Api, Call};
 use crate::{Suite, ADDED_KEY};
 
+/// Why a check of a computer's is a skip on celld, which runs none.
+const NO_COMPUTERS: &str = "celld runs no computers here: they need egress intercepts and snapshots its Docker engine lacks (docs/self-host.md, seam 2)";
+
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
 const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
@@ -321,15 +324,22 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         "access setup: {access_before}"
     );
     // an agent's name and picture (faces.rs): its fragment's, in its own
-    // storage and its git, shown from its face
-    let (face_owner, face_session) = super::templates::person(&api)?;
-    let (faced, face_id) = super::faces::agent_of(s, &api, &face_owner, "restart-face", "Juniper")?;
-    let faced = faced["name"].as_str().unwrap_or("").to_string();
-    let face_png = super::faces::orange();
-    let (w, d) = super::faces::set_face(&api, &face_owner, &faced, Some("Frank"), Some(Some(&face_png)), None)?;
-    let face_path = super::faces::picture_path(&face_id, &face_png);
-    let shown = s.eventually(Duration::from_secs(30), || super::faces::row(&api, &face_owner, &faced)["picture"] == face_path.as_str());
-    anyhow::ensure!(w.status == 200 && d.is_some_and(|d| d.status == 200) && shown, "face setup: {w}");
+    // storage and its git, shown from its face. An agent's identity is its
+    // computer's to give: none on celld
+    let face = match s.on_celld() {
+        true => None,
+        false => {
+            let (face_owner, face_session) = super::templates::person(&api)?;
+            let (faced, face_id) = super::faces::agent_of(s, &api, &face_owner, "restart-face", "Juniper")?;
+            let faced = faced["name"].as_str().unwrap_or("").to_string();
+            let face_png = super::faces::orange();
+            let (w, d) = super::faces::set_face(&api, &face_owner, &faced, Some("Frank"), Some(Some(&face_png)), None)?;
+            let face_path = super::faces::picture_path(&face_id, &face_png);
+            let shown = s.eventually(Duration::from_secs(30), || super::faces::row(&api, &face_owner, &faced)["picture"] == face_path.as_str());
+            anyhow::ensure!(w.status == 200 && d.is_some_and(|d| d.status == 200) && shown, "face setup: {w}");
+            Some((face_owner, face_session, faced, face_png, face_path))
+        }
+    };
     // a tool loop held after the call it bought (a tool call), its next
     // call refused for good (ai_tools.rs)
     let tooled = ai_tools::tools_fragment(s, &api, &owner, "restart-tools")?;
@@ -344,13 +354,21 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // computer's rows, and the browser's cookie
     let pending_key = Keys::generate();
     let pending_code = api.cli_begin(&pending_key)?.body["code"].as_str().unwrap_or("").to_string();
-    let connector = api.person()?;
-    let connector_session = api.sign_in(&Api::email_of(&connector))?;
-    let made = api.signed(&connector, "POST", "/api/computers", Some(&json!({})))?;
-    let asked = super::credentials::shell_authorize(&api, &connector_session)?;
-    let bound = super::credentials::own_key_cookie(&asked);
-    let back = super::credentials::sent_back(&api, asked.body["url"].as_str().unwrap_or_default())?;
-    anyhow::ensure!(made.status == 200 && asked.status == 200 && !pending_code.is_empty() && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {asked} {back}");
+    anyhow::ensure!(!pending_code.is_empty(), "pending CLI code setup");
+    // an own key's sign-in finishes at its person's computer: none on celld
+    let own_key = match s.on_celld() {
+        true => None,
+        false => {
+            let connector = api.person()?;
+            let connector_session = api.sign_in(&Api::email_of(&connector))?;
+            let made = api.signed(&connector, "POST", "/api/computers", Some(&json!({})))?;
+            let asked = super::credentials::shell_authorize(&api, &connector_session)?;
+            let bound = super::credentials::own_key_cookie(&asked);
+            let back = super::credentials::sent_back(&api, asked.body["url"].as_str().unwrap_or_default())?;
+            anyhow::ensure!(made.status == 200 && asked.status == 200 && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {asked} {back}");
+            Some((connector, connector_session, bound, back))
+        }
+    };
 
     s.stop()?;
     let api = s.start_with_a_key_more()?;
@@ -377,22 +395,30 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         typed.status == 200 && pressed.status == 200 && theirs.status == 200 && theirs.body["email"] == MEMBER_EMAIL,
         json!({ "typed": typed.status, "added": pressed.status, "me": theirs.body }),
     );
-    let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
-    let state = api.signed(&connector, "GET", "/api/connections", None)?;
-    let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
-    s.ok(
-        "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected",
-        page.status == 200 && page.text.contains("is connected") && connected,
-        json!({ "page": page.to_string(), "connections": state.body }),
-    );
-    let face_row = super::faces::row(&api, &face_owner, &faced);
-    let face_got = super::faces::fetched(&api, &face_path)?;
-    let face_sheet = super::signin::with_session(&api, "GET", &format!("/share/{faced}"), &face_session)?;
-    s.ok(
-        "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them",
-        face_row["title"] == "Frank" && face_row["picture"] == face_path.as_str() && face_got.status == 200 && face_got.bytes == face_png && face_sheet.text.contains("Frank") && face_sheet.text.contains(&face_path),
-        json!({ "row": face_row, "picture": face_got.status, "sheet": face_sheet.status }),
-    );
+    const OWN_KEY: &str = "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected";
+    match own_key {
+        Some((connector, connector_session, bound, back)) => {
+            let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
+            let state = api.signed(&connector, "GET", "/api/connections", None)?;
+            let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
+            s.ok(OWN_KEY, page.status == 200 && page.text.contains("is connected") && connected, json!({ "page": page.to_string(), "connections": state.body }));
+        }
+        None => s.skip(OWN_KEY, NO_COMPUTERS),
+    }
+    const FACE: &str = "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them";
+    match face {
+        Some((face_owner, face_session, faced, face_png, face_path)) => {
+            let face_row = super::faces::row(&api, &face_owner, &faced);
+            let face_got = super::faces::fetched(&api, &face_path)?;
+            let face_sheet = super::signin::with_session(&api, "GET", &format!("/share/{faced}"), &face_session)?;
+            s.ok(
+                FACE,
+                face_row["title"] == "Frank" && face_row["picture"] == face_path.as_str() && face_got.status == 200 && face_got.bytes == face_png && face_sheet.text.contains("Frank") && face_sheet.text.contains(&face_path),
+                json!({ "row": face_row, "picture": face_got.status, "sheet": face_sheet.status }),
+            );
+        }
+        None => s.skip(FACE, NO_COMPUTERS),
+    }
     let access_after = access_row(&api);
     s.ok(
         "after a restart the access view answers as it did: who is in, by email, and the invite waiting",
@@ -534,8 +560,23 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("a mutation before the crash", r.status == 200, &r);
     // Local workerd's Workflows keep a sleep as a timer in the process
     // (miniflare's engine: no alarm behind it), so one sleeping through a
-    // crash of `wrangler dev` never wakes; Cloudflare's do.
-    s.skip("a job sleeping through a crash wakes and finishes, once", "local Workflows do not outlive their process");
+    // crash of `wrangler dev` never wakes; Cloudflare's do, and celld's
+    // (each instance a cell, its sleep an alarm: docs/self-host.md, seam 1).
+    let nap = match s.durable_workflows() {
+        true => {
+            let (jobs, _) = jobs::jobs_fragment(s, &api, &owner, "restart-jobs", |_| {})?;
+            let r = api.op(&owner, &jobs, "nap", "through-the-crash", json!({ "ms": 4000 }))?;
+            let started = jobs::started(&r);
+            // running, its sleep under way, before the crash
+            let running = s.eventually(Duration::from_secs(10), || jobs::run(&api, &owner, &jobs, started).is_ok_and(|r| r.body["status"] == "running"));
+            anyhow::ensure!(running, "the nap runs before the crash");
+            Some((jobs, started))
+        }
+        false => {
+            s.skip("a job sleeping through a crash wakes and finishes, once", "local Workflows do not outlive their process");
+            None
+        }
+    };
     // a delete whose cleanup the crash cuts short (cell ended.rs): the
     // fragment's alarm finishes it after
     let ended = s.named(&api, &owner, "restart-ended")?;
@@ -565,6 +606,11 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let blobbed = blobs_never_kept(s, &api, &owner)?;
     s.crash()?;
     let api = s.start(false)?;
+    if let Some((jobs, started)) = nap {
+        let woke = jobs::settle(&api, &owner, &jobs, started, &["succeeded", "held"], Duration::from_secs(60));
+        let naps = jobs::records(&api, &owner, &jobs, "feed").iter().filter(|r| r["kind"] == "nap").count();
+        s.ok("a job sleeping through a crash wakes and finishes, once", woke["status"] == "succeeded" && naps == 1, format!("{woke} ({naps} nap records)"));
+    }
     let seen = json!({ "pins": api.status(&owner, &blobbed.name)?.body["pins"], "a": blob_caching(&api, &blobbed)?, "b": other_asset(&api, &blobbed)? });
     s.ok(
         "after a crash, a refresh cut between its pointer reads kept nothing of it: live the commit before, both assets' bytes its own, revalidated, never kept for good",

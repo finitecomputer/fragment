@@ -128,6 +128,10 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("icons", &[crate::Need::Fakes, crate::Need::Levers]) {
         return Ok(());
     }
+    if s.on_celld() {
+        s.skip("icons made, fitted, kept, served, limited and charged, by the API and the CLI, and favicons", "celld has no Images binding, so the node makes and fits no icons (docs/self-host.md)");
+        return Ok(());
+    }
     cli_icons(s, api)?;
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
