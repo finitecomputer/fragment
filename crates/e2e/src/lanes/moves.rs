@@ -335,17 +335,28 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let again = api.signed(&alice_agent_keys, "POST", &at("done"), Some(&json!({ "ok": true })))?;
     let after = (api.signed(&alice_agent_keys, "GET", &at("zip"), None)?, api.signed(&alice_agent_keys, "POST", &at("open"), None)?);
     s.ok(
-        "done well: retiring as migrated; the same done again changes nothing; its stage is refused to its own agent at once (409); a done that is not one is 400",
+        "done well: retiring; the same done again changes nothing; its stage is refused to its own agent at once (409); a done that is not one is 400",
         bad.status == 400 && done.status == 200 && done.body["state"] == "retiring" && again.status == 200 && again.body["state"] == "retiring" && after.0.status == 409 && after.1.status == 409,
         format!("{bad} {} {} {}", done.body, after.0, after.1),
     );
+    // done is harmless: nothing for the mover, the old agent stays stopped
+    // and its stage kept, until staff's word
+    let asked = mover.commands()?.into_iter().any(|c| c.old == e1);
+    mover.run_once()?;
+    let row = moved(&e1)?;
+    let kept = objects(&format!("p1/{e1}/1/"));
+    s.ok(
+        "a good import waits for staff: retiring with no command, nothing in the mailbox, no deadline but its stage's keep, and its stage kept in the bucket",
+        !asked && row["state"] == "retiring" && row["command"].is_null() && row["deadline_ms"] == row["staged_ms"].as_i64().map(|at| at + 14 * DAY_MS).unwrap_or_default() && kept.len() == 2,
+        format!("{row} {kept:?}"),
+    );
+    let r = act(&e1, "retire")?;
     let retire = mover.commands()?.into_iter().find(|c| c.old == e1).map(|c| serde_json::to_value(&c).unwrap_or_default());
     mover.run_once()?;
-    let gone = deleted(s, &format!("p1/{e1}/1/"));
     s.ok(
-        "the old agent is retired as migrated (moved), and its stage deleted from the bucket by the alarm",
-        retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && gone && state(&e1) == "moved",
-        format!("{retire:?} {}", state(&e1)),
+        "on staff's retire the old agent is retired as migrated (moved), its stage still kept to its keep",
+        r.status == 200 && r.body["state"] == "retiring" && retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && state(&e1) == "moved" && objects(&format!("p1/{e1}/1/")).len() == 2,
+        format!("{r} {retire:?} {}", state(&e1)),
     );
 
     // ---- a roster withdraws the unasked; staff's withdrawal holds
@@ -476,20 +487,23 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
             &late_move,
         );
     }
-    // the late sign-up's import, to its end: the old agent retired as
-    // migrated, marked again from archived (what finite.computer redirects by)
+    // the late sign-up's import, to its end: on staff's word, the old agent
+    // retired as migrated, marked again from archived (what finite.computer
+    // redirects by)
     let late_stage = format!("{c1}.p2.{}", moved(&c1)?["attempt"]);
     let at = |what: &str| format!("/api/migrations/stages/{late_stage}/{what}");
     let opened = api.signed(&carol_agent_keys, "POST", &at("open"), None)?;
     let zip = api.signed(&carol_agent_keys, "GET", &at("zip"), None)?;
     let done = api.signed(&carol_agent_keys, "POST", &at("done"), Some(&json!({ "ok": true })))?;
+    let asked = mover.commands()?.into_iter().any(|c| c.old == c1);
+    let r = act(&c1, "retire")?;
     let retire = mover.commands()?.into_iter().find(|c| c.old == c1).map(|c| serde_json::to_value(&c).unwrap_or_default());
     mover.run_once()?;
     let late_kept = objects(&format!("p2/{c1}/"));
     s.ok(
-        "the late sign-up reads the kept stage and says it is done: the old agent is retired as migrated, the move done (moved), its stage kept to its expiry",
-        opened.status == 200 && opened.body["manifest"]["phase"] == "p2" && zip.status == 200 && zip.bytes == mover.zip_bytes() && done.body["state"] == "retiring" && retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && state(&c1) == "moved" && late_kept.len() == 2,
-        format!("{} {} {retire:?} {} {late_kept:?}", opened.status, done.body, state(&c1)),
+        "the late sign-up reads the kept stage and says it is done; on staff's retire, the old agent is retired as migrated, the move done (moved), its stage kept to its expiry",
+        opened.status == 200 && opened.body["manifest"]["phase"] == "p2" && zip.status == 200 && zip.bytes == mover.zip_bytes() && done.body["state"] == "retiring" && !asked && r.status == 200 && retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && state(&c1) == "moved" && late_kept.len() == 2,
+        format!("{} {} {asked} {retire:?} {} {late_kept:?}", opened.status, done.body, state(&c1)),
     );
     let kept = objects(&format!("p2/{d1}/"));
     later_by(90 * DAY_MS)?;
@@ -757,7 +771,7 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the agent opens its stage and reads its zip through its own egress (NIP-98 as itself)", opened.starts_with("fetched 200:") && opened.contains(STAGE_FORMAT) && zip.starts_with("fetched 200:"), format!("{opened} | {}", zip.chars().take(40).collect::<String>()));
     let done = fetched(s, 3, &format!("fetch {base}/done with {agent_name} in x-fragment-agent posting {{\"ok\":true}}"))?;
     let after = fetched(s, 4, &format!("fetch {base}/zip with {agent_name} in x-fragment-agent"))?;
-    s.ok("it says it is done: the move retires the old agent, and its stage's routes refuse at once", done.starts_with("fetched 200:") && done.contains("retiring") && after.starts_with("fetched 409:"), format!("{done} | {after}"));
+    s.ok("it says it is done: the move waits for staff's retire, and its stage's routes refuse at once", done.starts_with("fetched 200:") && done.contains("retiring") && after.starts_with("fetched 409:"), format!("{done} | {after}"));
     mover.run_once()?;
     Ok(())
 }

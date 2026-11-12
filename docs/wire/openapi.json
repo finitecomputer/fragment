@@ -1803,7 +1803,7 @@
           },
           {
             "const": "retiring",
-            "description": "Imported: the mover is told to retire the old one.",
+            "description": "Imported: the old agent, stopped, is retired on staff's word (the\nmover is told to then; until then it holds no command).",
             "type": "string"
           },
           {
