@@ -5,6 +5,26 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## No mail without Email Sending
+
+- **Shortcut:** the platform's mail (invites, a key added, an org's seat,
+  an export ready, a trial code) goes through Cloudflare Email Sending's
+  binding (`EMAIL`, `cell/src/mail.rs`), or in dev and the e2e to the
+  mail fake (`FRAGMENT_MAIL_URL`). A self-hosted runtime has no Email
+  Sending (celld's deploy refuses `send_email`), and its deployment no
+  fake (docs/self-host.md). With neither, `mail::send` sends nothing, logs one
+  warning per message (`mail.unsent`: "email not sent: this runtime has
+  no mailer, not yet implemented"), and answers no message id, never an
+  error, so the flow around it goes on: an invite still waits for its
+  person's yes; a key is still added. An org's `mailed` and a trial's
+  `sent` say false. Paul, 2026-10-22: not solved in this pass.
+- **Risk:** no one hears of what was meant for them: an invitee learns of
+  an invite only from the sharer, and the share sheet still says it
+  mailed a link.
+- **Delete when:** a self-hosted deployment names a mailer of its own
+  (SMTP, or a company's relay, behind the same `send`), or the share sheet
+  and its kin say plainly that nothing was mailed.
+
 ## A computer's lifecycle writes its old flags too
 
 - **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle

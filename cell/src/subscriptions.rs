@@ -43,7 +43,7 @@ impl FragmentCell {
         if url.len() > SUB_URL_MAX_BYTES {
             return Err(CellError::invalid(format!("a subscription URL is at most {SUB_URL_MAX_BYTES} bytes")));
         }
-        egress::check(url, self.cfg.egress_local).map_err(|e| CellError::invalid(format!("url: {e}")))?;
+        egress::check(url, self.cfg.egress_local, &self.cfg.egress_allow).map_err(|e| CellError::invalid(format!("url: {e}")))?;
         let id = self.add_subscription(&principal, channel, url)?;
         json_response(&json!({ "id": id, "channel": channel, "url": url }))
     }

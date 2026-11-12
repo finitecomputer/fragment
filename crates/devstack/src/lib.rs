@@ -195,8 +195,8 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// binds them in the account's, `images` beside its own computer images,
 /// and every one built from a Dockerfile of its own
 /// (`containers::scope_images`), so that no other stack's teardown removes
-/// its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
+/// its computers; less `unbound` (`Fleet::unbound`).
+fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)], unbound: &[&str]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
@@ -209,6 +209,9 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(Str
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for b in REMOTE_ONLY_BINDINGS {
         obj.remove(b);
+    }
+    for b in unbound {
+        anyhow::ensure!(obj.remove(*b).is_some(), "{} has no `{b}` to leave out", project.join("wrangler.jsonc").display());
     }
     anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: the fleet's are bound here", project.join("wrangler.jsonc").display());
     // none with the cell's stand-ins (`Secrets::Shim`): it binds no store
@@ -449,6 +452,12 @@ pub struct Fleet {
     pub connectors: Option<String>,
     /// Where its secrets are (`Secrets`): the runtime's.
     pub secrets: Secrets,
+    /// The project's bindings its local config leaves out (`send_email`,
+    /// `browser`, `images`, `containers`), as a deployment on a runtime
+    /// without that service runs: a self-hosted one (docs/self-host.md).
+    /// The e2e checks the cell without them on wrangler, where every one
+    /// is otherwise bound.
+    pub unbound: &'static [&'static str],
 }
 
 /// A Stripe account as the cell reads it.
@@ -577,15 +586,15 @@ impl Fleet {
         let shim = match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-                write_local_config(project, &bound.cell(), &self.images)?;
+                write_local_config(project, &bound.cell(), &self.images, self.unbound)?;
                 vec![]
             }
             Secrets::Shim => {
-                write_local_config(project, &[], &self.images)?;
+                write_local_config(project, &[], &self.images, self.unbound)?;
                 self.shim_vars(&bound)?
             }
             Secrets::OpenBao(target) => {
-                write_local_config(project, &[], &self.images)?;
+                write_local_config(project, &[], &self.images, self.unbound)?;
                 target.seed(&self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed OpenBao: {e}"))?;
                 Self::openbao_vars(target, &bound)?
             }
