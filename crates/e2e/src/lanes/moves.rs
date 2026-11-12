@@ -26,8 +26,14 @@ fn agent(old: &str) -> RosterAgent {
         sizes: Sizes { cache: 1, history: 2, work: 3, staged: 5, total: 6 },
         brains: vec![],
         sites: vec![],
-        has: Has { telegram: false, openrouter: false, nostr: true },
+        // none, as the mover's fleet says of every old agent (FIN-498)
+        has: Has { telegram: false, openrouter: false, nostr: false },
     }
+}
+
+/// `fragment operator <args> --key-file <key> --json`: its `data`.
+fn op_cli(s: &Suite, api: &Api, home: &std::path::Path, key: &str, args: &[&str]) -> Result<Value> {
+    s.cli_json(api, home, &[&["operator"], args, &["--key-file", key, "--json"]].concat())
 }
 
 fn person(workos_id: &str, olds: &[&str]) -> RosterPerson {
@@ -54,6 +60,15 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let act = |o: &str, op: &str| api.signed(&operator, "POST", &format!("/api/admin/migrations/{o}"), Some(&json!({ "op": op })));
     let withdraw = |o: &str, why: &str| api.signed(&operator, "POST", &format!("/api/admin/migrations/{o}"), Some(&json!({ "op": "withdraw", "why": why })));
     const WHY: &str = "a staff test agent";
+    // staff's CLI, with the operator key's file
+    let file = s.dir("move-operator").join("operator.key");
+    std::fs::write(&file, format!("{}\n", operator.secret_hex()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let (home, key) = (s.dir("move-cli"), file.to_string_lossy().to_string());
     // a move as staff read it: the operators' list, page by page
     let moved = |o: &str| -> Result<Value> {
         let mut after = String::new();
@@ -142,30 +157,29 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let yes_again = answer(&a1, "yes", Some(&alice_agent))?;
     let cmd = mover.commands()?.into_iter().find(|c| c.old == a1).context("a1's command")?;
     s.ok(
-        "Yes with another person's agent is refused (403); with their own, the mover's mailbox holds stop_and_stage of the stage <old>.p1.1, handing off every secret the old agent has, and Yes again changes nothing",
+        "Yes with another person's agent is refused (403); with their own, the mover's mailbox holds stop_and_stage of the stage <old>.p1.1, asking for every kind of secret whatever the roster's has says, and Yes again changes nothing",
         theirs.status == 403
             && yes.body["state"] == "asked"
             && yes_again.status == 200
-            && serde_json::to_value(&cmd)? == json!({ "id": format!("{a1}:1:stop_and_stage"), "old": a1, "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{a1}.p1.1"), "secrets": ["nostr_nsec"] }),
+            && serde_json::to_value(&cmd)? == json!({ "id": format!("{a1}:1:stop_and_stage"), "old": a1, "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{a1}.p1.1"), "secrets": ["telegram_bot_token", "openrouter_key", "nostr_nsec"] }),
         format!("{theirs} {cmd:?}"),
     );
 
     // ---- the hand-off of its secrets (F11): the mover's alone, for its
-    // command's kinds; a value is never echoed (move-import puts them)
+    // command; a value is never echoed (move-import puts them)
     let hand = |keys: &crate::Keys, o: &str, body: Value| api.signed(keys, "POST", &format!("/api/migrations/mover/agents/{o}/secrets"), Some(&body));
     let mover_keys = s.mover.clone();
     let nsec = json!({ "kind": "nostr_nsec", "value": "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5" });
     let stranger_hand = hand(&stranger, &a1, json!({ "command": cmd.id, "items": [nsec] }))?;
-    let unasked = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [{ "kind": "telegram_bot_token", "value": "123456:handoff-sentinel" }] }))?;
-    let twice = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [nsec, nsec] }))?;
+    let twice = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [nsec, { "kind": "nostr_nsec", "value": "handoff-sentinel" }] }))?;
     let unread = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [{ "kind": "nostr_nsec", "value": 987_654_321_012u64 }] }))?;
     let stale = hand(&mover_keys, &a1, json!({ "command": format!("{a1}:9:stop_and_stage"), "items": [nsec] }))?;
     let none = hand(&mover_keys, &d1, json!({ "command": format!("{d1}:1:stop_and_stage"), "items": [nsec] }))?;
-    let quiet = [&unasked, &twice, &unread].iter().all(|r| !r.text.contains("handoff-sentinel") && !r.text.contains("987654321012"));
+    let quiet = [&twice, &unread].iter().all(|r| !r.text.contains("handoff-sentinel") && !r.text.contains("987654321012"));
     s.ok(
-        "a hand-off is the mover's alone (403); a kind its command does not ask for, a kind twice, or a body that does not read is refused (400) in words that never quote a value; another command, or an old agent with none, is 409",
-        stranger_hand.status == 403 && unasked.status == 400 && twice.status == 400 && unread.status == 400 && quiet && stale.status == 409 && none.status == 409,
-        format!("{} {} {} {} {} {}", stranger_hand.status, unasked, twice.status, unread, stale.status, none.status),
+        "a hand-off is the mover's alone (403); a kind twice, or a body that does not read is refused (400) in words that never quote a value; another command, or an old agent with none, is 409",
+        stranger_hand.status == 403 && twice.status == 400 && unread.status == 400 && quiet && stale.status == 409 && none.status == 409,
+        format!("{} {} {} {} {}", stranger_hand.status, twice, unread, stale.status, none.status),
     );
 
     // ---- the mover down: held, then staff try again
@@ -177,9 +191,13 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let list = admin("GET", "")?;
     let row = list.body["moves"].as_array().and_then(|ms| ms.iter().find(|m| m["old"] == a1.as_str())).cloned().unwrap_or_default();
     s.ok("staff see it held, with its reason and no command, and no name or email", list.status == 200 && row["state"] == "held" && row["reason"] == "mover_down" && row["command"].is_null() && !list.text.contains("@old.test") && !list.text.contains("Old "), &row);
-    let r = act(&a1, "retry")?;
+    let r = op_cli(s, api, &home, &key, &["retry", &a1]);
     let stale = mover.report_as(&a1, &cmd.id, 9, event("stopped"))?;
-    s.ok("staff's retry is a new attempt (2), and a report on attempt 1's command is stale (409), changing nothing", r.status == 200 && r.body["state"] == "asked" && r.body["attempt"] == 2 && stale.status == 409 && state(&a1) == "asked", format!("{r} {}", stale.body));
+    s.ok(
+        "staff's retry (`fragment operator retry`) is a new attempt (2), and a report on attempt 1's command is stale (409), changing nothing",
+        r.as_ref().is_ok_and(|v| v["state"] == "asked" && v["attempt"] == 2) && stale.status == 409 && state(&a1) == "asked",
+        format!("{r:?} {}", stale.body),
+    );
 
     // ---- staging: stopped, progress, a part, then a stall, then staged
     mover.script(Script::Stalls);
@@ -258,13 +276,13 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- staff restart the old agent: offered again, the mover told to restart it
     let staged_three = objects(&format!("p1/{a1}/3/"));
-    let r = act(&a1, "restart-old")?;
+    let r = op_cli(s, api, &home, &key, &["restart-old", &a1]);
     let restart = mover.commands()?.into_iter().find(|c| c.old == a1);
     mover.run_once()?;
     let m = moved(&a1)?;
     s.ok(
-        "restart-old offers it again, unbound, and the mover restarts the old agent: its command answered, then gone",
-        r.status == 200 && r.body["state"] == "open" && restart.is_some_and(|c| c.id == format!("{a1}:3:restart")) && m["command"].is_null() && m["agent"].is_null(),
+        "restart-old (`fragment operator restart-old`) offers it again, unbound, and the mover restarts the old agent: its command answered, then gone",
+        r.as_ref().is_ok_and(|v| v["state"] == "open") && restart.is_some_and(|c| c.id == format!("{a1}:3:restart")) && m["command"].is_null() && m["agent"].is_null(),
         &m,
     );
 
@@ -280,11 +298,16 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     mover.run_once()?;
     let m = moved(&a1)?;
     s.ok("Yes again is attempt 4; a failed stage past the attempts is held (stage_failed)", attempt == 4 && m["state"] == "held" && m["reason"] == "stage_failed", &m);
-    let r = act(&a1, "retire")?;
+    let r = op_cli(s, api, &home, &key, &["retire", &a1]);
     mover.script(Script::Done);
     mover.run_once()?;
     let bad = withdraw(&a1, WHY)?;
-    s.ok("staff retire it: the mover retires the old agent and the move is done (moved); a done move is not withdrawn (409)", r.body["state"] == "retiring" && state(&a1) == "moved" && bad.status == 409, format!("{} {}", r.body, bad));
+    let again = op_cli(s, api, &home, &key, &["retire", &a1]);
+    s.ok(
+        "staff retire it (`fragment operator retire`): the mover retires the old agent and the move is done (moved); a done move is not withdrawn (409), nor retired again (the CLI fails)",
+        r.as_ref().is_ok_and(|v| v["state"] == "retiring") && state(&a1) == "moved" && bad.status == 409 && again.is_err(),
+        format!("{r:?} {bad} {again:?}"),
+    );
 
     // ---- the one person's bound agent reads its own stage, while it
     // imports; no one else, ever
@@ -407,16 +430,8 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{inc} {dropped} {f_back} {forgot} {forgot_again}"),
     );
     // the same from the CLI, with the operator key's file
-    let file = s.dir("move-operator").join("operator.key");
-    std::fs::write(&file, format!("{}\n", operator.secret_hex()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
-    }
-    let (home, key) = (s.dir("move-cli"), file.to_string_lossy().to_string());
     let w3 = old("w3");
-    let cli = |args: &[&str]| s.cli_json(api, &home, &[&["operator"], args, &["--key-file", &key, "--json"]].concat());
+    let cli = |args: &[&str]| op_cli(s, api, &home, &key, args);
     let out = cli(&["withdraw", &w3, "--why", WHY]);
     let list = cli(&["moves", "--withdrawn"]);
     let back = cli(&["include", &w3]);
@@ -673,9 +688,8 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(woke, "the computer wakes: {}", phase(api, &owner, &id));
 
     // the move: Yes with this agent, staged
-    // an old agent with all three secrets: Yes hands each to its owner's Vault
-    let mut people = vec![person(&workos_id, &[&old])];
-    people[0].agents[0].has = Has { telegram: true, openrouter: true, nostr: true };
+    // an old agent with all three secrets, though its roster says none: Yes hands each to its owner's Vault
+    let people = vec![person(&workos_id, &[&old])];
     let r = mover.push(&Roster { snapshot: format!("{old}-s1"), observed_ms: 1_800_000_000_000, people })?;
     anyhow::ensure!(r.status == 200, "the roster: {} {}", r.status, r.body);
     let visit = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(&owner) })))?;
