@@ -80,7 +80,7 @@ interactively, no ATS keys, no pinned CA):
   after foreground timed out (its 5 s abort). The second succeeded **5.6 s
   after resume**. The box logged "connection was refused" for the first SYNs.
 
-On **Paul's phone** (embedded tsnet, hosted Tailscale, real cert, no ATS keys,
+On **a real iPhone** (embedded tsnet, hosted Tailscale, real cert, no ATS keys,
 no pinned CA):
 - **15/15** at `home.spike.finite.house`: the 65 s WebSocket, streamed and
   idle fetches, the chat frame with all four cookie flavours, and a 25 MB
