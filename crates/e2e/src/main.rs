@@ -446,6 +446,9 @@ pub struct Suite {
     project: PathBuf,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
+    /// Where the node's secrets are (`FRAGMENT_E2E_SECRETS`, `secrets_of`):
+    /// wrangler's local store, or the cell's stand-ins for its bindings.
+    secrets: devstack::Secrets,
     /// Whether the containers the run's nodes left are removed
     /// (`remove_containers`): at its end, or as it drops.
     containers_removed: bool,
@@ -804,6 +807,7 @@ impl Suite {
             operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
+            secrets: self.secrets,
         };
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
@@ -1164,6 +1168,18 @@ fn make_scratch(dir: &Path) -> Result<()> {
     std::fs::create_dir(dir).with_context(|| format!("{}: this run's scratch, made by another run first", dir.display()))
 }
 
+/// The node's secrets by `FRAGMENT_E2E_SECRETS`: unset or `store`,
+/// wrangler's local Secrets Store, as a deploy binds the account's; `vars`,
+/// the cell's stand-ins for its bindings (cell/secrets.mjs), as a runtime
+/// with no store reads them (docs/self-host.md).
+fn secrets_of(var: Option<&str>) -> Result<devstack::Secrets> {
+    match var {
+        None | Some("store") => Ok(devstack::Secrets::Store),
+        Some("vars") => Ok(devstack::Secrets::Shim),
+        Some(other) => bail!("FRAGMENT_E2E_SECRETS is store or vars, not {other:?}"),
+    }
+}
+
 /// A local run's settings beside its sections (hosted.rs `Args`).
 struct LocalRun {
     /// A rehearsal of the hosted lane, lending at most this many paid calls.
@@ -1262,6 +1278,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         scratch,
         project,
         shape: Shape::Plain,
+        secrets: secrets_of(std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref())?,
         containers_removed: false,
     };
     if let Some(k) = s.shard {
