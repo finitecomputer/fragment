@@ -340,6 +340,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         scratch,
         project: PathBuf::new(),
         shape: Shape::Plain,
+        secrets: devstack::Secrets::Store,
         containers_removed: false,
     }
 }
