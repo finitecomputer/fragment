@@ -2315,6 +2315,16 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.skip(label, "it needs the stub's scripted runtime");
     }
 
+    // its owner's own tools reach the agent too: `fragment acp`, as an ACP
+    // client (T3 Code, Zed) runs it, in a chat of its own
+    if scripted {
+        super::acp::checks(s, api, &owner, &id, &agent_name, &identity, wake)?;
+    } else {
+        for label in super::acp::CHECKS {
+            s.skip(label, "it needs the stub's scripted runtime");
+        }
+    }
+
     // a placeholder names its agent, not whoever sends it: the second
     // agent's, sent by the lead, is the second's (a person's agents are not
     // fenced: decision 44); removed from the computer, its tags are refused

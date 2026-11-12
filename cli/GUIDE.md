@@ -1100,6 +1100,37 @@ fragment schedule list juniper--k3x9            # each one's id, when in words, 
 fragment schedule pause|resume|rm juniper--k3x9 <id>
 ```
 
+## Your agent in an ACP client
+
+`fragment acp <agent>` is an ACP agent over stdio (the Agent Client
+Protocol: T3 Code, Zed, any ACP client), so you talk to your agent from
+the tool you already work in. In T3 Code: Settings, Providers, Add
+provider, Show more, Local ACP command; the executable is `fragment`, its
+arguments `acp` and the agent (`juniper`, or `juniper--k3x9`).
+
+- A session is a chat with the agent, made as the shell's New chat makes
+  one (`juniper-chat-2`). It is a chat like any other: in your shell's
+  list, on your phone, in search and in your export.
+- A prompt is a message to the agent there. Its reply streams as it is
+  written. Each tool call shows as it is asked for and as it ends, with
+  what the chat keeps of it: its name, its arguments' first words, an
+  exit code, never its output. A turn that fails fails the prompt with
+  the turn's reason, and the client's Stop stops the turn.
+- The agent works on its own computer, not in the folder the client has
+  open. It cannot read or change your checkout, and a client's
+  checkpoints do not rewind it. A prompt is words (a linked file is
+  named, never sent, and a picture is refused): send a file in the chat.
+- A question the agent asks in words is answered by your next prompt,
+  wherever it was asked (here, or in the chat while the client was
+  idle). A
+  card (its choices, a sign-in) is said in words with a link to the
+  chat, where you answer it. It is never handed to the client as a
+  permission request, which a client may approve by itself.
+- Every request is signed with this machine's key (`fragment login`
+  first), and the client is asked for nothing. One server serves one
+  agent: add one for each. Its stdout is the protocol's alone, and a
+  failure to start goes to stderr.
+
 ## Scheduled records
 
 Any fragment's editors can schedule a record on one of its channels at
@@ -1215,6 +1246,7 @@ fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S] | --return-to CHAT] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
+fragment acp <agent>                     # your agent as an ACP agent, over stdio (T3 Code, Zed): a session is a chat with it
 fragment search "<query>" --in <name>[,<name>…] | --all  [--limit N] [--mode hybrid|lexical|semantic] [--field K=V]… [--after T] [--before T]
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
@@ -1250,8 +1282,8 @@ Global flags: `--host <url>` (or `FRAGMENT_HOST`; else the host
 `fragment login` or `fragment host <url>` saved), `--json`, `-v`. With `--json` (or
 `FRAGMENT_OUTPUT=json`), stdout is exactly one line: `{"ok":true,
 "data":…}` or `{"ok":false,"error":{"code","message","hint","id"}}`
-(`id`: a failed `fragment call`'s); `fragment mcp`'s stdout is MCP's
-alone, and a failure to start it goes to stderr. The codes are stable, and a host's
+(`id`: a failed `fragment call`'s); `fragment mcp`'s and `fragment acp`'s
+stdout is their protocol's alone, and a failure to start one goes to stderr. The codes are stable, and a host's
 refusal gets its code from the error code in its answer, never from
 its wording:
 

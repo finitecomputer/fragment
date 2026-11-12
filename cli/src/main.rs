@@ -1,3 +1,4 @@
+mod acp;
 mod api;
 mod apps;
 mod ask;
@@ -5,6 +6,7 @@ mod auth;
 mod blobs;
 mod codestorage;
 mod home;
+mod jsonrpc;
 mod mcp;
 mod notice;
 mod operator;
@@ -361,6 +363,14 @@ enum Cmd {
         /// without it, its queries alone
         #[arg(long)]
         write: bool,
+    },
+    /// Serve one of your agents to an ACP client (T3 Code, Zed) over stdio:
+    /// each session is a chat with it, each prompt a message there, and its
+    /// turn streams back. In T3 Code: Settings, Providers, Add provider,
+    /// Local ACP command: `fragment`, with the arguments `acp` and the agent
+    Acp {
+        /// The agent: its label or fragment (`fred`, `fred--k3x9`), its name, or its identity
+        agent: String,
     },
     /// Post a record to a channel fragment.json declares with a post role;
     /// prints the record (a retry with the same --id appends nothing)
@@ -1358,9 +1368,9 @@ fn main() {
     let mut json_mode = json_env_flag();
     let result = match Cli::try_parse() {
         Ok(cli) => {
-            // an MCP server's stdout is the protocol's alone: its failure to
-            // start goes to stderr, whatever FRAGMENT_OUTPUT says
-            json_mode &= !matches!(cli.cmd, Cmd::Mcp { .. });
+            // an MCP or ACP server's stdout is the protocol's alone: its
+            // failure to start goes to stderr, whatever FRAGMENT_OUTPUT says
+            json_mode &= !matches!(cli.cmd, Cmd::Mcp { .. } | Cmd::Acp { .. });
             run(cli)
         }
         // help and version (exit 0), and clap's own usage text for a person (exit 2)
@@ -2735,6 +2745,10 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Mcp { name, write } => {
             // stdout carries the protocol's messages and nothing else
             mcp::serve(&c, &name, write, std::io::stdin().lock(), std::io::stdout().lock())?;
+        }
+        Cmd::Acp { agent } => {
+            // stdout carries the protocol's messages and nothing else
+            acp::serve(&c, &agent, std::io::stdin().lock(), std::io::stdout())?;
         }
         Cmd::Post { name, channel, body, id } => {
             let body: Value = serde_json::from_str(&body).map_err(|e| usage(format!("--body must be JSON: {e}")))?;
