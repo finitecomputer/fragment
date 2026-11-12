@@ -21,7 +21,7 @@ const SECRET_BYTES_MIN = 32;
 // an exec frame's payload, at most (the engine's)
 const FRAME_PAYLOAD_MAX = 1 << 20;
 // an intercepted request's body, at most (the node's, the engine's)
-const EGRESS_BODY_MAX = 32 << 20;
+export const EGRESS_BODY_MAX = 32 << 20;
 // a node's health answers within this, or it is down
 const HEALTH_MS = 6000;
 // any other call but a start, a `wait`, an exec's stream and a port's
@@ -138,14 +138,47 @@ function signed(node, method, path, bodyHash) {
   return authHeader(node, t, callString(method, path, t, bodyHash));
 }
 
-// Whether `header` was signed inside the window over the string
-// `canonicalOf(t)` makes.
-async function verified(node, header, canonicalOf) {
+// A signature header's time and signature, when it is well formed and its
+// time inside the window; else null. Checked before anything else is read.
+function inWindow(header) {
   const m = /^t=(\d{1,12}),sig=([0-9a-f]{64})$/.exec(header || "");
-  if (!m) return false;
+  if (!m) return null;
   const t = Number(m[1]);
-  if (Math.abs(Math.floor(Date.now() / 1000) - t) > WINDOW_S) return false;
-  return crypto.subtle.verify("HMAC", await node.key, unhex(m[2]), enc.encode(canonicalOf(t)));
+  return Math.abs(Math.floor(Date.now() / 1000) - t) > WINDOW_S ? null : { t, sig: m[2] };
+}
+
+// Whether `signed` (`inWindow`'s) is the node's over the string
+// `canonicalOf(t)` makes.
+async function verified(node, signed, canonicalOf) {
+  return crypto.subtle.verify("HMAC", await node.key, unhex(signed.sig), enc.encode(canonicalOf(signed.t)));
+}
+
+// A request's body, read to its end, or null once it passes `max` bytes:
+// what it holds is never more than that and one chunk, and the rest is
+// cancelled unread (a body with no declared length streams on).
+async function bounded(request, max) {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  // bounded by `max`: each pass reads one chunk, and past `max` it stops
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) {
+    body.set(c, at);
+    at += c.byteLength;
+  }
+  return body;
 }
 
 // One exec frame: the engine's 8-byte header (a stream byte, three zeroes,
@@ -242,6 +275,9 @@ class NodeProcess {
     };
     ws.addEventListener("close", closed);
     ws.addEventListener("error", closed);
+    // the node takes an exec's spec as its first message, before any frame
+    // (its stdin, a kill): sent once its answers are listened for
+    ws.send(JSON.stringify(spec));
     if (spec.stdin) {
       const write = (chunk) => {
         if (gone) throw new Error("exec: the process has exited");
@@ -601,9 +637,7 @@ export class NodeContainer {
     };
     if (opts.cwd) spec.cwd = opts.cwd;
     if (opts.user) spec.user = opts.user;
-    const process = new NodeProcess(ws, spec, opts);
-    ws.send(JSON.stringify(spec));
-    return process;
+    return new NodeProcess(ws, spec, opts);
   }
 
   // A guest port, HTTP and WebSocket alike: its body streams, signed as
@@ -644,13 +678,17 @@ export async function nodeEgress(request, node, nodeContainer) {
   };
   if (!node || !nodeContainer) return refuse(404, "this computer is not on a node");
   if (container !== nodeContainer.name) return refuse(403, "another computer's intercept");
+  // the route is public: what reaches its body first carries a signature in
+  // its window, and no more of it is read than an intercept may hold
+  const signed = inWindow(h.get(AUTH));
+  if (!signed) return refuse(401, "no signature in its window");
   const declared = Number(h.get("content-length") || 0);
-  if (declared > EGRESS_BODY_MAX) return refuse(413, `a body of at most ${EGRESS_BODY_MAX} bytes`);
-  const body = await request.arrayBuffer();
-  if (body.byteLength > EGRESS_BODY_MAX) return refuse(413, `a body of at most ${EGRESS_BODY_MAX} bytes`);
+  if (!(declared <= EGRESS_BODY_MAX)) return refuse(413, `a body of at most ${EGRESS_BODY_MAX} bytes`);
+  const body = await bounded(request, EGRESS_BODY_MAX);
+  if (!body) return refuse(413, `a body of at most ${EGRESS_BODY_MAX} bytes`);
   const e = { method: request.method, container, intercept, scheme, host, path };
   const bodyHash = await sha256Hex(body);
-  if (!(await verified(node, h.get(AUTH), (t) => egressString(e, t, bodyHash)))) return refuse(401, "a bad signature");
+  if (!(await verified(node, signed, (t) => egressString(e, t, bodyHash)))) return refuse(401, "a bad signature");
   if (!/^\d{1,3}$/.test(intercept)) return refuse(400, "an intercept's index");
   const index = Number(intercept);
   const fetcher = nodeContainer.binding(index);
