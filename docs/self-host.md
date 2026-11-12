@@ -288,8 +288,15 @@ New in this phase:
     (`CELLD_MAX_STATELESS_ISOLATES`, one a core by default), where local
     workerd runs one. What one isolate's memory holds (the router's
     ledger gate, which the levers forget and read) is then another
-    isolate's on the next request, as on Cloudflare. The e2e runs celld
-    with one, as its checks of the gate assume.
+    isolate's on the next request, as on Cloudflare. On celld the e2e
+    keeps what callers see (the next call refused, 402) and skips what a
+    lever reads of the gate (`Suite::one_isolate`).
+54. **A slides presenter's Stop is lost on celld** (the `slides` section,
+    every run): the page sets its presence and posts `{live: false}` to its
+    channel back to back, and the record never lands. Not explained yet;
+    celld's docs say it starts a socket's message handlers in arrival
+    order without waiting for the one before, where workerd's input gate
+    holds the next event while one awaits storage.
 
 ## What a self-hosted org won't have, and its setup steps
 
