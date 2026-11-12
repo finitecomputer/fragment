@@ -417,10 +417,11 @@ pub struct Fleet {
     pub operator_key_values: Vec<(String, String)>,
     pub connection_secret_values: Vec<(String, String)>,
     pub swap_upstream: Option<String>,
-    /// The project's bindings its local config leaves out (`send_email`),
-    /// as a deployment on a runtime without that service runs: a
-    /// self-hosted one (docs/self-host.md). The e2e checks the cell
-    /// without them on wrangler, where every one is otherwise bound.
+    /// The project's bindings its local config leaves out (`send_email`,
+    /// `browser`, `images`, `containers`), as a deployment on a runtime
+    /// without that service runs: a self-hosted one (docs/self-host.md).
+    /// The e2e checks the cell without them on wrangler, where every one
+    /// is otherwise bound.
     pub unbound: &'static [&'static str],
 }
 
