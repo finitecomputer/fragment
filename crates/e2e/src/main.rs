@@ -19,6 +19,12 @@
 //! a branch deployment on real vendors: each section says what it needs
 //! (needs.rs), and one that needs what a preview lacks (a fake, the node,
 //! the whole deployment, local Docker) is a skip that says why.
+//!
+//! `FRAGMENT_E2E_RUNTIME=celld` runs the local node on `celld dev` instead
+//! (`CELLD_BIN`; docs/self-host.md, seam 1), on the same fakes: a section
+//! that needs the runtime's own containers is a skip (needs.rs), and so is
+//! a check of what celld has no part in (a card's shot: no Browser
+//! Rendering), each saying why.
 
 mod api;
 mod browser;
@@ -404,6 +410,8 @@ pub struct Suite {
     chrome: browser::Shared,
     /// The local node's tools (`None`: a hosted run, which starts no node).
     tools: Option<devstack::Tools>,
+    /// celld's, when the local node runs on it (`FRAGMENT_E2E_RUNTIME=celld`).
+    celld: Option<devstack::celld::CelldTools>,
     node: Option<devstack::Node>,
     /// The node's port, held for the whole run: each of the node's lives
     /// listens on it (`devstack::NodeOptions::listener`), so no other socket
@@ -491,6 +499,39 @@ impl Suite {
     /// vendor or the deployment's own image answers.
     pub fn hosted(&self) -> bool {
         self.hosted_rules
+    }
+
+    /// Whether the local node runs on celld (`FRAGMENT_E2E_RUNTIME=celld`).
+    pub fn on_celld(&self) -> bool {
+        self.celld.is_some()
+    }
+
+    /// Whether the node runs its Worker and every object in one isolate
+    /// (local workerd), so a lever that reads or clears one isolate's
+    /// memory (the ledger gate's) reaches the caller's. celld runs each
+    /// object in an isolate of its own, as Cloudflare may: there a check
+    /// keeps what callers see, not what a lever reads of the gate.
+    pub fn one_isolate(&self) -> bool {
+        !self.on_celld()
+    }
+
+    /// Whether a job's sleep outlives a crash of the node: celld's
+    /// Workflows keep it (each instance a cell, its sleep an alarm); local
+    /// workerd's hold it as a timer in the process.
+    pub fn durable_workflows(&self) -> bool {
+        self.on_celld()
+    }
+
+    /// Whether the node shoots preview cards: celld has no Browser
+    /// Rendering, and the cell skips every shot there (`card.skipped`,
+    /// `no_browser`, which the unbound section checks).
+    pub fn shoots_cards(&self) -> bool {
+        !self.on_celld()
+    }
+
+    /// A check of a card's shot on a node that takes none: a skip.
+    pub fn skip_card(&mut self, label: &str) {
+        self.skip(label, "celld has no Browser Rendering, so the node shoots no cards (docs/self-host.md)");
     }
 
     /// Whether the node's vendors are the fakes: a local run, or its
@@ -715,6 +756,7 @@ impl Suite {
         started
     }
 
+
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
         self.shape = shape;
         let started = self.start(false);
@@ -801,13 +843,18 @@ impl Suite {
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
             ),
-            // the move, its cutoff far off: the move lane moves its object's clock past it
-            migrations: Some((fragment_core::npub::encode(self.mover.pubkey_hex()), MIGRATIONS_CUTOFF_MS.to_string())),
+            // the move, its cutoff far off: the move lane moves its object's
+            // clock past it. Off on celld, as on any self-hosted deployment
+            // (needs.rs `Need::Move`)
+            migrations: (!self.on_celld()).then(|| (fragment_core::npub::encode(self.mover.pubkey_hex()), MIGRATIONS_CUTOFF_MS.to_string())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
-            computer_image: (self.shape != Shape::Unbound).then(|| "stub".into()),
+            // celld runs no computers: they need the runtime's egress
+            // intercepts and snapshots (docs/self-host.md, seam 2); the unbound
+            // section's node has no containers
+            computer_image: (!self.on_celld() && self.shape != Shape::Unbound).then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
             // a run must not depend on public DNS (devstack::Fleet)
@@ -826,14 +873,16 @@ impl Suite {
             operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
+            // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
+            connectors: self.on_celld().then(devstack::celld::connectors),
+            // wrangler's local store, or the cell's stand-ins (`secrets_of`;
+            // celld has no store: seam 12)
             secrets: self.secrets,
             unbound: match self.shape {
                 Shape::Unbound => &["send_email", "browser", "images", "containers"],
                 _ => &[],
             },
         };
-        // its secrets go to wrangler's local store in the node's own state
-        // (seeded once a state, bound by name as a deploy binds them)
         fleet.configure(tools, &self.project)?;
         let opts = devstack::NodeOptions {
             project: self.project.clone(),
@@ -844,7 +893,10 @@ impl Suite {
             // a crash kills wrangler and workerd as one
             own_group: true,
         };
-        let (node, _) = devstack::Node::start(tools, &opts)?;
+        let (node, _) = match &self.celld {
+            None => devstack::Node::start(tools, &opts)?,
+            Some(celld) => devstack::celld::start(celld, &opts)?,
+        };
         self.node = Some(node);
         // Stripe's events go to the platform's host, as its endpoint would
         self.stripe.node().set_endpoint(&format!("{}/api/stripe/webhook", fleet.platform_url), STRIPE_WEBHOOK);
@@ -885,8 +937,15 @@ impl Suite {
     /// Reloads the node's Worker as a deploy does: a new build of its shim
     /// (a comment more), which `wrangler dev` runs as a new version, every
     /// Durable Object starting again; back once wrangler says it is ready.
+    /// On celld (run with `--no-watch`), a graceful restart of the node:
+    /// every object starts again there too.
     pub fn reload(&mut self) -> Result<()> {
         anyhow::ensure!(!self.hosted_rules, "the hosted lane reloads no node: a section that does declares Need::Node");
+        if self.on_celld() {
+            self.stop()?;
+            self.start(false)?;
+            return Ok(());
+        }
         let log = self.node.as_ref().context("a running node")?.log.clone();
         let ready = || std::fs::read_to_string(&log).map(|t| t.matches("Local server updated and ready").count()).unwrap_or(0);
         let before = ready();
@@ -1194,12 +1253,14 @@ fn make_scratch(dir: &Path) -> Result<()> {
 /// The node's secrets by `FRAGMENT_E2E_SECRETS`: unset or `store`,
 /// wrangler's local Secrets Store, as a deploy binds the account's; `vars`,
 /// the cell's stand-ins for its bindings (cell/secrets.mjs), as a runtime
-/// with no store reads them (docs/self-host.md).
-fn secrets_of(var: Option<&str>) -> Result<devstack::Secrets> {
-    match var {
-        None | Some("store") => Ok(devstack::Secrets::Store),
-        Some("vars") => Ok(devstack::Secrets::Shim),
-        Some(other) => bail!("FRAGMENT_E2E_SECRETS is store or vars, not {other:?}"),
+/// with no store reads them (docs/self-host.md). celld has no store: its
+/// are the stand-ins.
+fn secrets_of(celld: bool, var: Option<&str>) -> Result<devstack::Secrets> {
+    match (celld, var) {
+        (false, None | Some("store")) => Ok(devstack::Secrets::Store),
+        (true, Some("store")) => bail!("FRAGMENT_E2E_SECRETS=store is wrangler's: celld has no Secrets Store"),
+        (_, Some("vars")) | (true, None) => Ok(devstack::Secrets::Shim),
+        (_, Some(other)) => bail!("FRAGMENT_E2E_SECRETS is store or vars, not {other:?}"),
     }
 }
 
@@ -1244,9 +1305,20 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         lanes::hermes::stage_images(&project)?;
     }
     let test_secret = devstack::random_hex(32);
+    // the runtime: wrangler dev's workerd, or celld (docs/self-host.md, seam 1)
+    let celld = match std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() {
+        Err(_) | Ok("wrangler") => None,
+        Ok("celld") if rehearse.is_some() => bail!("a rehearsal keeps a preview's rules on wrangler dev: drop FRAGMENT_E2E_RUNTIME=celld"),
+        Ok("celld") => Some(devstack::celld::CelldTools::locate()?),
+        Ok(other) => bail!("FRAGMENT_E2E_RUNTIME is wrangler or celld, not {other}"),
+    };
+    if let Some(c) = &celld {
+        println!("runtime: celld dev ({})", c.celld.display());
+    }
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let (rung, shared) = match rehearse {
+        None if celld.is_some() => (needs::Rung::Celld, api::Run::new(test_secret.clone(), 0)),
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             // its computers answer through the scripted model: no real agent
@@ -1254,6 +1326,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };
+    let secrets = secrets_of(celld.is_some(), std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref())?;
     let hidden = rehearse.is_some();
     let openrouter = fragment_fakes::openrouter::OpenRouter::start()?;
     let listener = devstack::hold_port(0)?;
@@ -1278,6 +1351,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         cron: None,
         chrome: browser::Shared::new(&scratch),
         tools: Some(tools),
+        celld,
         node: None,
         port: listener.local_addr()?.port(),
         listener: Some(listener),
@@ -1301,7 +1375,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         scratch,
         project,
         shape: Shape::Plain,
-        secrets: secrets_of(std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref())?,
+        secrets,
         containers_removed: false,
     };
     if let Some(k) = s.shard {
@@ -1355,7 +1429,7 @@ fn finish(s: &mut Suite) -> Result<()> {
     let t0 = Instant::now();
     s.chrome.close();
     println!("      (Chrome closed in {:.1?})", t0.elapsed());
-    let skipped = match s.hosted() {
+    let skipped = match s.hosted() || s.on_celld() {
         true => "skipped (each says why)",
         false => "skipped (the hosted lane's)",
     };

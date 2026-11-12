@@ -4,7 +4,7 @@
 //!                    --dev is `dev`'s build (cell/wrangler.jsonc's rebuild):
 //!                    no fat LTO and no wasm-opt, so a change to a file of the
 //!                    release rebuilds in seconds; deploys and the e2e refuse it
-//!   dev [--clean] [--real-agent [--models <config>]]
+//!   dev [--clean] [--real-agent [--models <config>]] [--runtime wrangler|celld]
 //!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <name>.fragment.localhost:8790), the
@@ -16,6 +16,10 @@
 //!                    FRAGMENT_MODELS_FILE and FRAGMENT_MODEL_KEY_FILE put
 //!                    the text tiers on a deployment's own models, without
 //!                    the image (docs/self-host.md, seam 3)
+//!                    --runtime celld runs it on `celld dev` (CELLD_BIN;
+//!                    docs/self-host.md, seam 1): no computers, no cards,
+//!                    the secrets in .dev.vars behind the cell's stand-ins
+//!                    for the store's bindings
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -202,32 +206,46 @@ fn build_cmd(args: &[String]) -> Result<()> {
 }
 
 /// What `cargo xtask dev` is asked for: `--clean`, `--real-agent`, and
-/// `--models <config>` with it.
+/// `--models <config>` with it; `--runtime celld` (docs/self-host.md, seam 1).
 struct DevArgs {
     clean: bool,
     real_agent: bool,
     models: Option<std::path::PathBuf>,
+    celld: bool,
 }
 
 fn dev_args(args: &[String]) -> Result<DevArgs> {
-    let mut out = DevArgs { clean: false, real_agent: false, models: None };
+    let mut out = DevArgs { clean: false, real_agent: false, models: None, celld: false };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--clean" => out.clean = true,
             "--real-agent" => out.real_agent = true,
             "--models" => out.models = Some(it.next().context("--models names a deployment's config")?.into()),
-            other => bail!("dev takes --clean, --real-agent and --models <config>, not {other:?}"),
+            "--runtime" => {
+                out.celld = match it.next().map(String::as_str) {
+                    Some("wrangler") => false,
+                    Some("celld") => true,
+                    other => bail!("--runtime is wrangler or celld, not {}", other.unwrap_or("nothing")),
+                }
+            }
+            other => bail!("dev takes --clean, --real-agent, --models <config> and --runtime <wrangler|celld>, not {other:?}"),
         }
     }
     if out.models.is_some() && !out.real_agent {
         bail!("--models picks --real-agent's models: name --real-agent too");
+    }
+    if out.celld && out.real_agent {
+        bail!("--real-agent runs computers on our Hermes image, and celld runs no computers here (docs/self-host.md, seam 2)");
     }
     Ok(out)
 }
 
 fn dev(args: &[String]) -> Result<()> {
     let args = dev_args(args)?;
+    // the runtime: wrangler's local workerd, or celld (docs/self-host.md,
+    // seam 1), located first: a missing CELLD_BIN stops the run at once
+    let celld = args.celld.then(devstack::celld::CelldTools::locate).transpose()?;
     // its models and key are read before anything builds
     let real = args.real_agent.then(|| dev_agent::RealAgent::read(args.models.as_deref())).transpose()?;
     // a self-hosted stack's own models (FRAGMENT_MODELS_FILE; docs/self-host.md, seam 3)
@@ -270,14 +288,7 @@ fn dev(args: &[String]) -> Result<()> {
     let (workos, workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
         _ => {
-            let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
-            // its users kept as the node keeps its people (who sign in by
-            // subject), and every subject the node signs someone in by taken
-            // as it is (a node from before the file, or one whose file
-            // went): a fake made new each start would give the first email
-            // to sign in the subject of whoever had it before
-            fake.keep_users_in(&workos_users)?;
-            fake.adopt(&devstack::signed_in_subjects(&devstack::cell_dir(), &format!("workos:{DEV_WORKOS_CLIENT}"))?)?;
+            let fake = dev_workos_fake(&devstack::cell_dir(), &workos_users, DEV_WORKOS_PORT)?;
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
@@ -341,7 +352,9 @@ fn dev(args: &[String]) -> Result<()> {
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
         test_secret: None,
-        computer_image: Some(if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
+        // celld runs no computers here: they need the runtime's egress
+        // intercepts and snapshots (docs/self-host.md, seam 2)
+        computer_image: celld.is_none().then(|| if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
         images: match &real {
             Some(_) => vec![(dev_agent::RealAgent::IMAGE.into(), devstack::hermes_image())],
             None => vec![],
@@ -355,10 +368,16 @@ fn dev(args: &[String]) -> Result<()> {
         operator_key_values: DEV_OPERATOR_KEYS.iter().map(|(name, _, key)| (name.to_string(), key.to_string())).collect(),
         connection_secret_values: workos_fake.as_ref().map(|_| vec![(DEV_CONNECTION.into(), "mock-connection-secret".into())]).unwrap_or_default(),
         swap_upstream: None,
-        secrets: devstack::Secrets::Store,
+        // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
+        connectors: celld.as_ref().map(|_| devstack::celld::connectors()),
+        // wrangler's local store under cell/.wrangler/state; celld has none,
+        // and the cell's stand-ins read .dev.vars (seam 12)
+        secrets: match celld {
+            None => devstack::Secrets::Store,
+            Some(_) => devstack::Secrets::Shim,
+        },
         unbound: &[],
     };
-    // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
@@ -367,8 +386,15 @@ fn dev(args: &[String]) -> Result<()> {
         // in the terminal's group: Ctrl-C stops it with xtask
         own_group: false,
     };
-    let (node, took) = devstack::Node::start(&tools, &opts)?;
+    let (node, took) = match &celld {
+        None => devstack::Node::start(&tools, &opts)?,
+        Some(celld) => devstack::celld::start(celld, &opts)?,
+    };
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
+    match &celld {
+        None => println!("  runtime:      wrangler dev (workerd)"),
+        Some(c) => println!("  runtime:      celld dev ({}): no computers, no cards, no icons drawn (docs/self-host.md)", c.celld.display()),
+    }
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
@@ -405,10 +431,30 @@ fn dev(args: &[String]) -> Result<()> {
         }
     })?;
     let status = node.wait()?;
-    println!("wrangler dev exited: {status}");
-    let removed = devstack::containers::remove(&devstack::cell_dir())?;
-    println!("removed {} containers the dev node left", removed.containers);
+    println!("the node exited: {status}");
+    // the runtime's own containers: celld runs none here
+    if celld.is_none() {
+        let removed = devstack::containers::remove(&devstack::cell_dir())?;
+        println!("removed {} containers the dev node left", removed.containers);
+    }
     Ok(())
+}
+
+/// Dev's WorkOS fake on `port`, its users kept in `users_file`, and every
+/// subject `project`'s node signs someone in by taken as it is (a node from
+/// before the file, or one whose file went): a fake made new each start
+/// would give the first email to sign in the subject of whoever had it
+/// before. A celld state's subjects are in that file alone (devstack reads
+/// wrangler's state, not celld's), and both runtimes' stacks share it, so a
+/// celld state that outlived it is refused whichever runtime starts
+/// (`celld::workos_users_kept`): a start on wrangler would otherwise make the
+/// file afresh, for celld to take as its record.
+fn dev_workos_fake(project: &Path, users_file: &Path, port: u16) -> Result<fragment_fakes::workos::WorkOs> {
+    devstack::celld::workos_users_kept(project, users_file)?;
+    let fake = fragment_fakes::workos::WorkOs::start_on(port, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
+    fake.keep_users_in(users_file)?;
+    fake.adopt(&devstack::signed_in_subjects(project, &format!("workos:{DEV_WORKOS_CLIENT}"))?)?;
+    Ok(fake)
 }
 
 /// Dev's provider catalog: its connection (`DEV_CONNECTION`) where its
@@ -531,13 +577,17 @@ const E2E_BIN: &str = "target/release/fragment-e2e";
 /// ahead beside them all so its build finds every layer cached.
 fn build_e2e() -> Result<()> {
     let t0 = std::time::Instant::now();
+    // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers, so
+    // no images (docs/self-host.md, seam 2)
+    let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
     let built = std::thread::scope(|s| {
-        let images = s.spawn(build::images);
+        let built_images = images.then(|| s.spawn(build::images));
         let native = s.spawn(build_native);
         let cell = build::cell();
-        cell.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
+        let built_images = built_images.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
+        cell.and(native.join().expect("the native build does not panic")).and(built_images)
     });
-    println!("built the cell, the CLI, the suite and the images in {:.1?}", t0.elapsed());
+    println!("built the cell, the CLI, the suite{} in {:.1?}", if images { " and the images" } else { "" }, t0.elapsed());
     built
 }
 
@@ -698,6 +748,36 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: a celld state that outlived dev's WorkOS users file is
+    /// refused whichever runtime starts next, so a start on wrangler never
+    /// makes the shared file afresh for celld to take as its record (a
+    /// review of #1253: a known subject handed to another email). Method:
+    /// a project with celld's state and the fake's file; the file lost;
+    /// starts as each runtime would; then `--clean`'s clearing. Replay: the
+    /// refusal again, and the file still not made.
+    #[test]
+    fn a_lost_users_file_beside_celld_state_is_refused_on_either_runtime() {
+        let dir = std::env::temp_dir().join(format!("dev-workos-{}", super::devstack::random_hex(6)));
+        let (project, users) = (dir.join("cell"), dir.join("workos.json"));
+        std::fs::create_dir_all(&project).unwrap();
+        // a first celld stack: its fake's file, then its node's state
+        let alice = super::dev_workos_fake(&project, &users, 0).expect("a first start").user("alice@example.com").id;
+        std::fs::create_dir_all(super::devstack::celld::state_dir(&project)).unwrap();
+        assert!(users.exists(), "the fake kept its users");
+        assert!(super::dev_workos_fake(&project, &users, 0).is_ok_and(|f| f.user("alice@example.com").id == alice), "a restart with both");
+        std::fs::remove_file(&users).unwrap();
+        // a start on wrangler, then celld, then wrangler again: one path
+        for start in ["wrangler", "celld", "wrangler"] {
+            let refused = super::dev_workos_fake(&project, &users, 0).map(|f| f.user("bob@example.com").id);
+            assert!(refused.as_ref().is_err_and(|e| e.to_string().contains("--clean")), "{start}: {refused:?} (alice was {alice})");
+            assert!(!users.exists(), "a refused start makes no users file for the next to take");
+        }
+        // --clean clears both runtimes' state and the file: a fresh start
+        super::devstack::clear_state(&project).unwrap();
+        assert!(super::dev_workos_fake(&project, &users, 0).is_ok(), "after --clean, a fresh start");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// `cargo xtask dev`'s flags: each alone and together; an unknown one,
     /// `--models` without its config, and `--models` without `--real-agent`
     /// are refused before anything builds.
