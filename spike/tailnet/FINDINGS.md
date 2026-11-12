@@ -109,22 +109,25 @@ no pinned CA):
   first load on a probe, with a retry. Cause not pinned (no timestamps in
   the phone's tsnet log).
 
-### Identity: WhoIs works; `serve --tcp` adds no identity headers
+### Identity: hosted WhoIs names the embedded node's person
 
-`ts_user` in the page results was empty because the origin did no lookup.
-That field echoes `Tailscale-User-Login`, which `tailscale serve` adds only in
-HTTP proxy mode, not with `--tcp … --proxy-protocol 2`.
-
-The lookup itself works on the hosted box. LocalAPI WhoIs of the PROXY-v2
-address names the node and the person:
-- the phone, the simulator and the Mac each map to their node, owned by the
-  same untagged user;
+Sign-in is OIDC everywhere, with tsidp as the tailnet default. The door
+(#1258) is an OIDC relying party. tsidp does the WhoIs on the browser's
+connection, so for sign-in from inside the app, tsidp must resolve the app's
+**embedded tsnet node** to a person. Hosted WhoIs does:
+- the phone's and the simulator's tsnet nodes (logged in interactively)
+  resolve to their owner, untagged, as does the Mac;
 - an address that isn't a peer gives "peer not found".
 
-So the identity door does WhoIs itself (LocalAPI on tailscaled's socket),
-keyed by the PROXY-v2 address. The origin now does the same
-(`-whois-socket`). Live per request through `serve --tcp 8443
---proxy-protocol 2`: the Mac's request came back with its node and its owner.
+Shown with LocalAPI WhoIs on the box, and per request by a test origin
+(`-whois-socket`, behind `serve --tcp 8443 --proxy-protocol 2`). A node
+logged in with a tagged auth key would resolve to the tag, which tsidp
+refuses, so the app must use interactive login.
+
+`ts_user` was empty in the main runs because that origin only echoed
+`Tailscale-User-Login`. `serve --tcp` passthrough drops the
+`Tailscale-User-*` headers, which is fine: nothing in our design relies on
+them.
 
 ### Spike-app trap (fixed): a partial bundled config decoded as nothing
 
@@ -290,10 +293,10 @@ through tsnet and through the box's dialer) is measured above.
 - **iOS socket reclamation (TN2277):** tsnet's SOCKS server lives on one
   loopback listener. If it dies, "SOCKS5 server exited", and `Loopback()`
   keeps returning the dead address. Recovery = close and rebuild the node.
-- **Identity:** WhoIs on the box names the app's node and its owner
-  (`tsspike-sim-hs`, user `spike`, OS iOS, no tags). An app logged in
-  interactively is a person's node. One logged in with a tagged auth key is
-  not (and tsidp refuses tagged devices).
+- **Identity:** WhoIs names the app's embedded node and its owner, untagged:
+  on Headscale (`tsspike-sim-hs`, user `spike`) and on hosted Tailscale (the
+  phone and the simulator). That's what tsidp needs; see "Identity" above.
+  Use interactive login: a tagged auth key gives a tag, which tsidp refuses.
 
 ## 5/6. Fragment's behaviours over this path
 
@@ -327,15 +330,21 @@ assumes one site: `__Host-` cookies, Origin checks on POST, Sec-Fetch-Site.
   - impose no idle timeout under the cell's own.
 
   With root (TUN), the socket peer is the 100.x address directly.
-- **Identity door:** one `WORKOS_API_URL` serves both the browser's authorize
-  and logout redirects and the cell's server-side code exchange. So it needs
-  one name that resolves:
-  - for clients: on the tailnet, through the same proxy the WebView uses. A
-    name under the platform's wildcard works for A, and for B when it has a
-    record/mapping like any fragment;
-  - on the box: to loopback, since a rootless box cannot reach its own 100.x.
-
-  The door's WhoIs takes the PROXY-v2 address.
+- **Identity door (#1258, an OIDC relying party in front of tsidp):**
+  - The cell's one `WORKOS_API_URL` serves both the browser's redirects
+    (authorize, logout) and the cell's server-side exchange. So the door's
+    URL must resolve for clients on the tailnet, through the same proxy the
+    WebView uses (a name under the platform's wildcard works), and on the box.
+  - tsidp is its own tailnet node. Its name is an exact MagicDNS name, which
+    **does** resolve through tsnet's dialer, unlike subdomains. Its own
+    `tailscale cert` is publicly trusted, so the app needs no ATS exception
+    for it.
+  - The relying party's back-channel calls to tsidp (token, JWKS) go to a
+    100.x address. A **rootless box cannot route to tailnet addresses**
+    (measured: direct connects time out; the route goes out the LAN
+    gateway). Those calls go through the box's tailscaled proxy, or tsidp
+    runs on the box itself, or the box runs tailscaled with TUN (root).
+  - Not tested: a real tsidp sign-in through the embedded node.
 - **Cookie domains:** keep everything host-only (no `Domain=`). Fragments
   and every other service on the tailnet or org domain are same-site, so
   SameSite is no boundary there. Origin checks stay mandatory.
@@ -345,5 +354,4 @@ assumes one site: `__Host-` cookies, Origin checks on POST, Sec-Fetch-Site.
 
 ## Gaps
 
-See the report: the real tailnet (box login), a Let's Encrypt cert, the
-system Tailscale on the Mac, the phone, battery, and the dev stack pass.
+- No real tsidp sign-in through the embedded node (WhoIs only).
