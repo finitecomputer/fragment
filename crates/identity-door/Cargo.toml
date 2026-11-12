@@ -5,8 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "The identity door: a self-hosted box's sign-in behind the WorkOS endpoints the cell already calls, an OpenID Connect relying party of the provider its config names (tsidp on a tailnet, an org's own IdP on an intranet; docs/self-host.md, seam 4)."
 
-# Every crate here is already in the workspace's lock (beneath reqwest and
-# the fakes): the door adds no supply chain of its own. hyper serves;
+# Every crate named here was already in the workspace's lock (beneath
+# reqwest and the fakes); hyper's server half brings one more beneath it,
+# httpdate. hyper serves;
 # reqwest (rustls) asks the provider; ring, rustls's own crypto, checks the
 # id_token's signature. Nothing here is hand-rolled HTTP or crypto. (The
 # `openidconnect` crate would add a dozen crates to the lock, its own RSA
