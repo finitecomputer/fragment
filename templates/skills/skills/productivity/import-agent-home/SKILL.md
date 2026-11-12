@@ -133,7 +133,7 @@ or the move is paused for Finite's team. Run this as one command, then
 write the stage in `progress.md`:
 
 ```sh
-stage="<the stage>" && mkdir -p "$HOME/home-import" /tmp/home-import && \
+stage="<the stage>" && mkdir -p "$HOME/home-import" "/tmp/home-import-$stage" && \
 curl -fsS -X POST -H "x-fragment-agent: $FRAGMENT_AS_AGENT" -o "$HOME/home-import/stage.json" "http://api.fragment.internal/api/migrations/stages/$stage/open" && \
 jq '.manifest | {layout, zip_bytes, zip_sha256, left_more, left: (.left // [] | group_by(.why) | map({why: .[0].why, files: length, bytes: (map(.bytes) | add)}))}' "$HOME/home-import/stage.json" && df -h /tmp
 ```
@@ -153,13 +153,15 @@ The layout is the manifest's `layout`, its file
 is what the old platform kept back, by kind (each file is listed in
 `stage.json`). Keep `stage.json`: the report (step 8) uses it.
 
-**Download the zip** into `/tmp`, never into your home: your computer
-saves your home, and the zip is large and only needed once. Run this in
+**Download the zip** into `/tmp/home-import-<the stage>/`, never into your
+home: your computer saves your home, and the zip is large and only needed
+once. That folder is this stage's alone: your owner's other agents share
+this computer's `/tmp`, and may be bringing theirs over at the same time. Run this in
 the background, without `notify`, and wait for it with your `process`
 tool. Each try goes on where the last stopped:
 
 ```sh
-stage="<the stage>" z=/tmp/home-import/home.zip && want="$(jq -r .manifest.zip_bytes "$HOME/home-import/stage.json")" && \
+stage="<the stage>" && z="/tmp/home-import-$stage/home.zip" && want="$(jq -r .manifest.zip_bytes "$HOME/home-import/stage.json")" && \
 for try in 1 2 3 4 5 6 7 8 9 10; do
   have="$(stat -c %s "$z" 2>/dev/null || echo 0)"; [ "$have" -ge "$want" ] && break
   curl -fsS -C - -H "x-fragment-agent: $FRAGMENT_AS_AGENT" -o "$z" "http://api.fragment.internal/api/migrations/stages/$stage/zip" || sleep 10
@@ -168,8 +170,8 @@ echo "bytes: $(stat -c %s "$z" 2>/dev/null || echo 0) of $want"; \
 echo "sha256: $(sha256sum "$z" | cut -d' ' -f1) of $(jq -r .manifest.zip_sha256 "$HOME/home-import/stage.json")"
 ```
 
-Both pairs must match. If they don't, delete `/tmp/home-import/home.zip`
-and download it again, once. Wrong again: end the import as not done,
+Both pairs must match. If they don't, delete
+`/tmp/home-import-<the stage>/home.zip` and download it again, once. Wrong again: end the import as not done,
 why "the zip did not arrive whole". If you are started again and the zip
 is gone (a restart clears `/tmp`), open the stage again and download it
 again: both answer the same until you say `done`.
@@ -221,7 +223,7 @@ their old agent over, why in plain words, and that Finite's team will
 pick it up. Ask them to do nothing.
 
 Below, `<source>` is `~/home-import/home.zip`, the stage's
-`/tmp/home-import/home.zip`, or the path you were given, and `<L>` is
+`/tmp/home-import-<the stage>/home.zip`, or the path you were given, and `<L>` is
 `hermes` or the layout file's path.
 
 ## 1. Survey
@@ -437,7 +439,8 @@ Finish with one message, in plain words:
 Write the full detail to `~/home-import/report.md` too, and mark every
 step done in `progress.md`. In a move, write `report.md` before your
 message, then send `done` ("From a move's stage"), then the message. Then
-delete `~/home-import/home.zip`, `/tmp/home-import/`, `~/home-import/home/`
-and `~/home-import/skills/`: everything is in its place now, and your
+delete `~/home-import/home.zip`, `~/home-import/home/` and
+`~/home-import/skills/`, and in a move your stage's own
+`/tmp/home-import-<the stage>/` (never another folder in `/tmp`): everything is in its place now, and your
 computer saves your whole home each time it sleeps. Keep `report.md`,
 `progress.md` and `stage.json`.
