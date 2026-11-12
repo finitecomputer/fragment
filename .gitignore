@@ -3,6 +3,7 @@ target/
 .DS_Store
 node_modules/
 cell/.celld/
+cell/.celld.secrets.json
 cell/.dev.vars
 cell/build/
 cell/build.lock

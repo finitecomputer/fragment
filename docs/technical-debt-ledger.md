@@ -10,20 +10,19 @@ unfinished design, not debt.
 - **Shortcut:** the platform's mail (invites, a key added, an org's seat,
   an export ready, a trial code) goes through Cloudflare Email Sending's
   binding (`EMAIL`, `cell/src/mail.rs`), or in dev and the e2e to the
-  mail fake (`FRAGMENT_MAIL_URL`). A self-hosted runtime has no Email
-  Sending (celld's deploy refuses `send_email`), and its deployment no
-  fake (docs/self-host.md). With neither, `mail::send` sends nothing, logs one
-  warning per message (`mail.unsent`: "email not sent: this runtime has
-  no mailer, not yet implemented"), and answers no message id, never an
-  error, so the flow around it goes on: an invite still waits for its
-  person's yes; a key is still added. An org's `mailed` and a trial's
-  `sent` say false. Paul, 2026-10-22: not solved in this pass.
-- **Risk:** no one hears of what was meant for them: an invitee learns of
-  an invite only from the sharer, and the share sheet still says it
-  mailed a link.
-- **Delete when:** a self-hosted deployment names a mailer of its own
-  (SMTP, or a company's relay, behind the same `send`), or the share sheet
-  and its kin say plainly that nothing was mailed.
+  mail fake (`FRAGMENT_MAIL_URL`). A self-hosted node has no mailer: celld
+  binds `EMAIL` with workerd's class and every send rejects
+  (`E_NO_MAILER`, "this node has no mailer"), which the cell takes as any
+  failed send (`upstream_failed`). An invite to someone new is refused and
+  not kept; a key's or an export's mail is logged as failed; an org's
+  `mailed` and a trial's send say it was not sent. Paul, 2026-10-22: not
+  solved in this pass.
+- **Risk:** on a self-hosted box, people new to it cannot be invited by
+  mail, and nothing mailed reaches anyone. Whether a box with no mailer
+  should still make invites is a product rule, its own PR.
+- **Delete when:** celld relays mail for its node (SMTP, or a company's
+  relay, behind the same binding: its `SendEmail`'s seam), or that product
+  rule lands.
 
 ## A computer's lifecycle writes its old flags too
 

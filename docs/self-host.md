@@ -15,10 +15,15 @@ supplies other implementations of the same interfaces. The cell never
 asks "am I self-hosted?": it reads what it has from its configuration and
 its bindings. A mode flag is a design bug.
 
-The e2e checks the cell without a service on wrangler too: its `unbound`
-section restarts the node with those bindings left out of its config
-(`devstack::Fleet::unbound`), so master's own runs keep each degradation
-working.
+**The runtime looks like Cloudflare** (Paul, 2026-11-12): celld presents
+Cloudflare's binding surface, so the production cell carries no code of a
+self-hosted runtime's. Each binding has workerd's class (`R2Bucket`,
+`Fetcher`, `SendEmail`, …, as workers-rs checks them); the Secrets Store's
+secrets are read from the node's secrets backend; and the services a node
+does not run are bound with workerd's classes, every call rejecting,
+saying so. A gap is closed in celld (github.com/futurepaul/celld), never
+in the cell: a self-host change to master does not touch `cell/`,
+`crates/core` or `crates/proto`.
 
 ## The seams
 
@@ -30,19 +35,22 @@ working.
 | 4, 9 | Sign-in by OpenID Connect; LAN mode | not yet; locally, dev's WorkOS fake |
 | 5 | Files: macrofiche, the code-store contract | not yet: the code.storage fake |
 | 6 | Blobs | nothing to port: celld's R2, over `celld dev`'s disk |
-| 7 | Preview cards: a renderer | not yet: a card is skipped, saying why |
+| 7 | Preview cards: a renderer | not yet: a card's shot fails (celld's `BROWSER` rejects) |
 | 10 | Money: own hardware in points | not yet |
-| 12 | Secrets | the stand-in, OpenBao 2.7.2 behind it (the default on celld), variables for local fleets alone |
-| — | Mail | debt: said and carried on |
+| 12 | Secrets | celld's node backend: OpenBao 2.7.2 (the default), a file of their values for `celld dev` alone |
+| — | Mail | debt: celld's `EMAIL` rejects every send (`E_NO_MAILER`), a failed send |
 
 ## 1. The runtime: celld
 
 celld (github.com/futurepaul/celld, its `selfhost` line: upstream's
 v0.6.3, still its latest, and the fork's parity fixes, among them V8
-15.2.124.45, far alarms, a forwarded body's length and facet aborts) runs
-the cell from a config rendered for it, `wrangler.celld.jsonc` beside the
-cell's own (`crates/devstack/src/celld.rs`, `DROPPED`), less what celld
-has no part in. One `devstack::Node` runs either runtime behind the
+15.2.124.45, far alarms, a forwarded body's length, facet aborts and
+Cloudflare's binding surface) runs the cell from the config a local
+wrangler node runs (`wrangler.local.jsonc`, its secrets bound by name),
+less `build` (`crates/devstack/src/celld.rs`, `DROPPED`), written beside
+the cell's own as `wrangler.celld.jsonc`. Its node's settings are celld's
+own: its secrets backend (`CELLD_SECRETS_FILE`, seam 12) and no container
+engine (`CELLD_CONTAINER_ENGINE=none`). One `devstack::Node` runs either runtime behind the
 node's front door (front.rs): celld listens on a port of its own, which
 the front door is told, as it learns workerd's from wrangler's. Stop
 (SIGINT), crash (the group SIGKILLed) and the e2e's signal handler serve
@@ -54,7 +62,7 @@ Every binding and runtime API master's cell uses, against the fork's
 | Binding or API | On celld | Class | How the cell runs |
 |---|---|---|---|
 | `durable_objects`: Fragment, Principal, Registry, Ledger, SearchIndex, Vault | yes | works | |
-| `durable_objects`: Computer | the class runs | off | no computers: `FRAGMENT_COMPUTER_IMAGE` unset, so a computer is refused, typed ("this deployment makes no computers"); its container host reads no container as none running, so a person's wipe still empties their computer's rows |
+| `durable_objects`: Computer | the class runs, its `ctx.container` not running | off | no computers: `FRAGMENT_COMPUTER_IMAGE` unset, so a computer is refused, typed ("this deployment makes no computers"); its container host finds no container running, so a person's wipe still empties their computer's rows |
 | `durable_objects`: Migrations, and R2 `STAGE` | yes | off | the finite.computer move: unconfigured (`FRAGMENT_MIGRATIONS_MOVER` unset), as on any deployment but finite.chat's |
 | `migrations` (`new_sqlite_classes`, v1 to v4) | yes | works | |
 | `durable_objects.code_update_strategy` | accepted, no effect | works | celld reads the bindings alone; `celld dev` deploys once (`--no-watch`), and the e2e's reload restarts the node |
@@ -62,27 +70,28 @@ Every binding and runtime API master's cell uses, against the fork's
 | `workflows` (`JOBS`) | yes, durable | works | a sleep is an alarm, so a job sleeping through a crash wakes (local workerd's does not) |
 | `queues` (`DELIVERIES`, `METERS`, the dead letters) | yes | works | |
 | An object's requests in flight | 64 at most by default | works, configured | devstack runs celld with 512 (found 50) |
-| `r2_buckets` (`BLOBS`) | yes; its class reads as `Object` | works | read by what it does (`js::by_what_it_does`, found 35) |
-| `assets` (`ASSETS`, `run_worker_first`, `html_handling`, `not_found_handling`) | yes; its class reads as `Object` | works | read by what it does (found 35) |
-| `secrets_store_secrets` | refused | stood in | the cell's stand-ins (seam 12), OpenBao behind them; people's secrets stay in the Vault object |
-| `ai` (`AI`: Workers AI) | refused | degraded, typed refusal | text tiers on an OpenAI-compatible API (seam 3); a slot left on Workers AI, image steps, transcription and embeddings fail typed ("this node has no AI binding"). Dev and the e2e keep the fake (`FRAGMENT_AI_URL`) |
-| `send_email` (`EMAIL`) | refused | degraded, said | no mail: each send logs `mail.unsent` and answers no id, never an error |
-| `browser` (`BROWSER`) | refused | degraded, said | no cards: a live is skipped once, `card.skipped` `no_browser`; asking for a shot again is refused, typed (`host_failed`). Seam 7 brings a renderer |
-| `images` (`IMAGES`) | refused | degraded, typed refusal | no icons drawn or fitted: refused at once, typed (`host_failed`), before anything is charged |
-| `containers` | runs on Docker, but without `interceptOutboundHttp`/`interceptOutboundHttps` or `snapshotContainer` (krun engine only) | off | a computer needs its egress intercepts and its saves: dropped by the render; seam 2 places computers on sandcastle nodes |
+| `r2_buckets` (`BLOBS`) | yes, `R2Bucket` | works | |
+| `assets` (`ASSETS`, `run_worker_first`, `html_handling`, `not_found_handling`) | yes, `Fetcher` | works | |
+| `secrets_store_secrets` | yes, `Fetcher`: read from the node's secrets backend | works | seam 12; people's secrets stay in the Vault object |
+| `ai` (`AI`: Workers AI) | bound (`Ai`); every call rejects, "this node has no Workers AI" | degraded | text tiers on an OpenAI-compatible API (seam 3); a slot left on Workers AI, image steps, transcription and embeddings fail. Dev and the e2e keep the fake (`FRAGMENT_AI_URL`), and their local config drops `ai` on either runtime |
+| `send_email` (`EMAIL`) | bound (`SendEmail`); every send rejects, `E_NO_MAILER` | degraded | a failed send: Mail, below. Dev and the e2e keep the mail fake (`FRAGMENT_MAIL_URL`) |
+| `browser` (`BROWSER`) | bound (`Fetcher`); every fetch rejects, "this node has no Browser Rendering" | degraded | a card's shot fails, as one Browser Rendering fails. Seam 7 brings a renderer |
+| `images` (`IMAGES`) | bound (`ImagesBindingImpl`); every output rejects, "this node has no Images" | degraded | an icon's making offers no candidate, and an upload that needs fitting fails (`host_failed`); a PNG at the icon's size is kept as it is |
+| `containers` | accepted; a node with no engine (`CELLD_CONTAINER_ENGINE=none`) builds no image, and each object's `ctx.container` is there, not running, its start throwing "this node runs no computers" | off | celld's Docker engine has no egress intercepts or snapshots, which a computer needs; seam 2 places computers on sandcastle nodes |
 | `ctx.exports` | yes (`DurableObjectState.exports`) | works | used only by a computer's container host |
 | `interceptOutboundHttp`, `interceptOutboundHttps`, `snapshotContainer` | krun engine only | off | with computers (seam 2) |
 | `connect()` (`cloudflare:sockets`) | yes | off | the XFTP relay is a computer's |
 | `compatibility_flags`: `nodejs_compat` | partial (its `node:` modules) | works | the Sandbox SDK's imports load |
 | `compatibility_flags`: `containers_pid_namespace` | accepted, no effect | off | with computers |
-| `build` | refused | n/a | worker-build has run (`cargo xtask build`) |
+| `build` | refused | n/a | dropped by the render (`DROPPED`): worker-build has run (`cargo xtask build`) |
 | A streamed request body forwarded to an object | its length carried, as workerd's (found 47, fixed in the fork) | works | |
 | `CF-Connecting-IP` | not set | degraded | every CLI code's ask counts as one address, `unnamed`, unless a front proxy sets the header (found 48) |
 | Cache API, HTMLRewriter, cron triggers | | n/a | the cell uses none |
 
 - **Dev:** `cargo xtask dev --runtime celld` (`CELLD_BIN`; esbuild from
   worker-build's cache or `CELLD_ESBUILD`): the same fakes and settings as
-  on wrangler, no computers, the secrets in OpenBao behind the stand-ins.
+  on wrangler, no computers, the secrets bound as on wrangler and read by
+  the node from OpenBao.
 - **The e2e:** `FRAGMENT_E2E_RUNTIME=celld`. Its rung (`needs::Rung::Celld`)
   has everything a local run has but the runtime's containers and the
   finite.computer move: a section that needs computers is a skip saying
@@ -90,7 +99,8 @@ Every binding and runtime API master's cell uses, against the fork's
   an icon's making; found 31's 413); the check local workerd cannot make
   runs (a job sleeping through a crash). The build makes no computer
   images.
-- **Master's path is unchanged:** nothing here branches on the runtime.
+- **Master's path is unchanged:** nothing here branches on the runtime,
+  and the cell has no code of celld's.
 
 ## 3. Models from a file
 
@@ -116,43 +126,34 @@ self-hosted model names its price in its slot, zero for the box's own:
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model-key cargo xtask dev
 ```
 
-## 12. Secrets: the store's bindings, stood in for
+## 12. Secrets: the store's bindings, read from the node's backend
 
 The cell reads each deployment secret as `await env.<BINDING>.get()`
-(cell/src/keys.rs, through workers-rs's `SecretStore`). A self-hosted
-runtime has no Secrets Store (celld's deploy refuses
-`secrets_store_secrets`), so `cell/secrets.mjs` gives the cell stand-ins
-with the same face: every class in `cell/entry.mjs` that runs the
-platform's code takes its env through `withSecrets`, which, when the
-Worker variable `FRAGMENT_SECRETS` names the deployment's secrets (the
-pairs a deploy writes into `secrets_store_secrets`, and a backend), puts
-an object with an async `get()` in each binding's place. Its class is
-named `Fetcher`, as workerd's is, since workers-rs takes a store binding
-by that name. Without `FRAGMENT_SECRETS` (Cloudflare, `wrangler dev`) the
-env is as it came; the Rust is the same on both and never knows which it
-read.
+(cell/src/keys.rs, through workers-rs's `SecretStore`), on every runtime.
+celld binds `secrets_store_secrets` as Cloudflare does: each a `Fetcher`
+whose `get()` answers the secret, which celld's host reads by its
+`secret_name` from the node's secrets backend, outside every isolate. The
+backend is the node's configuration (celld's `CELLD_SECRETS_FILE`, an
+owner-only JSON file), never the Worker's variables, and nothing falls
+back to a backend it does not name (celld's docs/services/secrets-store.md):
 
 - **`openbao`:** Vault's KV v2 API (OpenBao, or a company's own Vault):
   `GET <addr>/v1/<mount>/data/[<prefix>/]<secret_name>`, the value its
-  field `value`, with the token in `FRAGMENT_SECRETS_TOKEN` (and
-  `X-Vault-Namespace` when `namespace` is set). The token is the one
-  secret given outside the service, and the stand-ins hide it from the
-  rest of the env. A read takes 5 s at most and follows no redirect; a
-  failure is typed, never a hang (`SecretsError
-  [missing|refused|sealed|down|failed|malformed]`). The shim caches
-  nothing: keys.rs keeps a value a minute per isolate, as it keeps the
-  store's.
-- **`vars`:** the Worker variable of the binding's own name, in
-  `.dev.vars` (`devstack::Secrets::Shim`): a convenience for dev and the
-  e2e alone. The shim refuses it on any fleet that is not local
-  (`FRAGMENT_EGRESS_LOCAL=allow`).
-- A `FRAGMENT_SECRETS` that names no backend is refused at the first
-  request, loudly; nothing falls back to a backend it did not name.
+  field `value`, with the token in `token_file` (read at every read, so
+  the token the stack renews or mints there is the one sent) and
+  `X-Vault-Namespace` when `namespace` is set. A read takes 5 s at most
+  and follows no redirect; a failure rejects, typed, never a hang
+  (`SecretsError`, its `code` `missing`, `refused`, `sealed`, `down`,
+  `failed` or `malformed`). celld caches nothing: keys.rs keeps a value a
+  minute per isolate, as it keeps the store's.
+- **`vars`:** the values in the file itself (devstack's `Secrets::Vars`):
+  `celld dev`'s alone, for dev and the e2e. A node of a fleet refuses it
+  at start.
+- An unknown secret rejects (`missing`), as workerd's binding does; with
+  no backend named, every read rejects (`unbound`).
 - People's own secrets are not here: they stay in master's Vault Durable
   Object, sealed under keys derived from the host secret, as on
   Cloudflare.
-- The e2e checks the stand-ins on wrangler too: `FRAGMENT_E2E_SECRETS=vars`
-  or `openbao` runs its node with them (its local config binds no store).
 
 **OpenBao is a self-hosted deployment's backend** (Paul, 2026-11-11): it
 stands in for Cloudflare's Secrets Store, holding the platform's root
@@ -182,8 +183,9 @@ connections' client secrets, the model keys, the operator keys).
 - **Secret zero:** the cell's token, policy `fragment-cell`: `read` on
   `fragment/data/*` and nothing else. Periodic (30 days), renewed at each
   start and hourly while `xtask dev` runs, minted again when it has
-  lapsed; in `.dev.vars` (0600).
-- **Loopback only**, no TLS: the cell and OpenBao share the box.
+  lapsed; in `cell.token` in OpenBao's state (0600), which the node's
+  secrets file names by its path.
+- **Loopback only**, no TLS: the node and OpenBao share the box.
 - **Its audit log is on:** every request, its secrets HMAC'd by OpenBao,
   in `audit.log` beside its data (the e2e counts the cell's reads from it).
   A deployment rotates it as it rotates any log.
@@ -197,35 +199,23 @@ connections' client secrets, the model keys, the operator keys).
   `--clean` clears) unless `FRAGMENT_SECRETS_BACKEND=vars`; the e2e on
   celld unless `FRAGMENT_E2E_SECRETS=vars`. `wrangler dev` keeps its own
   store.
-- **A company's Vault:** `FRAGMENT_SECRETS` names it (`{"backend":
+- **A company's Vault:** the node's secrets file names it (`{"backend":
   "openbao", "addr": "https://vault.corp.example:8200", "mount": "secret",
-  "prefix": "fragment", "namespace": "eng", "secrets": […]}`), each secret
-  a KV v2 entry whose field is `value`, the cell's token in
-  `FRAGMENT_SECRETS_TOKEN`, its CA in `CELLD_EXTRA_CA_FILE`. Only OpenBao
-  is tested.
+  "prefix": "fragment", "namespace": "eng", "token_file": "…"}`), each
+  secret a KV v2 entry whose field is `value`, its CA in
+  `CELLD_EXTRA_CA_FILE`. Only OpenBao is tested.
 
 ## Mail
 
 Master mails through Email Sending's binding (`EMAIL`), or in dev and the
-e2e through the fake. A self-hosted deployment has neither: `mail::send`
-sends nothing, logs one `mail.unsent` warning ("email not sent: this
-runtime has no mailer, not yet implemented") and answers no message id,
-never an error. An invite still waits for its person's yes; a key is still
-added; an org's `mailed` and a trial's `sent` say false. Debt:
+e2e through the fake. celld binds `EMAIL` with no mailer behind it: every
+send rejects, `E_NO_MAILER`, "this node has no mailer", and the cell takes
+it as any refused send (`upstream_failed`). An invite to someone new is
+refused (its invite is not kept), as before; a key's mail and an export's
+are logged as failed; an org's `mailed` says false. Whether a box with no
+mailer should still make invites is a product rule, for a PR of its own.
+celld's mailer (SMTP relaying) is a later change. Debt:
 docs/technical-debt-ledger.md, "No mail without Email Sending".
-
-## Bindings a runtime may lack, or class differently
-
-A self-hosted runtime binds what it has. The cell reads a binding by what
-it does, or whether it is there, and never asks which runtime it is on:
-
-| Binding | Without it | How the cell runs |
-|---|---|---|
-| `r2_buckets` (`BLOBS`, the move's `STAGE`), `assets` (`ASSETS`) | there, but its class need not be workerd's (celld's read as `Object`) | read by what it does (`js::by_what_it_does`), not by workers-rs's class check |
-| `browser` (`BROWSER`) | no cards | a live is skipped once, `card.skipped` `no_browser`; a shot asked for again is refused, typed (`host_failed`) |
-| `images` (`IMAGES`) | no icons drawn | an icon's making, and an upload that needs fitting, refused at once, typed (`host_failed`), before anything is asked or charged; a PNG at the icon's size is kept as it is |
-| `containers` | no computers (`FRAGMENT_COMPUTER_IMAGE` unset: a computer is refused, typed) | the container host reads no container as none running, so a person's wipe still empties their computer's rows |
-| `send_email` (`EMAIL`) | no mail | Mail, above |
 
 ## What celld does differently, still true
 
@@ -242,9 +232,6 @@ The old lane's numbering is kept.
     and still checks nothing was charged or sent.
 34. **`celld dev` reads its whole bucket for every listing:** the fork
     carries a range query as a stopgap; upstream's #265.
-35. **celld's R2 and assets bindings' classes read as `Object`,** so
-    workers-rs's typed reads refuse them: the cell reads `BLOBS`, `STAGE`
-    and `ASSETS` by what they do.
 45. **`celld dev` fences itself when one lease renewal stalls** past its
     10 s TTL (`SELF-FENCE: node lease not renewed within TTL`, exit 3): its
     store's SQLite waits on a disk busy writing back. Off that disk it does
@@ -277,6 +264,9 @@ The old lane's numbering is kept.
 
 Fixed since, in the fork or here:
 
+- 35, celld's R2 and assets bindings' classes read as `Object`, which
+  workers-rs's typed reads refuse: the fork names every binding's class as
+  workerd does, so the cell reads them as it does on Cloudflare.
 - 47, a streamed body forwarded to an object lost its length: the fork
   keeps it, as workerd does, so the cell forwards nothing of its own.
 - 51, `facets.abort` failed for a brain's facet ("adopt failed"): the fork
@@ -345,11 +335,11 @@ through the person's browser, so the tailnet is enough.
 
 | Feature | Why | On celld today |
 |---|---|---|
-| Voice transcription (iOS voice memos too) | Whisper on Workers AI | a typed refusal (no `AI` binding); a later seam moves it to OpenRouter |
-| Job steps `ai.image`, `ai.video`, `ai.decide`; embeddings | Workers AI (video through AI Gateway too) | a typed refusal; a later seam |
-| Drawn icons, and fitting uploaded ones | Workers AI and Cloudflare Images | refused at once, typed (`host_failed`, "no Images binding"); a 256×256 PNG is kept as it is |
-| Preview cards | Browser Rendering | skipped, said once (`card.skipped`, `no_browser`); seam 7's renderer |
-| Platform email | Email Sending | `mail.unsent`, never an error (debt) |
+| Voice transcription (iOS voice memos too) | Whisper on Workers AI | fails: celld's `AI` rejects ("this node has no Workers AI"); a later seam moves it to OpenRouter |
+| Job steps `ai.image`, `ai.video`, `ai.decide`; embeddings | Workers AI (video through AI Gateway too) | fails, as above; a later seam |
+| Drawn icons, and fitting uploaded ones | Workers AI and Cloudflare Images | a making offers no candidate, a fitting fails (`host_failed`): celld's `AI` and `IMAGES` reject; a 256×256 PNG is kept as it is |
+| Preview cards | Browser Rendering | a shot fails: celld's `BROWSER` rejects; seam 7's renderer |
+| Platform email | Email Sending | a failed send: celld's `EMAIL` rejects (`E_NO_MAILER`); an invite to someone new is refused (debt) |
 | Buying seats and credit | Stripe, its inbound webhook | operators comp seats and grant credit |
 | Operators' glance, its logs half | Workers Observability | the registry's numbers still show |
 | The finite.computer move | the Migrations object, `STAGE`, `/move` | off: unconfigured, hidden |
@@ -393,15 +383,16 @@ behind a tailnet name, and the Hermes `FRAGMENT_HOST` rebuild.
 ```sh
 # celld: the fork's selfhost line (cargo build --release -p celld)
 CELLD_BIN=…/celld cargo xtask dev --runtime celld
-# its secrets in .dev.vars instead of OpenBao (a local fleet's convenience)
+# its secrets in its node's file instead of OpenBao (`celld dev`'s alone)
 FRAGMENT_SECRETS_BACKEND=vars CELLD_BIN=… cargo xtask dev --runtime celld
-# the e2e on celld (OpenBao behind the stand-ins unless FRAGMENT_E2E_SECRETS=vars)
+# the e2e on celld (its node reads OpenBao unless FRAGMENT_E2E_SECRETS=vars)
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
 ```
 
 ## Not yet
 
-- Computers (seam 2): none on celld. celld's Docker engine has no egress
+- Computers (seam 2): none on celld. devstack's node has no engine
+  (`CELLD_CONTAINER_ENGINE=none`); celld's Docker engine has no egress
   intercepts or snapshots, which a computer needs; its krun engine
   (sandcastle's) has both.
 - Sign-in by OpenID Connect (seams 4, 9).

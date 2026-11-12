@@ -1,17 +1,12 @@
-//! OpenBao's state and config, and the cell's shim (cell/secrets.mjs) read
-//! on the pinned Node: against a scripted server here, and, in the tests
-//! marked `ignore`, against the pinned OpenBao itself (fetched into
-//! target/tools): `cargo test -p fragment-devstack openbao -- --include-ignored`.
+//! OpenBao's state and config, and, in the tests marked `ignore`, the
+//! pinned OpenBao itself (fetched into target/tools): `cargo test -p
+//! fragment-devstack openbao -- --include-ignored`. How celld reads it,
+//! the node's secrets backend, is celld's to test (its secrets.rs).
 
-use std::io::{BufRead, BufReader};
-use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::*;
 
@@ -175,260 +170,6 @@ fn a_cached_bao_that_is_not_the_pinned_bytes_is_refused_unrun() {
     fs::remove_dir_all(&tools).unwrap();
 }
 
-/// What one request to the scripted server carried.
-#[derive(Debug, Clone)]
-struct Hit {
-    path: String,
-    token: Option<String>,
-    namespace: Option<String>,
-}
-
-/// What a scripted server answers a path: its status, body and extra
-/// headers, or, for `None`, nothing: it holds the connection.
-type Answer = fn(&str) -> Option<(u16, String, Vec<(String, String)>)>;
-
-/// A scripted server, and what each request to it carried.
-struct Scripted {
-    addr: String,
-    hits: Arc<Mutex<Vec<Hit>>>,
-}
-
-fn scripted(answer: Answer) -> Scripted {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = format!("http://{}", listener.local_addr().unwrap());
-    let hits: Arc<Mutex<Vec<Hit>>> = Arc::default();
-    let log = Arc::clone(&hits);
-    std::thread::spawn(move || {
-        // bounded: the test's requests, then the test process ends
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
-            let log = Arc::clone(&log);
-            std::thread::spawn(move || serve(stream, answer, log));
-        }
-    });
-    Scripted { addr, hits }
-}
-
-fn serve(mut stream: TcpStream, answer: Answer, log: Arc<Mutex<Vec<Hit>>>) {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut first = String::new();
-    // a connection opened and closed with no request in it
-    if reader.read_line(&mut first).unwrap_or(0) == 0 {
-        return;
-    }
-    let path = first.split_whitespace().nth(1).unwrap_or("").to_string();
-    let (mut token, mut namespace) = (None, None);
-    // bounded: a request's head, at most 100 lines
-    for _ in 0..100 {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
-            break;
-        }
-        let (k, v) = line.split_once(':').unwrap_or(("", ""));
-        match k.trim().to_ascii_lowercase().as_str() {
-            "x-vault-token" => token = Some(v.trim().to_string()),
-            "x-vault-namespace" => namespace = Some(v.trim().to_string()),
-            _ => {}
-        }
-    }
-    log.lock().unwrap().push(Hit { path: path.clone(), token, namespace });
-    match answer(&path) {
-        Some((status, body, extra)) => {
-            let extra: String = extra.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
-            let head = format!("HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n", body.len());
-            let _ = stream.write_all(head.as_bytes());
-            let _ = stream.write_all(body.as_bytes());
-        }
-        // a service that hangs: the connection held, no answer
-        None => std::thread::sleep(Duration::from_secs(30)),
-    }
-}
-
-/// Each case (`env`, and the binding to `get()`, or null for the env
-/// alone) through `withSecrets` on the pinned Node, at once: each one's
-/// value, or its error's name, code and message, and how long it took.
-/// The cases, tokens among them, go on Node's standard input.
-fn shim(cases: &Value) -> Vec<Value> {
-    let root = crate::repo_root();
-    let node = crate::node::locate(&root.join(crate::TOOLS_DIR)).expect("the pinned Node");
-    let dir = scratch("shim");
-    fs::create_dir_all(&dir).unwrap();
-    let script = dir.join("harness.mjs");
-    let shim = root.join("cell/secrets.mjs");
-    fs::write(
-        &script,
-        format!(
-            r#"import {{ withSecrets }} from {shim};
-let input = "";
-for await (const chunk of process.stdin) input += chunk;
-const results = await Promise.all(JSON.parse(input).map(async (c) => {{
-  const t0 = Date.now();
-  try {{
-    const env = withSecrets(c.env);
-    const hidden = env.FRAGMENT_SECRETS_TOKEN === undefined;
-    if (c.binding === null) return {{ hidden, ms: Date.now() - t0 }};
-    const value = await env[c.binding].get();
-    return {{ value, hidden, ms: Date.now() - t0 }};
-  }} catch (e) {{
-    return {{ error: {{ name: e.name, code: e.code ?? null, message: String(e.message) }}, ms: Date.now() - t0 }};
-  }}
-}}));
-console.log(JSON.stringify(results));
-"#,
-            shim = serde_json::to_string(&format!("file://{}", shim.display())).unwrap()
-        ),
-    )
-    .unwrap();
-    let mut child = node.script(&script, &root.join(crate::CACHE_DIR)).unwrap().stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    child.stdin.take().unwrap().write_all(cases.to_string().as_bytes()).unwrap();
-    let out = child.wait_with_output().unwrap();
-    fs::remove_dir_all(&dir).unwrap();
-    assert!(out.status.success(), "the harness: {}", String::from_utf8_lossy(&out.stderr));
-    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
-}
-
-/// An env whose `HOST_SECRET` is `name` under OpenBao at `addr`, with
-/// `extra` keys in its config.
-fn env(addr: &str, name: &str, token: Option<&str>, extra: Value) -> Value {
-    let mut cfg = json!({ "backend": "openbao", "addr": addr, "mount": "fragment", "secrets": [{ "binding": "HOST_SECRET", "secret_name": name }] });
-    for (k, v) in extra.as_object().into_iter().flatten() {
-        cfg[k] = v.clone();
-    }
-    let mut env = json!({ "FRAGMENT_SECRETS": cfg.to_string() });
-    if let Some(t) = token {
-        env[TOKEN_VAR] = json!(t);
-    }
-    env
-}
-
-fn case(env: Value, binding: Option<&str>) -> Value {
-    json!({ "env": env, "binding": binding })
-}
-
-/// A port nothing listens on.
-fn dead_addr() -> String {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    format!("http://{}", l.local_addr().unwrap())
-}
-
-/// Asserts a case failed with `code`, its message holding each of `says`.
-fn failed(r: &Value, code: &str, says: &[&str]) {
-    assert_eq!(r["error"]["name"], "SecretsError", "{r}");
-    assert_eq!(r["error"]["code"], code, "{r}");
-    let message = r["error"]["message"].as_str().unwrap();
-    for s in says {
-        assert!(message.contains(s), "{s:?} in {message:?}");
-    }
-}
-
-/// Where the scripted OpenBao's redirect points: another server, which must
-/// see nothing.
-static ELSEWHERE: OnceLock<String> = OnceLock::new();
-
-// Goal: the shim's openbao backend reads `<addr>/v1/<mount>/data/[<prefix>/]<name>`
-// with the token (and the namespace when set), answers the value, and says
-// why when it cannot, each kind its own: missing (404), refused (403),
-// sealed (503, Vault's body), malformed (no `value`), failed (500, and a
-// redirect, which it never follows, so the token goes nowhere else), and
-// down: nothing listening at once, a server that hangs within its bound.
-// The token is hidden from the env it hands on. Method: the pinned Node
-// against a scripted server, every case at once.
-#[test]
-fn the_shim_reads_through_the_kv_api_and_says_why_it_cannot() {
-    let elsewhere = scripted(|_| Some((200, "{}".into(), vec![])));
-    ELSEWHERE.set(elsewhere.addr.clone()).expect("set once");
-    let bao = scripted(|path| {
-        let ok = |v: &str| Some((200, json!({ "data": { "data": { "value": v }, "metadata": { "version": 3 } } }).to_string(), vec![]));
-        match path.rsplit('/').next().unwrap_or("") {
-            "kept" => ok("the-value"),
-            "missing" => Some((404, "{\"errors\":[]}".into(), vec![])),
-            "refused" => Some((403, "{\"errors\":[\"1 error occurred:\\n\\t* permission denied\\n\\n\"]}".into(), vec![])),
-            "sealed" => Some((503, "{\"errors\":[\"Vault is sealed\"]}".into(), vec![])),
-            "odd" => Some((200, json!({ "data": { "data": { "other": "x" } } }).to_string(), vec![])),
-            "broken" => Some((500, "{\"errors\":[\"internal error\"]}".into(), vec![])),
-            "moved" => Some((307, "{}".into(), vec![("location".into(), format!("{}/v1/fragment/data/moved", ELSEWHERE.get().expect("set")))])),
-            "hang" => None,
-            _ => Some((404, "{\"errors\":[]}".into(), vec![])),
-        }
-    });
-    let a = bao.addr.as_str();
-    let t = Some("s.test-token");
-    let none = json!({});
-    let cases = json!([
-        case(env(a, "kept", t, none.clone()), Some("HOST_SECRET")),
-        case(env(a, "kept", t, json!({ "prefix": "team/fragment", "namespace": "corp/eng" })), Some("HOST_SECRET")),
-        case(env(a, "missing", t, none.clone()), Some("HOST_SECRET")),
-        case(env(a, "refused", t, none.clone()), Some("HOST_SECRET")),
-        case(env(a, "sealed", t, none.clone()), Some("HOST_SECRET")),
-        case(env(a, "odd", t, none.clone()), Some("HOST_SECRET")),
-        case(env(a, "broken", t, none.clone()), Some("HOST_SECRET")),
-        case(env(a, "moved", t, none.clone()), Some("HOST_SECRET")),
-        case(env(&dead_addr(), "kept", t, none.clone()), Some("HOST_SECRET")),
-        case(env(a, "hang", t, none.clone()), Some("HOST_SECRET")),
-        case(env(a, "kept", t, none.clone()), None),
-    ]);
-    let r = shim(&cases);
-    assert_eq!(r[0]["value"], "the-value", "{}", r[0]);
-    assert_eq!(r[1]["value"], "the-value", "{}", r[1]);
-    failed(&r[2], "missing", &["fragment/missing is not in OpenBao at", "bao kv put -mount=fragment missing value="]);
-    failed(&r[3], "refused", &["refused the cell's token for fragment/refused", "permission denied"]);
-    failed(&r[4], "sealed", &["is sealed", "Vault is sealed"]);
-    failed(&r[5], "malformed", &["has no \"value\" field"]);
-    failed(&r[6], "failed", &["answered 500", "internal error"]);
-    failed(&r[7], "failed", &["answered 307"]);
-    failed(&r[8], "down", &["is not answering"]);
-    assert!(r[8]["ms"].as_u64().unwrap() < 2000, "nothing listening is an error at once: {}", r[8]);
-    failed(&r[9], "down", &["did not answer for fragment/hang within 5 s"]);
-    let hung = r[9]["ms"].as_u64().unwrap();
-    assert!((4_900..8_000).contains(&hung), "a hang is cut at its bound: {hung} ms");
-    assert_eq!(r[10]["hidden"], true, "the token is the shim's, not the env's");
-    for (i, res) in r.iter().enumerate() {
-        assert!(!res.to_string().contains("s.test-token"), "no answer or message holds the token: case {i}: {res}");
-    }
-
-    let hits = bao.hits.lock().unwrap().clone();
-    let kept: Vec<&Hit> = hits.iter().filter(|h| h.path.ends_with("/kept")).collect();
-    let paths: Vec<&str> = kept.iter().map(|h| h.path.as_str()).collect();
-    assert!(paths.contains(&"/v1/fragment/data/kept") && paths.contains(&"/v1/fragment/data/team/fragment/kept"), "{paths:?}");
-    assert!(hits.iter().all(|h| h.token.as_deref() == Some("s.test-token")), "every read carries the token: {hits:?}");
-    assert!(kept.iter().any(|h| h.namespace.as_deref() == Some("corp/eng")) && kept.iter().any(|h| h.namespace.is_none()), "the namespace when set, alone");
-    assert!(elsewhere.hits.lock().unwrap().is_empty(), "a redirect is never followed: the token goes nowhere else");
-}
-
-// Goal: a config that is wrong, or a token that is missing, is refused at
-// the first request, saying what; the vars backend takes no OpenBao keys.
-#[test]
-fn a_wrong_config_is_refused_saying_what() {
-    let a = "http://127.0.0.1:9";
-    let t = Some("s.tok");
-    let vars = json!({ "FRAGMENT_SECRETS": json!({ "backend": "vars", "addr": a, "secrets": [] }).to_string() });
-    let bad = json!([
-        case(env("http://127.0.0.1:9/vault", "x", t, json!({})), None),
-        case(env("ftp://bao", "x", t, json!({})), None),
-        case(env(a, "x", t, json!({ "mount": "../sys" })), None),
-        case(env(a, "x", t, json!({ "prefix": "a/../b" })), None),
-        case(env(a, "x", t, json!({ "adress": a })), None),
-        case(env(a, "x", None, json!({})), None),
-        case(env(a, "x", Some("has space"), json!({})), None),
-        case(vars, None),
-    ]);
-    let r = shim(&bad);
-    let says = [
-        "addr is the service's origin",
-        "addr is the service's origin",
-        "mount is a KV v2 mount's path",
-        "prefix, when set, is a path",
-        "not adress",
-        "FRAGMENT_SECRETS_TOKEN, which is not set",
-        "which is not a token",
-        "backend vars takes backend, secrets, not addr",
-    ];
-    for (i, says) in says.iter().enumerate() {
-        let message = r[i]["error"]["message"].as_str().unwrap_or_else(|| panic!("case {i} refused: {}", r[i]));
-        assert!(message.contains(says), "case {i}: {says:?} in {message:?}");
-    }
-}
-
 /// The pinned `bao`, installed on first use.
 fn pinned() -> PathBuf {
     locate(&crate::repo_root().join(crate::TOOLS_DIR)).expect("the pinned OpenBao")
@@ -477,12 +218,14 @@ fn openbao_initialises_once_and_unseals_itself_at_every_start() {
 // Goal: the cell's token reads the mount and nothing else: no write, no
 // other mount, no sys path; a second start keeps (renews) it; one that is
 // not OpenBao's any more is replaced, owner-only. The stack's own token
-// reaches no sys path either.
+// reaches no sys path either. The audit log counts the token's reads, and
+// keeps tokens and values HMAC'd. The node's secrets file names the token
+// by its path, never its value.
 #[test]
 #[ignore = "runs the pinned OpenBao (fetched into target/tools)"]
 fn the_cells_token_reads_its_mount_and_nothing_else() {
     let dir = scratch("policy");
-    let bao = started(&dir, false);
+    let bao = started(&dir, true);
     let target = bao.target();
     target.seed(&SEEDED).unwrap();
     let token = target.cell_token().unwrap();
@@ -501,64 +244,18 @@ fn the_cells_token_reads_its_mount_and_nothing_else() {
     let admin = target.admin_token().unwrap();
     assert_eq!(get("sys/mounts", &admin), 403, "the stack's token reaches no sys path");
     assert_eq!(get("fragment/data/nothing-here", "s.not-a-token"), 403, "a wrong token is refused");
+    let audit = audited(bao.layout()).unwrap();
+    assert_eq!(audit.cell_reads, 2, "the audit log holds the token's two reads of the mount: {audit:?}");
+    let log = fs::read_to_string(bao.layout().audit()).unwrap();
+    assert!(!log.contains(&token) && !log.contains(SEEDED[0].1), "the audit log keeps tokens and values HMAC'd");
+    let node = target.node_config().to_string();
+    assert!(!node.contains(&token) && node.contains(&target.layout.cell_token().display().to_string()), "{node}");
 
     fs::write(target.layout.cell_token(), "s.lapsed-or-forged").unwrap();
     let new = target.cell_token().unwrap();
     assert_ne!(new, token);
     assert_eq!(get("fragment/data/fragment-host-secret", &new), 200);
     assert_eq!(mode(&target.layout.cell_token()), 0o600);
-    drop(bao);
-    fs::remove_dir_all(&dir).unwrap();
-}
-
-// Goal: the shim reads a seeded secret through the real OpenBao, and says
-// why it cannot: missing, a wrong token (refused), OpenBao down, and
-// OpenBao sealed (started with a key that does not open its data).
-#[test]
-#[ignore = "runs the pinned OpenBao (fetched into target/tools)"]
-fn the_shim_reads_through_openbao_and_says_why_it_cannot() {
-    let dir = scratch("shim-real");
-    let mut bao = started(&dir, true);
-    let target = bao.target();
-    target.seed(&SEEDED).unwrap();
-    let token = target.cell_token().unwrap();
-    let a = target.addr.clone();
-    let r = shim(&json!([
-        case(env(&a, "fragment-host-secret", Some(&token), json!({})), Some("HOST_SECRET")),
-        case(env(&a, "fragment-not-seeded", Some(&token), json!({})), Some("HOST_SECRET")),
-        case(env(&a, "fragment-host-secret", Some("s.wrong-token"), json!({})), Some("HOST_SECRET")),
-    ]));
-    assert_eq!(r[0]["value"], SEEDED[0].1, "{}", r[0]);
-    failed(&r[1], "missing", &["fragment/fragment-not-seeded is not in OpenBao"]);
-    failed(&r[2], "refused", &["refused the cell's token", "permission denied"]);
-    let audit = audited(bao.layout()).unwrap();
-    assert_eq!(audit.cell_reads, 2, "the audit log holds the cell's two reads, the wrong token's none: {audit:?}");
-    let log = fs::read_to_string(bao.layout().audit()).unwrap();
-    assert!(!log.contains(&token) && !log.contains(SEEDED[0].1), "the audit log keeps tokens and values HMAC'd");
-
-    bao.down().unwrap();
-    let t0 = Instant::now();
-    let r = shim(&json!([case(env(&a, "fragment-host-secret", Some(&token), json!({})), Some("HOST_SECRET"))]));
-    failed(&r[0], "down", &["is not answering"]);
-    assert!(t0.elapsed() < Duration::from_secs(5), "down is said at once");
-
-    // sealed: the server up, with a key that does not open its data
-    let key = fs::read(target.layout.seal_key()).unwrap();
-    fs::write(target.layout.seal_key(), [3u8; SEAL_KEY_BYTES]).unwrap();
-    let port: u16 = target.addr.rsplit(':').next().unwrap().parse().unwrap();
-    fs::write(target.layout.config(), render_config(&target.layout, port, false).unwrap()).unwrap();
-    let bin = pinned();
-    let mut sealed = Command::new(&bin).arg("server").arg(format!("-config={}", target.layout.config().display())).env_clear().stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    let up = Instant::now();
-    while target.call(reqwest::Method::GET, "sys/health", None, None, "health").ok().map(|(s, _)| s) != Some(503) {
-        assert!(up.elapsed() < READY_TIMEOUT, "OpenBao answers, sealed");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let r = shim(&json!([case(env(&a, "fragment-host-secret", Some(&token), json!({})), Some("HOST_SECRET"))]));
-    let _ = sealed.kill();
-    let _ = sealed.wait();
-    failed(&r[0], "sealed", &["is sealed", "Vault is sealed"]);
-    fs::write(target.layout.seal_key(), &key).unwrap();
     drop(bao);
     fs::remove_dir_all(&dir).unwrap();
 }

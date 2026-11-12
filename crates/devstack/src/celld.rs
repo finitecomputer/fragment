@@ -1,15 +1,18 @@
 //! The stack on celld (docs/self-host.md, seam 1): one `celld dev` process
-//! serving the platform Worker, as `wrangler dev` does, from a config
-//! rendered without what celld has no part in, and with its `.dev.vars`.
+//! serving the platform Worker, as `wrangler dev` does, from the config a
+//! local node runs (`crate::local_config`), and with its `.dev.vars`.
 //! celld is a self-hosted Workers runtime (github.com/futurepaul/celld: its
-//! `selfhost` line is upstream's release and the fork's few parity fixes).
+//! `selfhost` line is upstream's release and the fork's parity fixes).
 //!
-//! What celld lacks is never asked for, and the cell runs without it
-//! (`DROPPED`): no Workers AI (the model route's slots on an
-//! OpenAI-compatible API, or the fake's URL), no Browser Rendering (no
-//! cards), no Email Sending (no mail, said once per send), no Images (no
-//! icons drawn), and no Secrets Store (the cell's stand-ins for its
-//! bindings, cell/secrets.mjs: `crate::Secrets::Shim`).
+//! celld presents Cloudflare's binding surface, so the cell runs on it as
+//! it runs on Cloudflare, with no code of celld's own. It binds every key of
+//! the config: the Secrets Store's secrets, read from the node's secrets
+//! backend (`secrets_file`: a file of their values, or OpenBao); and the
+//! services it does not run (Email Sending, Images, Browser Rendering,
+//! Workers AI), each with workerd's class, every call rejecting, saying the
+//! node has none. Its node runs no computers (`CELLD_CONTAINER_ENGINE=none`):
+//! the `Computer` class's container is there, not running, and a start
+//! throws (docs/self-host.md, seam 2).
 //!
 //! The node's port is its front door's (front.rs), as on wrangler: celld
 //! listens on a port of its own, which the front door learns from its
@@ -23,38 +26,50 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use crate::{boot_log, front, read_config, spawn_node, Node, NodeOptions, READY_TIMEOUT};
+use crate::{boot_log, front, spawn_node, Node, NodeOptions, READY_TIMEOUT};
 
-/// What the celld render leaves out of the cell's config, and why. celld
-/// refuses each of the first five at deploy (its SUPPORTED_KEYS; its
-/// docs/cloudflare-compat.md); it runs `containers` (experimental), but on
-/// its Docker engine with no egress intercepts or snapshots, which a
-/// computer needs (docs/self-host.md, seam 2), so the render drops it and
-/// the stack makes no computers.
-pub const DROPPED: [(&str, &str); 7] = [
-    ("ai", "Workers AI: the model route's slots run on an OpenAI-compatible API (FRAGMENT_MODELS), or on the fake (FRAGMENT_AI_URL)"),
-    ("browser", "Browser Rendering: no preview cards (said once a shot, card.skipped no_browser)"),
-    ("send_email", "Email Sending: no mail; each send says so and carries on (docs/technical-debt-ledger.md)"),
-    ("images", "Cloudflare Images: no icons drawn (a typed refusal)"),
-    ("build", "worker-build has run (cargo xtask build)"),
-    ("secrets_store_secrets", "Secrets Store: the cell's stand-ins read the fleet's (cell/secrets.mjs)"),
-    ("containers", "computers need the runtime's egress intercepts and snapshots, which celld's Docker engine lacks (docs/self-host.md, seam 2)"),
-];
+/// What the celld render leaves out of the local config, and why.
+pub const DROPPED: [(&str, &str); 1] = [("build", "worker-build has run (cargo xtask build)")];
 
-/// The project's config as celld runs it: `wrangler.celld.jsonc`, beside
-/// its own (so its paths and `.dev.vars` resolve the same), less `DROPPED`.
-/// It binds no secrets: celld has no Secrets Store, and the cell's
-/// stand-ins take their place (cell/secrets.mjs).
+/// The config celld runs: `wrangler.celld.jsonc`, beside the project's own
+/// (so its paths and `.dev.vars` resolve the same), the local config a node
+/// runs (`crate::local_config`, its secrets bound by name as on wrangler)
+/// less `DROPPED`. `Fleet::configure` writes the local config first.
 pub fn celld_config(project: &Path) -> Result<PathBuf> {
-    let mut config = read_config(project)?;
+    let local = crate::local_config(project);
+    let text = fs::read_to_string(&local).with_context(|| format!("read {} (Fleet::configure writes it)", local.display()))?;
+    let mut config: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("parse {}", local.display()))?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
-    anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: on celld, the cell's stand-ins take the fleet's", project.join("wrangler.jsonc").display());
     for (key, _) in DROPPED {
         obj.remove(key);
     }
     let path = project.join("wrangler.celld.jsonc");
     fs::write(&path, serde_json::to_string_pretty(&config)?)?;
     Ok(path)
+}
+
+/// The celld node's secrets file (its `CELLD_SECRETS_FILE`), beside the
+/// project's `.dev.vars`: its backend, `vars` with the secrets' values, or
+/// `openbao` with where OpenBao is and the path of the token that reads it
+/// (`crate::Secrets`). The node's configuration, never the Worker's
+/// variables.
+pub fn secrets_file(project: &Path) -> PathBuf {
+    project.join(".celld.secrets.json")
+}
+
+/// Writes `config` as the node's secrets file (`secrets_file`), mode 600
+/// (celld refuses one others may read), replacing the one before whole.
+pub fn write_secrets_file(project: &Path, config: &serde_json::Value) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = secrets_file(project);
+    let tmp = path.with_extension("json.new");
+    let _ = fs::remove_file(&tmp);
+    let mut f = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    f.write_all(serde_json::to_string(config)?.as_bytes())?;
+    f.sync_all()?;
+    fs::rename(&tmp, &path).with_context(|| format!("move {} to {}", tmp.display(), path.display()))?;
+    Ok(())
 }
 
 /// A self-hosted deployment's connectors (`FRAGMENT_CONNECTORS`): the
@@ -154,11 +169,14 @@ fn ready_line(port: u16) -> String {
 }
 
 /// Starts `celld dev` on `opts.project` (its fleet configured first, as for
-/// wrangler: `Fleet::configure` with `Secrets::Shim`), behind the node's
-/// front door, ready once it says so. It stops on SIGINT, as Ctrl-C stops
-/// it; `Node`'s stop and crash serve it as they serve wrangler's.
+/// wrangler: `Fleet::configure` with `Secrets::Vars` or `Secrets::OpenBao`,
+/// which writes its secrets file), behind the node's front door, ready once
+/// it says so. It stops on SIGINT, as Ctrl-C stops it; `Node`'s stop and
+/// crash serve it as they serve wrangler's.
 pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)> {
     let config = celld_config(&opts.project)?;
+    let secrets = secrets_file(&opts.project);
+    anyhow::ensure!(secrets.is_file(), "no secrets file for the celld node at {} (Fleet::configure writes it, with Secrets::Vars or Secrets::OpenBao)", secrets.display());
     let port = opts.port();
     // celld's own port, which only the front door dials: picked and let go
     // just before celld binds it (`celld dev` takes no port 0)
@@ -177,6 +195,10 @@ pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)>
         .env("CELLD_FACET_MAX_BYTES", FACET_MAX_BYTES.to_string())
         .env("CELLD_DYNAMIC_LOCKDOWN", "1")
         .env("CELLD_MAX_CELL_REQUESTS", CELL_REQUESTS_MAX.to_string())
+        // the node's own settings: its secrets backend, and no computers
+        // here (seam 2), so its deploy builds no image
+        .env("CELLD_SECRETS_FILE", &secrets)
+        .env("CELLD_CONTAINER_ENGINE", "none")
         .env("NO_COLOR", "1");
     cmd.current_dir(&opts.project);
     let t0 = Instant::now();
@@ -234,30 +256,58 @@ mod tests {
         assert_eq!(policy.entries()[0], fragment_core::connectors::Policy::default().entries()[0], "SimpleX as the default names it");
     }
 
-    /// Goal: the rendered config keeps every binding celld runs and drops
-    /// each key it has no part in, whatever the source's comments; one that
-    /// binds secrets of its own is refused (the stand-ins take the fleet's).
-    /// Method: cell/wrangler.jsonc itself, then one with a store binding.
+    /// Goal: celld runs the local config a wrangler node runs, its secrets
+    /// bound by name, less `build` alone: the services it does not run and
+    /// the computers' containers stay in it, for celld binds them all. With
+    /// no local config written yet, it is refused, naming the file. Replay:
+    /// rendered twice, the same. Method: cell/wrangler.jsonc, through
+    /// `write_local_config` with a secret bound.
+    fn json(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
     #[test]
-    fn renders_what_celld_runs() {
+    fn renders_the_local_config_less_build() {
         let dir = std::env::temp_dir().join(format!("celld-config-{}", crate::random_hex(6)));
         fs::create_dir_all(&dir).unwrap();
-        fs::copy(crate::cell_dir().join("wrangler.jsonc"), dir.join("wrangler.jsonc")).unwrap();
-        let source = read_config(&dir).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(celld_config(&dir).unwrap()).unwrap()).unwrap();
-        for (k, _) in DROPPED {
-            assert!(v.get(k).is_none(), "{k} dropped");
-        }
-        for (k, kept) in source.as_object().unwrap() {
-            if !DROPPED.iter().any(|(d, _)| d == k) {
-                assert_eq!(v.get(k), Some(kept), "{k} kept as it is");
+        // as a staged copy is: its images' Dockerfiles the source tree's
+        let mut config = crate::read_config(&crate::cell_dir()).unwrap();
+        crate::absolute_images(&mut config, &crate::cell_dir()).unwrap();
+        fs::write(dir.join("wrangler.jsonc"), config.to_string()).unwrap();
+        let e = celld_config(&dir).unwrap_err().to_string();
+        assert!(e.contains("wrangler.local.jsonc"), "{e}");
+        crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[]).unwrap();
+        let local = json(&crate::local_config(&dir));
+        for _ in 0..2 {
+            let v = json(&celld_config(&dir).unwrap());
+            assert!(v.get("build").is_none(), "build dropped");
+            for (k, kept) in local.as_object().unwrap() {
+                if k != "build" {
+                    assert_eq!(v.get(k), Some(kept), "{k} kept as it is");
+                }
             }
+            for k in ["assets", "worker_loaders", "workflows", "r2_buckets", "queues", "durable_objects", "migrations", "send_email", "images", "browser", "containers", "secrets_store_secrets"] {
+                assert!(v.get(k).is_some(), "{k} kept");
+            }
+            assert_eq!(v["secrets_store_secrets"][0]["secret_name"], "fragment-host-secret");
         }
-        for k in ["assets", "worker_loaders", "workflows", "r2_buckets", "queues", "durable_objects", "migrations"] {
-            assert!(v.get(k).is_some(), "{k} kept");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Goal: the node's secrets file is its owner's alone (celld refuses
+    /// one others may read), written whole, and replaced whole.
+    #[test]
+    fn the_secrets_file_is_owner_only_and_replaced_whole() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("celld-secrets-{}", crate::random_hex(6)));
+        fs::create_dir_all(&dir).unwrap();
+        for value in ["one", "two"] {
+            write_secrets_file(&dir, &serde_json::json!({ "backend": "vars", "values": { "s": value } })).unwrap();
+            let path = secrets_file(&dir);
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(json(&path)["values"]["s"], value);
+            assert!(!path.with_extension("json.new").exists());
         }
-        fs::write(dir.join("wrangler.jsonc"), r#"{ "name": "x", "main": "a.mjs", "secrets_store_secrets": [] }"#).unwrap();
-        assert!(celld_config(&dir).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

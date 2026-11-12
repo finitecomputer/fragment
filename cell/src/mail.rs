@@ -4,9 +4,6 @@
 //! Sending's binding (`EMAIL`: wrangler.jsonc `send_email`). In dev and the
 //! e2e it goes instead to the fake at `FRAGMENT_MAIL_URL` (crates/fakes,
 //! mail.rs), which takes the binding's input as it is and sends nothing.
-//! A runtime with neither (a self-hosted one: docs/self-host.md) sends
-//! nothing, says so once per message, and the flow around it goes on
-//! (docs/technical-debt-ledger.md, "No mail without Email Sending").
 //! Transactional mail only: what a person asked for or is owed (an invite,
 //! a seat), never a campaign.
 
@@ -21,9 +18,6 @@ use crate::js;
 
 pub use fragment_core::mail::Mail;
 
-/// What a runtime without a mailer says of each message it does not send.
-const NO_MAILER: &str = "email not sent: this runtime has no mailer, not yet implemented";
-
 /// What the fake answers, as the binding resolves (`{messageId}`) or
 /// rejects (`{code, message}`).
 #[derive(serde::Deserialize)]
@@ -34,26 +28,20 @@ struct Answer {
     message: Option<String>,
 }
 
-/// Sends `mail`: its message id, or none when this runtime has no mailer
-/// (no `EMAIL` binding, and no fake), which is said and is no
-/// error, so the flow around the send goes on.
-pub async fn send(env: &Env, cfg: &Config, mail: &Mail) -> CellResult<Option<String>> {
+/// Sends `mail`: its message id.
+pub async fn send(env: &Env, cfg: &Config, mail: &Mail) -> CellResult<String> {
     if let Some(why) = mail::refusal(mail) {
         return Err(CellError::invalid(why));
     }
     // an e2e person's address (`<name>@e2e.test`) names no mailbox: on a
     // preview, whose mail is real, it goes nowhere rather than bounce
     if cfg.mail_url.is_none() && cfg.test_hooks && fragment_core::levers::valid_e2e_email(&mail.to) {
-        return Ok(Some(format!("e2e-unsent-{}", js::random_hex::<8>())));
-    }
-    if cfg.mail_url.is_none() && !js::has_binding(env.as_ref(), "EMAIL") {
-        console_warn!("{{\"event\":\"mail.unsent\",\"message\":\"{NO_MAILER}\"}}");
-        return Ok(None);
+        return Ok(format!("e2e-unsent-{}", js::random_hex::<8>()));
     }
     let from = cfg.mail_from.as_ref().ok_or_else(|| CellError::host("this deployment sends no mail: set its mail_from (FRAGMENT_MAIL_FROM)"))?;
     let message = mail::message(from, mail);
     let Some(url) = &cfg.mail_url else {
-        return js::email_send(env.as_ref(), &message).await.map(Some).map_err(|(code, why)| refused(&code, &why));
+        return js::email_send(env.as_ref(), &message).await.map_err(|(code, why)| refused(&code, &why));
     };
     // the lower rung: the binding's input, to a fake at the vendor boundary
     let h = Headers::new();
@@ -66,7 +54,7 @@ pub async fn send(env: &Env, cfg: &Config, mail: &Mail) -> CellResult<Option<Str
         .map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the mail fake did not answer: {e}")))?;
     let answer: Answer = resp.read_json().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the mail fake's answer: {e}")))?;
     match (resp.status_code(), answer.message_id) {
-        (200, Some(id)) => Ok(Some(id)),
+        (200, Some(id)) => Ok(id),
         _ => Err(refused(answer.code.as_deref().unwrap_or(""), answer.message.as_deref().unwrap_or("no reason given"))),
     }
 }

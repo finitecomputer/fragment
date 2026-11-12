@@ -2,10 +2,10 @@
 //! (`cell/`), its variables rendered into its `.dev.vars` and its secrets
 //! seeded into wrangler's local Secrets Store, bound by name as a deploy
 //! binds them (store.rs); or one `celld dev` process (celld.rs;
-//! docs/self-host.md, seam 1), its secrets behind the cell's stand-ins for
-//! the store's bindings, in `.dev.vars` (`Secrets::Shim`) or in OpenBao
-//! (openbao.rs, `Secrets::OpenBao`). `xtask dev` runs it in the
-//! foreground; the e2e starts, crashes, and restarts it.
+//! docs/self-host.md, seam 1), its secrets bound by name the same way and
+//! read by celld from the node's secrets backend: a file of their values
+//! (`Secrets::Vars`) or OpenBao (openbao.rs, `Secrets::OpenBao`). `xtask
+//! dev` runs it in the foreground; the e2e starts, crashes, and restarts it.
 
 use std::fs;
 use std::io::Write;
@@ -116,7 +116,7 @@ pub fn read_config(project: &Path) -> Result<serde_json::Value> {
 /// The cell's shim, as a staged copy needs it: `entry.mjs` and each module
 /// it imports from beside it (a deploy runs it from the source tree, so
 /// only a staged copy can miss one: `the_staged_shim_holds_what_it_imports`).
-pub const SHIM_FILES: [&str; 3] = ["entry.mjs", "backup-reads.mjs", "secrets.mjs"];
+pub const SHIM_FILES: [&str; 2] = ["entry.mjs", "backup-reads.mjs"];
 
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
@@ -191,12 +191,12 @@ pub fn local_config(project: &Path) -> PathBuf {
 
 /// The project's config as a local node runs it (`local_config`): less the
 /// remote-only bindings, its secrets bound by name (`secrets`, each a
-/// binding and its secret's name) in wrangler's local store, as a deploy
-/// binds them in the account's, `images` beside its own computer images,
-/// and every one built from a Dockerfile of its own
-/// (`containers::scope_images`), so that no other stack's teardown removes
-/// its computers; less `unbound` (`Fleet::unbound`).
-fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)], unbound: &[&str]) -> Result<PathBuf> {
+/// binding and its secret's name) in the local node's store (wrangler's,
+/// or celld's backend), as a deploy binds them in the account's, `images`
+/// beside its own computer images, and every one built from a Dockerfile
+/// of its own (`containers::scope_images`), so that no other stack's
+/// teardown removes its computers.
+fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
@@ -210,14 +210,8 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(Str
     for b in REMOTE_ONLY_BINDINGS {
         obj.remove(b);
     }
-    for b in unbound {
-        anyhow::ensure!(obj.remove(*b).is_some(), "{} has no `{b}` to leave out", project.join("wrangler.jsonc").display());
-    }
     anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: the fleet's are bound here", project.join("wrangler.jsonc").display());
-    // none with the cell's stand-ins (`Secrets::Shim`): it binds no store
-    if !secrets.is_empty() {
-        obj.insert("secrets_store_secrets".into(), store::bindings_json(store::LOCAL_STORE_ID, secrets));
-    }
+    obj.insert("secrets_store_secrets".into(), store::bindings_json(store::LOCAL_STORE_ID, secrets));
     let path = local_config(project);
     fs::write(&path, serde_json::to_string_pretty(&config)?)?;
     Ok(path)
@@ -315,33 +309,32 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-/// Where a local node's secrets are, for the bindings the cell reads them
-/// through (cell/src/keys.rs: `await env.<BINDING>.get()`, either way).
+/// Where a local node's secrets are. Either way the local config binds
+/// each by name, as a deploy binds the account's, and the cell reads it as
+/// it reads the store's (cell/src/keys.rs: `await env.<BINDING>.get()`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Secrets {
-    /// wrangler's local Secrets Store in the node's state directory, bound
-    /// by name as a deploy binds the account's (`wrangler dev`).
+    /// wrangler's local Secrets Store in the node's state directory
+    /// (`wrangler dev`).
     Store,
-    /// The cell's stand-ins for the store's bindings (cell/secrets.mjs;
-    /// docs/self-host.md, seam 12), backed by Worker variables of the
-    /// bindings' own names in `.dev.vars`: a runtime with no Secrets Store
-    /// (celld), or the e2e on wrangler checking the stand-ins
-    /// (`FRAGMENT_E2E_SECRETS=vars`). Its local config binds no store.
-    Shim,
-    /// The same stand-ins, backed by OpenBao (openbao.rs): each secret
-    /// seeded under its store name, and the cell given a token that reads
-    /// them (`FRAGMENT_SECRETS_TOKEN`), and nothing else, in `.dev.vars`.
+    /// celld's secrets backend `vars`: the values in the node's secrets
+    /// file (`celld::secrets_file`), which only `celld dev` reads.
+    Vars,
+    /// celld's secrets backend `openbao` (openbao.rs): each secret seeded
+    /// under its store name, and the node given the path of a token that
+    /// reads them, and nothing else.
     OpenBao(openbao::Target),
 }
 
 /// What a local deployment is configured with. The cell reads its
 /// settings as Worker variables, from `.dev.vars` (mode 600), and its keys
-/// from Secrets Store bindings (cell/src/keys.rs): under `wrangler dev`
-/// from wrangler's local store in its state directory, which `configure`
-/// seeds with these values, under the names `store::Bound::conventional`
-/// gives them, and binds as a deploy does; or from the cell's stand-ins
-/// for them (`Secrets::Shim`). A dev or test deployment points
-/// code.storage at the fake in `crates/fakes`.
+/// from Secrets Store bindings (cell/src/keys.rs), which `configure` binds
+/// as a deploy does, under the names `store::Bound::conventional` gives
+/// them: under `wrangler dev` from wrangler's local store in its state
+/// directory, which `configure` seeds with these values; under `celld dev`
+/// from the node's secrets backend (`Secrets::Vars`, `Secrets::OpenBao`).
+/// A dev or test deployment points code.storage at the fake in
+/// `crates/fakes`.
 pub struct Fleet {
     pub host_secret: String,
     pub codestorage_org: String,
@@ -452,12 +445,6 @@ pub struct Fleet {
     pub connectors: Option<String>,
     /// Where its secrets are (`Secrets`): the runtime's.
     pub secrets: Secrets,
-    /// The project's bindings its local config leaves out (`send_email`,
-    /// `browser`, `images`, `containers`), as a deployment on a runtime
-    /// without that service runs: a self-hosted one (docs/self-host.md).
-    /// The e2e checks the cell without them on wrangler, where every one
-    /// is otherwise bound.
-    pub unbound: &'static [&'static str],
 }
 
 /// A Stripe account as the cell reads it.
@@ -549,56 +536,35 @@ impl Fleet {
         Ok(values)
     }
 
-    /// The stand-ins' variables (`Secrets::Shim`): `FRAGMENT_SECRETS`,
-    /// naming each binding, its secret's name and the backend
-    /// (cell/secrets.mjs), and each value as the variable of its binding's
-    /// name. Two bindings may name one secret: each gets its value.
-    fn shim_vars(&self, bound: &store::Bound) -> Result<Vec<(String, String)>> {
-        let values = self.values(bound)?;
-        let value = |name: &str| values.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string()).expect("every bound secret has its value");
-        let bindings = bound.cell();
-        let named: Vec<serde_json::Value> = bindings.iter().map(|(binding, name)| serde_json::json!({ "binding": binding, "secret_name": name })).collect();
-        let mut vars = vec![("FRAGMENT_SECRETS".to_string(), serde_json::json!({ "backend": "vars", "secrets": named }).to_string())];
-        vars.extend(bindings.iter().map(|(binding, name)| (binding.clone(), value(name))));
-        Ok(vars)
-    }
-
-    /// The stand-ins' variables backed by OpenBao (`Secrets::OpenBao`):
-    /// `FRAGMENT_SECRETS`, naming each binding, its secret's store name and
-    /// where OpenBao is, and the cell's token (renewed, or made when it has
-    /// lapsed). No value is a variable.
-    fn openbao_vars(target: &openbao::Target, bound: &store::Bound) -> Result<Vec<(String, String)>> {
-        let token = target.cell_token().map_err(|e| anyhow::anyhow!("the cell's OpenBao token: {e}"))?;
-        Ok(vec![("FRAGMENT_SECRETS".to_string(), target.shim_config(&bound.cell()).to_string()), (openbao::TOKEN_VAR.to_string(), token)])
-    }
-
     /// Renders the deployment for a node on `project`: its settings into
-    /// the project's `.dev.vars`, and its secrets where `secrets` says:
-    /// into wrangler's local store in the project's state directory
-    /// (`store::seed_local`, which skips values it holds already), their
-    /// bindings into its local config (`local_config`); for the cell's
-    /// stand-ins, into `.dev.vars` beside the settings, the local config
-    /// binding none; or into OpenBao (`openbao::Target::seed`, which writes
-    /// only what changed), the cell's token into `.dev.vars`. Clear the
-    /// state first (`clear_state`), not after.
+    /// the project's `.dev.vars`, its secrets' bindings into its local
+    /// config (`local_config`), and the secrets where `secrets` says: into
+    /// wrangler's local store in the project's state directory
+    /// (`store::seed_local`, which skips values it holds already); into the
+    /// celld node's secrets file (`celld::secrets_file`, mode 600); or into
+    /// OpenBao (`openbao::Target::seed`, which writes only what changed),
+    /// the node's file naming it and the path of the token that reads them
+    /// (renewed, or made when it has lapsed). Clear the state first
+    /// (`clear_state`), not after.
     pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
         let bound = self.bound();
-        let shim = match &self.secrets {
+        write_local_config(project, &bound.cell(), &self.images)?;
+        match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-                write_local_config(project, &bound.cell(), &self.images, self.unbound)?;
-                vec![]
+                // a celld stack's file of values, left from a run before, goes
+                let _ = fs::remove_file(celld::secrets_file(project));
             }
-            Secrets::Shim => {
-                write_local_config(project, &[], &self.images, self.unbound)?;
-                self.shim_vars(&bound)?
+            Secrets::Vars => {
+                let values: serde_json::Map<String, serde_json::Value> = self.values(&bound)?.into_iter().map(|(name, value)| (name.to_string(), value.into())).collect();
+                celld::write_secrets_file(project, &serde_json::json!({ "backend": "vars", "values": values }))?;
             }
             Secrets::OpenBao(target) => {
-                write_local_config(project, &[], &self.images, self.unbound)?;
                 target.seed(&self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed OpenBao: {e}"))?;
-                Self::openbao_vars(target, &bound)?
+                target.cell_token().map_err(|e| anyhow::anyhow!("the node's OpenBao token: {e}"))?;
+                celld::write_secrets_file(project, &target.node_config())?;
             }
-        };
+        }
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         // the node's one release (`dev`) deployed as it is configured, as a
@@ -709,7 +675,6 @@ impl Fleet {
         if let Some(c) = &self.connectors {
             vars.push(("FRAGMENT_CONNECTORS", c.as_str()));
         }
-        vars.extend(shim.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         write_dev_vars(project, &vars)
     }
 }
