@@ -162,17 +162,21 @@ A person's Yes brings their old agent's own keys to their Vault
 keeps talking in the same chat after the move, with no token pasted or
 revoked.
 
-- **What.** A phase 1 `stop_and_stage` names in `secrets` every kind the
-  old agent has (the roster's `has`): `telegram_bot_token`,
-  `openrouter_key`, `nostr_nsec`. A Yes hands them all off, with no
-  question of its own: the Vault is the person's, and nothing uses an
-  entry until they set something up. Phase 2 names none (no one said
-  Yes): its secrets stay in the old host's backup.
+- **What.** A phase 1 `stop_and_stage` names in `secrets` every kind:
+  `telegram_bot_token`, `openrouter_key`, `nostr_nsec`. A Yes hands off
+  each the old agent holds, with no question of its own: the Vault is
+  the person's, and nothing uses an entry until they set something up.
+  The mover reads each from its fixed place in the stopped agent and
+  hands off only those it read; it skips the call when it read none.
+  The roster's `has` doesn't decide it, because the mover's fleet can't
+  know which an old agent holds (FIN-498); `has` stays on the wire,
+  kept as it came, and nothing here reads it. Phase 2 names none (no
+  one said Yes): its secrets stay in the old host's backup.
 - **When.** Once the mover stopped the old agent, before it stages:
   the route takes only the old agent's current `stop_and_stage`, the one
-  `command` names (409 otherwise), only for the kinds it asks for (400),
-  while it is asked or staging (409). Each kind once, a value at most
-  `HANDOFF_VALUE_MAX_BYTES` (4 KiB).
+  `command` names (409 otherwise), any of the kinds it asks for (400
+  otherwise), while it is asked or staging (409). Each kind once, a
+  value at most `HANDOFF_VALUE_MAX_BYTES` (4 KiB).
 - **Where.** The router reads the values; `Migrations` sees only their
   kinds, and says whose Vault and agent they are for. Each value goes
   from the router straight into the person's Vault (`vault::hand_off`),

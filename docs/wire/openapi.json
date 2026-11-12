@@ -190,7 +190,7 @@
           },
           "secrets": {
             "default": [],
-            "description": "`stop_and_stage` after a person's Yes (phase 1): the secrets the\nold agent has (the roster's `has`), each to hand to its person's\nVault (`POST …/agents/{old}/secrets`) once it is stopped. None in\nphase 2: no one said Yes.",
+            "description": "`stop_and_stage` after a person's Yes (phase 1): every kind of\nsecret, whatever the roster's `has` says, each the old agent holds\nto hand to its person's Vault (`POST …/agents/{old}/secrets`) once\nit is stopped; one it does not hold is left out. None in phase 2:\nno one said Yes.",
             "items": {
               "$ref": "#/components/schemas/SecretKind"
             },
@@ -679,7 +679,7 @@
         "x-fragment-direction": "in"
       },
       "Has": {
-        "description": "Which secrets it holds (never their values).",
+        "description": "Which secrets it holds (never their values), if its roster knows:\nkept as it came, read by nothing here (a Yes asks for every kind).",
         "properties": {
           "nostr": {
             "type": "boolean"

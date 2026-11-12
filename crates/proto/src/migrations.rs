@@ -344,7 +344,8 @@ pub struct OldSite {
     pub public: bool,
 }
 
-/// Which secrets it holds (never their values).
+/// Which secrets it holds (never their values), if its roster knows:
+/// kept as it came, read by nothing here (a Yes asks for every kind).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Has {
@@ -397,10 +398,11 @@ pub struct Command {
     #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub mark: Option<Mark>,
-    /// `stop_and_stage` after a person's Yes (phase 1): the secrets the
-    /// old agent has (the roster's `has`), each to hand to its person's
-    /// Vault (`POST …/agents/{old}/secrets`) once it is stopped. None in
-    /// phase 2: no one said Yes.
+    /// `stop_and_stage` after a person's Yes (phase 1): every kind of
+    /// secret, whatever the roster's `has` says, each the old agent holds
+    /// to hand to its person's Vault (`POST …/agents/{old}/secrets`) once
+    /// it is stopped; one it does not hold is left out. None in phase 2:
+    /// no one said Yes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub secrets: Vec<SecretKind>,

@@ -14,7 +14,7 @@
 //! Removable with the move (docs/technical-debt-ledger.md).
 
 use fragment_proto::migrations::{
-    command_id, stage_id, stage_prefix, Command, CommandKind, Handoff, Has, HeldReason, Mark, MoveState, Phase, Report, SecretKind, StageDone, ATTEMPTS_MAX, HANDOFF_VALUE_MAX_BYTES, TEXT_MAX_BYTES, WHY_MAX_BYTES,
+    command_id, stage_id, stage_prefix, Command, CommandKind, Handoff, HeldReason, Mark, MoveState, Phase, Report, SecretKind, StageDone, ATTEMPTS_MAX, HANDOFF_VALUE_MAX_BYTES, TEXT_MAX_BYTES, WHY_MAX_BYTES,
 };
 use fragment_proto::vault::{Place, PutSecret};
 use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
@@ -359,21 +359,22 @@ impl Move {
                 Act::Retire(mark) => Some(mark),
                 _ => None,
             },
-            secrets: vec![],
+            secrets: self.secrets(),
         })
     }
 
     /// The secrets its current command hands to its person's Vault: on a
     /// person's Yes (a phase 1 `stop_and_stage`, bound to their agent),
-    /// every kind its old agent has, with no question of its own (the
-    /// Vault is theirs, and nothing uses an entry until they set
-    /// something up); none otherwise.
-    pub fn secrets(&self, has: &Has) -> Vec<SecretKind> {
+    /// every kind, with no question of its own (the Vault is theirs, and
+    /// nothing uses an entry until they set something up); none
+    /// otherwise. Every kind, not the roster's `has`: the mover's fleet
+    /// can't know which an old agent holds, and the mover hands off only
+    /// those it reads (FIN-498).
+    pub fn secrets(&self) -> Vec<SecretKind> {
         if self.command != Some(Act::StopAndStage) || self.phase != Phase::P1 || self.agent.is_none() {
             return vec![];
         }
-        let held = [has.telegram, has.openrouter, has.nostr];
-        SecretKind::ALL.into_iter().zip(held).filter_map(|(k, h)| h.then_some(k)).collect()
+        SecretKind::ALL.to_vec()
     }
 
     /// Its current attempt's stage id and prefix (none before an attempt).
@@ -706,11 +707,11 @@ pub fn handoff_kinds(h: &Handoff) -> Result<Vec<SecretKind>, Refused> {
 /// Whether the mover may hand off `kinds` of `m`'s old agent for
 /// `command`: its current command (409 otherwise), whose `secrets` name
 /// each (400), while its old agent is being stopped or staged (409).
-pub fn handoff(m: &Move, command: &str, has: &Has, kinds: &[SecretKind]) -> Result<(), Refused> {
+pub fn handoff(m: &Move, command: &str, kinds: &[SecretKind]) -> Result<(), Refused> {
     if m.command_id().as_deref() != Some(command) {
         return Err(Refused::Stale);
     }
-    let asked = m.secrets(has);
+    let asked = m.secrets();
     if !kinds.iter().all(|k| asked.contains(k)) {
         return Err(Refused::Unfit("a hand-off names only the secrets its command asks for"));
     }
@@ -1823,32 +1824,35 @@ mod tests {
         assert_eq!(said(&restarted(&held), "Ada"), said(&held, "Ada"), "restart");
     }
 
-    /// Goal: a person's Yes hands every secret its old agent has to their
-    /// Vault (F11), only for that command, while it stops or stages, and
-    /// each into an entry bound to the new agent toward its kind's hosts.
+    /// Goal: a person's Yes asks for every kind of secret for their Vault
+    /// (F11), whatever the roster's `has` says (FIN-498: the mover's fleet
+    /// can't know it), and takes any of them, only for that command, while
+    /// it stops or stages, each into an entry bound to the new agent
+    /// toward its kind's hosts.
     #[test]
     fn a_yes_hands_off_the_old_agents_secrets() {
         use fragment_proto::migrations::HandoffItem;
-        let all = Has { telegram: true, openrouter: true, nostr: true };
-        let some = Has { telegram: true, openrouter: false, nostr: false };
         let asked = to(yes(&open_move(), AGENT, T0));
-        // valid: every kind it has, on its command, while asked or staging
-        assert_eq!(asked.secrets(&all), SecretKind::ALL.to_vec());
-        assert_eq!(asked.secrets(&some), vec![SecretKind::TelegramBotToken]);
+        // valid: every kind asked; all of them, or some (the rest not read), on its command, while asked or staging
+        assert_eq!(asked.secrets(), SecretKind::ALL.to_vec());
+        assert_eq!(asked.command().unwrap().secrets, SecretKind::ALL.to_vec(), "as the mailbox answers it");
         let cmd = asked.command_id().unwrap();
-        assert_eq!(handoff(&asked, &cmd, &all, &SecretKind::ALL), Ok(()));
+        assert_eq!(handoff(&asked, &cmd, &SecretKind::ALL), Ok(()));
         let s = staging();
-        assert_eq!(handoff(&restarted(&s), &s.command_id().unwrap(), &some, &[SecretKind::TelegramBotToken]), Ok(()), "staging, restarted");
-        // invalid: a kind it has not, another command, a move past staging
-        assert_eq!(handoff(&s, &s.command_id().unwrap(), &some, &[SecretKind::OpenrouterKey]), Err(Refused::Unfit("a hand-off names only the secrets its command asks for")));
-        assert_eq!(handoff(&s, "prj_1:2:stop_and_stage", &all, &[SecretKind::NostrNsec]), Err(Refused::Stale));
+        assert_eq!(s.secrets(), SecretKind::ALL.to_vec(), "staging");
+        for kind in SecretKind::ALL {
+            assert_eq!(handoff(&restarted(&s), &s.command_id().unwrap(), &[kind]), Ok(()), "staging, restarted: {kind:?} alone");
+        }
+        // invalid: another command, a move past staging
+        assert_eq!(handoff(&s, "prj_1:2:stop_and_stage", &[SecretKind::NostrNsec]), Err(Refused::Stale));
         let i = importing();
-        assert_eq!(handoff(&i, &cmd, &all, &[SecretKind::NostrNsec]), Err(Refused::Stale), "staged: its command is done");
+        assert_eq!(handoff(&i, &cmd, &[SecretKind::NostrNsec]), Err(Refused::Stale), "staged: its command is done");
         // none without a Yes: phase 2's stop_and_stage, an unasked move, staff's restart
         let p2 = cutoff(&Move::listed("o", "u", false, T0), T0, T0).unwrap().to;
-        assert_eq!(p2.secrets(&all), vec![]);
-        assert!(handoff(&p2, &p2.command_id().unwrap(), &all, &[SecretKind::NostrNsec]).is_err());
-        assert_eq!(open_move().secrets(&all), vec![]);
+        assert_eq!(p2.secrets(), vec![]);
+        assert_eq!(p2.command().unwrap().secrets, vec![], "as the mailbox answers it");
+        assert_eq!(handoff(&p2, &p2.command_id().unwrap(), &[SecretKind::NostrNsec]), Err(Refused::Unfit("a hand-off names only the secrets its command asks for")));
+        assert_eq!(open_move().secrets(), vec![]);
         // its bounds: each kind once, 1 to 3, a value 1 to 4096 bytes
         let item = |kind, value: &str| HandoffItem { kind, value: value.into() };
         let h = |items| Handoff { command: cmd.clone(), items };
