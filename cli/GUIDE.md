@@ -1239,7 +1239,7 @@ fragment operator payer <org> <email|npub> [--id I] [--key-file F]
 fragment operator moves [--withdrawn] [--key-file F]   # the finite.computer move; --withdrawn: the will-not-move list, each with its why
 fragment operator withdraw <old> --why W [--key-file F]   # keep an old agent out of the move (ahead of the roster too)
 fragment operator include <old> [--key-file F]   # take a withdrawal back
-fragment operator retry <old> [--key-file F]   # a held move asked again, as a new attempt
+fragment operator retry <old> [--key-file F]   # a held move tried again where it was held: a new attempt at its stage, or its retirement or (phase 2) import again
 fragment operator restart-old <old> [--key-file F]   # the old agent started again, the move offered again (phase 1, before its retirement)
 fragment operator retire <old> [--key-file F]   # a held move's old agent retired as migrated: the move done
 ```

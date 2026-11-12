@@ -689,7 +689,8 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// A held move asked again, as a new attempt
+    /// A held move tried again from where it was held: a new attempt at
+    /// its stage, or its retirement or (phase 2) its import again
     Retry {
         old: String,
         #[arg(long)]
