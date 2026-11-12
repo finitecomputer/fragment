@@ -1,0 +1,93 @@
+# Spike only (never merged): one SwiftUI app for iOS and macOS that loads a
+# Fragment-shaped page in a WKWebView, either directly (system network, e.g.
+# the Tailscale app), through a SOCKS5 probe, or through an embedded tsnet
+# node (libtailscale's TailscaleKit) via WKWebsiteDataStore.proxyConfigurations.
+# TSSpikeBare is the same app without TailscaleKit, for the size delta.
+name: TSSpike
+options:
+  bundleIdPrefix: build.finite
+  deploymentTarget:
+    iOS: "18.1"
+    macOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    GENERATE_INFOPLIST_FILE: NO
+  configs:
+    Debug:
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      ONLY_ACTIVE_ARCH: YES
+      DEBUG_INFORMATION_FORMAT: dwarf
+    Release:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      SWIFT_COMPILATION_MODE: wholemodule
+      DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+      VALIDATE_PRODUCT: YES
+# The nix xcodegen has no setting presets: platform settings are explicit.
+ios: &ios
+  SDKROOT: iphoneos
+  SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+  TARGETED_DEVICE_FAMILY: "1,2"
+  LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@executable_path/Frameworks"]
+targets:
+  TSSpike:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    settings:
+      base:
+        <<: *ios
+        PRODUCT_BUNDLE_IDENTIFIER: build.finite.tsspike
+        PRODUCT_NAME: TSSpike
+    info:
+      path: Generated/Info-iOS.plist
+      properties: &iosinfo
+        CFBundleDisplayName: TS Spike
+        UILaunchScreen: {}
+        UIApplicationSceneManifest: {UIApplicationSupportsMultipleScenes: false}
+        CFBundleURLTypes: [{CFBundleURLSchemes: [tsspike]}]
+        NSLocalNetworkUsageDescription: The spike reaches tailnet peers on your network directly.
+        NSAppTransportSecurity: {NSExceptionDomains: {ts.net: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, tsspike.test: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}}}
+    dependencies:
+      - framework: Frameworks/TailscaleKit.xcframework
+        embed: true
+  TSSpikeBare:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    settings:
+      base:
+        <<: *ios
+        PRODUCT_BUNDLE_IDENTIFIER: build.finite.tsspikebare
+        PRODUCT_NAME: TSSpikeBare
+    info:
+      path: Generated/Info-iOS-bare.plist
+      properties: *iosinfo
+  TSSpikeMac:
+    type: application
+    platform: macOS
+    sources: [Sources]
+    settings:
+      base:
+        SDKROOT: macosx
+        SUPPORTED_PLATFORMS: macosx
+        LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@executable_path/../Frameworks"]
+        COMBINE_HIDPI_IMAGES: YES
+        PRODUCT_BUNDLE_IDENTIFIER: build.finite.tsspike.mac
+        PRODUCT_NAME: TSSpikeMac
+        CODE_SIGN_ENTITLEMENTS: Mac.entitlements
+        CODE_SIGN_IDENTITY: "-"
+    info:
+      path: Generated/Info-macOS.plist
+      properties:
+        CFBundleDisplayName: TS Spike
+        CFBundleURLTypes: [{CFBundleURLSchemes: [tsspike]}]
+        NSAppTransportSecurity: {NSExceptionDomains: {ts.net: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, tsspike.test: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}}}
+    dependencies:
+      - framework: Frameworks/mac/TailscaleKit.framework
+        embed: true
