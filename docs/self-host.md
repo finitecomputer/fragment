@@ -112,11 +112,12 @@ runs them on the box's krun engine (sandcastle's `sandcastle-engine`,
 root, a jailed microVM per container), which speaks Cloudflare's container
 API. `CELLD_CONTAINER_ENGINE=krun:<the engine's socket>` names it; the
 cell, the core and the wire know nothing of it, and nothing sits between
-celld and the engine. The fork's fixes for it (futurepaul/celld#14 to #20,
+celld and the engine. The fork's fixes for it (futurepaul/celld#14 to #21,
 a stack) are each a gap the e2e's computer lanes found: a dev node's images,
 the intercept socket's path, intercepts set during a start or set again, a
 WebSocket and a large body through one, a `monitor()` whose event had
-answered, and an `exec()` during a start.
+answered (its object now woken as the container stops), and an `exec()`
+during a start.
 
 - **Images:** `celld dev` builds the config's images with Docker, as it
   does for its Docker engine, and loads each into the krun engine under
@@ -134,9 +135,15 @@ answered, and an `exec()` during a start.
   through the backups intercept; `snapshotDirectory()` is never called.
   Dev and the e2e sleep unsnapshotted (`FRAGMENT_COMPUTER_SNAPSHOTS=off`),
   as on wrangler.
-- **Crashes:** a container that stops is heard at the Computer object's
-  next event (a request, its alarm), where Cloudflare's `monitor()` settles
-  at once.
+- **Crashes:** a container that stops wakes its Computer object, whose
+  `monitor()` settles then, as on Cloudflare.
+- **Capacity:** the engine admits a VM by its instance's memory, up to its
+  `memory_mib_max`; a computer is 2 vCPU and 6 GiB (decision 13), so this
+  box's 32 GiB admits five awake at once, and a start past it is refused
+  (429) and tried again by the cell. The whole e2e keeps more awake than
+  that, so its later computer sections on celld meet refusals; each runs
+  alone within it. A box sizes the budget for the computers it keeps awake
+  (a stub guest uses about 250 MB of its 6 GiB).
 - **Cleanup:** a node reaps its VMs when it stops and when it starts again
   on its project; a run killed outright has devstack destroy its node's by
   celld's naming (`celld::Engine::remove`; docs/technical-debt-ledger.md).
@@ -420,7 +427,8 @@ through the person's browser, so the tailnet is enough.
 7. Models: endpoints for every slot, and embeddings.
 8. Plans and operators: `fragment operator key`; `operators`;
    `default_plan`.
-9. Computers: the krun engine installed and running; the Hermes image
+9. Computers: the krun engine installed and running, its memory budget
+   sized for the computers awake at once (6 GiB each); the Hermes image
    built (with `FRAGMENT_HOST`) and loaded into it (seam 2).
 10. Providers: rows dropped or keys brought; OAuth clients for Google,
     Linear and Salesforce.
