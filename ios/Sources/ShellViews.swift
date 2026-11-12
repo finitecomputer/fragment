@@ -114,6 +114,24 @@ private struct SidebarPan: UIGestureRecognizerRepresentable {
     }
 }
 
+/// A blur behind the status bar, fading out just past it, over what scrolls
+/// beneath: the material's blur, masked to grow toward the screen's edge.
+private struct StatusBarBlur: View {
+    var body: some View {
+        GeometryReader { proxy in
+            let top = proxy.safeAreaInsets.top
+            Rectangle().fill(.regularMaterial)
+                .mask(LinearGradient(stops: [.init(color: .black, location: 0),
+                                             .init(color: .black, location: top / (top + 20)),
+                                             .init(color: .clear, location: 1)],
+                                     startPoint: .top, endPoint: .bottom))
+                .frame(height: top + 20)
+                .ignoresSafeArea(edges: .top)
+        }
+        .allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
 struct SidebarView: View {
     let library: Library
     let page: ShellPage
@@ -198,9 +216,8 @@ struct SidebarView: View {
             }.padding(.horizontal, 12).padding(.top, 12)
         }
         .refreshable { await library.load(api) }
-        // nothing of its own at the top: the status bar softens what passes under it
-        .safeAreaBar(edge: .top) { Color.clear.frame(height: 0) }
-        .scrollEdgeEffectStyle(.soft, for: .top)
+        // what passes under the status bar blurs, more the higher it goes
+        .overlay(alignment: .top) { StatusBarBlur() }
         .safeAreaBar(edge: .bottom) {
             HStack(alignment: .bottom, spacing: 12) {
                 VStack(spacing: 4) {
