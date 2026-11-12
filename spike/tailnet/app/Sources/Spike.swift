@@ -24,12 +24,29 @@ struct SpikeConfig: Codable {
     var matchDomains = ""        // comma list: proxy only these domains (empty: all)
     var control = ""             // control server URL (empty: Tailscale's)
 
+    // A missing key keeps its default. The synthesized Decodable requires
+    // every key, so a partial SpikeDefaults.json silently failed to decode
+    // and the phone launched in direct mode with no URL.
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func v(_ k: CodingKeys, _ d: String) throws -> String { try c.decodeIfPresent(String.self, forKey: k) ?? d }
+        url = try v(.url, url); mode = try v(.mode, mode); proxy = try v(.proxy, proxy); pass = try v(.pass, pass)
+        ca = try v(.ca, ca); pin = try v(.pin, pin); hostname = try v(.hostname, hostname); authKey = try v(.authKey, authKey)
+        store = try v(.store, store); matchDomains = try v(.matchDomains, matchDomains); control = try v(.control, control)
+    }
+
     static let key = "spikeConfig"
     static func load() -> SpikeConfig {
         let d = UserDefaults.standard
         // saved (a deep link) > bundled SpikeDefaults.json (the phone build) > empty
         let bundled = Bundle.main.url(forResource: "SpikeDefaults", withExtension: "json")
-            .flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode(SpikeConfig.self, from: $0) }
+            .flatMap { try? Data(contentsOf: $0) }.flatMap { data -> SpikeConfig? in
+                do { return try JSONDecoder().decode(SpikeConfig.self, from: data) } catch {
+                    NSLog("SPIKE bundled SpikeDefaults.json does not decode: \(error)")  // never silently direct
+                    return nil
+                }
+            }
         var c = (d.data(forKey: key)).flatMap { try? JSONDecoder().decode(SpikeConfig.self, from: $0) } ?? bundled ?? SpikeConfig()
         // `-url …` style launch arguments override (UserDefaults argument domain).
         for (k, apply) in [("url", { c.url = $0 }), ("mode", { c.mode = $0 }), ("proxy", { c.proxy = $0 }),

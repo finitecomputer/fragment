@@ -11,6 +11,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -27,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -36,13 +38,44 @@ import (
 )
 
 var (
-	listen   = flag.String("listen", "127.0.0.1:8443", "TLS listen address")
-	plain    = flag.String("plain", "", "optional plaintext listen address (behind a TLS-terminating proxy)")
-	proxyPro = flag.Bool("proxy-protocol", false, "expect a PROXY v1/v2 header on each connection")
-	certDir  = flag.String("certs", "certs", "dir of <name>.crt (full chain) + <name>.key pairs")
-	platform = flag.String("platform", "", "platform hosts (comma list): P (fragments <name>.P) or P@S (fragments <name>.S, P may sit under S)")
-	logDir   = flag.String("logs", "logs", "dir for access.jsonl and results.jsonl")
+	listen    = flag.String("listen", "127.0.0.1:8443", "TLS listen address")
+	plain     = flag.String("plain", "", "optional plaintext listen address (behind a TLS-terminating proxy)")
+	proxyPro  = flag.Bool("proxy-protocol", false, "expect a PROXY v1/v2 header on each connection")
+	certDir   = flag.String("certs", "certs", "dir of <name>.crt (full chain) + <name>.key pairs")
+	platform  = flag.String("platform", "", "platform hosts (comma list): P (fragments <name>.P) or P@S (fragments <name>.S, P may sit under S)")
+	logDir    = flag.String("logs", "logs", "dir for access.jsonl and results.jsonl")
+	whoisSock = flag.String("whois-socket", "", "tailscaled's socket: name each request's person by WhoIs (what an identity door does)")
 )
+
+// whois asks the box's tailscaled who holds a tailnet address (LocalAPI over
+// its unix socket), as the identity door would with the PROXY-v2 address.
+var whoisClient = &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{
+	DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", *whoisSock)
+	},
+}}
+
+func whois(addr string) (login, node string) {
+	if *whoisSock == "" {
+		return "", ""
+	}
+	resp, err := whoisClient.Get("http://local-tailscaled.sock/localapi/v0/whois?addr=" + url.QueryEscape(addr))
+	if err != nil {
+		return "error: " + err.Error(), ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Sprintf("none (%d)", resp.StatusCode), ""
+	}
+	var w struct {
+		Node        struct{ ComputedName string }
+		UserProfile struct{ LoginName string }
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&w) != nil {
+		return "error: bad whois answer", ""
+	}
+	return w.UserProfile.LoginName, w.Node.ComputedName
+}
 
 type logger struct {
 	mu sync.Mutex
@@ -260,7 +293,7 @@ func accessLog(next http.Handler) http.Handler {
 			"cookies": cookieNames(r), "origin": r.Header.Get("Origin"),
 			"site": r.Header.Get("Sec-Fetch-Site"), "dest": r.Header.Get("Sec-Fetch-Dest"),
 			"ua": r.Header.Get("User-Agent"), "xff": r.Header.Get("X-Forwarded-For"),
-			"ts_user": r.Header.Get("Tailscale-User-Login"),
+			"ts_user": tsUser(r),
 		})
 	})
 }
@@ -395,9 +428,20 @@ func whoami(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"remote": r.RemoteAddr, "host": hostOf(r), "proto": r.Proto, "tls": tlsInfo,
 		"cookies": cookieNames(r), "site": r.Header.Get("Sec-Fetch-Site"),
-		"ts_user": r.Header.Get("Tailscale-User-Login"),
+		"ts_user": tsUser(r), "ts_node": tsNode(r),
 	})
 }
+
+// The person behind a request: serve's header in HTTP mode, else WhoIs.
+func tsUser(r *http.Request) string {
+	if h := r.Header.Get("Tailscale-User-Login"); h != "" {
+		return h
+	}
+	u, _ := whois(r.RemoteAddr)
+	return u
+}
+
+func tsNode(r *http.Request) string { _, n := whois(r.RemoteAddr); return n }
 
 func static(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")

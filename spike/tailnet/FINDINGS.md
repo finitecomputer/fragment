@@ -64,6 +64,57 @@ Over the Mac's **system Tailscale** (the zero-embedding path):
 
 Platform trust on Apple and rustls accepts the new YE chain with no setup.
 
+Through **embedded tsnet on hosted Tailscale** (the simulator app, logged in
+interactively, no ATS keys, no pinned CA):
+- **15/15**. All 27 requests came from the app's tailnet address. The path
+  went direct (5 ms ping); the 25 MB upload ran at 18.3 Mbps.
+- Cold start with a saved node, real control plane (3 runs):
+
+  | Run | tsnet up | Signed-in page done |
+  |---|---|---|
+  | 1 | 0.70 s | 1.44 s |
+  | 2 | 2.28 s | 2.96 s |
+  | 3 | 0.69 s | 1.27 s |
+
+- Reconnect after 5 min in the background (simulator): the first probe
+  after foreground timed out (its 5 s abort). The second succeeded **5.6 s
+  after resume**. The box logged "connection was refused" for the first SYNs.
+
+On **Paul's phone** (embedded tsnet, hosted Tailscale, real cert, no ATS keys,
+no pinned CA):
+- **15/15** at `home.spike.finite.house`: the 65 s WebSocket, streamed and
+  idle fetches, the chat frame with all four cookie flavours, and a 25 MB
+  upload at 22.3 Mbps.
+- All 60 requests came from the phone's tailnet address, over a direct path.
+- Login link shown 1.3 s after the deep link. After approving in Safari and
+  returning, tsnet was up in 0.55 s and the signed-in page loaded 0.63 s
+  later.
+- Footprint about 32 MB (the phone reports lower than the simulator).
+
+### Identity: WhoIs works; `serve --tcp` adds no identity headers
+
+`ts_user` in the page results was empty because the origin did no lookup.
+That field echoes `Tailscale-User-Login`, which `tailscale serve` adds only in
+HTTP proxy mode, not with `--tcp … --proxy-protocol 2`.
+
+The lookup itself works on the hosted box. LocalAPI WhoIs of the PROXY-v2
+address names the node and the person:
+- the phone, the simulator and the Mac each map to their node, owned by the
+  same untagged user;
+- an address that isn't a peer gives "peer not found".
+
+So the identity door does WhoIs itself (LocalAPI on tailscaled's socket),
+keyed by the PROXY-v2 address. The origin now does the same (`-whois-socket`).
+
+### Spike-app trap (fixed): a partial bundled config decoded as nothing
+
+Swift's synthesized `Decodable` requires every non-optional key, even ones
+with a default. The phone's `SpikeDefaults.json` listed only some keys, so it
+failed (`keyNotFound: proxy`) and the app silently fell back to direct mode.
+Fixed with a `decodeIfPresent` init (a missing key keeps its default) and a
+logged failure. Before and after shown on the same file. The phone ran this
+time by a deep link.
+
 ### Install-order lesson: create the records before anything looks the names up
 
 The bare platform name failed on the home network while every new wildcard
@@ -74,6 +125,10 @@ domain was delegated. The zone's own negative TTL is 1800 s.
 The Tailscale app does not avoid this. With no global nameservers set,
 MagicDNS forwards non-tailnet names to the OS resolvers, here that same
 router. Embedded tsnet resolves through the system too.
+
+Clients cache too: after the router's entry expired (it answered at
+22:48Z), the Mac's own resolver cache still returned "hostname not found"
+to curl, URLSession and the CLI. Flushing it needs sudo.
 
 So an installer must create the records (and wait for delegation of a fresh
 domain) before anything looks the names up. Its first check should query the
