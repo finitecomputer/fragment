@@ -15,10 +15,18 @@
 // is the server's, read again while a move is under way. A refusal is the
 // server's words.
 //
+// Once its new agent exists, a move is that agent's to tell (FIN-463: the
+// first move's agent asked its person a question in its own chat while
+// this page said "Bringing it over…"): each such row opens its agent's
+// chat, and an import that starts while the page shows takes the person
+// there, the first if several do. One importing when the page opened is
+// left to its person, who came here to see it.
+//
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
 // `addAgent`, `setGuest`, `reload` (the list again), `ownAgents` (their
 // agent fragments' names), `identityOf` (an agent fragment's identity, once
-// its computer has it), and `timers`.
+// its computer has it), `chatOf` (an agent identity's own chat, of
+// theirs), `openChat`, and `timers`.
 
 import { platformImage } from "./computer.js";
 
@@ -42,18 +50,29 @@ export function createMovePage(root, h) {
   let busy = false;
   let shown = false;
   let timer = null;
+  // the moves importing at this opening's first read (`arrive`), and which
+  // opening it is: a read answered after the page closed is no one's
+  let importingAtOpen = null;
+  let opening = 0;
   // what the person chose, kept across drawings, and Bring over as drawn
   const chosen = new Map();
   let go = null;
   const anyChosen = () => (offers ?? []).some((o) => ASKABLE.has(o.state) && (chosen.get(o.old) ?? true));
 
+  // whether it was this opening's
   async function read() {
+    const at = opening;
     try {
-      offers = (await api("GET", "/api/migrations/offers")).offers ?? [];
+      const got = (await api("GET", "/api/migrations/offers")).offers ?? [];
+      if (at !== opening) return false;
+      offers = got;
       readFailed = null;
+      importingAtOpen ??= new Set(offers.filter((o) => o.state === "importing").map((o) => o.old));
     } catch (e) {
+      if (at !== opening) return false;
       readFailed = e?.status ? e.message : "Couldn't load your agents. Try again.";
     }
+    return true;
   }
 
   function row(o) {
@@ -89,6 +108,12 @@ export function createMovePage(root, h) {
       again.disabled = busy;
       again.onclick = () => askAgain(o);
       li.append(again);
+    } else if (o.agent && h.chatOf(o.agent)) {
+      const chat = el("button", null, "Open chat");
+      chat.type = "button";
+      chat.disabled = busy;
+      chat.onclick = () => h.openChat(h.chatOf(o.agent));
+      li.append(chat);
     }
     return li;
   }
@@ -122,6 +147,17 @@ export function createMovePage(root, h) {
     root.replaceChildren(wrap);
   }
 
+  // an import begun since the page opened: its agent's chat, the page left.
+  // None before this opening's first answered read: what the page holds
+  // until then is an earlier opening's, and no news
+  function arrive() {
+    if (!shown || busy || !importingAtOpen) return false;
+    const o = offers?.find((x) => x.state === "importing" && !importingAtOpen?.has(x.old) && x.agent && h.chatOf(x.agent));
+    if (!o) return false;
+    h.openChat(h.chatOf(o.agent));
+    return true;
+  }
+
   // read again while a move is under way, the page shown
   function follow() {
     if (timer !== null) timers.clearTimeout(timer);
@@ -129,7 +165,7 @@ export function createMovePage(root, h) {
     if (shown && !busy && offers?.some((o) => IN_FLIGHT.has(o.state))) {
       timer = timers.setTimeout(async () => {
         timer = null;
-        await read();
+        if (!(await read()) || arrive()) return;
         draw();
         follow();
       }, READ_EVERY_MS);
@@ -218,20 +254,24 @@ export function createMovePage(root, h) {
     busy = false;
     await read();
     h.reload?.();
+    if (arrive()) return;
     draw();
     follow();
   }
 
   async function open() {
     shown = true;
+    opening += 1;
+    importingAtOpen = null;
     draw();
-    await read();
+    if (!(await read())) return;
     draw();
     follow();
   }
 
   function close() {
     shown = false;
+    opening += 1;
     if (timer !== null) timers.clearTimeout(timer);
     timer = null;
   }

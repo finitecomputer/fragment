@@ -186,7 +186,8 @@ release was deployed (`release::DEPLOYED`), which no release reads now
   A release tolerates what the next writes where it can: a run's `via`
   it does not know reads as written, and a trigger kind it does not know
   starts nothing. A value an older release cannot read makes its release
-  forward only, by a schema step (Fragment step 6, FIN-328).
+  forward only, by a schema step (Fragment step 6, FIN-328; Migrations
+  step 7, a move waiting for staff).
 
 A deploy is all at once (a gradual deployment would refuse between its
 two versions), and done when every object class answers it within 90 s

@@ -29,19 +29,22 @@ const settle = async () => {
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
 };
 
-function page(t, own = { agents: [], ids: new Map() }) {
+function page(t, own = { agents: [], ids: new Map(), chats: new Map() }) {
   const root = new Node("section");
   const calls = [];
   const made = [];
   const timers = { setTimeout: (fn) => (timers.due = fn, 1), clearTimeout: () => (timers.due = null), due: null };
   const api = (method, path, body) => new Promise((ok, fail) => calls.push({ method, path, body, ok, fail }));
   let guest = true;
+  const opened = [];
   const ui = createMovePage(root, {
     api, el: (tag, cls, text) => new Node(tag, cls, text), timers,
     setGuest: (g) => (guest = g),
     addAgent: (spec) => new Promise((ok, fail) => made.push({ spec, ok, fail })),
     reload: () => {},
     ownAgents: () => own.agents, identityOf: (f) => own.ids.get(f) ?? null,
+    chatOf: (identity) => own.chats?.get(identity) ?? null,
+    openChat: (chat) => (opened.push(chat), ui.close()),
   });
   t.after(() => ui.close());
   const rows = () => walk(root).filter((n) => n.tag === "li").map((li) => ({
@@ -57,7 +60,7 @@ function page(t, own = { agents: [], ids: new Map() }) {
     assert.deepEqual([c?.method, c?.path], [method, path], "the next call");
     return c;
   };
-  return { ui, root, calls, made, timers, rows, button, errors, next, guest: () => guest };
+  return { ui, root, calls, made, timers, rows, button, errors, next, opened, guest: () => guest };
 }
 
 const offer = (old, state, said, o = {}) => ({ old, name: `Old ${old}`, state, said, ...o });
@@ -227,4 +230,119 @@ test("a choice keeps the page as it is, the box and its focus with it: only Brin
   box.onchange();
   assert.equal(walk(p.root).find((n) => n.tag === "input" && n.type === "checkbox"), box);
   assert.equal(p.button("Bring over").disabled, false, "chosen");
+});
+
+// FIN-463: the first move on production imported, and its new agent asked
+// its person a question in its own chat, while this page said "Bringing
+// it over…". Once an import starts, its agent's chat is where its person
+// is, or one tap away.
+test("an import that starts while the page shows takes the person to its new agent's chat; each row with a new agent opens that agent's chat", async (t) => {
+  const own = { agents: ["juniper--k3x9", "fern--p2q8"], ids: new Map(), chats: new Map([["npub1juniper", "juniper-chat--k3x9"], ["npub1fern", "fern-chat--p2q8"]]) };
+  const p = page(t, own);
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" }), offer("b", "importing", "Bringing Old b over…", { agent: "npub1fern" })] });
+  await settle();
+  assert.deepEqual(p.opened, [], "one already importing as the page opens is the person's to open: they came here to see it");
+  assert.deepEqual(p.rows().map((r) => r.buttons), [["Open chat"], ["Open chat"]], "each a tap from its new agent's chat");
+  p.button("Open chat").onclick();
+  assert.deepEqual(p.opened, ["juniper-chat--k3x9"], "its own chat");
+  p.opened.length = 0;
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" }), offer("b", "importing", "Bringing Old b over…", { agent: "npub1fern" })] });
+  await settle();
+  const due = p.timers.due;
+  p.timers.due = null;
+  due();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" }), offer("b", "importing", "Bringing Old b over…", { agent: "npub1fern" })] });
+  await settle();
+  assert.deepEqual(p.opened, ["juniper-chat--k3x9"], "its import began as the page showed: to its agent's chat, where it asks and says how it goes");
+  assert.equal(p.timers.due, null, "the page read no more");
+  assert.equal(p.calls.length, 0);
+});
+
+test("Bring over into a move that imports at once (a kept stage's): the person is taken to the new agent's chat once its Yes is posted", async (t) => {
+  const own = { agents: [], ids: new Map(), chats: new Map([["npub1juniper", "juniper-chat--k3x9"]]) };
+  const p = page(t, own);
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "archived", "Old a is kept.")] });
+  await settle();
+  p.button("Bring over").onclick();
+  await settle();
+  p.next("POST", "/api/migrations/offers").ok({ offers: [] });
+  await settle();
+  p.next("GET", "/api/ledger").ok({ plan: "seat" });
+  await settle();
+  p.made[0].ok({ chat: "juniper-chat--k3x9", id: "npub1juniper", computer: "computer:aa" });
+  await settle();
+  p.next("POST", "/api/migrations/offers/a/yes").ok({ state: "importing" });
+  await settle();
+  assert.deepEqual(p.opened, [], "not while Bring over is under way");
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" })] });
+  await settle();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" })] });
+  await settle();
+  assert.deepEqual(p.opened, ["juniper-chat--k3x9"]);
+});
+
+test("a read the person left before it answered is not this opening's: an import they come back to is theirs to open, never a jump", async (t) => {
+  const own = { agents: [], ids: new Map(), chats: new Map([["npub1juniper", "juniper-chat--k3x9"]]) };
+  const p = page(t, own);
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" })] });
+  await settle();
+  p.timers.due();
+  const stale = p.next("GET", "/api/migrations/offers");
+  p.ui.close();
+  p.ui.open();
+  const fresh = p.next("GET", "/api/migrations/offers");
+  stale.ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" })] });
+  await settle();
+  fresh.ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" })] });
+  await settle();
+  p.timers.due();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" })] });
+  await settle();
+  assert.deepEqual(p.opened, [], "importing as they came back: the page stays");
+  assert.deepEqual(p.rows()[0].buttons, ["Open chat"]);
+});
+
+test("reads that fail as the person comes back are no news: a move importing before is never taken for one just begun", async (t) => {
+  const own = { agents: [], ids: new Map(), chats: new Map([["npub1juniper", "juniper-chat--k3x9"]]) };
+  const p = page(t, own);
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" })] });
+  await settle();
+  p.ui.close();
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").fail(Object.assign(new Error("offline"), { status: 503 }));
+  await settle();
+  p.timers.due();
+  p.next("GET", "/api/migrations/offers").fail(Object.assign(new Error("offline"), { status: 503 }));
+  await settle();
+  assert.deepEqual(p.opened, [], "no read of this opening answered: nothing is new");
+  p.timers.due();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" })] });
+  await settle();
+  assert.deepEqual(p.opened, [], "importing at this opening's first answer: the page stays");
+  assert.deepEqual(p.rows()[0].buttons, ["Open chat"]);
+});
+
+test("an opening the person left before its first read answered goes no further: no read again on its behalf", async (t) => {
+  const p = page(t);
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" })] });
+  await settle();
+  p.ui.close();
+  p.timers.due = null;
+  p.ui.open();
+  const stale = p.next("GET", "/api/migrations/offers");
+  p.ui.close();
+  p.ui.open();
+  const fresh = p.next("GET", "/api/migrations/offers");
+  stale.ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" })] });
+  await settle();
+  assert.equal(p.timers.due, null, "nothing read again on the old opening's word");
+  fresh.ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" })] });
+  await settle();
+  assert.ok(p.timers.due, "the opening's own read follows the move");
 });

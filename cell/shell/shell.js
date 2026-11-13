@@ -1938,6 +1938,11 @@ const movePage = createMovePage($("move-page"), {
   addAgent: (spec) => onboarding.addAgent(spec),
   ownAgents: () => state.fragments.filter((f) => f.kind === "agent" && own(f)).map((f) => f.name),
   identityOf: (fragment) => [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null,
+  chatOf: (identity) => {
+    const agent = [...state.agents.values()].find((a) => a.identity === identity);
+    return agent ? agentsOwnChat(agent.fragment)?.name ?? null : null;
+  },
+  openChat: (name) => openChat(name),
 });
 function openMove(push = true) {
   if (push) at(MOVE);
