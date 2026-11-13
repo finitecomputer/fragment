@@ -19,6 +19,8 @@ struct WorkingIndicator: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var began = Date()
     @ScaledMetric(relativeTo: .caption) private var textSize = 13.0
+    /// Its one line (and Thinking): the size of the chat's secondary words, above its steps'.
+    @ScaledMetric(relativeTo: .subheadline) private var lineSize = 15.0
     @State private var expanded = false
     /// How many of its steps are shown while it opens, one after another;
     /// `.max` once they all are (new steps then show at once).
@@ -122,10 +124,10 @@ struct WorkingIndicator: View {
                 dots(identity: agent.id.agent, elapsed: elapsed)
             }
             // Thinking reads as the working line does; a wait still stands out
-            Text(text).font(.system(size: textSize, weight: { if case .working = hint.kind { return .regular } else { return .semibold } }())).foregroundStyle(secondary)
+            Text(text).font(.system(size: lineSize, weight: { if case .working = hint.kind { return .regular } else { return .semibold } }())).foregroundStyle(secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(minHeight: textSize * 1.5)
+        .frame(minHeight: lineSize * 1.5)
         .accessibilityElement(children: .combine).accessibilityIdentifier("workingIndicator")
     }
 
@@ -171,7 +173,7 @@ struct WorkingIndicator: View {
                         Text(card.doneWord + " for " + Self.duration((card.until ?? card.since) - card.since))
                     }
                     glyph("chevron", size: 14).rotationEffect(.degrees(expanded ? 90 : 0)).animation(.easeInOut(duration: 0.14), value: expanded)
-                }.frame(minHeight: 24).contentShape(Rectangle())
+                }.font(.system(size: lineSize)).frame(minHeight: 24).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityIdentifier("workingTools")
             if !shown.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
