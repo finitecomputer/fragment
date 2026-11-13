@@ -348,6 +348,27 @@
       //   "exchange": "https://api.linear.app/oauth/token", "revoke": "https://api.linear.app/oauth/revoke",
       //   "client_id": "<the app's client id>", "access": { "read": { "scopes": ["read"] }, "write": { "scopes": ["write"] } } },
       "env": ["LINEAR_OAUTH_ACCESS_TOKEN"] },
+    // The person's GitLab.com account, as Google is: Pipes' `gitlab`
+    // provider, connected through the browser once its OAuth app's secret
+    // is in the store (the app Pipes' GitLab integration uses, with the
+    // platform's callback beside Pipes', allowed the four scopes below).
+    // gitlab.com alone: a self-managed GitLab is each customer's own host.
+    // Read only asks for `read_api`, read and write for `api` (all the person
+    // may do through the API, their code included), each with `openid email`
+    // for the label. Tokens last two hours; a refresh replaces the refresh
+    // token too. Its API is /api/v4, but the token goes to any path on
+    // gitlab.com, as a bearer token alone: Git over HTTPS, a password, is
+    // refused. GitLab's revocation needs the client's secret beside the
+    // token, which a disconnect does not send: the person revokes the app in
+    // GitLab (Edit profile → Applications). docs.gitlab.com/api/oauth2 and
+    // /integration/oauth_provider, read 2026-11-11.
+    { "name": "gitlab", "kind": "connection",
+      "hosts": ["gitlab.com"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://gitlab.com/oauth/authorize", "exchange": "https://gitlab.com/oauth/token",
+      //   "client_id": "<the app's application id>", "access": { "read": { "scopes": ["read_api", "openid", "email"] }, "write": { "scopes": ["api", "openid", "email"] } } },
+      "env": ["GITLAB_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
       "env": ["PERPLEXITY_API_KEY"], "key": "fragment-perplexity-api-key" },
