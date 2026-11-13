@@ -129,7 +129,7 @@ struct WorkingIndicator: View {
         }()
         return HStack(spacing: 8) {
             // a wait on someone breathes; work runs a wave; a problem holds still
-            LogoStripes(elapsed: moving || asked ? elapsed : nil, size: lineSize, breathing: asked).foregroundStyle(secondary)
+            LogoStripes(elapsed: moving || asked ? now.timeIntervalSinceReferenceDate : nil, size: lineSize, breathing: asked).foregroundStyle(secondary)
             HStack(spacing: 6) {
                 if moving { shimmer(text, elapsed: elapsed, active: true) } else { Text(text).foregroundStyle(secondary) }
                 if let since { Text("· " + Self.duration(milliseconds - since)).monospacedDigit() }
@@ -166,7 +166,7 @@ struct WorkingIndicator: View {
             Button { toggle(steps: card.steps.count) } label: {
                 HStack(spacing: 6) {
                     // gone once it's done: the line is then a summary, not a working one
-                    if card.running { LogoStripes(elapsed: elapsed, size: lineSize).foregroundStyle(secondary).padding(.trailing, 2) }
+                    if card.running { LogoStripes(elapsed: now.timeIntervalSinceReferenceDate, size: lineSize).foregroundStyle(secondary).padding(.trailing, 2) }
                     if card.running {
                         // a word for what it does now, held long enough to read
                         HeldWord(word: card.nowWord) { shimmer($0, elapsed: elapsed, active: true) }
@@ -386,8 +386,11 @@ private struct HeldWord<Content: View>: View {
 /// color. While something is under way (`elapsed`, the
 /// line's clock) they light in a wave running up and down; while it waits on
 /// someone they breathe, all together; otherwise (nil, or Reduce Motion) they
-/// hold still. Each line sits on whole pixels.
+/// hold still. Each line sits on whole pixels. Its clock is the time of day,
+/// never the line's own (which restarts with each step): it flows on unbroken
+/// as the word changes, and from Thinking into the working line.
 private struct LogoStripes: View {
+    /// Seconds on a clock that never restarts (`timeIntervalSinceReferenceDate`).
     let elapsed: TimeInterval?
     let size: CGFloat
     /// All its lines lit together, slowly up and down, rather than in a wave.
