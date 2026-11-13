@@ -90,6 +90,12 @@ supports wasm32 (Apple's does not; `brew install llvm`, Nix, or
   `cargo clippy --workspace --all-targets -- -D warnings`.
   `cargo test -p fragment-bridge --test docker -- --ignored` builds and
   tests the real images with Docker.
+- `cargo xtask pod image build|platform|publish --config <file>`,
+  `pod image compare`, `pod measure` and `pod vm create|start|stop|describe|delete`:
+  the pod's image built on a Linux build host, its release measured from
+  its bytes, published and booted on Compute Engine (`docs/pod.md`, "The
+  image"). `--dry-run` prints every command; what spends or deletes needs
+  its own `--confirm-…` flag. The config lives outside the repo.
 - Deployment commands: `cargo xtask secret set|gen|list`, `stripe check|setup`,
   `deploy --config <file> [--branch <name>]`, `image push|copy`.
   Read `xtask/src/main.rs` and the module before running them.

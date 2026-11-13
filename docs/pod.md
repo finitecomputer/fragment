@@ -23,9 +23,12 @@ On master:
 - `crates/pod-init` (`fragment-pod-init`, binary `pod-init`): the service
   in the TD (below).
 
-Not yet on master: the owner's command line (`fragment pod …` in `cli/`),
-the image, measurement and VM tooling (`cargo xtask pod …`), and a key
-service. They are thin layers over the library.
+- `pod-image/`: the measured image's definition (below, "The image"),
+  and `cargo xtask pod` (`xtask/src/pod/`): its build, measurement and
+  VMs.
+
+Not yet on master: the owner's command line (`fragment pod …` in `cli/`)
+and a key service. They are thin layers over the library.
 
 ## Lock and unlock
 
@@ -160,6 +163,97 @@ docker run --rm --privileged -v "$PWD:/src:ro" -w /src rust:1.99-alpine sh -c \
 The measured image's binary: `cargo build --release -p fragment-pod-init
 --bin pod-init --target x86_64-unknown-linux-musl`, with
 `RUSTFLAGS="-C linker=rust-lld"` when the host is not x86_64 Linux.
+
+## The image
+
+`pod-image/` defines it (its README says what it is and where each part
+lives): one mkosi definition for the locked image and its debug sibling,
+with the tools pinned in `pod-image/pins.jsonc` and the platform it carries
+pinned in `pod-image/pinned-platform/` (debt: the image carries an old
+fork of the platform, not the tree it is built from;
+`docs/technical-debt-ledger.md`). `cargo xtask pod` builds, measures and
+boots it:
+
+```sh
+cargo xtask pod image platform all --config <file>       # once per build host: the pinned platform, staged
+cargo xtask pod image build --config <file> [--variant locked|debug|both]
+cargo xtask pod image compare target/pod-image/locked <other build> [--same]
+cargo xtask pod measure --dir target/pod-image/locked --name pod-p --seq 1 [--quote q.bin [--log ccel.bin]] [--mrtd <hex>] [--rtmr0 <hex>] [--out release.json]
+cargo xtask pod image publish --config <file> --variant locked --confirm-spend
+cargo xtask pod vm create|start --config <file> --confirm-spend
+cargo xtask pod vm stop --config <file> --confirm-stop
+cargo xtask pod vm describe --config <file> [--save <dir>]
+cargo xtask pod vm delete --config <file> [--delete-data-disk <name>] --confirm-delete
+```
+
+Every command that reaches the build host or Compute Engine takes
+`--dry-run`, which prints each command it would run, in order, and runs
+none. Those that spend money or delete things run only with their own
+confirming flag; without it they print the plan and refuse. A delete says
+what it deletes and what it keeps first; the data disk, the owner's
+volume, goes only when named again with `--delete-data-disk`.
+
+- **build** ships the committed tree (`git archive HEAD`; a run refuses a
+  dirty tree) to the build host, builds `pod-init` from it static for
+  musl, assembles mkosi's folder from `pod-image/mkosi` (and
+  `pod-image/debug/mkosi`), systemd-stub 257, the staged platform and the
+  debug image's one key (`build.debug_key`), runs mkosi as root, and
+  fetches the small outputs into `target/pod-image/<variant>/`: `pod.efi`,
+  `gpt.bin`, `pod.roothash`, `partitions.json`, `sha256sums`, `sizes`,
+  `pod-init.sha256` and `build.json` (the commit and the pins). The disk
+  stays on the host. mkosi needs Linux and root: the host is this machine
+  when it is Linux (`"host": "local"`), or a Compute Engine VM reached with
+  `gcloud compute ssh` (`"gce"`).
+- **platform** builds the pinned platform on the host and stages it
+  (`sources`, `build`, `trial`, `images`, `debs`, `stage`, or `all`); it
+  reads the patches from the tree the last build shipped.
+- **measure** computes RTMR1 and RTMR2 from the image's own bytes
+  (`attest::expect`, `verify::measure`) and writes the release a
+  policy.json holds, RTMR3 pinned to zero. MRTD and RTMR0 cannot be
+  computed from the image (RTMR0 depends on the machine type and the
+  disks attached at boot): they come from a boot's `--quote` or as given,
+  and are left out otherwise. With `--quote` it refuses a boot whose RTMR1
+  to RTMR3 differ.
+- **publish** writes the disk onto a scratch disk attached to the build VM,
+  checks it against the hash fetched here, makes an image with
+  `UEFI_COMPATIBLE,TDX_CAPABLE,GVNIC`, and deletes the scratch disk. An
+  image that exists ends it; a scratch disk left by a stopped run is
+  reused.
+- **vm create** makes the data disk if it is not there (kept as it is if
+  it is), then the TDX VM, attaching the data disk as device name
+  `pod-data`; a VM of that name already there is refused. Port 7000 must
+  reach the VM: the network's firewall is the deployment's own.
+
+The config is a file outside the repo (no deployment setting lives in the
+repo); its sections are read by the commands that need them, and an
+unknown or missing key is refused:
+
+```jsonc
+{
+  "project": "my-pod-project",
+  // on everything made, beside the tool's own pod-role and pod-variant
+  "labels": { "owner": "me" },
+  "build": {
+    // "local" (this machine, Linux) or "gce" with instance and zone
+    "host": "gce", "instance": "pod-build", "zone": "us-central1-f",
+    // the build user's home on the host (its cargo, worker-build's cache);
+    // "dir" (default <home>/podimg) holds the sources, tools and outputs
+    "home": "/home/builder",
+    // the one SSH key the debug image admits, a file here
+    "debug_key": "/home/me/.ssh/pod-debug.pub"
+  },
+  // Compute Engine image names, 55 characters at most
+  "images": { "locked": "pod-img-p", "debug": "pod-img-p-debug" },
+  "vm": {
+    "name": "pod-1", "zone": "us-central1-f", "machine_type": "c3-standard-8",
+    "variant": "locked", "boot_disk_gb": 10,
+    "data_disk": { "name": "pod-1-data", "size_gb": 20, "type": "pd-balanced" },
+    "network": "pod-net", "subnet": "pod-subnet", "tags": ["pod-7000"],
+    // optional: the VM deletes itself after this (its data disk stays)
+    "max_run_duration": "3h"
+  }
+}
+```
 
 ## What each check proves
 

@@ -92,6 +92,13 @@
 //!                    copy an image another account's registry holds
 //!                    (FROM_CLOUDFLARE_ACCOUNT_ID's) into that one, byte for
 //!                    byte (skopeo), its digest checked unchanged: a promotion
+//!   pod image build|platform|publish --config <file> [--dry-run] …,
+//!   pod image compare <a> <b>, pod measure …, pod vm create|start|stop|describe|delete --config <file> …
+//!                    the pod's measured image (pod-image/): built on a build
+//!                    host, compared, its release measured from its bytes,
+//!                    published, and booted as a TDX VM; --dry-run prints
+//!                    each command, and what spends or deletes needs its own
+//!                    confirming flag (xtask/src/pod/; docs/pod.md, "The image")
 //!   teardown --config <file> --branch <name>
 //!                    remove a branch deployment (irreversible)
 //!   stripe check|setup --config <file> [--branch <name>] [--webhook-secret-file <path>]
@@ -796,7 +803,7 @@ fn main() -> Result<()> {
         Some("image") => image::image(&args[1..]),
         Some("pod") => pod::pod(&args[1..]),
         Some("cli-release") => cli_release::run(&args[1..]),
-        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name> | pod image|measure|vm …"),
     }
 }
 
