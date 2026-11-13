@@ -520,6 +520,7 @@ struct ComposerView: View {
     var canRecord = true
     var focused: Binding<Bool>? = nil
     @Environment(\.dynamicTypeSize) private var type
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var typed: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments || recording }
     private var stops: Bool { working && !typed }
     private var valid: Bool { (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments) && text.utf8.count <= 32_768 }
@@ -575,17 +576,32 @@ struct ComposerView: View {
             .accessibilityIdentifier("steer")
         }
         if recordFirst { launcherAction } else { Button {
+            guard canSend else { return }
             submitting = true
             Task { await (stops ? stop() : send()); submitting = false }
         } label: {
-            // the launcher's glass bead at the chat's size, so the two send alike
-            Group {
-                if busy || submitting { ProgressView().launcherGlass(size: 34) }
-                else { Image(systemName: stops ? "stop.fill" : "arrow.up").font(.system(size: 17, weight: .semibold)).launcherGlass(size: 34) }
+            // the launcher's glass bead at the chat's size, so the two send
+            // alike: one bead whose glass and glyph change, never dimmed;
+            // with nothing to send it's clear glass
+            let sending = busy || submitting, off = !canSend && !sending
+            ZStack {
+                if sending {
+                    ProgressView().tint(Color(uiColor: .systemBackground)).transition(.opacity.combined(with: .scale(scale: 0.6)))
+                } else {
+                    Image(systemName: stops ? "stop.fill" : "arrow.up").font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(off ? Color(uiColor: .tertiaryLabel) : Color(uiColor: .systemBackground))
+                        .contentTransition(.symbolEffect(.replace))
+                        .transition(.opacity.combined(with: .scale(scale: 0.6)))
+                }
             }
+            .launcherGlass(tint: off ? .clear : Color(uiColor: .label), size: 34)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: off)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: sending)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: stops)
             .frame(width: 44, height: 44).contentShape(Circle())
         }
-        .disabled(!canSend).opacity(canSend || busy || submitting ? 1 : 0.4)
+        // not `disabled`: never dimmed as it sends or waits for words
+        .allowsHitTesting(canSend)
         .accessibilityLabel(stops ? "Stop response" : "Send message")
         .accessibilityIdentifier(stops ? "stop" : "send") }
     }
