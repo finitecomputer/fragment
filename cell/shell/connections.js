@@ -26,6 +26,12 @@ export function createConnections({ api, el, section, named, seg, computer, getA
   // https://www.googleapis.com/auth/<name>), else that segment itself; the
   // list never names a sign-in scope as missing
   const SCOPE_NAMES = {
+    // Atlassian's (read:jira-work: a name of no path)
+    "read:jira-work": "Jira issues (read)",
+    "write:jira-work": "Jira issues",
+    "read:jira-user": "Jira people",
+    "read:me": "Profile",
+    // Google's
     "gmail.readonly": "Gmail (read)",
     "gmail.modify": "Gmail (manage)",
     "gmail.send": "Gmail (send)",
@@ -348,8 +354,8 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     if (p.note) inner.append(el("p", "provider-about", p.note));
     // what a connection's account allows, in words
     const granted = !several && p.kind === "connection" && p.state === "connected" ? p.granted ?? [] : [];
-    // (never its sign-in's: openid, email, profile)
-    const scopes = [...new Set(granted.map(scopeName))].filter((g) => !/^(openid|email|profile|userinfo\.\w+)$/.test(g));
+    // (never its sign-in's: openid, email, profile, offline_access)
+    const scopes = [...new Set(granted.map(scopeName))].filter((g) => !/^(openid|email|profile|offline_access|userinfo\.\w+)$/.test(g));
     if (scopes.length) {
       const chips = el("div", "provider-chips");
       chips.append(...scopes.map((g) => el("span", null, g)));

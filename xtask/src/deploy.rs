@@ -2011,15 +2011,17 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            // the example offers Linear beside Google, and Salesforce; the hosted e2e's preview, not yet
+            // the example offers Linear beside Google, Salesforce, and Atlassian; the hosted e2e's preview, not yet
             let example = file == "deploy/example.jsonc";
             let connections: &[&str] = if example { &["google", "linear"] } else { &["google"] };
             let orgs: &[&str] = if example { &["salesforce"] } else { &[] };
+            let sites: &[&str] = if example { &["atlassian"] } else { &[] };
             let expected: Vec<&str> = ["x", "firecrawl", "fal", "browser-use"]
                 .into_iter()
                 .chain(connections.iter().copied())
                 .chain(["perplexity", "google-places", "xai", "elevenlabs"])
                 .chain(orgs.iter().copied())
+                .chain(sites.iter().copied())
                 .chain(["openrouter"])
                 .collect();
             assert_eq!(names, expected, "{file}");
@@ -2082,6 +2084,36 @@ mod tests {
         assert!(p.note.as_deref().is_some_and(|n| n.contains("dedicated integration user")), "Settings says how to limit what agents may do: {:?}", p.note);
         assert!(catalog.intercepts().contains(&"*.my.salesforce.com".to_string()));
         assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_SALESFORCE".into(), "fragment-salesforce-oauth-secret")));
+    }
+
+    /// The example's Atlassian row, its commented connect uncommented (a
+    /// client id, the secret's store name and the Jira skill's access file
+    /// filled in), loads: its two accesses as the skill's file names them,
+    /// no revocation (Atlassian documents none for its apps), its one host,
+    /// and its client secret bound as the cell's.
+    #[test]
+    fn the_example_atlassian_connect_loads_once_uncommented() {
+        let root = devstack::repo_root();
+        let example = fs::read_to_string(root.join("deploy/example.jsonc")).unwrap();
+        let access = fs::read_to_string(root.join("templates/skills/skills/productivity/jira-finite/references/atlassian-access.json")).unwrap();
+        let start = example.find(r#"{ "name": "atlassian""#).expect("the example's atlassian row");
+        let row = &example[start..start + example[start..].find(r#""env": ["ATLASSIAN_OAUTH_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-atlassian-oauth-secret").replace("<the app's client id>", "atlassian-client").replace("<the Jira skill's references/atlassian-access.json>", &access);
+        let dir = root.join("target/xtask-tests/atlassian-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let p = catalog.get("atlassian").expect("its row");
+        let o = p.connection_oauth.as_ref().expect("its connect");
+        let written: Value = serde_json::from_str(&access).unwrap();
+        assert_eq!(serde_json::to_value(&o.access).unwrap(), written, "the skill's access file is the row's access");
+        assert_eq!((o.client_id.as_str(), o.revoke.as_deref(), p.hosts.as_slice()), ("atlassian-client", None, &["api.atlassian.com".to_string()][..]));
+        assert_eq!(o.authorize, "https://auth.atlassian.com/authorize?audience=api.atlassian.com&prompt=consent");
+        assert_eq!(o.access.offered(), [fragment_core::catalog::ConnectionAccess::Read, fragment_core::catalog::ConnectionAccess::Write]);
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_ATLASSIAN".into(), "fragment-atlassian-oauth-secret")));
     }
 
     /// A provider's note: the example's (its google row's, commented out)
