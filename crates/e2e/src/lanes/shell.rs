@@ -5985,6 +5985,19 @@ fn open_chat(b: &mut Browser, page: &Page) -> String {
     b.eval(page, "[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
 }
 
+/// Counts the answers to the page's calls whose address has `part`, each
+/// once it is read as the shell reads it (`api`: its JSON), in
+/// `window.__answers.read`: what the shell does with the answer has run by
+/// the next look at the page. `window.__answers.restore()` takes it away.
+fn answers_read(part: &str) -> String {
+    format!(
+        "(() => {{ const real = window.fetch; const part = {}; const a = window.__answers = {{ read: 0, restore: () => {{ window.fetch = real; }} }}; \
+         window.fetch = async (url, o) => {{ if (!String(url).includes(part)) return real(url, o); let r; try {{ r = await real(url, o); }} catch (e) {{ a.read++; throw e; }} \
+         const json = r.json.bind(r); r.json = () => json().finally(() => {{ a.read++; }}); return r; }}; return true; }})()",
+        js(part)
+    )
+}
+
 /// Types `text` into the open chat's composer, in its frame (`host`), and
 /// sends it, once its composer is ready. Whether it was sent.
 fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bool {
@@ -6265,12 +6278,16 @@ fn making_states(
     archive(b, &other)?;
 
     // ---- made, but the list's reads refused (a deploy going out): its room
-    // waits, never a blank page; the list answering, the chat opens there
+    // waits, never a blank page; the list answering, the chat opens there.
+    // The reads are refused from the create's ask on, counted once it has
+    // answered: one the live list made while a slow create was out (1.6 s
+    // on a loaded celld box) would have the chat, and its answer would open
+    // it at once, as it should (making.js: answered made, listed).
     let before = names();
-    b.eval(page, "(() => { const f = window.fetch; window.__listOff = true; window.__refusedAfter = 0; window.__posted = false; window.__restoreList = () => { window.fetch = f; }; \
-                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; \
-                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__posted) { window.__refusedAfter++; return new Response(JSON.stringify({ error: 'deploying', message: 'a deploy is going out (a test)' }), { status: 503, headers: { 'content-type': 'application/json' } }); } \
-                 const r = await f(url, o); if (o?.method === 'POST' && path === '/api/fragments' && r.ok) window.__posted = true; return r; }; return true; })()")?;
+    b.eval(page, "(() => { const f = window.fetch; window.__listOff = true; window.__refusedAfter = 0; window.__sent = false; window.__posted = false; window.__restoreList = () => { window.fetch = f; }; \
+                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const create = o?.method === 'POST' && path === '/api/fragments'; if (create) window.__sent = true; \
+                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__sent) { if (window.__posted) window.__refusedAfter++; return new Response(JSON.stringify({ error: 'deploying', message: 'a deploy is going out (a test)' }), { status: 503, headers: { 'content-type': 'application/json' } }); } \
+                 const r = await f(url, o); if (create && r.ok) window.__posted = true; return r; }; return true; })()")?;
     let picked = new_chat(b, reader_hero)?;
     // two of its reads refused since it was made: the create has answered
     let refused_twice = b.until(page, "window.__refusedAfter >= 2", wait);
@@ -6293,10 +6310,12 @@ fn making_states(
     let before = names();
     let refresh = "document.querySelector('#computer-notices [data-action=refresh]')";
     let no_band = b.until(page, &format!("!{refresh}"), wait);
-    b.eval(page, "(() => { const f = window.fetch; window.__listOff = true; window.__failedAfter = 0; window.__posted = false; window.__restoreList = () => { window.fetch = f; }; \
-                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; \
-                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__posted) { window.__failedAfter++; throw new TypeError('Failed to fetch (a test)'); } \
-                 const r = await f(url, o); if (o?.method === 'POST' && path === '/api/fragments' && r.ok) window.__posted = true; return r; }; return true; })()")?;
+    // (failing from the create's ask on, counted once it has answered, as
+    // the refused reads above)
+    b.eval(page, "(() => { const f = window.fetch; window.__listOff = true; window.__failedAfter = 0; window.__sent = false; window.__posted = false; window.__restoreList = () => { window.fetch = f; }; \
+                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const create = o?.method === 'POST' && path === '/api/fragments'; if (create) window.__sent = true; \
+                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__sent) { if (window.__posted) window.__failedAfter++; throw new TypeError('Failed to fetch (a test)'); } \
+                 const r = await f(url, o); if (create && r.ok) window.__posted = true; return r; }; return true; })()")?;
     let picked = new_chat(b, reader_hero)?;
     let told = b.until(page, &format!("window.__failedAfter >= 1 && !!{refresh} && !document.getElementById('computer-notices').hidden"), wait);
     let waiting = b.eval(page, &format!("{making_shown} && ![...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden)"))?;
@@ -6319,10 +6338,12 @@ fn making_states(
     // and nothing says a chat was not made; the list back, the Reader's
     // chat is listed, not opened
     let main_hero = format!("#chats [data-key={}]", js(&format!("agent:{}", own_named(api, me.session, me.first)?)));
-    let fail_lists = "(() => { const f = window.fetch; window.__listOff = true; window.__posts = 0; window.__failedAfter = 0; window.__restoreList = () => { window.fetch = f; }; \
-                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; \
-                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__posts > 0) { window.__failedAfter++; throw new TypeError('Failed to fetch (a test)'); } \
-                 const r = await f(url, o); if (o?.method === 'POST' && path === '/api/fragments' && r.ok) window.__posts++; return r; }; return true; })()";
+    // (the list's reads failing from the first create's ask on, counted
+    // once one has answered, as the refused reads above)
+    let fail_lists = "(() => { const f = window.fetch; window.__listOff = true; window.__sent = 0; window.__posts = 0; window.__failedAfter = 0; window.__restoreList = () => { window.fetch = f; }; \
+                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const create = o?.method === 'POST' && path === '/api/fragments'; if (create) window.__sent++; \
+                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__sent > 0) { if (window.__posts > 0) window.__failedAfter++; throw new TypeError('Failed to fetch (a test)'); } \
+                 const r = await f(url, o); if (create && r.ok) window.__posts++; return r; }; return true; })()";
     let refresh = "document.querySelector('#computer-notices [data-action=refresh]')";
     let no_refusal = "!(document.getElementById('action-notices')?.innerText ?? '').includes('not made')";
     // the main agent's blank chats from before set aside (archived), so the
@@ -6585,18 +6606,27 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     let third = own_named(api, me.session, &format!("{own_chat}-3"))?;
     let empty = s.eventually(wait, || b.eval_in_frame(page, &third, "!!document.querySelector('#messages .empty h2') && !document.querySelector('#messages .msg')").ok() == Some(Value::Bool(true)));
     let _ = b.screenshot(page, &shots.join("desktop-new-chat.png"));
+    // asked again from that chat, open already, nothing on screen changes:
+    // this New chat ends once its ask of that chat (`stillBlank`) is
+    // answered. Until then it holds the shell's one New chat at a time
+    // (asks.js `start`: another's press starts nothing), and its answer
+    // opens that chat over one opened since (the Reader's, next, when that
+    // ask took longer than the steps between, as on celld).
+    b.eval(page, &answers_read(&format!("/api/f/{third}/channels/chat?")))?;
     let again_started = new_chat(b, &main_hero)?;
+    let asked = b.until(page, "window.__answers.read >= 1", wait);
+    b.eval(page, "(window.__answers.restore(), true)")?;
     let again = b.until(page, &format!("document.getElementById('chat-title').textContent === 'New chat' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&third)), wait);
     let made = chats_with(&own_chat);
     s.ok(
         "their main agent's hero starts an empty chat with it; asked again before anything is said there, it opens that one, not another",
-        started && blank && empty && again_started && again && open_chat(b, page) == third && made.len() == before.len() + 2,
+        started && blank && empty && again_started && asked && again && open_chat(b, page) == third && made.len() == before.len() + 2,
         json!({ "chats": made }),
     );
     // from the Reader's chat, their main agent's New chat opens that empty
     // chat again, not another
     click_chat(b, page, reader_chat)?;
-    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    let from_reader = b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     for scheme in ["light", "dark"] {
         b.color_scheme(page, scheme)?;
         let _ = b.screenshot(page, &shots.join(format!("desktop-sections-{scheme}.png")));
@@ -6607,8 +6637,8 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     let made = chats_with(&own_chat);
     s.ok(
         "from the Reader's chat, their main agent's New chat opens its empty chat again, not another",
-        picked && row_opened && open_chat(b, page) == third && made.len() == before.len() + 2,
-        json!({ "chats": made }),
+        from_reader && picked && row_opened && open_chat(b, page) == third && made.len() == before.len() + 2,
+        json!({ "from_reader": from_reader, "chats": made }),
     );
     // from that empty chat of their main agent's, the Reader's New chat: a
     // chat with the Reader, never that one (a blank chat is its own agent's)
