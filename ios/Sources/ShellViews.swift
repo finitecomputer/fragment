@@ -152,6 +152,8 @@ struct SidebarView: View {
     @State private var chatTitle = ""
     @State private var managingChat: FragmentSummary?
     @State private var actionError: String?
+    /// Taps on an agent's pill or its New chat, each felt as a light tap.
+    @State private var tapped = 0
 
     private var currentChat: FragmentSummary? {
         guard case .chat(let name) = page else { return nil }
@@ -197,8 +199,10 @@ struct SidebarView: View {
                                 // it: the rectangle around it showed as the menu went
                                 .contentShape(.contextMenuPreview, .capsule).contentShape(.capsule)
                             }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
+                            // its menu opens on this tap; the tap is felt too
+                            .simultaneousGesture(TapGesture().onEnded { tapped += 1 })
                             // a new chat with this agent, opened empty
-                            Button { newChat(agent) } label: {
+                            Button { tapped += 1; newChat(agent) } label: {
                                 Image(systemName: "square.and.pencil").font(Self.icon)
                                     .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
                             }
@@ -226,6 +230,7 @@ struct SidebarView: View {
         .scrollEdgeEffectHidden(true, for: .top)
         .contentMargins(.top, 12, for: .scrollContent)
         .overlay(alignment: .top) { StatusBarBlur(margin: 12) }
+        .sensoryFeedback(.impact(weight: .light), trigger: tapped)
         .safeAreaBar(edge: .bottom) {
             HStack(alignment: .bottom, spacing: 12) {
                 VStack(spacing: 4) {
