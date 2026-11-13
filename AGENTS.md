@@ -35,6 +35,8 @@ platform concept.
 - `crates/identity-door`: a self-hosted box's sign-in, an OpenID Connect
   relying party behind the WorkOS endpoints the cell calls
   (docs/self-host.md, seam 4).
+- `crates/lan`: LAN mode, a self-hosted box's own DNS zone, TLS front
+  door and certificate authority (docs/self-host.md, seam 9).
 - `crates/pod`: a pod, one owner's self-hosted stack in a confidential VM
   (`docs/pod.md`): its unlock protocol, quote layout and event log, and,
   by feature, the verifier, the release checks and the owner's side;
