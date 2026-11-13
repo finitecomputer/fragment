@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use super::super::signin::{site_cookie, unframed, with_session};
 use super::super::templates::{email_of, person};
 use super::{armed, form_of, now_ms, post};
-use crate::api::{url_enc, Api};
+use crate::api::{url_enc, Api, Call};
 use crate::Suite;
 
 /// The page the requester opened, which their way in comes back to.
@@ -44,7 +44,14 @@ pub(super) fn requests(s: &mut Suite, api: &Api, owner: &Keys, owner_session: &s
     let (ann, ann_session) = person(api)?;
     let (ann_email, ann_id) = (email_of(&ann), api.identity(&ann)?);
     let cookie = site_cookie(api, &ann_session, &name)?;
-    let r = api.page(&name, "", Some(&format!("fragment_site={cookie}")))?;
+    // a browser's top-level navigation, which a refusal answers as a page
+    let navigation = vec![
+        ("accept", "text/html".to_string()),
+        ("sec-fetch-dest", "document".to_string()),
+        ("sec-fetch-mode", "navigate".to_string()),
+        ("sec-fetch-site", "none".to_string()),
+    ];
+    let r = api.call(Call { method: "GET", url: api.site_url(&name, ""), cookie: Some(format!("fragment_site={cookie}")), extra: navigation, ..Call::default() })?;
     s.ok(
         "a fragment refuses someone not in it (403) with Request access, a link to the platform's page for it",
         r.status == 403 && r.text.contains("You don't have access to") && r.text.contains(&format!("{platform}/auth/fragment/ask?name={name}&amp;return=")),
@@ -95,10 +102,12 @@ pub(super) fn requests(s: &mut Suite, api: &Api, owner: &Keys, owner_session: &s
     s.ok(
         "and sees it among their notices: its title, who asked, Share as viewer, Share as editor and Dismiss",
         notices.len() == 1
-            && notices[0]["id"] == format!("asked:{name}:{ann_id}").as_str()
-            && notices[0]["title"] == title.as_str()
-            && notices[0]["text"] == format!("{ann_email} asked for access to it.").as_str()
-            && actions(&notices[0]).iter().map(|(l, _, _)| l.as_str()).eq(["Share as viewer", "Share as editor", "Dismiss"]),
+            && notices.first().is_some_and(|n| {
+                n["id"] == format!("asked:{name}:{ann_id}").as_str()
+                    && n["title"] == title.as_str()
+                    && n["text"] == format!("{ann_email} asked for access to it.").as_str()
+                    && actions(n).iter().map(|(l, _, _)| l.as_str()).eq(["Share as viewer", "Share as editor", "Dismiss"])
+            }),
         json!(notices),
     );
     let again = post(api, &page, &ann_session, &platform, &[("form", &fresh)])?;
@@ -109,7 +118,7 @@ pub(super) fn requests(s: &mut Suite, api: &Api, owner: &Keys, owner_session: &s
     );
 
     // ---- the owner shares it: the notice's Share as editor is their own invite
-    let (_, share_at, share_body) = actions(&notices[0]).into_iter().nth(1).context("Share as editor")?;
+    let (_, share_at, share_body) = notices.first().and_then(|n| actions(n).into_iter().nth(1)).context("the request's Share as editor")?;
     let shared = api.signed(owner, "POST", &share_at, Some(&share_body))?;
     s.ok(
         "its Share as editor is the owner's own invite to the requester's email, which waits for their yes, mailed to them; the request is gone from the owner's notices",
