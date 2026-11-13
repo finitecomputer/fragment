@@ -118,19 +118,19 @@ private struct AgentSegments: View {
                         withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { library.selectedAgent = agent.name }
                     } label: {
                         HStack(spacing: 7) {
-                            AgentAvatar(agent: agent, size: 26)
+                            AgentAvatar(agent: agent, size: 26, round: true)
                             if selected { Text(agent.displayTitle).font(.subheadline.weight(.medium)).lineLimit(1).padding(.trailing, 7) }
                         }
                         .padding(5)
                         .background {
                             if selected {
-                                // concentric with the avatar's corners, 5 inside it
-                                RoundedRectangle(cornerRadius: 12).fill(Color(uiColor: .systemBackground).opacity(0.8))
+                                // a pill round the round avatar, 5 out from it
+                                Capsule().fill(Color(uiColor: .systemBackground).opacity(0.8))
                                     .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
                                     .matchedGeometryEffect(id: "pill", in: pill)
                             }
                         }
-                        .contentShape(.rect(cornerRadius: 12))
+                        .contentShape(.capsule)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(agent.displayTitle)
@@ -187,7 +187,9 @@ struct HomeView: View {
                                 attach: { home.hold($0, $1) }, room: home.room, memo: { launchMemo($0) },
                                 send: { await launch() }, editable: !home.launching, recordingChanged: recordingChanged,
                                 chrome: false, recordFirst: true, canRecord: library.agent != nil, focused: $focused)
-                        .padding(.horizontal, 4).padding(.top, 10).padding(.bottom, library.agent == nil ? 4 : -1) // 8 with the agents' own 3
+                        // 16 to the card's edge with the composer's own 6: its round
+                        // action as far from the card's right as from its top
+                        .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, library.agent == nil ? 4 : -1) // 8 with the agents' own 3
                     if let error = home.error { Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 6) }
                     if library.agent != nil {
                         AgentSegments(library: library).padding(.bottom, 13)
@@ -661,11 +663,14 @@ struct ComposerLayout: Layout {
     }
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let at = arrange(ProposedViewSize(width: bounds.width, height: bounds.height), subviews)
-        // the buttons at the bottom either way, as a bottom-aligned row has them
-        subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.maxY - at.lead.height), proposal: ProposedViewSize(at.lead))
-        subviews[2].place(at: CGPoint(x: bounds.maxX - at.trail.width, y: bounds.maxY - at.trail.height), proposal: ProposedViewSize(at.trail))
+        // In one row the buttons and the words share a center line, whatever
+        // the text size makes the field's height; stacked, the buttons sit
+        // at the bottom, under the words.
+        func top(_ height: CGFloat) -> CGFloat { at.stacked ? bounds.maxY - height : bounds.midY - height / 2 }
+        subviews[0].place(at: CGPoint(x: bounds.minX, y: top(at.lead.height)), proposal: ProposedViewSize(at.lead))
+        subviews[2].place(at: CGPoint(x: bounds.maxX - at.trail.width, y: top(at.trail.height)), proposal: ProposedViewSize(at.trail))
         let origin = at.stacked ? CGPoint(x: bounds.minX + Self.inset, y: bounds.minY)
-            : CGPoint(x: bounds.minX + at.lead.width, y: bounds.maxY - at.field.height)
+            : CGPoint(x: bounds.minX + at.lead.width, y: top(at.field.height))
         subviews[1].place(at: origin, proposal: ProposedViewSize(at.field))
     }
 }
