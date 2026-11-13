@@ -139,7 +139,9 @@ private struct AgentSegments: View {
                 }
             }
             // room for the tile's shadow inside the scroll view's clip
-            .padding(.vertical, 3).padding(.horizontal, 16)
+            // the first face centered under the composer's +, 38 in: the +
+            // is 10 + 6 + half its 44; the face 20 + its tile's 5 + half its 26
+            .padding(.vertical, 3).padding(.leading, 20).padding(.trailing, 16)
         }
         .scrollIndicators(.hidden).scrollBounceBehavior(.basedOnSize)
     }
