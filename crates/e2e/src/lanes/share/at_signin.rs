@@ -168,7 +168,8 @@ fn in_chrome(s: &mut Suite, api: &Api, owner: &Keys, name: &str, signin: &str, i
     };
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &dee_session)?;
     let page = chrome.open(&format!("{}{signin}", api.base))?;
-    let armed = chrome.until(&page, "!!document.querySelector('button[value=accept]') && !document.querySelector('button[value=accept]').disabled", wait);
+    // armed, and drawn whole: its landscape read (the load event waits on it)
+    let armed = chrome.until(&page, "document.readyState === 'complete' && !!document.querySelector('button[value=accept]') && !document.querySelector('button[value=accept]').disabled", wait);
     for (width, height, mobile) in [(1280, 800, false), (390, 844, true)] {
         chrome.viewport(&page, width, height, mobile)?;
         for scheme in ["light", "dark"] {

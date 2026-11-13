@@ -50,7 +50,7 @@ pub(super) fn page(session: &str, who: &Signed, email: Option<&str>, name: &str,
         "<p>{from} invited you to {may} <b>{t}</b>.</p>\
          <form method=\"post\" action=\"/auth/fragment/invite?name={qn}&amp;return={qb}{address}\"><input type=\"hidden\" name=\"form\" value=\"{f}\">\
          <footer><button class=\"quiet\" name=\"answer\" value=\"decline\" data-arm disabled>Decline</button><button name=\"answer\" value=\"accept\" data-arm disabled>Accept and open</button></footer></form>\
-         <p class=\"hint\">Accepting makes you a member: it knows you as {you}, and it is in your fragments. Or <a href=\"/\">go back</a>.</p>",
+         <p class=\"hint\">Accepting makes you a member: it knows you as {you}, and it is in your fragments.</p>",
         t = esc(title),
         qn = esc(&enc(name)),
         qb = esc(&enc(back)),
