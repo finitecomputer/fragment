@@ -24,6 +24,17 @@ unfinished design, not debt.
   relay, behind the same binding: its `SendEmail`'s seam), or that product
   rule lands.
 
+## LAN mode's certificate lasts until a restart
+
+- **Shortcut:** fragment-lan (crates/lan; docs/self-host.md, seam 9)
+  issues the zone's certificate once, at its start, valid 397 days, and
+  never again while it runs.
+- **Risk:** a box that runs 397 days without a restart serves an expired
+  certificate, and every device refuses it until the service starts again.
+- **Delete when:** the door issues a fresh certificate from its root
+  before the one it serves expires (a rustls certificate resolver it
+  swaps), tested across the swap.
+
 ## A computer's lifecycle writes its old flags too
 
 - **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle
@@ -961,3 +972,94 @@ unfinished design, not debt.
 - **Delete when:** each batch's commit is made again from main as the
   indexes' is (keeping the newer entry), or the archive moves to an app
   whose mutation writes both.
+
+## The pod image carries a pinned fork of the platform
+
+- **Shortcut:** the pod image (`pod-image/`) does not carry the tree it is
+  built from. `cargo xtask pod image platform` builds and stages exactly
+  what the proof of concept's demo ran, pinned in `pod-image/pinned-platform/`
+  and nowhere else: fragment `2e123d40` on `selfhost-http-port` with
+  `fragment-prebuilt.patch`, celld (`futurepaul/celld`, `selfhost`,
+  `b19f09d`), sandcastle (`futurepaul/sandcastle`, `node`, `5d64525`) with
+  its Docker engine double and `sandcastle-double-vms-max.patch`, and the
+  Docker CE, containerd.io and Tailscale packages held to `debs.sha256`.
+  Only `pod-init` is built from the tree being built. Master's self-host
+  has no computers inside a confidential VM: its computers run on celld's
+  krun engine, which needs KVM, and no rentable confidential VM offers
+  nested virtualization (`docs/explorations/private-agents-mvp.md`,
+  "Computers are the open problem").
+- **Risk:** the image's platform is months behind master and gets none of
+  its fixes; the Docker double gives an agent's computer a container, not
+  a microVM, so less isolation between the agent and the platform; and
+  the fork's tree runs only at the compile-time path
+  `/srv/private/home/fragment-home`, as the stack's user (uid 1001, gid 1002).
+  The computers' Docker images are rebuilt by the platform step, not
+  pinned by digest, so two builds can carry different ones.
+- **Delete when:** a computers path that works without KVM exists on
+  master's self-host (Paul's decision 2 in the MVP's plan); then the image
+  builds the tree it is built from, `pod-image/pinned-platform/` and the
+  platform step go, and the stack's units run master's self-host.
+
+## The pod image's unit helpers are shell
+
+- **Shortcut:** the pod image carries small shell helpers that mkosi or
+  systemd run (`pod-image/mkosi/mkosi.extra/usr/lib/pod/`): `pod-opened`
+  (pod-init's open hook: the volume's directories, bind mounts, the
+  overlay over the image's tree, the tailnet's nft table, then the
+  platform's units), `pod-addr` (which address the front door binds, from
+  Tailscale's state or Google's metadata server), `pod-computers` (loads
+  the computers' images into Docker), `pod-stack` (the platform's
+  environment, then `xtask dev --lan`) and `gce-disk-name` (a udev
+  helper that reads a disk's Compute Engine device name from NVMe vendor
+  data). They were moved over as they are because changing one changes
+  the image, which is not being rebuilt.
+- **Risk:** each is untested outside a booted pod; `pod-opened` decides
+  what of the volume is trusted state and runs as root before the
+  platform starts.
+- **Delete when:** the next rebuild of the image after the platform debt
+  above is gone: `pod-opened`'s and `pod-addr`'s work moves into pod-init
+  (an open step it runs itself, tested with its fake volume),
+  `pod-computers` and `pod-stack` become master's self-host units, and
+  `gce-disk-name` becomes a udev rule on the `nvme` namespace's
+  attributes or goes with Google's guest packages' own rule.
+  `mkosi.postinst.chroot` stays: mkosi runs a script there by design.
+
+## A pod's RTMR0 is taken as observed
+
+- **Shortcut:** a release an owner accepts (`fragment-pod`'s policy,
+  `cargo xtask pod measure`) holds RTMR1 and RTMR2 computed from the
+  image's bytes, and MRTD and RTMR0 copied from a boot that was looked at.
+  RTMR0 is Google's firmware's measurements, and on one VM it differed
+  with and without the data disk attached at boot
+  (`docs/explorations/private-pod-findings.md`, `2026-11-12-measured-pod`).
+- **Risk:** the owner's check of the firmware and the VM's shape is "the
+  same as the first boot I saw", not "what was published". A firmware
+  update by Google, or another machine type or disk layout, changes the
+  register and refuses every unlock until a release is observed again.
+- **Delete when:** RTMR0 is computed, or checked against Google's signed
+  firmware endorsement and a replay of the boot's event log, for the
+  machine type and disks a pod runs with.
+
+## A blank pod has no attested way to take its first settings
+
+- **Shortcut:** a new locked pod needs its model key and its tailnet
+  login before it is of use, and the locked image has no door for them:
+  the proof of concept placed them on the volume through the debug image
+  (`docs/explorations/private-pod-findings.md`, `2026-11-12-measured-pod`).
+- **Risk:** setting up a pod means booting the image that has SSH, with
+  the owner's volume open, once.
+- **Delete when:** the owner's CLI sends a pod's first settings as it
+  sends the disk key: sealed to the boot it has checked, in a request it
+  signed, taken by `pod-init`.
+
+## A pod's volume can be rolled back unseen
+
+- **Shortcut:** the owner's volume is LUKS2 with no integrity layer and
+  no counter kept outside the machine, so a pod opens an older copy of
+  its disk as it opens today's.
+- **Risk:** whoever runs the machine can put back a snapshot: the owner's
+  data returns to an earlier day, unread but unnoticed. Privacy holds;
+  freshness does not.
+- **Delete when:** the volume is authenticated and its latest state is
+  pinned where the operator cannot rewind it (the plan's "Rollback
+  detection, authenticated disk").

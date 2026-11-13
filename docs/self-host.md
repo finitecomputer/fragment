@@ -5,6 +5,10 @@ it is written against. It lands on master seam by seam: each is switched
 on by configuration, and master's Cloudflare path is unchanged. Where this
 disagrees with `docs/cloudflare-v1.md`, that doc wins.
 
+A pod (`docs/pod.md`) is one owner's self-hosted stack inside a
+confidential VM, plus a measured image, the owner's unlock, and
+attestation.
+
 ## The rule: one cell, interfaces, placement as configuration
 
 The cell is written against Cloudflare's runtime APIs (Durable Objects,
@@ -32,12 +36,14 @@ in the cell: a self-host change to master does not touch `cell/`,
 | 1 | The runtime: celld | dev and the e2e (below) |
 | 2 | Computers on sandcastle nodes | not yet: no computers on celld |
 | 3 | Models from a file | dev's `FRAGMENT_MODELS_FILE` |
-| 4, 9 | Sign-in by OpenID Connect; LAN mode | not yet; locally, dev's WorkOS fake |
+| 4 | Sign-in by OpenID Connect | not yet; locally, dev's WorkOS fake |
+| 9 | LAN mode: the box's own zone, door and root | `fragment-lan` (crates/lan); dev's `--lan`, the e2e's `lan` |
 | 5 | Files: macrofiche, the code-store contract | not yet: the code.storage fake |
 | 6 | Blobs | nothing to port: celld's R2, over `celld dev`'s disk |
 | 7 | Preview cards: a renderer | not yet: a card's shot fails (celld's `BROWSER` rejects) |
 | 10 | Money: own hardware in points | not yet |
 | 12 | Secrets | celld's node backend: OpenBao 2.7.2 (the default), a file of their values for `celld dev` alone |
+| 13 | A pod: a self-hosted box in a confidential VM | its library and `pod-init` (crates/pod, crates/pod-init), `cargo xtask pod`; its image carries a pinned fork of the platform, not this tree (debt) |
 | — | Mail | debt: celld's `EMAIL` rejects every send (`E_NO_MAILER`), a failed send |
 
 ## 1. The runtime: celld
@@ -126,6 +132,122 @@ self-hosted model names its price in its slot, zero for the box's own:
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model-key cargo xtask dev
 ```
 
+## 9. LAN mode: a zone, a door and a CA of the box's own
+
+A box on a tailnet or a LAN has no public name and no public CA, yet the
+cell is written for https origins: the platform's `__Host-` cookies,
+each fragment its own origin (`<name>.<suffix>`), service workers, the
+clipboard. LAN mode gives a box those with no change to the cell: one
+service, `fragment-lan --config <file>` (crates/lan), in front of the
+node's own port, serves
+
+- **a zone of the box's own** (a name under `home.arpa`, RFC 8375, by
+  default `fragment.home.arpa`): the platform at its apex,
+  `https://<zone>`, each fragment one label under it,
+  `https://<name>.<zone>`. The cell is configured so and knows nothing
+  else: `FRAGMENT_PLATFORM_URL` is `https://<zone>`, `FRAGMENT_HOST_SUFFIX`
+  the zone.
+- **DNS for it** (simple-dns's wire format), authoritative for the zone
+  alone: the apex and each name one label under it answer the box's
+  address (A, or AAAA for an IPv6 one; the other type is NODATA), the
+  apex its SOA and NS; a deeper name is NXDOMAIN; **every other name is
+  REFUSED**. It forwards nothing, so it is never an open resolver: a
+  device asks it for the zone alone (a tailnet's split DNS, a resolver's
+  stub zone, macOS's `/etc/resolver/<zone>`) and its own resolver for the
+  rest. UDP and TCP.
+- **a root CA of the box's own** (rcgen), made once in the state
+  directory and kept: devices trust it. It is name-constrained to the
+  zone (a critical DNS subtree), so a device that trusts it trusts it for
+  the zone and nothing else, even if its key leaks; it signs end-entity
+  certificates alone. Its key is `root.key` (PKCS#8, 0600, in a 0700
+  directory); a key file others can read, a root for another zone, half
+  a root, or a root that is not its key's is refused rather than used.
+  **The zone's certificate** (the apex and `*.<zone>`, serverAuth, 397
+  days) and its key are made anew at each start and held in memory alone.
+- **the door**: TLS for the zone (HTTP/1.1, bodies streamed both ways
+  unbuffered, an upgrade such as a WebSocket spliced), each request its
+  own connection to the node (no pool: devstack's front.rs tells why). The
+  apex and each name one label under it go to the node with their own
+  `Host`; any other name is 421. **The door is the box's edge**: it sets
+  `CF-Connecting-IP` to the connection's peer and `X-Forwarded-Proto:
+  https`, and drops first whatever a client sent under those, under any
+  other `cf-` name, or as `Forwarded`, `X-Forwarded-*`, `X-Real-IP` or
+  `True-Client-IP`. So each client is counted by its own address and none
+  can name another (found 48).
+- **the root's page over plain http**: `/ca` (and `/` by address) shows
+  the root's SHA-256 fingerprint and offers it as PEM
+  (`/ca/root.pem`) and DER (`/ca/root.crt`, which iOS installs as a
+  profile); a name in the zone moves to https. The page is plaintext, so
+  a device compares the fingerprint with the one the box printed at its
+  start before it trusts it.
+- **one address, nothing else**: every listener binds the one address the
+  config names (a tailnet's in the private pod); an unspecified address
+  (`0.0.0.0`, `::`), a multicast or broadcast one is refused, and the
+  node it fronts must be on loopback.
+
+```json
+{
+  "zone": "fragment.home.arpa",
+  "address": "100.101.102.103",
+  "https_port": 443,
+  "http_port": 80,
+  "dns_port": 53,
+  "node": "127.0.0.1:8790",
+  "state_dir": "/var/lib/fragment-lan"
+}
+```
+
+`http_port` and `dns_port` may be left out (none). Ports below 1024 need
+the right to bind them: on Linux `setcap cap_net_bind_service=+ep` on the
+binary, or `net.ipv4.ip_unprivileged_port_start`; the start says so when
+refused. It logs its listeners, whether it made or kept the root, the
+root's fingerprint, and the leaf's expiry.
+
+**The same on either runtime:** LAN mode is in front of the node's port,
+and nothing in it is the runtime's, so a box on celld and a local fleet
+on wrangler's workerd are served alike. The cell has no code of its own
+for it (`git diff master -- cell/ crates/core crates/proto` is empty).
+
+**Departures from the old lane** (`selfhost-http-port`'s `crates/lan`): its
+Dex is gone (sign-in is seam 4's identity door, an OpenID Connect relying
+party of the box's provider); its DNS forwarded every other name to the
+router, where this one refuses them (the zone is asked for alone); it
+answered every depth under the zone, where this one answers what the
+certificate covers (one label) and says NXDOMAIN deeper; its leaf key was
+written to disk, where this one's never is; its door routed labels to
+other upstreams (`dex`), where this one has one upstream, the node; it
+served an Apple profile of its own making, where this one serves the DER
+that iOS installs as one; hickory-proto (two dozen crates in the lock)
+became simple-dns (one).
+
+- **Dev:** `cargo xtask dev --lan` (either runtime): fragment-lan
+  in-process in front of the node's own port, the platform at
+  `https://fragment.home.arpa:8443`, DNS on :8753 and the root's page on
+  :8780, on 127.0.0.1; `FRAGMENT_LAN_ZONE`, `FRAGMENT_LAN_ADDRESS`,
+  `FRAGMENT_LAN_HTTPS_PORT`, `FRAGMENT_LAN_HTTP_PORT`,
+  `FRAGMENT_LAN_DNS_PORT` and `FRAGMENT_LAN_STATE` (the root, by default
+  `target/devstack/lan`, which `--clean` keeps) name others. The banner
+  says how this Mac resolves the zone (`/etc/resolver/<zone>` with the
+  DNS port) and trusts the root. The node keeps its loopback port, where
+  the CLI and `xtask try` still reach it.
+- **The e2e:** the `lan` section starts the node again as a box in LAN
+  mode serves it (`Shape::Lan`), fragment-lan in front of it on loopback,
+  and asks as a device that resolves through the box's DNS and trusts its
+  root alone (`Api::fronted`): the zone's names and the refusal of
+  others; the root's page; the platform, a `__Host-` cookie, a sign-in
+  and signed calls at `https://<zone>`; a fragment at its own origin; a
+  name no fragment's (the cell's 404) and no zone's (the door's 421); CLI
+  codes counted by the peer's address whatever a client names; a restart
+  keeping the root with a new leaf; nothing on another address. The
+  crate's own tests (`cargo test -p fragment-lan`) check the name
+  constraint against webpki, every refusal, and streams and upgrades
+  through the door.
+- **Not here:** sign-in through the door (seam 4's identity door needs a
+  name of its own under the zone, which the cell would have to keep from
+  fragments' vanity addresses: a decision for when it lands), renewing
+  the leaf without a restart (debt), and a hardware-held root key (the
+  same hardening path as OpenBao's seal key).
+
 ## 12. Secrets: the store's bindings, read from the node's backend
 
 The cell reads each deployment secret as `await env.<BINDING>.get()`
@@ -205,6 +327,50 @@ connections' client secrets, the model keys, the operator keys).
   secret a KV v2 entry whose field is `value`, its CA in
   `CELLD_EXTRA_CA_FILE`. Only OpenBao is tested.
 
+## 13. A pod: a self-hosted box in a confidential VM
+
+A pod is this document's self-hosted box, for one owner, inside an Intel
+TDX confidential VM, so that whoever runs the machine cannot read what it
+holds. `docs/pod.md` is its contract;
+`docs/explorations/private-agents-mvp.md` is the plan, a proposal still.
+It takes the seams above as they are and adds three things of its own:
+
+- **A measured image** (`pod-image/`; `cargo xtask pod image`, `measure`
+  and `vm`): a unified kernel image under systemd-stub 257 over a
+  read-only root under dm-verity, with no SSH, no login and no guest
+  agent. A debug sibling adds SSH and measures differently, so neither is
+  accepted under the other's release. A boot's RTMR1 and RTMR2 are
+  computed from the image's bytes; MRTD and RTMR0 are taken as observed
+  (debt).
+- **The owner's unlock** (`crates/pod`, `crates/pod-init`): the box's data
+  is on a LUKS2 volume whose key the owner alone holds. `pod-init` comes
+  up locked at every start and opens the volume only with a key sealed to
+  that boot, in a request the owner signed.
+- **Attestation** (`crates/pod`'s verifier, by feature): before the key
+  leaves its holder, five checks on the pod's quote: Intel's chain, the
+  release's registers, the platform's TCB and debug bit, Google's evidence
+  of which instance it is, and the owner the pod names.
+
+**What it takes of the seams:** 1, celld; 3, a models file naming private
+slots alone; 12, OpenBao, its state on the owner's volume; 9, LAN mode as
+its front door, on the tailnet's address; and 4, sign-in, when it lands.
+
+**No pod is built from this tree yet.** Seam 2's computers run on krun,
+which needs KVM, and no rentable confidential VM offers nested
+virtualization. So the image carries the platform the proof of concept
+ran, pinned (`pod-image/pinned-platform/`: the old lane, with
+sandcastle's Docker double), and is not rebuilt from master. Debt: "The
+pod image carries a pinned fork of the platform". `cargo xtask pod image`
+and `vm` were ported from the proof of concept's scripts and have not run
+against a build host or Compute Engine since.
+
+**Master's path is unchanged:** a pod is an image and two binaries.
+Nothing in the cell, the dev stack or the e2e branches on it.
+
+Its debts (docs/technical-debt-ledger.md): the pinned platform, the
+image's shell helpers, RTMR0 taken as observed, a blank pod's first
+settings, and a volume rolled back unseen.
+
 ## Mail
 
 Master mails through Email Sending's binding (`EMAIL`), or in dev and the
@@ -240,7 +406,8 @@ The old lane's numbering is kept.
 48. **No `CF-Connecting-IP` on celld:** the cell counts a CLI code's asks
     by it, so every address is `unnamed` and shares one bucket. A front
     proxy that sets the header (a tailnet's, a company's) gives each its
-    own.
+    own. LAN mode's door (seam 9) is one: it sets the header to each
+    connection's peer and drops a client's own.
 49. **The dev WorkOS fake's adoption reads wrangler's state layout**
     (`devstack::signed_in_subjects`): on celld it finds no one, so a dev
     stack on celld keeps its fake's subjects in the fake's own file alone.
@@ -354,6 +521,10 @@ through the person's browser, so the tailnet is enough.
 2. TLS: a publicly trusted certificate and a wildcard (ACME DNS-01).
 3. The front door sets `CF-Connecting-IP` (found 48): without it every
    CLI code's ask counts as one address, and a client could name its own.
+   LAN mode (seam 9) does steps 1 to 3 on the box itself: its own zone
+   and DNS, its own name-constrained root in place of a public
+   certificate (each device trusts it once), and a door that sets the
+   header.
 4. Secrets: OpenBao (or the org's own Vault), its unseal key kept
    safe (a TPM, an HSM or a KMS once built); the host secret, 32 or more
    random bytes, among the platform's root secrets there (seam 12).
@@ -385,16 +556,20 @@ behind a tailnet name, and the Hermes `FRAGMENT_HOST` rebuild.
 CELLD_BIN=…/celld cargo xtask dev --runtime celld
 # its secrets in its node's file instead of OpenBao (`celld dev`'s alone)
 FRAGMENT_SECRETS_BACKEND=vars CELLD_BIN=… cargo xtask dev --runtime celld
+# LAN mode in front of either runtime (seam 9)
+cargo xtask dev --lan
 # the e2e on celld (its node reads OpenBao unless FRAGMENT_E2E_SECRETS=vars)
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
 ```
 
 ## Not yet
 
+- A pod built from this tree (13): its image carries a pinned fork
+  until computers have a path without KVM.
 - Computers (seam 2): none on celld. devstack's node has no engine
   (`CELLD_CONTAINER_ENGINE=none`); celld's Docker engine has no egress
   intercepts or snapshots, which a computer needs; its krun engine
   (sandcastle's) has both.
-- Sign-in by OpenID Connect (seams 4, 9).
+- Sign-in by OpenID Connect (seam 4).
 - Own hardware in points (10), cards (7), macrofiche (5).
 - `celld deploy`: no xtask path yet; this is the dev stack and the e2e.

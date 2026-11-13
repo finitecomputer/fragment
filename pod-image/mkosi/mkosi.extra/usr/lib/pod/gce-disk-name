@@ -1,0 +1,9 @@
+#!/bin/sh
+# gce-disk-name <nvme namespace, e.g. nvme0n2>: prints ID_POD_GCE_NAME=<the
+# disk's device name> for udev. Compute Engine writes {"device_name": ...}
+# into the namespace's vendor-specific bytes (from offset 384), which is
+# what Google's own helper (google-guest-configs, google_nvme_id) reads.
+name="$(nvme id-ns -b "/dev/$1" 2> /dev/null | tail -c +385 | tr -d '\000' \
+  | grep -ao '"device_name": *"[A-Za-z0-9_-]*"' | head -1 | sed 's/.*"\([A-Za-z0-9_-]*\)"$/\1/')"
+[ -n "$name" ] && echo "ID_POD_GCE_NAME=$name"
+exit 0

@@ -1,0 +1,301 @@
+# A pod
+
+A pod is one owner's self-hosted stack (`docs/self-host.md`) inside a
+confidential VM (Intel TDX on a Google Cloud confidential VM), plus three
+things: a measured image, the owner's unlock, and attestation. The pod
+keeps its data on a LUKS volume whose key only the owner holds. After any
+boot it is locked; the owner's machine verifies the pod by attestation,
+then sends the disk key sealed to a key that exists only inside that boot,
+in a request signed by the owner's key.
+
+On master:
+
+- `crates/pod` (`fragment-pod`): the library both sides link. Without
+  features, `unlock` (the protocol below) and `attest` (the quote layout,
+  nonces, the GCE instance binding, the CCEL event log and its replay, and
+  the RTMR1 and RTMR2 an image's boot must produce, computed from the
+  image's partition table and UKI). Feature `verify`: `verify` (the
+  verifier) and `checks` (the checks before a key leaves its holder, behind
+  an `Attestor`, so the owner's CLI and a key service decide them with the
+  same code). Feature `owner`: `owner` (pod-init's client, the owner's state
+  directory, policy.json, the TLS checks and the key request in its order).
+
+- `crates/pod-init` (`fragment-pod-init`, binary `pod-init`): the service
+  in the TD (below).
+
+- `pod-image/`: the measured image's definition (below, "The image"),
+  and `cargo xtask pod` (`xtask/src/pod/`): its build, measurement and
+  VMs.
+
+Not yet on master: the owner's command line (`fragment pod …` in `cli/`)
+and a key service. They are thin layers over the library.
+
+## Lock and unlock
+
+States: `blank` (no volume, or no LUKS header), `locked` (a volume, not
+open), `open` (mapped and mounted). The pod reads the state from the
+system for every request and remembers nothing but its boot key, an
+X25519 pair made in memory at start and never stored.
+
+Each quote's REPORTDATA is SHA-512 of `"pod-binding-v1\0"` ‖ nonce (32)
+‖ boot_pubkey (32) ‖ state (1: 0, 1, 2) ‖ owner (32, x-only secp256k1,
+zeros if none) ‖ tls_root (32, SHA-256 of the root certificate's DER,
+zeros if none) (`unlock::binding`). The client recomputes it from
+`/status` and its own nonce; until it equals the verified quote's
+REPORTDATA, nothing in `/status` is trusted.
+
+A key request seals the 64-byte disk key with HPKE base mode
+(DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305), info
+`pod-unlock-v1`, aad `kind ‖ owner ‖ boot_pubkey` (kind is `init` or
+`unlock`) (`unlock::seal`), and signs SHA-256(`"pod-request-v1\0"` ‖ kind
+‖ boot_pubkey ‖ enc ‖ ct) with BIP-340 (k256 0.13.4, as crates/nip98)
+(`unlock::sign`). The pod checks, in order: shape and size (4 KiB), the
+signature under `owner`, the seal under this boot's secret, the state
+(init needs blank, unlock locked), the volume operation, for unlock the
+owner recorded inside the volume (another owner holding the right key is
+refused and the volume closed again), then the open hook. A request made
+for an earlier boot fails at the signature.
+
+The JSON (`unlock::wire`): binary fields are lowercase hex of a fixed
+length, every length is checked before decoding, and unknown fields are
+refused. `/status` is `{"version":1,"state","boot_pubkey","owner"|null,
+"tls_root"|null,"quote"}`; a key request is `{"owner","enc","ct","sig"}`
+and answers `{"state":"open"}`; a refusal is `{"error":"<code>",
+"detail":"…"}`.
+
+While locked, `/status`'s owner is the hint beside the volume, which the
+host can rewrite; once open it is the file inside the volume. A forged
+hint can make the owner's side send a key, but only to a TD running an
+attested release, which opens nothing with it unless the volume's own
+record names that owner.
+
+A release (`unlock::release`) is a sequence number, a name, and the
+registers it pins (MRTD, RTMR0 to RTMR3); registers it does not name are
+not compared, and it must name at least one. One shape everywhere: a
+release in policy.json, a release file, an approval to a key service.
+
+## The owner's side
+
+The owner's state directory holds `owner.key` and `disk.key` (0600,
+never overwritten), `state.json` and the owner's `policy.json`
+(`owner::dir`, `owner::policy`):
+
+```json
+{"releases": [{"seq": 1, "name": "pod-a", "mrtd": "<96 hex>", "rtmr0": "…", "rtmr1": "…", "rtmr2": "…"}],
+ "allow_tcb_status": [],
+ "gce_instance": "projects/<number>/zones/<zone>/instances/<id>"}
+```
+
+Before a key leaves, five checks must pass on a fresh quote
+(`owner::checks`, all but `owner` are `checks`'): `quote` (the chain to
+Intel's root with collateral fetched now, and the binding), `release` (the
+registers match a policy.json release whose `seq` is not below
+`state.json`'s `last_unlocked_seq`; omitted registers are named as not
+compared), `platform` (debug off, TCB UpToDate or allowed),
+`google_instance` (MR_OWNER and Google's host registry), `owner` (the
+attested owner is this key, or the pod is blank, for init only). After the
+pod answers, a second fresh attestation must show the same boot key,
+`open`, and this owner; then the release's seq is written to `state.json`
+(`owner::flow`). `verify` adds `tls_root` (the served PEM hashes to the
+attested root) and, with a TLS target, `tls_leaf` (a handshake trusting
+only that root succeeds for the name).
+
+## pod-init
+
+`crates/pod-init` (`fragment-pod-init`, binary `pod-init`) is the service
+in the TD. It links fragment-pod without features (`unlock` and `attest`
+alone) and no HTTP or async crate, so it builds static for
+x86_64-unknown-linux-musl with no C toolchain. It answers one request at a
+time, so two key requests never race on the volume.
+
+| Route | Answer |
+|---|---|
+| `GET /status?nonce=<64 hex>` | the state, boot key, owner and TLS root, and a quote over their binding |
+| `GET /eventlog` | the CCEL (`/sys/firmware/acpi/tables/data/CCEL`) |
+| `GET /tls-root` | the root's PEM; 404 if none yet |
+| `GET /healthz` | `ok` |
+| `POST /init`, `POST /unlock` | a key request; `200 {"state":"open"}` |
+
+Refusal codes: `bad_request`, `bad_field`, `too_large` (413), `bad_nonce`,
+`bad_signature` (401), `bad_seal`, `wrong_key`, `owner_mismatch` (403),
+`wrong_state` (409), `volume_failed`, `open_hook_failed` (the volume stays
+open), `quote_failed` (500), `not_found`, `method_not_allowed`.
+
+```sh
+sudo pod-init --config /etc/pod-init.json [--bind 0.0.0.0] [--port 7000] [--configfs <dir>] [--ccel <file>]
+```
+
+```json
+{"volume_image": "/var/lib/pod/volume.img", "volume_size_gb": 20,
+ "mapper_name": "pod", "mount": "/srv/pod", "owner_file": "pod/owner",
+ "owner_hint": "/var/lib/pod/owner.hint", "tls_root": "/srv/pod/tls/root.pem",
+ "open_hook": "/usr/local/bin/pod-opened"}
+```
+
+Without `owner_hint`, the hint is kept in the volume's LUKS2 header
+(token 7), for an image whose root is read-only and whose /var is memory.
+It needs root, `cryptsetup`, `mkfs.ext4`, `mount` and `umount` on PATH.
+The key goes to cryptsetup on stdin only. Init makes a sparse image file
+of `volume_size_gb` if `volume_image` does not exist (never under /dev),
+then `luksFormat --type luks2 --cipher aes-xts-plain64 --key-size 512
+--sector-size 4096 --pbkdf pbkdf2 --pbkdf-force-iterations 1000` (the key
+is 64 random bytes; a slow KDF adds nothing), opens it with
+`--perf-no_read_workqueue --perf-no_write_workqueue --allow-discards`,
+makes ext4 and mounts with `-o discard`. `open_hook` runs with no
+arguments once the volume is mounted, for at most 300 s.
+
+Quotes come through configfs-tsm (`tsm`: a report directory, REPORTDATA
+to `inblob`, `outblob` read while `generation` holds still), behind a
+`Quoter` trait so the service is tested without a TDX guest.
+
+`cargo test -p fragment-pod-init` covers the service with a fake volume
+and quoter through the real HTTP reader, the owner's client and key
+request against it, and the configfs-tsm sequence against a fake kernel.
+The real volume (`tests/luks.rs`) needs root and loop devices and is
+ignored; on a Mac, build it for Linux and run it in a privileged container:
+
+```sh
+docker run --rm --privileged -v "$PWD:/src:ro" -w /src rust:1.99-alpine sh -c \
+  'apk add -q musl-dev cryptsetup e2fsprogs util-linux \
+   && CARGO_TARGET_DIR=/tmp/t cargo test --locked -p fragment-pod-init --test luks -- --ignored'
+```
+
+The measured image's binary: `cargo build --release -p fragment-pod-init
+--bin pod-init --target x86_64-unknown-linux-musl`, with
+`RUSTFLAGS="-C linker=rust-lld"` when the host is not x86_64 Linux.
+
+## The image
+
+`pod-image/` defines it (its README says what it is and where each part
+lives): one mkosi definition for the locked image and its debug sibling,
+with the tools pinned in `pod-image/pins.jsonc` and the platform it carries
+pinned in `pod-image/pinned-platform/` (debt: the image carries an old
+fork of the platform, not the tree it is built from;
+`docs/technical-debt-ledger.md`). `cargo xtask pod` builds, measures and
+boots it:
+
+```sh
+cargo xtask pod image platform all --config <file>       # once per build host: the pinned platform, staged
+cargo xtask pod image build --config <file> [--variant locked|debug|both]
+cargo xtask pod image compare target/pod-image/locked <other build> [--same]
+cargo xtask pod measure --dir target/pod-image/locked --name pod-p --seq 1 [--quote q.bin [--log ccel.bin]] [--mrtd <hex>] [--rtmr0 <hex>] [--out release.json]
+cargo xtask pod image publish --config <file> --variant locked --confirm-spend
+cargo xtask pod vm create|start --config <file> --confirm-spend
+cargo xtask pod vm stop --config <file> --confirm-stop
+cargo xtask pod vm describe --config <file> [--save <dir>]
+cargo xtask pod vm delete --config <file> [--delete-data-disk <name>] --confirm-delete
+```
+
+Every command that reaches the build host or Compute Engine takes
+`--dry-run`, which prints each command it would run, in order, and runs
+none. Those that spend money or delete things run only with their own
+confirming flag; without it they print the plan and refuse. A delete says
+what it deletes and what it keeps first; the data disk, the owner's
+volume, goes only when named again with `--delete-data-disk`.
+
+- **build** ships the committed tree (`git archive HEAD`; a run refuses a
+  dirty tree) to the build host, builds `pod-init` from it static for
+  musl, assembles mkosi's folder from `pod-image/mkosi` (and
+  `pod-image/debug/mkosi`), systemd-stub 257, the staged platform and the
+  debug image's one key (`build.debug_key`), runs mkosi as root, and
+  fetches the small outputs into `target/pod-image/<variant>/`: `pod.efi`,
+  `gpt.bin`, `pod.roothash`, `partitions.json`, `sha256sums`, `sizes`,
+  `pod-init.sha256` and `build.json` (the commit and the pins). The disk
+  stays on the host. mkosi needs Linux and root: the host is this machine
+  when it is Linux (`"host": "local"`), or a Compute Engine VM reached with
+  `gcloud compute ssh` (`"gce"`).
+- **platform** builds the pinned platform on the host and stages it
+  (`sources`, `build`, `trial`, `images`, `debs`, `stage`, or `all`); it
+  reads the patches from the tree the last build shipped.
+- **measure** computes RTMR1 and RTMR2 from the image's own bytes
+  (`attest::expect`, `verify::measure`) and writes the release a
+  policy.json holds, RTMR3 pinned to zero. MRTD and RTMR0 cannot be
+  computed from the image (RTMR0 depends on the machine type and the
+  disks attached at boot): they come from a boot's `--quote` or as given,
+  and are left out otherwise. With `--quote` it refuses a boot whose RTMR1
+  to RTMR3 differ.
+- **publish** writes the disk onto a scratch disk attached to the build VM,
+  checks it against the hash fetched here, makes an image with
+  `UEFI_COMPATIBLE,TDX_CAPABLE,GVNIC`, and deletes the scratch disk. An
+  image that exists ends it; a scratch disk left by a stopped run is
+  reused.
+- **vm create** makes the data disk if it is not there (kept as it is if
+  it is), then the TDX VM, attaching the data disk as device name
+  `pod-data`; a VM of that name already there is refused. Port 7000 must
+  reach the VM: the network's firewall is the deployment's own.
+
+The config is a file outside the repo (no deployment setting lives in the
+repo); its sections are read by the commands that need them, and an
+unknown or missing key is refused:
+
+```jsonc
+{
+  "project": "my-pod-project",
+  // on everything made, beside the tool's own pod-role and pod-variant
+  "labels": { "owner": "me" },
+  "build": {
+    // "local" (this machine, Linux) or "gce" with instance and zone
+    "host": "gce", "instance": "pod-build", "zone": "us-central1-f",
+    // the build user's home on the host (its cargo, worker-build's cache);
+    // "dir" (default <home>/podimg) holds the sources, tools and outputs
+    "home": "/home/builder",
+    // the one SSH key the debug image admits, a file here
+    "debug_key": "/home/me/.ssh/pod-debug.pub"
+  },
+  // Compute Engine image names, 55 characters at most
+  "images": { "locked": "pod-img-p", "debug": "pod-img-p-debug" },
+  "vm": {
+    "name": "pod-1", "zone": "us-central1-f", "machine_type": "c3-standard-8",
+    "variant": "locked", "boot_disk_gb": 10,
+    "data_disk": { "name": "pod-1-data", "size_gb": 20, "type": "pd-balanced" },
+    "network": "pod-net", "subnet": "pod-subnet", "tags": ["pod-7000"],
+    // optional: the VM deletes itself after this (its data disk stays)
+    "max_run_duration": "3h"
+  }
+}
+```
+
+## What each check proves
+
+| Check | Proves | Does not prove |
+|---|---|---|
+| chain (dcap-qvl) | A TDX module on a genuine Intel CPU signed this report. The checks cover the quote signature, the attestation key bound through the QE report, the PCK chain to Intel's pinned root, both CRLs, the TCB info and QE identity signatures and dates, and that the TCB is not Revoked. | Where the CPU is. Anyone with any TDX machine passes this check. A machine whose attestation key was extracted (TEE.fail, DDRop) also passes. |
+| collateral dates | TCB info and QE identity are within their issueDate and nextUpdate (dcap-qvl checks the CRLs and certificates too). | That collateral saved from an earlier fetch reflects revocations made since then. |
+| td_attributes | DEBUG and the other "TD under debug" bits are off, so the host cannot read the TD's memory through the debug interface. | Anything about physical attacks. |
+| nonce / binding | The quote was made after we chose the nonce, and (the binding) the TD itself said the boot key, state, owner and TLS root. | That no unannounced flaw lets a host forge a TD. |
+| tcb_status | Intel's status is UpToDate for this CPU and TDX module, or one you named. | That no unannounced flaw exists. |
+| expect_* / release | The registers equal the values given. | That the values are the right ones. That comes from computing them from the image (`attest::expect`, `verify::measure`). |
+| replay | The event log is the boot that produced RTMR0 to RTMR2 (`attest::replay`). Each event whose digest is of its own data, text or value shows exactly what was hashed (`attest::describe::coverage`). | What an event that only names a file, image or ACPI table contained. You must hash that yourself. |
+| firmware | Google signed this MRTD as one of its firmware builds (signer certificate chains to the pinned GCE-cc-tcb-root). | That the firmware is benign, or that the binary can be rebuilt from source. |
+| gce_instance | MR_OWNER is SHA-384 of the named project number, zone and instance id (the PZID). | That the host is Google's. The host sets MR_OWNER, so this means something only together with host_registry. |
+| host_registry | Google's public registry lists this quote's PPID, which comes from Intel's PCK certificate, as a Google host in that region. | A signature: the document is fetched over TLS and is not signed. It also does not prove that a listed host is still in Google's data centre. |
+
+Network: collateral fetches send only the FMSPC and CA type to Intel's PCS
+(`api.trustedservices.intel.com`); the firmware endorsement fetch sends the
+MRTD, and the host registry fetch the PPID, to storage.googleapis.com.
+
+## SEV-SNP
+
+`verify::snp` verifies an AMD SEV-SNP report (N2D, Milan) with virtee's
+`sev` crate, pure Rust: the ARK must be AMD's Milan root pinned in that
+crate, ARK → ASK → VCEK/VLEK → report signature, the VCEK's hwID equal to
+CHIP_ID, the nonce in REPORT_DATA, debug off. Every other field (policy,
+TCBs, CHIP_ID, HOST_DATA, ID and author key digests, REPORT_ID) is
+returned for the caller to judge; none names a cloud instance.
+`verify::firmware::verify_snp` checks the measurement against Google's
+SEV-SNP endorsement. A pod runs on TDX; this was added to compare Google's
+N2D (SEV-SNP) machines, and is kept with its tests.
+
+## Tests
+
+`cargo test -p fragment-pod` runs offline from `crates/pod/testdata/`: a
+real quote, nonce and CCEL from a c3-standard-8 TDX VM, Intel's collateral
+for that quote (fetched once on 2026-11-10; the tests run at a fixed time
+after that fetch), Google's firmware endorsement for its MRTD, a real
+SEV-SNP report with its certificates and endorsement, test TLS
+certificates, and `pod-image-a` and `pod-image-d`: the log, quote and
+first 34 sectors of the measured image's boots. Four tests also need that
+image's UKI and are ignored unless asked for, with `POD_IMAGE_A_UKI` or
+`POD_IMAGE_D_UKI` naming it (checked against testdata's `sha256sums`). The
+recorded quotes carry a plain nonce, so no offline test covers the chain
+and the binding together.

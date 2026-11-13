@@ -1,0 +1,32 @@
+[package]
+name = "fragment-pod-init"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "pod-init, in a pod's TD: keeps the owner's LUKS volume locked after every boot, attests its state and a boot key, and opens it for a sealed key the owner signed (docs/pod.md)."
+
+# The binary is src/bin/pod-init.rs, found by its path, so a workspace
+# that stubs this crate with an empty src/lib.rs (the images' CLI stages)
+# names no missing file.
+#
+# The in-VM binary takes only what it uses. fragment-pod without features
+# is its `unlock` (the protocol) and `attest` (the quote layout) halves,
+# pure Rust: no verifier, so no dcap-qvl, sev, x509-cert, fatfs, reqwest,
+# rustls or ring. No HTTP or async crate either: the routes are a few
+# fixed ones, one request at a time, and the small server in src/http.rs
+# is less code in the measured image than any dependency. So the binary
+# builds static for x86_64-unknown-linux-musl with no C toolchain.
+[dependencies]
+fragment-pod = { path = "../pod", default-features = false }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# tests/against_owner_client.rs: the owner's side (its client, checks
+# and key request) against this service. Dev-only, so the binary's
+# fragment-pod stays without features: `cargo tree -p fragment-pod-init
+# -e normal` shows none of the verifier's crates.
+fragment-pod = { path = "../pod", features = ["owner"] }
+# owner_flow.rs names the flow's result type.
+anyhow = "1"

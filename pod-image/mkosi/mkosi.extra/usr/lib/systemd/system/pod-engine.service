@@ -1,0 +1,16 @@
+[Unit]
+Description=pod: sandcastle's Docker double, the engine the box's node drives
+Requires=docker.service
+After=docker.service
+
+[Service]
+User=alex
+Group=alex
+SupplementaryGroups=docker
+Environment=HOME=/srv/private/home
+ExecStart=/usr/lib/pod/bin/sandcastle-docker-engine --dir /srv/private/engine --relay /usr/lib/pod/bin/sandcastle-docker-relay
+# on the volume, never the console
+StandardOutput=append:/srv/private/home/engine.log
+StandardError=inherit
+Restart=on-failure
+RestartSec=5

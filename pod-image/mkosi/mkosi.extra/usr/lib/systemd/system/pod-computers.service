@@ -1,0 +1,10 @@
+[Unit]
+Description=pod: the computers' Docker images, loaded from the image when missing or other
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/pod/pod-computers
+TimeoutStartSec=20min

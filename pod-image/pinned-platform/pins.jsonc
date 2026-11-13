@@ -1,0 +1,56 @@
+// PINNED PLATFORM: debt (docs/technical-debt-ledger.md, "The pod image
+// carries a pinned fork of the platform").
+//
+// The image does not carry the fragment tree it is built from. It carries
+// the platform the proof of concept's demo ran: an old fork of fragment,
+// celld and sandcastle with its Docker engine double (which gives an
+// agent's computer a container, not a microVM), and the Docker, containerd
+// and Tailscale packages held to debs.sha256. Master's self-host has no
+// computers inside a confidential VM yet: its computers need KVM, which no
+// rentable confidential VM offers. When a computers path that works
+// without KVM is on master's self-host, the image builds the tree it is
+// built from and this folder goes.
+//
+// Everything pinned is in this folder: this file, debs.sha256 and the two
+// patches. Each checkout fetches every branch of its repository and
+// checks out the commit; `branch` says where the commit was. `cargo xtask
+// pod image platform` (xtask/src/pod/platform.rs) reads it; pod-init
+// alone is built from the tree being built.
+{
+  "celld": {
+    "url": "https://github.com/futurepaul/celld",
+    "branch": "selfhost",
+    "commit": "b19f09d"
+  },
+  // with sandcastle-double-vms-max.patch: the double reports vms_max, as
+  // the demo's did
+  "sandcastle": {
+    "url": "https://github.com/futurepaul/sandcastle",
+    "branch": "node",
+    "commit": "5d64525",
+    "patch": "sandcastle-double-vms-max.patch"
+  },
+  // fragment 2e123d40 on selfhost-http-port, with fragment-prebuilt.patch:
+  // FRAGMENT_PREBUILT=1 makes `xtask dev --lan` build nothing at start
+  "fragment": {
+    "url": "https://github.com/finitecomputer/fragment",
+    "branch": "selfhost-http-port",
+    "commit": "2e123d40",
+    "patch": "fragment-prebuilt.patch",
+    // devstack::repo_root() is the compile-time CARGO_MANIFEST_DIR, so the
+    // tree runs only at the path it was built at: the overlay pod-opened
+    // mounts over the image's copy
+    "tree": "/srv/private/home/fragment-home"
+  },
+  // the stack's user, owner of the tree and of the volume's files (the
+  // demo VM's first user); the build host must build the tree as this user
+  "stack_uid": 1001,
+  "stack_gid": 1002,
+  // what the demo VM ran; each package's bytes are held to debs.sha256
+  "packages": {
+    "docker": "5:29.9.3-1~ubuntu.24.04~noble",
+    "containerd": "2.4.2-3~ubuntu.24.04~noble",
+    "tailscale": "1.104.6",
+    "sha256s": "debs.sha256"
+  }
+}

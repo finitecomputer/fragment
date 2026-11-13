@@ -1,0 +1,9 @@
+[Unit]
+Description=pod (debug): this boot's SSH host key, in memory only
+Before=ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/install -d -m 0700 /run/pod-ssh
+ExecStart=/usr/bin/ssh-keygen -q -t ed25519 -N "" -f /run/pod-ssh/ssh_host_ed25519_key
