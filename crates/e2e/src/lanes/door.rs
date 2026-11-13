@@ -1,6 +1,6 @@
 //! Sign-in through the identity door (crates/identity-door;
-//! docs/self-host.md, seam 4), the end of the `signin` section: the node
-//! started again as a self-hosted box signs people in (`Shape::Door`), its
+//! docs/self-host.md, seam 4), the `door` section, after `signin`: the
+//! node started again as a self-hosted box signs people in (`Shape::Door`), its
 //! `WORKOS_API_URL` the door's, its WorkOS client and key the door's, with
 //! no code of the cell's own for it. Behind the door, an OpenID Connect
 //! provider: the fake (crates/fakes/src/oidc.rs), strict, then shaped as
@@ -103,9 +103,14 @@ fn door_on(provider: &Oidc, port: u16, callback: &str) -> Result<Door> {
     Ok(Door::start(Config::new(([127, 0, 0, 1], port).into(), &url, DOOR_SECRET.to_vec(), p, vouched, vec![client])?)?)
 }
 
-pub(super) fn door(s: &mut Suite) -> Result<()> {
+pub(super) fn door(s: &mut Suite, api: &Api) -> Result<()> {
+    // the OpenID Connect fake it scripts, and the node itself: started
+    // again as a self-hosted box, and plain after
+    if !s.section("door", &[crate::Need::Fakes, crate::Need::Node]) {
+        return Ok(());
+    }
     let provider = Oidc::start(PROVIDER_CLIENT, PROVIDER_SECRET)?;
-    let callback = format!("{}/auth/callback", s.api().base);
+    let callback = format!("{}/auth/callback", api.base);
     let door = door_on(&provider, crate::devstack::free_port()?, &callback)?;
     let url = door.url.clone();
     s.stop()?;

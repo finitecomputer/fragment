@@ -32,7 +32,7 @@ in the cell: a self-host change to master does not touch `cell/`,
 | 1 | The runtime: celld | dev and the e2e (below) |
 | 2 | Computers on sandcastle nodes | not yet: no computers on celld |
 | 3 | Models from a file | dev's `FRAGMENT_MODELS_FILE` |
-| 4 | Sign-in: the identity door, an OpenID Connect relying party behind WorkOS's endpoints | dev on celld and the e2e's `signin` section, against the OpenID Connect fake (below) |
+| 4 | Sign-in: the identity door, an OpenID Connect relying party behind WorkOS's endpoints | dev on celld and the e2e's `door` section, against the OpenID Connect fake (below) |
 | 9 | LAN mode | not yet |
 | 5 | Files: macrofiche, the code-store contract | not yet: the code.storage fake |
 | 6 | Blobs | nothing to port: celld's R2, over `celld dev`'s disk |
@@ -272,9 +272,10 @@ devices, and needs the browser on the tailnet.
   secret is `target/devstack/identity-door-secret`. Named WorkOS files
   (`WORKOS_CLIENT_ID_FILE`, `WORKOS_API_KEY_FILE`) still choose a real
   WorkOS. Dev on wrangler keeps the WorkOS fake.
-- **The e2e:** the `signin` section's last cases (`crates/e2e/src/lanes/door.rs`)
-  start the node again shaped as a self-hosted box (`Shape::Door`: the
-  door's client and URL, no Pipes rows), with the OpenID Connect fake
+- **The e2e:** the `door` section (`crates/e2e/src/lanes/door.rs`, after
+  `signin`) starts the node again shaped as a self-hosted box
+  (`Shape::Door`: the door's client and URL, no Pipes rows), with the
+  OpenID Connect fake
   behind the door, strict and then shaped as tsidp, on either runtime. The
   rest of the run signs people in through the WorkOS fake, whose levers
   and Pipes the other sections drive.

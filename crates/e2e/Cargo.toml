@@ -20,7 +20,7 @@ fragment-core = { path = "../core" }
 fragment-nip98 = { path = "../nip98", features = ["sign"] }
 fragment-devstack = { path = "../devstack" }
 fragment-fakes = { path = "../fakes" }
-# a self-hosted box's sign-in, which the signin section signs people in through
+# a self-hosted box's sign-in, which the door section signs people in through
 fragment-identity-door = { path = "../identity-door" }
 # the release's blessed templates, to compare what fragments on them serve
 fragment-templates = { path = "../templates", features = ["embed"] }

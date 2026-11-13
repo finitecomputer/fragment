@@ -1,5 +1,4 @@
-//! Sign-in (docs/api.md, Sign-in), against the WorkOS fake, then through the
-//! identity door as a self-hosted box signs people in (lanes/door.rs): people are keyed by
+//! Sign-in (docs/api.md, Sign-in), against the WorkOS fake: people are keyed by
 //! their `(issuer, subject)`, browsers hold sessions (the platform's, then
 //! one per fragment origin through a single-use redemption), a CLI key
 //! joins a person through a browser approval, and a browser and the CLI
@@ -418,9 +417,7 @@ fn switch_cases(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
-    // the node itself too: its last cases sign in through the identity
-    // door, on a node started again as a self-hosted box (lanes/door.rs)
-    if !s.section("signin", &[crate::Need::Fakes, crate::Need::Node, crate::Need::Deployment, crate::Need::Levers, crate::Need::Chrome]) {
+    if !s.section("signin", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers, crate::Need::Chrome]) {
         return Ok(());
     }
 
@@ -1329,9 +1326,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         first_refused.is_some_and(|i| (limit..=2 * limit).contains(&i)) && statuses.iter().all(|st| *st == 200 || *st == 429) && other.status == 200,
         format!("refused first at {first_refused:?} of {} begins; another address: {other}", statuses.len()),
     );
-    // last: a self-hosted box's sign-in, through the identity door, on a
-    // node started again so (and started plain after)
-    super::door::door(s)
+    Ok(())
 }
 
 /// Presses the shell's "Use another account" (`button`, on `page`) while
