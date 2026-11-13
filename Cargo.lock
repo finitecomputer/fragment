@@ -1239,6 +1239,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fragment-pod-init"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fragment-pod",
+ "hex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fragment-proto"
 version = "0.1.0"
 dependencies = [

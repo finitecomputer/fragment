@@ -20,6 +20,9 @@ On master:
   same code). Feature `owner`: `owner` (pod-init's client, the owner's state
   directory, policy.json, the TLS checks and the key request in its order).
 
+- `crates/pod-init` (`fragment-pod-init`, binary `pod-init`): the service
+  in the TD (below).
+
 Not yet on master: the owner's command line (`fragment pod …` in `cli/`),
 the image, measurement and VM tooling (`cargo xtask pod …`), and a key
 service. They are thin layers over the library.
@@ -93,6 +96,70 @@ pod answers, a second fresh attestation must show the same boot key,
 (`owner::flow`). `verify` adds `tls_root` (the served PEM hashes to the
 attested root) and, with a TLS target, `tls_leaf` (a handshake trusting
 only that root succeeds for the name).
+
+## pod-init
+
+`crates/pod-init` (`fragment-pod-init`, binary `pod-init`) is the service
+in the TD. It links fragment-pod without features (`unlock` and `attest`
+alone) and no HTTP or async crate, so it builds static for
+x86_64-unknown-linux-musl with no C toolchain. It answers one request at a
+time, so two key requests never race on the volume.
+
+| Route | Answer |
+|---|---|
+| `GET /status?nonce=<64 hex>` | the state, boot key, owner and TLS root, and a quote over their binding |
+| `GET /eventlog` | the CCEL (`/sys/firmware/acpi/tables/data/CCEL`) |
+| `GET /tls-root` | the root's PEM; 404 if none yet |
+| `GET /healthz` | `ok` |
+| `POST /init`, `POST /unlock` | a key request; `200 {"state":"open"}` |
+
+Refusal codes: `bad_request`, `bad_field`, `too_large` (413), `bad_nonce`,
+`bad_signature` (401), `bad_seal`, `wrong_key`, `owner_mismatch` (403),
+`wrong_state` (409), `volume_failed`, `open_hook_failed` (the volume stays
+open), `quote_failed` (500), `not_found`, `method_not_allowed`.
+
+```sh
+sudo pod-init --config /etc/pod-init.json [--bind 0.0.0.0] [--port 7000] [--configfs <dir>] [--ccel <file>]
+```
+
+```json
+{"volume_image": "/var/lib/pod/volume.img", "volume_size_gb": 20,
+ "mapper_name": "pod", "mount": "/srv/pod", "owner_file": "pod/owner",
+ "owner_hint": "/var/lib/pod/owner.hint", "tls_root": "/srv/pod/tls/root.pem",
+ "open_hook": "/usr/local/bin/pod-opened"}
+```
+
+Without `owner_hint`, the hint is kept in the volume's LUKS2 header
+(token 7), for an image whose root is read-only and whose /var is memory.
+It needs root, `cryptsetup`, `mkfs.ext4`, `mount` and `umount` on PATH.
+The key goes to cryptsetup on stdin only. Init makes a sparse image file
+of `volume_size_gb` if `volume_image` does not exist (never under /dev),
+then `luksFormat --type luks2 --cipher aes-xts-plain64 --key-size 512
+--sector-size 4096 --pbkdf pbkdf2 --pbkdf-force-iterations 1000` (the key
+is 64 random bytes; a slow KDF adds nothing), opens it with
+`--perf-no_read_workqueue --perf-no_write_workqueue --allow-discards`,
+makes ext4 and mounts with `-o discard`. `open_hook` runs with no
+arguments once the volume is mounted, for at most 300 s.
+
+Quotes come through configfs-tsm (`tsm`: a report directory, REPORTDATA
+to `inblob`, `outblob` read while `generation` holds still), behind a
+`Quoter` trait so the service is tested without a TDX guest.
+
+`cargo test -p fragment-pod-init` covers the service with a fake volume
+and quoter through the real HTTP reader, the owner's client and key
+request against it, and the configfs-tsm sequence against a fake kernel.
+The real volume (`tests/luks.rs`) needs root and loop devices and is
+ignored; on a Mac, build it for Linux and run it in a privileged container:
+
+```sh
+docker run --rm --privileged -v "$PWD:/src:ro" -w /src rust:1.99-alpine sh -c \
+  'apk add -q musl-dev cryptsetup e2fsprogs util-linux \
+   && CARGO_TARGET_DIR=/tmp/t cargo test --locked -p fragment-pod-init --test luks -- --ignored'
+```
+
+The measured image's binary: `cargo build --release -p fragment-pod-init
+--bin pod-init --target x86_64-unknown-linux-musl`, with
+`RUSTFLAGS="-C linker=rust-lld"` when the host is not x86_64 Linux.
 
 ## What each check proves
 

@@ -34,7 +34,9 @@ platform concept.
   `crates/fakes`, `crates/devstack`, `crates/e2e`: local vendor fakes and harness.
 - `crates/pod`: a pod, one owner's self-hosted stack in a confidential VM
   (`docs/pod.md`): its unlock protocol, quote layout and event log, and,
-  by feature, the verifier, the release checks and the owner's side.
+  by feature, the verifier, the release checks and the owner's side;
+  `crates/pod-init`: `pod-init`, the service in the pod's TD that keeps
+  the owner's volume.
 - `templates/`: fragment templates; `applib/`: reusable app code.
 - `images/`: a separate Rust workspace (bridge, stub, Hermes).
 - `bench/search/`: the benchmark behind each fragment's search index
