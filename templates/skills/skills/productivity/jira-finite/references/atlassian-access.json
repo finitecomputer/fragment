@@ -3,6 +3,9 @@
     "scopes": [
       "read:jira-work",
       "read:jira-user",
+      "read:page:confluence",
+      "read:space:confluence",
+      "search:confluence",
       "read:me",
       "offline_access"
     ]
@@ -12,6 +15,10 @@
       "read:jira-work",
       "write:jira-work",
       "read:jira-user",
+      "read:page:confluence",
+      "write:page:confluence",
+      "read:space:confluence",
+      "search:confluence",
       "read:me",
       "offline_access"
     ]

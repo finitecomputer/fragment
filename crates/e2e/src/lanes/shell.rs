@@ -4375,6 +4375,20 @@ fn access_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         offered && buttons == json!([["read", "Connect read only"], ["write", "Connect read and write"]]),
         &buttons,
     );
+    // its services, each ticked as the card is drawn: Files unticked, its
+    // connect asks for Mail alone
+    sheet_of(b, page, &row)?;
+    let ticks = b.eval(page, &format!("[...document.querySelectorAll('{row} .provider-services input[type=checkbox]')].map((t) => [t.value, t.checked, t.parentElement.textContent])"))?;
+    b.eval(page, &format!("((t) => (t.checked = false, true))(document.querySelector('{row} .provider-services input[value=files]'))"))?;
+    let (came_back, connected) = connected_in_window(s, b, page, &format!("{row} [data-action=connect][data-access=read]"), provider)?;
+    s.ok(
+        "a connection that offers services shows each, ticked; with one unticked, its connect asks the provider for the rest alone",
+        ticks == json!([["mail", true, "Mail"], ["files", true, "Files"]]) && came_back && connected && s.workos.scopes(email, provider) == ["mail.read", "openid"],
+        json!({ "ticks": ticks, "cameBack": came_back, "connected": connected, "scopes": s.workos.scopes(email, provider) }),
+    );
+    let off = shell(api, session, "DELETE", &format!("/api/connections/{provider}"), None, &[])?;
+    anyhow::ensure!(off.status == 200, "disconnect {provider} after its checks: {off}");
+    b.reload(page)?;
     Ok(())
 }
 

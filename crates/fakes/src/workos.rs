@@ -129,6 +129,9 @@ struct State {
     /// Connected accounts deleted (user id, provider), each asked once.
     deleted: Vec<(String, String)>,
     omit_id_token: bool,
+    /// The next code exchange answers no `scope`: RFC 6749's "the one
+    /// requested", which the callback must know.
+    omit_scope: bool,
     omit_expires_in: bool,
     /// Access tokens Pipes refreshed: each asked for after its import's
     /// `expires_at`.
@@ -470,7 +473,9 @@ pub const ACCOUNT_HOSTS_UNDER: &str = "my.oauth.test";
 impl WorkOs {
     pub fn connection_oauth(&self) -> Value {
         let access = json!({ "read": { "scopes": CONNECTION_SCOPES }, "write": { "scopes": CONNECTION_WRITE_SCOPES } });
-        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "access": access, "revoke": format!("{}/test-oauth/revoke", self.url) })
+        // a person picks among its services as they connect: Mail, Files
+        let services = json!([{ "id": "mail", "name": "Mail", "scopes": ["mail.read", "mail.send"] }, { "id": "files", "name": "Files", "scopes": ["files.read"] }]);
+        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "access": access, "services": services, "revoke": format!("{}/test-oauth/revoke", self.url) })
     }
 
     /// The stand-in provider's connection through its client that
@@ -491,11 +496,17 @@ impl WorkOs {
     pub fn one_access_connection_oauth(&self) -> Value {
         let mut o = self.connection_oauth();
         o["access"] = json!({ "write": { "scopes": CONNECTION_SCOPES } });
+        // and no services: every scope of its one access
+        o.as_object_mut().expect("an object").remove("services");
         o
     }
 
     /// The next code exchange answers no ID token, as a provider asked for no `openid`.
     pub fn omit_next_id_token(&self) { self.state.lock().expect("workos state").omit_id_token = true; }
+
+    /// The next code exchange answers no `scope`, as a provider may when it
+    /// granted what was asked (RFC 6749 §5.1).
+    pub fn omit_next_scope(&self) { self.state.lock().expect("workos state").omit_scope = true; }
 
     /// What Pipes keeps of `email`'s account at `provider` (its compatibility
     /// connection, made if there is none), as a refresh of it would.
@@ -686,6 +697,9 @@ impl WorkOs {
                     let refresh = s.next("mock_refresh");
                     // its account's own host, as Salesforce's answer names its org's (`instance_url`)
                     let mut grant = json!({ "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": scopes, "instance_url": format!("https://{account}.{ACCOUNT_HOSTS_UNDER}") });
+                    if std::mem::take(&mut s.omit_scope) {
+                        grant.as_object_mut().expect("an object").remove("scope");
+                    }
                     // OpenID Connect's ID token beside the grant when `openid` was asked
                     // for, unsigned as the fake's AuthKit tokens are: its account's
                     // email, for this client

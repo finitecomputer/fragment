@@ -70,6 +70,22 @@ less connects as an account that may do less: a dedicated user (a service
 account) with only the permissions they mean to give. The row's note says
 so.
 
+## Services
+
+A row may name the services a person picks among as they connect
+(`connection_oauth.services`: each an id, a name, and the scopes that are
+its, of either access): Gmail, Drive and Calendar; Outlook mail, OneDrive
+and Contacts. Settings shows each, ticked, beside the connect; a connect
+names those ticked (`POST …/authorize` `{access, services}`; none named is
+every one), and asks the provider for the picked access's scopes of those
+services alone, beside the scopes no service names (signing in). The
+pending row keeps the pick, and the callback reads the grant against it.
+Microsoft's consent can't leave a permission out, so this is how a person
+does there (and leaves out one their organization's admin must approve);
+Google's can, and its services are the same choice made before its page.
+What the grant then lacks of its access is said as a partial grant's is
+(below): a reconnect asks for the services ticked then.
+
 ## Partial grants
 
 A person may untick permissions on the provider's consent screen. A

@@ -46,7 +46,7 @@ use fragment_core::catalog::{ConnectionAccess, ConnectionOAuth, Kind, KeyOAuth};
 use fragment_core::connection_accounts::{self as accounts, Held, Intent};
 use fragment_core::own_signin;
 use fragment_core::roundtrip::{self, Trip};
-use fragment_proto::computer::{ConnectionAccount, ProviderModel, ProviderPrice, ProviderSignIn, ProviderState, ProviderView, Providers};
+use fragment_proto::computer::{ConnectionAccount, ConnectionService, ProviderModel, ProviderPrice, ProviderSignIn, ProviderState, ProviderView, Providers};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde_json::{json, Value};
 use worker::*;
@@ -254,6 +254,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     missing: account.and_then(|a| missing(p.connection_oauth.as_ref(), a)),
                     access: account.and_then(|a| access(p.connection_oauth.as_ref(), a)),
                     accesses: p.connection_oauth.as_ref().map(|o| o.access.offered()),
+                    services: p.connection_oauth.as_ref().and_then(|o| o.services.as_ref()).map(|l| l.iter().map(|s| ConnectionService { id: s.id.clone(), name: s.name.clone() }).collect()),
                     note: p.note.clone(),
                     accounts: p.several().then(|| {
                         held.iter()
@@ -298,7 +299,13 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             let (intent, access) = Intent::asked(&asked).map_err(CellError::invalid)?;
             // an access its row offers: read only is none where the provider
             // has no read-only scope (the account's own permissions are the limit)
-            let grant = o.access.of(access).ok_or_else(|| CellError::invalid(format!("{provider} offers read and write alone: its provider has no read-only access, so what your agents may do is what the account you sign in as may (connect it with {{\"access\": \"write\"}})")))?;
+            o.access.of(access).ok_or_else(|| CellError::invalid(format!("{provider} offers read and write alone: its provider has no read-only access, so what your agents may do is what the account you sign in as may (connect it with {{\"access\": \"write\"}})")))?;
+            // the services picked, of its row's (none named: every one)
+            let services = fragment_core::connection_signin::services_asked(&asked).map_err(CellError::invalid)?;
+            let scopes = fragment_core::connection_signin::scopes_asked(o, access, services.as_deref()).ok_or_else(|| match &o.services {
+                Some(offered) => CellError::invalid(format!("{provider} offers the services {:?}: name some of those, or none for every one", offered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>())),
+                None => CellError::invalid(format!("{provider} offers no services to pick: connect it naming none")),
+            })?;
             if intent != Intent::Connect {
                 if !p.several() {
                     return Err(CellError::invalid(format!("{provider} connects one account here: connect it with no body")));
@@ -315,9 +322,9 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     _ => {}
                 }
             }
-            let begun = crate::ask_registry(env, &crate::registry::calls::BeginConnection { session, provider: provider.to_string(), intent, access }).await?;
+            let begun = crate::ask_registry(env, &crate::registry::calls::BeginConnection { session, provider: provider.to_string(), intent, access, services }).await?;
             if !roundtrip::valid_state(&begun.state) || !own_signin::valid_token(&begun.challenge) { return Err(CellError::host("invalid connection challenge")); }
-            let to = fragment_core::connection_signin::authorize_url(o, grant, &callback_url(cfg, provider), &begun.challenge, &begun.state);
+            let to = fragment_core::connection_signin::authorize_url(o, &scopes, &callback_url(cfg, provider), &begun.challenge, &begun.state);
             let mut resp = json_response(&json!({ "provider": provider, "url": to }))?;
             resp.headers_mut().append("set-cookie", &crate::auth::trip_begun(Trip::Connection, &begun.state, url))?;
             Ok(resp)

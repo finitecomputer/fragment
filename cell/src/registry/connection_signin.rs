@@ -38,6 +38,7 @@ struct Pending {
     intent: String,
     account: Option<String>,
     access: String,
+    services: Option<String>,
 }
 
 impl RegistryCell {
@@ -75,8 +76,9 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::RateLimited, "too many connection authorizations under way; finish one or wait ten minutes"));
         }
         let (intent, account) = b.intent.columns();
-        self.exec("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at, intent, account, access) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            vec![sha(&state).into(), live.hash.into(), b.provider.as_str().into(), issuer.into(), subject.into(), sha(&serde_json::to_string(o).expect("OAuth config serializes")).into(), sealed.into(), (now + roundtrip::TTL_S * 1000).into(), intent.into(), account.map_or(SqlStorageValue::Null, |a| a.into()), b.access.word().into()])?;
+        let services = b.services.as_ref().map(|s| serde_json::to_string(s).expect("ids serialize"));
+        self.exec("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at, intent, account, access, services) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![sha(&state).into(), live.hash.into(), b.provider.as_str().into(), issuer.into(), subject.into(), sha(&serde_json::to_string(o).expect("OAuth config serializes")).into(), sealed.into(), (now + roundtrip::TTL_S * 1000).into(), intent.into(), account.map_or(SqlStorageValue::Null, |a| a.into()), b.access.word().into(), services.map_or(SqlStorageValue::Null, |s| s.into())])?;
         Ok(ConnectionBegun { state, challenge: own_signin::challenge(&verifier) })
     }
 
@@ -120,9 +122,19 @@ impl RegistryCell {
         // granted, and one of signing in alone gives their agents nothing,
         // and is said so
         let Some(access) = fragment_proto::computer::ConnectionAccess::of_word(&pending.access) else { return Ok(NotUnderWay) };
-        // an access its row no longer offers (read only, gone since) finishes nothing
-        let Some(grant) = o.access.of(access) else { return Ok(NotUnderWay) };
-        let tokens = match connection_signin::tokens(&answer, &grant.scopes) {
+        // what it asked for: an access, or a service, its row no longer
+        // offers (gone since) finishes nothing
+        // held to a pick's shape as the route held it (1 to 16 ids, each
+        // once), whatever the row says it is
+        let picked = match &pending.services {
+            Some(text) => match crate::json_text::<serde_json::Value>(text).map(|v| connection_signin::services_asked(&serde_json::json!({ "services": v }))) {
+                Ok(Ok(Some(ids))) => Some(ids),
+                _ => return Ok(NotUnderWay),
+            },
+            None => None,
+        };
+        let Some(asked) = connection_signin::scopes_asked(o, access, picked.as_deref()) else { return Ok(NotUnderWay) };
+        let tokens = match connection_signin::tokens_of(&answer, &asked, &connection_signin::scopes_named(o)) {
             Ok(tokens) => tokens,
             Err(connection_signin::Refused::NoScopes) => return Ok(NoScopes),
             Err(connection_signin::Refused::Invalid) => return Ok(Failed),
