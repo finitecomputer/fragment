@@ -133,6 +133,9 @@ struct SidebarView: View {
     @State private var chatTitle = ""
     @State private var managingChat: FragmentSummary?
     @State private var actionError: String?
+    /// Each agent row's top, from the top of what the list shows (0, just
+    /// under the bar): which agent the bar holds, and how far it is pushed.
+    @State private var headerTops: [String: CGFloat] = [:]
 
     private var currentChat: FragmentSummary? {
         guard case .chat(let name) = page else { return nil }
@@ -144,48 +147,17 @@ struct SidebarView: View {
         // scroll edge), never a hard cut where the list ends; the first agent
         // starts at the top, the sidebar closed by a swipe or by going somewhere.
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4, pinnedViews: [.sectionHeaders]) {
+            LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(library.sidebarAgents) { agent in
-                    // its row pinned at the top while its chats scroll under it
                     Section {
                         ForEach(library.chats.filter { ($0.agents ?? []).first == library.identities[agent.name] }) { chat in
                             chatRow(chat)
                         }
                     } header: {
-                        HStack(spacing: 8) {
-                            Menu {
-                                Button("Agent settings", systemImage: "person.crop.circle") { library.selectedAgent = agent.name; navigate(.settings) }
-                                Button(agent.pinned == true ? "Unpin" : "Pin to top", systemImage: agent.pinned == true ? "pin.slash" : "pin") {
-                                    Task { await library.pin(agent, api: api) }
-                                }
-                                if let chat = currentChat, let identity = library.identities[agent.name], (chat.agents ?? []).contains(identity) {
-                                    Section(chat.displayTitle) { chatActions(chat) }
-                                }
-                            } label: {
-                                HStack(spacing: 12) {
-                                    AgentAvatar(agent: agent, round: true)
-                                    Text(agent.displayTitle).font(.headline)
-                                    if agent.pinned == true {
-                                        Image(systemName: "pin.fill").font(Self.mark).foregroundStyle(.tertiary).accessibilityLabel("Pinned")
-                                    }
-                                    Spacer()
-                                    Image(systemName: "chevron.down").font(Self.mark).foregroundStyle(.secondary)
-                                }
-                                // the new-chat button's glass, and its height
-                                .padding(.leading, 8).padding(.trailing, 14).frame(height: Self.control)
-                                .glassEffect(.regular.interactive(), in: .capsule)
-                                // its shape as the menu opens from it and closes back into
-                                // it: the rectangle around it showed as the menu went
-                                .contentShape(.contextMenuPreview, .capsule).contentShape(.capsule)
-                            }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
-                            // a new chat with this agent, opened empty
-                            Button { newChat(agent) } label: {
-                                Image(systemName: "square.and.pencil").font(Self.icon)
-                                    .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("New chat with \(agent.displayTitle)").accessibilityIdentifier("agentNewChat-\(agent.name)")
-                        }
+                        agentRow(agent)
+                            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .scrollView(axis: .vertical)).minY } action: { headerTops[agent.name] = $0 }
+                            // under the blur once the bar's copy stands in for it
+                            .accessibilityHidden(pinned?.agent.name == agent.name)
                     }
                 }
                 let ungrouped = library.chats.filter { library.agents(in: $0).isEmpty }
@@ -204,7 +176,18 @@ struct SidebarView: View {
         // what passes under the status bar blurs as under a chat's top bar:
         // the system's soft edge, over a bar of its own to reach past the clock
         // (a bar of nothing, a clear color, gets no edge: it holds a blank line)
-        .safeAreaBar(edge: .top) { Text(verbatim: " ").frame(maxWidth: .infinity).frame(height: 12).accessibilityHidden(true) }
+        .safeAreaBar(edge: .top) {
+            Text(verbatim: " ").frame(maxWidth: .infinity).frame(height: 12).accessibilityHidden(true)
+                // The agent whose chats are at the top, held there while they
+                // scroll and pushed off by the next: drawn in the bar, above its
+                // blur, never faded with the list beneath it.
+                .overlay(alignment: .top) {
+                    if let pinned {
+                        agentRow(pinned.agent).padding(.horizontal, 12)
+                            .offset(y: 12 + pinned.push)
+                    }
+                }
+        }
         .scrollEdgeEffectStyle(.soft, for: .top)
         .safeAreaBar(edge: .bottom) {
             HStack(alignment: .bottom, spacing: 12) {
@@ -244,6 +227,52 @@ struct SidebarView: View {
             Button("OK") { actionError = nil }
         } message: { Text(actionError ?? "") }
         .sheet(item: $managingChat) { chat in AgentMembershipView(chat: chat, library: library, api: api) }
+    }
+    /// The agent scrolled past the top, whose chats show there, and how far
+    /// the next agent's row has pushed it up.
+    private var pinned: (agent: FragmentSummary, push: CGFloat)? {
+        let agents = library.sidebarAgents
+        guard let index = agents.lastIndex(where: { (headerTops[$0.name] ?? .infinity) < 0 }) else { return nil }
+        let next = agents.indices.contains(index + 1) ? headerTops[agents[index + 1].name] : nil
+        let push = next.map { min(0, $0 - Self.control - 4) } ?? 0
+        return (agents[index], push)
+    }
+    /// An agent's pill (its menu) and its New chat beside it.
+    private func agentRow(_ agent: FragmentSummary) -> some View {
+        HStack(spacing: 8) {
+            Menu {
+                Button("Agent settings", systemImage: "person.crop.circle") { library.selectedAgent = agent.name; navigate(.settings) }
+                Button(agent.pinned == true ? "Unpin" : "Pin to top", systemImage: agent.pinned == true ? "pin.slash" : "pin") {
+                    Task { await library.pin(agent, api: api) }
+                }
+                if let chat = currentChat, let identity = library.identities[agent.name], (chat.agents ?? []).contains(identity) {
+                    Section(chat.displayTitle) { chatActions(chat) }
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    AgentAvatar(agent: agent, round: true)
+                    Text(agent.displayTitle).font(.headline)
+                    if agent.pinned == true {
+                        Image(systemName: "pin.fill").font(Self.mark).foregroundStyle(.tertiary).accessibilityLabel("Pinned")
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.down").font(Self.mark).foregroundStyle(.secondary)
+                }
+                // the new-chat button's glass, and its height
+                .padding(.leading, 8).padding(.trailing, 14).frame(height: Self.control)
+                .glassEffect(.regular.interactive(), in: .capsule)
+                // its shape as the menu opens from it and closes back into
+                // it: the rectangle around it showed as the menu went
+                .contentShape(.contextMenuPreview, .capsule).contentShape(.capsule)
+            }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
+            // a new chat with this agent, opened empty
+            Button { newChat(agent) } label: {
+                Image(systemName: "square.and.pencil").font(Self.icon)
+                    .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("New chat with \(agent.displayTitle)").accessibilityIdentifier("agentNewChat-\(agent.name)")
+        }
     }
     @ViewBuilder private func chatActions(_ chat: FragmentSummary) -> some View {
         Button("Rename chat…", systemImage: "pencil") { chatTitle = chat.displayTitle; renamingChat = chat }
