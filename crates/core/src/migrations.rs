@@ -398,6 +398,13 @@ impl Move {
         matches!(self.state, MoveState::Listed | MoveState::Open | MoveState::Later | MoveState::Never)
     }
 
+    /// A good import whose old agent waits, stopped, for staff's word to
+    /// retire it (`done`): no command yet, so staff may still restart the
+    /// old agent or try again.
+    pub fn awaits_retire(&self) -> bool {
+        self.state == MoveState::Retiring && self.command.is_none()
+    }
+
     /// When the supervisor next looks at it, if ever: its state's
     /// deadline, or its stage's keep.
     pub fn deadline(&self) -> Option<i64> {
@@ -409,7 +416,8 @@ impl Move {
                 (false, Some(at)) => at + OPEN_MS,
                 _ => self.since_ms + DONE_MS,
             }),
-            MoveState::Retiring => Some(self.since_ms + RETIRE_MS),
+            // its day starts at staff's word: until then it waits for them
+            MoveState::Retiring => self.command.map(|_| self.since_ms + RETIRE_MS),
             MoveState::Archiving => Some(match &self.command {
                 Some(Act::Retire(_)) => self.progress_ms.unwrap_or(self.since_ms) + RETIRE_MS,
                 _ if self.progress_ms.is_none() => self.since_ms + STOP_MS,
@@ -797,22 +805,18 @@ pub fn open(m: &Move, agent: &str, stage: &str) -> Outcome {
     }
 }
 
-/// The agent says its import ended: well, the old agent is retired as
-/// migrated (a phase 2 one is marked again); not, staff take it. Its reads
-/// end either way; a phase 1 stage is swept, a phase 2 one kept to its
-/// expiry (`swept`). The same answer again changes nothing.
+/// The agent says its import ended. It is harmless either way: its reads
+/// end, its stage is kept to its keep, and nothing is asked of the mover.
+/// Well, its move is `retiring` with no command, the old agent stopped
+/// until staff's `retire` (`awaits_retire`); not, it is held for staff.
+/// The same answer again changes nothing.
 pub fn done(m: &Move, agent: &str, stage: &str, d: &StageDone, now: i64) -> Outcome {
     its_stage(m, agent, stage)?;
     match (m.state, d.ok) {
-        (MoveState::Importing, ok) => {
-            let mut effects = vec![];
-            let from = m.clone().swept(&mut effects);
-            let to = match ok {
-                true => Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..from.moved(MoveState::Retiring, now) },
-                false => from.held(HeldReason::ImportFailed, now),
-            };
-            Ok(Some(Step { to, effects }))
-        }
+        (MoveState::Importing, ok) => step(match ok {
+            true => Move { command: None, seq: 0, ..m.moved(MoveState::Retiring, now) },
+            false => m.held(HeldReason::ImportFailed, now),
+        }),
         (MoveState::Retiring | MoveState::Moved, true) => Ok(None),
         (MoveState::Held, false) if m.reason == Some(HeldReason::ImportFailed) => Ok(None),
         (s, _) => Err(Refused::NotNow(s)),
@@ -888,12 +892,16 @@ pub fn cutoff(m: &Move, cutoff_ms: i64, now: i64) -> Option<Step> {
 /// Asked again, from where it was held: a new attempt at its stage, or its
 /// retirement again (an archive's, its stage kept), or its import's
 /// routine again (phase 2's kept stage).
+/// A good import waiting for staff's retire is tried again as its import
+/// was (`awaits_retire`).
 pub fn retry(m: &Move, now: i64) -> Outcome {
-    if m.state != MoveState::Held {
-        return Err(Refused::NotNow(m.state));
-    }
+    let from = match m.state {
+        MoveState::Held => m.held_from,
+        _ if m.awaits_retire() => Some(MoveState::Importing),
+        s => return Err(Refused::NotNow(s)),
+    };
     let mut effects = vec![];
-    let to = match (m.held_from, m.phase) {
+    let to = match (from, m.phase) {
         (Some(MoveState::Retiring), _) => Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..m.moved(MoveState::Retiring, now) },
         // an archive staged whose retirement's word never came: its
         // retirement again, its stage kept (the mover may have retired the
@@ -916,11 +924,12 @@ pub fn retry(m: &Move, now: i64) -> Outcome {
 }
 
 /// The old agent started again and offered again: a person who changed
-/// their mind after Yes, or a move staff give up on. Never once its
-/// retirement began.
+/// their mind after Yes, or a move staff give up on (a good import's too,
+/// until staff retire it). Never once its retirement began.
 pub fn restart_old(m: &Move, now: i64) -> Outcome {
     let restartable = match m.state {
         MoveState::Asked | MoveState::Staging | MoveState::Importing => m.phase == Phase::P1,
+        MoveState::Retiring => m.phase == Phase::P1 && m.awaits_retire(),
         MoveState::Held => m.phase == Phase::P1 && matches!(m.held_from, Some(MoveState::Asked | MoveState::Staging | MoveState::Importing)),
         _ => false,
     };
@@ -933,16 +942,14 @@ pub fn restart_old(m: &Move, now: i64) -> Outcome {
     Ok(Some(Step { to, effects }))
 }
 
-/// Retired as migrated: a held move staff finished by hand.
+/// Retired as migrated, on staff's word: a good import waiting for it
+/// (`awaits_retire`), or a held move staff finished by hand. Its stage
+/// is kept to its keep (the old agent's retirement cannot be undone).
 pub fn retire(m: &Move, now: i64) -> Outcome {
-    match m.state {
-        MoveState::Held => {
-            let mut effects = vec![];
-            let to = Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..m.clone().swept(&mut effects).moved(MoveState::Retiring, now) };
-            Ok(Some(Step { to, effects }))
-        }
-        s => Err(Refused::NotNow(s)),
+    if m.state != MoveState::Held && !m.awaits_retire() {
+        return Err(Refused::NotNow(m.state));
     }
+    step(Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..m.moved(MoveState::Retiring, now) })
 }
 
 /// Out of the move by staff, saying why: offered no more, never archived,
@@ -1273,39 +1280,88 @@ mod tests {
         assert_eq!(held.reason, Some(HeldReason::ImportTimedOut));
     }
 
+    /// Goal (FIN-463, after the first real move): `done` is harmless. A
+    /// good import keeps its stage to its keep and leaves the old agent
+    /// stopped, its retirement waiting for staff's word: the mailbox holds
+    /// nothing for it and no deadline holds it, while its person reads it
+    /// as done.
     #[test]
-    fn done_retires_the_old_agent_and_sweeps_the_stage() {
+    fn done_ok_keeps_the_stage_and_waits_for_staffs_retire() {
         let i = to(open(&importing(), AGENT, "prj_1.p1.1"));
         let d = done(&i, AGENT, "prj_1.p1.1", &ok(), T0 + 100).unwrap().unwrap();
-        assert_eq!(d.effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
-        assert_eq!((d.to.state, d.to.command, d.to.staged_ms), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated)), None));
-        assert_eq!(d.to.command_id().as_deref(), Some("prj_1:1:retire_migrated"));
+        assert_eq!(d.effects, vec![], "its stage is kept");
+        assert_eq!((d.to.state, d.to.command, d.to.staged_ms), (MoveState::Retiring, None, Some(T0 + 10)));
+        assert_eq!(d.to.command(), None, "nothing in the mailbox: the old agent stays stopped");
+        assert_eq!(d.to.deadline(), Some(T0 + 10 + KEEP_MS), "no retirement's day: only its stage's keep");
+        assert_eq!(said(&d.to, "Juniper"), "Done.");
         assert_eq!(readable(&d.to, AGENT, "prj_1.p1.1"), Err(Refused::NotNow(MoveState::Retiring)), "its routes refuse at once");
         assert_eq!(done(&restarted(&d.to), AGENT, "prj_1.p1.1", &ok(), T0 + 101), Ok(None), "replay");
         let bad = StageDone { ok: false, report_sha256: None, why: Some("x".into()) };
         assert_eq!(done(&d.to, AGENT, "prj_1.p1.1", &bad, T0), Err(Refused::NotNow(MoveState::Retiring)), "the other answer after");
         assert_eq!(done(&i, "npub1other", "prj_1.p1.1", &ok(), T0), Err(Refused::NotYours));
-        // retired: moved
-        let r = d.to;
-        let m = to(report(&r, &report_on(&r, 1, "retired"), T0 + 200));
-        assert_eq!((m.state, m.command, m.deadline()), (MoveState::Moved, None, None));
-        assert_eq!(report(&m, &report_on(&r, 2, "retired"), T0), Err(Refused::Stale), "done with");
+        // no clock retires it, or holds it: past a retirement's day, nothing
+        assert_eq!(tick(&d.to, T0 + 100 + RETIRE_MS), None);
+        // its keep passes: its stage goes, and it still waits for staff
+        let swept = tick(&restarted(&d.to), T0 + 10 + KEEP_MS).expect("its keep");
+        assert_eq!(swept.effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
+        assert_eq!((swept.to.state, swept.to.command, swept.to.deadline()), (MoveState::Retiring, None, None));
+        // staff's retire: now the mover retires it, within a day, its stage kept
+        let r = retire(&restarted(&d.to), T0 + 200).unwrap().unwrap();
+        assert_eq!(r.effects, vec![], "its stage is kept to its keep");
+        assert_eq!((r.to.state, r.to.command, r.to.staged_ms), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated)), Some(T0 + 10)));
+        assert_eq!(r.to.command_id().as_deref(), Some("prj_1:1:retire_migrated"));
+        assert_eq!(r.to.deadline(), Some(T0 + 200 + RETIRE_MS), "a day for its word, from staff's retire");
+        assert_eq!(retire(&r.to, T0 + 201), Err(Refused::NotNow(MoveState::Retiring)), "asked once");
+        assert_eq!(done(&r.to, AGENT, "prj_1.p1.1", &ok(), T0 + 201), Ok(None), "replay after");
+        // retired: moved, its stage still kept to its keep
+        let m = to(report(&r.to, &report_on(&r.to, 1, "retired"), T0 + 300));
+        assert_eq!((m.state, m.command, m.deadline()), (MoveState::Moved, None, Some(T0 + 10 + KEEP_MS)));
+        assert_eq!(report(&m, &report_on(&r.to, 2, "retired"), T0), Err(Refused::Stale), "done with");
+        assert_eq!(tick(&m, T0 + 10 + KEEP_MS).expect("its keep").effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
+    }
+
+    /// Until staff retire it, a good import can still be undone or tried
+    /// again: the old agent restarted (offered again), or a new attempt
+    /// staged into the same new agent. Once its retirement is asked, not.
+    #[test]
+    fn after_done_ok_staff_restart_the_old_agent_or_retry() {
+        let d = to(done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0 + 100));
+        let back = restart_old(&restarted(&d), T0 + 101).unwrap().unwrap();
+        assert_eq!((back.to.state, back.to.agent.clone(), back.to.command), (MoveState::Open, None, Some(Act::Restart)));
+        assert_eq!(back.effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
+        let again = retry(&restarted(&d), T0 + 102).unwrap().unwrap();
+        assert_eq!((again.to.state, again.to.attempt, again.to.agent.as_deref(), again.to.command), (MoveState::Asked, 2, Some(AGENT), Some(Act::StopAndStage)));
+        assert_eq!(again.effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }], "the superseded attempt's stage");
+        // the second attempt imports into the same agent, and waits again
+        let s = to(report(&again.to, &report_on(&again.to, 1, "stopped"), T0 + 103));
+        let i2 = to(report(&s, &report_on(&s, 2, staged_event()), T0 + 104));
+        let d2 = to(done(&i2, AGENT, "prj_1.p1.2", &ok(), T0 + 105));
+        assert_eq!((d2.state, d2.command, d2.staged_ms), (MoveState::Retiring, None, Some(T0 + 104)));
+        // once staff asked for its retirement, neither
+        let r = to(retire(&d, T0 + 106));
+        assert_eq!(restart_old(&r, T0 + 107), Err(Refused::NotNow(MoveState::Retiring)), "never once retirement began");
+        assert_eq!(retry(&r, T0 + 107), Err(Refused::NotNow(MoveState::Retiring)));
+        // and a withdrawal waits for the old agent to be restarted first
+        assert_eq!(withdraw(&d, WHY, T0 + 107), Err(Refused::NotNow(MoveState::Retiring)));
     }
 
     #[test]
-    fn a_failed_import_is_held_and_swept() {
+    fn a_failed_import_is_held_and_its_stage_kept() {
         let i = importing();
         let bad = StageDone { ok: false, report_sha256: None, why: Some("x".into()) };
         let d = done(&i, AGENT, "prj_1.p1.1", &bad, T0).unwrap().unwrap();
-        assert_eq!((d.to.state, d.to.reason, d.to.staged_ms), (MoveState::Held, Some(HeldReason::ImportFailed), None));
-        assert_eq!(d.effects.len(), 1);
+        assert_eq!((d.to.state, d.to.reason, d.to.staged_ms), (MoveState::Held, Some(HeldReason::ImportFailed), Some(T0 + 10)));
+        assert_eq!((d.effects.as_slice(), d.to.deadline()), (&[][..], Some(T0 + 10 + KEEP_MS)), "kept to its keep");
         assert_eq!(done(&restarted(&d.to), AGENT, "prj_1.p1.1", &bad, T0), Ok(None), "replay");
         assert_eq!(done(&d.to, AGENT, "prj_1.p1.1", &ok(), T0), Err(Refused::NotNow(MoveState::Held)));
+        // staff's retire keeps it too; a retry supersedes it
+        assert_eq!(retire(&d.to, T0 + 1).unwrap().unwrap().effects, vec![]);
+        assert_eq!(retry(&d.to, T0 + 1).unwrap().unwrap().effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
     }
 
     #[test]
     fn a_failed_retirement_is_asked_again_until_its_deadline() {
-        let r = done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0).unwrap().unwrap().to;
+        let r = to(retire(&to(done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0)), T0));
         // failed: still retiring, its command still the mover's, its deadline unmoved
         let f = to(report(&r, &report_on(&r, 1, "failed"), T0 + 5));
         assert_eq!((f.state, f.command_id().as_deref(), f.deadline()), (MoveState::Retiring, Some("prj_1:1:retire_migrated"), r.deadline()));
@@ -1352,7 +1408,7 @@ mod tests {
         // a Yes after: attempt 3, never mixed with the others
         assert_eq!(to(yes(&restarted_, AGENT, T0 + 4)).attempt, 3);
         assert_eq!(restart_old(&open_move(), T0), Err(Refused::NotNow(MoveState::Open)));
-        let retiring = done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0).unwrap().unwrap().to;
+        let retiring = to(retire(&to(done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0)), T0));
         assert_eq!(restart_old(&retiring, T0), Err(Refused::NotNow(MoveState::Retiring)), "never once retirement began");
         // retire: a held move finished by hand
         let ret = to(retire(&restarted(&held), T0 + 5));
@@ -1496,12 +1552,13 @@ mod tests {
         assert_eq!(e.to.state, MoveState::Expired);
         assert_eq!(e.effects, vec![Effect::Sweep { prefix: "p2/prj_1/1/".into() }]);
         assert_eq!(yes(&e.to, AGENT, cut), Err(Refused::NotNow(MoveState::Expired)));
-        // a late Yes before then imports the kept stage, then retires it as migrated
+        // a late Yes before then imports the kept stage; staff then retire it as migrated
         let late = yes(&ar, AGENT, cut + 10).unwrap().unwrap();
         assert_eq!(late.effects, vec![Effect::Routine { agent: AGENT.into(), stage: "prj_1.p2.1".into() }]);
         let d = done(&late.to, AGENT, "prj_1.p2.1", &ok(), cut + 11).unwrap().unwrap();
-        assert_eq!((d.to.state, d.to.command), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated))));
+        assert_eq!((d.to.state, d.to.command), (MoveState::Retiring, None), "staff's word first");
         assert_eq!(d.effects, vec![], "kept to its expiry");
+        assert_eq!(to(retire(&d.to, cut + 12)).command, Some(Act::Retire(Mark::Migrated)));
     }
 
     /// Phase 2's two retirements are two commands: as archived at the
@@ -1517,7 +1574,7 @@ mod tests {
         let archived = st.command_id().expect("retired as archived");
         let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
         let late = to(yes(&ar, AGENT, cut + 10));
-        let d = to(done(&late, AGENT, "o.p2.1", &ok(), cut + 11));
+        let d = to(retire(&to(done(&late, AGENT, "o.p2.1", &ok(), cut + 11)), cut + 11));
         let migrated = d.command_id().expect("retired as migrated");
         assert_ne!(archived, migrated, "two retirements, two commands");
         // the archive's receipt again is stale: it changes nothing
@@ -1562,10 +1619,12 @@ mod tests {
         let st = to(report(&restarted(&s), &report_on(&s, 2, staged_event()), cut + 2));
         let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
         let late = to(yes(&ar, AGENT, cut + 10));
-        // done well: retired as migrated, its stage kept
+        // done well, then retired as migrated on staff's word: its stage kept
         let d = done(&late, AGENT, "o.p2.1", &ok(), cut + 11).unwrap().unwrap();
         assert_eq!((d.effects.as_slice(), d.to.staged_ms), (&[][..], Some(cut + 2)), "kept after a good import");
-        let m = to(report(&d.to, &report_on(&d.to, 1, "retired"), cut + 12));
+        assert_eq!(d.to.deadline(), Some(expiry), "waiting for staff: only its expiry");
+        let r = to(retire(&d.to, cut + 12));
+        let m = to(report(&r, &report_on(&r, 1, "retired"), cut + 12));
         assert_eq!((m.state, m.deadline()), (MoveState::Moved, Some(expiry)), "moved, its stage kept to its expiry");
         assert_eq!(tick(&m, expiry - 1), None);
         let gone = tick(&m, expiry).expect("its expiry");
@@ -1838,6 +1897,50 @@ mod tests {
                 assert!(name.len() <= 32 && name.ends_with("--x7k2"), "{name}");
                 crate::vault::check(&name, &put, &catalog).unwrap_or_else(|e| panic!("{name}: {e}"));
             }
+        }
+    }
+
+    /// Goal: a good import waiting for staff (`retiring`, no command)
+    /// never reaches the release before #1263, which reads that row but
+    /// not its meaning: its staff ops refuse it, and once its stage's
+    /// keep passes it holds it `retire_timed_out`, whose `retry` retires
+    /// the old agent. Its object holds step 7, which that release refuses
+    /// before it reads a row, at every call and alarm (`schema_refused`),
+    /// whether the stage was kept or swept; nothing changes, and rolled
+    /// forward, staff's retry imports again. Method: a waiting move, before
+    /// and after its keep, written as the cell writes it on this code's
+    /// object; started by the code of six steps; then by this code again.
+    #[test]
+    fn a_move_waiting_for_staff_is_refused_by_the_release_before() {
+        use crate::migrate::{self, host::Lite, Db, Ran, SchemaError, MIGRATIONS};
+        let before = migrate::Class { steps: &MIGRATIONS.steps[..6], ..MIGRATIONS };
+        let newest = MIGRATIONS.steps.len() as u32;
+        let waiting = to(done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0 + 100));
+        assert_eq!((waiting.state, waiting.command, waiting.deadline()), (MoveState::Retiring, None, Some(T0 + 10 + KEEP_MS)));
+        let swept = tick(&waiting, T0 + 10 + KEEP_MS).expect("its keep").to;
+        assert_eq!((swept.state, swept.command, swept.deadline()), (MoveState::Retiring, None, None), "its stage gone, no deadline left");
+        let literal = |c: Col| match c {
+            Col::Null => "NULL".to_string(),
+            Col::Int(n) => n.to_string(),
+            Col::Text(t) => format!("'{}'", t.replace('\'', "''")),
+        };
+        for m in [waiting, swept] {
+            let db = Lite::new();
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &MIGRATIONS, T0)), Ok(Ran::Made { version: newest }));
+            let values: Vec<String> = m.values().into_iter().map(literal).collect();
+            db.exec(&format!("INSERT INTO moves ({}, offer) VALUES ({}, '')", COLUMNS.join(", "), values.join(", "))).expect("written as this code writes it");
+            let refused = db.transaction(|db| migrate::migrate(db, &before, T0 + 200));
+            assert_eq!(refused, Err(SchemaError::Newer { class: "Migrations", held: newest, known: 6 }), "the release before refuses the object");
+            assert_eq!(migrate::held(&db, &MIGRATIONS).expect("held").len() as u32, newest, "unchanged");
+            // rolled forward: this code takes it, the move as it was
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &MIGRATIONS, T0 + 300)), Ok(Ran::Current { version: newest }));
+            let rows = db.rows("SELECT * FROM moves").expect("its moves");
+            let back = Move::read(&rows[0]).expect("a move reads back");
+            assert_eq!(back, m, "nothing changed");
+            // and staff's retry imports again, never retires
+            let again = to(retry(&back, T0 + 400));
+            assert_eq!((again.state, again.phase, again.attempt), (MoveState::Asked, Phase::P1, m.attempt + 1));
+            assert!(!matches!(again.command, Some(Act::Retire(_))), "{:?}", again.command);
         }
     }
 }
