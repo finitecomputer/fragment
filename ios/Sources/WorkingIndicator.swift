@@ -379,8 +379,7 @@ private struct HeldWord<Content: View>: View {
     }
 }
 
-/// The working line's mark, after the logo's bars: a small rounded square
-/// of lines in the line's own color, lit in a wave that runs up and down them
+/// The working line's mark, after the logo's bars: a small circle of lines in the line's own color, lit in a wave that runs up and down them
 /// while something is under way (`elapsed`, the line's clock); evenly and
 /// still (nil, or Reduce Motion) otherwise. Each line sits on whole pixels.
 private struct LogoStripes: View {
@@ -396,18 +395,20 @@ private struct LogoStripes: View {
         let side = (size * 0.95).rounded()
         let scale = self.scale
         Canvas { context, box in
-            func pixels(_ value: CGFloat) -> CGFloat { (value * scale).rounded() / scale }
-            let pitch = box.height / CGFloat(Self.lines)
-            let thick = max(1 / scale, pixels(pitch * 0.5))
+            // one whole-pixel pitch for every line: each gap the same, each edge sharp
+            let height = (box.height * scale).rounded(.down)
+            let pitch = (height / CGFloat(Self.lines)).rounded(.down)
+            let thick = max(1, (pitch * 0.5).rounded())
+            let first = ((height - (CGFloat(Self.lines) * pitch - (pitch - thick))) / 2).rounded(.down)
             // the lit line, sweeping from top to bottom and back
             let at = lit.map { (1 - cos($0 * 2.2)) / 2 * Double(Self.lines - 1) }
-            context.clip(to: Path(roundedRect: CGRect(origin: .zero, size: box), cornerRadius: box.width * 0.3, style: .continuous))
+            context.clip(to: Path(ellipseIn: CGRect(origin: .zero, size: box)))
             for index in 0..<Self.lines {
                 let glow = at.map { max(0, 1 - abs(Double(index) - $0) / 1.3) } ?? 0.6
                 var line = context
                 line.opacity = 0.3 + 0.7 * glow
-                let top = pixels(CGFloat(index) * pitch + (pitch - thick) / 2)
-                line.fill(Path(CGRect(x: 0, y: top, width: box.width, height: thick)), with: .foreground)
+                let top = (first + CGFloat(index) * pitch) / scale
+                line.fill(Path(CGRect(x: 0, y: top, width: box.width, height: thick / scale)), with: .foreground)
             }
         }
         .frame(width: side, height: side)
