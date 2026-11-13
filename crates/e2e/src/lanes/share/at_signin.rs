@@ -168,12 +168,14 @@ fn in_chrome(s: &mut Suite, api: &Api, owner: &Keys, name: &str, signin: &str, i
     };
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &dee_session)?;
     let page = chrome.open(&format!("{}{signin}", api.base))?;
-    // armed, and drawn whole: its landscape read (the load event waits on it)
-    let armed = chrome.until(&page, "document.readyState === 'complete' && !!document.querySelector('button[value=accept]') && !document.querySelector('button[value=accept]').disabled", wait);
+    let armed = chrome.until(&page, "!!document.querySelector('button[value=accept]') && !document.querySelector('button[value=accept]').disabled", wait);
     for (width, height, mobile) in [(1280, 800, false), (390, 844, true)] {
         chrome.viewport(&page, width, height, mobile)?;
-        for scheme in ["light", "dark"] {
+        for (scheme, landscape) in [("light", "platform-landscape.jpg"), ("dark", "platform-landscape-dark.jpg")] {
             chrome.color_scheme(&page, scheme)?;
+            // the scheme's landscape (platform-pages.css) read, then painted
+            chrome.until(&page, &format!("performance.getEntriesByType('resource').some(e => e.name.includes({landscape:?}))"), wait);
+            std::thread::sleep(Duration::from_millis(300));
             chrome.screenshot(&page, &s.scratch.join(format!("invite-at-signin-{width}-{scheme}.png")))?;
         }
     }
