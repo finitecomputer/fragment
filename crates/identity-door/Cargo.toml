@@ -1,0 +1,38 @@
+[package]
+name = "fragment-identity-door"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "The identity door: a self-hosted box's sign-in behind the WorkOS endpoints the cell already calls, an OpenID Connect relying party of the provider its config names (tsidp on a tailnet, an org's own IdP on an intranet; docs/self-host.md, seam 4)."
+
+# Every crate named here was already in the workspace's lock (beneath
+# reqwest and the fakes); hyper's server half brings one more beneath it,
+# httpdate. hyper serves;
+# reqwest (rustls) asks the provider; ring, rustls's own crypto, checks the
+# id_token's signature. Nothing here is hand-rolled HTTP or crypto. (The
+# `openidconnect` crate would add a dozen crates to the lock, its own RSA
+# among them, for what fragment#1244's rules, brought here, already decide.)
+[dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "signal"] }
+hyper = { version = "1", default-features = false, features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2.6"
+hex = "0.4"
+getrandom = "0.3"
+url = "2.5"
+thiserror = "2"
+base64 = "0.22"
+hkdf = "0.12"
+hmac = "0.12"
+ring = "0.17"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+# the OpenID Connect provider, faked (strict, or shaped as tsidp)
+fragment-fakes = { path = "../fakes" }

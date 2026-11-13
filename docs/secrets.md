@@ -19,6 +19,7 @@ its home; everything that uses it reads it from there.
 | Browser sessions | the registry, as SHA-256 hashes; the tokens only in HttpOnly cookies | no one |
 | The DNS token, a preview's test secret, the Stripe key xtask uses | files on the deploying machine, named by path in the config (Files, below) | Paul |
 | An operator key (a wipe's) | a file on the operator's machine (below) | its operator |
+| A self-hosted box's identity door: its own secret (it seals the door's state at the provider and derives each sign-in's PKCE verifier and nonce) and its client secret at the OpenID Connect provider | files on the box, owner-only (the door refuses one others may read), named by its config (docs/self-host.md, seam 4); the platform's client secret at the door stays in the node's secrets backend as `WORKOS_KEY`, and the door's config holds only its SHA-256 | the box's operator |
 
 A computer's guest holds only placeholders (docs/computers.md). A
 placeholder's tag is an HMAC of (computer, agent, provider) under a key

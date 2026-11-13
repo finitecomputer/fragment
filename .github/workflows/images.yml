@@ -143,6 +143,7 @@ jobs:
               - crates/devstack/Cargo.toml
               - crates/e2e/Cargo.toml
               - crates/fakes/Cargo.toml
+              - crates/identity-door/Cargo.toml
               - xtask/Cargo.toml
 
   # The Docker lane. The images are built first by the runner's own Docker

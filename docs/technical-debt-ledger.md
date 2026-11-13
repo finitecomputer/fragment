@@ -24,6 +24,24 @@ unfinished design, not debt.
   relay, behind the same binding: its `SendEmail`'s seam), or that product
   rule lands.
 
+## A self-hosted box signs in through WorkOS's surface
+
+- **Shortcut:** on a self-hosted box the cell signs people in through the
+  identity door (`crates/identity-door`; docs/self-host.md, seam 4), which
+  answers WorkOS AuthKit's endpoints so the cell needs no code of its
+  own. The cell still speaks WorkOS's words there: its sign-in page says
+  "WorkOS said `access_denied`: …" for a refusal of the door's or the
+  provider's, and "Use another account" cannot ask the provider for
+  another person (the door cannot tell a switch from a sign-in, and keeps
+  no session to end), so the provider's own session decides who signs in.
+- **Risk:** a self-hosted person sees the word WorkOS on a refusal page,
+  and on a provider that holds sessions (Keycloak, Entra; not tsidp, where
+  the device names its one person) cannot switch accounts without signing
+  out there.
+- **Delete when:** a product change words the cell's sign-in by its
+  provider and tells the provider a switch (Core 1.0's `prompt=login`),
+  proven on preview as the self-host rule asks of a cell change.
+
 ## A computer's lifecycle writes its old flags too
 
 - **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle
