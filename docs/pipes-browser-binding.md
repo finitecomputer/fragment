@@ -29,7 +29,12 @@ back to WorkOS's own authorize URL. The routes are docs/api.md's
   before its first use.
 - **The OAuth client** must be the one the deployment's WorkOS
   integration uses, or Pipes cannot refresh. Its secret is a store
-  secret (docs/secrets.md).
+  secret (docs/secrets.md). It authenticates to the provider as its row
+  says (`client_auth`, beside its `connection_oauth`; RFC 6749 §2.3.1):
+  its id and secret in the code exchange's form (`"post"`, a row that
+  names none), or in an HTTP Basic header and in no body (`"basic"`),
+  which is what Zoom's, Airtable's, Xero's and Notion's token endpoints
+  ask.
 - **The account's label** is the email of the ID token answered beside
   the grant: read without its signature (it came from the token endpoint
   over TLS: OpenID Connect Core 3.1.3.7), its `aud` checked, an
@@ -77,7 +82,10 @@ the rest.
 ## Disconnecting
 
 A disconnect revokes the grant at the provider where the row names
-`revoke` (RFC 7009), then deletes the account at Pipes. Before either,
+`revoke` (RFC 7009), then deletes the account at Pipes. A row whose
+client authenticates with HTTP Basic sends that header with the
+revocation too (Zoom's refuses one without it); any other sends the token
+alone, as Google's, Linear's and Salesforce's take it. Before either,
 the registry fences the account in one turn: attempts still pending end,
 callbacks still exchanging import nothing, and one already importing
 refuses the fence (429). The fence lasts (`connection_fences`) until a

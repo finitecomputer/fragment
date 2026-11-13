@@ -55,7 +55,12 @@ fn granting(api: &Api, session: &str, account: &str, grant: Option<&str>) -> Res
 
 /// `granting`'s, the person picking `access` (`read` or `write`).
 fn granting_as(api: &Api, session: &str, account: &str, grant: Option<&str>, access: &str) -> Result<(String, String, String)> {
-    let r = begin_as(api, session, PROVIDER, json!({ "access": access }))?;
+    granting_at(api, session, PROVIDER, account, grant, access)
+}
+
+/// `granting_as`'s, at `provider`.
+fn granting_at(api: &Api, session: &str, provider: &str, account: &str, grant: Option<&str>, access: &str) -> Result<(String, String, String)> {
+    let r = begin_as(api, session, provider, json!({ "access": access }))?;
     anyhow::ensure!(r.status == 200, "begin connection: {r}");
     let cookie = r.cookies().into_iter().find(|c| c.starts_with("fragment_connection=")).context("connection cookie")?;
     let mut to = reqwest::Url::parse(r.body["url"].as_str().context("authorize URL")?)?;
@@ -120,6 +125,35 @@ fn access_picked(s: &mut Suite, api: &Api, a: &str) -> Result<()> {
 }
 
 fn refused(r: &Reply, word: &str) -> bool { r.status == 303 && r.header("location").ends_with(&format!("?refused={word}")) }
+
+/// A row whose client authenticates with HTTP Basic (`client_auth`: RFC
+/// 6749 §2.3.1, as Zoom's, Airtable's, Xero's and Notion's token endpoints
+/// ask), through the stand-in provider's client that takes its header
+/// alone (`fragment_fakes::workos::BASIC_CLIENT`: it refuses a secret in
+/// the body, and a revocation its client does not authenticate). A person
+/// connects and disconnects there as at any other connection.
+fn basic_client(s: &mut Suite, api: &Api) -> Result<()> {
+    let provider = crate::BASIC_CONNECTION;
+    let email = "connection-basic@e2e.test";
+    let session = api.sign_in(email)?;
+    let counts = s.workos.connection_counts();
+    let (url, cookie, _) = granting_at(api, &session, provider, "basic-a", None, "read")?;
+    let r = back(api, &url, Some(&session), Some(&cookie))?;
+    let listed = row(api, &session, provider)?;
+    s.ok("a connection whose client authenticates with HTTP Basic connects: its code exchanged with the header alone, its grant imported as any other's",
+        r.status == 200 && listed["state"] == "connected" && listed["account"] == "basic-a@oauth.test" && listed["access"] == "read"
+            && s.workos.connection_counts() == (counts.0 + 1, counts.1 + 1, counts.2) && s.workos.scopes(email, provider) == fragment_fakes::workos::CONNECTION_SCOPES,
+        format!("callback {r}; listed {listed}"));
+    let (revoked, deleted) = (s.workos.revoked().len(), s.workos.deleted().len());
+    let off = shell(api, &session, "DELETE", &format!("/api/connections/{provider}"))?;
+    let minted = s.workos.tokens(provider).last().cloned().unwrap_or_default();
+    s.ok("and its disconnect revokes the grant with the same header, then deletes the account at Pipes",
+        off.status == 200 && off.body["revoked"] == true && off.body["state"] == "not_connected" && !minted.is_empty()
+            && s.workos.revoked().len() == revoked + 1 && s.workos.revoked().last() == Some(&minted)
+            && s.workos.deleted().len() == deleted + 1 && !s.workos.holds(email, provider),
+        &off);
+    Ok(())
+}
 
 pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("connections", &[Need::Fakes, Need::Node, Need::Levers]) { return Ok(()); }
@@ -408,5 +442,6 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let counts = s.workos.connection_counts();
     let statuses: Vec<u16> = (0..=fragment_core::connection_signin::PENDING_PER_SESSION_MAX).map(|_| begin(&api, &capped, PROVIDER).map(|r| r.status)).collect::<Result<_>>()?;
     s.ok("pending attempts are bounded without exchanging or importing", statuses[..8] == [200; 8] && statuses[8] == 429 && s.workos.connection_counts() == counts, format!("{statuses:?}"));
+    basic_client(s, &api)?;
     several::several(s, &api)
 }

@@ -1,9 +1,10 @@
 //! What a section needs to run (`Suite::section`), so a run's set is
 //! chosen by where it runs, never by a hand-kept list. A local run has
-//! everything; a hosted one (a branch deployment on real vendors) has the
-//! levers its test secret opens, Chrome when it is installed, and the
-//! computers and models its deployment offers, and nothing that stands in
-//! for a vendor or controls the node.
+//! everything; one on celld everything but the runtime's own containers; a
+//! hosted one (a branch deployment on real vendors) has the levers its
+//! test secret opens, Chrome when it is installed, and the computers and
+//! models its deployment offers, and nothing that stands in for a vendor
+//! or controls the node.
 
 /// One thing a section needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -47,11 +48,26 @@ pub enum Need {
     /// it): a wipe's (docs/api.md, Operators). A local run makes one; a
     /// hosted run has one when it is given its file.
     Operator,
+    /// The finite.computer move, configured (a fleet's `migrations`): off
+    /// on a self-hosted deployment, which has nothing to move from.
+    Move,
 }
 
 impl Need {
-    pub const ALL: [Need; 11] =
-        [Need::Fakes, Need::Node, Need::Deployment, Need::Levers, Need::LocalDocker, Need::Chrome, Need::Computers, Need::Models, Need::TwoSites, Need::RealAgent, Need::Operator];
+    pub const ALL: [Need; 12] = [
+        Need::Fakes,
+        Need::Node,
+        Need::Deployment,
+        Need::Levers,
+        Need::LocalDocker,
+        Need::Chrome,
+        Need::Computers,
+        Need::Models,
+        Need::TwoSites,
+        Need::RealAgent,
+        Need::Operator,
+        Need::Move,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -66,6 +82,7 @@ impl Need {
             Need::TwoSites => "two-sites",
             Need::RealAgent => "real-agent",
             Need::Operator => "operator",
+            Need::Move => "move",
         }
     }
 }
@@ -95,17 +112,30 @@ pub struct Offers {
 pub enum Rung {
     /// Under `wrangler dev`, with the fakes: everything.
     Local,
+    /// Under `celld dev`, with the fakes (`FRAGMENT_E2E_RUNTIME=celld`;
+    /// docs/self-host.md, seam 1): everything but the runtime's own
+    /// containers, which need egress intercepts and snapshots celld's
+    /// Docker engine lacks (seam 2).
+    Celld,
     /// A branch deployment on real vendors.
     Hosted(Offers),
 }
 
+const NO_REAL_AGENT: &str = "it needs a real agent (our Hermes image on a real model), which only a preview has: a local run's computers answer through the scripted model";
+
 /// Why `need` is missing on `rung`, or `None` when it is there.
 pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
-    let Rung::Hosted(offers) = rung else {
-        return match need {
-            Need::RealAgent => Some("it needs a real agent (our Hermes image on a real model), which only a preview has: a local run's computers answer through the scripted model"),
-            _ => None,
-        };
+    let offers = match rung {
+        Rung::Local => return (need == Need::RealAgent).then_some(NO_REAL_AGENT),
+        Rung::Celld => {
+            return match need {
+                Need::RealAgent => Some(NO_REAL_AGENT),
+                Need::LocalDocker | Need::Computers => Some("it needs the runtime's own containers, and celld runs none here: a computer needs egress intercepts and snapshots, which celld's Docker engine lacks (docs/self-host.md, seam 2)"),
+                Need::Move => Some("it needs the finite.computer move, which is off on a self-hosted deployment: nothing to move from (docs/self-host.md)"),
+                _ => None,
+            };
+        }
+        Rung::Hosted(offers) => offers,
     };
     match need {
         Need::Fakes => Some("it needs the vendor fakes (a scripted model, code.storage's git, WorkOS' accounts, the push service, a local upstream), which only a local run has"),
@@ -123,7 +153,7 @@ pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
         Need::Operator if !offers.operator => {
             Some("it needs an operator key the deployment lists and no person holds (`--operator-key-file <file>`, its npub in the config's `operators`), and the run has none")
         }
-        Need::Levers | Need::Chrome | Need::Computers | Need::Models | Need::RealAgent | Need::Operator => None,
+        Need::Levers | Need::Chrome | Need::Computers | Need::Models | Need::RealAgent | Need::Operator | Need::Move => None,
     }
 }
 
@@ -153,6 +183,20 @@ mod tests {
         for need in local {
             assert_eq!(missing(need, Rung::Local), None, "{need:?}");
         }
+    }
+
+    /// celld runs no containers of its own: no computers there. Everything
+    /// else a local run has, it has.
+    #[test]
+    fn celld_has_everything_but_the_runtimes_containers() {
+        for need in Need::ALL {
+            let without = matches!(need, Need::LocalDocker | Need::Computers | Need::RealAgent | Need::Move);
+            assert_eq!(missing(need, Rung::Celld).is_some(), without, "{need:?}");
+        }
+        let (need, why) = unmet(&[Need::Levers, Need::Computers], Rung::Celld).expect("no computers on celld");
+        assert_eq!(need, Need::Computers);
+        assert!(why.contains("seam 2"), "{why}");
+        assert_eq!(unmet(&[Need::Fakes, Need::Node, Need::Deployment, Need::Chrome, Need::TwoSites, Need::Operator], Rung::Celld), None);
     }
 
     /// A real agent (our Hermes on a real model) is a preview's alone: a
