@@ -1,0 +1,97 @@
+[package]
+name = "fragment-pod"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "A pod: one owner's self-hosted stack in a confidential VM. Its lock-and-unlock protocol, the TDX quote layout and event log, the verifier (Intel's chain, Google's provenance, SEV-SNP, registers computed from an image) and the checks before a disk key leaves its holder (docs/pod.md)."
+
+# Two halves, by feature, so the in-VM binary (crates/pod-init) links only
+# the first. Without features: `unlock` (the protocol) and `attest` (the
+# quote layout, nonces, the GCE instance binding, event-log replay and
+# the image's expected registers), pure Rust, which pod-init builds static
+# for x86_64-unknown-linux-musl with no C toolchain. `verify` adds the
+# verifier and the release checks (`verify`, `checks`), with dcap-qvl,
+# sev, x509-cert, fatfs and reqwest; `owner` adds the owner's side
+# (`owner`: the client, the state directory, the TLS checks and the key
+# request), for the CLI.
+[features]
+verify = ["dep:dcap-qvl", "dep:sev", "dep:x509-cert", "dep:der", "dep:chrono", "dep:ring", "dep:fatfs", "dep:reqwest", "dep:anyhow"]
+owner = ["verify", "dep:rustls"]
+
+[dependencies]
+hex = "0.4"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+zeroize = "1"
+# BIP-340 Schnorr, pinned as crates/nip98 pins it: the owner key is the
+# same kind of key as the product's identity.
+k256 = { version = "=0.13.4", default-features = false, features = ["schnorr"] }
+# RFC 9180 HPKE (rozbb), pure Rust. 0.13 because it shares the RustCrypto
+# 0.10 generation (sha2, digest) with k256 0.13; 0.15 moves to the next.
+# DHKEM(X25519)/HKDF-SHA256/ChaCha20-Poly1305 are the only ones used.
+hpke = { version = "=0.13.0", default-features = false, features = ["alloc", "x25519"] }
+# The rand_core hpke 0.13 takes; k256 is given bytes, not an RNG.
+rand_core = { version = "0.9", features = ["os_rng"] }
+# PEM to DER for the TLS root, with no other dependency (its own
+# constant-time base64). 1.15, the root lock's, has the PEM reader.
+rustls-pki-types = { version = "1.15", features = ["std"] }
+# Not called directly: named so its "zeroize" feature is on, which makes
+# the StaticSecret inside hpke's X25519 private key (the boot secret)
+# zeroize on drop. hpke itself asks for default-features = false.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+
+# The `verify` feature's.
+#
+# DCAP verification: Phala's dcap-qvl, pure Rust, MIT, released 2026-11-03
+# and maintained (it tracks Intel's QVL: TD 1.5 bodies, TCB convergence,
+# TDRelaunchAdvised). It checks the quote signature, the attestation key
+# through the QE report, the PCK chain to Intel's root (pinned in the
+# crate), both CRLs, TCB info and QE identity signatures and expiry, the
+# QE identity policy, and matches the platform TCB level; it refuses a
+# Revoked TCB. It leaves to us: REPORTDATA (the nonce), which TCB
+# statuses we accept, the expected registers, and GCE provenance. It also
+# checks the debug attribute, but we turn that off and check it ourselves
+# (src/verify/policy.rs) so the refusal is a typed error of ours.
+# Looked at and not chosen: intel-tee-quote-verification-rs wraps Intel's
+# C++ QVL through FFI (a C++ library to install); tdx-quote (entropy)
+# parses and checks the quote signature only, no collateral or TCB;
+# go-tdx-guest is Google's verifier but Go. The rustcrypto backend keeps
+# its crypto pure Rust; it brings its own webpki fork
+# (dcap-qvl-webpki, pinned exactly by dcap-qvl). Without its `std`
+# feature (it is alloc-only without it, and every call here works so):
+# `std` turns on serde_json's `preserve_order`, which in a workspace
+# build is every crate's serde_json, and reorders the keys master's
+# byte-pinned tests hold (crates/core's ledger and models tests).
+dcap-qvl = { version = "=0.7.1", default-features = false, features = ["rustcrypto", "default-x509"], optional = true }
+# Collateral and certificate dates; already beneath dcap-qvl.
+chrono = { version = "0.4", default-features = false, features = ["alloc", "std"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+# Already in the tree through rustls; used for the random nonce and to
+# verify Google's RSA-PSS firmware endorsement.
+ring = { version = "0.17", optional = true }
+# The same x509-cert dcap-qvl uses, to read Google's endorsement certs.
+x509-cert = { version = "0.3", default-features = false, optional = true }
+der = { version = "0.8", features = ["alloc"], optional = true }
+# To read \EFI\BOOT\BOOTX64.EFI out of the ESP of a disk image
+# (`verify::disk`). Pure Rust, MIT; used read-only, on an in-memory copy
+# of the partition.
+fatfs = { version = "0.3", default-features = false, features = ["std", "alloc"], optional = true }
+# SEV-SNP reports: virtee's sev crate (Apache-2.0, maintained by the
+# VirTEE project, the library behind snpguest). It parses the report
+# (v2 to v5), pins AMD's Milan/Genoa/Turin ARK and ASK, and verifies
+# ARK -> ASK -> VCEK/VLEK -> report signature. crypto_nossl keeps it pure
+# Rust (p384, rsa); "snp" only, no SEV or ioctl code. snpguest itself
+# does not build on macOS (its report command needs Linux's ioctls).
+sev = { version = "=8.0.0", default-features = false, features = ["snp", "crypto_nossl"], optional = true }
+anyhow = { version = "1", optional = true }
+
+# The `owner` feature's: for the TLS checks, a handshake whose only trust
+# anchor is the attested root. Already in the tree through reqwest, with
+# ring as its provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+
+[dev-dependencies]
+# The tests cover every half: this turns `owner` (and so `verify`) on
+# for them, so a plain `cargo test -p fragment-pod` runs them all.
+fragment-pod = { path = ".", features = ["owner"] }
