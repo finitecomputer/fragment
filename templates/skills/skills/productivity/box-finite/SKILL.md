@@ -86,6 +86,9 @@ $BOX share remove file 456
   through it.
 - `download` refuses to overwrite a file unless `--overwrite`; Box may
   answer `not_ready` for a file just uploaded: download it again shortly.
+  It saves the file only once all of its bytes are here: one that breaks
+  off (`download_failed`) saves nothing and leaves a file already at the
+  path as it was.
 - `upload` makes a new file; a name already in the folder is
   `item_name_in_use`. A new version of a file, or one over 50 MB, is Box's
   own upload API (its docs: https://developer.box.com/guides/uploads).
@@ -142,5 +145,6 @@ exit 1; Box's own error codes come through as Box names them
 | `not_found` | The id is wrong, or their Box user cannot see it |
 | `item_name_in_use` | Pick another name, or another folder |
 | `not_ready` | Box is still preparing a file just uploaded: download it again shortly |
+| `download_failed` | The download broke off; nothing was saved and a file already there is as it was: download it again |
 | `rate_limit_exceeded` | Wait, then ask again; ask for less at a time |
 | `redirected` | Box answered a redirect, which the helper never follows with the token: download files with `files download` |

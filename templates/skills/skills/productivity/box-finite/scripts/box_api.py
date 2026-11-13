@@ -34,6 +34,7 @@ Environment:
 """
 
 import argparse
+import contextlib
 import http.client
 import json
 import os
@@ -264,13 +265,35 @@ def download_url(file):
         return e.location
 
 
-def save(url, target, overwrite):
-    """The bytes at `url`, fetched with no token, written to `target` (none
-    of them left there should the download fail)."""
+def save(url, target, overwrite, file):
+    """The bytes at `url`, fetched with no token, saved as `target` once all
+    of them are here. Until then they are staged in a new file beside it,
+    so a download that breaks off leaves `target` as it was."""
+    staged = os.path.join(os.path.dirname(target) or ".", f".box-download-{secrets.token_hex(8)}")
+    try:
+        f = open(staged, "xb")
+    except OSError as exc:
+        raise BoxError(0, "bad_out", f"{target}: {exc.strerror or exc}") from None
+    try:
+        with f:
+            written, headers = fetch(url, f)
+        whole = expected_bytes(headers, file)
+        if whole is not None and written != whole:
+            raise BoxError(0, "download_failed", f"the download ended at {written} bytes, not its {whole}")
+        commit(staged, target, overwrite)
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(staged)
+    return written
+
+
+def fetch(url, f):
+    """The bytes at `url`, fetched with no token, written to `f` and to
+    disk: their count, and the answer's headers."""
     request = urllib.request.Request(url, headers={"Accept": "*/*"}, method="GET")
     try:
         with DOWNLOADS.open(request, timeout=TIMEOUT_S) as response:
-            return write(response, target, overwrite)
+            return write(body(response), f), response.headers
     except urllib.error.HTTPError as exc:
         raise BoxError(exc.code, "download_failed", f"Box's download URL answered {exc.code}") from None
     except urllib.error.URLError as exc:
@@ -279,21 +302,61 @@ def save(url, target, overwrite):
         raise BoxError(0, "download_failed", f"the download broke off: {exc}") from None
 
 
-def write(response, target, overwrite):
+def body(response):
+    """`response`'s body, a chunk at a time. `read(n)` answers short, and
+    raises nothing, at a premature end: the caller counts the bytes."""
     try:
-        f = open(target, "wb" if overwrite else "xb")
-    except OSError as exc:
-        raise BoxError(0, "bad_out", f"{target}: {exc.strerror or exc}") from None
+        while chunk := response.read(CHUNK_BYTES):
+            yield chunk
+    except (OSError, http.client.HTTPException) as exc:
+        raise BoxError(0, "download_failed", f"the download broke off: {exc}") from None
+
+
+def write(chunks, f):
+    """`chunks` written to `f` and flushed to disk: their length."""
     written = 0
     try:
-        with f:
-            while chunk := response.read(CHUNK_BYTES):
-                f.write(chunk)
-                written += len(chunk)
-    except BaseException:
-        os.remove(target)
-        raise
+        for chunk in chunks:
+            f.write(chunk)
+            written += len(chunk)
+        f.flush()
+        os.fsync(f.fileno())
+    except OSError as exc:
+        raise BoxError(0, "bad_out", f"the download could not be saved: {exc.strerror or exc}") from None
     return written
+
+
+def expected_bytes(headers, file):
+    """How many bytes a whole download holds: its Content-Length. A chunked
+    body's own framing is checked by http.client, which raises on a short
+    one (None); a body with neither ends when its connection closes, so it
+    is held to the size Box states for the file."""
+    if (headers.get("Transfer-Encoding") or "").strip().lower() == "chunked":
+        return None
+    declared = headers.get("Content-Length")
+    if declared is None:
+        size = call("GET", f"/2.0/files/{file}", query={"fields": "size"}).get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise BoxError(0, "download_failed", "Box's download answered no length, and Box states no size for the file to check it by")
+        return size
+    if not re.fullmatch(r"[0-9]{1,20}", declared.strip()):
+        raise BoxError(0, "download_failed", f"Box's download answered a Content-Length of {declared!r}")
+    return int(declared)
+
+
+def commit(staged, target, overwrite):
+    """`staged`, whole, becomes `target` in one step. Unless it may be
+    overwritten, a file that appeared there during the download is kept: a
+    hard link, unlike a rename, fails on a name already taken."""
+    try:
+        if overwrite:
+            os.replace(staged, target)
+        else:
+            os.link(staged, target)
+    except FileExistsError:
+        raise BoxError(0, "exists", f"{target} exists: name another with --out, or pass --overwrite") from None
+    except OSError as exc:
+        raise BoxError(0, "bad_out", f"{target}: {exc.strerror or exc}") from None
 
 
 def files_download(args):
@@ -301,7 +364,7 @@ def files_download(args):
     if args.out and not os.path.isdir(args.out):
         writable(args.out, args.overwrite)
     target = destination(args, file)
-    written = save(download_url(file), target, args.overwrite)
+    written = save(download_url(file), target, args.overwrite, file)
     out({"status": "downloaded", "id": file, "path": target, "bytes": written})
 
 
@@ -476,6 +539,7 @@ HINTS = {
     "forbidden": "the person narrowed this agent's connections and left Box out",
     "redirected": "Box's redirect is never followed with the token: download a file with `files download`",
     "not_ready": "Box is still preparing the file: download it again shortly",
+    "download_failed": "nothing was saved, and a file already at the path is as it was: download it again",
 }
 # Box's own
 BOX_HINTS = {
