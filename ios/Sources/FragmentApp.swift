@@ -566,6 +566,18 @@ struct FragmentRoot: View {
                                 ToolbarItem(placement: .topBarLeading) {
                                     Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
                                 }
+                                // Home's name is a glass button, as its neighbors are: Settings
+                                if page == .launcher {
+                                    ToolbarItem(placement: .principal) {
+                                        // the center gets no toolbar glass of its own: drawn as its neighbors'
+                                        Button { page = .settings } label: {
+                                            Text(title).font(.headline).padding(.horizontal, 16).frame(height: 44)
+                                                .glassEffect(.regular.interactive(), in: .capsule)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityHint("Opens Settings").accessibilityIdentifier("homeSettings")
+                                    }
+                                }
                                 ToolbarItemGroup(placement: .topBarTrailing) {
                                     // a chat has no New chat of its own: the sidebar's starts one
                                     if page == .history || page == .settings {
