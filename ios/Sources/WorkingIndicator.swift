@@ -381,8 +381,9 @@ private struct HeldWord<Content: View>: View {
     }
 }
 
-/// The working line's mark, after the logo's bars: a small circle of lines
-/// in the line's own color. While something is under way (`elapsed`, the
+/// The working line's mark, after the logo's bars: a circle made of
+/// rounded lines, each as wide as the circle where it sits, in the line's own
+/// color. While something is under way (`elapsed`, the
 /// line's clock) they light in a wave running up and down; while it waits on
 /// someone they breathe, all together; otherwise (nil, or Reduce Motion) they
 /// hold still. Each line sits on whole pixels.
@@ -410,13 +411,18 @@ private struct LogoStripes: View {
             let at = breathing ? nil : lit.map { (1 - cos($0 * 2.2)) / 2 * Double(Self.lines - 1) }
             // breathing: every line together, in and out about every four seconds
             let breath = breathing ? lit.map { (1 - cos($0 * 1.6)) / 2 } : nil
-            context.clip(to: Path(ellipseIn: CGRect(origin: .zero, size: box)))
             for index in 0..<Self.lines {
                 let glow = breath ?? at.map { max(0, 1 - abs(Double(index) - $0) / 1.3) } ?? 0.6
                 var line = context
                 line.opacity = 0.3 + 0.7 * glow
-                let top = (first + CGFloat(index) * pitch) / scale
-                line.fill(Path(CGRect(x: 0, y: top, width: box.width, height: thick / scale)), with: .foreground)
+                // each line as wide as the circle is where it sits, a capsule
+                // centered on whole pixels: together, the lines make the circle
+                let top = first + CGFloat(index) * pitch
+                let across = (box.width * scale) / 2, middle = top + thick / 2 - height / 2
+                let half = (sqrt(max(0, across * across - middle * middle))).rounded(.down)
+                let width = max(thick, 2 * half)
+                let rect = CGRect(x: ((box.width * scale - width) / 2).rounded() / scale, y: top / scale, width: width / scale, height: thick / scale)
+                line.fill(Path(roundedRect: rect, cornerRadius: rect.height / 2), with: .foreground)
             }
         }
         .frame(width: side, height: side)
