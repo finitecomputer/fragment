@@ -121,12 +121,13 @@ private struct StatusBarBlur: View {
     var body: some View {
         GeometryReader { proxy in
             let top = proxy.safeAreaInsets.top
-            Rectangle().fill(.ultraThinMaterial)
+            // a light touch: enough to soften what passes, not to hide it
+            Rectangle().fill(.ultraThinMaterial).opacity(0.55)
                 .mask(LinearGradient(stops: [.init(color: .black, location: 0),
-                                             .init(color: .black, location: top / (top + 20)),
+                                             .init(color: .black, location: top / (top + 12)),
                                              .init(color: .clear, location: 1)],
                                      startPoint: .top, endPoint: .bottom))
-                .frame(height: top + 20)
+                .frame(height: top + 12)
                 .ignoresSafeArea(edges: .top)
         }
         .allowsHitTesting(false).accessibilityHidden(true)
