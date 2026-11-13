@@ -105,40 +105,38 @@ struct WorkingIndicator: View {
     private func hintLine(_ agent: Agent, hint: WorkingHint, now: Date, elapsed: TimeInterval) -> some View {
         let milliseconds = Int64(now.timeIntervalSince1970 * 1000)
         let late: Bool = { if case .pending(let since) = hint.kind { return phase != "starting" && phase != "asleep" && milliseconds - since >= 90_000 }; return false }()
-        let text: String = {
+        // what it says, and how long it has waited (none for a word that isn't a wait)
+        let (text, since): (String, Int64?) = {
             switch hint.kind {
-            case .working(let asker): return "Thinking" + (asker != nil && asker != principal ? " for \(name(asker!))" : "")
-            case .asked(let asks): return asks == principal ? "Waiting for your answer" : "Waiting for \(name(asks))'s answer"
-            case .pending:
-                if phase == "wont_wake" { return "\(agent.name)'s computer could not start. Open the computer settings to restart it." }
-                if late { return "\(agent.name) has not started a reply yet." }
-                if phase == "starting" || phase == "asleep" { return "\(agent.name) is starting up…" }
-                if phase == "sleeping" { return "\(agent.name)'s computer is going to sleep…" }
-                return present.contains(agent.id.agent) ? "Waiting for \(agent.name) to start a reply…" : "Waiting for \(agent.name)…"
+            case .working(let asker): return ("Thinking" + (asker != nil && asker != principal ? " for \(name(asker!))" : ""), nil)
+            case .asked(let asks): return (asks == principal ? "Waiting for you" : "Waiting for \(name(asks))", nil)
+            case .pending(let since):
+                if phase == "wont_wake" { return ("Couldn't start · restart it in Settings", nil) }
+                if late { return ("Taking a while", since) }
+                if phase == "starting" || phase == "asleep" { return ("Waking up", since) }
+                if phase == "sleeping" { return ("Going to sleep", nil) }
+                return ("Waiting", since)
+            }
+        }()
+        // a problem, or a wait on someone, holds still; everything else moves
+        let moving: Bool = {
+            switch hint.kind {
+            case .working: return true
+            case .asked: return false
+            case .pending: return !late && phase != "wont_wake"
             }
         }()
         return HStack(spacing: 8) {
-            if case .asked = hint.kind {
-                glyph("asked", size: 15).foregroundStyle(Color(rgb: Self.colorRGB(agent.id.agent)))
-            } else if case .pending = hint.kind, !late && phase != "wont_wake" {
-                dots(identity: agent.id.agent, elapsed: elapsed)
+            LogoStripes(elapsed: moving ? elapsed : nil, size: lineSize).foregroundStyle(secondary)
+            HStack(spacing: 6) {
+                if moving { shimmer(text, elapsed: elapsed, active: true) } else { Text(text).foregroundStyle(secondary) }
+                if let since { Text("· " + Self.duration(milliseconds - since)).monospacedDigit() }
             }
-            // Thinking reads as the working line does; a wait still stands out
-            Text(text).font(.system(size: lineSize, weight: { if case .working = hint.kind { return .regular } else { return .semibold } }())).foregroundStyle(secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            .font(.system(size: lineSize)).foregroundStyle(stepColor)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .frame(minHeight: lineSize * 1.5)
         .accessibilityElement(children: .combine).accessibilityIdentifier("workingIndicator")
-    }
-
-    private func dots(identity: String, elapsed: TimeInterval) -> some View {
-        HStack(spacing: 3) {
-            ForEach(0..<3) { dot in
-                Circle().fill(Color(rgb: Self.colorRGB(identity)))
-                    .frame(width: 5, height: 5)
-                    .offset(y: Self.offset(elapsed: elapsed, dot: dot))
-            }
-        }.accessibilityHidden(true)
     }
 
     private func glyph(_ icon: String, size: CGFloat = 13) -> some View {
@@ -165,6 +163,7 @@ struct WorkingIndicator: View {
         return VStack(alignment: .leading, spacing: 0) {
             Button { toggle(steps: card.steps.count) } label: {
                 HStack(spacing: 6) {
+                    LogoStripes(elapsed: card.running ? elapsed : nil, size: lineSize).foregroundStyle(secondary).padding(.trailing, 2)
                     if card.running {
                         // a word for what it does now, held long enough to read
                         HeldWord(word: card.nowWord) { shimmer($0, elapsed: elapsed, active: true) }
@@ -376,5 +375,35 @@ private struct HeldWord<Content: View>: View {
                 guard !Task.isCancelled else { return }
                 shown = word; since = Date()
             }
+    }
+}
+
+/// The working line's mark, after the logo's bars: a small square of lines
+/// in the line's own color, lit in a wave that runs up and down them while
+/// something is under way (`elapsed`, the line's clock); evenly and still
+/// (nil, or Reduce Motion) otherwise.
+private struct LogoStripes: View {
+    let elapsed: TimeInterval?
+    let size: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    static let lines = 7
+
+    var body: some View {
+        let lit: Double? = reduceMotion ? nil : elapsed
+        Canvas { context, box in
+            let pitch = box.height / CGFloat(Self.lines)
+            let thick = pitch * 0.5
+            // the lit line, sweeping from top to bottom and back
+            let at = lit.map { (1 - cos($0 * 2.2)) / 2 * Double(Self.lines - 1) }
+            for index in 0..<Self.lines {
+                let glow = at.map { max(0, 1 - abs(Double(index) - $0) / 1.6) } ?? 0.6
+                var line = context
+                line.opacity = 0.3 + 0.7 * glow
+                let rect = CGRect(x: 0, y: CGFloat(index) * pitch + (pitch - thick) / 2, width: box.width, height: thick)
+                line.fill(Path(roundedRect: rect, cornerRadius: thick / 2), with: .foreground)
+            }
+        }
+        .frame(width: size * 0.9, height: size * 0.9)
+        .accessibilityHidden(true)
     }
 }
