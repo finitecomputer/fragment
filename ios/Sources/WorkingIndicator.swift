@@ -20,8 +20,14 @@ struct WorkingIndicator: View {
     @State private var began = Date()
     @ScaledMetric(relativeTo: .caption) private var textSize = 13.0
     @State private var expanded = false
+    /// How many of its steps are shown while it opens, one after another;
+    /// `.max` once they all are (new steps then show at once).
+    @State private var revealed = 0
+    @State private var revealing: Task<Void, Never>?
+    @State private var closed = 0
+    /// The steps that open one by one, each with a tick; past them, the rest at once.
+    static let staggered = 10
     @State private var openSteps = Set<String>()
-    @State private var advancedAt: Date?
     @State private var fittedArguments: [String: String] = [:]
     private struct ArgumentFit: Equatable {
         let width: CGFloat
@@ -76,11 +82,8 @@ struct WorkingIndicator: View {
         // A newly created web activity node starts its CSS clocks at zero.
         .onChange(of: hints) { _, _ in began = Date() }
         .onChange(of: cards.map(\.id)) { _, _ in began = Date(); expanded = false; openSteps = []; fittedArguments = [:] }
-        .onChange(of: reduceMotion) { _, _ in began = Date(); advancedAt = nil }
-        .onChange(of: cards.first?.steps) { old, new in
-            began = Date()
-            if (new?.count ?? 0) > (old?.count ?? 0) { advancedAt = Date() }
-        }
+        .onChange(of: reduceMotion) { _, _ in began = Date() }
+        .onChange(of: cards.first?.steps) { _, _ in began = Date() }
     }
 
     private func content(now: Date, elapsed: TimeInterval) -> some View {
@@ -155,17 +158,14 @@ struct WorkingIndicator: View {
     }
 
     private func toolCard(_ card: ToolCard, now: Date, elapsed: TimeInterval) -> some View {
-        let rolling = card.running && !expanded
-        let advance = advancedAt.map { min(1, max(0, now.timeIntervalSince($0) / 0.32)) } ?? 1
-        let eased = reduceMotion ? 1 : UnitCurve.bezier(startControlPoint: UnitPoint(x: 0.25, y: 0.1), endControlPoint: UnitPoint(x: 0.25, y: 1)).value(at: advance)
         // one line until it's opened: what it does now, never the steps rolling by
-        let shown = expanded ? card.steps : []
+        let shown = expanded ? Array(card.steps.prefix(revealed)) : []
         return VStack(alignment: .leading, spacing: 0) {
-            Button { expanded.toggle(); advancedAt = nil } label: {
+            Button { toggle(steps: card.steps.count) } label: {
                 HStack(spacing: 6) {
                     if card.running {
                         // a word for what it does now, held long enough to read
-                        HeldWord(word: card.nowWord).foregroundStyle(secondary)
+                        HeldWord(word: card.nowWord) { shimmer($0, elapsed: elapsed, active: true) }
                         Text("· " + Self.duration(Int64(now.timeIntervalSince1970 * 1000) - card.since)).monospacedDigit()
                     } else {
                         Text(card.doneWord + " for " + Self.duration((card.until ?? card.since) - card.since))
@@ -176,16 +176,38 @@ struct WorkingIndicator: View {
             if !shown.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(shown) { step in
-                        let age = card.steps.count - 1 - (card.steps.firstIndex { $0.id == step.id } ?? 0)
-                        let opacity = !rolling || age == 0 ? 1.0 : age == 1 ? 0.6 : age == 2 ? 0.3 : 0
-                        toolLine(step, agent: card.turn.agent, now: now, elapsed: elapsed, rolling: rolling, verticalPadding: rolling && eased < 1 && age == 3 ? 3 * (1 - eased) : 3)
-                            .opacity(rolling && eased < 1 ? (age == 0 ? eased : age == 1 ? 1 - 0.4 * eased : age == 2 ? 0.6 - 0.3 * eased : 0.3 * (1 - eased)) : opacity)
-                            .frame(height: rolling && eased < 1 && age == 0 ? max(6, min(textSize * 1.55 + 6, 3 * textSize * eased)) : rolling && eased < 1 && age == 3 ? min(textSize * 1.55 + 6 * (1 - eased), 3 * textSize * (1 - eased)) : nil, alignment: .top).clipped()
+                        toolLine(step, agent: card.turn.agent, now: now, elapsed: elapsed, rolling: false)
+                            .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: -6)), removal: .opacity))
                     }
                 }.padding(.top, 6)
             }
         }
         .font(.system(size: textSize)).foregroundStyle(stepColor)
+        // a tick as each step arrives, and a soft tap as they fold away
+        .sensoryFeedback(trigger: revealed) { old, new in new > old && new <= Self.staggered ? .selection : nil }
+        .sensoryFeedback(.impact(weight: .light), trigger: closed)
+    }
+
+    /// Opens its steps one after another (all at once with Reduce Motion),
+    /// or folds them away.
+    private func toggle(steps: Int) {
+        revealing?.cancel()
+        if expanded {
+            withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) { expanded = false; revealed = 0 }
+            closed += 1
+            return
+        }
+        expanded = true
+        guard !reduceMotion else { revealed = .max; return }
+        revealed = 0
+        revealing = Task {
+            for count in 1...max(1, min(steps, Self.staggered)) {
+                withAnimation(.snappy(duration: 0.28)) { revealed = count }
+                try? await Task.sleep(for: .milliseconds(55))
+                if Task.isCancelled { return }
+            }
+            withAnimation(.snappy(duration: 0.28)) { revealed = .max }
+        }
     }
 
     private func toolLine(_ step: ToolStep, agent: String, now: Date, elapsed: TimeInterval, rolling: Bool, verticalPadding: Double = 3) -> some View {
@@ -331,16 +353,18 @@ private extension Color {
 }
 
 /// A word that changes as the work does, each held at least a moment so a
-/// quick step never flickers past, and changed with a fade.
-private struct HeldWord: View {
+/// quick step never flickers past, and changed with a fade; drawn by
+/// `content` (the working line's shimmer).
+private struct HeldWord<Content: View>: View {
     let word: String
+    @ViewBuilder let content: (String) -> Content
     @State private var shown: String?
     @State private var since = Date.distantPast
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    static let hold: TimeInterval = 1.5
+    static var hold: TimeInterval { 1.5 }
 
     var body: some View {
-        Text(shown ?? word)
+        content(shown ?? word)
             .id(shown ?? word)
             .transition(.opacity)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: shown)
