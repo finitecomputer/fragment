@@ -91,7 +91,9 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   again as the view is read). For a request carrying one, the computer
   asks the Vault (`vault/fill`), which answers only for an agent the
   secret names, toward one of its hosts; the swap plans the request with
-  that secret's row beside the catalog (`Catalog::with`).
+  that secret's row beside the catalog (`Catalog::with`). A request to
+  those hosts carrying no placeholder goes on as it came, its own
+  `Authorization` (a git remote's basic auth) untouched.
 - **A Nostr key signs, never leaves** (`place: {"sign": "nip98"}`): the
   Vault answers a fresh NIP-98 event over the request as it goes (its
   https URL, method and body's SHA-256) in `Authorization: Nostr …`, and

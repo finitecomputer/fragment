@@ -517,7 +517,8 @@ pub enum SecretKind {
     /// Telegram connector from Settings.
     TelegramBotToken,
     OpenrouterKey,
-    /// The old agent's Nostr key, an `nsec` (or 64 hex): kept, never sent.
+    /// The old agent's Nostr key, an `nsec` (or 64 hex): it signs the new
+    /// agent's calls to finite.site from the Vault, and is never sent.
     NostrNsec,
 }
 
