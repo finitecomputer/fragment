@@ -81,6 +81,7 @@ $CAPI pages list --space ENG --max 20            # newest change first
 $CAPI pages get 123456                           # its body in storage format (XHTML), and its version
 $CAPI pages create --space ENG --title "Release notes" --text "What shipped…" --parent 123000
 $CAPI pages update 123456 --version 4 --body "<p>…</p>" --message "Fixed the dates"
+$CAPI pages update 123789 --version 1 --publish     # a draft, published: only when asked
 $CAPI request GET "/wiki/api/v2/pages/123456/footer-comments?limit=20"
 ```
 
@@ -96,6 +97,14 @@ $CAPI request GET "/wiki/api/v2/pages/123456/footer-comments?limit=20"
   (`conflict`) if someone changed the page since. Without `--version` the
   helper reads the page now and changes that one. A title or body not given
   stays as it is.
+- **An update never publishes a draft unasked.** `pages create --draft`
+  makes a draft. Confluence's update names the status it leaves the page
+  in, published or draft, and the helper never asks for draft: Confluence's
+  v2 API is reported to refuse that (409), and a draft has no version to
+  check. So `pages update` refuses a draft (`draft`) unless you give
+  `--publish`, which publishes it. Give `--publish` only when your owner
+  asked to publish the page; otherwise leave the draft to them in
+  Confluence. A trashed or archived page isn't changed (`not_current`).
 - `request` reaches any of the site's Confluence API from `/wiki/api/v2/`
   or `/wiki/rest/api/`; its query goes after `?`, and `--json` is its body.
   Confluence's API docs are at
@@ -134,6 +143,8 @@ line on stderr, `{error, status, message, hint}`, and exit 1.
 | `no_permission` | Their Confluence permissions don't allow it in that space |
 | `not_found`, `no_such_space` | The id or key is wrong, or one they may not see: `$CAPI spaces` |
 | `conflict` | The page changed since you read it: get it again and change that version |
+| `draft` | The page is a draft: publish it with `--publish` only if your owner asked; otherwise leave it to them |
+| `not_current` | The page is trashed or archived: say so; change it only once your owner restores it |
 | `choose_site` / `no_such_site` | Name a site with `--site`; `$CAPI sites` lists them |
 | `no_site` | Confluence wasn't allowed (they add it in Settings → Connections → Reconnect to add), or no site they picked has Confluence |
 | `invalid_input` | Confluence says what: often a body that isn't valid storage format |

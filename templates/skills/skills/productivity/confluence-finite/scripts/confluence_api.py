@@ -20,7 +20,7 @@ Usage:
   python confluence_api.py pages list --space ENG [--title "…"] [--max 25] [--cursor C]
   python confluence_api.py pages get 123456 [--format storage|atlas_doc_format|view] [--raw]
   python confluence_api.py pages create --space ENG --title "…" (--text "…" | --body "<p>…</p>") [--parent 123456] [--draft]
-  python confluence_api.py pages update 123456 [--title "…"] [--text "…" | --body "<p>…</p>"] [--version 4] [--message "…"]
+  python confluence_api.py pages update 123456 [--title "…"] [--text "…" | --body "<p>…</p>"] [--version 4] [--message "…"] [--publish]
   python confluence_api.py request GET /wiki/api/v2/pages/123456/children [--json '{…}']
 
 Every command but check and sites takes --site (the site's name, its host,
@@ -324,6 +324,21 @@ def pages_create(args):
     out(page_summary(made, site))
 
 
+def updated_status(page, status, publish):
+    """The status an update leaves the page in, which v2's update names
+    (`current` is published): a published page stays published, and a
+    draft is published only when asked (--publish). The helper never keeps
+    a draft a draft: v2 asks status `draft` at version 1 for that, which it
+    is reported to refuse (409, CONFCLOUD-76640) and which names no version
+    to check. Nor does it restore a trashed, deleted or archived page, as
+    `current` would."""
+    if status == "current" or (status == "draft" and publish):
+        return "current"
+    if status == "draft":
+        raise ApiError(0, "draft", f"page {page} is a draft, and an update publishes it: give --publish only if the person asked to publish it")
+    raise ApiError(0, "not_current", f"page {page} is {status or 'of no status Confluence named'}: the helper changes a published page, or publishes a draft (--publish)")
+
+
 def pages_update(args):
     page = checked(args.id, NUMBER, "page")
     if args.version is not None and args.version < 1:
@@ -331,13 +346,14 @@ def pages_update(args):
     if args.title is not None and not args.title.strip():
         raise ApiError(0, "bad_title", "a page needs a title")
     given = args.body is not None or args.text is not None
-    # what isn't given is the page's own, read now
-    current = {} if given and args.title and args.version is not None else read_page(args, page)[0]
+    # the page as it is now: its status, always, and what isn't given
+    current = read_page(args, page)[0]
+    status = updated_status(page, current.get("status"), args.publish)
     read = args.version if args.version is not None else (current.get("version") or {}).get("number")
     if not isinstance(read, int):
         raise ApiError(0, "no_version", "Confluence named no version for the page: give --version, the one you read")
     body = storage(args) if given else ((current.get("body") or {}).get("storage") or {}).get("value", "")
-    update = {"id": page, "status": "current", "title": args.title.strip() if args.title else current.get("title"),
+    update = {"id": page, "status": status, "title": args.title.strip() if args.title else current.get("title"),
               "body": {"representation": "storage", "value": body}, "version": {"number": read + 1}}
     if args.message:
         update["version"]["message"] = args.message
@@ -399,6 +415,7 @@ def parser():
             p.add_argument("--title", help="a new title (else its own)")
             p.add_argument("--version", type=int, help="the version you read (`pages get`): Confluence refuses the change if the page changed since")
             p.add_argument("--message", help="what changed, kept with the version")
+            p.add_argument("--publish", action="store_true", help="publish the page if it is a draft (only when the person asked to); without it a draft is not changed")
         body = p.add_mutually_exclusive_group(required=action == "create")
         body.add_argument("--text", help="plain text, its blank lines paragraphs")
         body.add_argument("--body", help="the body in Confluence's storage format (XHTML)")
@@ -421,6 +438,8 @@ HINTS = {
     "not_found": "no such page or space, or the person may not see it",
     "no_such_space": "`spaces` lists the spaces the person may see",
     "conflict": "the page changed since you read it: get it again, and make your change on that version",
+    "draft": "the helper changes a draft only by publishing it: ask the person whether to publish it (then update with --publish), or leave the draft to them in Confluence",
+    "not_current": "the page is trashed, deleted or archived: say so, and change it only if the person restores it",
     "choose_site": "name the site with --site; `sites` lists them",
     "no_such_site": "`sites` lists the sites the person granted; they add one by connecting Atlassian again in Settings (Disconnect, then Connect) and picking it",
     "no_site": "the person didn't allow Confluence (they add it in Settings, under Connections: Reconnect to add), or no site they picked has Confluence",
