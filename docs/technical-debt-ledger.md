@@ -24,6 +24,17 @@ unfinished design, not debt.
   relay, behind the same binding: its `SendEmail`'s seam), or that product
   rule lands.
 
+## LAN mode's certificate lasts until a restart
+
+- **Shortcut:** fragment-lan (crates/lan; docs/self-host.md, seam 9)
+  issues the zone's certificate once, at its start, valid 397 days, and
+  never again while it runs.
+- **Risk:** a box that runs 397 days without a restart serves an expired
+  certificate, and every device refuses it until the service starts again.
+- **Delete when:** the door issues a fresh certificate from its root
+  before the one it serves expires (a rustls certificate resolver it
+  swaps), tested across the swap.
+
 ## A computer's lifecycle writes its old flags too
 
 - **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle

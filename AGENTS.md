@@ -32,6 +32,8 @@ platform concept.
 - `crates/proto`: wire types; `crates/core`: pure logic and state machines;
   `crates/nip98`: authentication; `crates/templates`: release assets;
   `crates/fakes`, `crates/devstack`, `crates/e2e`: local vendor fakes and harness.
+- `crates/lan`: LAN mode, a self-hosted box's own DNS zone, TLS front
+  door and certificate authority (docs/self-host.md, seam 9).
 - `crates/pod`: a pod, one owner's self-hosted stack in a confidential VM
   (`docs/pod.md`): its unlock protocol, quote layout and event log, and,
   by feature, the verifier, the release checks and the owner's side;
