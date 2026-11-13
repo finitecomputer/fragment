@@ -71,7 +71,7 @@ struct WorkingIndicator: View {
         Group {
             if hints.isEmpty && cards.isEmpty {
                 EmptyView()
-            } else if cards.allSatisfy({ !$0.running }) && hints.allSatisfy({ if case .asked = $0.kind { true } else { false } }) {
+            } else if cards.allSatisfy({ !$0.running }) && hints.isEmpty {
                 content(now: Date(), elapsed: 0)
             } else if reduceMotion {
                 TimelineView(.periodic(from: .now, by: 1)) { frame in content(now: frame.date, elapsed: 0) }
@@ -118,7 +118,8 @@ struct WorkingIndicator: View {
                 return ("Waiting", since)
             }
         }()
-        // a problem, or a wait on someone, holds still; everything else moves
+        let asked: Bool = { if case .asked = hint.kind { true } else { false } }()
+        // a problem, or a wait on someone, never shimmers; everything else does
         let moving: Bool = {
             switch hint.kind {
             case .working: return true
@@ -127,7 +128,8 @@ struct WorkingIndicator: View {
             }
         }()
         return HStack(spacing: 8) {
-            LogoStripes(elapsed: moving ? elapsed : nil, size: lineSize).foregroundStyle(secondary)
+            // a wait on someone breathes; work runs a wave; a problem holds still
+            LogoStripes(elapsed: moving || asked ? elapsed : nil, size: lineSize, breathing: asked).foregroundStyle(secondary)
             HStack(spacing: 6) {
                 if moving { shimmer(text, elapsed: elapsed, active: true) } else { Text(text).foregroundStyle(secondary) }
                 if let since { Text("· " + Self.duration(milliseconds - since)).monospacedDigit() }
@@ -379,12 +381,16 @@ private struct HeldWord<Content: View>: View {
     }
 }
 
-/// The working line's mark, after the logo's bars: a small circle of lines in the line's own color, lit in a wave that runs up and down them
-/// while something is under way (`elapsed`, the line's clock); evenly and
-/// still (nil, or Reduce Motion) otherwise. Each line sits on whole pixels.
+/// The working line's mark, after the logo's bars: a small circle of lines
+/// in the line's own color. While something is under way (`elapsed`, the
+/// line's clock) they light in a wave running up and down; while it waits on
+/// someone they breathe, all together; otherwise (nil, or Reduce Motion) they
+/// hold still. Each line sits on whole pixels.
 private struct LogoStripes: View {
     let elapsed: TimeInterval?
     let size: CGFloat
+    /// All its lines lit together, slowly up and down, rather than in a wave.
+    var breathing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.displayScale) private var scale
     static let lines = 5
@@ -401,10 +407,12 @@ private struct LogoStripes: View {
             let thick = max(1, (pitch * 0.5).rounded())
             let first = ((height - (CGFloat(Self.lines) * pitch - (pitch - thick))) / 2).rounded(.down)
             // the lit line, sweeping from top to bottom and back
-            let at = lit.map { (1 - cos($0 * 2.2)) / 2 * Double(Self.lines - 1) }
+            let at = breathing ? nil : lit.map { (1 - cos($0 * 2.2)) / 2 * Double(Self.lines - 1) }
+            // breathing: every line together, in and out about every four seconds
+            let breath = breathing ? lit.map { (1 - cos($0 * 1.6)) / 2 } : nil
             context.clip(to: Path(ellipseIn: CGRect(origin: .zero, size: box)))
             for index in 0..<Self.lines {
-                let glow = at.map { max(0, 1 - abs(Double(index) - $0) / 1.3) } ?? 0.6
+                let glow = breath ?? at.map { max(0, 1 - abs(Double(index) - $0) / 1.3) } ?? 0.6
                 var line = context
                 line.opacity = 0.3 + 0.7 * glow
                 let top = (first + CGFloat(index) * pitch) / scale
