@@ -164,6 +164,23 @@ pub fn invite(to: &str, from: &str, title: &str, edit: bool, link: &str, days: i
     }
 }
 
+/// The mail a fragment's owner (`to`) is sent when someone signed in as
+/// `from` asks for access to it (FIN-502): who asks for what, and the
+/// platform's page (`link`), where the request waits among their notices
+/// to share it or dismiss it. The requester has nothing until they do.
+pub fn access_asked(to: &str, from: &str, title: &str, link: &str) -> Mail {
+    let (title, from) = (one_line(title, SUBJECT_PART_MAX), one_line(from, SUBJECT_PART_MAX));
+    Mail {
+        to: to.to_string(),
+        subject: format!("{from} asked for access to \u{201c}{title}\u{201d}"),
+        text: format!(
+            "{from} asked for access to \u{201c}{title}\u{201d} on {PRODUCT}.\n\n\
+             Share it with them, or dismiss the request: {link}\n\n\
+             They have no access until you share it with them.\n"
+        ),
+    }
+}
+
 /// How a key came to be added to a person, as the mail about it says.
 #[derive(Debug, Clone, Copy)]
 pub enum KeyHow<'a> {
@@ -324,6 +341,22 @@ mod tests {
         let m = invite("bea@example.com", &long, &long, false, "https://finite.chat/", 30);
         assert_eq!(refusal(&m), None, "{}", m.subject);
         assert!(m.text.contains("invited you to view"));
+    }
+
+    /// Goal: an owner is mailed who asked for what, on one line each, and
+    /// where they answer it (their notices, on the platform's page); the
+    /// requester's email and the title are cut to a subject's length.
+    #[test]
+    fn a_request_names_who_asked_for_what_on_one_line() {
+        let m = access_asked("ann@example.com", "bea@example.com", "Garden\nplans", "https://finite.chat/");
+        assert_eq!(m.to, "ann@example.com");
+        assert_eq!(m.subject, "bea@example.com asked for access to \u{201c}Garden plans\u{201d}");
+        assert!(m.text.contains("bea@example.com asked for access to \u{201c}Garden plans\u{201d} on Finite.Computer.\n"), "{}", m.text);
+        assert!(m.text.contains("Share it with them, or dismiss the request: https://finite.chat/\n"), "{}", m.text);
+        assert!(m.text.contains("They have no access until you share it"), "{}", m.text);
+        assert_eq!(refusal(&m), None);
+        let long = "x".repeat(500);
+        assert_eq!(refusal(&access_asked("ann@example.com", &long, &long, "https://finite.chat/")), None);
     }
 
     /// Goal: a person reads one name for the platform, in its mail and in

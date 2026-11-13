@@ -22,6 +22,9 @@
 //!   POST /auth/fragment?name=&return=      the yes (remembered), then the redemption
 //!   POST /auth/fragment/invite?name=&return=   that invite's yes, then the redemption as a
 //!                                 member; or its no, then the platform's page
+//!   GET  /auth/fragment/ask?name=&return=  "You don't have access to X": a request to its owner
+//!                                 (`ask`, FIN-502); an invite waiting, that invite instead
+//!   POST /auth/fragment/ask?name=&return=  the request, kept against its owner, who is told
 //!   GET  /auth/frame?name=&return=         the same for a frame of the platform's own page (the
 //!                                 shell's tabs), as Fetch Metadata says it is: a frame redemption
 //!                                 bound to the platform's origin; a note in the frame, and a word
@@ -91,6 +94,7 @@ use crate::routed::{Credential, Signed};
 use crate::{share, Fetched};
 use fragment_core::gather::Gathered;
 
+mod ask;
 mod invite;
 
 pub const SESSION_COOKIE: &str = "fragment_session";
@@ -457,6 +461,8 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
                 }
             }
             (Method::Post, ["auth", "fragment", "invite"]) => invite::answered(&mut req, env, cfg, url).await,
+            (Method::Get, ["auth", "fragment", "ask"]) => ask::page(&req, env, cfg, url).await,
+            (Method::Post, ["auth", "fragment", "ask"]) => ask::asked(&mut req, env, cfg, url).await,
             (Method::Post, ["auth", "fragment"]) => {
                 let (name, back) = fragment_asked(url)?;
                 let (session, _, _) = match share::poster(&mut req, env, url, &platform, &format!("consent:{name}")).await? {
@@ -924,7 +930,8 @@ pub(crate) fn is_refusal(code: ErrorCode) -> bool {
 /// at once on the person's own fragments and those shared with them, after
 /// asking on anyone else's, and through sign-in first when signed out
 /// (`/auth/fragment`). Anything else says what happened and what to do:
-/// sign in, ask its owner, or, when a `?view=` opened nothing, ask for the
+/// sign in, ask its owner (Request access, the platform's page:
+/// auth/ask.rs), or, when a `?view=` opened nothing, ask for the
 /// new link; the platform's own reason under it. From a frame, where
 /// neither sign-in nor the platform's pages show, its links open a tab.
 pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: bool, e: &CellError) -> CellResult<Response> {
@@ -957,7 +964,9 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
         ("You need to sign in".to_string(), format!("<p>Sign in to open <b>{l}</b>.</p>{why}<p>{sign_in}</p>"))
     } else {
         let sign_out = a(&format!("{base}__signout"), &format!("Sign out of {label}"));
-        (format!("You don't have access to {label}"), format!("<p>Ask {ask} to share it with you.</p>{why}<p>{home} · {sign_out}</p>"))
+        // the platform's page asks its owner (auth/ask.rs), or shows an invite waiting
+        let request = a(&format!("{}/auth/fragment/ask?name={name}&return={}{}", cfg.platform(), enc(&back), address_query(cfg, url)), "Request access");
+        (format!("You don't have access to {label}"), format!("<p>Ask {ask} to share it with you: {request}.</p>{why}<p>{home} · {sign_out}</p>"))
     };
     // A page refused as signed out in a frame says so to the page around
     // it, the platform's alone (`{fragment: "signin-blocked", name, why:

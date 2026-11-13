@@ -1280,6 +1280,11 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let rest = rest.to_vec();
             share::invites(req, env, &url, &rest).await
         }
+        // a request for access to the signer's fragment, theirs to dismiss (share.rs)
+        (_, ["api", "access-requests", rest @ ..]) => {
+            let rest = rest.to_vec();
+            share::dismiss_request(req, env, &url, &rest).await
+        }
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer_for(env, &req, &url, &[]).await?;
             if let Some(asker) = &principal.acting_for {

@@ -318,6 +318,9 @@ impl RegistryCell {
         self.exec("DELETE FROM subjects WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM pictures WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM invite_mails WHERE sharer = ?", vec![identity.into()])?;
+        // their requests for access, those to their fragments, and their counts (asks.rs)
+        self.exec("DELETE FROM access_asks WHERE requester = ? OR owner = ?", vec![identity.into(), identity.into()])?;
+        self.exec("DELETE FROM access_ask_days WHERE who = ?", vec![identity.into()])?;
         self.wipe_orgs(identity)?;
         self.exec("DELETE FROM wiped_orgs WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM offer_answers WHERE person = ?", vec![identity.into()])?;

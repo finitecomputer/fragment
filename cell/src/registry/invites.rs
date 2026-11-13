@@ -190,7 +190,8 @@ impl RegistryCell {
             return Err(e);
         }
         self.tell_invitee(&i.email).await;
-        Ok(())
+        // a request for access from whoever signs in as the email is answered
+        self.asks_met(&i.fragment, Some(&i.email)).await
     }
 
     /// Counts a mail in `sharer`'s day, or refuses it (429), counting
@@ -233,7 +234,7 @@ impl RegistryCell {
         }
     }
 
-    async fn tell_person(&self, person: &str) {
+    pub(super) async fn tell_person(&self, person: &str) {
         // their notices changed (the one frame: `GET /api/notices` again)
         if let Err(e) = crate::principal::tell_changed(&self.env, person).await {
             console_error!("{}", serde_json::json!({ "invites-told": person, "failed": e.message, "code": e.code }));
@@ -247,7 +248,7 @@ impl RegistryCell {
     /// me to edit a fragment, do you see it?'"), as an agent shares for its
     /// owner (`access::agent_shares`). Any other agent is 403; a person
     /// naming `for`, 400.
-    fn invitee_by(&self, by: &By, acting_for: Option<&str>) -> CellResult<Identity> {
+    pub(super) fn invitee_by(&self, by: &By, acting_for: Option<&str>) -> CellResult<Identity> {
         let who = self.by(by)?;
         match (who.kind, who.owner.as_deref()) {
             (IdentityKind::Person, _) if acting_for.is_none() => Ok(who),
@@ -296,7 +297,8 @@ impl RegistryCell {
     /// seat, lapsed or ending by itself soon (Pay again for its admin, and
     /// Payment and invoices for whoever pays, where seats are sold), then
     /// their invites; on a local fleet, one to a `must-answer…` fragment as
-    /// one that must be answered (`fragment_core::levers::must_answer_invite`).
+    /// one that must be answered (`fragment_core::levers::must_answer_invite`);
+    /// then the requests for access to their fragments, the newest first.
     /// A seat's lapse and its return are told their pages by their ledger,
     /// whose standing follows the seat (`ledger.rs` `told`).
     fn notices_of(&self, b: NoticesOf) -> CellResult<fragment_proto::notice::NoticeList> {
@@ -316,7 +318,9 @@ impl RegistryCell {
             n.must_answer = levers::must_answer_invite(fleet, s("fragment"));
             n
         });
-        Ok(fragment_proto::notice::NoticeList { notices: seat.into_iter().chain(invites).collect() })
+        // the requests for access to their fragments (asks.rs)
+        let asked = self.asked_of(&b.person)?;
+        Ok(fragment_proto::notice::NoticeList { notices: seat.into_iter().chain(invites).chain(asked).collect() })
     }
 
     /// The email of `person`'s that `fragment`'s invite waits on for their
@@ -379,6 +383,8 @@ impl RegistryCell {
             None => {
                 self.exec("DELETE FROM invite_claims WHERE fragment = ?", vec![f.fragment.as_str().into()])?;
                 let gone = self.rows::<EmailRow>("DELETE FROM invites_waiting WHERE fragment = ? RETURNING email", vec![f.fragment.as_str().into()])?;
+                // it ended: no request for access to it waits either
+                self.asks_met(&f.fragment, None).await?;
                 gone.into_iter().take(limits::INVITES_MAX).map(|r| r.email).collect()
             }
         };

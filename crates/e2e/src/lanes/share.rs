@@ -35,6 +35,7 @@ use crate::api::{url_enc, Api, Call, Reply};
 use crate::browser::{Browser, Page};
 use crate::Suite;
 
+mod ask_access;
 mod at_signin;
 
 /// Runs on a node restarted with the platform and the fragments on two domains
@@ -1029,5 +1030,6 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         format!("listed {listed} windowed {windowed} offered {offered} shown {shown}: {text}"),
     );
     drop(chrome);
-    at_signin::invite_asked_first(s, api, &owner)
+    at_signin::invite_asked_first(s, api, &owner)?;
+    ask_access::requests(s, api, &owner, &owner_session)
 }

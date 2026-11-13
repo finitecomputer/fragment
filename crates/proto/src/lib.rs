@@ -90,6 +90,22 @@ pub mod limits {
     pub const INVITE_MAILS_DAILY_MAX: u32 = 50;
     /// Invites waiting on one email, across the fleet's fragments.
     pub const INVITES_PER_EMAIL_MAX: usize = 100;
+    /// How long a request for access to a fragment waits on its owner
+    /// (FIN-502): as long as an invite waits on its person.
+    pub const ACCESS_ASK_TTL_S: i64 = INVITE_TTL_S;
+    /// How long after its owner dismissed it a request asked again tells
+    /// them nothing (no notice, no mail).
+    pub const ACCESS_ASK_QUIET_S: i64 = 7 * 24 * 3600;
+    /// Requests for access one person may make in a day, across fragments.
+    pub const ACCESS_ASKS_DAILY_MAX: u32 = 20;
+    /// Requests waiting on one fragment's owner (dismissed ones counted
+    /// while they keep a request asked again quiet).
+    pub const ACCESS_ASKS_PER_FRAGMENT_MAX: usize = 50;
+    /// Mails about requests one owner is sent in a day; past it, the
+    /// request is their notice alone.
+    pub const ACCESS_ASK_MAILS_DAILY_MAX: u32 = 20;
+    /// Requests an owner's notices show, the newest first.
+    pub const ACCESS_ASKS_NOTICED_MAX: usize = 20;
     /// A storage token's lifetime.
     pub const STORAGE_TOKEN_TTL_S: i64 = 900;
     /// A file path in the repo.

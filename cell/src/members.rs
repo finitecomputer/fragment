@@ -791,6 +791,34 @@ impl FragmentCell {
     }
 
     /// Its title as its members' lists show it, if it has one.
+    /// `GET /signin/asking` (the router's alone: auth/ask.rs, FIN-502):
+    /// whom someone signed in who asks for access to it asks, by the
+    /// identity it names its owner, and its title, as their notice says
+    /// it. Someone in it already, or whose agent is (they read what it
+    /// reads), is 409, saying so. The requester never sees the owner's
+    /// identity: the router hands it to the registry alone.
+    pub(crate) fn access_owner(&self, caller: &Caller) -> CellResult<Response> {
+        if caller.principal().is_none() {
+            return Err(CellError::new(ErrorCode::Unauthenticated, "sign in to ask for access"));
+        }
+        let standing = self.standing(caller, false)?;
+        if let Some(role) = standing.member {
+            let what = match role {
+                Role::Owner => "its owner",
+                Role::Editor => "an editor",
+                Role::Viewer | Role::Public => "a viewer",
+            };
+            return Err(CellError::new(ErrorCode::Conflict, format!("you are in it already, as {what}")));
+        }
+        if standing.owns_member_agent {
+            return Err(CellError::new(ErrorCode::Conflict, "an agent of yours is in it: you read what it reads"));
+        }
+        let name = self.name()?;
+        let owner = fragment_core::npub::display(&self.must(MetaKey::Owner)?);
+        let title = self.title()?.unwrap_or_else(|| crate::share::label(&name).to_string());
+        json_response(&json!({ "owner": owner, "title": title }))
+    }
+
     pub(crate) fn title(&self) -> CellResult<Option<String>> {
         let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok());
         Ok(face.and_then(|f| f["title"].as_str().map(str::to_string)).filter(|t| !t.is_empty()))

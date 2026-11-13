@@ -25,6 +25,7 @@
 //!   GET  /api/invites                    the invites waiting on a person's emails
 //!   POST /api/invites/<name>/accept      their yes: a member now
 //!   POST /api/invites/<name>/decline     their no: it waits no more
+//!   POST /api/access-requests/<name>/dismiss   an owner's no to a request for access (FIN-502)
 //!
 //! A fragment's page (its author's code, or an agent's) is cross-site from
 //! the platform on fragment.club, but one site
@@ -1004,6 +1005,33 @@ pub(crate) async fn invites(mut req: Request, env: &Env, url: &Url, rest: &[&str
                 (None, false) => crate::json_answer(&json!({ "ok": true, "declined": fragment })),
                 _ => Err(CellError::host("the registry's answer to an invite's yes or no named no role, or one after a no")),
             }
+        }
+        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
+    }
+}
+
+/// `POST /api/access-requests/<fragment>/dismiss` (`{requester}`, their
+/// identity): a fragment's owner dismisses a request for access to it (its
+/// notice's Dismiss: registry/asks.rs, FIN-502). Their agent dismisses for
+/// them, acting `for` them, as it answers their invites. None waiting from
+/// them: 404 (`reason: gone`).
+pub(crate) async fn dismiss_request(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Dismissed {
+        requester: String,
+    }
+    let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let (by, acting_for) = (crate::orgs::signed_by(env, &req, url, &bytes)?, crate::acting_for(url)?);
+    match (req.method(), rest) {
+        (Method::Post, [fragment, "dismiss"]) => {
+            let asked: Dismissed = serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if !npub::is_identity(&asked.requester) {
+                return Err(CellError::invalid("requester is the identity (npub) that asked"));
+            }
+            let fragment = crate::named_fragment(fragment)?;
+            ask_registry(env, &crate::registry::asks::DismissAsk { by, acting_for, fragment, requester: asked.requester.clone() }).await?;
+            crate::json_answer(&json!({ "ok": true, "dismissed": asked.requester }))
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }
