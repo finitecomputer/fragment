@@ -82,15 +82,17 @@ private extension View {
     /// The launcher's primary action, the top bar's size. Glass doesn't refract
     /// glass, so on the card the system's goes flat: this one draws what light
     /// does in a glass bead, a tight gloss above and light pooled at the foot
-    /// behind the icon, and a rim and shadow around it.
-    func launcherGlass(tint: Color = Color(uiColor: .label)) -> some View {
-        foregroundStyle(Color(uiColor: .systemBackground)).fontWeight(.semibold)
-            .frame(width: 44, height: 44).contentShape(.circle)
+    /// behind the icon, and a rim and shadow around it. Its light scales with
+    /// `size`, so a smaller bead (the chat's Send) is the same glass.
+    func launcherGlass(tint: Color = Color(uiColor: .label), size: CGFloat = 44) -> some View {
+        let scale = size / 44
+        return foregroundStyle(Color(uiColor: .systemBackground)).fontWeight(.semibold)
+            .frame(width: size, height: size).contentShape(.circle)
             .background {
                 ZStack {
-                    Circle().fill(RadialGradient(colors: [.white.opacity(0.42), .clear], center: .bottom, startRadius: 0, endRadius: 26))
+                    Circle().fill(RadialGradient(colors: [.white.opacity(0.42), .clear], center: .bottom, startRadius: 0, endRadius: 26 * scale))
                     Ellipse().fill(LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.03)], startPoint: .top, endPoint: .bottom))
-                        .frame(width: 30, height: 15).offset(y: -12.5)
+                        .frame(width: 30 * scale, height: 15 * scale).offset(y: -12.5 * scale)
                 }.clipShape(.circle)
             }
             .glassEffect(.regular.tint(tint.opacity(0.85)).interactive(), in: .circle)
@@ -576,9 +578,12 @@ struct ComposerView: View {
             submitting = true
             Task { await (stops ? stop() : send()); submitting = false }
         } label: {
-            // the launcher's glass bead, so the two send alike
-            if busy || submitting { ProgressView().launcherGlass() }
-            else { Image(systemName: stops ? "stop.fill" : "arrow.up").launcherGlass() }
+            // the launcher's glass bead at the chat's size, so the two send alike
+            Group {
+                if busy || submitting { ProgressView().launcherGlass(size: 34) }
+                else { Image(systemName: stops ? "stop.fill" : "arrow.up").font(.system(size: 17, weight: .semibold)).launcherGlass(size: 34) }
+            }
+            .frame(width: 44, height: 44).contentShape(Circle())
         }
         .disabled(!canSend).opacity(canSend || busy || submitting ? 1 : 0.4)
         .accessibilityLabel(stops ? "Stop response" : "Send message")
