@@ -23,6 +23,7 @@ import os
 import socket
 import stat
 import struct
+import sys
 import tempfile
 import threading
 import unittest
@@ -37,6 +38,8 @@ RESET = ConnectionResetError(54, "Connection reset by peer")
 
 
 def load_helper():
+    # no __pycache__ beside the helper: everything under templates/skills ships
+    sys.dont_write_bytecode = True
     spec = importlib.util.spec_from_file_location("gitlab_api", HELPER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
