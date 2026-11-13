@@ -6,7 +6,9 @@ its home. Its layout file is `finite-computer.layout.json` beside this
 one.
 
 You only read the copy. The old agent and its sites keep running on the
-old Finite until your owner turns them off.
+old Finite until your owner turns them off, but for one change: a site
+your owner makes public here sends its old address on to its new one
+("Sites on finite.site").
 
 **What the zip may hold beside the home.** The export adds a few small
 files of facts. Each is optional; when one is missing, take the safer
@@ -93,6 +95,16 @@ teammates once those teammates have moved.
 ### Sites, as apps
 
 Each `sites/<site>/` is the site's files, as its repository held them.
+Copy it out first:
+
+```sh
+fragment home extract <source> sites/<site> --to "$HOME/home-import/home" --layout <L>
+```
+
+A site the zip doesn't hold may still be on finite.site: once the zip's
+are done, see "Sites on finite.site" below. It puts each one where this
+puts a zip's, and the steps from here on are the same for both.
+
 Make each app once, as `SKILL.md`'s rules say:
 
 ```sh
@@ -112,7 +124,6 @@ it serves into the app's `site/`, leaving out `finite.toml`:
 
 ```sh
 W="$HOME/home-import/work/sites/<site>" && \
-fragment home extract <source> sites/<site> --to "$HOME/home-import/home" --layout <L> && \
 root="$(realpath -e -- "$HOME/home-import/home/sites/<site>")" && \
 { served="$(realpath -e -- "$root/<path>")" || served="$root"; } && \
 case "$served/" in "$root/"*) ;; *) served="$root" ;; esac && \
@@ -151,14 +162,113 @@ If it says STOP, deploy nothing, and say in the report what it listed.
 
 **Public.** Make a site public only if its `sites/<site>.json` says
 `"visibility": "public"` and your owner's answers say to keep public
-sites public: `fragment visibility <its name> public`. Then open its
-address and check it. With no `.json`, keep it private, and name it in
+sites public, or, when they asked for their old sites alone, they named
+it to make public: `fragment visibility <its name> public`. Then open its
+address and check it, and point its old address at it ("Sites on
+finite.site", below). With no `.json`, keep it private, and name it in
 the report so your owner can make it public.
 
 Write each old address (`sites/<site>.json`'s `url`, else
 `https://<site>.finite.site`) with its new one into
 `~/home-import/site-map.json` (`{"https://garden.finite.site":
 "https://garden--k3x9.finite.place"}`). Steps 4 and 5 use it.
+
+### Sites on finite.site
+
+The old agent's sites are also on finite.site, each a git repository it
+owned. From there, bring over each site the zip didn't, and send a site's
+old address on to its new one once your owner makes it public. Do this
+after the zip's sites, or alone when your owner asks for their old sites
+later (`SKILL.md`, step 0).
+
+**The key.** finite.site knows the old agent by its Nostr key. A move
+puts that key in your owner's Vault for you, and it never comes to you:
+each request you send to finite.site carries its placeholder, and your
+computer has the Vault sign it on the way. Find the placeholder:
+
+```sh
+curl -fsS http://api.fragment.internal/api/computer | jq -r --arg a "$FRAGMENT_AS_AGENT" '.agents[] | select(.fragment == $a) | .credentials[] | select((.provider | startswith("nostr-")) and (.hosts | index("finite.site"))) | "\(.provider) \(.placeholder)"'
+```
+
+- **One line:** its second word is `<the placeholder>` below.
+- **Several:** use the one named after you: `nostr-` and your
+  fragment's name (`$FRAGMENT_AS_AGENT`), or its start.
+- **None:** the key isn't here for you, or it is kept but sent nowhere.
+  Stop this part. Send nothing to finite.site, never look for the key, and
+  never ask your owner for it. Tell them, in your message or the report:
+  "I can't reach your old sites on finite.site yet: your old agent's key
+  has to be set up there for me first. Ask Finite's team, then ask me
+  again." The rest of an import goes on.
+
+**Its sites.** List them:
+
+```sh
+ph="<the placeholder>" && mkdir -p "$HOME/home-import" && \
+curl -sS -o "$HOME/home-import/finite-site.json" -w 'finite.site: %{http_code}\n' -H "Authorization: Nostr $ph" "https://finite.site/api/v2/projects" && \
+jq -c '.projects[] | select(.role == "owner" and .site != null) | {slug, site: .site.name, url: .site.url, status: .site.status, visibility: .site.visibility, branch: .site.branch, redirect_to: .site.redirect_to}' "$HOME/home-import/finite-site.json"
+```
+
+- **200:** each line is a site the old agent owned. Leave out one whose
+  `status` isn't `published` (nothing is served there) and one whose
+  `redirect_to` is set (it moved already). None left: say the old agent
+  had no other sites on finite.site. But when the zip held sites and none
+  is listed at all, finite.site doesn't know this key as the old agent's:
+  stop this part as with no key.
+- **401, or another 4xx:** finite.site didn't take the signature. Stop
+  this part as with no key, and name the status in the report.
+- **5xx, or no answer:** wait a minute and run it again, up to five
+  times. Still failing: say finite.site didn't answer, and stop this part.
+
+**Which.** A site's folder in the zip is its slug (`sites/<slug>/`).
+- **In an import:** every site listed whose slug the zip didn't hold.
+  For one it held, the listing's `url` is its old address: put that in
+  `site-map.json` in place of any other for it.
+- **Alone:** the ones your owner named, else every one. A site that
+  `progress.md` or `site-map.json` already names (its slug, or its `url`
+  with or without the last `/`) came over before: make nothing for it
+  again, and only point its old address, if your owner now makes it
+  public.
+
+**Bring one over.** Its files go where the zip's would, under its slug.
+finite.site gives a login for its repository alone; it is used for this
+one clone, then deleted:
+
+```sh
+ph="<the placeholder>" slug="<its slug>" branch="<its branch>" && \
+case "$slug" in "" | *[!a-z0-9-]*) echo "STOP: not a plain slug" ;; *) \
+  t="/tmp/finite-site-$FRAGMENT_AS_AGENT-$slug" H="$HOME/home-import/home/sites/$slug" && \
+  rm -rf -- "$t" "$H" && mkdir -p "$t" "$HOME/home-import/home/sites" && chmod 700 "$t" && \
+  curl -fsS -X POST -H "Authorization: Nostr $ph" -H "content-type: application/json" -d '{}' -o "$t/auth.json" "https://finite.site/api/v2/projects/$slug/git-auth" && \
+  jq -r '"https://\(.username | @uri):\(.password | @uri)@finite.site"' "$t/auth.json" > "$t/login" && \
+  git -c credential.helper= -c credential.helper="store --file=$t/login" clone --quiet --depth 1 --branch "$branch" "https://finite.site/$slug.git" "$H"; \
+  ok=$?; rm -rf -- "$t" "$H/.git"; \
+  [ "$ok" = 0 ] && jq -c --arg slug "$slug" '.projects[] | select(.slug == $slug) | .site | {url, visibility, path, spa}' "$HOME/home-import/finite-site.json" > "$H.json" && ls -A "$H" ;; \
+esac
+```
+
+It lists the site's files. If it says STOP, or fails, bring that site
+over no further, and say so in the report. Otherwise write in
+`progress.md` that its files came, then go on from "Make each app once"
+above, `<site>` its slug and its title the listing's `site`.
+
+**Point the old address.** Only for a site your owner made public here,
+once its new address answers. `<its slug>` is the one `finite-site.json`
+lists beside the site's old address (its `url`), and `<its new address>`
+is `https://` and its host, with nothing after
+(`https://garden--k3x9.finite.place`):
+
+```sh
+ph="<the placeholder>" slug="<its slug>" to="<its new address>" && \
+curl -sS -w '\nfinite.site: %{http_code}\n' -X POST -H "Authorization: Nostr $ph" -H "content-type: application/json" -d "$(jq -cn --arg to "$to" '{to: $to}')" "https://finite.site/api/v2/projects/$slug/site/redirect"
+```
+
+A 200 answers `redirect_to`, the new address. Check it: `curl -sS -o
+/dev/null -w '%{http_code} %{redirect_url}\n' "<its url>"` says `302`
+and the new address. Every page of the old address now goes to the
+same page at the new one. A site kept private gets no redirect: its old
+address keeps serving as it did, to those it was shared with. In a move,
+every site stays private, so none is pointed. With no key (above),
+nothing is pointed: say so, and that the old address still serves.
 
 ## The old platform, and this one
 
@@ -197,5 +307,6 @@ Tell your owner, in the report:
 - **Sharing:** sites and brains are shared again with people, by them.
 - **Teammates:** they invite teammates to a brain once those teammates
   have moved.
-- **Old sites:** these keep serving at their old addresses until they are
-  turned off. Give them the new addresses.
+- **Old sites:** one made public here sends its old address's visitors
+  to its new one. The others keep serving at their old addresses until
+  they are turned off. Give them the new addresses.
