@@ -229,8 +229,8 @@ fn kept(name: &str, held: Option<&Place>, placing: &Placing) -> Result<(), Vault
 /// never both keep it, and a move cut short anywhere leaves it in the
 /// Vault, claimed: the same move again takes it again and finishes it.
 /// A claim has no clock (one that lapsed could let a second destination
-/// keep a value the first had kept already); setting the secret again, or
-/// removing it, ends it.
+/// keep a value the first had kept already); setting the secret again with
+/// a value, or removing it, ends it (set again with none, it keeps both).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claimed {
     /// The secret's name in its Vault.
@@ -241,7 +241,7 @@ pub struct Claimed {
 
 impl std::fmt::Display for Claimed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} is being moved into {}: move it there again to finish, or set it again in your vault", self.name, self.to)
+        write!(f, "{} is being moved into {}: move it there again to finish, or set it again with a value in your vault", self.name, self.to)
     }
 }
 
@@ -475,7 +475,7 @@ mod tests {
         row.put("r1");
         let a = row.take("one/BOT").expect("the first take");
         let b = row.take("two/BOT");
-        assert_eq!(b, Err("bot is being moved into one/BOT: move it there again to finish, or set it again in your vault".to_string()));
+        assert_eq!(b, Err("bot is being moved into one/BOT: move it there again to finish, or set it again with a value in your vault".to_string()));
         // one keeps it, then completes: gone from the Vault, kept once
         assert!(row.moved("one/BOT", &a));
         assert!(row.0.is_none());
