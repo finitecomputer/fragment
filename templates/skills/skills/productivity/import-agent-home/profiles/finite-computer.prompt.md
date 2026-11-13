@@ -19,3 +19,15 @@ For a Google Drive link, write "on the zip at <the link>" in place of
 The agent asks nothing more, does it all, and ends with one message
 saying what came over, what didn't and why, and what is left for the
 person to do.
+
+Later, for the old agent's sites on finite.site alone (its key must be in
+the person's Vault for the new agent, toward finite.site):
+
+```
+Please bring my old agent's sites over from finite.site with the
+import-agent-home skill.
+
+Make these public: garden
+```
+
+Leave out the last line to keep them all private.
