@@ -163,7 +163,8 @@ struct WorkingIndicator: View {
         return VStack(alignment: .leading, spacing: 0) {
             Button { toggle(steps: card.steps.count) } label: {
                 HStack(spacing: 6) {
-                    LogoStripes(elapsed: card.running ? elapsed : nil, size: lineSize).foregroundStyle(secondary).padding(.trailing, 2)
+                    // gone once it's done: the line is then a summary, not a working one
+                    if card.running { LogoStripes(elapsed: elapsed, size: lineSize).foregroundStyle(secondary).padding(.trailing, 2) }
                     if card.running {
                         // a word for what it does now, held long enough to read
                         HeldWord(word: card.nowWord) { shimmer($0, elapsed: elapsed, active: true) }
@@ -378,32 +379,38 @@ private struct HeldWord<Content: View>: View {
     }
 }
 
-/// The working line's mark, after the logo's bars: a small square of lines
-/// in the line's own color, lit in a wave that runs up and down them while
-/// something is under way (`elapsed`, the line's clock); evenly and still
-/// (nil, or Reduce Motion) otherwise.
+/// The working line's mark, after the logo's bars: a small rounded square
+/// of lines in the line's own color, lit in a wave that runs up and down them
+/// while something is under way (`elapsed`, the line's clock); evenly and
+/// still (nil, or Reduce Motion) otherwise. Each line sits on whole pixels.
 private struct LogoStripes: View {
     let elapsed: TimeInterval?
     let size: CGFloat
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    static let lines = 7
+    @Environment(\.displayScale) private var scale
+    static let lines = 5
 
     var body: some View {
         let lit: Double? = reduceMotion ? nil : elapsed
+        // a whole number of points, so its pixel grid starts where the view does
+        let side = (size * 0.95).rounded()
+        let scale = self.scale
         Canvas { context, box in
+            func pixels(_ value: CGFloat) -> CGFloat { (value * scale).rounded() / scale }
             let pitch = box.height / CGFloat(Self.lines)
-            let thick = pitch * 0.5
+            let thick = max(1 / scale, pixels(pitch * 0.5))
             // the lit line, sweeping from top to bottom and back
             let at = lit.map { (1 - cos($0 * 2.2)) / 2 * Double(Self.lines - 1) }
+            context.clip(to: Path(roundedRect: CGRect(origin: .zero, size: box), cornerRadius: box.width * 0.3, style: .continuous))
             for index in 0..<Self.lines {
-                let glow = at.map { max(0, 1 - abs(Double(index) - $0) / 1.6) } ?? 0.6
+                let glow = at.map { max(0, 1 - abs(Double(index) - $0) / 1.3) } ?? 0.6
                 var line = context
                 line.opacity = 0.3 + 0.7 * glow
-                let rect = CGRect(x: 0, y: CGFloat(index) * pitch + (pitch - thick) / 2, width: box.width, height: thick)
-                line.fill(Path(roundedRect: rect, cornerRadius: thick / 2), with: .foreground)
+                let top = pixels(CGFloat(index) * pitch + (pitch - thick) / 2)
+                line.fill(Path(CGRect(x: 0, y: top, width: box.width, height: thick)), with: .foreground)
             }
         }
-        .frame(width: size * 0.9, height: size * 0.9)
+        .frame(width: side, height: side)
         .accessibilityHidden(true)
     }
 }
