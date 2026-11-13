@@ -400,6 +400,8 @@ struct ComposerBar: View {
             _ = attach(items.count) { try await ComposerFiles.read(items) }
         }
         .onChange(of: voice.recording, initial: true) { _, now in recordingChanged(now) }
+        // a voice memo felt as it starts and as it ends, wherever it is recorded
+        .sensoryFeedback(trigger: voice.recording) { _, now in now ? .start : .stop }
         .onChange(of: scenePhase) { _, phase in if phase != .active { voice.cancel() } }
         .onDisappear { voice.cancel() }
     }

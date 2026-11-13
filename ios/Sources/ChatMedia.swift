@@ -199,6 +199,9 @@ final class UploadProgress: NSObject, URLSessionTaskDelegate, Sendable {
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+            // iOS silences haptics while recording unless asked: the memo's
+            // start and stop are felt (the composer's `sensoryFeedback`)
+            try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
             try session.setActive(true)
             let recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44_100, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 96_000])
             guard recorder.record() else { throw APIError.server("The microphone could not start recording.") }
