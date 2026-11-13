@@ -90,7 +90,9 @@ $DBX request POST /2/files/list_revisions --json '{"path": "/Work/plan.pdf", "li
   `--mode update --rev <rev>` replaces only the revision you read (`get`
   shows its `rev`), so a change someone made since is not lost.
 - `download` saves to a local file (its name, here, by default) and never
-  replaces one unless you pass `--overwrite`.
+  replaces one unless you pass `--overwrite`. It saves only a whole file:
+  one cut short (`incomplete_answer`) saves nothing and leaves a local file
+  already there as it was.
 - `delete` removes a file, or a folder with all it holds. Dropbox keeps
   deleted files for a time (as long as the account's plan says), so the
   person can restore one on dropbox.com. Never call
@@ -136,4 +138,5 @@ hint}`, and exit 1; Dropbox's own errors come through as its
 | `path/conflict/…`, `to/conflict/…` | Something is there already: pick another name, or `--autorename` |
 | `too_many_requests` | Dropbox is limiting requests: wait, then try once more |
 | `invalid_root` | The account's team changed: run `check`, and pass its `root_namespace_id` |
+| `incomplete_answer` | The connection broke mid-answer: nothing was saved; try once more, but after a change `get` or `list` first, since it may have happened |
 | `redirected` | Dropbox answered a redirect, which the helper never follows with the token: say so, and stop |

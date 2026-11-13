@@ -64,6 +64,7 @@ EXTENSION = re.compile(r"^[A-Za-z0-9]{1,16}$")
 # an RPC route on api.dropboxapi.com: /2/<namespace>/<route>[/<more>]
 ROUTE = re.compile(r"^/2/[a-z0-9_]+(/[a-z0-9_]+)+$")
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+LENGTH = re.compile(r"^[0-9]{1,20}$")
 BRIEF_FIELDS = (".tag", "name", "path_display", "id", "size", "server_modified", "rev")
 
 
@@ -109,7 +110,12 @@ def send(request, timeout):
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             raise DropboxError(exc.code, "redirected", f"Dropbox answered a redirect to {exc.headers.get('Location', '?')}, which the helper never follows with the token") from None
-        raise refusal(exc.code, exc.read().decode("utf-8", errors="replace")) from None
+        try:
+            with exc:
+                text = b"".join(body(exc)).decode("utf-8", errors="replace")
+        except DropboxError as cut:
+            raise DropboxError(exc.code, cut.code, f"Dropbox refused the call, but {cut}") from None
+        raise refusal(exc.code, text) from None
     except urllib.error.URLError as exc:
         raise DropboxError(0, "unreachable", str(exc.reason)) from None
 
@@ -120,8 +126,39 @@ def rpc(route, args=None):
     data = None if args is None else json.dumps(args).encode("utf-8")
     h = headers({"Content-Type": "application/json"} if data is not None else None)
     with send(urllib.request.Request(API + route, data=data, headers=h, method="POST"), TIMEOUT_S) as response:
-        raw = response.read()
+        raw = b"".join(body(response))
     return json.loads(raw.decode("utf-8")) if raw.strip() else None
+
+
+def content_length(response):
+    """The body's length as its Content-Length states it, or None: none
+    stated, or a Transfer-Encoding, which overrides it."""
+    stated = (response.headers.get("Content-Length") or "").strip()
+    if response.headers.get("Transfer-Encoding") or not LENGTH.match(stated):
+        return None
+    return int(stated)
+
+
+def body(response, size=None):
+    """The answer's body, chunk by chunk, refused (`incomplete_answer`)
+    unless as many bytes arrive as it promised: its Content-Length, and
+    `size`, where Dropbox states the file's. HTTPResponse.read(n) answers b""
+    at an early end of the connection instead of raising (http.client keeps
+    that for compatibility), so the count is checked here."""
+    promised = sorted({n for n in (content_length(response), size) if n is not None})
+    received = 0
+    while True:
+        try:
+            chunk = response.read(CHUNK_BYTES)
+        except (OSError, http.client.HTTPException) as exc:
+            raise DropboxError(0, "incomplete_answer", f"the connection failed after {received} bytes of the answer: {exc!r}") from None
+        if not chunk:
+            break
+        received += len(chunk)
+        yield chunk
+    if any(n != received for n in promised):
+        stated = " and ".join(str(n) for n in promised)
+        raise DropboxError(0, "incomplete_answer", f"{received} bytes of the answer arrived, where it stated {stated}")
 
 
 def arg_header(args):
@@ -268,29 +305,43 @@ def download(args):
     h = headers({"Dropbox-API-Arg": arg_header({"path": path})})
     part = dest + ".part"
     with send(urllib.request.Request(CONTENT + "/2/files/download", headers=h, method="POST"), CONTENT_TIMEOUT_S) as response:
-        try:
-            result = json.loads(response.headers.get("Dropbox-API-Result") or "{}")
-        except ValueError:
-            result = {}
-        size = save(response, part)
+        result = api_result(response)
+        size = save(response, part, result.get("size"))
+    # only a whole file gets here: one cut short has failed in save, and
+    # whatever was at `dest` is as it was
     os.replace(part, dest)
     out({"saved_to": dest, "bytes": size, "metadata": brief(result)})
 
 
-def save(response, part):
-    """The answer's body written to `part`, its size; nothing left of it
-    where the download fails."""
-    size = 0
+def api_result(response):
+    """A download's Dropbox-API-Result: the file's metadata ({} where it
+    sent none that reads)."""
     try:
+        result = json.loads(response.headers.get("Dropbox-API-Result") or "{}")
+    except ValueError:
+        return {}
+    return result if isinstance(result, dict) else {}
+
+
+def save(response, part, size):
+    """The answer's body written to `part`, its size, once all of it has
+    arrived (`size`: the file's, as Dropbox states it); nothing left of it
+    where the download fails."""
+    if isinstance(size, bool) or not isinstance(size, int):
+        size = None
+    try:
+        saved = 0
         with open(part, "wb") as f:
-            while chunk := response.read(CHUNK_BYTES):
+            for chunk in body(response, size):
                 f.write(chunk)
-                size += len(chunk)
-    except (OSError, http.client.HTTPException) as exc:
+                saved += len(chunk)
+        return saved
+    except BaseException as exc:
         if os.path.exists(part):
             os.remove(part)
-        raise DropboxError(0, "download_failed", str(exc)) from None
-    return size
+        if isinstance(exc, OSError):
+            raise DropboxError(0, "download_failed", str(exc)) from None
+        raise
 
 
 def write_mode(args):
@@ -310,10 +361,10 @@ def upload(args):
         raise DropboxError(0, "too_large", "files/upload takes at most 150 MiB; a larger file needs an upload session")
     upload_arg = {"path": dropbox_path(args.to), "mode": write_mode(args), "autorename": args.autorename, "mute": False}
     with open(args.file, "rb") as f:
-        body = f.read()
+        content = f.read()
     h = headers({"Dropbox-API-Arg": arg_header(upload_arg), "Content-Type": "application/octet-stream"})
-    with send(urllib.request.Request(CONTENT + "/2/files/upload", data=body, headers=h, method="POST"), CONTENT_TIMEOUT_S) as response:
-        out(brief(json.loads(response.read().decode("utf-8") or "{}")))
+    with send(urllib.request.Request(CONTENT + "/2/files/upload", data=content, headers=h, method="POST"), CONTENT_TIMEOUT_S) as response:
+        out(brief(json.loads(b"".join(body(response)).decode("utf-8") or "{}")))
 
 
 def mkdir(args):
@@ -414,6 +465,7 @@ HINTS = {
     "missing_scope": READ_ONLY,
     "too_many_requests": "Dropbox is limiting requests: wait, then try once more",
     "invalid_root": "the account's root changed (it joined or left a team): run check, and use its root_namespace_id",
+    "incomplete_answer": "the connection broke before all of Dropbox's answer arrived: a download saved nothing and left any local file as it was; try once more, but after a change (upload, move, copy, delete, mkdir) look first (get, list): it may have happened",
 }
 
 
