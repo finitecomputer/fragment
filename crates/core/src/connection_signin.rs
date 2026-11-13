@@ -161,12 +161,16 @@ pub fn revoke_form(token: &str) -> String {
     url::form_urlencoded::Serializer::new(String::new()).append_pair("token", token).finish()
 }
 
-/// The scopes that only sign a person in: OpenID Connect's `openid`,
-/// `email` and `profile`, and Google's long names for the last two.
-/// Google grants them beside whatever else the person allows (its granular
-/// consent offers no box for them), so a grant of these alone lets an
-/// agent do nothing (`tokens` refuses it), and none is ever missing.
-pub const IDENTITY_SCOPES: [&str; 5] = ["openid", "email", "profile", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"];
+/// The scopes that only sign a person in, or keep them signed in: OpenID
+/// Connect's `openid`, `email`, `profile` and `offline_access` (a refresh
+/// token: OpenID Connect Core 11, which Microsoft and Atlassian ask for by
+/// that name), and Google's long names for `email` and `profile`. A
+/// provider grants them beside whatever else the person allows (Google's
+/// granular consent offers no box for them; Microsoft may leave
+/// `offline_access` out of its answer's `scope`), so a grant of these alone
+/// lets an agent do nothing (`tokens` refuses it), none is ever missing, and
+/// none tells an access.
+pub const IDENTITY_SCOPES: [&str; 6] = ["openid", "email", "profile", "offline_access", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"];
 
 fn identity(scope: &str) -> bool {
     IDENTITY_SCOPES.contains(&scope)
@@ -203,6 +207,24 @@ pub enum Refused {
 }
 
 pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
+    tokens_of(answer, requested, requested)
+}
+
+/// Every scope a row names, of either access: what a grant's answer is
+/// read against (`spelled_as_asked`), whichever access was asked for.
+pub fn scopes_named(o: &ConnectionOAuth) -> Vec<String> {
+    let mut named: Vec<String> = vec![];
+    for s in o.access.read.iter().chain([&o.access.write]).flat_map(|g| g.scopes.iter()) {
+        if !named.contains(s) {
+            named.push(s.clone());
+        }
+    }
+    named
+}
+
+/// `tokens`, its answer's scopes spelled as `named` (the row's every scope,
+/// `scopes_named`) spells them where the provider answered them another way.
+pub fn tokens_of(answer: &Value, requested: &[String], named: &[String]) -> Result<Tokens, Refused> {
     use Refused::Invalid;
     let access = answer["access_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
     let refresh = answer["refresh_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
@@ -220,13 +242,45 @@ pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
         None => requested.to_vec(),
         Some(s) => {
             let s = s.as_str().filter(|s| s.len() <= SCOPES_MAX * (SCOPE_MAX_BYTES + 1)).ok_or(Invalid)?;
-            bounded(s.split(' ').map(str::to_string).collect()).ok_or(Invalid)?
+            spelled_as_asked(bounded(s.split(' ').map(str::to_string).collect()).ok_or(Invalid)?, named)
         }
     };
     if requested.iter().any(|s| !identity(s)) && !scopes.iter().any(|s| !identity(s) && requested.contains(s)) {
         return Err(Refused::NoScopes);
     }
     Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes, metadata: None })
+}
+
+/// A grant's scopes, each spelled as its row names it (`named`: the row's
+/// every scope) where the provider answered it another way (Microsoft may
+/// answer `https://graph.microsoft.com/Mail.Read` as `Mail.Read`, or lower
+/// case): as named exactly, else the one scope named so without regard to
+/// case, else the one scope named as a URL whose last segment it is. Two
+/// such, or none, and it stays as answered: never guessed. One answered twice
+/// so is kept once. Whatever reads the grant after (its import, `missing`,
+/// `access_of`) reads the row's own spelling.
+fn spelled_as_asked(granted: Vec<String>, named: &[String]) -> Vec<String> {
+    let last = |r: &str| r.contains("://").then(|| r.rsplit('/').next().unwrap_or(r).to_string());
+    let mut spelled: Vec<String> = vec![];
+    for g in granted {
+        // each step decides when it finds one or more: one is the name, more
+        // is a tie, kept as answered; the next step looks only where none
+        let by_case: Vec<&String> = named.iter().filter(|r| r.eq_ignore_ascii_case(&g)).collect();
+        let by_last: Vec<&String> = named.iter().filter(|r| last(r).is_some_and(|s| s.eq_ignore_ascii_case(&g))).collect();
+        let s = if named.contains(&g) {
+            g
+        } else if !by_case.is_empty() {
+            if by_case.len() == 1 { by_case[0].clone() } else { g }
+        } else if by_last.len() == 1 {
+            by_last[0].clone()
+        } else {
+            g
+        };
+        if !spelled.contains(&s) {
+            spelled.push(s);
+        }
+    }
+    spelled
 }
 
 /// What a connection's row asks for that its grant lacks, in the row's
@@ -935,6 +989,79 @@ mod tests {
         let mut one = config();
         one.access.read = None;
         assert_eq!(access_of(&one, &["mail.read".to_string()]), None);
+    }
+
+    /// Microsoft's documented answer (Microsoft identity platform, the
+    /// authorization code flow): its Graph scopes by their full names, no
+    /// `offline_access` in its `scope` beside the refresh token, and an ID
+    /// token whose `email` has no `email_verified`. It connects with nothing
+    /// missing, read only or read and write as its grant holds, labeled by
+    /// that email.
+    #[test]
+    fn microsofts_answer_connects_with_its_graph_scopes_and_its_email() {
+        let g = |s: &str| format!("https://graph.microsoft.com/{s}");
+        let sign = ["openid", "email", "profile", "offline_access"].map(String::from);
+        let grant = |scopes: &[&str]| Grant { scopes: sign.iter().cloned().chain(scopes.iter().map(|s| g(s))).collect() };
+        let access = catalog::Access { read: Some(grant(&["User.Read", "Mail.Read", "Calendars.Read", "Files.Read", "Contacts.Read"])), write: grant(&["User.Read", "Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite", "Files.ReadWrite", "Contacts.ReadWrite"]) };
+        let o = ConnectionOAuth { authorize: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?prompt=select_account".into(), exchange: "https://login.microsoftonline.com/common/oauth2/v2.0/token".into(), client_id: "client".into(), access, revoke: None };
+        assert!(check(&o).is_ok());
+        let answer = |scopes: &[&str]| {
+            let mut a = id_token(json!({ "aud": "client", "sub": "AAAAAAAAAAAAAAAAAAAAAIkzqFVrSaSaFHy782bbtaQ", "email": "ada@contoso.com", "preferred_username": "ada@contoso.com", "name": "Ada" }));
+            let scope = ["openid", "profile", "email"].iter().map(|s| s.to_string()).chain(scopes.iter().map(|s| g(s))).collect::<Vec<_>>().join(" ");
+            for (k, v) in [("token_type", json!("Bearer")), ("scope", json!(scope)), ("expires_in", json!(3599)), ("ext_expires_in", json!(3599)), ("access_token", json!("eyJ0eXAiOiJKV1Qi.access")), ("refresh_token", json!("M.C5.refresh"))] {
+                a[k] = v;
+            }
+            a
+        };
+        for (access, scopes) in [(ConnectionAccess::Read, &["User.Read", "Mail.Read", "Calendars.Read", "Files.Read", "Contacts.Read"][..]), (ConnectionAccess::Write, &["User.Read", "Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite", "Files.ReadWrite", "Contacts.ReadWrite"][..])] {
+            let requested = &o.access.of(access).unwrap().scopes;
+            let a = answer(scopes);
+            let granted = tokens(&a, requested).expect("Microsoft's documented answer");
+            assert_eq!(access_of(&o, &granted.scopes), Some(access), "{access:?}");
+            assert_eq!(missing(requested, &granted.scopes), Vec::<String>::new(), "{access:?}: offline_access, answered or not, is never missing");
+            assert_eq!(account_label(&a, "client").as_deref(), Some("ada@contoso.com"));
+        }
+        // offline_access with signing in alone is no grant of anything
+        assert_eq!(tokens(&granting("openid offline_access"), &o.access.write.scopes).err(), Some(Refused::NoScopes));
+        // Microsoft may answer its Graph scopes by their short names, or in
+        // another case: read in the row's spelling, they connect the same
+        let read = &o.access.read.as_ref().unwrap().scopes;
+        let short = answer(&[]);
+        for scope in ["openid profile email User.Read Mail.Read Calendars.Read Files.Read Contacts.Read", "openid profile email https://graph.microsoft.com/user.read https://graph.microsoft.com/mail.read https://graph.microsoft.com/calendars.read https://graph.microsoft.com/files.read https://graph.microsoft.com/contacts.read", "openid profile email User.Read https://graph.microsoft.com/Mail.Read mail.read Calendars.Read Files.Read Contacts.Read"] {
+            let mut a = short.clone();
+            a["scope"] = json!(scope);
+            let granted = tokens(&a, read).expect(scope);
+            assert_eq!((access_of(&o, &granted.scopes), missing(read, &granted.scopes)), (Some(ConnectionAccess::Read), vec![]), "{scope}");
+            assert!(granted.scopes.iter().all(|s| ["openid", "profile", "email"].contains(&s.as_str()) || read.contains(s)), "{scope}: {:?}", granted.scopes);
+        }
+        let named = scopes_named(&o);
+        let mut wrote = short.clone();
+        wrote["scope"] = json!("openid Mail.Read mail.send");
+        assert_eq!(tokens_of(&wrote, &o.access.write.scopes, &named).map(|t| access_of(&o, &t.scopes)).ok().flatten(), Some(ConnectionAccess::Write), "a write scope by its short name is read and write");
+        // read against the row's every scope, whichever access was asked: a
+        // read and write connect answered with read only's short names is
+        // read only, as their full names are
+        let mut read_only = short.clone();
+        read_only["scope"] = json!("openid User.Read Mail.Read");
+        let full = tokens_of(&{ let mut a = short.clone(); a["scope"] = json!(format!("openid {} {}", g("User.Read"), g("Mail.Read"))); a }, &o.access.write.scopes, &named).map(|t| access_of(&o, &t.scopes)).ok().flatten();
+        assert_eq!((tokens_of(&read_only, &o.access.write.scopes, &named).map(|t| access_of(&o, &t.scopes)).ok().flatten(), full), (Some(ConnectionAccess::Read), Some(ConnectionAccess::Read)));
+    }
+
+    /// A provider's answer spelled another way is read as the row names its
+    /// scopes, never guessed: an exact name first; a short or other-case name
+    /// only where it is one scope's; two such, and it stays as answered.
+    #[test]
+    fn an_answer_spelled_another_way_is_read_as_its_row_names_it_never_guessed() {
+        let named = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let spell = |granted: &[&str], row: &[&str]| spelled_as_asked(named(granted), &named(row));
+        assert_eq!(spell(&["read"], &["https://a.example/read", "https://b.example/read"]), ["read"], "two URL scopes end in it: not guessed");
+        assert_eq!(spell(&["read"], &["https://a.example/read", "read"]), ["read"], "an exact name over an alias");
+        assert_eq!(spell(&["READ"], &["https://a.example/read", "read"]), ["read"], "one named so without regard to case");
+        assert_eq!(spell(&["Read"], &["https://a.example/read", "https://a.example/READ"]), ["Read"], "two of other case: not guessed");
+        assert_eq!(spell(&["Read"], &["read", "READ", "https://a.example/read"]), ["Read"], "a tie of case is kept as answered, never taken on to a URL's last segment");
+        assert_eq!(spell(&["mail.read", "Mail.Read"], &["https://graph.microsoft.com/Mail.Read"]), ["https://graph.microsoft.com/Mail.Read"], "one scope, kept once");
+        assert_eq!(spell(&["email"], &["https://www.googleapis.com/auth/userinfo.email"]), ["email"], "Google's sign-in names are no aliases of each other");
+        assert_eq!(spell(&["api", "refresh_token"], &["api", "refresh_token", "openid"]), ["api", "refresh_token"], "as named, unchanged");
     }
 
     /// Google's row asks it to show its account chooser, then its consent,
