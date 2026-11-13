@@ -93,14 +93,13 @@ private extension View {
                     Circle().fill(RadialGradient(colors: [.white.opacity(0.42), .clear], center: .bottom, startRadius: 0, endRadius: 26 * scale))
                     Ellipse().fill(LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.03)], startPoint: .top, endPoint: .bottom))
                         .frame(width: 30 * scale, height: 15 * scale).offset(y: -12.5 * scale)
+                    // the rim inside the glass, so it swells with it on a press
+                    // rather than staying behind as a ring
+                    Circle().strokeBorder(LinearGradient(colors: [.white.opacity(0.7), .white.opacity(0.05), .white.opacity(0.5)],
+                                                         startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
                 }.clipShape(.circle)
             }
             .glassEffect(.regular.tint(tint.opacity(0.85)).interactive(), in: .circle)
-            .overlay {
-                Circle().strokeBorder(LinearGradient(colors: [.white.opacity(0.7), .white.opacity(0.05), .white.opacity(0.5)],
-                                                     startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
-                    .allowsHitTesting(false)
-            }
             .shadow(color: .black.opacity(0.28), radius: 8, y: 4)
     }
 }
@@ -578,7 +577,14 @@ struct ComposerView: View {
         if recordFirst { launcherAction } else { Button {
             guard canSend else { return }
             submitting = true
-            Task { await (stops ? stop() : send()); submitting = false }
+            Task {
+                let pressed = ContinuousClock.now
+                await (stops ? stop() : send())
+                // a send is often done at once: its spinner holds a moment on
+                // the dark bead rather than flickering as the bead lightens
+                try? await Task.sleep(until: pressed + .milliseconds(600))
+                submitting = false
+            }
         } label: {
             // the launcher's glass bead at the chat's size, so the two send
             // alike: one bead whose glass and glyph change, never dimmed;
