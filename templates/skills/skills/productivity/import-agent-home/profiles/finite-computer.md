@@ -263,10 +263,30 @@ files came, its app made (its full name), deployed. Only a deployed site
 has come over.
 
 **Point the old address.** Only for a site your owner made public here,
-once its new address answers. `<its slug>` is the one `finite-site.json`
-lists beside the site's old address (its `url`), and `<its new address>`
-is `https://` and its host, with nothing after
-(`https://garden--k3x9.finite.place`):
+and only once its new address serves every page the old one did:
+pointing it sends each old page to the same path at the new address, so
+a page the new one can't serve becomes a broken link for everyone who
+kept it. `<its slug>` is the one `finite-site.json` lists beside the
+site's old address (its `url`), and `<its new address>` is `https://`
+and its host, with nothing after (`https://garden--k3x9.finite.place`).
+
+- **A single-page app** (its listing's `spa` is true, or you moved its
+  routes to `#/…` above) is never pointed: its old `/about` would land
+  on a page this platform doesn't serve. Its old address keeps serving.
+  Say so in the report.
+- **Any other site:** first check its pages at the new address. Name up
+  to five the old site served besides `/`: its folders with an
+  `index.html` (`/blog/`), its other `.html` files (`/about.html`), and
+  paths its own links use. Give one of them a query string:
+
+```sh
+to="<its new address>" && \
+for p in "/" "<a page>" "<a page>" "<a page>?from=old"; do curl -sS -o /dev/null -w "%{http_code} $p\n" "$to$p"; done
+```
+
+Every line must say `200`. If one doesn't, don't point it: its old
+address keeps serving, and the report names the pages that failed.
+Otherwise:
 
 ```sh
 ph="<the placeholder>" slug="<its slug>" to="<its new address>" && \
