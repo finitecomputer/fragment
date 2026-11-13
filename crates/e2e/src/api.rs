@@ -1,7 +1,8 @@
 //! Signed and unsigned HTTP against the node, the way the CLI and a
 //! browser call it. Fragment hosts (`<name>.<suffix>`) are reached by
 //! sending the node the right `Host` header; a hosted run's, at their own
-//! names over https (`Target::Hosted`).
+//! names over https (`Target::Hosted`); a node behind a front door, at the
+//! door's names over https (`Target::Fronted`: LAN mode's).
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -204,6 +205,12 @@ pub enum Target {
     /// platform at `<branch>.<zone>`, a fragment at
     /// `<name>--<branch>.<zone>`.
     Hosted(Preview),
+    /// The local node behind a front door (LAN mode's, crates/lan), over
+    /// https at the door's own names: the platform at `Api::base`
+    /// (`https://<zone>:<port>`), a fragment at `https://<name>.<zone>:<port>`,
+    /// the client finding them and trusting them as a device on the box's
+    /// network does (`Api::fronted`).
+    Fronted,
 }
 
 /// A branch deployment, as the hosted run reaches it.
@@ -358,6 +365,16 @@ impl Api {
         self
     }
 
+    /// The node behind a front door at `base` (`https://<suffix>[:port]`),
+    /// through `http`: a client that finds the door's names and trusts its
+    /// certificates as a device on its network does.
+    pub fn fronted(base: &str, suffix: &str, http: reqwest::blocking::Client, run: &Arc<Run>) -> Result<Api> {
+        let url = reqwest::Url::parse(base)?;
+        anyhow::ensure!(url.scheme() == "https" && url.host_str() == Some(suffix), "a front door's platform is https at its zone's apex: {base}");
+        let port = url.port_or_known_default().unwrap_or(443);
+        Ok(Api { http, base: base.trim_end_matches('/').to_string(), port, suffix: suffix.to_string(), label_suffix: String::new(), target: Target::Fronted, run: Arc::clone(run) })
+    }
+
     /// A preview's API, at its own hosts over https.
     pub fn hosted(preview: &Preview, run: &Arc<Run>) -> Api {
         Api::hosted_with(preview, run, client(Pool::Idle(POOL_IDLE)))
@@ -412,7 +429,7 @@ impl Api {
     /// How this API's client keeps its connections (`Pool`).
     fn pool(&self) -> Pool {
         match self.target {
-            Target::Local => Pool::Fresh,
+            Target::Local | Target::Fronted => Pool::Fresh,
             Target::Hosted(_) => Pool::Idle(POOL_IDLE),
         }
     }
@@ -453,7 +470,7 @@ impl Api {
     pub fn host_mark(&self) -> String {
         match &self.target {
             Target::Hosted(preview) => format!("--{}", preview.branch),
-            Target::Local => self.label_suffix.clone(),
+            Target::Local | Target::Fronted => self.label_suffix.clone(),
         }
     }
 
@@ -462,6 +479,10 @@ impl Api {
         match &self.target {
             Target::Hosted(preview) => format!("{}/{path}", preview.fragment(name)),
             Target::Local => format!("http://{name}{}.{}:{}/{path}", self.label_suffix, self.suffix, self.port),
+            Target::Fronted => match self.port {
+                443 => format!("https://{name}.{}/{path}", self.suffix),
+                port => format!("https://{name}.{}:{port}/{path}", self.suffix),
+            },
         }
     }
 
@@ -534,8 +555,8 @@ impl Api {
                 to.set_port(Some(self.port)).expect("an http URL takes a port");
                 self.http.request(c.method.parse()?, to).header("host", host)
             }
-            // A deployment's hosts are its own, over https.
-            Target::Hosted(_) => self.http.request(c.method.parse()?, url.clone()),
+            // A deployment's hosts are its own, over https; so are a front door's.
+            Target::Hosted(_) | Target::Fronted => self.http.request(c.method.parse()?, url.clone()),
         };
         req = with_body(req, c.method, body);
         if let Some(ct) = c.content_type {
@@ -951,8 +972,9 @@ impl Socket {
                 req.headers_mut().insert("host", format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80)).parse()?);
                 req
             }
-            // a deployment's hosts are its own, over TLS
-            Target::Hosted(_) => to.as_str().into_client_request()?,
+            // a deployment's hosts are its own, over TLS (a front door's
+            // root is not one tungstenite trusts: no lane opens one there)
+            Target::Hosted(_) | Target::Fronted => to.as_str().into_client_request()?,
         };
         if let Some(k) = keys {
             req.headers_mut().insert("authorization", k.header("GET", http, &[], now_s()).parse()?);
