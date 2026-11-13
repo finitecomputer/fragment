@@ -228,6 +228,12 @@
   // One file a person may send, at most, in bytes: the zone's request body
   // limit on its Cloudflare plan. Without it, a Free or Pro zone's 100 MB.
   // "upload_max_bytes": 200000000,
+  // Local hosts a self-hosted org opens to its apps' jobs, push endpoints
+  // and subscriptions, beside the public internet (its intranet): host
+  // names, one-level `*.` globs, IP addresses and networks, at most 64.
+  // Loopback, link-local, localhost and this deployment's own hosts are
+  // never opened; an entry naming one is refused. Left out: public only.
+  // "egress_allow": ["*.corp.example", "wiki.corp.example", "10.20.0.0/16", "100.101.102.103"],
   // The sender the platform's mail (invites, seats) comes from: a bare
   // address or an unquoted Name <address> (no comments or lists), on a
   // domain onboarded to Cloudflare Email Sending (`wrangler email sending
@@ -288,7 +294,13 @@
   // orgs) names `"account_host": {"metadata": "instance_url", "under":
   // "my.salesforce.com"}`: its token also goes to a host under `under`, but
   // only the one its account's Pipes metadata names (docs/computers.md,
-  // "An account's own host").
+  // "An account's own host"). A connection whose provider wants its OAuth
+  // client's secret as an HTTP Basic header (Zoom, Airtable, Xero, Notion),
+  // never in the code exchange's body, names `"client_auth": "basic"`
+  // beside its `connection_oauth`: the header goes with its code exchange
+  // and its revocation (docs/pipes-browser-binding.md). Name it only once
+  // a release that knows the field is deployed: an older one refuses the
+  // catalog.
   "providers": [
     { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],

@@ -55,12 +55,12 @@ fn route(fragment: &str) -> String {
     format!("/api/f/{fragment}/icon")
 }
 
-fn make(api: &Api, keys: &Keys, fragment: &str, body: Value) -> Result<Reply> {
+pub(super) fn make(api: &Api, keys: &Keys, fragment: &str, body: Value) -> Result<Reply> {
     api.signed(keys, "POST", &format!("{}/make", route(fragment)), Some(&body))
 }
 
 /// `PUT` an image's bytes as its icon, signed over them.
-fn put(api: &Api, keys: &Keys, fragment: &str, bytes: &[u8]) -> Result<Reply> {
+pub(super) fn put(api: &Api, keys: &Keys, fragment: &str, bytes: &[u8]) -> Result<Reply> {
     let url = format!("{}{}", api.base, route(fragment));
     api.call(Call { method: "PUT", url, body: Some(bytes.to_vec()), content_type: Some("application/octet-stream"), keys: Some(keys), ..Call::default() })
 }
@@ -126,6 +126,10 @@ fn priced_as_its_call(entry: &Value) -> bool {
 
 pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("icons", &[crate::Need::Fakes, crate::Need::Levers]) {
+        return Ok(());
+    }
+    if s.on_celld() {
+        s.skip("icons made, fitted, kept, served, limited and charged, by the API and the CLI, and favicons", "celld has no Images binding, so the node makes and fits no icons (docs/self-host.md)");
         return Ok(());
     }
     cli_icons(s, api)?;
@@ -270,6 +274,7 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its fitting is one Images row on the owner's ledger (`upload`), whoever uploads", paid, json!(entries(api, &owner_id, &prefix).iter().filter(|e| call_of(e) == "upload").collect::<Vec<_>>()));
 
     favicon(s, api, &owner)?;
+    template_icon(s, api, &owner)?;
 
     // ---- a making whose drawings are all tiles offers none, saying why
     let r = make(api, &owner, &name, json!({ "hint": "a square" }))?;
@@ -554,6 +559,53 @@ fn favicon(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let gone = s.eventually(WAIT, || ask(None).is_ok_and(|r| r.status == 404));
     s.ok("its icon removed, and no favicon.ico of its own, none is served (404)", gone, ask(None)?);
     app_favicon(s, api, owner)
+}
+
+/// A brain shows its template's icon (fragment_templates::blessed::icon)
+/// with no one making one: listed and served from the release, by its
+/// hash; an icon of its own wins over it, and removed, the template's is
+/// shown again and is what `DELETE` answers.
+fn template_icon(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let release = fragment_templates::blessed::icon("brain").expect("the brain template's icon");
+    let name = s.named(api, owner, "icons-brain")?;
+    let r = api.create_with(owner, json!({ "name": name, "template": "brain" }))?;
+    anyhow::ensure!(r.status == 200, "the brain: {r}");
+    s.owned(&r.body, owner);
+    let shown = icon::icon_path(&name, release.sha256);
+    let listed = s.eventually(WAIT, || row(api, owner, &name)["picture"] == shown.as_str());
+    let got = get(api, owner, &name, None)?;
+    let versioned = api.signed(owner, "GET", &shown, None)?;
+    let again = get(api, owner, &name, Some(got.header("etag").as_str()))?;
+    s.ok(
+        "a new brain lists its template's icon, made by no one, and serves its bytes from the release (a PNG, tagged by its hash: 304 for that tag)",
+        listed
+            && got.status == 200
+            && got.header("content-type") == icon::MEDIA_TYPE
+            && hex::encode(Sha256::digest(&got.bytes)) == release.sha256
+            && got.header("etag") == format!("\"{}\"", release.sha256)
+            && versioned.status == 200
+            && versioned.bytes == got.bytes
+            && again.status == 304,
+        format!("{} / {got} / {versioned} / {again}", row(api, owner, &name)),
+    );
+    let kept = put(api, owner, &name, &photo())?;
+    let own = kept.body["icon"].as_str().unwrap_or("").to_string();
+    let relisted = s.eventually(WAIT, || row(api, owner, &name)["picture"] == own.as_str());
+    let mine = get(api, owner, &name, None)?;
+    s.ok(
+        "an icon of its own wins over its template's: listed and served",
+        kept.status == 200 && own != shown && relisted && mine.status == 200 && hex::encode(Sha256::digest(&mine.bytes)) == kept.body["sha256"].as_str().unwrap_or(""),
+        format!("{kept} / {}", row(api, owner, &name)),
+    );
+    let gone = api.signed(owner, "DELETE", &route(&name), None)?;
+    let back = s.eventually(WAIT, || row(api, owner, &name)["picture"] == shown.as_str());
+    let served = get(api, owner, &name, None)?;
+    s.ok(
+        "its own removed, it shows its template's again, which DELETE answers",
+        gone.status == 200 && gone.body == json!({ "icon": shown }) && back && served.status == 200 && hex::encode(Sha256::digest(&served.bytes)) == release.sha256,
+        format!("{gone} / {}", row(api, owner, &name)),
+    );
+    Ok(())
 }
 
 /// An app that answers `/favicon.ico` from its own route (App.fetch), its

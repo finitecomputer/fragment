@@ -315,6 +315,8 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         cron: None,
         chrome: browser::Shared::new(&scratch),
         tools: None,
+        celld: None,
+        openbao: None,
         node: None,
         listener: None,
         port: 0,
@@ -340,6 +342,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         scratch,
         project: PathBuf::new(),
         shape: Shape::Plain,
+        secrets: devstack::Secrets::Store,
         containers_removed: false,
     }
 }

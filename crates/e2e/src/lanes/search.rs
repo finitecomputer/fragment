@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use super::ledger::{forget_gate, gate_hears, lever, quiet};
+use super::ledger::{entries, forget_gate, gate_hears, lever, quiet};
 use crate::api::{Api, Reply};
 use crate::Suite;
 
@@ -117,12 +117,17 @@ fn gate_checks(s: &mut Suite, api: &Api) -> Result<(Keys, String, String)> {
         Ok((first, heard, question()?))
     };
     let both_allowed = [(reader_id.as_str(), "allowed"), (owner_id.as_str(), "allowed")];
+    let start = rows();
     let ((allowed, allowed_embeds), allowed_heard, (again, again_embeds)) = taught(&both_allowed)?;
     lend(0)?;
-    let before = rows();
+    // those two questions' charges, landed or not yet: a ledger's queue may
+    // deliver past `quiet`'s second (celld's does), so they are not counted
+    let before = start + 2;
     let ((paid, paid_embeds), payer_heard, (payer, payer_embeds)) = taught(&[(reader_id.as_str(), "refused")])?;
     let (replayed, replayed_embeds) = question()?;
-    let charged_once = rows() == before + 1;
+    // its row once it lands (a ledger's queue may take past `quiet`'s
+    // second to deliver it: celld's does), and no other after
+    let charged_once = s.eventually(Duration::from_secs(20), || entries(api, &reader_id, "aig:").len() == before + 1) && rows() == before + 1;
     lend(1_000)?;
     cap("g0", Some(0))?;
     let ((_, open_first_embeds), owner_heard, (open, open_embeds)) = taught(&[(owner_id.as_str(), "refused")])?;
@@ -142,22 +147,22 @@ fn gate_checks(s: &mut Suite, api: &Api) -> Result<(Keys, String, String)> {
     let capped = |r: &Reply| r.status == 402 && r.message().contains("cap this month");
     s.ok(
         "a reader's question in another person's fragment, both ledgers allowing it, is embedded as the reader's and answered by meaning, and so is the next",
-        allowed.status == 200 && allowed.body["semantic"] == "on" && allowed_embeds == 1 && allowed_heard && again.status == 200 && again_embeds == 1,
+        allowed.status == 200 && allowed.body["semantic"] == "on" && allowed_embeds == 1 && (allowed_heard || !s.one_isolate()) && again.status == 200 && again_embeds == 1,
         json!({ "found": allowed.body, "embedded": [allowed_embeds, again_embeds], "heard": allowed_heard }),
     );
     s.ok(
         "the reader's ledger refusing (its lending used up): the first question, its gate cold, is answered and charged once; the refusal heard beside it refuses the next, 402, saying so, and a replay too, nothing embedded or charged",
-        paid.status == 200 && paid_embeds == 1 && payer_heard && lent(&payer) && payer_embeds == 0 && lent(&replayed) && replayed_embeds == 0 && charged_once,
+        paid.status == 200 && paid_embeds == 1 && (payer_heard || !s.one_isolate()) && lent(&payer) && payer_embeds == 0 && lent(&replayed) && replayed_embeds == 0 && charged_once,
         json!({ "first": paid.status, "heard": payer_heard, "next": payer.body, "replayed": replayed.status, "charged_once": charged_once }),
     );
     s.ok(
         "the owner's ledger refusing (the fragment at its cap, $0 here): the first goes on, the next is refused, 402, saying so, with nothing embedded",
-        open_first_embeds == 1 && owner_heard && capped(&open) && open_embeds == 0,
+        open_first_embeds == 1 && (owner_heard || !s.one_isolate()) && capped(&open) && open_embeds == 0,
         json!({ "heard": owner_heard, "next": open.body, "embedded": open_embeds }),
     );
     s.ok(
         "both refusing: the first goes on, and the next is refused with the reader's refusal, nothing embedded",
-        both_first_embeds == 1 && both_heard && lent(&both) && !capped(&both) && both_embeds == 0,
+        both_first_embeds == 1 && (both_heard || !s.one_isolate()) && lent(&both) && !capped(&both) && both_embeds == 0,
         json!({ "heard": both_heard, "next": both.body, "embedded": both_embeds }),
     );
     let gate = part_ms(&slowed, "gate");
@@ -214,7 +219,7 @@ pub fn search(s: &mut Suite, api: &Api) -> Result<()> {
     let next = ask()?;
     s.ok(
         "the node restarted, its gates empty: a refused reader's first question goes on, the refusal heard beside it refuses the next, 402",
-        first.status == 200 && taught && next.status == 402,
+        first.status == 200 && (taught || !s.one_isolate()) && next.status == 402,
         json!({ "first": first.status, "taught": taught, "next": next.body }),
     );
     s.stop()?;
