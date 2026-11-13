@@ -1591,10 +1591,11 @@ fn made_while_its_seat_sync_fails(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&person, "PUT", "/api/seat", Some(&json!({ "sleeps": true })))?;
     let off = r.status == 200 && s.eventually(Duration::from_secs(20), || view(api)["alwaysOn"] == false);
     let slept = api.signed(&person, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
-    // let sleep with nothing open, it may be sleeping already as its owner
-    // asks (a sleep on celld's krun engine takes longer than one in local
-    // Docker): its owner's sleep then answers `sleeping`, and it sleeps
-    let asleep = slept.body["phase"] == "asleep" || (slept.body["phase"] == "sleeping" && s.eventually(WAKE, || view(api)["phase"] == "asleep"));
+    // let sleep with nothing open, on celld it may be sleeping already as its
+    // owner asks (a sleep on celld's krun engine takes longer than one in
+    // local Docker): its owner's sleep then answers `sleeping`, and it
+    // sleeps. Elsewhere the sleep answers `asleep`, as before
+    let asleep = slept.body["phase"] == "asleep" || (s.on_celld() && slept.body["phase"] == "sleeping" && s.eventually(WAKE, || view(api)["phase"] == "asleep"));
     s.ok("it woke as an always-on computer does; let sleep, it sleeps at the end", awake && off && asleep, json!([view(api), slept.body]));
     Ok(())
 }
