@@ -87,7 +87,9 @@ struct ToolCard: Equatable, Identifiable {
         let words = seconds < 20 ? ["Ran", "Cooked", "Tinkered", "Hustled"]
             : seconds < 120 ? ["Worked", "Cooked", "Brewed", "Crafted", "Hustled"]
             : ["Worked hard", "Toiled", "Labored", "Persevered", "Slogged", "Hammered", "Drudged", "Schlepped"]
-        return words[id.utf8.reduce(0) { ($0 &* 31 &+ Int($1)) & 0xFFFF } % words.count]
+        // FNV-1a: neighboring cards (work:41, work:42) land on different words
+        let hash = id.utf8.reduce(UInt64(0xcbf29ce484222325)) { ($0 ^ UInt64($1)) &* 0x100000001b3 }
+        return words[Int(hash % UInt64(words.count))]
     }
 }
 
