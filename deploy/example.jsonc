@@ -382,6 +382,35 @@
       //   "exchange": "https://login.salesforce.com/services/oauth2/token", "revoke": "https://login.salesforce.com/services/oauth2/revoke",
       //   "client_id": "<the app's consumer key>", "access": { "write": { "scopes": ["api", "refresh_token", "openid", "email"] } } },
       "env": ["SALESFORCE_ACCESS_TOKEN"] },
+    // The person's HubSpot account (its contacts, companies, deals, tickets
+    // and owners), as Google is: Pipes' `hubspot` provider, connected
+    // through the browser once its app's secret is in the store (the app
+    // Pipes' HubSpot integration uses, with the platform's callback beside
+    // Pipes' among its redirect URLs). HubSpot errors at an install URL
+    // lacking a scope the app requires, so the app requires read only's
+    // scopes and names read and write's `.write` ones conditionally
+    // required: each access asks for its own, space-separated (`oauth` is
+    // every app's). Its token answer lists `scopes`, never `scope`: the
+    // grant is what was asked (RFC 6749 §5.1). Its revocation takes a
+    // refresh token and the app's secret, not RFC 7009's form: a disconnect
+    // deletes the account at Pipes, and the person uninstalls the app in
+    // HubSpot. An account-level app (HubSpot's default), its token reaches
+    // the whole account, whatever its user may see; its note says so.
+    // developers.hubspot.com, read 2026-11-11: Working with OAuth, Scopes,
+    // Manage OAuth access tokens with the 2026-09 API (v1's token endpoint
+    // goes on 2027-02-16).
+    { "name": "hubspot", "kind": "connection",
+      "hosts": ["api.hubapi.com"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "note": "Only a HubSpot super admin, or a user with Marketplace Access, can connect HubSpot. Your agents then reach the whole account's records, not only those your HubSpot user can see.",
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://app.hubspot.com/oauth/authorize",
+      //   "exchange": "https://api.hubapi.com/oauth/2026-09/token",
+      //   "client_id": "<the app's client id>", "access": {
+      //   "read": { "scopes": ["oauth", "crm.objects.contacts.read", "crm.objects.companies.read", "crm.objects.deals.read", "crm.objects.tickets.read", "crm.objects.owners.read"] },
+      //   "write": { "scopes": ["oauth", "crm.objects.contacts.read", "crm.objects.contacts.write", "crm.objects.companies.read", "crm.objects.companies.write",
+      //     "crm.objects.deals.read", "crm.objects.deals.write", "crm.objects.tickets.read", "crm.objects.tickets.write", "crm.objects.owners.read"] } } },
+      "env": ["HUBSPOT_OAUTH_ACCESS_TOKEN"] },
     // The person's own OpenRouter account (Paul, 2026-10-08): connected from
     // settings through OpenRouter's own page (its PKCE key exchange: no key
     // pasted), and paid by their OpenRouter credit, never metered here. An
