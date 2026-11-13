@@ -576,23 +576,11 @@ struct ComposerView: View {
             submitting = true
             Task { await (stops ? stop() : send()); submitting = false }
         } label: {
-            ZStack {
-                // The adaptive label color keeps the filled control high-contrast;
-                // the glass foreground style is softened by vibrancy.
-                Circle().fill(canSend ? Color(uiColor: .label) : Color(uiColor: .tertiarySystemFill))
-                if busy || submitting {
-                    ProgressView().tint(.secondary)
-                } else {
-                    Image(systemName: stops ? "stop.fill" : "arrow.up")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(canSend ? Color(uiColor: .systemBackground) : Color.secondary)
-                }
-            }
-            .frame(width: 34, height: 34)
-            .frame(width: 44, height: 44)
-            .contentShape(Circle())
+            // the launcher's glass bead, so the two send alike
+            if busy || submitting { ProgressView().launcherGlass() }
+            else { Image(systemName: stops ? "stop.fill" : "arrow.up").launcherGlass() }
         }
-        .disabled(!canSend)
+        .disabled(!canSend).opacity(canSend || busy || submitting ? 1 : 0.4)
         .accessibilityLabel(stops ? "Stop response" : "Send message")
         .accessibilityIdentifier(stops ? "stop" : "send") }
     }
