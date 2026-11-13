@@ -61,6 +61,34 @@ struct ToolCard: Equatable, Identifiable {
     var until: Int64?
     var words: String? = nil
     var running: Bool { until == nil }
+
+    /// What its one line says while it runs, in a word anyone reads: what
+    /// its newest running step does, else Thinking (between steps).
+    var nowWord: String {
+        guard let index = steps.lastIndex(where: \.running) else { return "Thinking" }
+        switch steps[index].category {
+        // a command is work done on the computer, said both ways in turn
+        case "shell": return index.isMultiple(of: 2) ? "Working" : "Running"
+        case "web": return "Searching"
+        case "read": return "Reading"
+        case "write": return "Writing"
+        case "browser": return "Browsing"
+        case "image": return "Drawing"
+        case "delegate": return "Asking a helper"
+        case "memory": return "Remembering"
+        default: return "Working"
+        }
+    }
+
+    /// What its line says once done, with some personality: a word for how
+    /// long it took, the same one each time this card is drawn.
+    var doneWord: String {
+        let seconds = ((until ?? since) - since) / 1000
+        let words = seconds < 20 ? ["Ran", "Cooked", "Tinkered", "Hustled"]
+            : seconds < 120 ? ["Worked", "Cooked", "Brewed", "Crafted", "Hustled"]
+            : ["Worked hard", "Toiled", "Labored", "Persevered", "Slogged", "Hammered", "Drudged", "Schlepped"]
+        return words[id.utf8.reduce(0) { ($0 &* 31 &+ Int($1)) & 0xFFFF } % words.count]
+    }
 }
 
 struct WorkingHint: Equatable, Identifiable {

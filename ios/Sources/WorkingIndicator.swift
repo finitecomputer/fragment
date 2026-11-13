@@ -102,7 +102,7 @@ struct WorkingIndicator: View {
         let late: Bool = { if case .pending(let since) = hint.kind { return phase != "starting" && phase != "asleep" && milliseconds - since >= 90_000 }; return false }()
         let text: String = {
             switch hint.kind {
-            case .working(let asker): return "\(agent.name) is working" + (asker != nil && asker != principal ? " for \(name(asker!))" : "")
+            case .working(let asker): return "Thinking" + (asker != nil && asker != principal ? " for \(name(asker!))" : "")
             case .asked(let asks): return asks == principal ? "Waiting for your answer" : "Waiting for \(name(asks))'s answer"
             case .pending:
                 if phase == "wont_wake" { return "\(agent.name)'s computer could not start. Open the computer settings to restart it." }
@@ -115,10 +115,11 @@ struct WorkingIndicator: View {
         return HStack(spacing: 8) {
             if case .asked = hint.kind {
                 glyph("asked", size: 15).foregroundStyle(Color(rgb: Self.colorRGB(agent.id.agent)))
-            } else if !late && phase != "wont_wake" {
+            } else if case .pending = hint.kind, !late && phase != "wont_wake" {
                 dots(identity: agent.id.agent, elapsed: elapsed)
             }
-            Text(text).font(.system(size: textSize, weight: .semibold)).foregroundStyle(secondary)
+            // Thinking reads as the working line does; a wait still stands out
+            Text(text).font(.system(size: textSize, weight: { if case .working = hint.kind { return .regular } else { return .semibold } }())).foregroundStyle(secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(minHeight: textSize * 1.5)
@@ -157,32 +158,18 @@ struct WorkingIndicator: View {
         let rolling = card.running && !expanded
         let advance = advancedAt.map { min(1, max(0, now.timeIntervalSince($0) / 0.32)) } ?? 1
         let eased = reduceMotion ? 1 : UnitCurve.bezier(startControlPoint: UnitPoint(x: 0.25, y: 0.1), endControlPoint: UnitPoint(x: 0.25, y: 1)).value(at: advance)
-        let shown = expanded ? card.steps : Array(card.steps.suffix(card.running ? (eased < 1 ? 4 : 3) : 0))
+        // one line until it's opened: what it does now, never the steps rolling by
+        let shown = expanded ? card.steps : []
         return VStack(alignment: .leading, spacing: 0) {
             Button { expanded.toggle(); advancedAt = nil } label: {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     if card.running {
-                        let progress = reduceMotion ? 0 : UnitCurve.easeOut.value(at: elapsed.truncatingRemainder(dividingBy: 1.8) / 1.8)
-                        Circle().fill(Color(rgb: Self.colorRGB(card.turn.agent)))
-                            .background {
-                                if !reduceMotion {
-                                    Circle().fill(Color(rgb: Self.colorRGB(card.turn.agent)).opacity(0.55 * (1 - progress)))
-                                        .frame(width: 7 + 14 * progress, height: 7 + 14 * progress)
-                                }
-                            }
-                            .frame(width: 7, height: 7).padding(.leading, 6).padding(.trailing, 3)
-                        shimmer("Working for " + Self.duration(Int64(now.timeIntervalSince1970 * 1000) - card.since), elapsed: elapsed, active: true)
+                        // a word for what it does now, held long enough to read
+                        HeldWord(word: card.nowWord).foregroundStyle(secondary)
+                        Text("· " + Self.duration(Int64(now.timeIntervalSince1970 * 1000) - card.since)).monospacedDigit()
                     } else {
-                        HStack(spacing: -6) {
-                            ForEach(Self.icons(card.steps), id: \.self) { icon in
-                                glyph(icon, size: 11).foregroundStyle(secondary).frame(width: 20, height: 20)
-                                    .background(Color(rgb: colorScheme == .dark ? 0x262625 : 0xf0eee9), in: Circle())
-                                    .overlay(Circle().strokeBorder(FragmentStyle.background, lineWidth: 1.5))
-                            }
-                        }
-                        Text("Worked for " + Self.duration((card.until ?? card.since) - card.since))
+                        Text(card.doneWord + " for " + Self.duration((card.until ?? card.since) - card.since))
                     }
-                    Text("· \(card.steps.count) \(card.steps.count == 1 ? "step" : "steps")")
                     glyph("chevron", size: 14).rotationEffect(.degrees(expanded ? 90 : 0)).animation(.easeInOut(duration: 0.14), value: expanded)
                 }.frame(minHeight: 24).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityIdentifier("workingTools")
@@ -341,4 +328,27 @@ private extension Color {
 #Preview {
     WorkingIndicator(agents: [.init(id: TurnKey(agent: "npub1preview", id: "preview"), name: "Juniper")])
         .padding(20)
+}
+
+/// A word that changes as the work does, each held at least a moment so a
+/// quick step never flickers past, and changed with a fade.
+private struct HeldWord: View {
+    let word: String
+    @State private var shown: String?
+    @State private var since = Date.distantPast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    static let hold: TimeInterval = 1.5
+
+    var body: some View {
+        Text(shown ?? word)
+            .id(shown ?? word)
+            .transition(.opacity)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: shown)
+            .task(id: word) {
+                let wait = Self.hold - Date().timeIntervalSince(since)
+                if shown != nil, wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+                guard !Task.isCancelled else { return }
+                shown = word; since = Date()
+            }
+    }
 }
