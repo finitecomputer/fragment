@@ -1,0 +1,16 @@
+[Unit]
+Description=pod-init: attested lock and unlock of the data disk, port 7000
+# the data disk by the name udev gives it (65-pod-gce-disk.rules); without
+# one pod-init still starts after the device timeout, and says blank
+Wants=network-online.target sys-kernel-config.mount dev-disk-by\x2did-google\x2dpod\x2ddata.device
+After=network-online.target sys-kernel-config.mount systemd-modules-load.service dev-disk-by\x2did-google\x2dpod\x2ddata.device
+
+[Service]
+ExecStart=/usr/bin/pod-init --config /usr/lib/pod/pod-init.json --bind 0.0.0.0 --port 7000
+Restart=on-failure
+RestartSec=2
+# the open hook starts other units; a restart of this one leaves them be
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+# /tmp in memory. The root is read-only and systemd.volatile=state makes
+# only /var a tmpfs; Ubuntu ships no tmp.mount, and Docker's `docker run`
+# needs a writable /tmp ("failed to create temp dir: mkdir
+# /tmp/containerd-mount...: read-only file system", the first debug run).
+[Unit]
+Description=Temporary Directory /tmp
+ConditionPathIsSymbolicLink=!/tmp
+DefaultDependencies=no
+Conflicts=umount.target
+Before=local-fs.target umount.target
+After=swap.target
+
+[Mount]
+What=tmpfs
+Where=/tmp
+Type=tmpfs
+Options=mode=1777,strictatime,nosuid,nodev,size=50%,nr_inodes=1m
+
+[Install]
+WantedBy=local-fs.target

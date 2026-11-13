@@ -1,0 +1,3 @@
+# Sorts before 10-pod.preset, so it wins: sshd at boot (debug only).
+enable ssh.service
+disable ssh.socket

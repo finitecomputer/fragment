@@ -1,0 +1,21 @@
+[Unit]
+Description=pod: the platform (xtask dev --lan on celld), from the image's tree
+# started by pod-opened once the volume is open; never at boot
+Requires=pod-addr.service pod-computers.service pod-engine.service
+After=pod-addr.service pod-computers.service pod-engine.service
+
+[Service]
+User=alex
+Group=alex
+SupplementaryGroups=docker
+EnvironmentFile=/run/pod/stack.env
+ExecStart=/usr/lib/pod/pod-stack
+# on the volume, never the console
+StandardOutput=append:/srv/private/home/demo.log
+StandardError=inherit
+# xtask stops its stack on Ctrl-C: celld drains, then the node goes
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=10

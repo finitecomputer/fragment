@@ -1,0 +1,29 @@
+#!/usr/sbin/nft -f
+# What the tailnet may do with this VM, and the VM with the tailnet.
+#   in:  the front door (443), the root s page (80) and the zone s DNS (53); nothing else
+#   out: nothing the VM or its containers start: an agent runs what it likes,
+#        and the tailnet s other devices are not its to reach
+# A table of its own, ahead of Tailscale s and Docker s chains: a drop here is
+# final whatever they accept, and their restarts do not reorder it.
+table inet pod_demo
+delete table inet pod_demo
+table inet pod_demo {
+  chain input {
+    type filter hook input priority -10; policy accept;
+    iifname "tailscale0" ct state established,related accept
+    iifname "tailscale0" tcp dport { 53, 80, 443 } accept
+    iifname "tailscale0" udp dport 53 accept
+    iifname "tailscale0" icmp type echo-request accept
+    iifname "tailscale0" counter drop
+  }
+  chain forward {
+    type filter hook forward priority -10; policy accept;
+    oifname "tailscale0" counter drop
+    iifname "tailscale0" counter drop
+  }
+  chain output {
+    type filter hook output priority -10; policy accept;
+    oifname "tailscale0" ct state established,related accept
+    oifname "tailscale0" counter drop
+  }
+}

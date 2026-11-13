@@ -1,0 +1,5 @@
+# /dev/disk/by-id/google-<device name> for Compute Engine's NVMe disks (C3),
+# as Google's guest packages name them; this image has none of those.
+# pod-init's volume is /dev/disk/by-id/google-pod-data.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="nvme*n*", ENV{DEVTYPE}=="disk", IMPORT{program}="/usr/lib/pod/gce-disk-name %k"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_POD_GCE_NAME}=="?*", SYMLINK+="disk/by-id/google-$env{ID_POD_GCE_NAME}"

@@ -165,7 +165,7 @@ mod tests {
         for line in text.lines().filter(|l| l.starts_with("ADD ")) {
             assert!(line.contains("--checksum=sha256:") && line.contains("https://"), "local ADD or unpinned remote inputs need review: {line}");
         }
-        for path in ["cell/src/lib.rs", "cell/shell/index.html", "templates/chat/index.html", "xtask/src/main.rs", "crates/e2e/src/main.rs"] {
+        for path in ["cell/src/lib.rs", "cell/shell/index.html", "templates/chat/index.html", "xtask/src/main.rs", "crates/e2e/src/main.rs", "pod-image/mkosi/mkosi.conf"] {
             assert!(!INPUTS.iter().any(|p| path == *p || path.starts_with(&format!("{p}/"))), "not an image input: {path}");
         }
     }

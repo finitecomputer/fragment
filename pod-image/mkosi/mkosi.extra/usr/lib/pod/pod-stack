@@ -1,0 +1,20 @@
+#!/bin/bash
+# pod-stack: the platform as the demo VM ran it (poc/pod/demo/vm/demo.sh),
+# from the image: celld, sandcastle and the tree's prebuilt xtask, no
+# cargo, npm or network at start (FRAGMENT_PREBUILT: platform/
+# fragment-prebuilt.patch). Its addresses come from pod-addr.
+set -euo pipefail
+: "${FRAGMENT_LAN_BIND:?pod-addr sets it}" "${FRAGMENT_LAN_ADDR:?pod-addr sets it}"
+T=/srv/private/home/fragment-home
+export HOME=/srv/private/home TMPDIR=/srv/private/tmp
+export FRAGMENT_PREBUILT=1
+export CELLD_BIN=/usr/lib/pod/bin/celld CELLD_ESBUILD=/usr/lib/pod/bin/esbuild
+export SANDCASTLE_NODE_BIN=/usr/lib/pod/bin/sandcastle-node
+export FRAGMENT_LAN_BIN="$T/target/release/fragment-lan"
+export FRAGMENT_LAN_STATE=/srv/private/lan-state FRAGMENT_LAN_ZONE=private.home.arpa
+export FRAGMENT_LAN_DNS_UPSTREAM=169.254.169.254:53 FRAGMENT_LAN_USERS=alex
+export FRAGMENT_LAN_ENGINE=/srv/private/engine
+for _ in $(seq 1 30); do [[ -S /srv/private/engine/engine.sock ]] && break; sleep 1; done
+cd "$T"
+echo "pod-stack: $(date -u +%FT%TZ) the door on $FRAGMENT_LAN_BIND, the zone answering $FRAGMENT_LAN_ADDR"
+exec target/debug/xtask dev --lan

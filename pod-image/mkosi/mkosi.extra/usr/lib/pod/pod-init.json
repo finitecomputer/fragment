@@ -1,0 +1,9 @@
+{
+  "volume_image": "/dev/disk/by-id/google-pod-data",
+  "volume_size_gb": 1,
+  "mapper_name": "pod-private",
+  "mount": "/srv/private",
+  "owner_file": "pod/owner",
+  "tls_root": "/srv/private/lan-state/ca/ca.pem",
+  "open_hook": "/usr/lib/pod/pod-opened"
+}

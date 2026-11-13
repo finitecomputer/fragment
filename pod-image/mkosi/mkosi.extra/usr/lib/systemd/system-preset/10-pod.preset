@@ -1,0 +1,22 @@
+# What starts at boot: pod-init alone of the pod's units. Everything that
+# keeps state starts only after the owner's key has opened the data disk
+# (pod-opened starts it): Docker, containerd, Tailscale and the stack.
+# First match wins, and this file sorts before the distribution's.
+enable pod-init.service
+enable tmp.mount
+enable systemd-resolved.service
+enable systemd-timesyncd.service
+enable apparmor.service
+disable docker.service
+disable docker.socket
+disable containerd.service
+disable tailscaled.service
+disable pod-addr.service
+disable pod-computers.service
+disable pod-engine.service
+disable pod-stack.service
+disable ssh.service
+disable ssh.socket
+# TDX VMs here have no vTPM: these only fail, noisily, on the console
+disable systemd-pcrlock-*.service
+disable systemd-pcrlock-*.socket
