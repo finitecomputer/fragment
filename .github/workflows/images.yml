@@ -143,6 +143,7 @@ jobs:
               - crates/devstack/Cargo.toml
               - crates/e2e/Cargo.toml
               - crates/fakes/Cargo.toml
+              - crates/lan/Cargo.toml
               - crates/pod/Cargo.toml
               - crates/pod-init/Cargo.toml
               - xtask/Cargo.toml

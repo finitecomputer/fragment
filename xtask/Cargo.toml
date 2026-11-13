@@ -24,6 +24,8 @@ fragment-nip98 = { path = "../crates/nip98" }
 # the release's files, written into the cell's Static Assets at each build (build.rs)
 fragment-templates = { path = "../crates/templates", features = ["embed"] }
 fragment-fakes = { path = "../crates/fakes" }
+# dev's LAN mode, as a self-hosted box serves it (dev_lan.rs)
+fragment-lan = { path = "../crates/lan" }
 # `pod measure`: the registers an image's boot must show, from its bytes
 # (`verify`: its disk reader and the prediction lined up against a boot)
 fragment-pod = { path = "../crates/pod", features = ["verify"] }

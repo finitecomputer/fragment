@@ -20,7 +20,7 @@ const INPUTS: &[&str] = &[
     ".dockerignore", "images/hermes", "images/bridge", "images/Cargo.toml", "images/Cargo.lock",
     "Cargo.toml", "Cargo.lock", "cli", "crates/core", "crates/nip98", "crates/proto", "crates/templates",
     "templates/blank", "templates/board", "templates/calories", "templates/doc", "templates/inbox", "templates/notes", "templates/slides", "templates/todo",
-    "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "crates/pod/Cargo.toml", "crates/pod-init/Cargo.toml", "xtask/Cargo.toml",
+    "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "crates/lan/Cargo.toml", "crates/pod/Cargo.toml", "crates/pod-init/Cargo.toml", "xtask/Cargo.toml",
 ];
 
 #[derive(Debug, serde::Serialize)]

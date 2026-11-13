@@ -130,6 +130,7 @@ mod cloudflare;
 mod cli_release;
 mod deploy;
 mod dev_agent;
+mod dev_lan;
 mod dns;
 mod eval_sinks;
 mod guards;
@@ -225,15 +226,18 @@ struct DevArgs {
     real_agent: bool,
     models: Option<std::path::PathBuf>,
     celld: bool,
+    /// LAN mode (dev_lan.rs; docs/self-host.md, seam 9).
+    lan: bool,
 }
 
 fn dev_args(args: &[String]) -> Result<DevArgs> {
-    let mut out = DevArgs { clean: false, real_agent: false, models: None, celld: false };
+    let mut out = DevArgs { clean: false, real_agent: false, models: None, celld: false, lan: false };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--clean" => out.clean = true,
             "--real-agent" => out.real_agent = true,
+            "--lan" => out.lan = true,
             "--models" => out.models = Some(it.next().context("--models names a deployment's config")?.into()),
             "--runtime" => {
                 out.celld = match it.next().map(String::as_str) {
@@ -242,7 +246,7 @@ fn dev_args(args: &[String]) -> Result<DevArgs> {
                     other => bail!("--runtime is wrangler or celld, not {}", other.unwrap_or("nothing")),
                 }
             }
-            other => bail!("dev takes --clean, --real-agent, --models <config> and --runtime <wrangler|celld>, not {other:?}"),
+            other => bail!("dev takes --clean, --real-agent, --models <config>, --runtime <wrangler|celld> and --lan, not {other:?}"),
         }
     }
     if out.models.is_some() && !out.real_agent {
@@ -259,6 +263,8 @@ fn dev(args: &[String]) -> Result<()> {
     // the runtime: wrangler's local workerd, or celld (docs/self-host.md,
     // seam 1), located first: a missing CELLD_BIN stops the run at once
     let celld = args.celld.then(devstack::celld::CelldTools::locate).transpose()?;
+    // LAN mode's settings (docs/self-host.md, seam 9), checked before anything builds
+    let lan_mode = args.lan.then(dev_lan::Settings::from_env).transpose()?;
     // its models and key are read before anything builds
     let real = args.real_agent.then(|| dev_agent::RealAgent::read(args.models.as_deref())).transpose()?;
     // a self-hosted stack's own models (FRAGMENT_MODELS_FILE; docs/self-host.md, seam 3)
@@ -327,7 +333,8 @@ fn dev(args: &[String]) -> Result<()> {
         codestorage_org: DEV_ORG.into(),
         codestorage_key_pem: key,
         codestorage_url: fake.url.clone(),
-        host_suffix: "fragment.localhost".into(),
+        // in LAN mode, the zone: each fragment at https://<name>.<zone>
+        host_suffix: lan_mode.as_ref().map_or_else(|| "fragment.localhost".into(), |l| l.zone.clone()),
         host_label_suffix: None,
         // A dev fragment's pins move by its own moves, the CLI's refresh, and this poll.
         poll_interval_s: 10,
@@ -360,8 +367,9 @@ fn dev(args: &[String]) -> Result<()> {
         }),
         // dev's glance reads no logs: it says they are not configured
         observability: None,
-        // the CLI's host: sign-in and approvals happen where it points
-        platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
+        // the CLI's host: sign-in and approvals happen where it points; in
+        // LAN mode, the zone's apex behind the door
+        platform_url: lan_mode.as_ref().map_or_else(|| format!("http://127.0.0.1:{DEV_PORT}"), dev_lan::Settings::platform_url),
         operators: Some(fragment_core::npub::encode(operator.pubkey_hex())),
         // dev runs no move (docs/migrations.md)
         migrations: None,
@@ -397,6 +405,9 @@ fn dev(args: &[String]) -> Result<()> {
     fleet.configure(&tools, &devstack::cell_dir())?;
     // the cell's token, renewed while the stack runs (each start renews it too)
     let _renewer = openbao.as_ref().map(|(bao, _)| devstack::openbao::Renewer::start(bao.target(), devstack::openbao::RENEW_EVERY));
+    // LAN mode's DNS, door and root, in front of the node's own port: a
+    // refused port or root stops the run before the node starts
+    let lan = lan_mode.as_ref().map(|l| dev_lan::start(l, DEV_PORT)).transpose()?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
         listener: devstack::hold_port(DEV_PORT)?,
@@ -414,7 +425,10 @@ fn dev(args: &[String]) -> Result<()> {
         Some(c) => println!("  runtime:      celld dev ({}): no computers, no cards, no icons drawn (docs/self-host.md)", c.celld.display()),
     }
     println!("  node log:     {}", node.log.display());
-    println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
+    match (&lan_mode, &lan) {
+        (Some(settings), Some(lan)) => dev_lan::banner(settings, lan).iter().for_each(|line| println!("{line}")),
+        _ => println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/"),
+    }
     println!("  code.storage: {} (the fake)", fake.url);
     match &real {
         Some(r) => {
@@ -439,7 +453,8 @@ fn dev(args: &[String]) -> Result<()> {
         None => println!("  secrets:      wrangler's local Secrets Store"),
     }
 
-    println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
+    let signs_in_at = lan_mode.as_ref().map_or_else(|| format!("http://127.0.0.1:{DEV_PORT}"), dev_lan::Settings::platform_url);
+    println!("  sign-in:      {signs_in_at}/ via {workos_label}");
     if workos_fake.is_some() {
         println!("  connections:  {DEV_CONNECTION} (the WorkOS fake's stand-in: connects at once, nothing real)");
     }
@@ -849,6 +864,7 @@ mod tests {
         assert!(!none.clean && !none.real_agent && none.models.is_none());
         let all = args(&["--real-agent", "--clean", "--models", "preview.jsonc"]).unwrap();
         assert!(all.clean && all.real_agent && all.models.as_deref() == Some(std::path::Path::new("preview.jsonc")));
+        assert!(!none.lan && args(&["--lan", "--runtime", "celld"]).is_ok_and(|a| a.lan && a.celld), "LAN mode on either runtime");
         for bad in [&["--hermes"][..], &["--real-agent", "--models"], &["--models", "preview.jsonc"]] {
             assert!(args(bad).is_err(), "{bad:?}");
         }
