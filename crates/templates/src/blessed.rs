@@ -49,13 +49,23 @@ pub const DATA_FILES_MAX: usize = 1_000;
 pub const DATA_MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub const DATA_FILE_MAX_BYTES: u64 = 256 * 1024;
 
+/// A blessed template's icon, when it carries one (docs/api.md, Icons):
+/// the icon of each fragment on it that has none of its own, served from
+/// the release, so no fragment holds a copy (decision 40).
+pub const ICON: &str = "icon.png";
+
 /// Whether `path` of a blessed template is its data: what every fragment on
 /// it lists and reads from the release (`GET …/files`, `…/file`, `__files`,
 /// `__file`), beneath its own files at the same path. Everything but its
-/// manifest, its README, its code and its site, which the release serves
-/// otherwise (decision 40: no copies to drift).
+/// manifest, its README, its icon, its code and its site, which the release
+/// serves otherwise (decision 40: no copies to drift).
 pub fn is_data(path: &str) -> bool {
-    path != "fragment.json" && path != "README.md" && !is_code(path) && !path.starts_with("site/")
+    path != "fragment.json" && path != "README.md" && path != ICON && !is_code(path) && !path.starts_with("site/")
+}
+
+/// A blessed template's icon (`ICON`), when it carries one.
+pub fn icon(name: &str) -> Option<&'static File> {
+    template(name)?.file(ICON)
 }
 
 /// A data file's version, `release:<24 hex>` from its bytes' hash: its
@@ -263,6 +273,23 @@ mod tests {
         assert!(body.contains("raw/") && body.contains("fragment call <brain> search"), "it says how to ingest and search");
     }
 
+    /// Goal: a brain has an icon with no one making one (docs/api.md,
+    /// Icons). Method: the brain's template carries one, an icon as a
+    /// making keeps it (a `SIZE` PNG within `ICON_MAX_BYTES`, kept whole
+    /// by a `PUT`), and it is no data; a template without one has none.
+    #[test]
+    fn a_brain_carries_an_icon() {
+        use fragment_core::icon;
+        let brain = template("brain").unwrap();
+        let f = self::icon("brain").expect("the brain's icon");
+        let bytes = bytes_of(brain, f);
+        assert!(bytes.len() <= icon::ICON_MAX_BYTES, "{} bytes", bytes.len());
+        let (w, h, _) = icon::alpha_of(&bytes).expect("a PNG with alpha");
+        assert_eq!((w, h), (icon::SIZE, icon::SIZE));
+        assert!(data("brain").iter().all(|d| d.path != ICON), "no data");
+        assert!(self::icon("chat").is_none() && self::icon("todo").is_none());
+    }
+
     /// Goal: what counts as code is what a fragment on a template may not
     /// carry of its own. Method: app.mjs and applib modules are code; data,
     /// a page's script, and a module outside applib/ are not.
@@ -306,7 +333,7 @@ mod tests {
         for p in ["skills/research/arxiv-finite/SKILL.md", "skills/x/scripts/a.py", "LICENSE", "docs/README.md", "x/app.mjs"] {
             assert!(is_data(p), "{p}");
         }
-        for p in ["fragment.json", "README.md", "app.mjs", "applib/a.mjs", "site/index.html", "site/skills/x.md"] {
+        for p in ["fragment.json", "README.md", "icon.png", "app.mjs", "applib/a.mjs", "site/index.html", "site/skills/x.md"] {
             assert!(!is_data(p), "{p}");
         }
         assert!(data("agent").is_empty() && data("chat").is_empty(), "the agent and chat templates carry no data");

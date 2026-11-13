@@ -26,8 +26,14 @@ fn agent(old: &str) -> RosterAgent {
         sizes: Sizes { cache: 1, history: 2, work: 3, staged: 5, total: 6 },
         brains: vec![],
         sites: vec![],
-        has: Has { telegram: false, openrouter: false, nostr: true },
+        // none, as the mover's fleet says of every old agent (FIN-498)
+        has: Has { telegram: false, openrouter: false, nostr: false },
     }
+}
+
+/// `fragment operator <args> --key-file <key> --json`: its `data`.
+fn op_cli(s: &Suite, api: &Api, home: &std::path::Path, key: &str, args: &[&str]) -> Result<Value> {
+    s.cli_json(api, home, &[&["operator"], args, &["--key-file", key, "--json"]].concat())
 }
 
 fn person(workos_id: &str, olds: &[&str]) -> RosterPerson {
@@ -35,7 +41,7 @@ fn person(workos_id: &str, olds: &[&str]) -> RosterPerson {
 }
 
 pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("move", &[Need::Fakes, Need::Deployment, Need::Levers]) {
+    if !s.section("move", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Move]) {
         return Ok(());
     }
     let mover = Mover::new(&api.base, s.mover.clone());
@@ -54,6 +60,15 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let act = |o: &str, op: &str| api.signed(&operator, "POST", &format!("/api/admin/migrations/{o}"), Some(&json!({ "op": op })));
     let withdraw = |o: &str, why: &str| api.signed(&operator, "POST", &format!("/api/admin/migrations/{o}"), Some(&json!({ "op": "withdraw", "why": why })));
     const WHY: &str = "a staff test agent";
+    // staff's CLI, with the operator key's file
+    let file = s.dir("move-operator").join("operator.key");
+    std::fs::write(&file, format!("{}\n", operator.secret_hex()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let (home, key) = (s.dir("move-cli"), file.to_string_lossy().to_string());
     // a move as staff read it: the operators' list, page by page
     let moved = |o: &str| -> Result<Value> {
         let mut after = String::new();
@@ -142,30 +157,29 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let yes_again = answer(&a1, "yes", Some(&alice_agent))?;
     let cmd = mover.commands()?.into_iter().find(|c| c.old == a1).context("a1's command")?;
     s.ok(
-        "Yes with another person's agent is refused (403); with their own, the mover's mailbox holds stop_and_stage of the stage <old>.p1.1, handing off every secret the old agent has, and Yes again changes nothing",
+        "Yes with another person's agent is refused (403); with their own, the mover's mailbox holds stop_and_stage of the stage <old>.p1.1, asking for every kind of secret whatever the roster's has says, and Yes again changes nothing",
         theirs.status == 403
             && yes.body["state"] == "asked"
             && yes_again.status == 200
-            && serde_json::to_value(&cmd)? == json!({ "id": format!("{a1}:1:stop_and_stage"), "old": a1, "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{a1}.p1.1"), "secrets": ["nostr_nsec"] }),
+            && serde_json::to_value(&cmd)? == json!({ "id": format!("{a1}:1:stop_and_stage"), "old": a1, "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{a1}.p1.1"), "secrets": ["telegram_bot_token", "openrouter_key", "nostr_nsec"] }),
         format!("{theirs} {cmd:?}"),
     );
 
     // ---- the hand-off of its secrets (F11): the mover's alone, for its
-    // command's kinds; a value is never echoed (move-import puts them)
+    // command; a value is never echoed (move-import puts them)
     let hand = |keys: &crate::Keys, o: &str, body: Value| api.signed(keys, "POST", &format!("/api/migrations/mover/agents/{o}/secrets"), Some(&body));
     let mover_keys = s.mover.clone();
     let nsec = json!({ "kind": "nostr_nsec", "value": "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5" });
     let stranger_hand = hand(&stranger, &a1, json!({ "command": cmd.id, "items": [nsec] }))?;
-    let unasked = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [{ "kind": "telegram_bot_token", "value": "123456:handoff-sentinel" }] }))?;
-    let twice = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [nsec, nsec] }))?;
+    let twice = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [nsec, { "kind": "nostr_nsec", "value": "handoff-sentinel" }] }))?;
     let unread = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [{ "kind": "nostr_nsec", "value": 987_654_321_012u64 }] }))?;
     let stale = hand(&mover_keys, &a1, json!({ "command": format!("{a1}:9:stop_and_stage"), "items": [nsec] }))?;
     let none = hand(&mover_keys, &d1, json!({ "command": format!("{d1}:1:stop_and_stage"), "items": [nsec] }))?;
-    let quiet = [&unasked, &twice, &unread].iter().all(|r| !r.text.contains("handoff-sentinel") && !r.text.contains("987654321012"));
+    let quiet = [&twice, &unread].iter().all(|r| !r.text.contains("handoff-sentinel") && !r.text.contains("987654321012"));
     s.ok(
-        "a hand-off is the mover's alone (403); a kind its command does not ask for, a kind twice, or a body that does not read is refused (400) in words that never quote a value; another command, or an old agent with none, is 409",
-        stranger_hand.status == 403 && unasked.status == 400 && twice.status == 400 && unread.status == 400 && quiet && stale.status == 409 && none.status == 409,
-        format!("{} {} {} {} {} {}", stranger_hand.status, unasked, twice.status, unread, stale.status, none.status),
+        "a hand-off is the mover's alone (403); a kind twice, or a body that does not read is refused (400) in words that never quote a value; another command, or an old agent with none, is 409",
+        stranger_hand.status == 403 && twice.status == 400 && unread.status == 400 && quiet && stale.status == 409 && none.status == 409,
+        format!("{} {} {} {} {}", stranger_hand.status, twice, unread, stale.status, none.status),
     );
 
     // ---- the mover down: held, then staff try again
@@ -177,9 +191,13 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let list = admin("GET", "")?;
     let row = list.body["moves"].as_array().and_then(|ms| ms.iter().find(|m| m["old"] == a1.as_str())).cloned().unwrap_or_default();
     s.ok("staff see it held, with its reason and no command, and no name or email", list.status == 200 && row["state"] == "held" && row["reason"] == "mover_down" && row["command"].is_null() && !list.text.contains("@old.test") && !list.text.contains("Old "), &row);
-    let r = act(&a1, "retry")?;
+    let r = op_cli(s, api, &home, &key, &["retry", &a1]);
     let stale = mover.report_as(&a1, &cmd.id, 9, event("stopped"))?;
-    s.ok("staff's retry is a new attempt (2), and a report on attempt 1's command is stale (409), changing nothing", r.status == 200 && r.body["state"] == "asked" && r.body["attempt"] == 2 && stale.status == 409 && state(&a1) == "asked", format!("{r} {}", stale.body));
+    s.ok(
+        "staff's retry (`fragment operator retry`) is a new attempt (2), and a report on attempt 1's command is stale (409), changing nothing",
+        r.as_ref().is_ok_and(|v| v["state"] == "asked" && v["attempt"] == 2) && stale.status == 409 && state(&a1) == "asked",
+        format!("{r:?} {}", stale.body),
+    );
 
     // ---- staging: stopped, progress, a part, then a stall, then staged
     mover.script(Script::Stalls);
@@ -258,13 +276,13 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- staff restart the old agent: offered again, the mover told to restart it
     let staged_three = objects(&format!("p1/{a1}/3/"));
-    let r = act(&a1, "restart-old")?;
+    let r = op_cli(s, api, &home, &key, &["restart-old", &a1]);
     let restart = mover.commands()?.into_iter().find(|c| c.old == a1);
     mover.run_once()?;
     let m = moved(&a1)?;
     s.ok(
-        "restart-old offers it again, unbound, and the mover restarts the old agent: its command answered, then gone",
-        r.status == 200 && r.body["state"] == "open" && restart.is_some_and(|c| c.id == format!("{a1}:3:restart")) && m["command"].is_null() && m["agent"].is_null(),
+        "restart-old (`fragment operator restart-old`) offers it again, unbound, and the mover restarts the old agent: its command answered, then gone",
+        r.as_ref().is_ok_and(|v| v["state"] == "open") && restart.is_some_and(|c| c.id == format!("{a1}:3:restart")) && m["command"].is_null() && m["agent"].is_null(),
         &m,
     );
 
@@ -280,11 +298,16 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     mover.run_once()?;
     let m = moved(&a1)?;
     s.ok("Yes again is attempt 4; a failed stage past the attempts is held (stage_failed)", attempt == 4 && m["state"] == "held" && m["reason"] == "stage_failed", &m);
-    let r = act(&a1, "retire")?;
+    let r = op_cli(s, api, &home, &key, &["retire", &a1]);
     mover.script(Script::Done);
     mover.run_once()?;
     let bad = withdraw(&a1, WHY)?;
-    s.ok("staff retire it: the mover retires the old agent and the move is done (moved); a done move is not withdrawn (409)", r.body["state"] == "retiring" && state(&a1) == "moved" && bad.status == 409, format!("{} {}", r.body, bad));
+    let again = op_cli(s, api, &home, &key, &["retire", &a1]);
+    s.ok(
+        "staff retire it (`fragment operator retire`): the mover retires the old agent and the move is done (moved); a done move is not withdrawn (409), nor retired again (the CLI fails)",
+        r.as_ref().is_ok_and(|v| v["state"] == "retiring") && state(&a1) == "moved" && bad.status == 409 && again.is_err(),
+        format!("{r:?} {bad} {again:?}"),
+    );
 
     // ---- the one person's bound agent reads its own stage, while it
     // imports; no one else, ever
@@ -335,17 +358,28 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let again = api.signed(&alice_agent_keys, "POST", &at("done"), Some(&json!({ "ok": true })))?;
     let after = (api.signed(&alice_agent_keys, "GET", &at("zip"), None)?, api.signed(&alice_agent_keys, "POST", &at("open"), None)?);
     s.ok(
-        "done well: retiring as migrated; the same done again changes nothing; its stage is refused to its own agent at once (409); a done that is not one is 400",
+        "done well: retiring; the same done again changes nothing; its stage is refused to its own agent at once (409); a done that is not one is 400",
         bad.status == 400 && done.status == 200 && done.body["state"] == "retiring" && again.status == 200 && again.body["state"] == "retiring" && after.0.status == 409 && after.1.status == 409,
         format!("{bad} {} {} {}", done.body, after.0, after.1),
     );
+    // done is harmless: nothing for the mover, the old agent stays stopped
+    // and its stage kept, until staff's word
+    let asked = mover.commands()?.into_iter().any(|c| c.old == e1);
+    mover.run_once()?;
+    let row = moved(&e1)?;
+    let kept = objects(&format!("p1/{e1}/1/"));
+    s.ok(
+        "a good import waits for staff: retiring with no command, nothing in the mailbox, no deadline but its stage's keep, and its stage kept in the bucket",
+        !asked && row["state"] == "retiring" && row["command"].is_null() && row["deadline_ms"] == row["staged_ms"].as_i64().map(|at| at + 14 * DAY_MS).unwrap_or_default() && kept.len() == 2,
+        format!("{row} {kept:?}"),
+    );
+    let r = act(&e1, "retire")?;
     let retire = mover.commands()?.into_iter().find(|c| c.old == e1).map(|c| serde_json::to_value(&c).unwrap_or_default());
     mover.run_once()?;
-    let gone = deleted(s, &format!("p1/{e1}/1/"));
     s.ok(
-        "the old agent is retired as migrated (moved), and its stage deleted from the bucket by the alarm",
-        retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && gone && state(&e1) == "moved",
-        format!("{retire:?} {}", state(&e1)),
+        "on staff's retire the old agent is retired as migrated (moved), its stage still kept to its keep",
+        r.status == 200 && r.body["state"] == "retiring" && retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && state(&e1) == "moved" && objects(&format!("p1/{e1}/1/")).len() == 2,
+        format!("{r} {retire:?} {}", state(&e1)),
     );
 
     // ---- a roster withdraws the unasked; staff's withdrawal holds
@@ -407,16 +441,8 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{inc} {dropped} {f_back} {forgot} {forgot_again}"),
     );
     // the same from the CLI, with the operator key's file
-    let file = s.dir("move-operator").join("operator.key");
-    std::fs::write(&file, format!("{}\n", operator.secret_hex()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
-    }
-    let (home, key) = (s.dir("move-cli"), file.to_string_lossy().to_string());
     let w3 = old("w3");
-    let cli = |args: &[&str]| s.cli_json(api, &home, &[&["operator"], args, &["--key-file", &key, "--json"]].concat());
+    let cli = |args: &[&str]| op_cli(s, api, &home, &key, args);
     let out = cli(&["withdraw", &w3, "--why", WHY]);
     let list = cli(&["moves", "--withdrawn"]);
     let back = cli(&["include", &w3]);
@@ -476,20 +502,23 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
             &late_move,
         );
     }
-    // the late sign-up's import, to its end: the old agent retired as
-    // migrated, marked again from archived (what finite.computer redirects by)
+    // the late sign-up's import, to its end: on staff's word, the old agent
+    // retired as migrated, marked again from archived (what finite.computer
+    // redirects by)
     let late_stage = format!("{c1}.p2.{}", moved(&c1)?["attempt"]);
     let at = |what: &str| format!("/api/migrations/stages/{late_stage}/{what}");
     let opened = api.signed(&carol_agent_keys, "POST", &at("open"), None)?;
     let zip = api.signed(&carol_agent_keys, "GET", &at("zip"), None)?;
     let done = api.signed(&carol_agent_keys, "POST", &at("done"), Some(&json!({ "ok": true })))?;
+    let asked = mover.commands()?.into_iter().any(|c| c.old == c1);
+    let r = act(&c1, "retire")?;
     let retire = mover.commands()?.into_iter().find(|c| c.old == c1).map(|c| serde_json::to_value(&c).unwrap_or_default());
     mover.run_once()?;
     let late_kept = objects(&format!("p2/{c1}/"));
     s.ok(
-        "the late sign-up reads the kept stage and says it is done: the old agent is retired as migrated, the move done (moved), its stage kept to its expiry",
-        opened.status == 200 && opened.body["manifest"]["phase"] == "p2" && zip.status == 200 && zip.bytes == mover.zip_bytes() && done.body["state"] == "retiring" && retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && state(&c1) == "moved" && late_kept.len() == 2,
-        format!("{} {} {retire:?} {} {late_kept:?}", opened.status, done.body, state(&c1)),
+        "the late sign-up reads the kept stage and says it is done; on staff's retire, the old agent is retired as migrated, the move done (moved), its stage kept to its expiry",
+        opened.status == 200 && opened.body["manifest"]["phase"] == "p2" && zip.status == 200 && zip.bytes == mover.zip_bytes() && done.body["state"] == "retiring" && !asked && r.status == 200 && retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && state(&c1) == "moved" && late_kept.len() == 2,
+        format!("{} {} {asked} {retire:?} {} {late_kept:?}", opened.status, done.body, state(&c1)),
     );
     let kept = objects(&format!("p2/{d1}/"));
     later_by(90 * DAY_MS)?;
@@ -643,7 +672,7 @@ fn offer(s: &mut Suite, api: &Api, mover: &Mover, run: &str, later_by: &dyn Fn(i
 pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     use super::computers::{agent_replies, phase, turn_of, AGENT_JSON, CHAT_JSON};
     use super::jobs::records;
-    if !s.section("move-import", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Computers]) {
+    if !s.section("move-import", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Computers, Need::Move]) {
         return Ok(());
     }
     const WAKE: Duration = Duration::from_secs(90);
@@ -673,9 +702,8 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(woke, "the computer wakes: {}", phase(api, &owner, &id));
 
     // the move: Yes with this agent, staged
-    // an old agent with all three secrets: Yes hands each to its owner's Vault
-    let mut people = vec![person(&workos_id, &[&old])];
-    people[0].agents[0].has = Has { telegram: true, openrouter: true, nostr: true };
+    // an old agent with all three secrets, though its roster says none: Yes hands each to its owner's Vault
+    let people = vec![person(&workos_id, &[&old])];
     let r = mover.push(&Roster { snapshot: format!("{old}-s1"), observed_ms: 1_800_000_000_000, people })?;
     anyhow::ensure!(r.status == 200, "the roster: {} {}", r.status, r.body);
     let visit = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(&owner) })))?;
@@ -757,7 +785,7 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the agent opens its stage and reads its zip through its own egress (NIP-98 as itself)", opened.starts_with("fetched 200:") && opened.contains(STAGE_FORMAT) && zip.starts_with("fetched 200:"), format!("{opened} | {}", zip.chars().take(40).collect::<String>()));
     let done = fetched(s, 3, &format!("fetch {base}/done with {agent_name} in x-fragment-agent posting {{\"ok\":true}}"))?;
     let after = fetched(s, 4, &format!("fetch {base}/zip with {agent_name} in x-fragment-agent"))?;
-    s.ok("it says it is done: the move retires the old agent, and its stage's routes refuse at once", done.starts_with("fetched 200:") && done.contains("retiring") && after.starts_with("fetched 409:"), format!("{done} | {after}"));
+    s.ok("it says it is done: the move waits for staff's retire, and its stage's routes refuse at once", done.starts_with("fetched 200:") && done.contains("retiring") && after.starts_with("fetched 409:"), format!("{done} | {after}"));
     mover.run_once()?;
     Ok(())
 }
@@ -768,7 +796,7 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
 /// `/move` here; Not now answered there, the page is theirs. Its pictures,
 /// at 1280 and 390 px, light and dark.
 pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("move-ui", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Chrome, Need::LocalDocker, Need::Computers]) {
+    if !s.section("move-ui", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Chrome, Need::LocalDocker, Need::Computers, Need::Move]) {
         return Ok(());
     }
     let Some(mut b) = s.browser()? else {
@@ -832,7 +860,7 @@ pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
 /// node restarts, nothing more. One who holds a seat keeps theirs, and gets
 /// the credit. A comp with an end (`untilMs`) ends by itself then.
 pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("move-comp", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Node]) {
+    if !s.section("move-comp", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Node, Need::Move]) {
         return Ok(());
     }
     let mover = Mover::new(&api.base, s.mover.clone());
@@ -910,8 +938,11 @@ pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
 /// the cover standing aside there; the one question (which, by what
 /// name); Bring over makes the guest's comp, then a new agent (its chat not
 /// opened), then posts its Yes; then the move as the server says it goes:
-/// stopping, then (the fake mover staging it) bringing it over. Pictures
-/// at 1280 and 390 px, light and dark.
+/// stopping, then (the fake mover staging it) its import begun, which takes
+/// the person to the new agent's own chat (FIN-463: the agent tells its
+/// move there, and asks there). The page opened again then says it is
+/// being brought over, a tap from that chat. Pictures at 1280 and 390 px,
+/// light and dark.
 fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover: &Mover, session: &str, old: &str, shots: &std::path::Path) -> Result<()> {
     let wait = Duration::from_secs(30);
     let agent_wait = Duration::from_secs(180);
@@ -968,6 +999,11 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     let list = super::shell::shell(api, session, "GET", "/api/fragments", None, &[])?;
     let kinds: Vec<String> = list.body["fragments"].as_array().map(|l| l.iter().filter_map(|f| f["kind"].as_str().map(str::to_string)).collect()).unwrap_or_default();
     let one_each = kinds.iter().filter(|k| *k == "agent").count() == 1 && kinds.iter().filter(|k| *k == "chat").count() == 1;
+    let its_chat = list.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["kind"] == "chat")).and_then(|f| f["name"].as_str()).unwrap_or_default().to_string();
+    let shown_chat = format!(
+        "(location.pathname === '/' && document.getElementById('move-page').hidden && new URLSearchParams((document.querySelector('#frames iframe:not([hidden])')?.dataset.src ?? '?').split('?')[1]).get('name') === {})",
+        serde_json::to_string(&its_chat)?
+    );
     let _ = b.screenshot(&page, &shots.join("move-asked-1280-light.png"));
     s.ok(
         "Bring over: the guest is given the comp (a comped seat, $25), one new agent is made, with its one chat, not opened (the page stays), and its Yes starts the move: stopping, in the server's words",
@@ -975,24 +1011,45 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
             && ledger.body["purchasedMicros"] == 25_000_000 && seat.body["seat"]["comped"] == true,
         json!({ "move": m, "ledger": ledger.body["purchasedMicros"], "seat": seat.body["seat"], "path": still, "kinds": kinds }),
     );
-    // the mover stops it and stages it: the page follows, read again
+    // the mover stops it and stages it: the page follows, read again, and
+    // once its import begins the person is in the new agent's own chat
     mover.run_once()?;
-    let importing = b.until(&page, &format!("{said} === 'Bringing Juniper over…'"), Duration::from_secs(60));
-    let _ = b.screenshot(&page, &shots.join("move-importing-1280-light.png"));
-    s.ok("the move as it goes, read again while under way: the mover staged it, and the page says it is being brought over", importing, b.eval(&page, &said)?);
-    // FIN-463: where its SimpleX chat is kept, said once, calmly
-    let simplex = b.eval(&page, "[...document.querySelectorAll('#move-page .move-simplex')].map((p) => p.textContent)")?;
-    s.ok("as it imports, one line says its SimpleX chat, if it had one, is kept in Settings", simplex == json!(["If you chatted with it on SimpleX, keep that chat in Settings."]), &simplex);
-    for (width, height, phone, scheme) in [(1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
+    let arrived = b.until(&page, &shown_chat, Duration::from_secs(60));
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = b.screenshot(&page, &shots.join("move-arrived-1280-light.png"));
+    s.ok(
+        "its import begun while the page shows, the person is taken to the new agent's own chat, where it says how the move goes and asks what it needs",
+        arrived,
+        json!({ "path": b.eval(&page, "location.pathname")?, "chat": its_chat }),
+    );
+    b.close(page)?;
+    let open_chat = format!("[...({row}?.querySelectorAll('button') ?? [])].map((b) => b.textContent)");
+    for (width, height, phone, scheme) in [(1280, 800, false, "light"), (1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
         let p = b.open(&format!("{}/move", api.base))?;
         b.viewport(&p, width, height, phone)?;
         b.color_scheme(&p, scheme)?;
-        let _ = b.until(&p, &format!("{said} === 'Bringing Juniper over…'"), wait);
+        let importing = b.until(&p, &format!("{said} === 'Bringing Juniper over…' && {open_chat}.includes('Open chat')"), wait);
         std::thread::sleep(Duration::from_millis(300));
         let _ = b.screenshot(&p, &shots.join(format!("move-importing-{width}-{scheme}.png")));
+        if (width, scheme) == (1280, "light") {
+            s.ok(
+                "come back to the page as it imports: it stays, says it is being brought over, and its row opens the new agent's chat",
+                importing && b.eval(&p, "location.pathname")? == "/move",
+                json!({ "said": b.eval(&p, &said)?, "buttons": b.eval(&p, &open_chat)? }),
+            );
+            // FIN-463: where its SimpleX chat is kept, said once, calmly
+            let simplex = b.eval(&p, "[...document.querySelectorAll('#move-page .move-simplex')].map((p) => p.textContent)")?;
+            s.ok("as it imports, one line says its SimpleX chat, if it had one, is kept in Settings", simplex == json!(["If you chatted with it on SimpleX, keep that chat in Settings."]), &simplex);
+        }
+        b.eval(&p, &format!("([...{row}.querySelectorAll('button')].find((b) => b.textContent === 'Open chat').click(), true)"))?;
+        let tapped = b.until(&p, &shown_chat, wait);
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = b.screenshot(&p, &shots.join(format!("move-chat-{width}-{scheme}.png")));
+        if (width, scheme) == (1280, "light") {
+            s.ok("its Open chat is the new agent's own chat", tapped, b.eval(&p, "location.pathname")?);
+        }
         b.close(p)?;
     }
-    b.close(page)?;
     Ok(())
 }
 

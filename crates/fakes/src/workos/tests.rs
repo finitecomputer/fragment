@@ -183,6 +183,66 @@ fn a_token_past_its_imports_expiry_is_refreshed_once() {
 /// and stops; another, over the same file, is asked for a new email and the
 /// first one again. A fake with no file starts its ids over, the first
 /// email to come taking the first id.
+/// Goal: the stand-in provider's Basic client is authenticated by its
+/// `Authorization: Basic` header alone, at its token endpoint and at its
+/// revocation, so a connect and a disconnect that pass through it prove
+/// the header was sent and the body named no client.
+#[test]
+fn the_basic_client_is_authenticated_by_its_header_alone() {
+    let p = Pipes::start();
+    let (id, secret) = BASIC_CLIENT;
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let code = |client: &str| {
+        let q = [("client_id", client), ("response_type", "code"), ("code_challenge_method", "S256"), ("code_challenge", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"), ("redirect_uri", "http://127.0.0.1:9/cb"), ("scope", "mail.read openid"), ("state", "s")];
+        let r = p.http.get(format!("{}/test-oauth/authorize", p.fake.url)).query(&q).send().unwrap();
+        let back = url::Url::parse(r.headers()["location"].to_str().unwrap()).unwrap();
+        back.query_pairs().find(|(k, _)| k == "code").unwrap().1.into_owned()
+    };
+    let post = |path: &str, form: &[(&str, &str)], basic: Option<(&str, &str)>| {
+        let req = p.http.post(format!("{}{path}", p.fake.url)).form(form);
+        let r = match basic {
+            Some((user, password)) => req.basic_auth(user, Some(password)),
+            None => req,
+        }
+        .send()
+        .unwrap();
+        (r.status().as_u16(), serde_json::from_slice::<Value>(&r.bytes().unwrap()).unwrap_or(Value::Null))
+    };
+    let exchange = |path: &str, code: &str, client: &[(&str, &str)], basic: Option<(&str, &str)>| {
+        let form: Vec<(&str, &str)> = [("code", code), ("code_verifier", verifier), ("redirect_uri", "http://127.0.0.1:9/cb"), ("grant_type", "authorization_code")].into_iter().chain(client.iter().copied()).collect();
+        post(path, &form, basic)
+    };
+    let in_body = [("client_id", id), ("client_secret", secret)];
+
+    let ours = code(id);
+    for (why, client, basic) in [
+        ("no header", &[][..], None),
+        ("its secret in the body, as the other client sends it", &in_body[..], None),
+        ("its header, and the client in the body too", &in_body[..], Some((id, secret))),
+        ("its header, and its id in the body", &in_body[..1], Some((id, secret))),
+        ("another secret", &[][..], Some((id, "mock-connection-secret"))),
+    ] {
+        let (status, answer) = exchange("/test-oauth/basic/token", &ours, client, basic);
+        assert_eq!((status, answer["error"].as_str()), (401, Some("invalid_client")), "{why}: {answer}");
+    }
+    let (status, grant) = exchange("/test-oauth/basic/token", &ours, &[], Some((id, secret)));
+    assert_eq!(status, 200, "its header alone, the code unspent by the refusals: {grant}");
+    assert!(grant["refresh_token"].is_string() && grant["id_token"].is_string(), "{grant}");
+
+    // a code is its client's: neither is exchanged as the other
+    let (status, answer) = exchange("/test-oauth/token", &code(id), &[("client_id", "mock-connection-client"), ("client_secret", "mock-connection-secret")], None);
+    assert_eq!((status, answer["error"].as_str()), (400, Some("invalid_grant")), "the Basic client's code at the other's endpoint: {answer}");
+    let (status, answer) = exchange("/test-oauth/basic/token", &code("mock-connection-client"), &[], Some((id, secret)));
+    assert_eq!((status, answer["error"].as_str()), (400, Some("invalid_grant")), "the other client's code at the Basic one's: {answer}");
+
+    let token = grant["access_token"].as_str().unwrap();
+    let (status, answer) = post("/test-oauth/basic/revoke", &[("token", token)], None);
+    assert_eq!((status, answer["error"].as_str()), (401, Some("invalid_client")), "a revocation its client does not authenticate: {answer}");
+    assert!(p.fake.revoked().is_empty());
+    assert_eq!(post("/test-oauth/basic/revoke", &[("token", token)], Some((id, secret))).0, 200);
+    assert_eq!(p.fake.revoked(), [token.to_string()]);
+}
+
 #[test]
 fn users_kept_in_a_file_keep_their_subjects_across_a_restart() {
     let dir = std::env::temp_dir().join(format!("workos-kept-{}-{}", std::process::id(), now_s()));

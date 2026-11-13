@@ -1,0 +1,336 @@
+//! The stack on celld (docs/self-host.md, seam 1): one `celld dev` process
+//! serving the platform Worker, as `wrangler dev` does, from the config a
+//! local node runs (`crate::local_config`), and with its `.dev.vars`.
+//! celld is a self-hosted Workers runtime (github.com/futurepaul/celld: its
+//! `selfhost` line is upstream's release and the fork's parity fixes).
+//!
+//! celld presents Cloudflare's binding surface, so the cell runs on it as
+//! it runs on Cloudflare, with no code of celld's own. It binds every key of
+//! the config: the Secrets Store's secrets, read from the node's secrets
+//! backend (`secrets_file`: a file of their values, or OpenBao); and the
+//! services it does not run (Email Sending, Images, Browser Rendering,
+//! Workers AI), each with workerd's class, every call rejecting, saying the
+//! node has none. Its node runs no computers (`CELLD_CONTAINER_ENGINE=none`):
+//! the `Computer` class's container is there, not running, and a start
+//! throws (docs/self-host.md, seam 2).
+//!
+//! The node's port is its front door's (front.rs), as on wrangler: celld
+//! listens on a port of its own, which the front door learns from its
+//! `ready` line and passes each connection to.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context, Result};
+
+use crate::{boot_log, front, spawn_node, Node, NodeOptions, READY_TIMEOUT};
+
+/// What the celld render leaves out of the local config, and why.
+pub const DROPPED: [(&str, &str); 1] = [("build", "worker-build has run (cargo xtask build)")];
+
+/// The config celld runs: `wrangler.celld.jsonc`, beside the project's own
+/// (so its paths and `.dev.vars` resolve the same), the local config a node
+/// runs (`crate::local_config`, its secrets bound by name as on wrangler)
+/// less `DROPPED`. `Fleet::configure` writes the local config first.
+pub fn celld_config(project: &Path) -> Result<PathBuf> {
+    let local = crate::local_config(project);
+    let text = fs::read_to_string(&local).with_context(|| format!("read {} (Fleet::configure writes it)", local.display()))?;
+    let mut config: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("parse {}", local.display()))?;
+    let obj = config.as_object_mut().context("a wrangler config is an object")?;
+    for (key, _) in DROPPED {
+        obj.remove(key);
+    }
+    let path = project.join("wrangler.celld.jsonc");
+    fs::write(&path, serde_json::to_string_pretty(&config)?)?;
+    Ok(path)
+}
+
+/// The celld node's secrets file (its `CELLD_SECRETS_FILE`), beside the
+/// project's `.dev.vars`: its backend, `vars` with the secrets' values, or
+/// `openbao` with where OpenBao is and the path of the token that reads it
+/// (`crate::Secrets`). The node's configuration, never the Worker's
+/// variables.
+pub fn secrets_file(project: &Path) -> PathBuf {
+    project.join(".celld.secrets.json")
+}
+
+/// Writes `config` as the node's secrets file (`secrets_file`), mode 600
+/// (celld refuses one others may read), replacing the one before whole. The
+/// file it writes first (`.json.new`) holds the same secrets: it is removed
+/// when a step fails, and .gitignore covers it for a process killed between
+/// the two.
+pub fn write_secrets_file(project: &Path, config: &serde_json::Value) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = secrets_file(project);
+    let tmp = path.with_extension("json.new");
+    let _ = fs::remove_file(&tmp);
+    let written = (|| -> Result<()> {
+        let mut f = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        f.write_all(serde_json::to_string(config)?.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, &path).with_context(|| format!("move {} to {}", tmp.display(), path.display()))?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// A self-hosted deployment's connectors (`FRAGMENT_CONNECTORS`): the
+/// cell's default, less Telegram, whose webhook needs the platform reachable
+/// from the internet, which a box on a tailnet is not (docs/self-host.md).
+pub fn connectors() -> String {
+    let all = fragment_core::connectors::Policy::default();
+    let rows: Vec<&fragment_core::connectors::Connector> = all.entries().iter().filter(|c| c.id != "telegram").collect();
+    serde_json::to_string(&rows).expect("connectors serialize")
+}
+
+/// Whether a dev stack on celld may start dev's WorkOS fake on `project`:
+/// celld keeps the Registry in a store devstack does not read
+/// (`signed_in_subjects` reads wrangler's state), so the fake's own file of
+/// its users (`users_file`, written at every start) is the only record of
+/// the subjects it handed out. A celld state that outlived that file is
+/// refused: a fake started afresh would hand a subject the Registry knows
+/// to another email, and that email would sign in as its person.
+pub fn workos_users_kept(project: &Path, users_file: &Path) -> Result<()> {
+    let state = state_dir(project);
+    if state.exists() && !users_file.exists() {
+        bail!(
+            "{} is gone but celld's state ({}) is not: dev's WorkOS fake would hand its people's subjects to other emails. Restore the file, or start afresh with --clean",
+            users_file.display(),
+            state.display()
+        );
+    }
+    Ok(())
+}
+
+/// Where `celld dev` keeps a project's local state.
+pub fn state_dir(project: &Path) -> PathBuf {
+    project.join(".celld/dev")
+}
+
+/// What a celld stack runs on: celld itself (`CELLD_BIN`), and the esbuild
+/// it bundles the cell's entry with (`CELLD_ESBUILD`, else the newest in
+/// worker-build's cache).
+#[derive(Debug, Clone)]
+pub struct CelldTools {
+    pub celld: PathBuf,
+    pub esbuild: PathBuf,
+}
+
+impl CelldTools {
+    pub fn locate() -> Result<CelldTools> {
+        let celld = std::env::var_os("CELLD_BIN")
+            .map(PathBuf::from)
+            .context("set CELLD_BIN to a celld built from github.com/futurepaul/celld's selfhost line (cargo build --release -p celld)")?;
+        if !celld.is_file() {
+            bail!("no celld at {} (CELLD_BIN)", celld.display());
+        }
+        let esbuild = match std::env::var_os("CELLD_ESBUILD") {
+            Some(e) => PathBuf::from(e),
+            None => worker_build_esbuild()?,
+        };
+        if !esbuild.is_file() {
+            bail!("no esbuild at {} (CELLD_ESBUILD)", esbuild.display());
+        }
+        Ok(CelldTools { celld, esbuild })
+    }
+}
+
+/// The newest esbuild in worker-build's cache (`~/.cache/worker-build`),
+/// which `cargo xtask build` fills.
+fn worker_build_esbuild() -> Result<PathBuf> {
+    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
+    let dir = cache.join("worker-build");
+    let mut found: Vec<PathBuf> = fs::read_dir(&dir)
+        .with_context(|| format!("no worker-build cache at {} (build once with cargo xtask build, or set CELLD_ESBUILD)", dir.display()))?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("esbuild-"))
+        .map(|e| e.path().join("bin/esbuild"))
+        .filter(|p| p.is_file())
+        .collect();
+    found.sort();
+    found.pop().context("no esbuild in worker-build's cache (set CELLD_ESBUILD)")
+}
+
+/// A facet's database at most this (`CELLD_FACET_MAX_BYTES`, the fork's):
+/// past the cell's own cap (16 MiB), so the cell's refusal is the one met.
+const FACET_MAX_BYTES: u64 = 20 << 20;
+
+/// Requests one object may hold at once (`CELLD_MAX_CELL_REQUESTS`; celld's
+/// default is 64, past which it answers 503 "cell request limit reached").
+/// Cloudflare queues an object's requests with no such count, and one
+/// fragment's busiest moment is past 64: its triggered runs
+/// (`limits::TRIGGERED_RUNS_PER_HOUR`, 120), each a Workflow whose step
+/// waits on its object at once, beside its own clients.
+const CELL_REQUESTS_MAX: usize = 512;
+const _: () = assert!(CELL_REQUESTS_MAX as u64 >= 2 * fragment_proto::limits::TRIGGERED_RUNS_PER_HOUR, "an object holds its triggered runs and as many clients");
+
+/// What `celld dev` says once it serves (`  ready  http://127.0.0.1:<port>`,
+/// with NO_COLOR).
+fn ready_line(port: u16) -> String {
+    format!("ready  http://127.0.0.1:{port}")
+}
+
+/// Starts `celld dev` on `opts.project` (its fleet configured first, as for
+/// wrangler: `Fleet::configure` with `Secrets::Vars` or `Secrets::OpenBao`,
+/// which writes its secrets file), behind the node's front door, ready once
+/// it says so. It stops on SIGINT, as Ctrl-C stops it; `Node`'s stop and
+/// crash serve it as they serve wrangler's.
+pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)> {
+    let config = celld_config(&opts.project)?;
+    let secrets = secrets_file(&opts.project);
+    anyhow::ensure!(secrets.is_file(), "no secrets file for the celld node at {} (Fleet::configure writes it, with Secrets::Vars or Secrets::OpenBao)", secrets.display());
+    let port = opts.port();
+    // celld's own port, which only the front door dials: picked and let go
+    // just before celld binds it (`celld dev` takes no port 0)
+    let runtime = crate::free_port()?;
+    let (log, out) = boot_log(&opts.log_dir, port)?;
+    let out = Arc::new(Mutex::new(out));
+    let heard = Arc::new(front::Heard::default());
+    let front = front::Front::serve(opts.listener.try_clone()?, heard.clone(), out.clone())?;
+    let esbuild_dir = tools.esbuild.parent().context("esbuild's directory")?;
+    let path = std::env::join_paths(std::iter::once(esbuild_dir.to_path_buf()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())))?;
+    let mut cmd = Command::new(&tools.celld);
+    cmd.arg("dev").arg(&config).args(["--host", "127.0.0.1", "--port", &runtime.to_string(), "--logs", "--no-watch"]);
+    // the fork's hardening (its docs/hardening.md): a facet's database
+    // capped past the cell's own, and loaded code locked down
+    cmd.env("PATH", path)
+        .env("CELLD_FACET_MAX_BYTES", FACET_MAX_BYTES.to_string())
+        .env("CELLD_DYNAMIC_LOCKDOWN", "1")
+        .env("CELLD_MAX_CELL_REQUESTS", CELL_REQUESTS_MAX.to_string())
+        // the node's own settings: its secrets backend, and no computers
+        // here (seam 2), so its deploy builds no image
+        .env("CELLD_SECRETS_FILE", &secrets)
+        .env("CELLD_CONTAINER_ENGINE", "none")
+        .env("NO_COLOR", "1");
+    cmd.current_dir(&opts.project);
+    let t0 = Instant::now();
+    let child = spawn_node(cmd, opts, out, heard.clone())?;
+    let mut node = Node { child, own_group: opts.own_group, what: "celld dev", base: format!("http://127.0.0.1:{port}"), port, log: log.clone(), reaped: false, _front: front };
+    let ready = ready_line(runtime);
+    loop {
+        let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        if text.contains(&ready) {
+            break;
+        }
+        if crate::exited_unreaped(node.child.id(), false)? {
+            let status = node.reap()?;
+            bail!("celld dev exited ({status}) before it was ready:\n{text}");
+        }
+        if t0.elapsed() > READY_TIMEOUT {
+            bail!("celld dev on :{runtime} was not ready after {READY_TIMEOUT:?}:\n{text}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    heard.runtime_at(runtime);
+    Ok((node, t0.elapsed()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal: a celld state whose WorkOS fake lost its users file is
+    /// refused (a fresh fake would give an existing subject to another
+    /// email); a state with its file, or none, starts. Replay: the same ask
+    /// again answers the same.
+    #[test]
+    fn a_celld_state_without_its_fakes_users_is_refused() {
+        let dir = std::env::temp_dir().join(format!("celld-workos-{}", crate::random_hex(6)));
+        let users = dir.join("workos.json");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(workos_users_kept(&dir, &users).is_ok(), "no state, no file: a first start");
+        fs::create_dir_all(state_dir(&dir)).unwrap();
+        let e = workos_users_kept(&dir, &users).unwrap_err().to_string();
+        assert!(e.contains("is gone") && e.contains("--clean"), "{e}");
+        assert!(workos_users_kept(&dir, &users).is_err(), "asked again, refused again");
+        fs::write(&users, "{}").unwrap();
+        assert!(workos_users_kept(&dir, &users).is_ok(), "its file kept: it starts");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Goal: a self-hosted stack's connectors are the default's but
+    /// Telegram, and the cell takes them as it takes a deployment's.
+    #[test]
+    fn a_self_hosted_stack_links_no_telegram() {
+        let policy = fragment_core::connectors::Policy::parse(&connectors()).unwrap();
+        let ids: Vec<&str> = policy.entries().iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["simplex"]);
+        assert_eq!(policy.entries()[0], fragment_core::connectors::Policy::default().entries()[0], "SimpleX as the default names it");
+    }
+
+    /// Goal: celld runs the local config a wrangler node runs, its secrets
+    /// bound by name, less `build` alone: the services it does not run and
+    /// the computers' containers stay in it, for celld binds them all. With
+    /// no local config written yet, it is refused, naming the file. Replay:
+    /// rendered twice, the same. Method: cell/wrangler.jsonc, through
+    /// `write_local_config` with a secret bound.
+    fn json(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn renders_the_local_config_less_build() {
+        let dir = std::env::temp_dir().join(format!("celld-config-{}", crate::random_hex(6)));
+        fs::create_dir_all(&dir).unwrap();
+        // as a staged copy is: its images' Dockerfiles the source tree's
+        let mut config = crate::read_config(&crate::cell_dir()).unwrap();
+        crate::absolute_images(&mut config, &crate::cell_dir()).unwrap();
+        fs::write(dir.join("wrangler.jsonc"), config.to_string()).unwrap();
+        let e = celld_config(&dir).unwrap_err().to_string();
+        assert!(e.contains("wrangler.local.jsonc"), "{e}");
+        crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[]).unwrap();
+        let local = json(&crate::local_config(&dir));
+        for _ in 0..2 {
+            let v = json(&celld_config(&dir).unwrap());
+            assert!(v.get("build").is_none(), "build dropped");
+            for (k, kept) in local.as_object().unwrap() {
+                if k != "build" {
+                    assert_eq!(v.get(k), Some(kept), "{k} kept as it is");
+                }
+            }
+            for k in ["assets", "worker_loaders", "workflows", "r2_buckets", "queues", "durable_objects", "migrations", "send_email", "images", "browser", "containers", "secrets_store_secrets"] {
+                assert!(v.get(k).is_some(), "{k} kept");
+            }
+            assert_eq!(v["secrets_store_secrets"][0]["secret_name"], "fragment-host-secret");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Goal: the node's secrets file is its owner's alone (celld refuses
+    /// one others may read), written whole, and replaced whole.
+    #[test]
+    fn the_secrets_file_is_owner_only_and_replaced_whole() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("celld-secrets-{}", crate::random_hex(6)));
+        fs::create_dir_all(&dir).unwrap();
+        for value in ["one", "two"] {
+            write_secrets_file(&dir, &serde_json::json!({ "backend": "vars", "values": { "s": value } })).unwrap();
+            let path = secrets_file(&dir);
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(json(&path)["values"]["s"], value);
+            assert!(!path.with_extension("json.new").exists());
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Goal: a write that fails leaves no file of the secrets behind (the
+    /// review's P2 on #1256): here the move fails, the file's place being a
+    /// directory, and the `.json.new` it wrote first is gone.
+    #[test]
+    fn a_failed_secrets_write_leaves_no_secrets_behind() {
+        let dir = std::env::temp_dir().join(format!("celld-secrets-{}", crate::random_hex(6)));
+        let path = secrets_file(&dir);
+        fs::create_dir_all(path.join("in-the-way")).unwrap();
+        let e = write_secrets_file(&dir, &serde_json::json!({ "backend": "vars", "values": { "s": "dummy-secret" } })).unwrap_err();
+        assert!(format!("{e:#}").contains("move"), "{e:#}");
+        assert!(!path.with_extension("json.new").exists(), "no secrets left beside the file");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}
