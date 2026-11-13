@@ -102,10 +102,13 @@ struct NoticesBand: View {
                         ForEach(shown) { notice in row(notice, now: now) }
                         ForEach(refusals, id: \.id) { refusal in refused(refusal.id, refusal.failure) }
                     }
-                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    // room below for the glass's shadow to fade before the band clips it
+                    .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 28)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
                 }
                 .scrollBounceBehavior(.basedOnSize)
+                // no shade of its own at its edges: the page shows through as it is
+                .scrollEdgeEffectHidden(true, for: .all)
                 .frame(height: min(height, maxHeight))
                 // never under the toolbar, however it was scrolled when a notice went
                 .clipped()
@@ -179,10 +182,11 @@ struct NoticesBand: View {
     private func card(warns: Bool, @ViewBuilder _ content: () -> some View) -> some View {
         content()
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(FragmentStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+            .padding(14)
+            // an iOS banner's glass and corners; a warning keeps its red edge
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay {
-                if warns { RoundedRectangle(cornerRadius: 14).strokeBorder(Color.red.opacity(0.45)) }
+                if warns { RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Color.red.opacity(0.45)) }
             }
     }
 }

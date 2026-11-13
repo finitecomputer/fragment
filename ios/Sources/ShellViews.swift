@@ -4,8 +4,14 @@ import UIKit
 struct DesktopWallpaper: View {
     var body: some View {
         GeometryReader { proxy in
+            // laid out over the whole window, from its top to this view's foot,
+            // and shown where this view is: two of it meet without a seam (Home's,
+            // and the one behind the notices above it)
+            let frame = proxy.frame(in: .global)
             Image("DesktopWallpaper").resizable().scaledToFill()
-                .frame(width: proxy.size.width, height: proxy.size.height).clipped()
+                .frame(width: proxy.size.width, height: frame.maxY)
+                .offset(y: -frame.minY)
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top).clipped()
         }.ignoresSafeArea().accessibilityHidden(true)
     }
 }
