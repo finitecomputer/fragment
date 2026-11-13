@@ -2,7 +2,9 @@
 //! the API: the person puts, lists and removes their secrets, each a value
 //! that no answer, list or log ever names; an agent, even their own, is
 //! refused every route; another person sees none of them; each refusal of
-//! a bad secret writes nothing; the limit holds; and a restart keeps them.
+//! a bad secret writes nothing; the limit holds; set again with no value,
+//! one keeps its value and goes where it is set to; and a restart keeps
+//! them.
 use anyhow::Result;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
@@ -88,6 +90,31 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     let r = put(api, &ada, "nostr-ada", &json!({ "value": nsec, "hosts": ["finite.site"], "place": { "sign": "nip98" }, "agents": agents }))?;
     s.ok("a Nostr key is kept to sign, toward its hosts", r.status == 200 && r.body["place"] == json!({ "sign": "nip98" }) && !r.text.contains(&nsec), &r);
 
+    // set again with no value: a key handed off parked, pointed at its host
+    // by its person, keeps its value and the time it was set
+    let kept_key = Keys::generate().secret_hex();
+    let sign = json!({ "sign": "nip98" });
+    let parked = put(api, &ada, "nostr-kept", &json!({ "value": kept_key, "hosts": [], "place": sign, "agents": agents }))?;
+    let pointed = json!({ "hosts": ["finite.site"], "place": sign, "agents": agents });
+    let r = put(api, &ada, "nostr-kept", &pointed)?;
+    let again = put(api, &ada, "nostr-kept", &pointed)?;
+    s.ok(
+        "a parked Nostr key set again with no value goes to its new host, still a signer, its value and setAt kept; the same put again answers the same",
+        parked.status == 200
+            && parked.body["hosts"] == json!([])
+            && r.status == 200
+            && r.body["hosts"] == json!(["finite.site"])
+            && r.body["place"] == sign
+            && r.body["setAt"] == parked.body["setAt"]
+            && again.body == r.body,
+        format!("{parked} {r} {again}"),
+    );
+    let held = |api: &Api, name: &str| -> Result<Value> {
+        let l = api.signed(&ada, "GET", "/api/vault", None)?;
+        Ok(l.body["secrets"].as_array().and_then(|l| l.iter().find(|s| s["name"] == name).cloned()).unwrap_or(Value::Null))
+    };
+    let kept_before = held(api, "nostr-kept")?;
+
     // invalid: each refused, nothing written
     let before = names(api, &ada)?.1;
     for (why, name, body) in [
@@ -102,20 +129,27 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
         ("two places", "k1", json!({ "value": "v", "hosts": ["api.linear.app"], "place": { "header": "authorization", "query": "key" }, "agents": agents })),
         ("a field it does not know", "k1", json!({ "value": "v", "hosts": ["api.linear.app"], "agents": agents, "env": "LINEAR" })),
         ("a signing key off the curve", "k1", json!({ "value": "0".repeat(64), "hosts": ["finite.site"], "place": { "sign": "nip98" }, "agents": agents })),
+        ("no value for a secret not held", "k1", json!({ "hosts": ["finite.site"], "place": { "sign": "nip98" }, "agents": agents })),
+        ("no value for a Nostr key set to fill", "nostr-kept", json!({ "hosts": ["finite.site"], "agents": agents })),
+        ("no value for a token set to sign", "linear", json!({ "hosts": ["api.linear.app"], "place": { "sign": "nip98" }, "agents": agents })),
+        ("no value toward an address", "nostr-kept", json!({ "hosts": ["1.2.3.4"], "place": { "sign": "nip98" }, "agents": agents })),
+        ("no value and no agent", "nostr-kept", json!({ "hosts": ["finite.site"], "place": { "sign": "nip98" }, "agents": [] })),
     ] {
         let r = put(api, &ada, name, &body)?;
         let after = names(api, &ada)?.1;
         s.ok(&format!("{why} is refused (400), and nothing is written"), r.status == 400 && after == before, &r);
     }
+    s.ok("refused puts with no value leave the secret each named as it was", held(api, "nostr-kept")? == kept_before && held(api, "linear")?["place"] == json!({ "header": "x-api-key", "format": "{}" }), held(api, "nostr-kept")?);
 
     // who: their own agent, and another person
     let a = api.signed(&agent, "GET", "/api/vault", None)?;
     let p = put(api, &agent, "mine", &json!({ "value": "v", "hosts": ["api.linear.app"], "agents": agents }))?;
     let d = api.signed(&agent, "DELETE", "/api/vault/linear", None)?;
+    let k = put(api, &agent, "nostr-kept", &json!({ "hosts": ["api.example.com"], "place": { "sign": "nip98" }, "agents": agents }))?;
     s.ok(
-        "their own agent is refused every route (403): it uses secrets, never sets, lists or removes one",
-        a.status == 403 && p.status == 403 && d.status == 403 && names(api, &ada)?.1 == before,
-        format!("{a} {p} {d}"),
+        "their own agent is refused every route (403), a put with no value too: it uses secrets, never sets, lists or removes one",
+        a.status == 403 && p.status == 403 && d.status == 403 && k.status == 403 && names(api, &ada)?.1 == before && held(api, "nostr-kept")? == kept_before,
+        format!("{a} {p} {d} {k}"),
     );
     let (b, bob_names) = names(api, &bob)?;
     let gone = api.signed(&bob, "DELETE", "/api/vault/linear", None)?;
@@ -139,6 +173,16 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     let api = s.start(false)?;
     let (l, listed) = names(&api, &ada)?;
     s.ok("a restart keeps a vault's secrets", l.status == 200 && listed == before, &l);
+    let held = |api: &Api, name: &str| -> Result<Value> {
+        let l = api.signed(&ada, "GET", "/api/vault", None)?;
+        Ok(l.body["secrets"].as_array().and_then(|l| l.iter().find(|s| s["name"] == name).cloned()).unwrap_or(Value::Null))
+    };
+    let r = put(&api, &ada, "nostr-kept", &json!({ "hosts": ["api.example.com", "finite.site"], "place": { "sign": "nip98" }, "agents": agents }))?;
+    s.ok(
+        "after a restart, a kept value's secret is as it was set, and set again with no value once more",
+        held(&api, "nostr-kept")? == r.body && r.status == 200 && r.body["hosts"] == json!(["api.example.com", "finite.site"]) && r.body["setAt"] == kept_before["setAt"],
+        &r,
+    );
 
     // remove: once, then nothing
     let r = api.signed(&ada, "DELETE", "/api/vault/linear", None)?;
@@ -149,6 +193,8 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.body["removed"] == true && again.status == 200 && again.body["removed"] == false && !listed.contains(&"linear".to_string()),
         format!("{r} {again}"),
     );
+    let back = put(&api, &ada, "linear", &json!({ "hosts": ["api.linear.app"], "agents": agents }))?;
+    s.ok("a removed secret set again with no value is refused (400), not brought back", back.status == 400 && !names(&api, &ada)?.1.contains(&"linear".to_string()), &back);
 
     // the CLI: a value piped on stdin, never on its command line, and never
     // in what it prints
@@ -164,6 +210,27 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
         out.status.success() && printed.contains("\"x-api-key\"") && !printed.contains(&piped) && listed.status.success() && listed_text.contains("cli-key  api.example.com  for ada--k3x9") && !listed_text.contains(&piped),
         format!("{printed} / {listed_text}"),
     );
+    // --keep-value: no value read, its hosts set; then parked again
+    let kept = s.cli(&api, &home, &["vault", "set", "nostr-kept", "--agent", "ada--k3x9", "--to", "finite.site", "--sign", "nip98", "--keep-value"]);
+    let kept_text = String::from_utf8_lossy(&kept.stdout).into_owned();
+    let listed = String::from_utf8_lossy(&s.cli(&api, &home, &["vault", "list"]).stdout).into_owned();
+    let parked = s.cli(&api, &home, &["vault", "set", "nostr-kept", "--agent", "ada--k3x9", "--sign", "nip98", "--keep-value"]);
+    let parked_list = String::from_utf8_lossy(&s.cli(&api, &home, &["vault", "list"]).stdout).into_owned();
+    let new = s.cli(&api, &home, &["vault", "set", "cli-new", "--agent", "ada--k3x9", "--to", "api.example.com", "--keep-value"]);
+    let to_fill = s.cli(&api, &home, &["vault", "set", "nostr-kept", "--agent", "ada--k3x9", "--to", "finite.site", "--keep-value"]);
+    s.ok(
+        "the CLI's --keep-value points a kept key at its host and parks it again, reading no value; a new name, or a key set to fill, is refused",
+        kept.status.success()
+            && kept_text.contains("secret nostr-kept set for ada--k3x9, its value kept, toward finite.site")
+            && listed.contains("nostr-kept  finite.site  for ada--k3x9")
+            && parked.status.success()
+            && parked_list.contains("nostr-kept  (parked)  for ada--k3x9")
+            && !new.status.success()
+            && String::from_utf8_lossy(&new.stderr).contains("a new one needs its value")
+            && !to_fill.status.success()
+            && held(&api, "nostr-kept")?["place"] == json!({ "sign": "nip98" }),
+        format!("{kept_text} / {listed} / {parked_list} / {} / {}", String::from_utf8_lossy(&new.stderr), String::from_utf8_lossy(&to_fill.stderr)),
+    );
     let empty = piped_cli(s, &api, &home, &["vault", "set", "cli-empty", "--agent", "ada--k3x9"], "")?;
     let argv = s.cli(&api, &home, &["vault", "set", "cli-argv", &piped, "--agent", "ada--k3x9"]);
     let gone = s.cli(&api, &home, &["vault", "rm", "cli-key"]);
@@ -177,7 +244,7 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     let text = logs(s);
     s.ok(
         "no value put (a token, its rotation, a Nostr key) is in any node log",
-        !text.is_empty() && !text.contains(&value) && !text.contains(&rotated) && !text.contains(&nsec) && !text.contains(&piped),
+        !text.is_empty() && !text.contains(&value) && !text.contains(&rotated) && !text.contains(&nsec) && !text.contains(&kept_key) && !text.contains(&piped),
         format!("{} bytes of logs", text.len()),
     );
     Ok(())

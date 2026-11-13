@@ -2406,7 +2406,7 @@
       },
       "PutSecret": {
         "additionalProperties": false,
-        "description": "`PUT /api/vault/{secret}`: a secret set (or set again), whole. Its\nhosts, place and agents are set only with its value, so no one who\ncannot read a value sends it anywhere its setter did not mean. Its\n`Debug` shows the value, as the wire's checker needs: never print one.",
+        "description": "`PUT /api/vault/{secret}`: a secret set (or set again), whole. Only its\nperson sets one, so only they say where its value goes; set again with\nno value, it keeps the one it holds and goes where this says. Its\n`Debug` shows the value, as the wire's checker needs: never print one.",
         "properties": {
           "agents": {
             "description": "The agents that may use it, each by its fragment's name: at least\none (Paul, 2026-11-09: per agent).",
@@ -2428,12 +2428,15 @@
             "description": "Where it goes on a request; none, `Authorization: Bearer {}`."
           },
           "value": {
-            "description": "The value: a printable token, or, for `place.sign`, a Nostr secret\nkey as 64 hex.",
-            "type": "string"
+            "default": null,
+            "description": "The value: a printable token, or, for `place.sign`, a Nostr secret\nkey as 64 hex. None, the value it holds is kept: a secret it does\nnot hold yet, or one that would go from signing to filling or back,\nis refused (400).",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
-          "value",
           "hosts",
           "agents"
         ],
