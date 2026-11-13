@@ -126,7 +126,8 @@ fn op_path(op: &str, name: &str) -> CellResult<String> {
 
 /// Puts `put` (a `PutSecret`'s JSON) into `person`'s Vault under `name`,
 /// sealed there, under the rules of the person's own `PUT
-/// /api/vault/{name}`; set again, it is replaced whole. The seam for the
+/// /api/vault/{name}`; set again, it is replaced whole (with no value, all
+/// but its value). The seam for the
 /// platform's own code (FIN-463's hand-off): its answer is the `Secret`
 /// set, as JSON, never its value.
 pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &RawValue) -> CellResult<Vec<u8>> {
@@ -289,8 +290,8 @@ impl VaultCell {
         Ok(Response::from_bytes(answer.into_bytes())?)
     }
 
-    /// `put` checked, sealed and kept under `name`: its `Secret` as JSON.
-    /// A hand-off's (`receipt`) is put once, its receipt kept in the same
+    /// `put` checked, sealed and kept under `name`: its `Secret` as JSON;
+    /// with no value, `place`. A hand-off's (`receipt`) is put once, its receipt kept in the same
     /// turn (two writes with no wait between, which the object commits
     /// together); again, it puts nothing and answers `{}`. Nor does it take
     /// the name of a secret bound to other agents.
@@ -303,14 +304,21 @@ impl VaultCell {
         if receipt.map(received).transpose()? == Some(true) {
             return Ok("{}".into());
         }
-        let checked = rules::check(name, put, &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
-        if checked.placing == Placing::Nip98 && fragment_nip98::Keys::from_secret_hex(&put.value).is_none() {
+        let Some(value) = put.value.as_deref() else {
+            if receipt.is_some() {
+                return Err(CellError::invalid("a hand-off carries its value"));
+            }
+            return self.place(name, put);
+        };
+        // with a value, what is held is not read by the rules
+        let checked = rules::check(name, put, None, &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
+        if checked.placing == Placing::Nip98 && fragment_nip98::Keys::from_secret_hex(value).is_none() {
             return Err(CellError::invalid(format!("a secret's value: {}", rules::NOSTR_KEY)));
         }
         // sealed first (reading the host secret may yield): the checks and
         // the write below share one turn, and a wipe that ended meanwhile
         // stops it
-        let sealed = crate::keys::seal(&self.env, &self.scope(), put.value.as_bytes()).await?;
+        let sealed = crate::keys::seal(&self.env, &self.scope(), value.as_bytes()).await?;
         if self.wiped.get() {
             return Err(wiped());
         }
@@ -341,6 +349,22 @@ impl VaultCell {
         if let Some(r) = receipt {
             self.sql().exec("INSERT INTO receipts (key, at) VALUES (?, ?)", vec![r.into(), SqlStorageValue::Integer(js::now_ms())])?;
         }
+        Ok(text)
+    }
+
+    /// `name`, set again with no value: the value held kept as it is, never
+    /// opened (its seal, so its revision and any claim on it, untouched),
+    /// and only where it goes set, its `setAt` its value's own. One turn:
+    /// nothing here yields, so nothing is put, moved or removed between
+    /// its read and its write. One not held is refused, never made.
+    fn place(&self, name: &str, put: &PutSecret) -> CellResult<String> {
+        let rows = self.rows("SELECT secret FROM secrets WHERE name = ?", vec![name.into()])?;
+        let held: Option<Secret> = rows.first().map(stored).transpose()?;
+        let checked = rules::check(name, put, held.as_ref().map(|s| &s.place), &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
+        let held = held.ok_or_else(|| CellError::host("the rules kept a value for a secret not held"))?;
+        let secret = Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, set_at: held.set_at };
+        let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
+        self.sql().exec("UPDATE secrets SET secret = ? WHERE name = ?", vec![text.as_str().into(), name.into()])?;
         Ok(text)
     }
 

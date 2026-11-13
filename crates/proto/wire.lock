@@ -101,6 +101,7 @@ bound Place.query default null
 bound Place.sign default null
 bound PutDraft.text default null
 bound PutSecret.place default {}
+bound PutSecret.value default null
 bound Report.bytes default null
 bound Report.bytes range u64
 bound Report.files default null
@@ -409,7 +410,7 @@ field PutDraft.turn required string
 field PutSecret.agents required array<string>
 field PutSecret.hosts required array<string>
 field PutSecret.place optional Place
-field PutSecret.value required string
+field PutSecret.value optional string|null
 field Report.bytes optional integer|null
 field Report.command required string
 field Report.files optional integer|null

@@ -4,9 +4,9 @@
 //! what a secret may be.
 //!
 //! A secret is a value, the hosts it may go to, where it goes on a
-//! request (`Placing`), and the agents that may use it. Its hosts, place
-//! and agents are set only with its value, so no one who cannot read the
-//! value (no one can) sends it anywhere its setter did not mean.
+//! request (`Placing`), and the agents that may use it. Only its person
+//! sets one, so only they say where its value goes: with a value, or
+//! keeping the one it holds where that value means the same (`kept`).
 
 use fragment_proto::vault::{Place, PutSecret};
 
@@ -159,19 +159,22 @@ pub fn host_ok(host: &str) -> bool {
     h == host && catalog::valid_host(&h) && !tld_numeric && !h.ends_with(".internal") && h != "localhost"
 }
 
-/// `put`, under `name`, checked against the rules above.
-pub fn check(name: &str, put: &PutSecret, catalog: &Catalog) -> Result<Checked, VaultError> {
+/// `put`, under `name`, checked against the rules above; `held`, the
+/// place of the secret already kept under `name`, if one is. A put with no
+/// value keeps the one held (`kept`).
+pub fn check(name: &str, put: &PutSecret, held: Option<&Place>, catalog: &Catalog) -> Result<Checked, VaultError> {
     name_ok(name, catalog)?;
     let (placing, place) = placing(&put.place)?;
-    match placing {
-        Placing::Fill(_) => {
-            if !(1..=VALUE_MAX_BYTES).contains(&put.value.len()) || !put.value.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+    match (&placing, put.value.as_deref()) {
+        (_, None) => kept(name, held, &placing)?,
+        (Placing::Fill(_), Some(value)) => {
+            if !(1..=VALUE_MAX_BYTES).contains(&value.len()) || !value.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
                 return Err(VaultError::Value(format!("1 to {VALUE_MAX_BYTES} printable characters, with no space")));
             }
         }
-        Placing::Nip98 => {
+        (Placing::Nip98, Some(value)) => {
             // a key on the curve too: the cell's to check, where its signer is
-            if put.value.len() != 64 || !put.value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
                 return Err(VaultError::Value(NOSTR_KEY.into()));
             }
         }
@@ -197,6 +200,23 @@ pub fn check(name: &str, put: &PutSecret, catalog: &Catalog) -> Result<Checked, 
     Ok(Checked { hosts, place, placing, agents })
 }
 
+/// May `name`, set again with no value, keep the one it holds (placed as
+/// `held`) and go as `placing` says? Only a secret it holds, and only as
+/// the same kind of place: a fill's value is a token, a signature's a
+/// Nostr key, so going between the two needs a value of the other's rules.
+/// A held value passed these rules as it was put, so it is never opened
+/// to be checked again.
+fn kept(name: &str, held: Option<&Place>, placing: &Placing) -> Result<(), VaultError> {
+    let held = held.ok_or_else(|| VaultError::Value(format!("{name} is no secret of yours yet: a new one needs its value")))?;
+    // a stored place that reads as none is no value to keep: set it whole
+    let was = self::placing(held).map_err(|_| VaultError::Value(format!("{name}'s place is no longer one: set it again with its value")))?.0;
+    match (was, placing) {
+        (Placing::Fill(_), Placing::Fill(_)) | (Placing::Nip98, Placing::Nip98) => Ok(()),
+        (Placing::Nip98, Placing::Fill(_)) => Err(VaultError::Value(format!("{name} is a Nostr key that signs: to fill a request instead, set it again with a value"))),
+        (Placing::Fill(_), Placing::Nip98) => Err(VaultError::Value(format!("{name} fills a request: to sign instead, set it again with a Nostr key"))),
+    }
+}
+
 /// A secret's move out of its Vault, into a fragment of its person's as
 /// that fragment's secret (FIN-466; the cell's `vault/take` and
 /// `vault/moved`): one home, moved once, never lost.
@@ -209,8 +229,8 @@ pub fn check(name: &str, put: &PutSecret, catalog: &Catalog) -> Result<Checked, 
 /// never both keep it, and a move cut short anywhere leaves it in the
 /// Vault, claimed: the same move again takes it again and finishes it.
 /// A claim has no clock (one that lapsed could let a second destination
-/// keep a value the first had kept already); setting the secret again, or
-/// removing it, ends it.
+/// keep a value the first had kept already); setting the secret again with
+/// a value, or removing it, ends it (set again with none, it keeps both).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claimed {
     /// The secret's name in its Vault.
@@ -221,7 +241,7 @@ pub struct Claimed {
 
 impl std::fmt::Display for Claimed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} is being moved into {}: move it there again to finish, or set it again in your vault", self.name, self.to)
+        write!(f, "{} is being moved into {}: move it there again to finish, or set it again with a value in your vault", self.name, self.to)
     }
 }
 
@@ -253,7 +273,7 @@ mod tests {
     }
 
     fn put(value: &str, hosts: &[&str], place: Place, agents: &[&str]) -> PutSecret {
-        PutSecret { value: value.into(), hosts: hosts.iter().map(|h| h.to_string()).collect(), place, agents: agents.iter().map(|a| a.to_string()).collect() }
+        PutSecret { value: Some(value.into()), hosts: hosts.iter().map(|h| h.to_string()).collect(), place, agents: agents.iter().map(|a| a.to_string()).collect() }
     }
 
     const AGENT: &str = "ada--k3x9";
@@ -261,7 +281,7 @@ mod tests {
 
     #[test]
     fn a_token_toward_a_host_by_default_goes_as_a_bearer_and_is_stored_so() {
-        let c = check("linear", &put("lin_api_abc", &["api.linear.app", "api.linear.app"], Place::default(), &[AGENT, AGENT]), &catalog()).expect("valid");
+        let c = check("linear", &put("lin_api_abc", &["api.linear.app", "api.linear.app"], Place::default(), &[AGENT, AGENT]), None, &catalog()).expect("valid");
         assert_eq!(c.hosts, ["api.linear.app"]);
         assert_eq!(c.agents, [AGENT]);
         assert_eq!(c.placing, Placing::Fill(Placement::Header { name: "authorization".into(), format: "Bearer {}".into() }));
@@ -270,27 +290,27 @@ mod tests {
 
     #[test]
     fn each_place_reads_as_the_catalog_s_and_a_signature_as_its_header() {
-        let q = check("k", &put("v", &["a.example.com"], Place { query: Some("key".into()), ..Place::default() }, &[AGENT]), &catalog()).expect("query");
+        let q = check("k", &put("v", &["a.example.com"], Place { query: Some("key".into()), ..Place::default() }, &[AGENT]), None, &catalog()).expect("query");
         assert_eq!(q.placing, Placing::Fill(Placement::Query { name: "key".into() }));
-        let b = check("k", &put("v", &["a.example.com"], Place { basic: Some("password".into()), ..Place::default() }, &[AGENT]), &catalog()).expect("basic");
+        let b = check("k", &put("v", &["a.example.com"], Place { basic: Some("password".into()), ..Place::default() }, &[AGENT]), None, &catalog()).expect("basic");
         assert_eq!(b.placing, Placing::Fill(Placement::Basic { half: Half::Password }));
-        let h = check("k", &put("v", &["a.example.com"], Place { header: Some("x-api-key".into()), ..Place::default() }, &[AGENT]), &catalog()).expect("header");
+        let h = check("k", &put("v", &["a.example.com"], Place { header: Some("x-api-key".into()), ..Place::default() }, &[AGENT]), None, &catalog()).expect("header");
         assert_eq!(h.placing, Placing::Fill(Placement::Header { name: "x-api-key".into(), format: "{}".into() }));
-        let s = check("nostr-ada", &put(NSEC, &["finite.site"], Place { sign: Some("nip98".into()), ..Place::default() }, &[AGENT]), &catalog()).expect("sign");
+        let s = check("nostr-ada", &put(NSEC, &["finite.site"], Place { sign: Some("nip98".into()), ..Place::default() }, &[AGENT]), None, &catalog()).expect("sign");
         assert_eq!(s.placing, Placing::Nip98);
         assert_eq!(s.placing.placement(), Placement::Header { name: "authorization".into(), format: "Nostr {}".into() });
     }
 
     #[test]
     fn a_secret_with_no_hosts_is_parked_and_valid() {
-        let c = check("telegram-ada", &put("123:abc", &[], Place::default(), &[AGENT]), &catalog()).expect("parked");
+        let c = check("telegram-ada", &put("123:abc", &[], Place::default(), &[AGENT]), None, &catalog()).expect("parked");
         assert!(c.hosts.is_empty());
     }
 
     #[test]
     fn names_a_key_uses_or_of_another_form_are_refused() {
         for name in ["openrouter", "", "Linear", "-x", "x-", "a_b", &"x".repeat(33)] {
-            assert!(matches!(check(name, &put("v", &["a.example.com"], Place::default(), &[AGENT]), &catalog()), Err(VaultError::Name(_))), "{name:?}");
+            assert!(matches!(check(name, &put("v", &["a.example.com"], Place::default(), &[AGENT]), None, &catalog()), Err(VaultError::Name(_))), "{name:?}");
         }
     }
 
@@ -302,9 +322,9 @@ mod tests {
         let c = Catalog::parse(r#"[{"name": "openrouter", "kind": "own", "hosts": ["openrouter.ai"], "placements": [{"header": "authorization", "format": "Bearer {}"}], "env": ["OPENROUTER_API_KEY"]},
             {"name": "linear", "kind": "connection", "hosts": ["api.linear.app"], "placements": [{"header": "authorization", "format": "Bearer {}"}], "env": ["LINEAR_OAUTH_ACCESS_TOKEN"]},
             {"name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"], "placements": [{"header": "authorization", "format": "Bearer {}"}], "env": ["PERPLEXITY_API_KEY"]}]"#).expect("a catalog");
-        assert!(check("linear", &put("lin_api_abc", &["api.linear.app"], Place::default(), &[AGENT]), &c).is_ok());
+        assert!(check("linear", &put("lin_api_abc", &["api.linear.app"], Place::default(), &[AGENT]), None, &c).is_ok());
         for key in ["openrouter", "perplexity"] {
-            let refused = check(key, &put("v", &["a.example.com"], Place::default(), &[AGENT]), &c);
+            let refused = check(key, &put("v", &["a.example.com"], Place::default(), &[AGENT]), None, &c);
             assert!(matches!(&refused, Err(VaultError::Name(why)) if why.contains("is a key this deployment offers")), "{key}: {refused:?}");
         }
     }
@@ -312,23 +332,23 @@ mod tests {
     #[test]
     fn values_are_printable_tokens_or_a_nostr_key_as_hex() {
         for v in ["", "has space", "tab\tin", "é", &"x".repeat(VALUE_MAX_BYTES + 1)] {
-            assert!(matches!(check("k", &put(v, &["a.example.com"], Place::default(), &[AGENT]), &catalog()), Err(VaultError::Value(_))), "{v:?}");
+            assert!(matches!(check("k", &put(v, &["a.example.com"], Place::default(), &[AGENT]), None, &catalog()), Err(VaultError::Value(_))), "{v:?}");
         }
         let sign = Place { sign: Some("nip98".into()), ..Place::default() };
         // not hex, upper case, short
         for v in ["nsec1abc", &NSEC.to_uppercase(), &NSEC[..62]] {
-            assert!(matches!(check("k", &put(v, &["a.example.com"], sign.clone(), &[AGENT]), &catalog()), Err(VaultError::Value(_))), "{v:?}");
+            assert!(matches!(check("k", &put(v, &["a.example.com"], sign.clone(), &[AGENT]), None, &catalog()), Err(VaultError::Value(_))), "{v:?}");
         }
     }
 
     #[test]
     fn hosts_are_exact_public_names_and_at_most_eight() {
         for h in ["1.2.3.4", "[::1]", "localhost", "api.fragment.internal", "fragment.internal", "*.example.com", "Example.com", "example.com:443", "https://example.com", "example", "example.com."] {
-            assert!(matches!(check("k", &put("v", &[h], Place::default(), &[AGENT]), &catalog()), Err(VaultError::Hosts(_))), "{h:?}");
+            assert!(matches!(check("k", &put("v", &[h], Place::default(), &[AGENT]), None, &catalog()), Err(VaultError::Hosts(_))), "{h:?}");
         }
         let nine: Vec<String> = (0..9).map(|i| format!("h{i}.example.com")).collect();
         let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
-        assert!(matches!(check("k", &put("v", &nine, Place::default(), &[AGENT]), &catalog()), Err(VaultError::Hosts(_))));
+        assert!(matches!(check("k", &put("v", &nine, Place::default(), &[AGENT]), None, &catalog()), Err(VaultError::Hosts(_))));
     }
 
     #[test]
@@ -342,17 +362,76 @@ mod tests {
         let other_half = Place { basic: Some("both".into()), ..Place::default() };
         let other_sign = Place { sign: Some("nip46".into()), ..Place::default() };
         for p in [two, format_alone, hop, ours, no_slot, sign_and_header, other_half, other_sign] {
-            assert!(matches!(check("k", &put(NSEC, &["a.example.com"], p.clone(), &[AGENT]), &catalog()), Err(VaultError::Place(_))), "{p:?}");
+            assert!(matches!(check("k", &put(NSEC, &["a.example.com"], p.clone(), &[AGENT]), None, &catalog()), Err(VaultError::Place(_))), "{p:?}");
         }
     }
 
     #[test]
     fn a_secret_names_one_to_sixteen_agents_by_fragment_name() {
-        assert!(matches!(check("k", &put("v", &["a.example.com"], Place::default(), &[]), &catalog()), Err(VaultError::Agents(_))));
-        assert!(matches!(check("k", &put("v", &["a.example.com"], Place::default(), &["ada"]), &catalog()), Err(VaultError::Agents(_))));
+        assert!(matches!(check("k", &put("v", &["a.example.com"], Place::default(), &[]), None, &catalog()), Err(VaultError::Agents(_))));
+        assert!(matches!(check("k", &put("v", &["a.example.com"], Place::default(), &["ada"]), None, &catalog()), Err(VaultError::Agents(_))));
         let many: Vec<String> = (0..17).map(|i| format!("a{i}--k3x9")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
-        assert!(matches!(check("k", &put("v", &["a.example.com"], Place::default(), &many), &catalog()), Err(VaultError::Agents(_))));
+        assert!(matches!(check("k", &put("v", &["a.example.com"], Place::default(), &many), None, &catalog()), Err(VaultError::Agents(_))));
+    }
+
+    fn keep(hosts: &[&str], place: Place, agents: &[&str]) -> PutSecret {
+        PutSecret { value: None, ..put("unused", hosts, place, agents) }
+    }
+
+    fn sign() -> Place {
+        Place { sign: Some("nip98".into()), ..Place::default() }
+    }
+
+    /// A Nostr key handed off parked (FIN-463 F11) is pointed at its host
+    /// by its person with no value: kept, and still a signer.
+    #[test]
+    fn a_parked_key_set_again_with_no_value_keeps_it_toward_its_new_hosts() {
+        let parked = check("nostr-ada--k3x9", &put(NSEC, &[], sign(), &[AGENT]), None, &catalog()).expect("parked");
+        let c = check("nostr-ada--k3x9", &keep(&["finite.site"], sign(), &[AGENT]), Some(&parked.place), &catalog()).expect("kept");
+        assert_eq!((c.hosts, c.placing), (vec!["finite.site".to_string()], Placing::Nip98));
+        // a fill's value kept from one fill place to another
+        let bearer = check("linear", &put("lin_api_abc", &["api.linear.app"], Place::default(), &[AGENT]), None, &catalog()).expect("bearer");
+        let q = check("linear", &keep(&["api.linear.app"], Place { query: Some("key".into()), ..Place::default() }, &[AGENT, "bo--k3x9"]), Some(&bearer.place), &catalog()).expect("query");
+        assert_eq!((q.placing, q.agents), (Placing::Fill(Placement::Query { name: "key".into() }), vec![AGENT.to_string(), "bo--k3x9".to_string()]));
+    }
+
+    #[test]
+    fn no_value_for_a_new_secret_or_across_sign_and_fill_is_refused() {
+        let new = check("nostr-ada", &keep(&["finite.site"], sign(), &[AGENT]), None, &catalog());
+        assert!(matches!(&new, Err(VaultError::Value(why)) if why.contains("a new one needs its value")), "{new:?}");
+        let signer = sign();
+        let to_fill = check("nostr-ada", &keep(&["finite.site"], Place::default(), &[AGENT]), Some(&signer), &catalog());
+        assert!(matches!(&to_fill, Err(VaultError::Value(why)) if why.contains("Nostr key that signs")), "{to_fill:?}");
+        let bearer = Place { header: Some("authorization".into()), format: Some("Bearer {}".into()), ..Place::default() };
+        let to_sign = check("linear", &keep(&["api.linear.app"], sign(), &[AGENT]), Some(&bearer), &catalog());
+        assert!(matches!(&to_sign, Err(VaultError::Value(why)) if why.contains("set it again with a Nostr key")), "{to_sign:?}");
+        // a stored place that reads as none keeps nothing
+        let two = Place { header: Some("authorization".into()), query: Some("key".into()), ..Place::default() };
+        assert!(matches!(check("linear", &keep(&["api.linear.app"], Place::default(), &[AGENT]), Some(&two), &catalog()), Err(VaultError::Value(_))));
+    }
+
+    /// With no value, everything else is checked as with one.
+    #[test]
+    fn no_value_is_no_pass_on_the_name_hosts_place_or_agents() {
+        let signer = sign();
+        let held = Some(&signer);
+        assert!(matches!(check("openrouter", &keep(&["finite.site"], sign(), &[AGENT]), held, &catalog()), Err(VaultError::Name(_))));
+        assert!(matches!(check("k", &keep(&["1.2.3.4"], sign(), &[AGENT]), held, &catalog()), Err(VaultError::Hosts(_))));
+        assert!(matches!(check("k", &keep(&["finite.site"], Place { sign: Some("nip46".into()), ..Place::default() }, &[AGENT]), held, &catalog()), Err(VaultError::Place(_))));
+        assert!(matches!(check("k", &keep(&["finite.site"], sign(), &[]), held, &catalog()), Err(VaultError::Agents(_))));
+        assert!(matches!(check("k", &keep(&["finite.site"], sign(), &["ada"]), held, &catalog()), Err(VaultError::Agents(_))));
+    }
+
+    /// An older client's put, a value and all, reads as it did, and one
+    /// with no value writes no `value` field at all.
+    #[test]
+    fn a_put_with_a_value_reads_as_before_and_one_without_names_none() {
+        let old: PutSecret = serde_json::from_str(r#"{"value":"lin_api_abc","hosts":["api.linear.app"],"agents":["ada--k3x9"]}"#).expect("an older client's put");
+        assert_eq!(old, put("lin_api_abc", &["api.linear.app"], Place::default(), &[AGENT]));
+        let none: PutSecret = serde_json::from_str(r#"{"hosts":["finite.site"],"place":{"sign":"nip98"},"agents":["ada--k3x9"]}"#).expect("a put with no value");
+        assert_eq!(none.value, None);
+        assert!(!serde_json::to_string(&none).expect("json").contains("value"));
     }
 
     #[test]
@@ -396,7 +475,7 @@ mod tests {
         row.put("r1");
         let a = row.take("one/BOT").expect("the first take");
         let b = row.take("two/BOT");
-        assert_eq!(b, Err("bot is being moved into one/BOT: move it there again to finish, or set it again in your vault".to_string()));
+        assert_eq!(b, Err("bot is being moved into one/BOT: move it there again to finish, or set it again with a value in your vault".to_string()));
         // one keeps it, then completes: gone from the Vault, kept once
         assert!(row.moved("one/BOT", &a));
         assert!(row.0.is_none());
