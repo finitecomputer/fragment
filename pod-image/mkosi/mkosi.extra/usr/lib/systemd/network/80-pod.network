@@ -1,0 +1,7 @@
+# DHCP on the VM's NIC (gVNIC on Google Cloud).
+[Match]
+Type=ether
+Kind=!*
+
+[Network]
+DHCP=ipv4

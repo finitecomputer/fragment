@@ -1,0 +1,17 @@
+#!/bin/bash
+# pod-computers: loads the computers' images (the image's computers.tar)
+# into Docker when a tag is missing or names other bytes than the tar's,
+# so a new release's images replace the old ones under the same tags.
+set -euo pipefail
+need=0
+while read -r tag id; do
+  have="$(docker image inspect -f '{{.Id}}' "$tag" 2> /dev/null || true)"
+  [[ "$have" == "$id" ]] || { echo "pod-computers: $tag is '${have:-missing}', the image's is $id" >&2; need=1; }
+done < /usr/lib/pod/computers.ids
+if (( need )); then
+  docker load -q -i /usr/lib/pod/computers.tar >&2
+fi
+while read -r tag id; do
+  [[ "$(docker image inspect -f '{{.Id}}' "$tag")" == "$id" ]] || { echo "pod-computers: $tag still differs" >&2; exit 1; }
+done < /usr/lib/pod/computers.ids
+echo "pod-computers: images as the release has them" >&2

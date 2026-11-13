@@ -37,6 +37,10 @@ platform concept.
   by feature, the verifier, the release checks and the owner's side;
   `crates/pod-init`: `pod-init`, the service in the pod's TD that keeps
   the owner's volume.
+- `pod-image/`: the pod's measured image (mkosi), its locked variant
+  and debug sibling, beside `images/` and no input of the computer
+  images; `pod-image/pinned-platform/` is the platform it carries,
+  pinned (debt ledger).
 - `templates/`: fragment templates; `applib/`: reusable app code.
 - `images/`: a separate Rust workspace (bridge, stub, Hermes).
 - `bench/search/`: the benchmark behind each fragment's search index

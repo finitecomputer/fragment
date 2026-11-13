@@ -319,4 +319,89 @@ mod tests {
         assert_eq!(file_bounds("let size = 100_000_000; // bytes"), 1);
         assert_eq!(file_bounds("let sha = \"9f1e8a\"; let x = \"1e8ab\";"), 0, "an exponent's spelling inside a hash");
     }
+
+    /// Every file git tracks, by its path from the root.
+    fn tracked() -> Vec<String> {
+        let out = std::process::Command::new("git").args(["ls-files", "-z"]).current_dir(crate::devstack::repo_root()).output().expect("git ls-files");
+        assert!(out.status.success(), "git ls-files");
+        out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).map(|p| String::from_utf8_lossy(p).into_owned()).collect()
+    }
+
+    /// The scripts the pod image carries, each where mkosi or systemd runs
+    /// it, and why (pod-image/README.md, "The shell that remains"; the
+    /// ones that should become Rust are a debt entry).
+    const POD_IMAGE_SCRIPTS: [(&str, &str); 6] = [
+        ("pod-image/mkosi/mkosi.postinst.chroot", "mkosi's hook inside the image"),
+        ("pod-image/mkosi/mkosi.extra/usr/lib/pod/pod-opened", "pod-init's open hook"),
+        ("pod-image/mkosi/mkosi.extra/usr/lib/pod/pod-addr", "pod-addr.service's ExecStart"),
+        ("pod-image/mkosi/mkosi.extra/usr/lib/pod/pod-computers", "pod-computers.service's ExecStart"),
+        ("pod-image/mkosi/mkosi.extra/usr/lib/pod/pod-stack", "pod-stack.service's ExecStart"),
+        ("pod-image/mkosi/mkosi.extra/usr/lib/pod/gce-disk-name", "65-pod-gce-disk.rules' IMPORT{program}"),
+    ];
+
+    /// Whether a file's first line runs a shell.
+    fn shell_script(bytes: &[u8]) -> bool {
+        let first = bytes.split(|b| *b == b'\n').next().unwrap_or_default();
+        let Some(line) = std::str::from_utf8(first).ok().and_then(|l| l.strip_prefix("#!")) else { return false };
+        let mut words = line.split_whitespace();
+        let program = words.next().unwrap_or_default().rsplit('/').next().unwrap_or_default();
+        let program = if program == "env" { words.next().unwrap_or_default() } else { program };
+        ["sh", "bash", "dash", "zsh", "ksh"].contains(&program)
+    }
+
+    /// Goal: master's tooling is Rust in xtask (AGENTS.md): no tracked
+    /// file is a `.sh`, and the only shell scripts under pod-image/, and
+    /// its only files executable in git, are the image's own content that
+    /// mkosi or systemd runs, each named above with what runs it (and
+    /// each still named there, by its runner). The nft ruleset's
+    /// `#!/usr/sbin/nft -f` is no shell: pod-opened loads it with
+    /// `nft -f`. Method: every tracked file's name, and under pod-image/
+    /// its first line and its mode in git.
+    #[test]
+    fn scripts_are_the_pod_images_content_alone() {
+        let files = tracked();
+        assert!(files.len() > 500, "the tree was listed ({})", files.len());
+        let shell: Vec<&String> = files.iter().filter(|f| f.ends_with(".sh")).collect();
+        assert!(shell.is_empty(), "tooling is Rust in xtask, not shell: {shell:?}");
+        let root = crate::devstack::repo_root();
+        let scripts: Vec<&str> = files
+            .iter()
+            .filter(|f| f.starts_with("pod-image/"))
+            .filter(|f| std::fs::read(root.join(f)).is_ok_and(|b| shell_script(&b)))
+            .map(String::as_str)
+            .collect();
+        let allowed: Vec<&str> = POD_IMAGE_SCRIPTS.iter().map(|(p, _)| *p).collect();
+        let mut sorted = allowed.clone();
+        sorted.sort_unstable();
+        let mut found = scripts.clone();
+        found.sort_unstable();
+        assert_eq!(found, sorted, "a script in pod-image/ is one mkosi or systemd runs, named in POD_IMAGE_SCRIPTS");
+        let tree = std::fs::read_to_string(root.join("pod-image/mkosi/mkosi.extra/usr/lib/udev/rules.d/65-pod-gce-disk.rules")).expect("the udev rule");
+        assert!(tree.contains("/usr/lib/pod/gce-disk-name"), "the udev rule runs gce-disk-name");
+        let init = std::fs::read_to_string(root.join("pod-image/mkosi/mkosi.extra/usr/lib/pod/pod-init.json")).expect("pod-init's config");
+        assert!(init.contains("\"open_hook\": \"/usr/lib/pod/pod-opened\""), "pod-init runs pod-opened");
+        for unit in ["pod-addr", "pod-computers", "pod-stack"] {
+            let text = std::fs::read_to_string(root.join(format!("pod-image/mkosi/mkosi.extra/usr/lib/systemd/system/{unit}.service"))).expect("the unit");
+            assert!(text.contains(&format!("ExecStart=/usr/lib/pod/{unit}\n")), "{unit}.service runs it");
+        }
+        // executable in git, so the image's copy is, and nothing else is
+        let modes = std::process::Command::new("git").args(["ls-files", "-s", "--", "pod-image"]).current_dir(&root).output().expect("git ls-files -s");
+        let listed = String::from_utf8_lossy(&modes.stdout).into_owned();
+        let mut executable: Vec<&str> = listed.lines().filter(|l| l.starts_with("100755 ")).filter_map(|l| l.split('\t').nth(1)).collect();
+        executable.sort_unstable();
+        assert_eq!(executable, sorted, "the files executable in pod-image/ are the scripts named, each mode 755");
+        assert!(shell_script(b"#!/usr/bin/env bash\n") && shell_script(b"#!/bin/sh\nx") && !shell_script(b"#!/usr/sbin/nft -f\n") && !shell_script(b"[Unit]\n"));
+    }
+
+    /// Goal: pod-image/ is no input of the computer images: the
+    /// Dockerfiles' context (.dockerignore) leaves it out, and the
+    /// preview's input key does not name it (image/preview.rs's own test
+    /// holds that list). Method: .dockerignore, read.
+    #[test]
+    fn the_pod_image_is_not_in_the_computer_images_context() {
+        let ignore = std::fs::read_to_string(crate::devstack::repo_root().join(".dockerignore")).expect(".dockerignore");
+        let rules: Vec<&str> = ignore.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+        assert_eq!(rules.first(), Some(&"*"), "the context is an allow list");
+        assert!(!rules.iter().any(|r| r.starts_with("!pod-image")), "pod-image/ stays out of the images' context");
+    }
 }

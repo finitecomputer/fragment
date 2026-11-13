@@ -1,0 +1,61 @@
+#!/bin/bash
+# pod-opened: pod-init runs this as root once the owner's key has opened
+# the data disk and mounted it at /srv/private (at most 300 s, so the long
+# work is in units it starts). Nothing that keeps state ran before this:
+# Docker, containerd and Tailscale do not start at boot, their state is the
+# volume's, and the platform's tree is an overlay whose lower layer is the
+# image's read-only copy and whose upper layer is the volume's.
+set -euo pipefail
+P=/srv/private
+TREE="$P/home/fragment-home"
+LOWER=/usr/lib/pod/fragment-home
+USR=1001
+GRP=1002
+
+# a directory the volume lacks, with its owner and mode; one it has is
+# left as it is
+mk() {
+  local owner="$1" mode="$2" dir="$3"
+  [[ -d "$dir" ]] || install -d -o "${owner%:*}" -g "${owner#*:}" -m "$mode" "$dir"
+}
+mk 0:0 0710 "$P/docker"
+mk 0:0 0710 "$P/containerd"
+mk 0:0 0700 "$P/tailscale"
+mk 0:0 0755 "$P/overlay"
+mk "$USR:$GRP" 0755 "$P/overlay/upper"
+mk 0:0 0700 "$P/overlay/work"
+mk "$USR:$GRP" 0700 "$P/home"
+mk "$USR:$GRP" 0755 "$TREE"
+mk "$USR:$GRP" 0700 "$P/tmp"
+mk "$USR:$GRP" 0700 "$P/engine"
+mk "$USR:$GRP" 0700 "$P/lan-state"
+
+bind() {
+  install -d "$2"
+  mountpoint -q "$2" || mount --bind "$P/$1" "$2"
+}
+bind docker /var/lib/docker
+bind containerd /var/lib/containerd
+bind tailscale /var/lib/tailscale
+
+# the code from the measured root, its state (cell/.celld, target/devstack,
+# .dev.vars, ...) in the volume's upper layer
+mountpoint -q "$TREE" \
+  || mount -t overlay overlay -o "lowerdir=$LOWER,upperdir=$P/overlay/upper,workdir=$P/overlay/work" "$TREE"
+
+# the computers' images by the tags pod-computers loads them under, for the
+# box's node list (what `xtask node-images` records; it cannot run here)
+NI="$TREE/target/devstack/node-images.json"
+if [[ ! -f "$NI" ]]; then
+  install -d -o "$USR" -g "$GRP" -m 0755 "$TREE/target/devstack"
+  printf '%s\n' '{"engine":"/srv/private/engine","arch":"x86_64","images":{"stub":"fragment-stub:demo","hermes":"fragment-hermes:demo"}}' > "$NI.tmp"
+  chown "$USR:$GRP" "$NI.tmp"
+  mv "$NI.tmp" "$NI"
+fi
+
+# the tailnet's limits first, then the tailnet and Docker
+nft -f /usr/lib/pod/tailnet-firewall.nft
+systemctl start containerd.service docker.socket docker.service tailscaled.service
+# pod-addr, pod-computers and pod-engine come with it
+systemctl start --no-block pod-stack.service
+echo "pod-opened: volume state bound, overlay mounted, stack starting" >&2

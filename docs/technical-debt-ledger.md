@@ -961,3 +961,54 @@ unfinished design, not debt.
 - **Delete when:** each batch's commit is made again from main as the
   indexes' is (keeping the newer entry), or the archive moves to an app
   whose mutation writes both.
+
+## The pod image carries a pinned fork of the platform
+
+- **Shortcut:** the pod image (`pod-image/`) does not carry the tree it is
+  built from. `cargo xtask pod image platform` builds and stages exactly
+  what the proof of concept's demo ran, pinned in `pod-image/pinned-platform/`
+  and nowhere else: fragment `2e123d40` on `selfhost-http-port` with
+  `fragment-prebuilt.patch`, celld (`futurepaul/celld`, `selfhost`,
+  `b19f09d`), sandcastle (`futurepaul/sandcastle`, `node`, `5d64525`) with
+  its Docker engine double and `sandcastle-double-vms-max.patch`, and the
+  Docker CE, containerd.io and Tailscale packages held to `debs.sha256`.
+  Only `pod-init` is built from the tree being built. Master's self-host
+  has no computers inside a confidential VM: its computers run on celld's
+  krun engine, which needs KVM, and no rentable confidential VM offers
+  nested virtualization (`docs/explorations/private-agents-mvp.md`,
+  "Computers are the open problem").
+- **Risk:** the image's platform is months behind master and gets none of
+  its fixes; the Docker double gives an agent's computer a container, not
+  a microVM, so less isolation between the agent and the platform; and
+  the fork's tree runs only at the compile-time path
+  `/srv/private/home/fragment-home`, as the stack's user (uid 1001, gid 1002).
+  The computers' Docker images are rebuilt by the platform step, not
+  pinned by digest, so two builds can carry different ones.
+- **Delete when:** a computers path that works without KVM exists on
+  master's self-host (Paul's decision 2 in the MVP's plan); then the image
+  builds the tree it is built from, `pod-image/pinned-platform/` and the
+  platform step go, and the stack's units run master's self-host.
+
+## The pod image's unit helpers are shell
+
+- **Shortcut:** the pod image carries small shell helpers that mkosi or
+  systemd run (`pod-image/mkosi/mkosi.extra/usr/lib/pod/`): `pod-opened`
+  (pod-init's open hook: the volume's directories, bind mounts, the
+  overlay over the image's tree, the tailnet's nft table, then the
+  platform's units), `pod-addr` (which address the front door binds, from
+  Tailscale's state or Google's metadata server), `pod-computers` (loads
+  the computers' images into Docker), `pod-stack` (the platform's
+  environment, then `xtask dev --lan`) and `gce-disk-name` (a udev
+  helper that reads a disk's Compute Engine device name from NVMe vendor
+  data). They were moved over as they are because changing one changes
+  the image, which is not being rebuilt.
+- **Risk:** each is untested outside a booted pod; `pod-opened` decides
+  what of the volume is trusted state and runs as root before the
+  platform starts.
+- **Delete when:** the next rebuild of the image after the platform debt
+  above is gone: `pod-opened`'s and `pod-addr`'s work moves into pod-init
+  (an open step it runs itself, tested with its fake volume),
+  `pod-computers` and `pod-stack` become master's self-host units, and
+  `gce-disk-name` becomes a udev rule on the `nvme` namespace's
+  attributes or goes with Google's guest packages' own rule.
+  `mkosi.postinst.chroot` stays: mkosi runs a script there by design.
