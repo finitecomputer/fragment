@@ -210,7 +210,10 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
         out.status.success() && printed.contains("\"x-api-key\"") && !printed.contains(&piped) && listed.status.success() && listed_text.contains("cli-key  api.example.com  for ada--k3x9") && !listed_text.contains(&piped),
         format!("{printed} / {listed_text}"),
     );
-    // --keep-value: no value read, its hosts set; then parked again
+    // --keep-value: no value read, its hosts set; then parked again. The
+    // CLI's home is a person of its own: its key goes in parked first
+    let cli_key = Keys::generate().secret_hex();
+    let handed = piped_cli(s, &api, &home, &["vault", "set", "nostr-kept", "--agent", "ada--k3x9", "--sign", "nip98"], &cli_key)?;
     let kept = s.cli(&api, &home, &["vault", "set", "nostr-kept", "--agent", "ada--k3x9", "--to", "finite.site", "--sign", "nip98", "--keep-value"]);
     let kept_text = String::from_utf8_lossy(&kept.stdout).into_owned();
     let listed = String::from_utf8_lossy(&s.cli(&api, &home, &["vault", "list"]).stdout).into_owned();
@@ -218,9 +221,11 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     let parked_list = String::from_utf8_lossy(&s.cli(&api, &home, &["vault", "list"]).stdout).into_owned();
     let new = s.cli(&api, &home, &["vault", "set", "cli-new", "--agent", "ada--k3x9", "--to", "api.example.com", "--keep-value"]);
     let to_fill = s.cli(&api, &home, &["vault", "set", "nostr-kept", "--agent", "ada--k3x9", "--to", "finite.site", "--keep-value"]);
+    let after = String::from_utf8_lossy(&s.cli(&api, &home, &["vault", "list"]).stdout).into_owned();
     s.ok(
-        "the CLI's --keep-value points a kept key at its host and parks it again, reading no value; a new name, or a key set to fill, is refused",
-        kept.status.success()
+        "the CLI's --keep-value points a parked key at its host and parks it again, reading no value; a new name, or a key set to fill, is refused",
+        handed.status.success()
+            && kept.status.success()
             && kept_text.contains("secret nostr-kept set for ada--k3x9, its value kept, toward finite.site")
             && listed.contains("nostr-kept  finite.site  for ada--k3x9")
             && parked.status.success()
@@ -228,8 +233,10 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
             && !new.status.success()
             && String::from_utf8_lossy(&new.stderr).contains("a new one needs its value")
             && !to_fill.status.success()
-            && held(&api, "nostr-kept")?["place"] == json!({ "sign": "nip98" }),
-        format!("{kept_text} / {listed} / {parked_list} / {} / {}", String::from_utf8_lossy(&new.stderr), String::from_utf8_lossy(&to_fill.stderr)),
+            && String::from_utf8_lossy(&to_fill.stderr).contains("a Nostr key that signs")
+            && after.contains("nostr-kept  (parked)  for ada--k3x9")
+            && ![&kept_text, &listed, &parked_list, &after].iter().any(|t| t.contains(&cli_key)),
+        format!("{kept_text} / {listed} / {parked_list} / {} / {} / {after}", String::from_utf8_lossy(&new.stderr), String::from_utf8_lossy(&to_fill.stderr)),
     );
     let empty = piped_cli(s, &api, &home, &["vault", "set", "cli-empty", "--agent", "ada--k3x9"], "")?;
     let argv = s.cli(&api, &home, &["vault", "set", "cli-argv", &piped, "--agent", "ada--k3x9"]);
@@ -244,7 +251,7 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     let text = logs(s);
     s.ok(
         "no value put (a token, its rotation, a Nostr key) is in any node log",
-        !text.is_empty() && !text.contains(&value) && !text.contains(&rotated) && !text.contains(&nsec) && !text.contains(&kept_key) && !text.contains(&piped),
+        !text.is_empty() && !text.contains(&value) && !text.contains(&rotated) && !text.contains(&nsec) && !text.contains(&kept_key) && !text.contains(&cli_key) && !text.contains(&piped),
         format!("{} bytes of logs", text.len()),
     );
     Ok(())
