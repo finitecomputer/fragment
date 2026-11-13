@@ -38,6 +38,9 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     calendar: "Calendar",
     "calendar.readonly": "Calendar (read)",
     "contacts.readonly": "Contacts",
+    // Box's
+    root_readonly: "Files and folders (read)",
+    root_readwrite: "Files and folders",
   };
   // what a connection's account lets its agents do, picked as the person
   // connects it (`access`): its name for people, on a button and as said

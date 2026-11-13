@@ -988,4 +988,38 @@ mod tests {
         listed["scope"] = json!(["read", "write"]);
         assert_eq!(tokens(&listed, requested).err(), Some(Refused::Invalid));
     }
+
+    /// Box's row (deploy/example.jsonc): its authorize narrows a grant to
+    /// the scope it asks for, `root_readonly` read only, `root_readwrite`
+    /// read and write, and its token endpoint's answer names no `scope`
+    /// (developer.box.com, guides/api-calls/permissions-and-errors/scopes
+    /// and guides/authentication/tokens/access-tokens, read 2026-11-11), so
+    /// a grant is what was asked (RFC 6749 §5.1): each access connects as
+    /// picked, nothing missing. Box documents no PKCE: its endpoints ignore
+    /// a parameter they do not know (RFC 6749 §3.1, §3.2). It has no ID
+    /// token, so no account label.
+    #[test]
+    fn boxs_answer_names_no_scope_so_each_access_connects_as_asked() {
+        let one = |scope: &str| Grant { scopes: vec![scope.into()] };
+        let access = catalog::Access { read: Some(one("root_readonly")), write: one("root_readwrite") };
+        let o = ConnectionOAuth { authorize: "https://account.box.com/api/oauth2/authorize".into(), exchange: "https://api.box.com/oauth2/token".into(), client_id: "client".into(), access, revoke: None };
+        assert!(check(&o).is_ok());
+        let callback = "https://platform.example/api/connections/box/callback";
+        let answer = json!({ "access_token": "mock-access", "expires_in": 3600, "token_type": "bearer", "refresh_token": "mock-refresh", "issued_token_type": "urn:ietf:params:oauth:token-type:access_token" });
+        for (access, scope) in [(ConnectionAccess::Read, "root_readonly"), (ConnectionAccess::Write, "root_readwrite")] {
+            let grant = o.access.of(access).unwrap();
+            let u = url::Url::parse(&authorize_url(&o, grant, callback, "challenge", "state")).unwrap();
+            let query: Vec<(String, String)> = u.query_pairs().into_owned().collect();
+            let want = [("client_id", "client"), ("redirect_uri", callback), ("response_type", "code"), ("scope", scope), ("state", "state"), ("code_challenge", "challenge"), ("code_challenge_method", "S256")];
+            assert_eq!((u.host_str(), u.path(), query), (Some("account.box.com"), "/api/oauth2/authorize", want.map(|(k, v)| (k.to_string(), v.to_string())).to_vec()), "{access:?}: one scope, and nothing Box needs beside");
+            let granted = tokens(&answer, &grant.scopes).expect("Box's documented answer");
+            assert_eq!((granted.expires_in, granted.import_body("2026-11-11T00:00:00Z", None)["scopes"].clone()), (Some(3600), json!([scope])), "{access:?}: Pipes holds what was asked");
+            assert!(missing(&grant.scopes, &granted.scopes).is_empty());
+            assert_eq!(access_of(&o, &granted.scopes), Some(access));
+        }
+        assert_eq!((account_label(&answer, "client"), account_identifier(&answer, "client")), (None, None), "no ID token: no label");
+        let mut single = answer;
+        single.as_object_mut().unwrap().remove("refresh_token");
+        assert_eq!(tokens(&single, &o.access.write.scopes).err(), Some(Refused::Invalid), "a grant with no refresh token is never imported");
+    }
 }
