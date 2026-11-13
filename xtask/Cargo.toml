@@ -24,4 +24,8 @@ fragment-nip98 = { path = "../crates/nip98" }
 # the release's files, written into the cell's Static Assets at each build (build.rs)
 fragment-templates = { path = "../crates/templates", features = ["embed"] }
 fragment-fakes = { path = "../crates/fakes" }
+# `pod measure`: the registers an image's boot must show, from its bytes
+# (`verify`: its disk reader and the prediction lined up against a boot)
+fragment-pod = { path = "../crates/pod", features = ["verify"] }
+hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
