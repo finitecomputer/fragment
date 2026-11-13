@@ -574,6 +574,18 @@ impl Suite {
         self.skip(label, "celld has no Browser Rendering, so the node shoots no cards (docs/self-host.md)");
     }
 
+    /// Whether the node makes and fits icons: celld has no Images binding
+    /// (its `IMAGES` binding rejects every call, so every icon made or
+    /// uploaded fails there).
+    pub fn makes_icons(&self) -> bool {
+        !self.on_celld()
+    }
+
+    /// A check of an icon made or fitted on a node that makes none: a skip.
+    pub fn skip_icon(&mut self, label: &str) {
+        self.skip(label, "celld has no Images binding, so the node makes and fits no icons (docs/self-host.md)");
+    }
+
     /// Whether the node's vendors are the fakes: a local run, or its
     /// rehearsal (whose fakes no lane reaches, but which answer the node).
     pub fn on_fakes(&self) -> bool {
