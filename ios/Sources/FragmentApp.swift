@@ -561,6 +561,8 @@ struct FragmentRoot: View {
                 // its notices glass, as iOS's banners are, over what the page
                 // beneath has (below: Home's wallpaper meets it without a seam)
                 NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4)
+                    // its glass's shadow over the page's top, not under it
+                    .zIndex(1)
                     // Your Apps is pushed onto the page it was opened from, so
                     // Back (and swiping back) returns to that chat or page.
                     NavigationStack {

@@ -102,16 +102,19 @@ struct NoticesBand: View {
                         ForEach(shown) { notice in row(notice, now: now) }
                         ForEach(refusals, id: \.id) { refusal in refused(refusal.id, refusal.failure) }
                     }
-                    // room below for the glass's shadow to fade before the band clips it
-                    .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 28)
+                    // nothing below: the toolbar's own margin is the gap above its buttons
+                    .padding(.horizontal, 12).padding(.top, 6)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 // no shade of its own at its edges: the page shows through as it is
                 .scrollEdgeEffectHidden(true, for: .all)
+                // The glass's shadow falls past the band unless its notices
+                // overflow it; overflowing, they never scroll under the toolbar,
+                // however it was scrolled when a notice went.
+                .scrollClipDisabled(height <= maxHeight)
                 .frame(height: min(height, maxHeight))
-                // never under the toolbar, however it was scrolled when a notice went
-                .clipped()
+                .clipShape(Rectangle().inset(by: height > maxHeight ? 0 : -32))
             }
         }
     }
@@ -119,7 +122,7 @@ struct NoticesBand: View {
     /// A refusal whose notice is gone: its title and the server's words,
     /// until OK (which asks nothing).
     private func refused(_ id: String, _ failure: NoticeFailure) -> some View {
-        card(warns: failure.warns) {
+        card {
             VStack(alignment: .leading, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(failure.title).font(.subheadline.weight(.semibold))
@@ -135,12 +138,12 @@ struct NoticesBand: View {
     }
 
     private var refresh: some View {
-        card(warns: false) { NoticesRefresh(library: library, api: api) }
+        card { NoticesRefresh(library: library, api: api) }
             .accessibilityIdentifier("noticesRefresh")
     }
 
     private func row(_ notice: Notice, now: Int64) -> some View {
-        card(warns: notice.warns) {
+        card {
             VStack(alignment: .leading, spacing: 8) {
                 // every word it says, however little room the page leaves (the keyboard up)
                 VStack(alignment: .leading, spacing: 2) {
@@ -179,15 +182,12 @@ struct NoticesBand: View {
         }
     }
 
-    private func card(warns: Bool, @ViewBuilder _ content: () -> some View) -> some View {
+    private func card(@ViewBuilder _ content: () -> some View) -> some View {
         content()
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
-            // an iOS banner's glass and corners; a warning keeps its red edge
+            // an iOS banner's glass and corners
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .overlay {
-                if warns { RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Color.red.opacity(0.45)) }
-            }
     }
 }
 
