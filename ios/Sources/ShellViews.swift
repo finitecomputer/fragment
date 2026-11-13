@@ -115,6 +115,25 @@ private struct SidebarPan: UIGestureRecognizerRepresentable {
     }
 }
 
+/// A blur over the status bar and the margin below it, down to where the
+/// pinned agent's row starts and no further, fading out across that margin.
+private struct StatusBarBlur: View {
+    let margin: CGFloat
+    var body: some View {
+        GeometryReader { proxy in
+            let top = proxy.safeAreaInsets.top
+            Rectangle().fill(.ultraThinMaterial)
+                .mask(LinearGradient(stops: [.init(color: .black, location: 0),
+                                             .init(color: .black, location: top / (top + margin)),
+                                             .init(color: .clear, location: 1)],
+                                     startPoint: .top, endPoint: .bottom))
+                .frame(height: top + margin)
+                .ignoresSafeArea(edges: .top)
+        }
+        .allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
 struct SidebarView: View {
     let library: Library
     let page: ShellPage
@@ -201,11 +220,12 @@ struct SidebarView: View {
             }.padding(.horizontal, 12)
         }
         .refreshable { await library.load(api) }
-        // what passes under the status bar blurs as under a chat's top bar:
-        // the system's soft edge, over a bar of its own to reach past the clock
-        // (a bar of nothing, a clear color, gets no edge: it holds a blank line)
-        .safeAreaBar(edge: .top) { Text(verbatim: " ").frame(maxWidth: .infinity).frame(height: 12).accessibilityHidden(true) }
-        .scrollEdgeEffectStyle(.soft, for: .top)
+        // What passes under the status bar blurs there alone: the system's edge
+        // would fade the pinned agent too, so it's off, and the agent pins
+        // just below the blur, a margin's width under the status bar.
+        .scrollEdgeEffectHidden(true, for: .top)
+        .contentMargins(.top, 12, for: .scrollContent)
+        .overlay(alignment: .top) { StatusBarBlur(margin: 12) }
         .safeAreaBar(edge: .bottom) {
             HStack(alignment: .bottom, spacing: 12) {
                 VStack(spacing: 4) {
