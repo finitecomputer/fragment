@@ -44,6 +44,7 @@ step Migrations 3 routine_generation ad1b55b48c743941
 step Migrations 4 people_by_person 87d4690491d35ee6
 step Migrations 5 people_comped edd3cbbee6194f4f
 step Migrations 6 withdrawn_why 4d666c2bbef4f282
+step Migrations 7 waiting_forward_only 18ed5cf065932299
 
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)

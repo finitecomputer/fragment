@@ -439,6 +439,18 @@ never reaches another agent's core.
   (v7.0.3's force makes new keys each time, which an offline phone cannot
   follow). A connection repeated forces already damaged may stay stuck.
   Restarts and recovery send the owner nothing.
+- **A scan cut short.** The core takes the phone's confirmation, then
+  queues its acceptance. A core stopped between the two (a hold's save, a
+  crash) never accepts it in any later start, and the core has no command
+  that would, so the person's scan comes to nothing (preview, 2026-11-11).
+  Each start while inviting reads the invitation's connection; one taken
+  by an earlier life and still `requested` `RECHECK_MS` (10 s) later gets
+  a new invitation beside it, and the link page says to scan that. The
+  stalled one is kept, never torn down: one whose acceptance was queued
+  looks the same and finishes once its servers answer. Whichever connects
+  is the link, and the other is let go then. A new invitation the core
+  will not make leaves the link asking with the stalled one kept (its door
+  key too), says so, and is asked again at the next start or Try again.
 - **An owner's old SimpleX conversation can be kept** (FIN-463,
   `simplex/stage.rs`; docs/migrations.md, "SimpleX in a stage"). Before the
   move's routine reaches the agent (`driver.rs` `feed` holds it, within

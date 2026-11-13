@@ -3,7 +3,7 @@
 //! This small URL/form codec uses existing url/serde/PKCE primitives because
 //! the cell uses Workers Fetch, not a native OAuth client's HTTP transport.
 
-use crate::catalog::{self, ConnectionAccess, ConnectionOAuth, Grant};
+use crate::catalog::{self, ClientAuth, ConnectionAccess, ConnectionOAuth, Grant};
 use serde_json::{json, Value};
 
 pub const SCOPES_MAX: usize = 32;
@@ -205,6 +205,34 @@ pub fn exchange_form(o: &ConnectionOAuth, callback: &str, code: &str, verifier: 
     url::form_urlencoded::Serializer::new(String::new()).append_pair("grant_type", "authorization_code")
         .append_pair("client_id", &o.client_id).append_pair("client_secret", secret).append_pair("redirect_uri", callback)
         .append_pair("code", code).append_pair("code_verifier", verifier).finish()
+}
+
+/// A code exchange as its row's client authenticates (`ClientAuth`): its
+/// `Authorization` header, and its form. In the body, no header and
+/// `exchange_form`'s; with HTTP Basic, the header
+/// (`client_authorization`) and a form that names neither its id nor its
+/// secret: a request authenticates one way (RFC 6749 §2.3.1).
+pub fn exchange(o: &ConnectionOAuth, auth: ClientAuth, callback: &str, code: &str, verifier: &str, secret: &str) -> (Option<String>, String) {
+    match auth {
+        ClientAuth::Post => (None, exchange_form(o, callback, code, verifier, secret)),
+        ClientAuth::Basic => {
+            let form = url::form_urlencoded::Serializer::new(String::new()).append_pair("grant_type", "authorization_code")
+                .append_pair("redirect_uri", callback).append_pair("code", code).append_pair("code_verifier", verifier).finish();
+            (client_authorization(auth, &o.client_id, secret), form)
+        }
+    }
+}
+
+/// The `Authorization` header a connection's client authenticates with,
+/// at its code exchange and at a revocation, where its row says HTTP Basic
+/// (`ClientAuth::Basic`): its id and secret, each form-encoded, joined by
+/// a colon and said in base64 (RFC 6749 §2.3.1 and its Appendix B; an id
+/// or a secret of letters, digits and `-._` is left as it is, which every
+/// such provider's are). None where its row puts them in the body.
+pub fn client_authorization(auth: ClientAuth, client_id: &str, secret: &str) -> Option<String> {
+    use base64::Engine;
+    let encoded = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+    (auth == ClientAuth::Basic).then(|| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", encoded(client_id), encoded(secret)))))
 }
 
 /// A revocation's form (RFC 7009 §2.1; Google documents `token` alone).
@@ -601,6 +629,39 @@ mod tests {
         }
         let form: std::collections::BTreeMap<_, _> = url::form_urlencoded::parse(revoke_form("a+b/c=").as_bytes()).into_owned().collect();
         assert_eq!(form, std::collections::BTreeMap::from([("token".to_string(), "a+b/c=".to_string())]));
+    }
+
+    /// Goal: a client that authenticates with HTTP Basic (its row's
+    /// `client_auth`: RFC 6749 §2.3.1, as Zoom's, Airtable's, Xero's and
+    /// Notion's token endpoints ask) sends its id and secret in the header
+    /// alone, each form-encoded first; in the body, an exchange is the
+    /// form it always was, with no header.
+    #[test]
+    fn a_basic_client_authenticates_in_its_header_and_never_its_body() {
+        use base64::Engine;
+        let callback = "https://platform.example/api/connections/mail/callback";
+        let fields = |form: &str| url::form_urlencoded::parse(form.as_bytes()).map(|(k, _)| k.into_owned()).collect::<std::collections::BTreeSet<_>>();
+        let credentials = |header: Option<String>| {
+            let header = header.expect("a Basic client's header");
+            String::from_utf8(base64::engine::general_purpose::STANDARD.decode(header.strip_prefix("Basic ").expect("the Basic scheme")).expect("base64")).expect("text")
+        };
+        let mut o = config();
+        let (header, form) = exchange(&o, ClientAuth::Post, callback, "c+/=&", "verifier", "fake-secret");
+        assert_eq!((header, form.as_str()), (None, exchange_form(&o, callback, "c+/=&", "verifier", "fake-secret").as_str()), "in the body: no header, and the form as it was");
+        assert_eq!(fields(&form), ["client_id", "client_secret", "code", "code_verifier", "grant_type", "redirect_uri"].map(String::from).into());
+        assert_eq!(client_authorization(ClientAuth::Post, "client", "fake-secret"), None);
+
+        let (header, form) = exchange(&o, ClientAuth::Basic, callback, "c+/=&", "verifier", "fake-secret");
+        assert_eq!(credentials(header), "client:fake-secret");
+        assert_eq!(fields(&form), ["code", "code_verifier", "grant_type", "redirect_uri"].map(String::from).into(), "one authentication method a request: neither its id nor its secret is the body's");
+        assert!(!form.contains("fake-secret"));
+        let sent: std::collections::BTreeMap<_, _> = url::form_urlencoded::parse(form.as_bytes()).into_owned().collect();
+        assert_eq!((sent["grant_type"].as_str(), sent["redirect_uri"].as_str(), sent["code"].as_str(), sent["code_verifier"].as_str()), ("authorization_code", callback, "c+/=&", "verifier"));
+        // each half form-encoded before they are joined, so a colon in an
+        // id is never taken for the join
+        o.client_id = "cli:ent".into();
+        assert_eq!(credentials(exchange(&o, ClientAuth::Basic, callback, "code", "verifier", "s e/c+r=t").0), "cli%3Aent:s+e%2Fc%2Br%3Dt");
+        assert_eq!(credentials(client_authorization(ClientAuth::Basic, "cli:ent", "s e/c+r=t")), "cli%3Aent:s+e%2Fc%2Br%3Dt");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { KIND } from "./frame-messages.js";
 import { icon } from "./icons.js";
+import { providerMark } from "./provider-marks.js";
 
 // A provider's name for people: the platform's (`ProviderView.name`), or
 // its id where an older release answered without one (a deploy going out,
@@ -350,7 +351,13 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     const calls = mine.reduce((n, u) => n + u.calls, 0);
     const micros = mine.reduce((n, u) => n + u.micros, 0);
     const charge = p.kind === "operator" && calls ? ` · ${money(micros)}` : "";
-    const tile = (big) => el("span", `provider-tile${big ? " big" : ""}`, name.slice(0, 1));
+    // its mark (provider-marks.js), else its name's first letter
+    const tile = (big) => {
+      const mark = providerMark(p.provider);
+      const t = el("span", `provider-tile${big ? " big" : ""}`, mark ? "" : name.slice(0, 1));
+      if (mark) t.append(mark);
+      return t;
+    };
     const light = () => {
       const st = el("span", "provider-state");
       st.append(el("span", `provider-light ${lightOf(p)}`));

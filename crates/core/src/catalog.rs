@@ -334,6 +334,32 @@ pub struct Models {
     pub offer: Vec<OfferedModel>,
 }
 
+/// How a connection's OAuth client authenticates to its provider (RFC
+/// 6749 §2.3.1), under the names OAuth's metadata gives the two
+/// (`client_secret_post`, `client_secret_basic`): its row's `client_auth`,
+/// beside its `connection_oauth`. On the wire: `"post"` (a row that names
+/// none) or `"basic"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAuth {
+    /// Its id and secret in the code exchange's form, and nothing at a
+    /// revocation (Google's, Linear's and Salesforce's take the token
+    /// alone).
+    #[default]
+    Post,
+    /// HTTP Basic, its id and secret in the `Authorization` header of the
+    /// code exchange and of a revocation, and in neither's body: what
+    /// Zoom's, Airtable's, Xero's and Notion's token endpoints ask
+    /// (`connection_signin::client_authorization`).
+    Basic,
+}
+
+impl ClientAuth {
+    fn is_post(&self) -> bool {
+        *self == ClientAuth::Post
+    }
+}
+
 /// One provider a deployment offers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -366,6 +392,12 @@ pub struct Provider {
     /// token goes to its named hosts alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_host: Option<AccountHost>,
+    /// How a connection's OAuth client authenticates to its provider's
+    /// token and revocation endpoints (`ClientAuth`): a connection with
+    /// `connection_oauth` only. Absent, its id and secret in the code
+    /// exchange's body, as before the field was.
+    #[serde(default, skip_serializing_if = "ClientAuth::is_post")]
+    pub client_auth: ClientAuth,
     /// An own key's models, which a person may pick for their agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Models>,
@@ -444,6 +476,9 @@ pub enum CatalogError {
     /// An account host on a row that is no connection, or one whose suffix
     /// is no host name or whose metadata field is no name.
     AccountHost { provider: String, why: String },
+    /// `client_auth` on a row that is no connection with
+    /// `connection_oauth`: it has no OAuth client to authenticate.
+    ClientAuth { provider: String, why: String },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -464,6 +499,7 @@ impl std::fmt::Display for CatalogError {
             CatalogError::Note { provider, why } => write!(f, "{provider}'s note: {why}"),
             CatalogError::Accounts { provider, why } => write!(f, "{provider}'s accounts_max: {why}"),
             CatalogError::AccountHost { provider, why } => write!(f, "{provider}'s account_host: {why}"),
+            CatalogError::ClientAuth { provider, why } => write!(f, "{provider}'s client_auth: {why}"),
         }
     }
 }
@@ -754,6 +790,9 @@ impl Catalog {
                 if p.kind != Kind::Connection || p.connection_oauth.is_none() {
                     return Err(CatalogError::Accounts { provider, why: "only a connection with connection_oauth connects several accounts: they are imported by its callback".into() });
                 }
+            }
+            if p.client_auth != ClientAuth::Post && (p.kind != Kind::Connection || p.connection_oauth.is_none()) {
+                return Err(CatalogError::ClientAuth { provider, why: "only a connection with connection_oauth has an OAuth client to authenticate".into() });
             }
             if let Some(a) = &p.account_host {
                 if p.kind != Kind::Connection {
@@ -1132,6 +1171,40 @@ mod tests {
         assert_eq!(c.named("perplexity", false).map(|p| p.kind), Some(Kind::Operator));
         let key = crate::vault::row("perplexity", vec!["api.vault.test".into()], bearer);
         assert!(std::panic::catch_unwind(|| c.with(vec![key])).is_err(), "a key's name is never a Vault's");
+    }
+
+    /// How a connection's OAuth client authenticates (`client_auth`): a
+    /// connection with `connection_oauth` may say HTTP Basic; absent it is
+    /// the body, and the row writes as before the field was. No other row
+    /// has a client to say it of.
+    #[test]
+    fn a_connections_client_may_authenticate_with_http_basic() {
+        let oauth = json!({ "authorize": "https://accounts.example/authorize", "exchange": "https://accounts.example/token", "client_id": "client", "access": { "write": { "scopes": ["mail.read"] } } });
+        let with = |auth: Option<serde_json::Value>, oauth: Option<&serde_json::Value>| {
+            let mut g = google();
+            if let Some(auth) = auth {
+                g["client_auth"] = auth;
+            }
+            if let Some(o) = oauth {
+                g["connection_oauth"] = o.clone();
+            }
+            parse(json!([g]))
+        };
+        let c = with(None, Some(&oauth)).unwrap();
+        assert_eq!(c.get("google").unwrap().client_auth, ClientAuth::Post, "absent is the body");
+        assert!(!serde_json::to_string(c.get("google").unwrap()).unwrap().contains("client_auth"), "a row without it writes as before");
+        assert_eq!(with(Some(json!("post")), Some(&oauth)).unwrap(), c, "named, the body is as absent");
+        let basic = with(Some(json!("basic")), Some(&oauth)).unwrap();
+        assert_eq!(basic.get("google").unwrap().client_auth, ClientAuth::Basic);
+        assert!(serde_json::to_string(basic.get("google").unwrap()).unwrap().contains(r#""client_auth":"basic""#), "and reaches the cell as its row says it");
+        for bad in [json!("digest"), json!("Basic"), json!(""), json!(null), json!(true)] {
+            assert!(matches!(with(Some(bad.clone()), Some(&oauth)), Err(CatalogError::Shape(_))), "{bad}");
+        }
+        assert!(matches!(with(Some(json!("basic")), None), Err(CatalogError::ClientAuth { .. })), "a connection with no browser-bound connect has no client");
+        assert!(with(Some(json!("post")), None).is_ok(), "the body is every row's, said or not");
+        let mut key = json!({ "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["PERPLEXITY_API_KEY"] });
+        key["client_auth"] = json!("basic");
+        assert!(matches!(parse(json!([key])), Err(CatalogError::ClientAuth { .. })), "nor has an operator's key");
     }
 
     /// Several accounts: a connection whose callback imports them (its

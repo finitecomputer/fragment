@@ -80,6 +80,9 @@ pub fn schedules_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("at a phone's width nothing runs off the page, and each fragment's title is whole", fits, b.eval(&page, rows)?);
     b.color_scheme(&page, "light")?;
     b.viewport(&page, 1280, 900, false)?;
+    // the sidebar drawn again at the desktop's width before it is clicked
+    // (on a fast node the call below answers before it is)
+    b.until(&page, "!!document.getElementById('settings')?.offsetParent", wait);
 
     // paused, the routine says so and comes last, read as the page opens again
     let r = api.signed(&keys, "PUT", &format!("/api/f/{agent}/schedules/{id}"), Some(&json!({ "paused": true })))?;
