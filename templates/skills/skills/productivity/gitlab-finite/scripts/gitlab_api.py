@@ -39,9 +39,12 @@ Environment:
 
 import argparse
 import contextlib
+import http.client
 import json
 import os
 import re
+import secrets
+import stat
 import sys
 import urllib.error
 import urllib.parse
@@ -54,6 +57,8 @@ MAX_ITEMS = 100
 # an answer read into memory, and a download written to a file, at most
 MAX_READ_BYTES = 64 * 1024 * 1024
 MAX_SAVE_BYTES = 2 * 1024 * 1024 * 1024
+# an answer is read this much at a time
+READ_STEP_BYTES = 1024 * 1024
 # a project's numeric id, an issue's or merge request's number (iid), a
 # pipeline's or job's id
 NUMBER = re.compile(r"^[1-9][0-9]{0,19}$")
@@ -121,7 +126,9 @@ def call(method, path, query=None, body=None, raw=False, out=None):
         with OPENER.open(request, timeout=TIMEOUT_S) as response:
             if out:
                 return {"saved": out, "bytes": save(response, out)}
-            answer = response.read(MAX_READ_BYTES + 1)
+            parts = []
+            read_whole(response, parts.append, MAX_READ_BYTES, f"GitLab's answer is over {MAX_READ_BYTES} bytes: ask for less, or write it to a file with --out")
+            answer = b"".join(parts)
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             raise GitLabError(exc.code, "redirected", f"GitLab answered a redirect to {exc.headers.get('Location', '?')}, which the helper never follows with the token") from None
@@ -131,8 +138,11 @@ def call(method, path, query=None, body=None, raw=False, out=None):
     except OSError as exc:
         # the answer cut off as it was read (a timeout, a reset)
         raise GitLabError(0, "unreachable", str(exc) or type(exc).__name__) from None
-    if len(answer) > MAX_READ_BYTES:
-        raise GitLabError(0, "too_large", f"GitLab's answer is over {MAX_READ_BYTES} bytes: ask for less, or write it to a file with --out")
+    except http.client.IncompleteRead:
+        # a chunked answer that ended before its last chunk
+        raise GitLabError(0, "incomplete", "GitLab's answer broke off before its end: ask again") from None
+    except http.client.HTTPException as exc:
+        raise GitLabError(0, "unreachable", f"GitLab's answer could not be read as HTTP: {exc!r}") from None
     if raw:
         return answer
     try:
@@ -141,33 +151,67 @@ def call(method, path, query=None, body=None, raw=False, out=None):
         return {"text": answer.decode("utf-8", errors="replace")}
 
 
+def stated_size(response):
+    """The answer's size as its Content-Length states it; None for one that
+    states none, or a chunked one (http.client itself raises IncompleteRead
+    when a chunked answer breaks off)."""
+    if "chunked" in (response.headers.get("Transfer-Encoding") or "").lower():
+        return None
+    value = (response.headers.get("Content-Length") or "").strip()
+    return int(value) if value.isascii() and value.isdigit() else None
+
+
+def read_whole(response, sink, limit, too_large):
+    """The answer, to its end, given to `sink` a piece at a time, at most
+    `limit` bytes: its size. An answer that ends short of its Content-Length
+    is refused: http.client's bounded read returns short there rather than
+    raising, as it raises IncompleteRead only for a chunked answer."""
+    expected = stated_size(response)
+    if expected is not None and expected > limit:
+        raise GitLabError(0, "too_large", too_large)
+    size = 0
+    while chunk := response.read(READ_STEP_BYTES):
+        size += len(chunk)
+        if size > limit:
+            raise GitLabError(0, "too_large", too_large)
+        sink(chunk)
+    if expected is not None and size != expected:
+        raise GitLabError(0, "incomplete", f"GitLab's answer broke off after {size} of its {expected} bytes: ask again")
+    return size
+
+
 def save(response, out):
-    """The answer written to `out`, at most `MAX_SAVE_BYTES`: its size. A
-    download that fails leaves no part of itself behind."""
+    """The answer written to `out`, at most `MAX_SAVE_BYTES`: its size. It is
+    written to a new file beside `out`, which replaces `out` only once the
+    whole answer has arrived: a download that fails leaves `out` as it was,
+    and no part of itself behind."""
 
-    def unwritable(exc):
-        return GitLabError(0, "unwritable", f"{out}: {exc.strerror or exc}")
+    def writing(do, *args):
+        try:
+            return do(*args)
+        except OSError as exc:
+            raise GitLabError(0, "unwritable", f"{out}: {exc.strerror or exc}") from None
 
+    if os.path.isdir(out):
+        raise GitLabError(0, "unwritable", f"{out}: is a folder")
+    folder, name = os.path.split(os.path.abspath(out))
+    part = os.path.join(folder, f".{name}.{secrets.token_hex(4)}.part")
+    # a new file, made as open(out, "wb") makes one: the umask applies
+    f = writing(open, part, "xb")
     try:
-        f = open(out, "wb")
-    except OSError as exc:
-        raise unwritable(exc) from None
-    written = 0
-    try:
-        with f:
-            while chunk := response.read(1 << 20):
-                written += len(chunk)
-                if written > MAX_SAVE_BYTES:
-                    raise GitLabError(0, "too_large", f"the download is over {MAX_SAVE_BYTES} bytes")
-                try:
-                    f.write(chunk)
-                except OSError as exc:
-                    raise unwritable(exc) from None
+        size = read_whole(response, lambda chunk: writing(f.write, chunk), MAX_SAVE_BYTES, f"the download is over {MAX_SAVE_BYTES} bytes")
+        writing(f.close)
+        with contextlib.suppress(OSError):
+            # a file it replaces keeps its mode, as open(out, "wb") keeps it
+            os.chmod(part, stat.S_IMODE(os.stat(out).st_mode))
+        writing(os.replace, part, out)
     except BaseException:
         with contextlib.suppress(OSError):
-            os.remove(out)
+            f.close()
+        with contextlib.suppress(OSError):
+            os.remove(part)
         raise
-    return written
+    return size
 
 
 # GitLab's refusals that name no word of their own, by status
@@ -551,6 +595,7 @@ HINTS = {
     "not_allowed": "the person's role in that project or group does not allow it",
     "not_found": "the project, number or path is wrong, or the person's account cannot see it",
     "rate_limited": "GitLab.com's rate limit: wait a minute, then ask for less",
+    "incomplete": "the connection to GitLab broke off mid-answer: ask again (a file named by --out is left as it was)",
 }
 
 

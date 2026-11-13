@@ -146,8 +146,10 @@ state, web_url, labels, updated_at, author, assignees}`, merge requests with
 keep a few fields of each; the rest (a project, pipelines, a job, diffs,
 trees) come as GitLab answers them. `files get` prints
 `{project, path, ref, content}`, `jobs log` `{project, job, lines, log}`
-(its colors removed), and a command with `--out` `{saved, bytes}`. A failure
-is one JSON line on stderr, `{error, status, message, hint}`, and exit 1.
+(its colors removed), and a command with `--out` `{saved, bytes}`: the file
+is written only once the whole download has arrived, and a failed one leaves
+it as it was. A failure is one JSON line on stderr, `{error, status, message,
+hint}`, and exit 1.
 
 ## Rules
 
@@ -175,4 +177,5 @@ is one JSON line on stderr, `{error, status, message, hint}`, and exit 1.
 | `bad_project`, `bad_iid`, `bad_path`, `bad_ref`, `bad_json` | The helper refused it before asking GitLab: fix it |
 | `binary` | The file is not text: `files get … --out FILE` |
 | `rate_limited` | Wait a minute, then ask for less |
+| `incomplete` | The connection broke off mid-answer: ask again (a file named by `--out` is left as it was) |
 | `redirected` | GitLab answered a redirect, which the helper never follows with the token: say so, and stop |
