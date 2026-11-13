@@ -43,6 +43,7 @@ in the cell: a self-host change to master does not touch `cell/`,
 | 7 | Preview cards: a renderer | not yet: a card's shot fails (celld's `BROWSER` rejects) |
 | 10 | Money: own hardware in points | not yet |
 | 12 | Secrets | celld's node backend: OpenBao 2.7.2 (the default), a file of their values for `celld dev` alone |
+| 13 | A pod: a self-hosted box in a confidential VM | its library and `pod-init` (crates/pod, crates/pod-init), `cargo xtask pod`; its image carries a pinned fork of the platform, not this tree (debt) |
 | — | Mail | debt: celld's `EMAIL` rejects every send (`E_NO_MAILER`), a failed send |
 
 ## 1. The runtime: celld
@@ -326,6 +327,50 @@ connections' client secrets, the model keys, the operator keys).
   secret a KV v2 entry whose field is `value`, its CA in
   `CELLD_EXTRA_CA_FILE`. Only OpenBao is tested.
 
+## 13. A pod: a self-hosted box in a confidential VM
+
+A pod is this document's self-hosted box, for one owner, inside an Intel
+TDX confidential VM, so that whoever runs the machine cannot read what it
+holds. `docs/pod.md` is its contract;
+`docs/explorations/private-agents-mvp.md` is the plan, a proposal still.
+It takes the seams above as they are and adds three things of its own:
+
+- **A measured image** (`pod-image/`; `cargo xtask pod image`, `measure`
+  and `vm`): a unified kernel image under systemd-stub 257 over a
+  read-only root under dm-verity, with no SSH, no login and no guest
+  agent. A debug sibling adds SSH and measures differently, so neither is
+  accepted under the other's release. A boot's RTMR1 and RTMR2 are
+  computed from the image's bytes; MRTD and RTMR0 are taken as observed
+  (debt).
+- **The owner's unlock** (`crates/pod`, `crates/pod-init`): the box's data
+  is on a LUKS2 volume whose key the owner alone holds. `pod-init` comes
+  up locked at every start and opens the volume only with a key sealed to
+  that boot, in a request the owner signed.
+- **Attestation** (`crates/pod`'s verifier, by feature): before the key
+  leaves its holder, five checks on the pod's quote: Intel's chain, the
+  release's registers, the platform's TCB and debug bit, Google's evidence
+  of which instance it is, and the owner the pod names.
+
+**What it takes of the seams:** 1, celld; 3, a models file naming private
+slots alone; 12, OpenBao, its state on the owner's volume; 9, LAN mode as
+its front door, on the tailnet's address; and 4, sign-in, when it lands.
+
+**No pod is built from this tree yet.** Seam 2's computers run on krun,
+which needs KVM, and no rentable confidential VM offers nested
+virtualization. So the image carries the platform the proof of concept
+ran, pinned (`pod-image/pinned-platform/`: the old lane, with
+sandcastle's Docker double), and is not rebuilt from master. Debt: "The
+pod image carries a pinned fork of the platform". `cargo xtask pod image`
+and `vm` were ported from the proof of concept's scripts and have not run
+against a build host or Compute Engine since.
+
+**Master's path is unchanged:** a pod is an image and two binaries.
+Nothing in the cell, the dev stack or the e2e branches on it.
+
+Its debts (docs/technical-debt-ledger.md): the pinned platform, the
+image's shell helpers, RTMR0 taken as observed, a blank pod's first
+settings, and a volume rolled back unseen.
+
 ## Mail
 
 Master mails through Email Sending's binding (`EMAIL`), or in dev and the
@@ -519,6 +564,8 @@ FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
 
 ## Not yet
 
+- A pod built from this tree (13): its image carries a pinned fork
+  until computers have a path without KVM.
 - Computers (seam 2): none on celld. devstack's node has no engine
   (`CELLD_CONTAINER_ENGINE=none`); celld's Docker engine has no egress
   intercepts or snapshots, which a computer needs; its krun engine

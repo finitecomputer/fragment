@@ -1023,3 +1023,43 @@ unfinished design, not debt.
   `gce-disk-name` becomes a udev rule on the `nvme` namespace's
   attributes or goes with Google's guest packages' own rule.
   `mkosi.postinst.chroot` stays: mkosi runs a script there by design.
+
+## A pod's RTMR0 is taken as observed
+
+- **Shortcut:** a release an owner accepts (`fragment-pod`'s policy,
+  `cargo xtask pod measure`) holds RTMR1 and RTMR2 computed from the
+  image's bytes, and MRTD and RTMR0 copied from a boot that was looked at.
+  RTMR0 is Google's firmware's measurements, and on one VM it differed
+  with and without the data disk attached at boot
+  (`docs/explorations/private-pod-findings.md`, `2026-11-12-measured-pod`).
+- **Risk:** the owner's check of the firmware and the VM's shape is "the
+  same as the first boot I saw", not "what was published". A firmware
+  update by Google, or another machine type or disk layout, changes the
+  register and refuses every unlock until a release is observed again.
+- **Delete when:** RTMR0 is computed, or checked against Google's signed
+  firmware endorsement and a replay of the boot's event log, for the
+  machine type and disks a pod runs with.
+
+## A blank pod has no attested way to take its first settings
+
+- **Shortcut:** a new locked pod needs its model key and its tailnet
+  login before it is of use, and the locked image has no door for them:
+  the proof of concept placed them on the volume through the debug image
+  (`docs/explorations/private-pod-findings.md`, `2026-11-12-measured-pod`).
+- **Risk:** setting up a pod means booting the image that has SSH, with
+  the owner's volume open, once.
+- **Delete when:** the owner's CLI sends a pod's first settings as it
+  sends the disk key: sealed to the boot it has checked, in a request it
+  signed, taken by `pod-init`.
+
+## A pod's volume can be rolled back unseen
+
+- **Shortcut:** the owner's volume is LUKS2 with no integrity layer and
+  no counter kept outside the machine, so a pod opens an older copy of
+  its disk as it opens today's.
+- **Risk:** whoever runs the machine can put back a snapshot: the owner's
+  data returns to an earlier day, unread but unnoticed. Privacy holds;
+  freshness does not.
+- **Delete when:** the volume is authenticated and its latest state is
+  pinned where the operator cannot rewind it (the plan's "Rollback
+  detection, authenticated disk").
