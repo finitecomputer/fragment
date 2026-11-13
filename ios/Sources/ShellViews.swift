@@ -115,25 +115,6 @@ private struct SidebarPan: UIGestureRecognizerRepresentable {
     }
 }
 
-/// A blur behind the status bar, fading out just past it, over what scrolls
-/// beneath: the material's blur, masked to grow toward the screen's edge.
-private struct StatusBarBlur: View {
-    var body: some View {
-        GeometryReader { proxy in
-            let top = proxy.safeAreaInsets.top
-            // a light touch: enough to soften what passes, not to hide it
-            Rectangle().fill(.ultraThinMaterial).opacity(0.55)
-                .mask(LinearGradient(stops: [.init(color: .black, location: 0),
-                                             .init(color: .black, location: top / (top + 12)),
-                                             .init(color: .clear, location: 1)],
-                                     startPoint: .top, endPoint: .bottom))
-                .frame(height: top + 12)
-                .ignoresSafeArea(edges: .top)
-        }
-        .allowsHitTesting(false).accessibilityHidden(true)
-    }
-}
-
 struct SidebarView: View {
     let library: Library
     let page: ShellPage
@@ -217,11 +198,14 @@ struct SidebarView: View {
                     Text(error).font(.footnote).foregroundStyle(.secondary)
                     Button("Try again") { Task { await library.load(api) } }
                 }
-            }.padding(.horizontal, 12).padding(.top, 12)
+            }.padding(.horizontal, 12)
         }
         .refreshable { await library.load(api) }
-        // what passes under the status bar blurs, more the higher it goes
-        .overlay(alignment: .top) { StatusBarBlur() }
+        // what passes under the status bar blurs as under a chat's top bar:
+        // the system's soft edge, over a bar of its own to reach past the clock
+        // (a bar of nothing, a clear color, gets no edge: it holds a blank line)
+        .safeAreaBar(edge: .top) { Text(verbatim: " ").frame(maxWidth: .infinity).frame(height: 12).accessibilityHidden(true) }
+        .scrollEdgeEffectStyle(.soft, for: .top)
         .safeAreaBar(edge: .bottom) {
             HStack(alignment: .bottom, spacing: 12) {
                 VStack(spacing: 4) {
