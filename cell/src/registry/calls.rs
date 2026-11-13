@@ -922,15 +922,28 @@ pub(crate) struct Mint {
     /// answers to that frame may show in. `None`: a top-level one.
     #[serde(default)]
     pub embedder: Option<String>,
+    /// A top-level sign-in's (`/auth/fragment`, FIN-502): an invite to the
+    /// fragment waiting on the person's emails is answered (`Minted::invite`)
+    /// in place of a redemption, whatever they said yes to before, so its
+    /// person is asked to accept it rather than signed in as a stranger.
+    #[serde(default)]
+    pub invite_first: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Minted {
-    /// `None`: the person has not said yes to this fragment.
+    /// `None`: the person has not said yes to this fragment, or an invite
+    /// to it waits (`invite`).
     pub redeem: Option<String>,
     /// Whom the session names, and their latest sign-in's email.
     pub identity: Identity,
     pub email: Option<String>,
+    /// The invite to the fragment waiting on their emails, when the mint
+    /// asked first (`invite_first`) and one does: a row of `GET
+    /// /api/invites` (proto's `WaitingInvite`), passed on as read, as
+    /// that route passes it (registry/invites.rs `waiting_on`).
+    #[serde(default)]
+    pub invite: Option<serde_json::Value>,
 }
 
 impl Call for Mint {

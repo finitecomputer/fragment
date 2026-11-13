@@ -420,8 +420,9 @@ the registry keeps the SHA-256.
 | `GET /auth/callback?code=&state=` | the state must be the browser's cookie's (400); the code exchanged server-side; → `fragment_session` and back to `return`. A WorkOS `error`, a sign-in finished or past ten minutes, or a code WorkOS refuses: 400. A registry of another release refuses it unspent (503 `deploying`), so the same callback again signs in |
 | `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and answers a page (200) that goes on to WorkOS's logout (`session_id` its `sid`, `return_to` `<platform>/`). No session: home. Another origin: 403 |
 | `POST /auth/switch?return=` | "Use another account": ends this browser's session, then signs in as `/auth/login`, bound by `fragment_switch`. Where WorkOS answers from a session it already held (`auth_time` before the switch, or absent), no one is signed in and the browser goes through WorkOS's logout, so the next sign-in asks. Another origin: 403 |
-| `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<redemption>` (single-use, 60 s, that fragment only; a session holds at most `REDEMPTIONS_PER_SESSION_MAX` unspent), at once for a fragment of theirs, shared with them, or one they said yes to; for any other, a page asking first (Asking first). Signed out: sign-in first |
+| `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<redemption>` (single-use, 60 s, that fragment only; a session holds at most `REDEMPTIONS_PER_SESSION_MAX` unspent), at once for a fragment of theirs, shared with them, or one they said yes to; while an invite to it waits on their emails and they are not in it, a page with the invite first ("You're invited": who shared it, to view or edit, Accept and open, Decline), whatever they said yes to before (FIN-502); for any other, a page asking first (Asking first). Signed out: sign-in first |
 | `POST /auth/fragment?name=&return=` | that page's form (`form`): the yes, remembered, → the fragment's `__signin?token=` (303). Another origin, or a missing or stale token, 403 |
+| `POST /auth/fragment/invite?name=&return=` | the invite page's form (`form`, `answer`: `accept` or `decline`, else 400): its yes, as `POST /api/invites/{fragment}/accept`, → the fragment's `__signin?token=` as a member (303), on to `return`; its no, as `decline`, → `/` (303). None waiting: a page saying so (404) with the way on to the fragment; the fragment's refusal keeps it, a page with its status and words. Another origin, or a missing or stale token, 403 |
 | `GET /auth/frame?name=&return=` | a frame of the platform's own page signs in to the fragment (Frame sessions) |
 | `POST /api/f/{name}/session` | a person's approved key, NIP-98 signed (no session; an agent's key 403), for an app of its own with no browser (a phone's web view): `{returnTo?, consent?}` (at most 4096 bytes; another field, or a `returnTo` off the fragment's origin, 400) → `{consentRequired: false, url}`, `url` the fragment's `__signin?token=` as `/auth/fragment` mints it, at once for a fragment of theirs, shared with them, or one they said yes to; for any other `{consentRequired: true, canonical, email}`, no credential, until it asks again with `consent: true`, the yes remembered as the page's is. `no-store`. The key holds one parent session of its own (30 days, its token never kept, so no one can present it), which redemptions spend as a browser session's; each site session from it lives only while the key is its person's: revoking the key ends them and its unspent redemptions, and no other session |
 | `POST /cli/begin` | `fragment login`'s new key, signing this itself (unsigned or stale 401; a key someone holds, or a revoked one, 409) → `{code, url, expiresAt}`: eight letters of RFC 8628's base-20, shown `WDJB-MJHT`, for ten minutes and once, `url` the plain `<platform>/cli`. The registry keeps its SHA-256 with the request's time, city and country, and `User-Agent`; a key keeps its newest `cli_code::CODES_PER_KEY_MAX`. Past `FRAGMENT_CLI_BEGINS_PER_IP_MINUTE` for its `CF-Connecting-IP`, or `CLI_BEGINS_PER_MINUTE_MAX` fleet-wide, 429 |
@@ -612,8 +613,10 @@ yes (decision 63). The owner, or their agent for them, invites an email at
   changes only with `PUT members`.
 - Anyone else's invite waits `INVITE_TTL_S` in the fragment; the registry
   keeps it against the email and mails a link to the platform's page
-  (never the fragment's). It answers `{invited}`. (`{member}` was an
-  older answer: clients still read both.)
+  (never the fragment's address): the fragment's sign-in there,
+  `<platform>/auth/fragment?name=<fragment>`, which shows the invite to
+  accept before it opens the fragment (FIN-502). It answers `{invited}`.
+  (`{member}` was an older answer: clients still read both.)
 - Whoever signs in as the email sees it (`GET /api/invites`) and accepts,
   becoming a member at its role (a stronger one they hold is kept), or
   declines (`invite.declined`). Their agents come in with them, each a
@@ -650,7 +653,8 @@ member). Any other agent is 403; a person naming `for` 400:
 | `POST /api/invites/{fragment}/decline` | the same → `{ok, declined}`; none waiting: 404 (`reason: gone`) |
 
 Each waiting invite is also a notice of theirs (Notices), with Accept and
-Decline. Their pages are told when the invites waiting on them change:
+Decline, and the page a sign-in to its fragment shows first
+(`/auth/fragment`), with the same two. Their pages are told when the invites waiting on them change:
 `{type: "changed"}` on `GET /api/fragments/watch`, as for any notice
 (`invited`, sent before FIN-458, no more).
 
