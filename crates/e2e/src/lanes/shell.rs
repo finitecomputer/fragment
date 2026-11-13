@@ -1407,12 +1407,16 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // shown as a blob URL (the shell's CSP allows `img-src blob:`), larger
     // over its icon while a pointer is on it
     let icon = "document.querySelector('#apps [data-key^=\"app:\"]')";
-    let carded = b.until(
-        &page,
-        &format!("(() => {{ {icon}?.dispatchEvent(new PointerEvent('pointerenter', {{ pointerType: 'mouse' }})); const p = document.querySelector('.card-peek'); const i = p?.querySelector('img'); return !!p && !p.hidden && !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 1280 && i.naturalHeight === 800 && p.getBoundingClientRect().width === 320; }})()"),
-        super::site::CARD_WAIT,
-    );
-    s.ok("a pointer over its dock icon shows its card, a blob URL of the 1280×800 shot, larger above it", carded, b.eval(&page, "document.querySelector('.card-peek')?.outerHTML.slice(0, 200) ?? null")?);
+    if s.shoots_cards() {
+        let carded = b.until(
+            &page,
+            &format!("(() => {{ {icon}?.dispatchEvent(new PointerEvent('pointerenter', {{ pointerType: 'mouse' }})); const p = document.querySelector('.card-peek'); const i = p?.querySelector('img'); return !!p && !p.hidden && !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 1280 && i.naturalHeight === 800 && p.getBoundingClientRect().width === 320; }})()"),
+            super::site::CARD_WAIT,
+        );
+        s.ok("a pointer over its dock icon shows its card, a blob URL of the 1280×800 shot, larger above it", carded, b.eval(&page, "document.querySelector('.card-peek')?.outerHTML.slice(0, 200) ?? null")?);
+    } else {
+        s.skip_card("a pointer over its dock icon shows its card, a blob URL of the 1280×800 shot, larger above it");
+    }
     // deployed (its card is shot after), its face is the title it was given, not its template's
     let named = b.eval(&page, &format!("{icon}?.querySelector('.label')?.textContent ?? null"))?;
     s.ok("and its icon is titled with the title its maker gave it, not its template's", named == "groceries", &named);
@@ -5552,13 +5556,18 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
         ready && made.status == 200 && shown,
         json!({ "made": made.status, "firstInMs": first_ms, "secondInMs": second_ms, "first": b.eval(page, "[...document.querySelectorAll('#apps [data-key]')].map((r) => r.dataset.key)")?, "second": b.eval(&second, "[...document.querySelectorAll('#apps [data-key]')].map((r) => r.dataset.key)")? }),
     );
-    let carded = b.until(
-        page,
-        &format!("(() => {{ {}?.dispatchEvent(new PointerEvent('pointerenter', {{ pointerType: 'mouse' }})); const i = document.querySelector('.card-peek:not([hidden]) img'); return !!i && i.src.startsWith('blob:'); }})()", row(&name)),
-        super::site::CARD_WAIT,
-    );
-    b.eval(page, &format!("({}?.dispatchEvent(new PointerEvent('pointerleave')), true)", row(&name)))?;
-    s.ok("its icon shows its card once the platform shoots its deploy", wrote.status == 200 && deployed.status == 200 && carded, json!([wrote.status, deployed.status]));
+    if s.shoots_cards() {
+        let carded = b.until(
+            page,
+            &format!("(() => {{ {}?.dispatchEvent(new PointerEvent('pointerenter', {{ pointerType: 'mouse' }})); const i = document.querySelector('.card-peek:not([hidden]) img'); return !!i && i.src.startsWith('blob:'); }})()", row(&name)),
+            super::site::CARD_WAIT,
+        );
+        b.eval(page, &format!("({}?.dispatchEvent(new PointerEvent('pointerleave')), true)", row(&name)))?;
+        s.ok("its icon shows its card once the platform shoots its deploy", wrote.status == 200 && deployed.status == 200 && carded, json!([wrote.status, deployed.status]));
+    } else {
+        anyhow::ensure!(wrote.status == 200 && deployed.status == 200, "the agent's app written and deployed: {} {}", wrote.status, deployed.status);
+        s.skip_card("its icon shows its card once the platform shoots its deploy");
+    }
     let kept = b.eval(
         page,
         "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden); return { loads: window.__loads, open: f?.dataset.fragment ?? null, was: window.__open, \
@@ -5985,6 +5994,19 @@ fn open_chat(b: &mut Browser, page: &Page) -> String {
     b.eval(page, "[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
 }
 
+/// Counts the answers to the page's calls whose address has `part`, each
+/// once it is read as the shell reads it (`api`: its JSON), in
+/// `window.__answers.read`: what the shell does with the answer has run by
+/// the next look at the page. `window.__answers.restore()` takes it away.
+fn answers_read(part: &str) -> String {
+    format!(
+        "(() => {{ const real = window.fetch; const part = {}; const a = window.__answers = {{ read: 0, restore: () => {{ window.fetch = real; }} }}; \
+         window.fetch = async (url, o) => {{ if (!String(url).includes(part)) return real(url, o); let r; try {{ r = await real(url, o); }} catch (e) {{ a.read++; throw e; }} \
+         const json = r.json.bind(r); r.json = () => json().finally(() => {{ a.read++; }}); return r; }}; return true; }})()",
+        js(part)
+    )
+}
+
 /// Types `text` into the open chat's composer, in its frame (`host`), and
 /// sends it, once its composer is ready. Whether it was sent.
 fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bool {
@@ -6265,12 +6287,16 @@ fn making_states(
     archive(b, &other)?;
 
     // ---- made, but the list's reads refused (a deploy going out): its room
-    // waits, never a blank page; the list answering, the chat opens there
+    // waits, never a blank page; the list answering, the chat opens there.
+    // The reads are refused from the create's ask on, counted once it has
+    // answered: one the live list made while a slow create was out (1.6 s
+    // on a loaded celld box) would have the chat, and its answer would open
+    // it at once, as it should (making.js: answered made, listed).
     let before = names();
-    b.eval(page, "(() => { const f = window.fetch; window.__listOff = true; window.__refusedAfter = 0; window.__posted = false; window.__restoreList = () => { window.fetch = f; }; \
-                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; \
-                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__posted) { window.__refusedAfter++; return new Response(JSON.stringify({ error: 'deploying', message: 'a deploy is going out (a test)' }), { status: 503, headers: { 'content-type': 'application/json' } }); } \
-                 const r = await f(url, o); if (o?.method === 'POST' && path === '/api/fragments' && r.ok) window.__posted = true; return r; }; return true; })()")?;
+    b.eval(page, "(() => { const f = window.fetch; window.__listOff = true; window.__refusedAfter = 0; window.__sent = false; window.__posted = false; window.__restoreList = () => { window.fetch = f; }; \
+                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const create = o?.method === 'POST' && path === '/api/fragments'; if (create) window.__sent = true; \
+                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__sent) { if (window.__posted) window.__refusedAfter++; return new Response(JSON.stringify({ error: 'deploying', message: 'a deploy is going out (a test)' }), { status: 503, headers: { 'content-type': 'application/json' } }); } \
+                 const r = await f(url, o); if (create && r.ok) window.__posted = true; return r; }; return true; })()")?;
     let picked = new_chat(b, reader_hero)?;
     // two of its reads refused since it was made: the create has answered
     let refused_twice = b.until(page, "window.__refusedAfter >= 2", wait);
@@ -6293,10 +6319,12 @@ fn making_states(
     let before = names();
     let refresh = "document.querySelector('#computer-notices [data-action=refresh]')";
     let no_band = b.until(page, &format!("!{refresh}"), wait);
-    b.eval(page, "(() => { const f = window.fetch; window.__listOff = true; window.__failedAfter = 0; window.__posted = false; window.__restoreList = () => { window.fetch = f; }; \
-                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; \
-                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__posted) { window.__failedAfter++; throw new TypeError('Failed to fetch (a test)'); } \
-                 const r = await f(url, o); if (o?.method === 'POST' && path === '/api/fragments' && r.ok) window.__posted = true; return r; }; return true; })()")?;
+    // (failing from the create's ask on, counted once it has answered, as
+    // the refused reads above)
+    b.eval(page, "(() => { const f = window.fetch; window.__listOff = true; window.__failedAfter = 0; window.__sent = false; window.__posted = false; window.__restoreList = () => { window.fetch = f; }; \
+                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const create = o?.method === 'POST' && path === '/api/fragments'; if (create) window.__sent = true; \
+                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__sent) { if (window.__posted) window.__failedAfter++; throw new TypeError('Failed to fetch (a test)'); } \
+                 const r = await f(url, o); if (create && r.ok) window.__posted = true; return r; }; return true; })()")?;
     let picked = new_chat(b, reader_hero)?;
     let told = b.until(page, &format!("window.__failedAfter >= 1 && !!{refresh} && !document.getElementById('computer-notices').hidden"), wait);
     let waiting = b.eval(page, &format!("{making_shown} && ![...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden)"))?;
@@ -6319,10 +6347,12 @@ fn making_states(
     // and nothing says a chat was not made; the list back, the Reader's
     // chat is listed, not opened
     let main_hero = format!("#chats [data-key={}]", js(&format!("agent:{}", own_named(api, me.session, me.first)?)));
-    let fail_lists = "(() => { const f = window.fetch; window.__listOff = true; window.__posts = 0; window.__failedAfter = 0; window.__restoreList = () => { window.fetch = f; }; \
-                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; \
-                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__posts > 0) { window.__failedAfter++; throw new TypeError('Failed to fetch (a test)'); } \
-                 const r = await f(url, o); if (o?.method === 'POST' && path === '/api/fragments' && r.ok) window.__posts++; return r; }; return true; })()";
+    // (the list's reads failing from the first create's ask on, counted
+    // once one has answered, as the refused reads above)
+    let fail_lists = "(() => { const f = window.fetch; window.__listOff = true; window.__sent = 0; window.__posts = 0; window.__failedAfter = 0; window.__restoreList = () => { window.fetch = f; }; \
+                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const create = o?.method === 'POST' && path === '/api/fragments'; if (create) window.__sent++; \
+                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__sent > 0) { if (window.__posts > 0) window.__failedAfter++; throw new TypeError('Failed to fetch (a test)'); } \
+                 const r = await f(url, o); if (create && r.ok) window.__posts++; return r; }; return true; })()";
     let refresh = "document.querySelector('#computer-notices [data-action=refresh]')";
     let no_refusal = "!(document.getElementById('action-notices')?.innerText ?? '').includes('not made')";
     // the main agent's blank chats from before set aside (archived), so the
@@ -6585,18 +6615,27 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     let third = own_named(api, me.session, &format!("{own_chat}-3"))?;
     let empty = s.eventually(wait, || b.eval_in_frame(page, &third, "!!document.querySelector('#messages .empty h2') && !document.querySelector('#messages .msg')").ok() == Some(Value::Bool(true)));
     let _ = b.screenshot(page, &shots.join("desktop-new-chat.png"));
+    // asked again from that chat, open already, nothing on screen changes:
+    // this New chat ends once its ask of that chat (`stillBlank`) is
+    // answered. Until then it holds the shell's one New chat at a time
+    // (asks.js `start`: another's press starts nothing), and its answer
+    // opens that chat over one opened since (the Reader's, next, when that
+    // ask took longer than the steps between, as on celld).
+    b.eval(page, &answers_read(&format!("/api/f/{third}/channels/chat?")))?;
     let again_started = new_chat(b, &main_hero)?;
+    let asked = b.until(page, "window.__answers.read >= 1", wait);
+    b.eval(page, "(window.__answers.restore(), true)")?;
     let again = b.until(page, &format!("document.getElementById('chat-title').textContent === 'New chat' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&third)), wait);
     let made = chats_with(&own_chat);
     s.ok(
         "their main agent's hero starts an empty chat with it; asked again before anything is said there, it opens that one, not another",
-        started && blank && empty && again_started && again && open_chat(b, page) == third && made.len() == before.len() + 2,
+        started && blank && empty && again_started && asked && again && open_chat(b, page) == third && made.len() == before.len() + 2,
         json!({ "chats": made }),
     );
     // from the Reader's chat, their main agent's New chat opens that empty
     // chat again, not another
     click_chat(b, page, reader_chat)?;
-    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    let from_reader = b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     for scheme in ["light", "dark"] {
         b.color_scheme(page, scheme)?;
         let _ = b.screenshot(page, &shots.join(format!("desktop-sections-{scheme}.png")));
@@ -6607,8 +6646,8 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     let made = chats_with(&own_chat);
     s.ok(
         "from the Reader's chat, their main agent's New chat opens its empty chat again, not another",
-        picked && row_opened && open_chat(b, page) == third && made.len() == before.len() + 2,
-        json!({ "chats": made }),
+        from_reader && picked && row_opened && open_chat(b, page) == third && made.len() == before.len() + 2,
+        json!({ "from_reader": from_reader, "chats": made }),
     );
     // from that empty chat of their main agent's, the Reader's New chat: a
     // chat with the Reader, never that one (a blank chat is its own agent's)
@@ -7533,7 +7572,13 @@ const ICON_PROBE: &str = "(window.__icons = {
 fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(60);
     let dock = format!("document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
+    // the probe stays on the page for the checks after these (a deploy's
+    // refused upload reads the sheet through it)
     b.eval(page, &ICON_PROBE.replace("DOCK", &js(&format!("#apps [data-key=\"app:{app}\"]"))))?;
+    if !s.makes_icons() {
+        s.skip_icon("an app's icon in its window's sheet: four made to pick from, a pick kept and read again, one write at a time, failures said in the sheet, on a phone, the dock's newest icon, an upload while Remove waits, and Remove");
+        return Ok(());
+    }
     let item = "[...document.querySelectorAll('#menu [role=menuitem]')].find((b) => b.textContent === 'Icon…')";
     let open_sheet = |b: &mut Browser| -> Result<bool> {
         b.eval(page, "([...document.querySelectorAll('#stack .pane button[aria-label=More]')].pop()?.click(), true)")?;
@@ -7919,6 +7964,12 @@ fn apps_response_races_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str
 
     // Close and reopen once to make the old visit's reads; while closed,
     // change sharing and the card's bytes, then reopen into the new visit.
+    // (Its card is the one the platform shot, so on a node that shoots
+    // none there are no bytes to change.)
+    if !s.shoots_cards() {
+        s.skip_card("closing and reopening Apps with access and card reads held: either completion order leaves the new visit's access text and card bytes");
+        return Ok(());
+    }
     for (newest_first, visibility, source, expected_access, expected_card) in [
         (true, "public", "window.__appsChangedCard", "Public", changed_card.clone()),
         (false, "link", "window.__appsOriginalCard", "Anyone with the link", original.clone()),
@@ -8010,6 +8061,10 @@ fn brains_page_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Res
 /// read then. Its first reads are 404; the bounded retry shows the card the
 /// platform has since made, byte for byte, without another list change.
 fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    if !s.shoots_cards() {
+        s.skip_card("an app arriving while Apps is open gets its preview: initially unavailable, a bounded retry shows the server's card bytes with no navigation");
+        return Ok(());
+    }
     let wait = std::time::Duration::from_secs(60);
     b.eval(page, APPS_HASH_PROBE)?;
     b.eval(
@@ -8100,6 +8155,13 @@ fn apps_reach_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Resu
     b.until(page, &format!("!{row}"), wait);
 
     // a connector (Telegram's chat, members only as made) bound as their agent's door
+    if s.on_celld() {
+        s.skip(
+            "a connector bound as their agent's door is listed, its Reaches the door with Unlink, and their agent is not; unlinked from its Reaches, asked twice, it holds no door and leaves the Apps page",
+            "a self-hosted stack does not allow Telegram, whose webhook needs inbound internet: its door is refused (docs/self-host.md)",
+        );
+        return Ok(());
+    }
     let agent = b.eval(page, "fetch('/api/fragments', { headers: { 'x-fragment-shell': '1' }, credentials: 'same-origin' }).then((r) => r.json()).then((l) => l.fragments.find((f) => f.kind === 'agent' && f.role === 'owner')?.name ?? '')")?.as_str().unwrap_or("").to_string();
     let made = b.eval(page, &in_page("POST", "/api/fragments", json!({ "label": "reaching-connector", "template": "telegram", "title": "Telegram" })))?;
     let connector = made["body"]["name"].as_str().unwrap_or("").to_string();
@@ -8330,17 +8392,26 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     let docked = format!("!!document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
     let absent = |name: &str| format!("!document.querySelector({})", js(&format!("#apps-page [data-fragment=\"{name}\"]")));
     b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+    // its card, where the node shoots one
+    let cards = s.shoots_cards();
+    let carded = if cards { format!("{row}.querySelector('.app-row-card')?.src.startsWith('blob:')") } else { "true".to_string() };
     let listed = b.until(
         page,
-        &format!("location.pathname === '/apps' && !!{row} && {row}.querySelector('.app-row-access')?.textContent.includes('Anyone with the link') && {row}.querySelector('.app-row-card')?.src.startsWith('blob:') && {} && {}", absent(chat), absent(skills)),
+        &format!("location.pathname === '/apps' && !!{row} && {row}.querySelector('.app-row-access')?.textContent.includes('Anyone with the link') && {carded} && {} && {}", absent(chat), absent(skills)),
         wait,
     );
     let _ = b.screenshot(page, &shots.join("apps-page.png"));
     s.ok(
-        "the sidebar's Apps opens the Apps page (/apps): their app with its card and who can open it (Anyone with the link), and no chat or skills",
+        match cards {
+            true => "the sidebar's Apps opens the Apps page (/apps): their app with its card and who can open it (Anyone with the link), and no chat or skills",
+            false => "the sidebar's Apps opens the Apps page (/apps): their app and who can open it (Anyone with the link), and no chat or skills",
+        },
         listed,
         b.eval(page, "document.getElementById('apps-page')?.innerText ?? null")?,
     );
+    if !cards {
+        s.skip_card("the Apps page shows their app's card");
+    }
 
     let address = b.until(page, &format!("!!{row}?.querySelector('.app-row-url[href]')"), wait);
     b.eval(page, &format!("({}?.click(), true)", control("rename")))?;
@@ -8384,52 +8455,61 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     b.eval(page, &format!("(() => {{ if (!{row}?.querySelector('.icon-editor')) {}?.click(); return true; }})()", control("appearance")))?;
     apps_preview_visit_ui(s, b, page, app)?;
 
-    // its card shot again; asked again within the minute, refused under its row
-    let before = b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?;
-    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
-    let taking = b.until(page, &format!("{}?.textContent === 'Taking a new preview…' && {}?.disabled", control("card"), control("card")), wait);
-    let taken = b.until(page, &format!("{}?.textContent === 'New preview' && !{row}?.querySelector('.app-row-said')", control("card")), std::time::Duration::from_secs(120));
-    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
-    let refused = b.until(page, &format!("/within the minute/.test({row}?.querySelector('.app-row-said')?.textContent ?? '') && {}?.textContent === 'New preview'", control("card")), wait);
-    s.ok(
-        "New preview has its card shot again: Taking a new preview… until the shot reports, then its card; asked again within the minute, it says so under the row",
-        taking && taken && refused,
-        json!({ "before": before, "after": b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?, "row": b.eval(page, &format!("{row}?.innerText ?? null"))? }),
-    );
+    if s.shoots_cards() {
+        // its card shot again; asked again within the minute, refused under its row
+        let before = b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?;
+        b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+        let taking = b.until(page, &format!("{}?.textContent === 'Taking a new preview…' && {}?.disabled", control("card"), control("card")), wait);
+        let taken = b.until(page, &format!("{}?.textContent === 'New preview' && !{row}?.querySelector('.app-row-said')", control("card")), std::time::Duration::from_secs(120));
+        b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+        let refused = b.until(page, &format!("/within the minute/.test({row}?.querySelector('.app-row-said')?.textContent ?? '') && {}?.textContent === 'New preview'", control("card")), wait);
+        s.ok(
+            "New preview has its card shot again: Taking a new preview… until the shot reports, then its card; asked again within the minute, it says so under the row",
+            taking && taken && refused,
+            json!({ "before": before, "after": b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?, "row": b.eval(page, &format!("{row}?.innerText ?? null"))? }),
+        );
+    } else {
+        s.skip_card("New preview has its card shot again: Taking a new preview… until the shot reports, then its card; asked again within the minute, it says so under the row");
+    }
 
-    // an icon made here: its first read is held until the loading row is in
-    // the DOM, then fails. A share sheet opened and closed (no fragment
-    // change, no navigation) draws again; after its refreshes settle, the
-    // retry has succeeded into the live row rather than detached art
-    b.eval(page, &format!("(() => {{ if (!{row}?.querySelector('.icon-editor')) {}?.click(); return true; }})()", control("appearance")))?;
-    let sheet = b.until(page, "!!document.querySelector('#apps-page .icon-editor')", wait);
-    b.eval(page, "(document.querySelector('#apps-page .icon-editor .icon-make button[type=submit]')?.click(), true)")?;
-    let made = b.until(page, "document.querySelectorAll('#apps-page .icon-editor .icon-pick img').length > 0", wait);
-    let reads = format!("*/api/f/{app}/icon?v=*");
-    b.hold(page, &[&reads])?;
-    b.eval(page, "(document.querySelector('#apps-page .icon-editor .icon-pick')?.click(), true)")?;
-    let loading = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-picture:not([data-unread]) .app-icon')"), wait) && s.eventually(wait, || b.held(page).is_ok_and(|h| !h.is_empty()));
-    b.release(page, true)?;
-    let unread = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-picture[data-unread] .app-icon') && !{row}?.querySelector('.app-row-art img')"), wait);
-    std::thread::sleep(std::time::Duration::from_millis(2200));
-    b.eval(page, &format!("({}?.click(), true)", control("sharing")))?;
-    let shared = b.until(page, &format!("!!{row}?.querySelector('.app-sharing-frame')"), wait);
-    let ready = shared && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('button[data-done]')").ok() == Some(Value::Bool(true)));
-    let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
-    let closed = b.until(page, &format!("!{row}?.querySelector('.app-sharing-frame')"), wait);
-    let settled = b.until(page, &format!("!!{row}?.querySelector('.app-row-access')?.textContent"), wait);
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    let shown = b.until(page, &format!("(() => {{ const i = {row}?.querySelector('.app-row-art img'); return location.pathname === '/apps' && !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 256 && !{row}?.querySelector('.app-row-art [data-unread]'); }})()"), wait);
-    s.ok(
-        "its icon read fails after the loading row is drawn, then the same fragment's next draw retries and shows the loaded picture after refreshes settle",
-        sheet && made && loading && unread && ready && closed && settled && shown,
-        b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?,
-    );
-    b.eval(page, &format!("(() => {{ if (!{row}?.querySelector('.icon-editor')) {}?.click(); return true; }})()", control("appearance")))?;
-    b.until(page, "!!document.querySelector('#apps-page .icon-editor')", wait);
-    b.eval(page, "([...document.querySelectorAll('#apps-page .icon-editor .icon-actions button')].find((b) => b.textContent === 'Remove')?.click(), true)")?;
-    let removed = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-icon') && !{row}?.querySelector('.app-row-art img')"), wait);
-    s.ok("removed, its glyph is back", removed, b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?);
+    if s.makes_icons() {
+        // an icon made here: its first read is held until the loading row is in
+        // the DOM, then fails. A share sheet opened and closed (no fragment
+        // change, no navigation) draws again; after its refreshes settle, the
+        // retry has succeeded into the live row rather than detached art
+        b.eval(page, &format!("(() => {{ if (!{row}?.querySelector('.icon-editor')) {}?.click(); return true; }})()", control("appearance")))?;
+        let sheet = b.until(page, "!!document.querySelector('#apps-page .icon-editor')", wait);
+        b.eval(page, "(document.querySelector('#apps-page .icon-editor .icon-make button[type=submit]')?.click(), true)")?;
+        let made = b.until(page, "document.querySelectorAll('#apps-page .icon-editor .icon-pick img').length > 0", wait);
+        let reads = format!("*/api/f/{app}/icon?v=*");
+        b.hold(page, &[&reads])?;
+        b.eval(page, "(document.querySelector('#apps-page .icon-editor .icon-pick')?.click(), true)")?;
+        let loading = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-picture:not([data-unread]) .app-icon')"), wait) && s.eventually(wait, || b.held(page).is_ok_and(|h| !h.is_empty()));
+        b.release(page, true)?;
+        let unread = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-picture[data-unread] .app-icon') && !{row}?.querySelector('.app-row-art img')"), wait);
+        std::thread::sleep(std::time::Duration::from_millis(2200));
+        b.eval(page, &format!("({}?.click(), true)", control("sharing")))?;
+        let shared = b.until(page, &format!("!!{row}?.querySelector('.app-sharing-frame')"), wait);
+        let ready = shared && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('button[data-done]')").ok() == Some(Value::Bool(true)));
+        let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+        let closed = b.until(page, &format!("!{row}?.querySelector('.app-sharing-frame')"), wait);
+        let settled = b.until(page, &format!("!!{row}?.querySelector('.app-row-access')?.textContent"), wait);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let shown = b.until(page, &format!("(() => {{ const i = {row}?.querySelector('.app-row-art img'); return location.pathname === '/apps' && !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 256 && !{row}?.querySelector('.app-row-art [data-unread]'); }})()"), wait);
+        s.ok(
+            "its icon read fails after the loading row is drawn, then the same fragment's next draw retries and shows the loaded picture after refreshes settle",
+            sheet && made && loading && unread && ready && closed && settled && shown,
+            b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?,
+        );
+        b.eval(page, &format!("(() => {{ if (!{row}?.querySelector('.icon-editor')) {}?.click(); return true; }})()", control("appearance")))?;
+        b.until(page, "!!document.querySelector('#apps-page .icon-editor')", wait);
+        b.eval(page, "([...document.querySelectorAll('#apps-page .icon-editor .icon-actions button')].find((b) => b.textContent === 'Remove')?.click(), true)")?;
+        let removed = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-icon') && !{row}?.querySelector('.app-row-art img')"), wait);
+        s.ok("removed, its glyph is back", removed, b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?);
+    } else {
+        s.skip_icon("its icon read fails after the loading row is drawn, then the same fragment's next draw retries and shows the loaded picture after refreshes settle");
+        s.skip_icon("removed, its glyph is back");
+    }
 
     // who has access, changed in its share sheet: Public, then back
     let visibility = |b: &mut Browser, v: &str| -> Result<bool> {

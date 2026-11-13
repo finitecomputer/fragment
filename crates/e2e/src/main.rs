@@ -540,6 +540,12 @@ impl Suite {
         self.celld.is_some()
     }
 
+    /// Whether the local node runs computers: wrangler's always, celld's on
+    /// the krun engine alone (docs/self-host.md, seam 2).
+    pub fn runs_computers(&self) -> bool {
+        self.celld.as_ref().is_none_or(|c| c.engine.computers())
+    }
+
     /// Whether the node runs its Worker and every object in one isolate
     /// (local workerd), so a lever that reads or clears one isolate's
     /// memory (the ledger gate's) reaches the caller's. celld runs each
@@ -566,6 +572,18 @@ impl Suite {
     /// A check of a card's shot on a node that takes none: a skip.
     pub fn skip_card(&mut self, label: &str) {
         self.skip(label, "celld has no Browser Rendering, so the node shoots no cards (docs/self-host.md)");
+    }
+
+    /// Whether the node makes and fits icons: celld has no Images binding
+    /// (its `IMAGES` binding rejects every call, so every icon made or
+    /// uploaded fails there).
+    pub fn makes_icons(&self) -> bool {
+        !self.on_celld()
+    }
+
+    /// A check of an icon made or fitted on a node that makes none: a skip.
+    pub fn skip_icon(&mut self, label: &str) {
+        self.skip(label, "celld has no Images binding, so the node makes and fits no icons (docs/self-host.md)");
     }
 
     /// Whether the node's vendors are the fakes: a local run, or its
@@ -876,9 +894,10 @@ impl Suite {
             cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
-            // celld runs no computers: they need the runtime's egress
-            // intercepts and snapshots (docs/self-host.md, seam 2)
-            computer_image: (!self.on_celld()).then(|| "stub".into()),
+            // on celld, computers only on the krun engine: they need the
+            // runtime's egress intercepts and snapshots (docs/self-host.md,
+            // seam 2)
+            computer_image: self.runs_computers().then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
             // a run must not depend on public DNS (devstack::Fleet)
@@ -993,7 +1012,15 @@ impl Suite {
         }
         assert!(self.node.is_none(), "the run's node is stopped before its containers go");
         self.containers_removed = true;
-        devstack::containers::remove(&self.project).map(Some)
+        // on celld's krun engine, the VMs a node killed outright left (a
+        // node's own stop reaps them)
+        let krun = match &self.celld {
+            Some(c) => c.engine.remove(&self.project)?,
+            None => 0,
+        };
+        let mut removed = devstack::containers::remove(&self.project)?;
+        removed.containers += krun;
+        Ok(Some(removed))
     }
 
     /// Records who owns a fragment made some other way than `create` (the
@@ -1316,22 +1343,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let scratch = root.join("target/e2e").join(&run);
     make_scratch(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
-    // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
-    // of its own, which the terminal's signal does not reach, so the run
-    // kills it and all else it started (the Chromes: `on_termination`),
-    // then removes the containers it left
-    let leftovers = project.clone();
-    devstack::signals::on_termination(move |signal| {
-        println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers");
-        match devstack::containers::remove(&leftovers) {
-            Ok(r) => println!("      (removed {} containers of this run)", r.containers),
-            Err(e) => println!("      could not remove this run's containers: {e:#}"),
-        }
-    })?;
-    if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
-        lanes::hermes::stage_images(&project)?;
-    }
-    let test_secret = devstack::random_hex(32);
     // the runtime: wrangler dev's workerd, or celld (docs/self-host.md, seam 1)
     let celld = match std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() {
         Err(_) | Ok("wrangler") => None,
@@ -1339,8 +1350,26 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         Ok("celld") => Some(devstack::celld::CelldTools::locate()?),
         Ok(other) => bail!("FRAGMENT_E2E_RUNTIME is wrangler or celld, not {other}"),
     };
+    // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
+    // of its own, which the terminal's signal does not reach, so the run
+    // kills it and all else it started (the Chromes: `on_termination`),
+    // then removes the containers it left (on celld's krun engine, its VMs)
+    let leftovers = project.clone();
+    let engine = celld.as_ref().map(|c| c.engine.clone());
+    devstack::signals::on_termination(move |signal| {
+        println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers");
+        let krun = engine.as_ref().map_or(Ok(0), |e| e.remove(&leftovers));
+        match devstack::containers::remove(&leftovers).and_then(|r| Ok(r.containers + krun?)) {
+            Ok(n) => println!("      (removed {n} containers of this run)"),
+            Err(e) => println!("      could not remove this run's containers: {e:#}"),
+        }
+    })?;
+    if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
+        lanes::hermes::stage_images(&project)?;
+    }
+    let test_secret = devstack::random_hex(32);
     if let Some(c) = &celld {
-        println!("runtime: celld dev ({})", c.celld.display());
+        println!("runtime: celld dev ({}), its computers' engine {}", c.celld.display(), c.engine.value());
     }
     // the cell's secrets: wrangler's store, or celld's node's backend, a
     // file of their values or OpenBao (celld's default)
@@ -1349,7 +1378,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let (rung, shared) = match rehearse {
-        None if celld.is_some() => (needs::Rung::Celld, api::Run::new(test_secret.clone(), 0)),
+        None if celld.is_some() => (needs::Rung::Celld { computers: celld.as_ref().is_some_and(|c| c.engine.computers()) }, api::Run::new(test_secret.clone(), 0)),
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             // its computers answer through the scripted model: no real agent

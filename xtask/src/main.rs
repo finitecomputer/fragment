@@ -17,7 +17,9 @@
 //!                    the text tiers on a deployment's own models, without
 //!                    the image (docs/self-host.md, seam 3)
 //!                    --runtime celld runs it on `celld dev` (CELLD_BIN;
-//!                    docs/self-host.md, seam 1): no computers, no cards,
+//!                    docs/self-host.md, seam 1): no cards, computers only
+//!                    on this machine's krun engine
+//!                    (CELLD_CONTAINER_ENGINE=krun:<socket>; seam 2),
 //!                    the secrets bound as on wrangler and read by celld
 //!                    from OpenBao on :8802, its audit log on, or with
 //!                    FRAGMENT_SECRETS_BACKEND=vars from its node's file
@@ -240,9 +242,6 @@ fn dev_args(args: &[String]) -> Result<DevArgs> {
     if out.models.is_some() && !out.real_agent {
         bail!("--models picks --real-agent's models: name --real-agent too");
     }
-    if out.celld && out.real_agent {
-        bail!("--real-agent runs computers on our Hermes image, and celld runs no computers here (docs/self-host.md, seam 2)");
-    }
     Ok(out)
 }
 
@@ -251,6 +250,9 @@ fn dev(args: &[String]) -> Result<()> {
     // the runtime: wrangler's local workerd, or celld (docs/self-host.md,
     // seam 1), located first: a missing CELLD_BIN stops the run at once
     let celld = args.celld.then(devstack::celld::CelldTools::locate).transpose()?;
+    if args.real_agent && celld.as_ref().is_some_and(|c| !c.engine.computers()) {
+        bail!("--real-agent runs computers on our Hermes image, and this celld node runs none: set CELLD_CONTAINER_ENGINE=krun:<the engine's socket> (docs/self-host.md, seam 2)");
+    }
     // its models and key are read before anything builds
     let real = args.real_agent.then(|| dev_agent::RealAgent::read(args.models.as_deref())).transpose()?;
     // a self-hosted stack's own models (FRAGMENT_MODELS_FILE; docs/self-host.md, seam 3)
@@ -360,9 +362,10 @@ fn dev(args: &[String]) -> Result<()> {
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
         test_secret: None,
-        // celld runs no computers here: they need the runtime's egress
-        // intercepts and snapshots (docs/self-host.md, seam 2)
-        computer_image: celld.is_none().then(|| if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
+        // on celld, computers only on the krun engine: they need the
+        // runtime's egress intercepts and snapshots (docs/self-host.md,
+        // seam 2)
+        computer_image: celld.as_ref().is_none_or(|c| c.engine.computers()).then(|| if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
         images: match &real {
             Some(_) => vec![(dev_agent::RealAgent::IMAGE.into(), devstack::hermes_image())],
             None => vec![],
@@ -403,6 +406,7 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     match &celld {
         None => println!("  runtime:      wrangler dev (workerd)"),
+        Some(c) if c.engine.computers() => println!("  runtime:      celld dev ({}): computers on {}, no cards, no icons drawn (docs/self-host.md)", c.celld.display(), c.engine.value()),
         Some(c) => println!("  runtime:      celld dev ({}): no computers, no cards, no icons drawn (docs/self-host.md)", c.celld.display()),
     }
     println!("  node log:     {}", node.log.display());
@@ -444,20 +448,27 @@ fn dev(args: &[String]) -> Result<()> {
     // SIGTERM or SIGHUP to xtask alone, which the node never hears: it would
     // run on, orphaned, starting Chromes; so all xtask started dies with it
     // (`on_termination`; Ctrl-C, ignored here, still reaches the node itself)
-    devstack::signals::on_termination(|signal| {
+    let engine = celld.as_ref().map(|c| c.engine.clone());
+    devstack::signals::on_termination(move |signal| {
         println!("\nsignal {signal}: dev stopped its node and browsers, and removes its containers");
-        match devstack::containers::remove(&devstack::cell_dir()) {
-            Ok(r) => println!("removed {} containers the dev node left", r.containers),
+        let removed = match &engine {
+            Some(engine) => engine.remove(&devstack::cell_dir()),
+            None => devstack::containers::remove(&devstack::cell_dir()).map(|r| r.containers),
+        };
+        match removed {
+            Ok(n) => println!("removed {n} containers the dev node left"),
             Err(e) => println!("could not remove the dev node's containers: {e:#}"),
         }
     })?;
     let status = node.wait()?;
     println!("the node exited: {status}");
-    // the runtime's own containers: celld runs none here
-    if celld.is_none() {
-        let removed = devstack::containers::remove(&devstack::cell_dir())?;
-        println!("removed {} containers the dev node left", removed.containers);
-    }
+    // the runtime's own containers: wrangler's in Docker, or celld's VMs on
+    // its krun engine (a node that stops reaps its own)
+    let removed = match &celld {
+        Some(c) => c.engine.remove(&devstack::cell_dir())?,
+        None => devstack::containers::remove(&devstack::cell_dir())?.containers,
+    };
+    println!("removed {removed} containers the dev node left");
     Ok(())
 }
 

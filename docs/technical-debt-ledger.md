@@ -585,6 +585,25 @@ unfinished design, not debt.
   then `scope_images` and `remove` go. Moving `WRANGLER_VERSION` checks
   it.
 
+## A killed celld node's VMs are found by celld's naming
+
+- **Shortcut:** a `celld dev` node reaps its krun engine's VMs when it
+  stops and when it starts again on its project, but a run killed outright
+  (a signal's `kill_started`) gives it no chance, and the engine keeps a VM
+  until told. crates/devstack/src/celld.rs (`Engine::remove`) destroys the
+  project's by the name celld gives them: its node is `dev-` and 12 hex of
+  the SHA-256 of the project's canonical path (the fork's dev.rs), each
+  container `celld-`, 6 hex of the SHA-256 of the node, `-` (its
+  container.rs `node_prefix`).
+- **Risk:** a celld that names them otherwise leaves a killed run's VMs on
+  the engine (its `vms_max` is 16), where its next start does not reap
+  them: each e2e run is a project of its own.
+- **Delete when:** celld reaps a dev node's containers by itself when its
+  supervisor dies, or names them by a label devstack sets; then `remove`
+  and its naming go. devstack's `a_projects_containers_are_named_as_celld_names_them`
+  pins the naming as the fork has it; a celld that moves it must move
+  that test too.
+
 ## A local node's port is a front door of ours, past wrangler's proxy
 
 - **Shortcut:** wrangler's proxy pools connections the runtime closes
