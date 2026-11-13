@@ -752,6 +752,13 @@ mod tests {
         let plan = Plan::of(&headers, None, "/", &with, "finite.site").expect("planned");
         let out = plan.apply(&headers, None, &with, &secrets(&[(&nostr, "eyJldmVudCI6MX0")]));
         assert_eq!(out.headers, h(&[("authorization", "Nostr eyJldmVudCI6MX0")]));
+        // a request to that host carrying no placeholder (git's own basic
+        // auth, as finite.site mints it) plans nothing and goes as it came
+        let git = h(&[("authorization", "Basic Z2l0OmZzX21pbnRlZA=="), ("git-protocol", "version=2")]);
+        let plan = Plan::of(&git, Some("service=git-upload-pack"), "/a/b.git/info/refs", &with, "finite.site").expect("nothing to plan");
+        assert!(plan.is_empty());
+        let out = plan.apply(&git, Some("service=git-upload-pack"), &with, &BTreeMap::new());
+        assert_eq!((out.headers, out.query.as_deref()), (git, Some("service=git-upload-pack")));
     }
 
     /// A person's Vault secret named `linear` before the deployment offered

@@ -6,6 +6,7 @@
 //! invalid, replay and restart for each.
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use fragment_fakes::mover::{event, fixture_zip, staged, Mover, Script};
 use fragment_proto::migrations::{HandoffItem, Has, Roster, SecretKind, RosterAgent, RosterPerson, Sizes, STAGE_FORMAT, WHY_MAX_BYTES};
 use std::time::Duration;
@@ -742,11 +743,11 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     let v = vault()?;
     let (ns, or) = (entry(&v, &ns_name), entry(&v, &or_name));
     s.ok(
-        "tried again whole, it puts what it had not (the Nostr key, kept to sign with and sent nowhere), never puts back the token its person removed, and never takes the name of another agent's secret (OpenRouter's left out, theirs untouched)",
+        "tried again whole, it puts what it had not (the Nostr key, to sign with toward finite.site), never puts back the token its person removed, and never takes the name of another agent's secret (OpenRouter's left out, theirs untouched)",
         again.status == 200
             && again.body == json!({ "handed": ["telegram_bot_token", "nostr_nsec"] })
             && entry(&v, &tg_name).is_null()
-            && ns["hosts"] == json!([]) && ns["place"] == json!({ "sign": "nip98" }) && ns["agents"] == mine
+            && ns["hosts"] == json!([fragment_core::migrations::NOSTR_KEY_HOST]) && ns["place"] == json!({ "sign": "nip98" }) && ns["agents"] == mine
             && or["agents"] == json!(["other--x7k2"]) && or["hosts"] == json!(["example.com"])
             && ![token.as_str(), key.as_str(), NSEC].iter().any(|x| v.to_string().contains(x)),
         format!("{} {} | {v}", again.status, again.body),
@@ -783,6 +784,35 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     let opened = fetched(s, 1, &format!("fetch {base}/open with {agent_name} in x-fragment-agent posting {{}}"))?;
     let zip = fetched(s, 2, &format!("fetch {base}/zip with {agent_name} in x-fragment-agent"))?;
     s.ok("the agent opens its stage and reads its zip through its own egress (NIP-98 as itself)", opened.starts_with("fetched 200:") && opened.contains(STAGE_FORMAT) && zip.starts_with("fetched 200:"), format!("{opened} | {}", zip.chars().take(40).collect::<String>()));
+
+    // the old agent's Nostr key, handed off, signs its sites' calls at finite.site (the agent brings them over itself)
+    let site = fragment_core::migrations::NOSTR_KEY_HOST;
+    let tag = fragment_core::swap::TagKey::derive(&s.host_secret).tag(&id, &agent_name, &ns_name);
+    let signer = fragment_core::swap::Placeholder::new(fragment_core::catalog::Kind::Own, &ns_name, &tag).text();
+    let given = fetched(s, 5, "credentials")?;
+    let before = s.upstream.seen().len();
+    let listed = fetched(s, 6, &format!("fetch http://{site}/api/v1/sites with {signer}"))?;
+    let seen = s.upstream.seen().get(before..).and_then(|l| l.last().cloned()).unwrap_or_default();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+    let old_key = fragment_nip98::Keys::from_secret_hex(&fragment_core::npub::secret_hex(NSEC).context("NIP-19's example key")?).context("a key")?;
+    let header = seen["auth"]["authorization"].as_str().unwrap_or_default().to_string();
+    let by = fragment_nip98::verify(Some(&header), "GET", &format!("https://{site}/api/v1/sites"), b"", now, 120);
+    s.ok(
+        "the new agent's view lists the handed-off Nostr key as its own placeholder, and its egress catches finite.site: a call there reaches it signed (NIP-98) by the old agent's key, never the key",
+        given.contains(&signer) && listed.starts_with("fetched 200") && seen["host"] == site && by.as_deref() == Ok(old_key.pubkey_hex()) && !listed.contains(&old_key.secret_hex()) && !header.contains(&old_key.secret_hex()),
+        json!({ "given": given, "said": listed, "seen": seen, "signer": format!("{by:?}") }),
+    );
+    // a git remote's own basic auth, as finite.site mints it, carries no placeholder: the Vault signs nothing over it
+    let minted = format!("fs-minted-{tag}");
+    let before = s.upstream.seen().len();
+    let cloned = fetched(s, 7, &format!("fetch http://{site}/a/b.git/info/refs?service=git-upload-pack with {minted} as basic git"))?;
+    let seen = s.upstream.seen().get(before..).and_then(|l| l.last().cloned()).unwrap_or_default();
+    let basic = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("git:{minted}")));
+    s.ok(
+        "a request to finite.site that carries no placeholder (a git clone's minted basic auth) goes on untouched: its own Authorization, no signature",
+        cloned.starts_with("fetched 200") && seen["host"] == site && seen["auth"]["authorization"] == basic.as_str() && seen["target"] == "/a/b.git/info/refs?service=git-upload-pack",
+        json!({ "said": cloned, "seen": seen }),
+    );
     let done = fetched(s, 3, &format!("fetch {base}/done with {agent_name} in x-fragment-agent posting {{\"ok\":true}}"))?;
     let after = fetched(s, 4, &format!("fetch {base}/zip with {agent_name} in x-fragment-agent"))?;
     s.ok("it says it is done: the move waits for staff's retire, and its stage's routes refuse at once", done.starts_with("fetched 200:") && done.contains("retiring") && after.starts_with("fetched 409:"), format!("{done} | {after}"));
