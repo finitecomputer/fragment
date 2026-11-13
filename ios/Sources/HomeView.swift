@@ -582,19 +582,19 @@ struct ComposerView: View {
         } label: {
             // the launcher's glass bead at the chat's size, so the two send
             // alike: one bead whose glass and glyph change, never dimmed;
-            // with nothing to send it's clear glass
+            // with nothing to send it's a lighter bead
             let sending = busy || submitting, off = !canSend && !sending
             ZStack {
                 if sending {
                     ProgressView().tint(Color(uiColor: .systemBackground)).transition(.opacity.combined(with: .scale(scale: 0.6)))
                 } else {
                     Image(systemName: stops ? "stop.fill" : "arrow.up").font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(off ? Color(uiColor: .tertiaryLabel) : Color(uiColor: .systemBackground))
+                        .foregroundStyle(off ? Color.white : Color(uiColor: .systemBackground))
                         .contentTransition(.symbolEffect(.replace))
                         .transition(.opacity.combined(with: .scale(scale: 0.6)))
                 }
             }
-            .launcherGlass(tint: off ? .clear : Color(uiColor: .label), size: 34)
+            .launcherGlass(tint: off ? Color(uiColor: .systemGray3) : Color(uiColor: .label), size: 34)
             .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: off)
             .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: sending)
             .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: stops)
