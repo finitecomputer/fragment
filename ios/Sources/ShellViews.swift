@@ -13,14 +13,17 @@ struct DesktopWallpaper: View {
 struct AgentAvatar: View {
     let agent: FragmentSummary?
     var size: CGFloat = 32
+    /// A circle (on a capsule's end) rather than the rounded square.
+    var round = false
+    private var radius: CGFloat { round ? size / 2 : size * 0.28 }
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: size * 0.28).fill(color.gradient)
+            RoundedRectangle(cornerRadius: radius).fill(color.gradient)
             if let picture = agent?.picture, let url = URL(string: picture) {
                 AuthenticatedImage(url: url) { image in
                     if let image { image.resizable().scaledToFill() } else { Color.clear }
                 }
-                    .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.28))
+                    .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: radius))
             } else {
             Text(String((agent?.displayTitle ?? "?").prefix(1))).font(.system(size: size * 0.46, weight: .semibold)).foregroundStyle(.white)
             }
@@ -37,6 +40,7 @@ struct SidebarDrawer: View {
     let library: Library
     let page: ShellPage
     let api: FragmentAPI
+    var newChat: (FragmentSummary) -> Void = { _ in }
     let navigate: (ShellPage) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dragOffset: CGFloat = 0
@@ -44,7 +48,8 @@ struct SidebarDrawer: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let width = min(350, max(1, geometry.size.width - 36))
+            // The screen's width on a phone; on a wider screen, a column's
+            let width = min(480, max(1, geometry.size.width))
             ZStack(alignment: .leading) {
                 if isPresented {
                     Color.black.opacity(0.25 * max(0, 1 + Double(dragOffset / width)))
@@ -52,7 +57,7 @@ struct SidebarDrawer: View {
                         .onTapGesture { close() }
                         .accessibilityHidden(true)
                         .transition(.opacity)
-                    SidebarView(library: library, page: page, api: api, navigate: navigate)
+                    SidebarView(library: library, page: page, api: api, newChat: newChat, navigate: navigate)
                         .frame(width: width)
                         .offset(x: dragOffset)
                         .transition(.move(edge: .leading))
@@ -110,15 +115,45 @@ private struct SidebarPan: UIGestureRecognizerRepresentable {
     }
 }
 
+/// A blur over the status bar and the margin below it, down to where the
+/// pinned agent's row starts and no further, fading out across that margin.
+private struct StatusBarBlur: View {
+    let margin: CGFloat
+    var body: some View {
+        GeometryReader { proxy in
+            let top = proxy.safeAreaInsets.top
+            Rectangle().fill(.ultraThinMaterial)
+                .mask(LinearGradient(stops: [.init(color: .black, location: 0),
+                                             .init(color: .black, location: top / (top + margin)),
+                                             .init(color: .clear, location: 1)],
+                                     startPoint: .top, endPoint: .bottom))
+                .frame(height: top + margin)
+                .ignoresSafeArea(edges: .top)
+        }
+        .allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
 struct SidebarView: View {
     let library: Library
     let page: ShellPage
     let api: FragmentAPI
+    /// A new chat with this agent, opened empty.
+    let newChat: (FragmentSummary) -> Void
     let navigate: (ShellPage) -> Void
+    /// The height of its glass controls: an agent's pill and the round
+    /// buttons beside it and at its foot, drawn alike so they stay one size.
+    static let control: CGFloat = 44
+    /// Every action's icon (close, new chat, search, its pages), one size and
+    /// weight that follow the person's text size; and the small marks on a pill.
+    static let icon = Font.body.weight(.medium)
+    static let mark = Font.caption.weight(.semibold)
     @State private var renamingChat: FragmentSummary?
     @State private var chatTitle = ""
     @State private var managingChat: FragmentSummary?
     @State private var actionError: String?
+    /// Taps on an agent's pill or its New chat, each felt as a light tap.
+    @State private var tapped = 0
 
     private var currentChat: FragmentSummary? {
         guard case .chat(let name) = page else { return nil }
@@ -126,62 +161,98 @@ struct SidebarView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Finite.Computer").font(.headline)
-                Spacer()
-                Button("Search or start a new chat", systemImage: "square.and.pencil") { navigate(.launcher) }
-                    .labelStyle(.iconOnly).buttonStyle(.glass).accessibilityIdentifier("sidebarNewChat")
-            }.padding(20)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(library.sidebarAgents) { agent in
-                        Menu {
-                            Button("New chat with \(agent.displayTitle)", systemImage: "square.and.pencil") {
-                                library.selectedAgent = agent.name; navigate(.launcher)
-                            }
-                            Button("Agent settings", systemImage: "person.crop.circle") { library.selectedAgent = agent.name; navigate(.settings) }
-                            Button(agent.pinned == true ? "Unpin" : "Pin to top", systemImage: agent.pinned == true ? "pin.slash" : "pin") {
-                                Task { await library.pin(agent, api: api) }
-                            }
-                            if let chat = currentChat, let identity = library.identities[agent.name], (chat.agents ?? []).contains(identity) {
-                                Section(chat.displayTitle) { chatActions(chat) }
-                            }
-                        } label: {
-                            HStack(spacing: 12) {
-                                AgentAvatar(agent: agent)
-                                Text(agent.displayTitle).font(.headline)
-                                if agent.pinned == true {
-                                    Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.tertiary).accessibilityLabel("Pinned")
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
-                            }.padding(12).background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
-                        }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
+        // The chats run under the foot, which softens them as they pass (iOS's
+        // scroll edge), never a hard cut where the list ends; the first agent
+        // starts at the top, the sidebar closed by a swipe or by going somewhere.
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 4, pinnedViews: [.sectionHeaders]) {
+                ForEach(library.sidebarAgents) { agent in
+                    // its row pinned at the top while its chats scroll under it
+                    Section {
                         ForEach(library.chats.filter { ($0.agents ?? []).first == library.identities[agent.name] }) { chat in
                             chatRow(chat)
                         }
+                    } header: {
+                        HStack(spacing: 8) {
+                            Menu {
+                                Button("Agent settings", systemImage: "person.crop.circle") { library.selectedAgent = agent.name; navigate(.settings) }
+                                Button(agent.pinned == true ? "Unpin" : "Pin to top", systemImage: agent.pinned == true ? "pin.slash" : "pin") {
+                                    Task { await library.pin(agent, api: api) }
+                                }
+                                if let chat = currentChat, let identity = library.identities[agent.name], (chat.agents ?? []).contains(identity) {
+                                    Section(chat.displayTitle) { chatActions(chat) }
+                                }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    AgentAvatar(agent: agent, round: true)
+                                    Text(agent.displayTitle).font(.headline)
+                                    if agent.pinned == true {
+                                        Image(systemName: "pin.fill").font(Self.mark).foregroundStyle(.tertiary).accessibilityLabel("Pinned")
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.down").font(Self.mark).foregroundStyle(.secondary)
+                                }
+                                // the new-chat button's glass, and its height
+                                .padding(.leading, 8).padding(.trailing, 14).frame(height: Self.control)
+                                .glassEffect(.regular.interactive(), in: .capsule)
+                                // its shape as the menu opens from it and closes back into
+                                // it: the rectangle around it showed as the menu went
+                                .contentShape(.contextMenuPreview, .capsule).contentShape(.capsule)
+                            }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
+                            // its menu opens on this tap; the tap is felt too
+                            .simultaneousGesture(TapGesture().onEnded { tapped += 1 })
+                            // a new chat with this agent, opened empty
+                            Button { tapped += 1; newChat(agent) } label: {
+                                Image(systemName: "square.and.pencil").font(Self.icon)
+                                    .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("New chat with \(agent.displayTitle)").accessibilityIdentifier("agentNewChat-\(agent.name)")
+                        }
                     }
-                    let ungrouped = library.chats.filter { library.agents(in: $0).isEmpty }
-                    if !ungrouped.isEmpty {
-                        Text("Shared chats").font(.caption).foregroundStyle(.secondary).padding(.top)
-                        ForEach(ungrouped) { chatRow($0) }
-                    }
-                    if library.loading && library.fragments.isEmpty { ProgressView().padding() }
-                    if let error = library.error {
-                        Text(error).font(.footnote).foregroundStyle(.secondary)
-                        Button("Try again") { Task { await library.load(api) } }
-                    }
-                }.padding(.horizontal, 12)
-            }.refreshable { await library.load(api) }
-            VStack(spacing: 4) {
-                footer("History", icon: "clock", page: .history)
-                footer("Your Apps", icon: "square.grid.2x2", page: .apps)
-                footer("Settings", icon: "gearshape", page: .settings)
+                }
+                let ungrouped = library.chats.filter { library.agents(in: $0).isEmpty }
+                if !ungrouped.isEmpty {
+                    Text("Shared chats").font(.caption).foregroundStyle(.secondary).padding(.top)
+                    ForEach(ungrouped) { chatRow($0) }
+                }
+                if library.loading && library.fragments.isEmpty { ProgressView().padding() }
+                if let error = library.error {
+                    Text(error).font(.footnote).foregroundStyle(.secondary)
+                    Button("Try again") { Task { await library.load(api) } }
+                }
+            }.padding(.horizontal, 12)
+        }
+        .refreshable { await library.load(api) }
+        // What passes under the status bar blurs there alone: the system's edge
+        // would fade the pinned agent too, so it's off, and the agent pins
+        // just below the blur, a margin's width under the status bar.
+        .scrollEdgeEffectHidden(true, for: .top)
+        .contentMargins(.top, 12, for: .scrollContent)
+        .overlay(alignment: .top) { StatusBarBlur(margin: 12) }
+        .sensoryFeedback(.impact(weight: .light), trigger: tapped)
+        .safeAreaBar(edge: .bottom) {
+            HStack(alignment: .bottom, spacing: 12) {
+                VStack(spacing: 4) {
+                    footer("History", icon: "clock", page: .history)
+                    footer("Your Apps", icon: "square.grid.2x2", page: .apps)
+                    footer("Settings", icon: "gearshape", page: .settings)
+                }
+                // Search, or start a chat from what is typed: the launcher (the web's ⌘K)
+                Button { navigate(.launcher) } label: {
+                    Image(systemName: "magnifyingglass").font(Self.icon)
+                        .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Search or start a new chat").accessibilityIdentifier("sidebarSearch")
+                .padding(.bottom, 4)
             }.padding(12)
         }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
-        .padding(.vertical, 8).padding(.leading, 8)
+        // the whole screen, its words clear of the status bar and home indicator,
+        // over the launcher's wallpaper frosted: its colors come through the glass
+        .background {
+            DesktopWallpaper().overlay { Rectangle().fill(.regularMaterial).ignoresSafeArea() }
+        }
         .alert("Name this chat", isPresented: Binding(get: { renamingChat != nil }, set: { if !$0 { renamingChat = nil } })) {
             TextField("Chat name", text: $chatTitle)
             Button("Save") {
@@ -208,7 +279,7 @@ struct SidebarView: View {
     }
     private func chatRow(_ chat: FragmentSummary) -> some View {
         Button { navigate(.chat(chat.name)) } label: {
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text(chat.displayTitle).font(.subheadline.weight(.medium)).lineLimit(1)
                     Spacer(minLength: 4)
@@ -220,13 +291,16 @@ struct SidebarView: View {
                     }
                     Text(chat.preview ?? "No messages yet").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
-            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                .background(page == .chat(chat.name) ? Color.primary.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 12))
+            }.padding(.horizontal, 12).padding(.vertical, 8).frame(maxWidth: .infinity, alignment: .leading)
+                .background(page == .chat(chat.name) ? Color.primary.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }.buttonStyle(.plain).accessibilityIdentifier("sidebarChat-\(chat.name)")
         .contextMenu { chatActions(chat) }
     }
     private func footer(_ title: String, icon: String, page destination: ShellPage) -> some View {
-        Button { navigate(destination) } label: { Label(title, systemImage: icon).frame(maxWidth: .infinity, alignment: .leading).padding(12) }
+        Button { navigate(destination) } label: {
+            Label { Text(title) } icon: { Image(systemName: icon).font(Self.icon) }
+                .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+        }
             .buttonStyle(.plain).accessibilityIdentifier("sidebar-\(title.lowercased())")
     }
 }

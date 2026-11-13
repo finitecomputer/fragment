@@ -29,6 +29,8 @@ final class Library {
     var creating = false
     var unfinishedChat: FragmentSummary?
     @ObservationIgnored private var readying: (agent: String, chat: Task<FragmentSummary, Error>)?
+    /// A chat made to write in, whose composer takes the keyboard as it opens.
+    @ObservationIgnored var focusOnOpen: String?
     /// What the home screen's prompt holds (`HomeDraft`).
     let home = HomeDraft()
     /// A launch not sent yet: its chat, made for it and still empty, and
@@ -158,6 +160,17 @@ final class Library {
             } catch { readying = nil; throw error }
         }
         readying = (agent.name, chat)
+        return chat
+    }
+
+    /// A new chat with `agent` and nothing in it yet, listed and shown at once
+    /// (the sidebar's New chat): the readied one if there is one for them.
+    func startChat(with agent: FragmentSummary, api: FragmentAPI) async throws -> FragmentSummary {
+        let chat = try await readyChat(with: agent, api: api).value
+        readying = nil; unfinishedChat = nil
+        if !fragments.contains(where: { $0.name == chat.name }) { fragments.insert(chat, at: 0) }
+        try session(for: chat, api: api).beginEmpty()
+        focusOnOpen = chat.name
         return chat
     }
 
@@ -584,7 +597,10 @@ struct FragmentRoot: View {
             }
             .accessibilityHidden(sidebar)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
-            SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api) { destination in
+            SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api, newChat: { agent in
+                showingApps = false; toggleSidebar()
+                Task { await newChat(api, with: agent) }
+            }) { destination in
                 page = destination; showingApps = false; toggleSidebar()
             }
         }
@@ -680,6 +696,20 @@ struct FragmentRoot: View {
         if fragment.kind == "chat" { page = .chat(fragment.name); showingApps = false }
         else if fragment.kind == "launcher" { page = .launcher }
         else { openedApp = fragment }
+    }
+    /// The sidebar's New chat: a chat with `agent`, open and empty, its
+    /// composer the first thing; not made, Home again with why.
+    private func newChat(_ api: FragmentAPI, with agent: FragmentSummary) async {
+        library.selectedAgent = agent.name
+        page = .startingChat
+        do {
+            let chat = try await library.startChat(with: agent, api: api)
+            if page == .startingChat { page = .chat(chat.name) }
+            await library.load(api)
+        } catch {
+            library.error = error.localizedDescription
+            if page == .startingChat { page = .launcher }
+        }
     }
     /// Home's launch (`Library.launch`): its chat shown once made; not
     /// sent, Home again with its words, files and why, if that chat is still
