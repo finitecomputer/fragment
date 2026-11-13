@@ -152,5 +152,42 @@ pub(super) fn invite_asked_first(s: &mut Suite, api: &Api, owner: &Keys) -> Resu
     );
     let listed: Value = api.signed(&cy, "GET", "/api/invites", None)?.body;
     anyhow::ensure!(listed["invites"] == json!([]), "nothing waits on {cy_email} now: {listed}");
+    in_chrome(s, api, owner, &name, &signin, &invite)
+}
+
+/// In Chrome, as a person sees it: the invite page, at a desktop's width
+/// and a phone's, light and dark (kept in the run's scratch folder), and a
+/// click on its armed Accept that opens the fragment as a member.
+fn in_chrome(s: &mut Suite, api: &Api, owner: &Keys, name: &str, signin: &str, invite: &dyn Fn(&str, &str) -> Result<()>) -> Result<()> {
+    let wait = Duration::from_secs(20);
+    let (dee, dee_session) = person(api)?;
+    invite(&email_of(&dee), "editor")?;
+    let Some(mut chrome) = s.browser()? else {
+        s.ok("Chrome is installed for the share lane (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &dee_session)?;
+    let page = chrome.open(&format!("{}{signin}", api.base))?;
+    let armed = chrome.until(&page, "!!document.querySelector('button[value=accept]') && !document.querySelector('button[value=accept]').disabled", wait);
+    for (width, height, mobile) in [(1280, 800, false), (390, 844, true)] {
+        chrome.viewport(&page, width, height, mobile)?;
+        for scheme in ["light", "dark"] {
+            chrome.color_scheme(&page, scheme)?;
+            chrome.screenshot(&page, &s.scratch.join(format!("invite-at-signin-{width}-{scheme}.png")))?;
+        }
+    }
+    chrome.viewport(&page, 1280, 800, false)?;
+    chrome.color_scheme(&page, "light")?;
+    chrome.eval(&page, "(document.querySelector('button[value=accept]').click(), true)")?;
+    let landed = chrome.until(&page, &format!("location.host.startsWith({name:?}) && location.search === '?from=invite' && document.title === 'Todo'"), wait);
+    chrome.screenshot(&page, &s.scratch.join("invite-at-signin-accepted.png"))?;
+    let id = api.identity(&dee)?;
+    let members = api.signed(owner, "GET", &format!("/api/f/{name}/members"), None)?;
+    let role = members.body["members"].as_array().into_iter().flatten().find(|m| m["principal"] == id.as_str()).and_then(|m| m["role"].as_str().map(str::to_string));
+    s.ok(
+        "in Chrome: the invite page arms its Accept, and a click on it opens the fragment at the page asked for, signed in as a member at the invite's role",
+        armed && landed && role.as_deref() == Some("editor"),
+        chrome.eval(&page, "location.href + ' ' + document.title").unwrap_or_default(),
+    );
     Ok(())
 }

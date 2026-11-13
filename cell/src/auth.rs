@@ -16,7 +16,7 @@
 //!                                 instead, so the next sign-in asks who is signing in
 //!   GET  /auth/fragment?name=&return=      a single-use redemption for one fragment's origin; for
 //!                                 a fragment an invite to which waits on their emails, that
-//!                                 invite first ("Accept the invite to X?": `invite`, FIN-502);
+//!                                 invite first ("You're invited": `invite`, FIN-502);
 //!                                 for one that is not theirs, nor shared with them, a
 //!                                 question first ("Continue to X as you?"), asked once
 //!   POST /auth/fragment?name=&return=      the yes (remembered), then the redemption
