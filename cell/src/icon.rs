@@ -2,8 +2,10 @@
 //! Icons): made from drawings its editors pick among, or uploaded, kept
 //! as one of the fragment's blobs (named in its meta, which the blob
 //! collection keeps), served to its viewers, and shown in its members'
-//! lists as its picture. An agent fragment's picture is its avatar
-//! (crate::plane), never an icon.
+//! lists as its picture. One with none of its own shows the icon of the
+//! blessed template it runs, when that carries one (a brain's), read from
+//! the release. An agent fragment's picture is its avatar (crate::plane),
+//! never an icon.
 //!
 //! A making runs in the request that asks for it: a subject, then
 //! `icon::CANDIDATES` drawings at once, each cut out, examined, fitted and
@@ -21,6 +23,7 @@ use fragment_core::ledger::Spend;
 use fragment_core::price::Usage;
 use fragment_core::{blob, decide, face};
 use fragment_proto::{ErrorCode, FragmentKind, IdentityKind, Role};
+use fragment_templates::File;
 use serde_json::{json, Value};
 use worker::*;
 
@@ -54,10 +57,48 @@ fn operation(started_ms: i64) -> String {
     icon::operation(started_ms, js::random_bytes::<4>())
 }
 
+/// The icon a fragment shows: its own, one of its blobs, or its blessed
+/// template's (blessed.rs `icon`), a file of the release.
+enum Shown {
+    Own(String),
+    Release(&'static File),
+}
+
+impl Shown {
+    fn sha(&self) -> &str {
+        match self {
+            Shown::Own(sha) => sha,
+            Shown::Release(f) => f.sha256,
+        }
+    }
+}
+
 impl FragmentCell {
     /// The icon's SHA-256, when it has one.
     fn icon_sha(&self) -> CellResult<Option<String>> {
         self.meta(MetaKey::Icon)
+    }
+
+    /// The icon it shows: its own, else its template's.
+    fn icon_now(&self) -> CellResult<Option<Shown>> {
+        match self.icon_sha()? {
+            Some(sha) => Ok(Some(Shown::Own(sha))),
+            None => Ok(self.release_icon()?.map(Shown::Release)),
+        }
+    }
+
+    /// The bytes of the icon it shows, streamed (never held whole), tagged
+    /// by its SHA-256 as a blob's are.
+    async fn icon_body(&self, shown: &Shown) -> CellResult<Response> {
+        match shown {
+            Shown::Own(sha) => self.stream_blob(sha, icon::MEDIA_TYPE, None).await,
+            Shown::Release(f) => {
+                let headers = Headers::new();
+                headers.set("content-type", icon::MEDIA_TYPE)?;
+                headers.set("etag", &format!("\"{}\"", f.sha256))?;
+                crate::assets::body(&self.env, f, headers).await
+            }
+        }
     }
 
     /// Where its lists show its icon, when it has one and is no agent.
@@ -65,8 +106,8 @@ impl FragmentCell {
         if kind == FragmentKind::Agent {
             return Ok(None);
         }
-        let Some(sha) = self.icon_sha()? else { return Ok(None) };
-        Ok(Some(icon::icon_path(&self.name()?, &sha)))
+        let Some(shown) = self.icon_now()? else { return Ok(None) };
+        Ok(Some(icon::icon_path(&self.name()?, shown.sha())))
     }
 
     /// Its kind and title as its lists show them now (`MetaKey::Face`):
@@ -251,9 +292,10 @@ impl FragmentCell {
         Ok(Response::from_json(&json!({ "icon": path, "sha256": sha, "size": size }))?)
     }
 
-    /// `DELETE /api/f/{name}/icon` (editors and up): no icon; its lists
-    /// show the shell's own again. Its blob goes with the collection. A
-    /// write: refused while the owner's fragments are read-only.
+    /// `DELETE /api/f/{name}/icon` (editors and up): no icon of its own;
+    /// its lists show its template's again, or the shell's own. Its blob
+    /// goes with the collection. A write: refused while the owner's
+    /// fragments are read-only. Answers the icon it shows now.
     pub(crate) async fn icon_delete(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         self.writable().await?;
@@ -262,7 +304,7 @@ impl FragmentCell {
             self.show_icon().await?;
             self.event("icon.removed", "the icon was removed", json!({}));
         }
-        Ok(Response::from_json(&json!({ "icon": null }))?)
+        Ok(Response::from_json(&json!({ "icon": self.icon_shown(self.shown_as()?.0)? }))?)
     }
 
     /// `favicon.ico` on the fragment's own origin, which a browser asks of
@@ -272,13 +314,13 @@ impl FragmentCell {
     /// each time so a new icon shows, its headers alone for `head`; `None`
     /// when it has none.
     pub(crate) async fn favicon(&self, req: &Request, public: bool, head: bool) -> CellResult<Option<Response>> {
-        let Some(sha) = self.icon_sha()? else { return Ok(None) };
+        let Some(shown) = self.icon_now()? else { return Ok(None) };
         let cache = if public { "public, no-cache" } else { "private, no-cache" };
-        let etag = format!("\"{sha}\"");
+        let etag = format!("\"{}\"", shown.sha());
         if let Some(resp) = crate::serve::not_modified(req, &etag, cache)? {
             return Ok(Some(resp));
         }
-        let mut resp = if head { Response::empty()? } else { self.stream_blob(&sha, icon::MEDIA_TYPE, None).await? };
+        let mut resp = if head { Response::empty()? } else { self.icon_body(&shown).await? };
         let h = resp.headers_mut();
         h.set("content-type", icon::MEDIA_TYPE)?;
         h.set("etag", &etag)?;
@@ -292,9 +334,10 @@ impl FragmentCell {
     /// is no longer current is 404 too, never the current icon's bytes.
     pub(crate) async fn icon_get(&self, caller: &Caller, req: &Request) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        let Some(sha) = self.icon_sha()? else {
+        let Some(shown) = self.icon_now()? else {
             return Err(CellError::new(ErrorCode::NotFound, "no icon: make or upload one"));
         };
+        let sha = shown.sha();
         if !caller.url.query_pairs().filter(|(k, _)| k == "v").all(|(_, v)| v.as_ref() == &sha[..12]) {
             let mut resp = CellError::new(ErrorCode::NotFound, "no icon at that version").response()?;
             resp.headers_mut().set("cache-control", "no-store")?;
@@ -304,7 +347,7 @@ impl FragmentCell {
         if let Some(resp) = crate::serve::not_modified(req, &etag, ICON_CACHE)? {
             return Ok(resp);
         }
-        let mut resp = self.stream_blob(&sha, icon::MEDIA_TYPE, None).await?;
+        let mut resp = self.icon_body(&shown).await?;
         let h = resp.headers_mut();
         h.set("cache-control", ICON_CACHE)?;
         h.set("x-content-type-options", "nosniff")?;

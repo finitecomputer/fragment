@@ -744,7 +744,19 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(made.status == 200, "a connector: {made}");
     anyhow::ensure!(visibility(&connector, "link")?.status == 200, "the connector opened by its link");
     let r = api.signed(&owner, "POST", &at(&connector, "door"), Some(&json!({ "act": "link", "agent": s.named(api, &owner, "anyagent")? })))?;
-    s.ok("a connector its link opens is bound as no door (403 unshare_first)", refused(&r, "unshare_first"), &r);
+    if s.on_celld() {
+        // a self-hosted stack's connectors are SimpleX alone (Telegram's
+        // webhook needs the platform reachable from the internet): its
+        // policy refuses Telegram's door first, saying so
+        s.ok(
+            "a self-hosted stack links no Telegram: its door is refused, 403, as a connector the deployment does not allow",
+            r.status == 403 && r.message().contains("does not allow"),
+            &r,
+        );
+        s.skip("a connector its link opens is bound as no door (403 unshare_first)", "its connector is Telegram's, which a self-hosted stack does not allow (docs/self-host.md)");
+    } else {
+        s.ok("a connector its link opens is bound as no door (403 unshare_first)", refused(&r, "unshare_first"), &r);
+    }
 
     // one from before the rule: shared, with a key from then
     let old = s.named(api, &owner, "reachold")?;

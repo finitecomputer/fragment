@@ -30,3 +30,9 @@
   symlinks to it, and crates/templates embeds the two templates' once.
 - `vendor/split-grid.js` (`vendor/split-grid.LICENSE.txt`) and the
   Lucide icons in `icons.js` (`vendor/lucide-LICENSE`): their own licenses.
+- `provider-marks.js`: providers' marks in settings' Connections (Google,
+  Google Maps for Google Places, OpenRouter, X, Perplexity, ElevenLabs),
+  each one path copied unchanged from Simple Icons (simpleicons.org,
+  simple-icons v16.36.0, CC0 1.0). The brand names and marks are their
+  owners' trademarks, shown only to name each provider. A provider Simple
+  Icons lacks keeps its letter.

@@ -1464,7 +1464,7 @@ fn sells_nothing(s: &mut Suite, b: &mut Lease, api: &Api, guest: &dyn Fn(&Api, &
 /// nothing is a FAIL saying where the page is and what it has, not an
 /// error thrown in the page.
 pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("billing-page", &[Need::Chrome, Need::Fakes, Need::Deployment, Need::Node]) {
+    if !s.section("billing-page", &[Need::Chrome, Need::Fakes, Need::Deployment, Need::Node, Need::Computers]) {
         return Ok(());
     }
     let Some(mut b) = s.browser()? else {

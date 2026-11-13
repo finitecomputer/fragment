@@ -28,8 +28,13 @@ use serde_json::{json, Value};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
-/// How long Chrome may take to answer on its DevTools port.
-const CHROME_START_WAIT: Duration = Duration::from_secs(30);
+/// How long a starting Chrome's browser main thread, where its start runs,
+/// may do nothing (no CPU time, no page fault) before its DevTools port is
+/// up: one idle that long is stuck. One still working is waited on,
+/// however slow: a CI runner's first Chrome is 7 to 19 s on half of shard
+/// 1's runs and was past 30 s once, alive and starting (FIN-496). Where
+/// its thread can't be read (no `/proc`), the bound runs from its start.
+const CHROME_IDLE_MAX: Duration = Duration::from_secs(30);
 /// How long a reloaded page has to load its new document, resources and
 /// all (`reload`), and how many reloads it is given.
 const RELOAD_LOAD: Duration = Duration::from_secs(30);
@@ -270,6 +275,142 @@ fn devtools_port(profile: &Path) -> Option<u16> {
     Some(port)
 }
 
+/// One process, as its `/proc/<pid>/stat` says.
+#[derive(Debug, Clone, PartialEq)]
+struct Process {
+    pid: u32,
+    ppid: u32,
+    name: String,
+    /// R running, S sleeping, D waiting on a disk, T stopped, Z exited.
+    state: char,
+    /// CPU time in clock ticks, its reaped children's included.
+    ticks: u64,
+    /// Page faults, its reaped children's included.
+    faults: u64,
+    /// Those of them that read a disk.
+    reads: u64,
+}
+
+impl Process {
+    /// A process's (or one thread's) `stat` file, read.
+    fn read(path: &str) -> Option<Process> {
+        Process::parse(&std::fs::read_to_string(path).ok()?)
+    }
+
+    /// `pid (name) state ppid …`: the name may hold spaces and parentheses,
+    /// so the fields are counted from its last `)`.
+    fn parse(stat: &str) -> Option<Process> {
+        let (head, tail) = stat.trim_end().rsplit_once(") ")?;
+        let (pid, name) = head.split_once(" (")?;
+        let f: Vec<&str> = tail.split(' ').collect();
+        let n = |i: usize| f.get(i)?.parse::<u64>().ok();
+        Some(Process {
+            pid: pid.trim().parse().ok()?,
+            ppid: f.get(1)?.parse().ok()?,
+            name: name.to_string(),
+            state: f.first()?.chars().next()?,
+            // minflt cminflt majflt cmajflt utime stime cutime cstime
+            faults: n(7)? + n(8)?,
+            reads: n(9)? + n(10)?,
+            ticks: n(11)? + n(12)? + n(13)? + n(14)?,
+        })
+    }
+}
+
+/// A process and every process under it.
+#[derive(Debug)]
+struct Tree(Vec<Process>);
+
+/// What a tree's processes have done so far. Any change is work: a tree
+/// that stays the same did nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Work {
+    processes: usize,
+    ticks: u64,
+    faults: u64,
+    reads: u64,
+}
+
+impl std::fmt::Display for Work {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // /proc counts in USER_HZ, 100 a second on Linux
+        write!(f, "{} processes, {:.2}s of CPU, {} page faults, {} of them read from disk", self.processes, self.ticks as f64 / 100.0, self.faults, self.reads)
+    }
+}
+
+impl Tree {
+    /// `root`'s tree as `/proc` has it now (`None`: no `/proc`, or no such process).
+    fn read(root: u32) -> Option<Tree> {
+        let all = std::fs::read_dir("/proc").ok()?.filter_map(|e| {
+            let e = e.ok()?;
+            e.file_name().to_str()?.parse::<u32>().ok()?;
+            Process::read(e.path().join("stat").to_str()?)
+        });
+        Tree::of(root, all.collect())
+    }
+
+    fn of(root: u32, all: Vec<Process>) -> Option<Tree> {
+        let (mut inside, mut rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| p.pid == root);
+        if inside.is_empty() {
+            return None;
+        }
+        loop {
+            let (under, left): (Vec<_>, Vec<_>) = rest.into_iter().partition(|p| inside.iter().any(|q| q.pid == p.ppid));
+            rest = left;
+            if under.is_empty() {
+                return Some(Tree(inside));
+            }
+            inside.extend(under);
+        }
+    }
+
+    fn work(&self) -> Work {
+        let sum = |f: fn(&Process) -> u64| self.0.iter().map(f).sum();
+        Work { processes: self.0.len(), ticks: sum(|p| p.ticks), faults: sum(|p| p.faults), reads: sum(|p| p.reads) }
+    }
+}
+
+impl std::fmt::Display for Tree {
+    /// Each process, its state, and what it waits in (`wchan`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:", self.work())?;
+        for p in &self.0 {
+            let wchan = std::fs::read_to_string(format!("/proc/{}/wchan", p.pid)).unwrap_or_default();
+            write!(f, " {} {} {} (in {})", p.pid, p.name, p.state, if wchan.is_empty() { "-" } else { &wchan })?;
+        }
+        Ok(())
+    }
+}
+
+/// What a profile holds, for a start's report: its files and directories
+/// two levels down, by path, with each file's size (at most 40).
+fn held(profile: &Path) -> String {
+    let mut found = vec![];
+    let mut dirs = vec![(profile.to_path_buf(), 0)];
+    while let Some((dir, depth)) = dirs.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = e.path();
+            let name = path.strip_prefix(profile).unwrap_or(&path).display().to_string();
+            match e.file_type().is_ok_and(|t| t.is_dir()) {
+                true if depth == 0 => {
+                    found.push(format!("{name}/"));
+                    dirs.push((path, depth + 1));
+                }
+                true => found.push(format!("{name}/")),
+                false => found.push(format!("{name} ({} B)", e.metadata().map_or(0, |m| m.len()))),
+            }
+        }
+    }
+    found.sort();
+    let more = found.len().saturating_sub(40);
+    found.truncate(40);
+    match (found.is_empty(), more) {
+        (true, _) => "nothing".to_string(),
+        (false, 0) => found.join(", "),
+        (false, more) => format!("{} and {more} more", found.join(", ")),
+    }
+}
+
 pub(crate) fn chrome() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CHROME_BIN") {
         return Some(PathBuf::from(p));
@@ -340,6 +481,12 @@ impl Browser {
             .context("start Chrome")?;
         let t0 = Instant::now();
         let said = || std::fs::read_to_string(profile.join("chrome.log")).unwrap_or_default().lines().rev().take(5).collect::<Vec<_>>().join(" | ");
+        let pid = child.id();
+        // its browser's main thread, where its start runs (its other threads
+        // and processes may stay busy while that is stuck): what it had done
+        // when it last did more
+        let main = || Process::read(&format!("/proc/{pid}/task/{pid}/stat")).map(|p| (p.ticks, p.faults, p.reads));
+        let (mut done, mut since) = (main(), Instant::now());
         loop {
             let found = devtools_port(&profile).and_then(|port| {
                 reqwest::blocking::get(format!("http://127.0.0.1:{port}/json/version"))
@@ -348,15 +495,30 @@ impl Browser {
                     .and_then(|v| v["webSocketDebuggerUrl"].as_str().map(str::to_string))
             });
             if let Some(u) = found {
+                // how each start went: a slow one's disk reads say whether it waited on the disk
+                let work = Tree::read(pid).map(|t| format!(": {}", t.work())).unwrap_or_default();
+                println!("      (Chrome started in {:.1?}{work})", t0.elapsed());
                 return Ok((child, u, profile));
             }
             if let Ok(Some(status)) = child.try_wait() {
-                bail!("Chrome exited ({status}) before its DevTools endpoint came up: {}", said());
+                bail!("Chrome exited ({status}) {:.1?} after it started, before its DevTools endpoint came up: it said: {}; its profile held: {}", t0.elapsed(), said(), held(&profile));
             }
-            if t0.elapsed() > CHROME_START_WAIT {
+            let now = main();
+            if now != done {
+                (done, since) = (now, Instant::now());
+            }
+            if since.elapsed() > CHROME_IDLE_MAX {
+                // read while they still are: what each waits in goes when it is killed
+                let processes = Tree::read(pid).map_or_else(|| "unread (no /proc)".to_string(), |t| t.to_string());
                 let _ = child.kill();
                 let _ = child.wait();
-                bail!("Chrome's DevTools endpoint did not come up in {CHROME_START_WAIT:?} (its port: {:?}): {}", devtools_port(&profile), said());
+                bail!(
+                    "Chrome's main thread did nothing for {CHROME_IDLE_MAX:?} ({:.1?} after it started) and its DevTools endpoint is not up (its port: {:?}): its processes: {processes}; it said: {}; its profile held: {}",
+                    t0.elapsed(),
+                    devtools_port(&profile),
+                    said(),
+                    held(&profile),
+                );
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -1246,6 +1408,61 @@ mod tests {
             assert_eq!(with(half), None, "{half:?}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A process's stat is read from its last `)`, whatever its name
+    /// holds; its reaped children's time and faults count as its own.
+    #[test]
+    fn a_process_is_read_from_its_stat() {
+        let stat = "8114 (chrome (main) x) S 8000 8114 8000 0 -1 4194560 100 20 3 4 50 7 2 1 20 0 30 0 99 1 2 3\n";
+        let p = Process::parse(stat).expect("a stat");
+        assert_eq!(p, Process { pid: 8114, ppid: 8000, name: "chrome (main) x".into(), state: 'S', ticks: 60, faults: 120, reads: 7 });
+        for bad in ["", "8114 chrome S 8000", "8114 (chrome) S", "x (chrome) S 8000 1 1 0 -1 0 1 1 1 1 1 1 1 1"] {
+            assert_eq!(Process::parse(bad), None, "{bad:?}");
+        }
+    }
+
+    /// A tree is its root and every process under it, however deep, and
+    /// nothing beside it; a root that is gone is none.
+    #[test]
+    fn a_tree_is_its_root_and_all_under_it() {
+        let p = |pid, ppid| Process { pid, ppid, name: format!("p{pid}"), state: 'S', ticks: pid as u64, faults: 1, reads: 0 };
+        // 10 → 11 → 13 → 14, 10 → 12; 20 → 21 beside it; 1 above it
+        let all = vec![p(14, 13), p(1, 0), p(11, 10), p(21, 20), p(10, 1), p(13, 11), p(12, 10), p(20, 1)];
+        let tree = Tree::of(10, all.clone()).expect("its tree");
+        let mut pids: Vec<u32> = tree.0.iter().map(|p| p.pid).collect();
+        pids.sort();
+        assert_eq!(pids, [10, 11, 12, 13, 14]);
+        assert_eq!(tree.work(), Work { processes: 5, ticks: 60, faults: 5, reads: 0 });
+        assert!(Tree::of(99, all).is_none());
+    }
+
+    /// Read from `/proc`, a process's tree holds the children it started,
+    /// and a process at work (a shell's busy loop) shows its main thread's
+    /// CPU time growing; a stopped one's stays as it was.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_working_thread_shows_its_work() {
+        struct Killed(std::process::Child);
+        impl Drop for Killed {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Killed(Command::new("sh").args(["-c", "while :; do :; done"]).spawn().expect("sh"));
+        let pid = child.0.id();
+        assert!(Tree::read(std::process::id()).expect("ours").0.iter().any(|p| p.pid == pid), "ours holds the child");
+        let main = || Process::read(&format!("/proc/{pid}/task/{pid}/stat")).expect("its main thread");
+        let before = main();
+        let t0 = Instant::now();
+        while main().ticks == before.ticks {
+            assert!(t0.elapsed() < Duration::from_secs(10), "a busy loop's CPU time never grew");
+        }
+        assert!(Command::new("kill").args(["-STOP", &pid.to_string()]).status().is_ok_and(|s| s.success()), "the shell stops");
+        while main().state != 'T' {}
+        let stopped = main();
+        assert_eq!((main().ticks, main().faults), (stopped.ticks, stopped.faults), "a stopped thread does nothing");
     }
 
     /// Chromes started together each answer on the port each picked and

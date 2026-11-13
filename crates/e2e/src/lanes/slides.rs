@@ -219,11 +219,17 @@ pub fn slides(s: &mut Suite, api: &Api) -> Result<()> {
     shot(&mut chrome, &b, &media, "5-follower-sees-note.png");
     s.ok("the follower sees it live, and is asked to sign in to leave one", counted && seen, chrome.eval(&b, "document.querySelector('.sl-panel')?.innerText ?? ''")?);
 
-    // the presenter stops: the follower no longer follows
+    // the presenter stops: the follower no longer follows. Its page ends the
+    // presence at once and posts the Stop record after (slides-live.js), so
+    // the follower stops before the record lands: wait for the record
     press_button(&mut chrome, &a, "Stop")?;
     let ended = chrome.until(&b, "!document.querySelector('.sl-bar').innerText.includes('Following')", WAIT);
-    let last = api.signed(&owner, "GET", &format!("/api/f/{name}/channels/present"), None)?;
-    let bodies: Vec<Value> = last.body["records"].as_array().map(|r| r.iter().map(|r| r["body"].clone()).collect()).unwrap_or_default();
+    let presented = || -> Vec<Value> {
+        let last = api.signed(&owner, "GET", &format!("/api/f/{name}/channels/present"), None);
+        last.ok().and_then(|r| r.body["records"].as_array().map(|r| r.iter().map(|r| r["body"].clone()).collect())).unwrap_or_default()
+    };
+    s.eventually(WAIT, || presented().last().is_some_and(|b| b["live"] == false));
+    let bodies = presented();
     s.ok(
         "stopping ends it for everyone, and the channel holds each page presented",
         ended && bodies.last().is_some_and(|b| b["live"] == false) && [1, 2, 3, 4].iter().all(|p| bodies.iter().any(|b| b["page"] == *p && b["live"] == true)),

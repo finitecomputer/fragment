@@ -5,6 +5,25 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## No mail without Email Sending
+
+- **Shortcut:** the platform's mail (invites, a key added, an org's seat,
+  an export ready, a trial code) goes through Cloudflare Email Sending's
+  binding (`EMAIL`, `cell/src/mail.rs`), or in dev and the e2e to the
+  mail fake (`FRAGMENT_MAIL_URL`). A self-hosted node has no mailer: celld
+  binds `EMAIL` with workerd's class and every send rejects
+  (`E_NO_MAILER`, "this node has no mailer"), which the cell takes as any
+  failed send (`upstream_failed`). An invite to someone new is refused and
+  not kept; a key's or an export's mail is logged as failed; an org's
+  `mailed` and a trial's send say it was not sent. Paul, 2026-10-22: not
+  solved in this pass.
+- **Risk:** on a self-hosted box, people new to it cannot be invited by
+  mail, and nothing mailed reaches anyone. Whether a box with no mailer
+  should still make invites is a product rule, its own PR.
+- **Delete when:** celld relays mail for its node (SMTP, or a company's
+  relay, behind the same binding: its `SendEmail`'s seam), or that product
+  rule lands.
+
 ## A computer's lifecycle writes its old flags too
 
 - **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle

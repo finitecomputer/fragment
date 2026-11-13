@@ -952,7 +952,7 @@ impl FragmentCell {
     }
 
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
-        let url = egress::check(&f.url, self.cfg.egress_local).map_err(permanent)?;
+        let url = egress::check(&f.url, self.cfg.egress_local, &self.cfg.egress_allow).map_err(permanent)?;
         // a connector bound as a door that is shut sends nothing (doors.rs)
         if let Some(why) = self.door_shut().map_err(|e| StepFail::Retry(e.message))? {
             return Err(permanent(why));

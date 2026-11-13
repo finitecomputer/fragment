@@ -36,6 +36,9 @@ only from that computer's egress, toward that provider.
   is in use within a minute, with no deploy. A binding whose secret the
   store lacks is an error; nothing falls back to a Worker secret or
   variable.
+  A self-hosted runtime (celld) binds them the same way and reads each
+  from its node's secrets backend, OpenBao (docs/self-host.md, seam 12):
+  the cell is the same on both.
 - **App code holds no key.** It runs in a loader isolate whose env the
   platform builds (`js::app_env`), so it names no deployment secret. A
   job's `job.fetch` names a fragment secret as `{{NAME}}` in a header or

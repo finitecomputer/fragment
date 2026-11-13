@@ -1155,7 +1155,7 @@ none (its picture is its `avatar.png`): a making or `PUT` on one is 400.
 | `POST /api/f/{name}/icon/make` | editors | `{hint?}` (at most `icon::HINT_MAX_CHARS`) → `{subject, candidates: [{png, score}], flaws}` |
 | `PUT /api/f/{name}/icon` | editors | the image's bytes → `{icon, sha256, size}` |
 | `GET /api/f/{name}/icon` | viewers | the PNG (`ETag` its SHA-256), or 404 |
-| `DELETE /api/f/{name}/icon` | editors | → `{icon: null}` |
+| `DELETE /api/f/{name}/icon` | editors | → `{icon}`: the icon it shows now, or `null` |
 
 - **A making** names one object for the fragment's title, description and
   the hint (the object a hint names, without its writing or negations, as
@@ -1175,6 +1175,10 @@ none (its picture is its `avatar.png`): a making or `PUT` on one is 400.
 - **Kept** as one of its blobs, named in its meta. Its members' rows show it
   as `picture`, `/api/f/<name>/icon?v=<12 hex of its SHA-256>`, cacheable a
   day; a stale version is 404 `no-store`.
+- **A template's.** One with no icon of its own, on a blessed template
+  that carries `icon.png` (the brain's), shows that one, read from the
+  release at the same addresses (`v` its SHA-256's). `DELETE` removes only
+  its own.
 - **Its pages' favicon.** A `GET` or `HEAD` of `favicon.ico` on its origin,
   where live has no such file and the app answers 404 there, is answered
   the icon, `no-cache`, its SHA-256 the `ETag`.

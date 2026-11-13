@@ -32,7 +32,7 @@ use std::rc::Rc;
 use fragment_core::migrations::{self as machine, Col, Effect, Move, Refused, Step};
 use fragment_nip98::Payload;
 use fragment_proto::migrations::{
-    parse_stage, stage_prefix, valid_old, AdminAct, Handoff, Has, Mailbox, MoveAt, MoveState, Offer, OfferYes, Offers, Report, Reported, RosterTaken, StageCompleted, StageDone, StagePart, StageParts, MAILBOX_MAX, MANIFEST_MAX_BYTES,
+    parse_stage, stage_prefix, valid_old, AdminAct, Handoff, Mailbox, MoveAt, MoveState, Offer, OfferYes, Offers, Report, Reported, RosterTaken, StageCompleted, StageDone, StagePart, StageParts, MAILBOX_MAX, MANIFEST_MAX_BYTES,
     PARTS_MAX, PART_MAX_BYTES, ROSTER_AGENTS_MAX, ROSTER_PEOPLE_MAX, SecretKind, STAGE_FORMAT, STAGE_MANIFEST, STAGE_ZIP, TEXT_MAX_BYTES,
 };
 use fragment_proto::notice::NoticeList;
@@ -580,20 +580,6 @@ fn handoff_in(body: &str) -> CellResult<(String, Vec<SecretKind>)> {
     Ok((command.to_string(), kinds))
 }
 
-/// A move's row, with which secrets its old agent has as its roster offer
-/// says (`has_t`, `has_o`, `has_n`), read by SQLite: no decoder of its own.
-macro_rules! with_has {
-    () => {
-        "SELECT *, json_extract(offer, '$.has.telegram') AS has_t, json_extract(offer, '$.has.openrouter') AS has_o, json_extract(offer, '$.has.nostr') AS has_n FROM moves"
-    };
-}
-
-/// Which secrets a move's old agent has, from its row's `with_has` columns.
-fn has_of(row: &Value) -> Has {
-    let had = |c: &str| row[c].as_i64() == Some(1);
-    Has { telegram: had("has_t"), openrouter: had("has_o"), nostr: had("has_n") }
-}
-
 // ---- the object
 
 /// A roster as the object reads it: its ids, and each agent's offer kept as
@@ -816,8 +802,8 @@ impl MigrationsCell {
             // whose Vault, and which agent's
             ("handoff", [old]) => {
                 let (command, kinds) = handoff_in(&body)?;
-                let (m, has) = self.with_has(old)?;
-                machine::handoff(&m, &command, &has, &kinds).map_err(refused)?;
+                let m = parts.get(old)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move")))?;
+                machine::handoff(&m, &command, &kinds).map_err(refused)?;
                 let person = parts.person_of(&m.workos_id)?.ok_or_else(|| CellError::host(format!("{old} moves with no person bound")))?;
                 Ok(Response::ok(format!("{person}\n{}", m.agent.unwrap_or_default()))?)
             }
@@ -1068,12 +1054,6 @@ impl MigrationsCell {
         Ok((m, crate::json_body(offer.as_bytes())?))
     }
 
-    /// `old`'s move, and which secrets its old agent has (404: none).
-    fn with_has(&self, old: &str) -> CellResult<(Move, Has)> {
-        let row = self.parts().rows(concat!(with_has!(), " WHERE old = ?"), vec![text_value(old)])?.pop().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move")))?;
-        Ok((Move::read(&row).map_err(CellError::host)?, has_of(&row)))
-    }
-
     /// A person's answer to `old`'s offer (`later`, `never`, `ask-again`,
     /// `yes` with an agent and its owner): `person` names who answers, its
     /// move theirs (404 otherwise); `None` is a lever's, for its person.
@@ -1122,15 +1102,8 @@ impl MigrationsCell {
 
     /// The mover's commands, oldest first.
     fn mailbox(&self) -> CellResult<Mailbox> {
-        let rows = self.parts().rows(concat!(with_has!(), " WHERE command IS NOT NULL ORDER BY since_ms, old LIMIT ?"), vec![SqlStorageValue::Integer(MAILBOX_MAX as i64)])?;
-        let mut commands = vec![];
-        for row in &rows {
-            let m = Move::read(row).map_err(CellError::host)?;
-            let Some(mut c) = m.command() else { continue };
-            c.secrets = m.secrets(&has_of(row));
-            commands.push(c);
-        }
-        Ok(Mailbox { commands })
+        let moves = self.parts().moves("SELECT * FROM moves WHERE command IS NOT NULL ORDER BY since_ms, old LIMIT ?", vec![SqlStorageValue::Integer(MAILBOX_MAX as i64)])?;
+        Ok(Mailbox { commands: moves.iter().filter_map(Move::command).collect() })
     }
 
     fn report(&self, old: &str, r: &Report) -> CellResult<Reported> {

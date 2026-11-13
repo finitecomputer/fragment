@@ -403,7 +403,7 @@ out. One thing to do to one old agent, flat: its `kind`, and the fields that kin
 | `kind` | [`CommandKind`](#commandkind) | required |  |
 | `old` | `string` | required |  |
 | `phase` | [`Phase`](#phase) or `null` | optional | `stop_and_stage`: its phase. |
-| `secrets` | `array` of [`SecretKind`](#secretkind) | optional | `stop_and_stage` after a person's Yes (phase 1): the secrets the old agent has (the roster's `has`), each to hand to its person's Vault (`POST …/agents/{old}/secrets`) once it is stopped. None in phase 2: no one said Yes. |
+| `secrets` | `array` of [`SecretKind`](#secretkind) | optional | `stop_and_stage` after a person's Yes (phase 1): every kind of secret, whatever the roster's `has` says, each the old agent holds to hand to its person's Vault (`POST …/agents/{old}/secrets`) once it is stopped; one it does not hold is left out. None in phase 2: no one said Yes. |
 | `stage` | `string` or `null` | optional | `stop_and_stage`: the stage to upload (`stage_id`). |
 
 ### `CommandKind`
@@ -524,7 +524,7 @@ in, closed.
 
 ### `Has`
 
-in. Which secrets it holds (never their values).
+in. Which secrets it holds (never their values), if its roster knows: kept as it came, read by nothing here (a Yes asks for every kind).
 
 | field | type | | |
 | --- | --- | --- | --- |

@@ -24,7 +24,7 @@ pub enum IconCmd {
     },
     /// Use an image file as the icon (the platform fits and cuts it out)
     Set { name: String, file: PathBuf },
-    /// Remove the icon and restore the default glyph
+    /// Remove the icon and restore the default (its template's, or the glyph)
     Remove { name: String },
 }
 

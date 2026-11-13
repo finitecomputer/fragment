@@ -131,7 +131,7 @@ pub(super) fn set_secret(api: &Api, keys: &Keys, name: &str, value: &str, hosts:
     api.signed(keys, "PUT", &format!("/api/f/{name}/secrets/API_KEY"), Some(&json!({ "value": value, "hosts": hosts })))
 }
 
-fn run(api: &Api, keys: &Keys, name: &str, id: i64) -> Result<Reply> {
+pub(crate) fn run(api: &Api, keys: &Keys, name: &str, id: i64) -> Result<Reply> {
     api.signed(keys, "GET", &format!("/api/f/{name}/runs/{id}"), None)
 }
 

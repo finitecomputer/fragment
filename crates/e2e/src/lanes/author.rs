@@ -757,8 +757,12 @@ fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Re
         titles.push(json!({ "wanted": title, "main": manifest.body["meta"]["title"], "live": status.body["title"] }));
     }
     s.ok("CLI rename A to B to A and an immediate repeat each change main and the live display name", titles.iter().all(|r| r["wanted"] == r["main"] && r["wanted"] == r["live"]), json!(titles));
-    let receipt = s.cli_json(api, home, &["preview", &name, "--json"])?;
-    s.ok("CLI preview asks for a screenshot and returns its completion receipt", receipt["since"].is_i64() && receipt["live"].is_string(), &receipt);
+    if s.shoots_cards() {
+        let receipt = s.cli_json(api, home, &["preview", &name, "--json"])?;
+        s.ok("CLI preview asks for a screenshot and returns its completion receipt", receipt["since"].is_i64() && receipt["live"].is_string(), &receipt);
+    } else {
+        s.skip_card("CLI preview asks for a screenshot and returns its completion receipt");
+    }
     let label = name.split_once("--").expect("the name has a suffix").0;
     let claimed = s.cli_json(api, home, &["address", &name, label, "--json"])?;
     let read = s.cli_json(api, home, &["address", &name, "--json"])?;

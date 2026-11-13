@@ -1461,3 +1461,92 @@ async fn a_second_core_on_its_databases_is_outlasted() {
     say(&mut person, at_person, "and again").await;
     received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] and again")).await;
 }
+
+/// Goal: a scan cut short is made anew (preview, 2026-11-11: an owner
+/// linked a second agent beside one linked already, scanned its code, and
+/// nothing came of it, said nowhere). The core takes the phone's
+/// confirmation (`requested`), then accepts it; a core stopped between the
+/// two (here a hold, as a save is, while the core is frozen right there)
+/// never accepts it, in any later start. So the next start makes a new
+/// code beside it and its page says why; the person scans that, and the
+/// agent is linked, with its SimpleX chat, and the stalled scan let go.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker, python3 and sqlite3; run by hand"]
+async fn a_scan_cut_short_is_made_anew() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("scan-cut", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["xbt", "juniper"]).await;
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    // one agent linked already
+    c.state_of_until("xbt--k3x9", Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    assert_eq!(c.link_as(&fake, "xbt").0, 200);
+    let v = c.state_of_until("xbt--k3x9", Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_of_until("xbt--k3x9", Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+
+    // the second: its core frozen as it takes the phone's confirmation
+    let agent = "juniper--k3x9";
+    assert_eq!(c.link_as(&fake, "juniper").0, 200);
+    let v = c.state_of_until(agent, Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    let first = v["short"].as_str().expect("its short link, as its code says").to_string();
+    let top = docker(&["top", &c.name, "-eo", "pid,args"]).expect("its processes");
+    let pid = top.lines().find(|l| l.contains("simplex-chat") && l.contains(agent)).and_then(|l| l.split_whitespace().next()).expect("its core").to_string();
+    let db = data.join("simplex").join(agent).join("sx_chat.db");
+    let status = format!("sqlite3 -readonly '{}' 'select conn_status from connections' 2>/dev/null", db.display());
+    // a tight read of its database (the window is milliseconds), then SIGSTOP
+    let watch = r#"
+import os, signal, sqlite3, sys, time
+db, pid = sys.argv[1], int(sys.argv[2])
+end = time.time() + 60
+while time.time() < end:
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0)
+        while time.time() < end:
+            row = con.execute("select conn_status from connections").fetchone()
+            if row and row[0] == "requested":
+                os.kill(pid, signal.SIGSTOP)
+                sys.exit(0)
+            if row and row[0] != "new":
+                sys.exit(f"missed it: {row[0]}")
+    except sqlite3.Error:
+        time.sleep(0.001)
+sys.exit("never requested")
+"#;
+    let mut watcher = Command::new("python3").args(["-I", "-c", watch, &db.to_string_lossy(), &pid]).spawn().expect("the watcher runs");
+    let r = person.cmd(&format!("/connect {first}")).await;
+    assert_eq!(tag(&r), "sentConfirmation", "{r}");
+    assert!(watcher.wait().expect("it ends").success(), "the core took the confirmation");
+    let held = Command::new("bash").args(["-c", &status]).output().expect("read");
+    assert_eq!(String::from_utf8_lossy(&held.stdout).trim(), "requested", "frozen between taking the confirmation and accepting it");
+    // the hold stops it there (its SIGTERM waits on the frozen core, then
+    // SIGKILL), and its next start is a new life
+    c.exec("touch /run/computer/hold");
+    let t0 = Instant::now();
+    // bounded: 20 s, the platform's wait for an answer
+    while c.exec("test -e /run/computer/held && echo yes").trim() != "yes" {
+        assert!(t0.elapsed() < Duration::from_secs(20), "the hold answered within 20 s");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    c.exec("rm -f /run/computer/hold /run/computer/held");
+    let v = c.state_of_until(agent, Duration::from_secs(60), "a new code, and why", |v| v["phase"] == "inviting" && v["short"].as_str().is_some_and(|s| s != first)).await;
+    assert_eq!(v["why"], "That scan didn't finish. Scan the new code.", "{v}");
+    let r = person.cmd(&format!("/connect {}", v["short"].as_str().expect("its new code"))).await;
+    assert_eq!(tag(&r), "sentConfirmation", "{r}");
+    let v = c.state_of_until(agent, Duration::from_secs(90), "linked by the new code", |v| v["phase"] == "linked").await;
+    assert!(v.get("why").is_none(), "nothing left to say: {v}");
+    // the stalled scan, kept beside it until then, is let go
+    let t0 = Instant::now();
+    // bounded by 30 s
+    while String::from_utf8_lossy(&Command::new("bash").args(["-c", &status]).output().expect("read").stdout).lines().any(|l| l == "requested") {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the stalled scan let go");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    fake.until(30_000, "its SimpleX chat made", |w| w.made.iter().any(|m| m.starts_with("juniper-simplex--"))).await;
+    assert_eq!(c.events("simplex.told").iter().filter(|e| e["agent"] == agent && e["notice"] == "ScanLost").count(), 1, "told once");
+}

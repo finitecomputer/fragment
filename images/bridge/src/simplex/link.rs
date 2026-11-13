@@ -42,6 +42,23 @@
 //!   crash, a refusal) is read again. Forwarding is idempotent, so this
 //!   costs reads. An anchor the core no longer has ends the scan with what
 //!   it read.
+//! - **A scan cut short.** The core takes its acceptor's confirmation (its
+//!   invitation's connection `requested`, a contact made of it or not yet),
+//!   then queues its acceptance (`accepted`). A core stopped between the
+//!   two (a hold's save, a crash) never accepts it: no later start does,
+//!   and the core has no command that would (measured in the lab on v7.0.3,
+//!   tests/simplex.rs). One stopped just after it queued looks the same
+//!   through the core's API, and its next start finishes it once its
+//!   servers answer (in the lab, within a moment). So each start while
+//!   inviting reads the invitation's connection (`Cmd::Conns`); one
+//!   `requested` since before this start is read again `RECHECK_MS` later
+//!   (`Notice::Stalled`), and if it is still, a new invitation is made and
+//!   its owner told to scan that (`Notice::ScanLost`). The stalled one is
+//!   kept beside it (`earlier`), never torn down while it may finish:
+//!   whichever connects is the link, and the other is let go then. A
+//!   replacement the core will not make (its servers down) leaves the link
+//!   asking, the stalled one kept, and is asked again at the next start or
+//!   its owner's try.
 //! - **Working.** While the agent's turn runs on one of its owner's
 //!   messages (the engine's `working`, by its seq in their SimpleX chat),
 //!   the link puts `wire::WORKING` on that message in their app, and takes
@@ -68,7 +85,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use super::wire::{self, Cmd, ConnId, ContactId, Content, FileRef, GroupId, Resp, SyncStatus};
+use super::wire::{self, Cmd, ConnId, ConnState, ContactId, Content, FileRef, GroupId, Resp, SyncStatus};
 
 /// The newest items a start reads back, to forward what a killed core
 /// committed but never announced.
@@ -166,6 +183,12 @@ pub struct Link {
     /// is finished when it next does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<Cleanup>,
+    /// A scan an earlier life of the core took and did not accept, kept
+    /// beside the invitation made in its place (`Notice::ScanLost`): its
+    /// acceptance may be queued and finish yet. Only while asking or
+    /// inviting; let go once either connects, or the link is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earlier: Option<Earlier>,
     /// What an adopted identity held besides its owner, still to let go
     /// (`Input::Adopt`): asked at each start until the core says each is
     /// gone, or refuses it for good. At most `LEFTOVERS_MAX`.
@@ -175,6 +198,25 @@ pub struct Link {
     /// in the batch asked for the next (asked again at the next start).
     #[serde(skip)]
     pub refused: Refused,
+}
+
+/// A stalled scan's connection, and the contact its confirmation made of
+/// it when it made one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Earlier {
+    pub conn: ConnId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<ContactId>,
+}
+
+impl Earlier {
+    /// What lets it go at the core: its contact, or its pending connection.
+    fn gone(self) -> Cmd {
+        match self.contact {
+            Some(contact) => Cmd::Delete { contact, notify: false },
+            None => Cmd::DeleteConn { conn: self.conn },
+        }
+    }
 }
 
 /// A count of this life's alone: in no file, and in no comparison (as
@@ -287,6 +329,12 @@ pub enum Input<'a> {
     Started { rollback: bool },
     /// What the core said: an event, or an answer that was no error.
     Said(&'a Resp),
+    /// Its chats' connections (`Cmd::Conns`' answer, of the look `again`
+    /// says), read by a core whose process started at `since` (ms since the
+    /// Unix epoch).
+    Conns { conns: &'a [ConnState], since: u64, again: bool },
+    /// The second look at an invitation that stalled (`Notice::Stalled`).
+    Recheck,
     /// The core refused a command the link asked for, saying `what`.
     Failed { cmd: &'a Cmd, what: &'a str },
     /// The agent's reply to its owner, to send.
@@ -371,6 +419,13 @@ pub enum Notice {
     Unlinked { by_them: bool },
     /// The core refused something the link asked, saying `what`.
     Failed { what: String },
+    /// The invitation's scan was taken by an earlier life of the core and
+    /// not accepted: looked at again in a moment (`Input::Recheck`).
+    Stalled,
+    /// The owner's scan of the invitation was cut short (its core stopped
+    /// between taking the confirmation and accepting it): a new one is made,
+    /// for them to scan.
+    ScanLost,
     /// Another client took the bound contact's queues (FIN-483: a core run
     /// elsewhere on a copy of these databases): this core is deaf to them
     /// until it subscribes again, so it is started again.
@@ -386,9 +441,23 @@ impl Link {
                 if self.phase == Phase::Off {
                     self.phase = Phase::Asking;
                     out.push(Action::Ask(Cmd::Invite));
+                } else if self.phase == Phase::Asking && self.earlier.is_some() {
+                    // a replacement that may have failed, asked again (one
+                    // still under way answers twice: the second is let go)
+                    out.push(Action::Ask(Cmd::Invite));
                 }
             }
             Input::Unlink => match std::mem::take(&mut self.phase) {
+                // a stalled scan kept beside an invitation goes with it
+                // (asked once: it is the core's, as an unused one is)
+                phase @ (Phase::Inviting { .. } | Phase::Asking) if self.earlier.is_some() => {
+                    out.extend(self.earlier.take().map(|e| Action::Ask(e.gone())));
+                    if let Phase::Inviting { conn, .. } = phase {
+                        self.cleanup = Some(Cleanup::Conn(conn));
+                        out.push(Action::Ask(Cmd::DeleteConn { conn }));
+                    }
+                    out.push(Action::Save);
+                }
                 Phase::Linked { contact, .. } => {
                     self.let_go();
                     self.cleanup = Some(Cleanup::Contact(contact));
@@ -430,7 +499,8 @@ impl Link {
                         out.extend([Action::Ask(Cmd::DeleteConn { conn: *conn }), Action::Ask(Cmd::Invite)]);
                         self.phase = Phase::Asking;
                     }
-                    Phase::Inviting { .. } => {}
+                    // a scan this core's last life took but never accepted?
+                    Phase::Inviting { .. } => out.push(Action::Ask(Cmd::Conns { again: false })),
                     Phase::Linked { contact, .. } => {
                         let contact = *contact;
                         if rollback {
@@ -453,11 +523,40 @@ impl Link {
                 out.extend(self.leftovers.iter().take(LEFTOVERS_ASKED).map(|l| Action::Ask(l.cmd())));
             }
             Input::Said(resp) => self.said(resp, &mut out),
+            Input::Conns { conns, since, again } => {
+                // its acceptor's confirmation, taken by an earlier life of the
+                // core and not accepted: looked at again, then let go
+                if let Phase::Inviting { conn, .. } = self.phase {
+                    let stalled = conns.iter().find(|c| c.conn == conn && c.status == "requested" && c.updated_ms.is_some_and(|t| t < since));
+                    match (stalled, again) {
+                        (None, _) => {}
+                        (Some(_), false) => out.push(Action::Tell(Notice::Stalled)),
+                        (Some(c), true) => {
+                            // kept, as it may finish yet; one kept from before
+                            // this (a second stall in a row) goes: at most one
+                            out.extend(self.earlier.replace(Earlier { conn, contact: c.contact }).map(|e| Action::Ask(e.gone())));
+                            self.phase = Phase::Asking;
+                            out.extend([Action::Ask(Cmd::Invite), Action::Tell(Notice::ScanLost), Action::Save]);
+                        }
+                    }
+                }
+            }
+            Input::Recheck => {
+                if let Phase::Inviting { .. } = self.phase {
+                    out.push(Action::Ask(Cmd::Conns { again: true }));
+                }
+            }
             Input::Failed { cmd, what } => {
                 let what = wire::cut(what, 300).to_string();
                 match cmd {
+                    // a replacement for a stalled scan: still asking, the
+                    // stalled one kept (it may finish yet, and its door key
+                    // with it), asked again at the next start or its owner's
+                    // try; a first invitation, off
                     Cmd::Invite if self.phase == Phase::Asking => {
-                        self.phase = Phase::Off;
+                        if self.earlier.is_none() {
+                            self.phase = Phase::Off;
+                        }
                         out.push(Action::Tell(Notice::Failed { what }));
                     }
                     // A failure proves neither completion nor acceptance.
@@ -577,6 +676,20 @@ impl Link {
             }
             Resp::Connected { contact, conn, name } => match &self.phase {
                 Phase::Inviting { conn: invited, .. } if invited == conn => {
+                    // the stalled scan kept beside it is let go
+                    out.extend(self.earlier.take().map(|e| Action::Ask(e.gone())));
+                    self.phase = Phase::Linked { contact: *contact, name: name.clone() };
+                    self.let_go();
+                    out.extend([Action::Tell(Notice::Linked { name: name.clone() }), Action::Save]);
+                }
+                // the stalled scan finished after all: it is the link, and the
+                // invitation made in its place is let go (one still asked for
+                // is, as its answer comes)
+                Phase::Inviting { .. } | Phase::Asking if self.earlier.is_some_and(|e| e.conn == *conn) => {
+                    if let Phase::Inviting { conn: invited, .. } = self.phase {
+                        out.push(Action::Ask(Cmd::DeleteConn { conn: invited }));
+                    }
+                    self.earlier = None;
                     self.phase = Phase::Linked { contact: *contact, name: name.clone() };
                     self.let_go();
                     out.extend([Action::Tell(Notice::Linked { name: name.clone() }), Action::Save]);
@@ -643,7 +756,7 @@ impl Link {
             // a file's own events are the bridge's to act on (it receives the
             // file a forwarded message carries), never the link's, as is the
             // agent's profile (its name)
-            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::ContactInfo { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::FileSent { .. } | Resp::FileUnsent { .. } | Resp::Profile { .. } | Resp::Error { .. } | Resp::Other(_) => {}
+            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::ContactInfo { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::Conns(_) | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::FileSent { .. } | Resp::FileUnsent { .. } | Resp::Profile { .. } | Resp::Error { .. } | Resp::Other(_) => {}
             // an adopted identity's read (the bridge's, before it adopts), and
             // what is not one of its leftovers
             Resp::User { .. } | Resp::Contacts(_) | Resp::Groups(_) | Resp::GroupLeft { .. } | Resp::AddressDeleted => {}
@@ -860,6 +973,7 @@ impl Link {
         assert!(linked || (!self.syncing && self.outbox.is_empty()), "only a bound link syncs or holds replies");
         assert!(self.syncing || !self.forced, "a forced sync is one under way");
         assert!(self.outbox.len() <= OUTBOX_MAX, "the outbox is bounded");
+        assert!(self.earlier.is_none() || matches!(self.phase, Phase::Asking | Phase::Inviting { .. }), "a stalled scan is kept only beside an invitation");
         assert!(linked || (self.posted.is_empty() && self.reacted.is_empty()), "only a bound link keeps its owner's messages");
         // (an item it reacted to may have aged out of `posted` since: the
         // next `react` takes it off)
@@ -1244,12 +1358,147 @@ mod tests {
         // an invitation: kept across a plain restart, made anew after a rollback
         let mut inviting = Link::default();
         invited(&mut inviting);
-        assert!(inviting.apply(Input::Started { rollback: false }).is_empty());
+        assert_eq!(inviting.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Conns { again: false })], "its scan looked at");
         assert_eq!(inviting.apply(Input::Started { rollback: true }), vec![Action::Ask(Cmd::DeleteConn { conn: 1 }), Action::Ask(Cmd::Invite)]);
         assert_eq!(inviting.phase, Phase::Asking);
         // an invitation asked and never answered is asked again
         assert_eq!(inviting.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Invite)]);
         assert!(Link::default().apply(Input::Started { rollback: true }).is_empty(), "nothing linked, nothing to do");
+    }
+
+    /// Goal: a scan whose confirmation the core took and never accepted (its
+    /// core stopped between the two: preview, 2026-11-11) is made anew, and
+    /// its owner told to scan the new code, once a second look finds it still
+    /// so; and since one whose acceptance was queued looks the same and may
+    /// finish yet (Codex's review: its servers down), it is never torn down
+    /// but kept beside the new one, and whichever connects is the link. One
+    /// this life is still accepting, one accepted, one unused, or another
+    /// connection's, is left alone.
+    #[test]
+    fn a_scan_cut_short_is_made_anew() {
+        let conn = |conn: i64, contact: Option<i64>, status: &str, at: u64| ConnState { conn, contact, status: status.into(), updated_ms: Some(at) };
+        let since = 1_000_000;
+        let mut link = Link::default();
+        invited(&mut link);
+        assert_eq!(link.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Conns { again: false })]);
+        for again in [false, true] {
+            for (conns, why) in [
+                (vec![conn(1, Some(3), "requested", since)], "taken by this life, which accepts it"),
+                (vec![conn(1, None, "requested", since + 5)], "taken by this life, later"),
+                (vec![conn(1, Some(3), "accepted", since - 1)], "accepted: a start resumes it"),
+                (vec![conn(1, None, "new", since - 1)], "unused"),
+                (vec![conn(2, Some(4), "requested", since - 1)], "another connection's"),
+                (vec![ConnState { conn: 1, contact: None, status: "requested".into(), updated_ms: None }], "no time read"),
+                (vec![], "none"),
+            ] {
+                assert!(link.apply(Input::Conns { conns: &conns, since, again }).is_empty(), "{why}");
+                assert!(matches!(link.phase, Phase::Inviting { conn: 1, .. }), "{why}");
+            }
+        }
+        // stalled: looked at again, and only then a new invitation made, the
+        // stalled one kept beside it (its acceptance may be queued, waiting
+        // on its servers)
+        let stalled = [conn(2, Some(4), "ready", 1), conn(1, Some(3), "requested", since - 1)];
+        assert_eq!(link.apply(Input::Conns { conns: &stalled, since, again: false }), vec![Action::Tell(Notice::Stalled)]);
+        assert_eq!(link.apply(Input::Recheck), vec![Action::Ask(Cmd::Conns { again: true })]);
+        let resumed = [conn(1, Some(3), "accepted", since + 130)];
+        assert!(link.apply(Input::Conns { conns: &resumed, since, again: true }).is_empty(), "accepted as it started");
+        let mut kept = link.clone();
+        assert_eq!(link.apply(Input::Conns { conns: &stalled, since, again: true }), vec![Action::Ask(Cmd::Invite), Action::Tell(Notice::ScanLost), Action::Save]);
+        assert_eq!((link.phase.clone(), link.earlier), (Phase::Asking, Some(Earlier { conn: 1, contact: Some(3) })));
+        assert_eq!(Link::from_json(&link.to_json()).as_ref(), Ok(&link), "kept in its file");
+        let inv = Resp::Invitation { conn: 5, link: "simplex:/invitation#/?v=2-7&n".into(), short: None };
+        assert_eq!(link.apply(Input::Said(&inv)), vec![Action::Save]);
+        assert!(matches!(link.phase, Phase::Inviting { conn: 5, .. }));
+        assert!(link.apply(Input::Conns { conns: &stalled, since, again: true }).is_empty(), "the stalled one is no longer the one shown");
+        // the new code scanned: linked, and the stalled scan let go
+        let mut by_new = link.clone();
+        let new_contact = Resp::Connected { contact: 6, conn: 5, name: "paul".into() };
+        assert_eq!(by_new.apply(Input::Said(&new_contact)), vec![Action::Ask(Cmd::Delete { contact: 3, notify: false }), Action::Tell(Notice::Linked { name: "paul".into() }), Action::Save]);
+        assert_eq!((by_new.contact(), by_new.earlier), (Some(6), None));
+        // the stalled scan finished after all: it is the link, and the new
+        // invitation let go
+        let mut by_old = link.clone();
+        let old_contact = Resp::Connected { contact: 3, conn: 1, name: "paul".into() };
+        assert_eq!(by_old.apply(Input::Said(&old_contact)), vec![Action::Ask(Cmd::DeleteConn { conn: 5 }), Action::Tell(Notice::Linked { name: "paul".into() }), Action::Save]);
+        assert_eq!((by_old.contact(), by_old.earlier), (Some(3), None));
+        // so while the new one is still asked for: its answer, when it comes, is let go
+        assert_eq!(kept.apply(Input::Conns { conns: &stalled, since, again: true }).len(), 3);
+        assert_eq!(kept.apply(Input::Said(&old_contact)), vec![Action::Tell(Notice::Linked { name: "paul".into() }), Action::Save]);
+        assert_eq!(kept.apply(Input::Said(&inv)), vec![Action::Ask(Cmd::DeleteConn { conn: 5 })]);
+        // anyone else is refused as ever
+        let mut other = link.clone();
+        assert_eq!(other.apply(Input::Said(&Resp::Connected { contact: 9, conn: 7, name: "x".into() })), vec![Action::Ask(Cmd::Delete { contact: 9, notify: false }), Action::Tell(Notice::Refused)]);
+        // an unlink lets both go
+        let mut unlinked = link.clone();
+        assert_eq!(unlinked.apply(Input::Unlink), vec![Action::Ask(Cmd::Delete { contact: 3, notify: false }), Action::Ask(Cmd::DeleteConn { conn: 5 }), Action::Save]);
+        assert_eq!((unlinked.phase.clone(), unlinked.earlier, unlinked.cleanup), (Phase::Off, None, Some(Cleanup::Conn(5))));
+        // a second stall in a row: at most one kept, the oldest goes
+        let mut twice = link.clone();
+        let stalled_again = [conn(5, None, "requested", since - 1)];
+        assert_eq!(twice.apply(Input::Conns { conns: &stalled_again, since, again: true }), vec![Action::Ask(Cmd::Delete { contact: 3, notify: false }), Action::Ask(Cmd::Invite), Action::Tell(Notice::ScanLost), Action::Save]);
+        assert_eq!(twice.earlier, Some(Earlier { conn: 5, contact: None }));
+        // a replacement the core will not make: still asking, the stalled one
+        // kept (`a_failed_replacement_keeps_the_stalled_scan`)
+        assert_eq!(twice.apply(Input::Failed { cmd: &Cmd::Invite, what: "x" }), vec![Action::Tell(Notice::Failed { what: "x".into() })]);
+        assert_eq!((twice.phase, twice.earlier), (Phase::Asking, Some(Earlier { conn: 5, contact: None })));
+        // only an invitation is looked at: linked or off, nothing
+        let mut bound = linked();
+        assert!(bound.apply(Input::Conns { conns: &[conn(1, None, "requested", 0)], since, again: true }).is_empty());
+        assert!(bound.apply(Input::Recheck).is_empty());
+        assert!(Link::default().apply(Input::Conns { conns: &[conn(1, None, "requested", 0)], since, again: true }).is_empty());
+        assert!(Link::default().apply(Input::Recheck).is_empty());
+    }
+
+    /// A link whose scan stalled, its replacement asked (`a_scan_cut_short_is_made_anew`).
+    fn stalled_and_asking() -> Link {
+        let mut link = Link::default();
+        invited(&mut link);
+        let stalled = [ConnState { conn: 1, contact: Some(3), status: "requested".into(), updated_ms: Some(1) }];
+        assert_eq!(link.apply(Input::Conns { conns: &stalled, since: 2, again: true }), vec![Action::Ask(Cmd::Invite), Action::Tell(Notice::ScanLost), Action::Save]);
+        link
+    }
+
+    /// Goal (Alex's review of #1223): a replacement the core will not make
+    /// (its servers down) keeps the stalled scan, which may finish yet: the
+    /// link stays asking, so its door key is kept, and it is told; asked
+    /// again at the next start or when its owner asks; and the stalled scan
+    /// that connects is the link. A first invitation that fails, with
+    /// nothing kept, is off as before.
+    #[test]
+    fn a_failed_replacement_keeps_the_stalled_scan() {
+        let what = "errorAgent BROKER NETWORK NETLSError";
+        let failed = |link: &mut Link| link.apply(Input::Failed { cmd: &Cmd::Invite, what });
+        let original = Resp::Connected { contact: 3, conn: 1, name: "paul".into() };
+        // the replacement fails, then the stalled scan finishes: linked to it
+        let mut link = stalled_and_asking();
+        assert_eq!(failed(&mut link), vec![Action::Tell(Notice::Failed { what: what.into() })], "told, nothing let go");
+        assert_eq!((link.phase.clone(), link.earlier), (Phase::Asking, Some(Earlier { conn: 1, contact: Some(3) })));
+        assert_eq!(link.apply(Input::Said(&original)), vec![Action::Tell(Notice::Linked { name: "paul".into() }), Action::Save]);
+        assert_eq!((link.contact(), link.earlier), (Some(3), None));
+        // a restart after it: kept in its file, the replacement asked again,
+        // and the stalled scan still the owner's
+        let mut link = stalled_and_asking();
+        failed(&mut link);
+        let mut back = Link::from_json(&link.to_json()).expect("its file reads");
+        assert_eq!(back, link);
+        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Invite)]);
+        assert_eq!(back.apply(Input::Said(&original)), vec![Action::Tell(Notice::Linked { name: "paul".into() }), Action::Save]);
+        assert_eq!(back.contact(), Some(3));
+        // its owner's "Try again" asks it again too
+        let mut again = stalled_and_asking();
+        failed(&mut again);
+        assert_eq!(again.apply(Input::Want), vec![Action::Ask(Cmd::Invite)]);
+        // an unlink after it lets the stalled scan go, and is off
+        let mut unlinked = stalled_and_asking();
+        failed(&mut unlinked);
+        assert_eq!(unlinked.apply(Input::Unlink), vec![Action::Ask(Cmd::Delete { contact: 3, notify: false }), Action::Save]);
+        assert_eq!((unlinked.phase.clone(), unlinked.earlier), (Phase::Off, None));
+        // a first invitation that fails, with nothing kept: off, as before
+        let mut first = Link::default();
+        assert_eq!(first.apply(Input::Want), vec![Action::Ask(Cmd::Invite)]);
+        assert_eq!(failed(&mut first), vec![Action::Tell(Notice::Failed { what: what.into() })]);
+        assert_eq!(first.phase, Phase::Off);
     }
 
     /// Goal: a ratchet the core finds out of step is synchronized once,
@@ -1582,7 +1831,10 @@ mod tests {
                     _ => Resp::Other("x".into()),
                 };
                 let before = link.contact();
-                let actions = match rng() % 7 {
+                let conns = [ConnState { conn: (rng() % 3 + 1) as i64, contact: (rng() % 2 == 0).then_some(contact), status: ["new", "requested", "accepted"][(rng() % 3) as usize].into(), updated_ms: Some(rng() % 4) }];
+                let actions = match rng() % 9 {
+                    7 => link.apply(Input::Conns { conns: &conns, since: 2, again: rng() % 2 == 0 }),
+                    8 => link.apply(Input::Recheck),
                     0 => link.apply(Input::Want),
                     1 => link.apply(Input::Unlink),
                     2 => link.apply(Input::Started { rollback: rng() % 2 == 0 }),

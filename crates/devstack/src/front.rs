@@ -88,6 +88,15 @@ impl Heard {
         self.changed.notify_all();
     }
 
+    /// The runtime's port, told outright: celld's, which says it is ready
+    /// on the port it was given (celld.rs) and never moves it.
+    pub(crate) fn runtime_at(&self, port: u16) {
+        let mut r = self.runtime.lock().unwrap_or_else(PoisonError::into_inner);
+        r.port = Some(port);
+        r.restarting = false;
+        self.changed.notify_all();
+    }
+
     /// wrangler's output ended: it is gone.
     pub(crate) fn ended(&self) {
         self.runtime.lock().unwrap_or_else(PoisonError::into_inner).gone = true;

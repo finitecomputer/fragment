@@ -102,6 +102,12 @@ const DRAIN_MS: u64 = 5_000;
 const TICK_MS: u64 = 100;
 /// A sync still waiting reads the core's state this often until it is `ok`.
 const RESYNC_MS: u64 = 30_000;
+/// An invitation whose scan an earlier life took and did not accept is
+/// looked at again this long after, before a new one is shown beside it:
+/// one the core had queued its acceptance of is usually accepted within a
+/// moment of its start (the lab's, about 130 ms). Nothing is torn down at
+/// it (`link::Link::earlier`), so a later finish still links.
+const RECHECK_MS: u64 = 10_000;
 const INBOX_MAX: usize = 256;
 const WRITER_MAX: usize = 64;
 /// What the core's last words (stderr) are kept to, for its exit's line.
@@ -770,6 +776,10 @@ fn moved(name: &str) -> String {
     format!("Hi, it's {name}. I've moved to my new home: write to me here, as before.")
 }
 
+/// What its page says when the owner's scan was cut short (`Notice::ScanLost`)
+/// and a new invitation is shown in its place.
+const SCAN_LOST: &str = "That scan didn't finish. Scan the new code.";
+
 /// What it is told when its message cannot be carried: this link has no
 /// door key (one made before doors, or one a rollback took).
 const NO_DOOR: &str = "Your message didn't reach me. Please link SimpleX to me again from your Settings.";
@@ -906,6 +916,9 @@ struct Slot {
     profiled: Option<String>,
     epoch: u64,
     core: Option<Core>,
+    /// When its core's process last started (ms since the Unix epoch): what
+    /// the core changed before it, an earlier life did (`Input::Conns`).
+    spawned_ms: u64,
     up: bool,
     corr: u64,
     pending: BTreeMap<u64, Cmd>,
@@ -916,6 +929,9 @@ struct Slot {
     retry_at: Option<Instant>,
     /// When a forced sync still waiting is asked again (`Input::Resync`).
     resync_at: Option<Instant>,
+    /// When an invitation whose scan stalled is looked at again
+    /// (`Input::Recheck`).
+    recheck_at: Option<Instant>,
     /// It stopped too often: not started again until its owner asks.
     broken: Option<String>,
     /// Another client took its contact's queues (`Notice::Taken`): its core
@@ -1496,6 +1512,7 @@ impl Manager {
                 profiled: None,
                 epoch: 0,
                 core: None,
+                spawned_ms: 0,
                 up: false,
                 corr: 0,
                 pending: BTreeMap::new(),
@@ -1503,6 +1520,7 @@ impl Manager {
                 exits: VecDeque::new(),
                 retry_at: None,
                 resync_at: None,
+                recheck_at: None,
                 broken: None,
                 taken: false,
                 note: None,
@@ -1618,6 +1636,7 @@ impl Manager {
         self.reconcile().await;
         self.read_names(Instant::now());
         self.resync();
+        self.recheck(Instant::now());
         self.files_overdue(Instant::now());
         self.sends_overdue(Instant::now());
         self.quiet.store(self.running() == 0, Ordering::SeqCst);
@@ -1727,6 +1746,18 @@ impl Manager {
         for f in due {
             crate::ev!("simplex.resync", { "agent": f });
             self.apply(&f, Input::Resync);
+        }
+    }
+
+    /// Each invitation whose scan stalled, looked at again once its
+    /// `RECHECK_MS` passed, while its core is up.
+    fn recheck(&mut self, now: Instant) {
+        let due: Vec<String> = self.slots.iter_mut().filter(|(_, s)| s.up && s.recheck_at.is_some_and(|t| now >= t)).map(|(f, s)| {
+            s.recheck_at = None;
+            f.clone()
+        }).collect();
+        for f in due {
+            self.apply(&f, Input::Recheck);
         }
     }
 
@@ -1914,6 +1945,9 @@ impl Manager {
             return;
         };
         s.epoch += 1;
+        s.spawned_ms = crate::log::now_ms();
+        // a look an earlier life asked for is this start's own to ask
+        s.recheck_at = None;
         s.up = false;
         s.pending.clear();
         s.draining_since = None;
@@ -2082,6 +2116,7 @@ impl Manager {
             }
         };
         let asked = frame.corr.and_then(|c| s.pending.remove(&c));
+        let since = s.spawned_ms;
         if let Some(Cmd::CancelFile { file }) = &asked {
             let settled = cancel_settled(&frame.resp);
             crate::ev!("simplex.cancel_answered", { "agent": f, "file": file, "settled": settled });
@@ -2101,6 +2136,12 @@ impl Manager {
         }
         match asked {
             Some(cmd) => match &frame.resp {
+                Resp::Conns(conns) => {
+                    let again = matches!(cmd, Cmd::Conns { again: true });
+                    let read: Vec<_> = conns.iter().map(|c| serde_json::json!([c.conn, c.contact, c.status, c.updated_ms])).collect();
+                    crate::ev!("simplex.conns", { "agent": f, "since": since, "again": again, "conns": read });
+                    self.apply(f, Input::Conns { conns, since, again })
+                }
                 Resp::Error { what } => {
                     crate::ev!("simplex.refused", { "agent": f, "cmd": kind_of(&cmd), "what": what });
                     self.apply(f, Input::Failed { cmd: &cmd, what })
@@ -2444,6 +2485,8 @@ impl Manager {
                     Notice::Refused => crate::ev!("simplex.refused_contact", { "agent": f }),
                     Notice::MaybeLost | Notice::Resynced => {}
                     Notice::Taken => s.taken = true,
+                    Notice::Stalled => s.recheck_at = Some(Instant::now() + Duration::from_millis(RECHECK_MS)),
+                    Notice::ScanLost => s.note = Some(SCAN_LOST.into()),
                     Notice::Unlinked { by_them } => {
                         s.note = Some(if *by_them { "They removed this agent in their SimpleX app.".into() } else { "Unlinked.".into() });
                     }
@@ -2801,6 +2844,7 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::ContactInfo { .. } => "contact_info",
         Cmd::Delete { .. } => "delete",
         Cmd::DeleteConn { .. } => "delete_conn",
+        Cmd::Conns { .. } => "conns",
         Cmd::Chat { .. } => "chat",
         Cmd::Receive { .. } => "receive",
         Cmd::CancelFile { .. } => "cancel_file",
@@ -3762,6 +3806,7 @@ mod tests {
             naming: false,
             profiled: None,
             epoch: 0,
+            spawned_ms: 0,
             core: None,
             up: false,
             corr: 0,
@@ -3770,6 +3815,7 @@ mod tests {
             exits: VecDeque::new(),
             retry_at: None,
             resync_at: None,
+            recheck_at: None,
             broken: None,
             taken: false,
             note: None,
@@ -4111,6 +4157,7 @@ mod tests {
             naming: false,
             profiled: None,
             epoch: 4,
+            spawned_ms: 0,
             core: Some(Core { pid, writer, exited: exited.clone(), planned: false }),
             up: true,
             corr: 0,
@@ -4119,6 +4166,7 @@ mod tests {
             exits: VecDeque::new(),
             retry_at: None,
             resync_at: None,
+            recheck_at: None,
             broken: None,
             taken: false,
             note: None,
@@ -4266,6 +4314,7 @@ mod tests {
             naming: false,
             profiled: None,
             epoch: 1,
+            spawned_ms: 0,
             core: None,
             up: true,
             corr: 0,
@@ -4274,6 +4323,7 @@ mod tests {
             exits: VecDeque::new(),
             retry_at: None,
             resync_at: None,
+            recheck_at: None,
             broken: None,
             taken: false,
             note: None,
