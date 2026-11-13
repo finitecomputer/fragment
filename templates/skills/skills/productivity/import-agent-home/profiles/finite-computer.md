@@ -224,32 +224,42 @@ jq -c '.projects[] | select(.role == "owner" and .site != null) | {slug, site: .
   For one it held, the listing's `url` is its old address: put that in
   `site-map.json` in place of any other for it.
 - **Alone:** the ones your owner named, else every one. A site that
-  `progress.md` or `site-map.json` already names (its slug, or its `url`
-  with or without the last `/`) came over before: make nothing for it
-  again, and only point its old address, if your owner now makes it
-  public.
+  `site-map.json` names (its `url`, with or without the last `/`), or
+  that `progress.md` says is deployed, came over before: make nothing
+  for it again, and only point its old address, if your owner now makes
+  it public. One `progress.md` names but not as deployed was cut short:
+  go on from its first step not done, with the app named there.
 
-**Bring one over.** Its files go where the zip's would, under its slug.
-finite.site gives a login for its repository alone; it is used for this
-one clone, then deleted:
+**Bring one over.** finite.site gives a login for its repository alone:
+it is used for this one clone, into `/tmp`, then deleted. Its files then
+come into your home as a zip's do, through `fragment home extract`,
+which leaves out every file whose name says it may hold a password or
+key:
 
 ```sh
 ph="<the placeholder>" slug="<its slug>" branch="<its branch>" && \
 case "$slug" in "" | *[!a-z0-9-]*) echo "STOP: not a plain slug" ;; *) \
   t="/tmp/finite-site-$FRAGMENT_AS_AGENT-$slug" H="$HOME/home-import/home/sites/$slug" && \
-  rm -rf -- "$t" "$H" && mkdir -p "$t" "$HOME/home-import/home/sites" && chmod 700 "$t" && \
+  rm -rf -- "$t" "$H" && mkdir -p "$t/src/sites" && chmod 700 "$t" && \
   curl -fsS -X POST -H "Authorization: Nostr $ph" -H "content-type: application/json" -d '{}' -o "$t/auth.json" "https://finite.site/api/v2/projects/$slug/git-auth" && \
   jq -r '"https://\(.username | @uri):\(.password | @uri)@finite.site"' "$t/auth.json" > "$t/login" && \
-  git -c credential.helper= -c credential.helper="store --file=$t/login" clone --quiet --depth 1 --branch "$branch" "https://finite.site/$slug.git" "$H"; \
-  ok=$?; rm -rf -- "$t" "$H/.git"; \
-  [ "$ok" = 0 ] && jq -c --arg slug "$slug" '.projects[] | select(.slug == $slug) | .site | {url, visibility, path, spa}' "$HOME/home-import/finite-site.json" > "$H.json" && ls -A "$H" ;; \
+  git -c credential.helper= -c credential.helper="store --file=$t/login" clone --quiet --depth 1 --branch "$branch" "https://finite.site/$slug.git" "$t/src/sites/$slug"; \
+  ok=$?; rm -f -- "$t/auth.json" "$t/login"; rm -rf -- "$t/src/sites/$slug/.git"; \
+  [ "$ok" = 0 ] && fragment home extract "$t/src" "sites/$slug" --to "$HOME/home-import/home" --layout hermes && \
+  jq -c --arg slug "$slug" '.projects[] | select(.slug == $slug) | .site | {url, visibility, path, spa}' "$HOME/home-import/finite-site.json" > "$H.json" && \
+  echo "left out unread:" && comm -23 <(find "$t/src/sites/$slug" -type f -printf '%P\n' | sort) <(find "$H" -type f -printf '%P\n' | sort); \
+  rm -rf -- "$t"; ls -A "$H" ;; \
 esac
 ```
 
-It lists the site's files. If it says STOP, or fails, bring that site
-over no further, and say so in the report. Otherwise write in
-`progress.md` that its files came, then go on from "Make each app once"
-above, `<site>` its slug and its title the listing's `site`.
+It lists what it left out unread, then the site's files. Name each left
+out in the report, as `SKILL.md` says of `source.skipped`, and never go
+looking for them. If it says STOP, or fails, bring that site over no
+further, and say so in the report. Otherwise go on from "Make each app
+once" above, `<site>` its slug and its title the listing's `site`.
+Write each step in `progress.md` beside its slug as it is done: its
+files came, its app made (its full name), deployed. Only a deployed site
+has come over.
 
 **Point the old address.** Only for a site your owner made public here,
 once its new address answers. `<its slug>` is the one `finite-site.json`

@@ -71,10 +71,11 @@ finite-computer profile's "Sites on finite.site"
 (`${HERMES_SKILL_DIR}/profiles/finite-computer.md`), with the rules
 above, after loading `apps-finite`. Their answers are which sites (else
 every one) and which to make public (else none). Keep your place in
-`~/home-import/progress.md`, and add to `~/home-import/site-map.json`:
-a site already in either came over before. End with one message: each
-site's new address, which old addresses now send visitors there, and
-what didn't come over and why. Then delete `~/home-import/home/sites/`.
+`~/home-import/progress.md`, and add to `~/home-import/site-map.json`.
+End with one message: each site's new address, which old addresses now
+send visitors there, and what didn't come over and why. Then, once
+every site asked for is deployed or left out, delete
+`~/home-import/home/sites/`.
 
 Otherwise, your owner's message says three things:
 - **The home:** a zip they attached (the note before their message names
