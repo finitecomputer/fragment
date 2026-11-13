@@ -5,6 +5,10 @@ it is written against. It lands on master seam by seam: each is switched
 on by configuration, and master's Cloudflare path is unchanged. Where this
 disagrees with `docs/cloudflare-v1.md`, that doc wins.
 
+A pod (`docs/pod.md`) is one owner's self-hosted stack inside a
+confidential VM, plus a measured image, the owner's unlock, and
+attestation.
+
 ## The rule: one cell, interfaces, placement as configuration
 
 The cell is written against Cloudflare's runtime APIs (Durable Objects,
