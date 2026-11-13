@@ -115,7 +115,7 @@ struct WorkingIndicator: View {
                 if late { return ("Taking a while", since) }
                 if phase == "starting" || phase == "asleep" { return ("Waking up", since) }
                 if phase == "sleeping" { return ("Going to sleep", nil) }
-                return ("Waiting", since)
+                return ("Working", since)
             }
         }()
         let asked: Bool = { if case .asked = hint.kind { true } else { false } }()
