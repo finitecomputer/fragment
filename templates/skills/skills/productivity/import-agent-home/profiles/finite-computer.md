@@ -248,13 +248,14 @@ case "$slug" in "" | *[!a-z0-9-]*) echo "STOP: not a plain slug" ;; *) \
   [ "$ok" = 0 ] && fragment home extract "$t/src" "sites/$slug" --to "$HOME/home-import/home" --layout hermes && \
   jq -c --arg slug "$slug" '.projects[] | select(.slug == $slug) | .site | {url, visibility, path, spa}' "$HOME/home-import/finite-site.json" > "$H.json" && \
   echo "left out unread:" && comm -23 <(find "$t/src/sites/$slug" -type f -printf '%P\n' | sort) <(find "$H" -type f -printf '%P\n' | sort); \
-  rm -rf -- "$t"; ls -A "$H" ;; \
+  ok=$?; rm -rf -- "$t"; \
+  if [ "$ok" = 0 ]; then ls -A "$H"; else echo "FAILED: $slug did not come over whole"; fi ;; \
 esac
 ```
 
 It lists what it left out unread, then the site's files. Name each left
 out in the report, as `SKILL.md` says of `source.skipped`, and never go
-looking for them. If it says STOP, or fails, bring that site over no
+looking for them. If it says STOP or FAILED, bring that site over no
 further, and say so in the report. Otherwise go on from "Make each app
 once" above, `<site>` its slug and its title the listing's `site`.
 Write each step in `progress.md` beside its slug as it is done: its
