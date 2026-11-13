@@ -1111,7 +1111,8 @@ impl FragmentCell {
             (Method::Get, ["signin", "known"]) => json_response(&json!({ "role": self.require(&caller, false, Role::Viewer)? })),
             // whom someone asking for access asks (auth/ask.rs); the
             // router maps no outside path here either
-            (Method::Get, ["signin", "asking"]) => self.access_owner(&caller),
+            (Method::Get, ["signin", "asking"]) => self.may_ask_route(&caller),
+            (Method::Post, ["signin", "ask"]) => self.ask_access(&caller).await,
             (Method::Get, ["api", "status"]) => self.status(&caller),
             (Method::Get, ["api", "address"]) => self.address(&caller).await,
             (Method::Put, ["api", "address"]) => {

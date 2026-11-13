@@ -1,8 +1,9 @@
 //! Asking for access, on the platform's page (docs/api.md, Asking for
 //! access; FIN-502). Someone signed in who opens a fragment they are not
 //! in is told so on its origin (auth.rs `refused`), with a link here, where
-//! they ask its owner for it: the fragment names its owner (`GET
-//! /signin/asking`, the router's alone), and the registry keeps the request
+//! they ask its owner for it: the fragment sends the request to the
+//! registry itself (`POST /signin/ask`, the router's alone: members.rs
+//! `ask_access`), naming its owner and its life, and the registry keeps it
 //! against them, who see it among their notices and are mailed
 //! (registry/asks.rs). The owner's identity never reaches the requester.
 //!
@@ -16,7 +17,6 @@
 
 use fragment_core::form;
 use fragment_proto::ErrorCode;
-use serde::Deserialize;
 use serde::de::IgnoredAny;
 use worker::*;
 
@@ -24,19 +24,11 @@ use super::{address_query, enc, esc, fragment_asked, platform_session, redirect,
 use crate::ask_registry;
 use crate::config::Config;
 use crate::error::CellResult;
-use crate::registry::asks::{AskAccess, Asked};
+use crate::registry::asks::Asked;
 use crate::registry::calls::By;
 use crate::registry::invites::InvitesFor;
 use crate::routed::Signed;
 use crate::share;
-
-/// What the fragment answers `GET /signin/asking`: whom to ask, and what
-/// their notice calls it.
-#[derive(Deserialize)]
-struct Owner {
-    owner: String,
-    title: String,
-}
 
 /// The form purpose of a fragment's request page: a token for one
 /// fragment's request asks for no other.
@@ -85,26 +77,21 @@ pub(super) async fn page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> C
     share::sheet_page(200, &format!("You don't have access to {label}"), &body, true)
 }
 
-/// `POST /auth/fragment/ask?name=&return=`: the request, kept against the
-/// owner the fragment names now, then said so. Asked again (or dismissed a
-/// while ago, which the requester is never told) it is said the same way,
-/// as asked already; a request the registry refuses (too many today, too
-/// many waiting) says why, with its status.
+/// `POST /auth/fragment/ask?name=&return=`: the request, which the
+/// fragment sends the registry as its owner's, then said so. Asked again
+/// (or dismissed a while ago, which the requester is never told) it is
+/// said the same way, as asked already; a request refused (too many today,
+/// too many waiting) says why, with its status.
 pub(super) async fn asked(req: &mut Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     let (name, back) = fragment_asked(url)?;
-    let (session, live, _) = match share::poster(req, env, url, &cfg.platform(), &purpose(&name)).await? {
+    // the form's token bound to the session (`poster`), the fragment asks as the person it names
+    let (_, live, _) = match share::poster(req, env, url, &cfg.platform(), &purpose(&name)).await? {
         Ok(posted) => posted,
         Err(page) => return Ok(page),
     };
     let who = Signed::new(live.identity, None);
-    let named = match share::ask::<Owner>(env, url, &name, &who, Method::Get, "/signin/asking", None).await {
-        Ok(named) => named,
-        Err(e) if e.code == ErrorCode::Conflict => return in_already(cfg, url, &name, &back, &e.message),
-        Err(e) => return Err(e),
-    };
     let label = esc(share::label(&name));
-    let ask = AskAccess { by: By::Session(session), fragment: name.clone(), owner: named.owner, title: named.title };
-    match ask_registry(env, &ask).await {
+    match share::ask::<Asked>(env, url, &name, &who, Method::Post, "/signin/ask", None).await {
         Ok(Asked { again, email }) => {
             let (title, said) = match again {
                 false => ("Request sent", format!("<p>We told the owner of <b>{label}</b> that you asked for it.</p>")),
@@ -113,6 +100,7 @@ pub(super) async fn asked(req: &mut Request, env: &Env, cfg: &Config, url: &Url)
             let body = format!("{said}<p class=\"hint\">They see your email, {}. You'll get an email if they share it with you.</p>", esc(&email));
             share::sheet_page(200, title, &body, true)
         }
+        Err(e) if e.code == ErrorCode::Conflict => in_already(cfg, url, &name, &back, &e.message),
         Err(e) if e.code.status() < 500 => share::sheet_page(e.code.status(), "Not asked", &format!("<p>{}</p>", esc(&e.message)), true),
         Err(e) => Err(e),
     }

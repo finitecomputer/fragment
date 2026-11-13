@@ -23,7 +23,7 @@ step Registry 8 org_content 67159e5ef6e0243b
 step Registry 9 key_sessions 68cfc8333a9ff162
 step Registry 10 comp_until 192cf4964b4e7e5c
 step Registry 11 connection_signin_access dd677fc210bb157d
-step Registry 12 access_asks 8617e76f6e5458eb
+step Registry 12 access_asks ebaffe10951eef1e
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Principal 3 memberships_dock 607987fd7686be8b
@@ -110,7 +110,7 @@ Fragment table subs: CREATE TABLE subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, p
 Fragment table tree: CREATE TABLE tree ( ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL, PRIMARY KEY (ref, path))
 
 Registry table access_ask_days: CREATE TABLE access_ask_days ( who TEXT NOT NULL, kind TEXT NOT NULL, day INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (who, kind, day))
-Registry table access_asks: CREATE TABLE access_asks ( fragment TEXT NOT NULL, requester TEXT NOT NULL, owner TEXT NOT NULL, title TEXT NOT NULL, asked_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, dismissed_at INTEGER, PRIMARY KEY (fragment, requester))
+Registry table access_asks: CREATE TABLE access_asks ( fragment TEXT NOT NULL, requester TEXT NOT NULL, incarnation TEXT NOT NULL, owner TEXT NOT NULL, title TEXT NOT NULL, asked_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, dismissed_at INTEGER, PRIMARY KEY (fragment, requester))
 Registry index access_asks_expiry: CREATE INDEX access_asks_expiry ON access_asks (expires_at)
 Registry index access_asks_owner: CREATE INDEX access_asks_owner ON access_asks (owner, asked_at)
 Registry index access_asks_requester: CREATE INDEX access_asks_requester ON access_asks (requester)

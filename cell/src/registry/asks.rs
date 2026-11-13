@@ -30,13 +30,16 @@ use crate::js;
 
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
-/// `POST /asks/ask`: `by` (a person signed in) asks for access to
-/// `fragment`, whose owner its fragment named `owner` as it was asked, and
-/// whose title was `title`.
+/// `POST /asks/ask`, the fragment's own (members.rs `ask_access`): `by`
+/// (a person signed in, not in it) asks for access to `fragment`, the life
+/// of it `incarnation` (its creation's time), whose owner is `owner` and
+/// title `title`. The fragment sends it while that life is its own, so a
+/// request never names a life that ended before it was sent.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AskAccess {
     pub by: By,
     pub fragment: String,
+    pub incarnation: String,
     pub owner: String,
     pub title: String,
 }
@@ -67,6 +70,11 @@ pub(crate) struct DismissAsk {
 impl Call for DismissAsk {
     const PATH: &'static str = "/asks/dismiss";
     type Answer = ();
+}
+
+#[derive(Deserialize)]
+struct LifeRow {
+    incarnation: String,
 }
 
 #[derive(Deserialize)]
@@ -110,8 +118,8 @@ impl RegistryCell {
     /// already (asked again, or dismissed a while ago: nothing told). Every
     /// check comes before any write.
     async fn ask_access(&self, b: AskAccess) -> CellResult<Asked> {
-        if !fragment_proto::valid_fragment_name(&b.fragment) || !npub::is_identity(&b.owner) || b.title.chars().count() > limits::TITLE_MAX_CHARS {
-            return Err(CellError::invalid("a request names a fragment, its owner's identity, and its title"));
+        if !fragment_proto::valid_fragment_name(&b.fragment) || b.incarnation.is_empty() || !npub::is_identity(&b.owner) || b.title.chars().count() > limits::TITLE_MAX_CHARS {
+            return Err(CellError::invalid("a request names a fragment, its life, its owner's identity, and its title"));
         }
         let who = self.by(&b.by)?;
         if who.kind != IdentityKind::Person {
@@ -127,10 +135,14 @@ impl RegistryCell {
         let email = self.email_of(&who.id)?.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "sign in with an email to ask for access: its owner sees you by it"))?;
         let now = js::now_ms();
         self.sweep_asks(now)?;
-        let kept = self.count("SELECT COUNT(*) AS n FROM access_asks WHERE fragment = ? AND requester = ?", vec![b.fragment.as_str().into(), who.id.as_str().into()])? > 0;
-        if kept {
-            // asked again, or dismissed a while ago: its owner is told nothing
-            return Ok(Asked { again: true, email });
+        let key = || vec![SqlStorageValue::from(b.fragment.as_str()), SqlStorageValue::from(who.id.as_str())];
+        if let Some(kept) = self.row::<LifeRow>("SELECT incarnation FROM access_asks WHERE fragment = ? AND requester = ?", key())? {
+            if kept.incarnation == b.incarnation {
+                // asked again, or dismissed a while ago: its owner is told nothing
+                return Ok(Asked { again: true, email });
+            }
+            // asked of an earlier life of the name: this life's owner hears it anew
+            self.exec("DELETE FROM access_asks WHERE fragment = ? AND requester = ?", key())?;
         }
         if self.count("SELECT COUNT(*) AS n FROM access_asks WHERE fragment = ?", vec![b.fragment.as_str().into()])? >= limits::ACCESS_ASKS_PER_FRAGMENT_MAX as u64 {
             return Err(CellError::new(ErrorCode::RateLimited, "its owner has many requests waiting: ask again later"));
@@ -139,10 +151,11 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::RateLimited, format!("a person asks for access {} times a day at most: ask again tomorrow", limits::ACCESS_ASKS_DAILY_MAX)));
         }
         self.exec(
-            "INSERT INTO access_asks (fragment, requester, owner, title, asked_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO access_asks (fragment, requester, incarnation, owner, title, asked_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             vec![
                 b.fragment.as_str().into(),
                 who.id.as_str().into(),
+                b.incarnation.as_str().into(),
                 owner.id.as_str().into(),
                 b.title.as_str().into(),
                 SqlStorageValue::Integer(now),
@@ -156,21 +169,23 @@ impl RegistryCell {
     }
 
     /// Mails `owner` about a request, while their day allows and they have
-    /// an email; the request stands whether its mail went or not (their
-    /// notice is the request), so a mail not sent is logged, not refused.
+    /// an email. The mail is counted before it goes, in the same turn as
+    /// the check (as an invite's is): two requests at once never pass one
+    /// place left, and nothing is written after the send, so a wipe of the
+    /// owner meanwhile leaves no row naming them. The request stands
+    /// whether its mail went or not (their notice is the request), so a
+    /// mail not sent is logged, not refused, and still counted.
     async fn mail_owner(&self, owner: &str, from: &str, title: &str, now: i64) -> CellResult<()> {
         let Some(to) = self.email_of(owner)? else { return Ok(()) };
         if self.ask_day(owner, "mailed", now)? >= u64::from(limits::ACCESS_ASK_MAILS_DAILY_MAX) {
             return Ok(());
         }
+        self.count_ask_day(owner, "mailed", now)?;
         let asked = mail::access_asked(&to, from, title, &format!("{}/", self.cfg.platform()));
-        match crate::mail::send(&self.env, self.cfg, &asked).await {
-            Ok(_) => self.count_ask_day(owner, "mailed", now),
-            Err(e) => {
-                console_error!("{}", serde_json::json!({ "event": "asks.mail-failed", "owner": owner, "code": e.code, "message": e.message }));
-                Ok(())
-            }
+        if let Err(e) = crate::mail::send(&self.env, self.cfg, &asked).await {
+            console_error!("{}", serde_json::json!({ "event": "asks.mail-failed", "owner": owner, "code": e.code, "message": e.message }));
         }
+        Ok(())
     }
 
     /// `/asks/dismiss`: its owner's no. It stays, dismissed, a while
