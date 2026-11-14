@@ -977,6 +977,7 @@ pub(super) const VAULT_CHECKS: &[&str] = &[
     "a signed request goes with the query its signature covers, byte for byte, an empty piece and all",
     "a secret named as a connection the deployment offers (named before it offered it) stays its person's: in the view as a key, its placeholder filled toward its host",
     "one request carrying that connection's placeholder and the secret's, at the connection's host, each where its row takes it: each is filled with its own (Pipes' token in the header, the Vault's value in the query), never the other's",
+    "a Nostr key kept parked, then pointed at its host by its person with no value, is in the agent's view and signs there by that key",
 ];
 
 /// A Vault's secret, as its person puts it (`PUT /api/vault/{name}`).
@@ -1009,14 +1010,17 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     vault_put(api, w, "e2e-vault-parked", json!({ "value": other, "hosts": [], "agents": [w.agent] }))?;
     vault_put(api, w, "e2e-nostr", json!({ "value": nostr.secret_hex(), "hosts": [host], "place": { "sign": "nip98" }, "agents": [w.agent] }))?;
     vault_put(api, w, "e2e-vault-basic", json!({ "value": "pw12", "hosts": [host], "place": { "basic": "password" }, "agents": [w.agent] }))?;
-    let names = ["e2e-vault", "e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic"];
+    // a key handed off parked (FIN-463 F11), pointed at its host below
+    let handed = fragment_nip98::Keys::generate();
+    vault_put(api, w, "e2e-nostr-handed", json!({ "value": handed.secret_hex(), "hosts": [], "place": { "sign": "nip98" }, "agents": [w.agent] }))?;
+    let names = ["e2e-vault", "e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic", "e2e-nostr-handed"];
     let made: std::collections::BTreeMap<&str, String> = names.iter().map(|n| (*n, placeholder(s, w.id, w.agent, n))).collect();
     let ph = |name: &str| made[name].clone();
 
     let given = say(s, 601, "credentials", &mut said)?;
     s.ok(
         VAULT_CHECKS[0],
-        given.contains(&ph("e2e-vault")) && given.contains(&ph("e2e-vault-query")) && given.contains(&ph("e2e-nostr")) && !given.contains("e2e-vault-other") && !given.contains("e2e-vault-parked"),
+        given.contains(&ph("e2e-vault")) && given.contains(&ph("e2e-vault-query")) && given.contains(&ph("e2e-nostr")) && !given.contains("e2e-vault-other") && !given.contains("e2e-vault-parked") && !given.contains("e2e-nostr-handed"),
         &given,
     );
 
@@ -1116,6 +1120,21 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let off = api.signed(w.owner, "DELETE", &format!("/api/connections/{shared}"), None)?;
     anyhow::ensure!(off.status == 200, "the shared name's connection cleared: {off}");
 
+    // the parked key, pointed at its host with no value: it signs there
+    let pointed = vault_put(api, w, "e2e-nostr-handed", json!({ "hosts": [host], "place": { "sign": "nip98" }, "agents": [w.agent] }))?;
+    let given = say(s, 617, "credentials", &mut said)?;
+    let before = s.upstream.seen().len();
+    let r = say(s, 618, &format!("fetch http://{host}/v1/sites/redirect with {} posting {posted}", ph("e2e-nostr-handed")), &mut said)?;
+    let seen = last_seen(s, before);
+    let header = seen["auth"]["authorization"].as_str().unwrap_or_default().to_string();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+    let signer = fragment_nip98::verify(Some(&header), "POST", &format!("https://{host}/v1/sites/redirect"), posted.as_bytes(), now, 120);
+    s.ok(
+        VAULT_CHECKS[14],
+        pointed.body["hosts"] == json!([host]) && given.contains(&ph("e2e-nostr-handed")) && r.starts_with("fetched 200") && signer.as_deref() == Ok(handed.pubkey_hex()) && !r.contains(&handed.secret_hex()) && !header.contains(&handed.secret_hex()),
+        json!({ "given": given, "said": r, "seen": seen, "signer": format!("{signer:?}") }),
+    );
+
     let gone = api.signed(w.owner, "DELETE", "/api/vault/e2e-vault", None)?;
     let before = s.upstream.seen().len();
     let r = say(s, 609, &format!("fetch http://{host}/v1/me with {}", ph("e2e-vault")), &mut said)?;
@@ -1128,10 +1147,10 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
             logs.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
         }
     }
-    let secrets = [value.as_str(), other.as_str(), &nostr.secret_hex()];
+    let secrets = [value.as_str(), other.as_str(), &nostr.secret_hex(), &handed.secret_hex()];
     let leaked: Vec<&str> = secrets.iter().copied().filter(|v| said.iter().any(|t| t.contains(v)) || logs.contains(v)).collect();
     s.ok(VAULT_CHECKS[8], !logs.is_empty() && leaked.is_empty(), json!({ "answers": said.len(), "log bytes": logs.len(), "leaked": leaked.len() }));
-    for name in ["e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic", "e2e-oauth"] {
+    for name in ["e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic", "e2e-oauth", "e2e-nostr-handed"] {
         api.signed(w.owner, "DELETE", &format!("/api/vault/{name}"), None)?;
     }
     Ok(turns)
