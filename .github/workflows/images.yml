@@ -134,6 +134,7 @@ jobs:
               - crates/templates/**
               - templates/blank/**
               - templates/board/**
+              - templates/brainmap/**
               - templates/calories/**
               - templates/doc/**
               - templates/inbox/**
