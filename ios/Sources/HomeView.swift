@@ -563,6 +563,7 @@ struct ComposerView: View {
             // Send queues the words for the turn after; Steer tells this one now
             Button {
                 submitting = true
+                putKeyboardAway()
                 Task { await steer(); submitting = false }
             } label: {
                 Text("Steer").font(.subheadline.weight(.semibold))
@@ -577,6 +578,7 @@ struct ComposerView: View {
         if recordFirst { launcherAction } else { Button {
             guard canSend else { return }
             submitting = true
+            if !stops { putKeyboardAway() }
             Task {
                 let pressed = ContinuousClock.now
                 await (stops ? stop() : send())
@@ -610,6 +612,12 @@ struct ComposerView: View {
         .allowsHitTesting(canSend)
         .accessibilityLabel(stops ? "Stop response" : "Send message")
         .accessibilityIdentifier(stops ? "stop" : "send") }
+    }
+    /// The keyboard goes as a message does, so the reply has the room: the
+    /// focus given (else the field would take it back) and the responder.
+    private func putKeyboardAway() {
+        focused?.wrappedValue = false
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
     @ViewBuilder private var launcherAction: some View {
         if recording {

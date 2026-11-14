@@ -178,9 +178,8 @@ struct ChatView: View {
                         Task { await session.sendMemo(read) }
                         return true
                     },
-                    // the keyboard goes as a message does, so the reply has the room
-                    send: { dismissKeyboard(); await session.send() }, stop: { await session.stop() },
-                    steer: { recording in session.steers(recording: recording) ? { dismissKeyboard(); await session.steer(recording: recording) } : nil },
+                    send: { await session.send() }, stop: { await session.stop() },
+                    steer: { recording in session.steers(recording: recording) ? { await session.steer(recording: recording) } : nil },
                     quote: session.replyTo.map { quoted in (quoted.text, { session.replyTo = nil }) })
             }.background(FragmentStyle.background)
         }
@@ -516,8 +515,4 @@ struct WorkRecordView: View {
                 .font(.callout).foregroundStyle(.secondary)
         }
     }
-}
-
-@MainActor private func dismissKeyboard() {
-    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
 }
