@@ -240,25 +240,40 @@ struct AppsLibraryView: View {
     let library: Library
     let api: FragmentAPI
     @State private var sheet: AppsLibrarySheet?
+    @State private var query = ""
     let open: (FragmentSummary) -> Void
     static let addApp = FragmentSummary(name: "add-app", kind: "app", title: "Add an app")
+    /// The apps whose name or preview has every word searched for.
+    private var found: [FragmentSummary] {
+        let words = query.split(whereSeparator: \.isWhitespace)
+        guard !words.isEmpty else { return library.shownApps }
+        return library.shownApps.filter { app in
+            words.allSatisfy { app.displayTitle.localizedStandardContains($0) || (app.preview ?? "").localizedStandardContains($0) }
+        }
+    }
     var body: some View {
         ZStack {
             DesktopWallpaper()
             List {
                 Section {
-                    ForEach(library.shownApps) { app in
+                    ForEach(found) { app in
                         appRow(app, symbol: app.kind == "brain" ? "brain" : "app")
                     }
                 }
-                Section {
-                    appRow(Self.addApp, symbol: "plus")
+                if query.isEmpty {
+                    Section {
+                        appRow(Self.addApp, symbol: "plus")
+                    }
                 }
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            .overlay { if found.isEmpty && !query.isEmpty { ContentUnavailableView.search(text: query) } }
         }
+        // the system's glass search field, floating at the foot
+        .searchable(text: $query, prompt: "Search apps")
         .toolbar {
+            DefaultToolbarItem(kind: .search, placement: .bottomBar)
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Manage Apps", systemImage: "slider.horizontal.3") { sheet = .manage }.accessibilityIdentifier("manageApps")
             }
