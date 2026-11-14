@@ -99,6 +99,21 @@ const indexable = (p) => /\.(md|markdown)$/i.test(p) && !hidden(p) && !/(^|\/)(A
 const wikiOf = (p) => (p.includes("/") ? p.slice(0, p.indexOf("/")) : "");
 const editor = (role) => role === "editor" || role === "owner";
 const NOTHING_DONE = Object.freeze({ indexed: 0, unchanged: 0, removed: 0, skipped: 0, stale: 0 });
+const DIRTY = "dirty";
+const CLAIMED = "claimed";
+
+// A path is dirty until its owning batch finishes its claimed generation.
+// Absence from `dirty`, with `pages` recording the result, is completion.
+// A replay or a batch whose claim was taken changes nothing.
+export function pathTransition(row, event) {
+  if (event.type !== "finish" && event.type !== "release") throw new Error(`invalid indexing transition: ${event.type}`);
+  if (!row) return { action: "keep", state: null };
+  if (row.claimed === null || row.claimed === undefined) throw new Error(`invalid indexing transition: ${event.type} of a dirty path`);
+  if (row.by !== event.by) return { action: "keep", state: CLAIMED };
+  if (event.type === "finish" && row.gen === event.gen) return { action: "delete", state: null };
+  return { action: "dirty", state: DIRTY };
+}
+
 // The wait a 429 asks for, within bounds.
 const waitFor = (ms) => (Number.isFinite(ms) && ms > 0 ? Math.min(Math.max(Math.ceil(ms), WAIT_MIN_MS), WAIT_MAX_MS) : WAIT_DEFAULT_MS);
 
@@ -201,6 +216,15 @@ export class App extends DurableObject {
     this.ctx.storage.sql.exec("INSERT INTO dirty (path, gen) VALUES (?, ?) ON CONFLICT (path) DO UPDATE SET gen = excluded.gen", path, gen);
   }
 
+  #releaseClaims(by) {
+    const sql = this.ctx.storage.sql;
+    const rows = sql.exec("SELECT path, gen, claimed, by FROM dirty WHERE by = ?", by).toArray();
+    for (const row of rows) {
+      const next = pathTransition(row, { type: "release", by });
+      if (next.action === "dirty") sql.exec("UPDATE dirty SET claimed = NULL, by = NULL WHERE path = ? AND by = ?", row.path, by);
+    }
+  }
+
   // ---- the index, kept by the file trigger (or a member's start) ----
 
   // A run: mark what moved, then index it a batch at a time until no page
@@ -281,7 +305,7 @@ export class App extends DurableObject {
     try {
       for (const row of rows) done[await this.#index(row, by)]++;
     } catch (e) {
-      sql.exec("UPDATE dirty SET claimed = NULL, by = NULL WHERE by = ?", by);
+      this.#releaseClaims(by);
       if (e.code !== "rate_limited") throw e;
       const wait = waitFor(e.retry_after_ms);
       this.#set("waiting", String(Date.now() + wait));
@@ -377,9 +401,10 @@ export class App extends DurableObject {
     // a revision the index held already is no write
     const told = outcome === "held" ? "unchanged" : outcome;
     return this.ctx.storage.transactionSync(() => {
-      const row = sql.exec("SELECT gen, by FROM dirty WHERE path = ?", path).toArray()[0];
-      if (row?.by !== by) return told;
-      if (row.gen === gen) sql.exec("DELETE FROM dirty WHERE path = ?", path);
+      const row = sql.exec("SELECT gen, claimed, by FROM dirty WHERE path = ?", path).toArray()[0];
+      const next = pathTransition(row, { type: "finish", by, gen });
+      if (next.action === "keep") return told;
+      if (next.action === "delete") sql.exec("DELETE FROM dirty WHERE path = ?", path);
       else sql.exec("UPDATE dirty SET claimed = NULL, by = NULL WHERE path = ?", path);
       if (outcome === "unchanged" || outcome === "stale") return told;
       if (outcome === "removed") {

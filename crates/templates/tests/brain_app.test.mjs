@@ -34,7 +34,7 @@ const HOOKS = `export async function resolve(specifier, context, next) {
   return next(specifier, context);
 }`;
 register("data:text/javascript," + encodeURIComponent(HOOKS));
-const { App, CALLS_MAX } = await import(new URL("../../../templates/brain/app.mjs", import.meta.url).href);
+const { App, CALLS_MAX, pathTransition } = await import(new URL("../../../templates/brain/app.mjs", import.meta.url).href);
 
 const CLAIM_MS = 2 * 60 * 1000;
 // each test's own bound: a batch waiting on a gate that never opens (a
@@ -193,6 +193,17 @@ function clock(t) {
   t.after(() => (Date.now = real));
   return (ms) => (now += ms);
 }
+
+it("a claimed path finishes, requeues a newer generation, and refuses invalid transitions", () => {
+  const claimed = { gen: 4, claimed: 100, by: "batch-a" };
+  assert.deepEqual(pathTransition(claimed, { type: "finish", gen: 4, by: "batch-a" }), { action: "delete", state: null });
+  assert.deepEqual(pathTransition({ ...claimed, gen: 5 }, { type: "finish", gen: 4, by: "batch-a" }), { action: "dirty", state: "dirty" });
+  assert.deepEqual(pathTransition(claimed, { type: "release", by: "batch-a" }), { action: "dirty", state: "dirty" });
+  assert.deepEqual(pathTransition(claimed, { type: "finish", gen: 4, by: "batch-b" }), { action: "keep", state: "claimed" });
+  assert.deepEqual(pathTransition(null, { type: "finish", gen: 4, by: "batch-a" }), { action: "keep", state: null });
+  assert.throws(() => pathTransition({ ...claimed, claimed: null, by: null }, { type: "finish", gen: 4, by: null }), /invalid indexing transition/);
+  assert.throws(() => pathTransition(claimed, { type: "claim", by: "batch-a" }), /invalid indexing transition/);
+});
 
 // FIN-372: its page is the files view, whose status line is index_status's
 // `line`, busy while pages are left; and the AGENTS.md every brain lists
