@@ -268,6 +268,8 @@ struct AppsLibraryView: View {
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            // its first card close under the bar, not a header's height down
+            .contentMargins(.top, 12, for: .scrollContent)
             .overlay { if found.isEmpty && !query.isEmpty { ContentUnavailableView.search(text: query) } }
         }
         // the system's glass search field, floating at the foot
