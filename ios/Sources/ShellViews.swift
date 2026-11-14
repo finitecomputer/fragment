@@ -232,8 +232,8 @@ struct SidebarView: View {
 }
 
 private enum AppsLibrarySheet: Identifiable {
-    case settings(FragmentSummary), manage
-    var id: String { switch self { case .settings(let app): "settings-" + app.name; case .manage: "manage" } }
+    case settings(FragmentSummary)
+    var id: String { switch self { case .settings(let app): "settings-" + app.name } }
 }
 
 struct AppsLibraryView: View {
@@ -242,6 +242,8 @@ struct AppsLibraryView: View {
     @State private var sheet: AppsLibrarySheet?
     @State private var query = ""
     let open: (FragmentSummary) -> Void
+    /// A new chat that starts on building an app.
+    let startApp: () -> Void
     static let addApp = FragmentSummary(name: "add-app", kind: "app", title: "Add an app")
     /// The apps whose name or preview has every word searched for.
     private var found: [FragmentSummary] {
@@ -277,7 +279,7 @@ struct AppsLibraryView: View {
         .toolbar {
             DefaultToolbarItem(kind: .search, placement: .bottomBar)
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Manage Apps", systemImage: "slider.horizontal.3") { sheet = .manage }.accessibilityIdentifier("manageApps")
+                Button("Build an app", systemImage: "plus", action: startApp).accessibilityIdentifier("buildApp")
             }
         }
         .sheet(item: $sheet) { destination in
@@ -285,7 +287,6 @@ struct AppsLibraryView: View {
                 Group {
                     switch destination {
                     case .settings(let app): AppSettingsView(fragment: app, library: library, api: api)
-                    case .manage: AppManagementList(library: library, api: api)
                     }
                 }
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close", systemImage: "xmark") { sheet = nil } } }

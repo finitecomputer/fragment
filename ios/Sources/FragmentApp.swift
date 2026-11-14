@@ -539,6 +539,10 @@ struct FragmentRoot: View {
         }
         .task(id: scenePhase) { if scenePhase == .active { await connection.validate() } }
     }
+    /// Your Apps' +: Home, its words already asking to build one.
+    private func startApp() {
+        showingApps = false; library.home.text = "I want to build an app"; page = .launcher
+    }
     private func resetNavigation() {
         ImageCache.shared.removeAll()
         BlobStore.shared.removeAll()
@@ -577,7 +581,7 @@ struct FragmentRoot: View {
                                 }
                             }
                             .navigationDestination(isPresented: $showingApps) {
-                                AppsLibraryView(library: library, api: api, open: { openedApp = $0 })
+                                AppsLibraryView(library: library, api: api, open: { openedApp = $0 }, startApp: { startApp() })
                                     .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
                             }
                     }
@@ -649,7 +653,7 @@ struct FragmentRoot: View {
                 ContentUnavailableView("This chat isn’t in your list", systemImage: "bubble.left.and.bubble.right")
             }
         case .history: HistoryView(library: library, api: api, open: { open($0) })
-        case .apps: AppsLibraryView(library: library, api: api, open: { openedApp = $0 })
+        case .apps: AppsLibraryView(library: library, api: api, open: { openedApp = $0 }, startApp: { startApp() })
         case .settings: SettingsView(library: library, api: api, connect: { showingConnection = true }, open: { open($0) })
         }
     }
