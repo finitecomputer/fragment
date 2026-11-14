@@ -604,7 +604,7 @@ struct FragmentRoot: View {
             // behind the notices and the page alike: on Home the whole window's
             // wallpaper, which Home's own lines up with, so it shows behind them
             .background {
-                if page == .launcher { DesktopWallpaper() } else { FragmentStyle.background.ignoresSafeArea() }
+                if page == .launcher || page == .apps || showingApps { DesktopWallpaper() } else { FragmentStyle.background.ignoresSafeArea() }
             }
             .accessibilityHidden(sidebar)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
