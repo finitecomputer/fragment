@@ -721,6 +721,11 @@ pub fn handoff(m: &Move, command: &str, kinds: &[SecretKind]) -> Result<(), Refu
     }
 }
 
+/// Where a handed-off Nostr key signs: finite.site, whose API and git
+/// remotes the old agent's sites are under (2026-11-13: a moved
+/// agent brings its own sites over).
+pub const NOSTR_KEY_HOST: &str = "finite.site";
+
 /// A secret handed off, as its person's Vault keeps it: its name there,
 /// bound to the new agent's fragment, toward the hosts its kind goes to.
 /// `None`: a Nostr key that is not one (the Vault takes no other value).
@@ -728,9 +733,11 @@ pub fn handoff(m: &Move, command: &str, kinds: &[SecretKind]) -> Result<(), Refu
 /// - Telegram's token, toward `api.telegram.org`: moved from there into
 ///   the new agent's Telegram connector by Settings (`fromVault`).
 /// - OpenRouter's key, toward `openrouter.ai`.
-/// - The Nostr key, as 64 hex, to sign with (NIP-98) and with no host
-///   yet: kept, never sent, until something its person sets up asks for
-///   one.
+/// - The Nostr key, as 64 hex, to sign with (NIP-98) toward
+///   `NOSTR_KEY_HOST`: the new agent brings its old sites over itself,
+///   each finite.site call signed by the old agent's key, which never
+///   leaves the Vault. Its hosts are set only with its value, and a key
+///   is handed off once, so they are right here or never.
 ///
 /// Its name is its kind's and the agent's, at most 32 bytes:
 /// `telegram-<fragment>` whole when it fits; otherwise the label cut short
@@ -742,7 +749,7 @@ pub fn vault_secret(kind: SecretKind, fragment: &str, value: &str) -> Option<(St
     let (word, hosts, place, value) = match kind {
         SecretKind::TelegramBotToken => ("telegram", vec!["api.telegram.org".to_string()], Place::default(), value.to_string()),
         SecretKind::OpenrouterKey => ("openrouter", vec!["openrouter.ai".to_string()], Place::default(), value.to_string()),
-        SecretKind::NostrNsec => ("nostr", vec![], Place { sign: Some("nip98".into()), ..Place::default() }, crate::npub::secret_hex(value)?),
+        SecretKind::NostrNsec => ("nostr", vec![NOSTR_KEY_HOST.to_string()], Place { sign: Some("nip98".into()), ..Place::default() }, crate::npub::secret_hex(value)?),
     };
     let (label, suffix) = fragment_proto::split_fragment_name(fragment)?;
     let whole = format!("{word}-{fragment}");
@@ -1872,11 +1879,15 @@ mod tests {
         assert_eq!((name.as_str(), put.hosts.as_slice(), put.agents.as_slice(), put.value.as_str()), ("telegram-kestrel--x7k2", &["api.telegram.org".to_string()][..], &["kestrel--x7k2".to_string()][..], "123:abc"));
         let (name, put) = vault_secret(SecretKind::OpenrouterKey, "kestrel--x7k2", "sk-or-1").unwrap();
         assert_eq!((name.as_str(), put.hosts.as_slice()), ("openrouter-kestrel--x7k2", &["openrouter.ai".to_string()][..]));
-        // NIP-19's example key: kept as hex, to sign with, sent nowhere
+        // NIP-19's example key: kept as hex, to sign with toward finite.site
+        // (its sites' API and git remotes), bound to the new agent alone
         let nsec = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
         let hex = "67dea2ed018072d675f5415ecfaed7d2597555e202d85b3d65ea4e58d2d92ffa";
         let (name, put) = vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", nsec).unwrap();
-        assert_eq!((name.as_str(), put.value.as_str(), put.hosts.len(), put.place.sign.as_deref()), ("nostr-kestrel--x7k2", hex, 0, Some("nip98")));
+        assert_eq!(
+            (name.as_str(), put.value.as_str(), put.hosts.as_slice(), put.place.sign.as_deref(), put.agents.as_slice()),
+            ("nostr-kestrel--x7k2", hex, &["finite.site".to_string()][..], Some("nip98"), &["kestrel--x7k2".to_string()][..])
+        );
         assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", hex).unwrap().1.value, hex, "hex too");
         assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", "nsec1nope"), None, "not a key");
         // a long label is cut short to fit a name, beside its whole name's
@@ -1895,7 +1906,11 @@ mod tests {
             for fragment in ["kestrel--x7k2", long.as_str()] {
                 let (name, put) = vault_secret(kind, fragment, value).unwrap();
                 assert!(name.len() <= 32 && name.ends_with("--x7k2"), "{name}");
-                crate::vault::check(&name, &put, &catalog).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let checked = crate::vault::check(&name, &put, &catalog).unwrap_or_else(|e| panic!("{name}: {e}"));
+                if kind == SecretKind::NostrNsec {
+                    // it signs toward finite.site: not parked, so its agent's view lists it
+                    assert_eq!((checked.hosts.as_slice(), &checked.placing), (&["finite.site".to_string()][..], &crate::vault::Placing::Nip98), "{name}");
+                }
             }
         }
     }
