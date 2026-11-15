@@ -66,7 +66,7 @@ use std::path::Path;
 use anyhow::{ensure, Context, Result};
 
 /// Where runtime code is: what ships or runs for people.
-pub const RUNTIME: [(&str, &str); 14] = [
+pub const RUNTIME: [(&str, &str); 15] = [
     ("ios/", "the native iOS client (its Tests and UITests are tests)"),
     ("cell/", "the Worker: its Rust, entry.mjs and the platform's JavaScript, and the shell"),
     ("templates/", "the templates' apps, sites and skills, which fragments and computers run"),
@@ -80,6 +80,7 @@ pub const RUNTIME: [(&str, &str); 14] = [
     ("crates/lan/", "LAN mode: a self-hosted box's DNS zone, TLS front door and certificate authority"),
     ("crates/pod/", "a pod's protocol, verifier and release checks, the owner's and the pod's"),
     ("crates/pod-init/", "pod-init, the service in a pod's measured image"),
+    ("crates/pod-keyd/", "pod-keyd, the key service that unlocks a pod on its owner's terms, in a TD of its own"),
     ("pod-image/", "the pod's measured image: its units, configuration and helpers, which run in a pod"),
 ];
 

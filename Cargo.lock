@@ -1373,6 +1373,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fragment-pod-keyd"
+version = "0.1.0"
+dependencies = [
+ "fragment-pod",
+ "fragment-pod-init",
+ "hex",
+ "hmac 0.12.1",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
+]
+
+[[package]]
 name = "fragment-proto"
 version = "0.1.0"
 dependencies = [

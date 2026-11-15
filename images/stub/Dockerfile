@@ -52,9 +52,10 @@ COPY crates/identity-door/Cargo.toml crates/identity-door/Cargo.toml
 COPY crates/lan/Cargo.toml crates/lan/Cargo.toml
 COPY crates/pod/Cargo.toml crates/pod/Cargo.toml
 COPY crates/pod-init/Cargo.toml crates/pod-init/Cargo.toml
+COPY crates/pod-keyd/Cargo.toml crates/pod-keyd/Cargo.toml
 COPY xtask/Cargo.toml xtask/Cargo.toml
 RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
-    for m in crates/core crates/nip98 crates/proto crates/templates crates/devstack crates/e2e crates/fakes crates/identity-door crates/lan crates/pod crates/pod-init xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
+    for m in crates/core crates/nip98 crates/proto crates/templates crates/devstack crates/e2e crates/fakes crates/identity-door crates/lan crates/pod crates/pod-init crates/pod-keyd xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
  && mkdir -p cli/src && echo 'fn main() {}' > cli/src/main.rs && echo 'fn main() {}' > crates/templates/build.rs \
  && cargo build --release --locked -p fragment-cli --no-default-features
 COPY cli cli

@@ -147,6 +147,7 @@ jobs:
               - crates/lan/Cargo.toml
               - crates/pod/Cargo.toml
               - crates/pod-init/Cargo.toml
+              - crates/pod-keyd/Cargo.toml
               - xtask/Cargo.toml
 
   # The Docker lane. The images are built first by the runner's own Docker

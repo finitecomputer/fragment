@@ -41,7 +41,8 @@ platform concept.
   (`docs/pod.md`): its unlock protocol, quote layout and event log, and,
   by feature, the verifier, the release checks and the owner's side;
   `crates/pod-init`: `pod-init`, the service in the pod's TD that keeps
-  the owner's volume.
+  the owner's volume; `crates/pod-keyd`: `pod-keyd`, the key service that
+  unlocks a pod after a restart on its owner's terms.
 - `pod-image/`: the pod's measured image (mkosi), its locked variant
   and debug sibling, beside `images/` and no input of the computer
   images; `pod-image/pinned-platform/` is the platform it carries,

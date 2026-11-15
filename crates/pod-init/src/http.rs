@@ -165,6 +165,7 @@ impl Response {
             405 => "Method Not Allowed",
             409 => "Conflict",
             413 => "Content Too Large",
+            503 => "Service Unavailable",
             _ => "Internal Server Error",
         };
         write!(
