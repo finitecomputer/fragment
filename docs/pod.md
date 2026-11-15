@@ -23,12 +23,15 @@ On master:
 - `crates/pod-init` (`fragment-pod-init`, binary `pod-init`): the service
   in the TD (below).
 
+- `fragment pod status|verify|init|unlock <pod>` (`cli/src/pod`, the CLI's
+  default `pod` feature, which the computer images' CLI is built without):
+  the owner's command line over `owner`, with the CLI's own key as the
+  owner (cli/GUIDE.md, "Your pod").
 - `pod-image/`: the measured image's definition (below, "The image"),
   and `cargo xtask pod` (`xtask/src/pod/`): its build, measurement and
   VMs.
 
-Not yet on master: the owner's command line (`fragment pod …` in `cli/`)
-and a key service. They are thin layers over the library.
+Not yet on master: a key service. It is a thin layer over the library.
 
 ## Lock and unlock
 
@@ -76,9 +79,11 @@ release in policy.json, a release file, an approval to a key service.
 
 ## The owner's side
 
-The owner's state directory holds `owner.key` and `disk.key` (0600,
-never overwritten), `state.json` and the owner's `policy.json`
-(`owner::dir`, `owner::policy`):
+A pod's directory on the owner's machine holds `disk.key` (0600, never
+overwritten), `state.json` and the owner's `policy.json` (`owner::dir`,
+`owner::policy`). The owner's signing key is the caller's: the fragment
+CLI's own (its config's `secret_key`), and the directory is
+`<config>/pods/<host>/` beside that config (cli/GUIDE.md, "Your pod"):
 
 ```json
 {"releases": [{"seq": 1, "name": "pod-a", "mrtd": "<96 hex>", "rtmr0": "…", "rtmr1": "…", "rtmr2": "…"}],
@@ -93,9 +98,16 @@ registers match a policy.json release whose `seq` is not below
 `state.json`'s `last_unlocked_seq`; omitted registers are named as not
 compared), `platform` (debug off, TCB UpToDate or allowed),
 `google_instance` (MR_OWNER and Google's host registry), `owner` (the
-attested owner is this key, or the pod is blank, for init only). After the
-pod answers, a second fresh attestation must show the same boot key,
-`open`, and this owner; then the release's seq is written to `state.json`
+attested owner is this key, or the pod is blank, for init only). Once they
+pass, and before the key is made or sent, the release's seq is saved as
+`state.json`'s `last_unlocked_seq`, the floor: the maximum of what is
+saved and this seq, under a lock on `state.json.lock`, through a synced
+temporary file and a rename; if that fails, nothing is sent. So the floor
+is the newest release this owner checked and sent a key to, whether or
+not the pod's answer came back, and a pod rebooted into an older release
+gets nothing. An owner who must go back to an older release edits
+`state.json` on purpose. After the pod answers, a second fresh
+attestation must show the same boot key, `open`, and this owner
 (`owner::flow`). `verify` adds `tls_root` (the served PEM hashes to the
 attested root) and, with a TLS target, `tls_leaf` (a handshake trusting
 only that root succeeds for the name).

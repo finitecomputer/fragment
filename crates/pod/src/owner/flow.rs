@@ -2,8 +2,10 @@
 //! only after all five checks pass on a fresh attestation, and only sealed
 //! to the boot key that attestation vouched for; after the pod says
 //! "open", a second fresh attestation must show it open, owned by this
-//! key, on the same boot. What a person sees of each step is the
-//! caller's: a step is handed to `on` as it happens (the CLI prints it).
+//! key, on the same boot. The release floor is saved before the key is
+//! sent, so it holds even when the pod's answer never comes back. What a
+//! person sees of each step is the caller's: a step is handed to `on` as
+//! it happens (the CLI prints it).
 
 use super::attest::{self, Fetched, Trust};
 use super::checks::{Check, Mode, Outcome};
@@ -18,7 +20,7 @@ use crate::unlock::request;
 use crate::unlock::seal::Kind;
 use crate::unlock::sign::OwnerKey;
 use crate::verify::policy::Status;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use rustls::pki_types::CertificateDer;
 
 /// A check failed or the pod is in the wrong state: the CLI's exit 1,
@@ -49,20 +51,15 @@ pub enum Step<'a> {
     Confirming(&'a [Check]),
     /// Confirmed: attested open, on the same boot, owned by `owner`.
     Confirmed { owner: [u8; 32] },
-    /// The release unlocked, now the oldest this owner will unlock again.
+    /// The release the checks matched, saved as the floor before any key
+    /// is sent: the oldest this owner sends a key to again.
     Recorded(&'a Matched),
 }
 
-/// A new owner key in `dir` (never over one there); its public key.
-pub fn keygen(dir: &Dir) -> Result<[u8; 32]> {
-    let key = OwnerKey::generate()?;
-    dir.write_owner_key(&key)?;
-    Ok(key.public())
-}
-
-/// One round of attestation and the checks, changing nothing.
-pub fn status(dir: &Dir, a: &dyn Attestor, host: &str) -> Result<(Fetched, Outcome)> {
-    let ctx = Trust::load(dir)?;
+/// One round of attestation and the checks, changing nothing. `me` is
+/// the owner's public key, if there is one to compare.
+pub fn status(dir: &Dir, me: Option<[u8; 32]>, a: &dyn Attestor, host: &str) -> Result<(Fetched, Outcome)> {
+    let ctx = Trust::load(dir, me)?;
     let f = attest::fetch(a, &Pod::new(host)?)?;
     let o = ctx.check(&f, Mode::Status);
     Ok((f, o))
@@ -93,31 +90,42 @@ fn confirm(ctx: &Trust, pod: &Pod, a: &dyn Attestor, boot_pubkey: [u8; 32], on: 
     Ok(o)
 }
 
-fn record_release(dir: &Dir, o: &Outcome, on: &mut dyn FnMut(Step<'_>)) -> Result<()> {
-    if let Some(m) = &o.release {
-        dir.write_state(&PodState { last_unlocked_seq: Some(m.seq) })?;
-        on(Step::Recorded(m));
+/// The floor raised to the matched release, durably, before a key is
+/// made or sent: if the pod takes the key and its answer is lost (or the
+/// confirmation fails), a reboot into an older release still gets nothing.
+///
+/// The floor that decides is the one this save leaves, not the one the
+/// checks read: another run of this owner's may have saved a newer floor
+/// in between, and a release older than it gets no key from this run
+/// either.
+fn record_floor(dir: &Dir, o: &Outcome, on: &mut dyn FnMut(Step<'_>)) -> Result<()> {
+    let m = o.release.as_ref().ok_or_else(|| Refusal("no release matched, so none can be recorded".into()))?;
+    let saved = dir.write_state(&PodState { last_unlocked_seq: Some(m.seq) }).context("saving the release floor (state.json) before sending the key; nothing was sent")?;
+    if let Some(floor) = saved.last_unlocked_seq.filter(|&floor| floor > m.seq) {
+        return refuse(format!("release {} (seq {}) is older than the last unlocked (seq {floor}), which another run saved; nothing was sent", m.name, m.seq));
     }
+    on(Step::Recorded(m));
     Ok(())
 }
 
 /// `init` (a blank pod: a new disk key, saved before it is sent) or
-/// `unlock` (a locked pod: the saved disk key), each step handed to `on`.
-pub fn key_request(dir: &Dir, a: &dyn Attestor, host: &str, kind: Kind, on: &mut dyn FnMut(Step<'_>)) -> Result<()> {
+/// `unlock` (a locked pod: the saved disk key), signed by `me`, each step
+/// handed to `on`.
+pub fn key_request(dir: &Dir, me: &OwnerKey, a: &dyn Attestor, host: &str, kind: Kind, on: &mut dyn FnMut(Step<'_>)) -> Result<()> {
     let (mode, state) = match kind {
         Kind::Init => (Mode::Init, State::Blank),
         Kind::Unlock => (Mode::Unlock, State::Locked),
     };
-    let me = dir.owner_key()?;
     if kind == Kind::Init && dir.has_disk_key() {
         bail!("{} exists: this directory already holds a pod's disk key", dir.path(DISK_KEY).display());
     }
-    let ctx = Trust::load(dir)?;
+    let ctx = Trust::load(dir, Some(me.public()))?;
     let pod = Pod::new(host)?;
     let f = attest::fetch(a, &pod)?;
     let o = ctx.check(&f, mode);
     on(Step::Checked(&o.checks));
     require(&o, &f, state)?;
+    record_floor(dir, &o, on)?;
     let key = match kind {
         Kind::Init => {
             // Saved before it is sent, so a lost answer never loses the key.
@@ -127,12 +135,12 @@ pub fn key_request(dir: &Dir, a: &dyn Attestor, host: &str, kind: Kind, on: &mut
         }
         Kind::Unlock => dir.disk_key()?,
     };
-    let req = request::make(kind, &f.status.boot_pubkey, &me, &key)?;
+    let req = request::make(kind, &f.status.boot_pubkey, me, &key)?;
     drop(key);
     pod.send(kind, &req)?;
     on(Step::Sent);
     confirm(&ctx, &pod, a, f.status.boot_pubkey, on)?;
-    record_release(dir, &o, on)
+    Ok(())
 }
 
 /// A TLS server whose leaf must chain to the attested root.
@@ -158,8 +166,8 @@ impl Verification {
 
 /// The checks, then `tls_root` (the served PEM hashes to the attested
 /// root) and, with `tls`, `tls_leaf` (a handshake trusting only that root).
-pub fn verify(dir: &Dir, a: &dyn Attestor, host: &str, tls: Option<TlsTarget<'_>>) -> Result<Verification> {
-    let ctx = Trust::load(dir)?;
+pub fn verify(dir: &Dir, me: Option<[u8; 32]>, a: &dyn Attestor, host: &str, tls: Option<TlsTarget<'_>>) -> Result<Verification> {
+    let ctx = Trust::load(dir, me)?;
     let pod = Pod::new(host)?;
     let f = attest::fetch(a, &pod)?;
     let o = ctx.check(&f, Mode::Status);
@@ -178,4 +186,66 @@ pub fn verify(dir: &Dir, a: &dyn Attestor, host: &str, tls: Option<TlsTarget<'_>
         (None, _) => {}
     }
     Ok(Verification { fetched: f, outcome: o, tls: extra, root_pem: root.map(|(pem, _)| pem) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder of the test's own, removed when it goes.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("fragment-pod-flow-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Scratch(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn matched(seq: u64) -> Outcome {
+        Outcome { checks: Vec::new(), release: Some(Matched { seq, name: format!("r{seq}"), not_compared: Vec::new() }) }
+    }
+
+    /// Two runs at once. This one read the floor before another run of the
+    /// same owner's saved a newer one (5); the pod it then attests is on a
+    /// release older than that (4), which passed the checks against the
+    /// floor this run had read. The floor now saved decides: the run is
+    /// refused before a key is made or sent, and the floor stays.
+    #[test]
+    fn a_floor_another_run_raised_refuses_an_older_release() {
+        let tmp = Scratch::new("stale-floor");
+        let dir = Dir::new(&tmp.0);
+        dir.write_state(&PodState { last_unlocked_seq: Some(5) }).unwrap();
+        let mut recorded = Vec::new();
+        let err = record_floor(&dir, &matched(4), &mut |s| {
+            if let Step::Recorded(m) = s {
+                recorded.push(m.seq);
+            }
+        })
+        .unwrap_err();
+        assert!(err.downcast_ref::<Refusal>().is_some(), "a refusal, not a failure: {err:#}");
+        assert!(err.to_string().contains("older than the last unlocked (seq 5)"), "{err:#}");
+        assert!(recorded.is_empty(), "nothing is recorded as going ahead");
+        assert_eq!(dir.state().unwrap().last_unlocked_seq, Some(5));
+
+        // The floor's own release, and a newer one, go ahead.
+        for (seq, floor) in [(5, 5), (7, 7)] {
+            record_floor(&dir, &matched(seq), &mut |s| {
+                if let Step::Recorded(m) = s {
+                    recorded.push(m.seq);
+                }
+            })
+            .unwrap();
+            assert_eq!(dir.state().unwrap().last_unlocked_seq, Some(floor));
+        }
+        assert_eq!(recorded, [5, 7]);
+    }
 }

@@ -14,6 +14,7 @@ use fragment_pod::owner::dir::{Dir, DISK_KEY, POLICY};
 use fragment_pod::owner::flow::{self, Refusal, Step};
 use fragment_pod::unlock::binding::State;
 use fragment_pod::unlock::seal::Kind;
+use fragment_pod::unlock::sign::OwnerKey;
 use fragment_pod::verify::failure::Failure;
 use fragment_pod::verify::provenance::{Document, HostRegistry};
 use fragment_pod::verify::tdx::{PckFlags, Verified};
@@ -67,23 +68,23 @@ impl Attestor for Vouching {
     }
 }
 
-/// An owner's directory: a key, and a policy trusting MRTD `mrtd` as seq 3.
+/// An owner's directory for a pod: a policy trusting MRTD `mrtd` as seq 3.
 fn owner_dir(scratch: &common::scratch::Scratch, mrtd: u8) -> Dir {
     let dir = Dir::new(&scratch.path().join("owner"));
-    flow::keygen(&dir).unwrap();
+    std::fs::create_dir_all(scratch.path().join("owner")).unwrap();
     let policy = format!(r#"{{"releases":[{{"seq":3,"name":"pod-a","mrtd":"{}"}}],"gce_instance":"{INSTANCE}"}}"#, hex::encode([mrtd; 48]));
     std::fs::write(dir.path(POLICY), policy).unwrap();
     dir
 }
 
 /// `kind` against `pod`, which serves `connections` requests; the steps.
-fn request(pod: &common::Pod, dir: &Dir, kind: Kind, connections: usize) -> (anyhow::Result<()>, Vec<String>) {
+fn request(pod: &common::Pod, dir: &Dir, me: &OwnerKey, kind: Kind, connections: usize) -> (anyhow::Result<()>, Vec<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let host = listener.local_addr().unwrap().to_string();
     std::thread::scope(|scope| {
         scope.spawn(|| pod.service.serve(&listener, Some(connections)));
         let mut steps = Vec::new();
-        let r = flow::key_request(dir, &Vouching, &host, kind, &mut |s: Step<'_>| {
+        let r = flow::key_request(dir, me, &Vouching, &host, kind, &mut |s: Step<'_>| {
             steps.push(match s {
                 Step::Checked(c) => format!("checked {}", c.len()),
                 Step::Sent => "sent".into(),
@@ -100,11 +101,13 @@ fn request(pod: &common::Pod, dir: &Dir, kind: Kind, connections: usize) -> (any
 fn init_then_unlock_after_a_reboot_in_order_and_record_the_release() {
     let scratch = common::scratch::Scratch::new();
     let dir = owner_dir(&scratch, MRTD);
+    let me = OwnerKey::generate().unwrap();
     let mut pod = common::Pod::new();
     // status, the key request, the confirming status
-    let (r, steps) = request(&pod, &dir, Kind::Init, 3);
+    let (r, steps) = request(&pod, &dir, &me, Kind::Init, 3);
     r.unwrap();
-    assert_eq!(steps, ["checked 5", "sent", "confirming 5", "confirmed", "recorded 3"]);
+    // the floor is saved before the key is sent
+    assert_eq!(steps, ["checked 5", "recorded 3", "sent", "confirming 5", "confirmed"]);
     assert!(dir.has_disk_key(), "the disk key was saved");
     assert_eq!(dir.state().unwrap().last_unlocked_seq, Some(3));
     assert_eq!(pod.status().state, State::Open);
@@ -112,9 +115,9 @@ fn init_then_unlock_after_a_reboot_in_order_and_record_the_release() {
     pod.service.volume.close().unwrap();
     pod.reboot(None);
     assert_eq!(pod.status().state, State::Locked);
-    let (r, steps) = request(&pod, &dir, Kind::Unlock, 3);
+    let (r, steps) = request(&pod, &dir, &me, Kind::Unlock, 3);
     r.unwrap();
-    assert_eq!(steps.last().map(String::as_str), Some("recorded 3"));
+    assert_eq!(steps.get(1).map(String::as_str), Some("recorded 3"));
     assert_eq!(pod.status().state, State::Open);
 }
 
@@ -124,7 +127,7 @@ fn an_unknown_release_is_refused_before_any_key_is_made_or_sent() {
     let dir = owner_dir(&scratch, 0xbb);
     let pod = common::Pod::new();
     // the status alone: nothing is sent after it
-    let (r, steps) = request(&pod, &dir, Kind::Init, 1);
+    let (r, steps) = request(&pod, &dir, &OwnerKey::generate().unwrap(), Kind::Init, 1);
     let err = r.unwrap_err();
     assert!(err.downcast_ref::<Refusal>().is_some(), "{err:#}");
     assert!(format!("{err:#}").contains("release"), "{err:#}");

@@ -1155,6 +1155,79 @@ made public (403 `private_while_reaching`; a secret on one its link
 opens is 403 `unshare_first`). People you add by name, at any role, are
 fine, and they can use its keys.
 
+## Your pod
+
+A pod is your own Fragment stack in a confidential VM (Intel TDX on
+Google Cloud; docs/pod.md). Its disk is encrypted with a key only you
+hold, and it starts locked after every boot. `fragment pod` checks the
+pod's attestation, then sends the disk key sealed to a key that exists
+only in that boot, signed with this machine's key. That key, the one
+`fragment login` makes, is the pod's owner. A pod needs no account on a
+platform.
+
+```
+fragment pod status <pod>                # its state and the five checks; changes nothing
+fragment pod verify <pod> [--tls H:P --sni NAME]   # the checks, then its TLS root (and a server's leaf) against the attested one
+fragment pod init <pod>                  # claim a blank pod: a new disk key, printed once as the recovery code
+fragment pod unlock <pod>                # after a restart or upgrade: the saved disk key
+```
+
+`<pod>` is `host[:port]`, a DNS name or an IPv4 address (port 7000,
+pod-init's, if none). Every command prints each check with `PASS`,
+`FAIL` or `SKIPPED` and one line of evidence: `quote` (Intel's chain,
+with collateral fetched now, and the binding of nonce, boot key, state,
+owner and TLS root), `release` (the registers are a release in your
+policy, not older than the last one unlocked), `platform` (debug off,
+TCB up to date), `google_instance` (the instance your policy names, on a
+host in Google's registry) and `owner` (this key, or a blank pod for
+`init`). `verify` adds `tls_root` and, with `--tls`, `tls_leaf`. If the
+quote check fails, nothing else the pod said is trusted and the rest are
+skipped. `init` and `unlock` send nothing unless all five pass, and after
+the pod says open, a fresh attestation must show it open, owned by this
+key, on the same boot.
+
+Exit codes: 0 when every check passed and the action was done. 1 when a
+check failed, the pod refused, or the pod did not answer. 2 for a usage
+mistake, such as a pod with no policy. A refusal is `pod_refused`, and
+its message names the check that failed or what the pod refused. With
+`--json`, `status` and `verify` answer `{"ok":true,"data":{"passed",
+"checks",…}}` and still exit 1 when a check failed.
+
+Where a pod's files are: a folder per pod, by host, beside the config
+(`~/Library/Application Support/fragment/` on macOS,
+`$XDG_CONFIG_HOME/fragment/` or `~/.config/fragment/` on Linux):
+
+```
+<config>/config.json                    # secret_key: the owner's key (0600)
+<config>/pods/<host>/policy.json        # yours, written by hand: the releases and the instance you accept
+<config>/pods/<host>/state.json         # {"last_unlocked_seq": N}: the floor; an older release is refused (0600)
+<config>/pods/<host>/state.json.lock    # empty: held while the floor is written
+<config>/pods/<host>/disk.key           # the disk key: 128 hex and a newline (0600, never overwritten)
+```
+
+The folder is made 0700. `<host>` is lower case, with no port. The floor
+is saved before a key is sent, never lowered: it is the newest release
+you checked and sent a key to, whether or not the pod's answer came back.
+To go back to an older release on purpose, edit `state.json`.
+`policy.json`'s format is docs/pod.md's ("The owner's side"):
+
+```json
+{"releases": [{"seq": 1, "name": "pod-a", "mrtd": "<96 hex>", "rtmr1": "<96 hex>", "rtmr2": "<96 hex>"}],
+ "allow_tcb_status": [],
+ "gce_instance": "projects/<number>/zones/<zone>/instances/<id>"}
+```
+
+The recovery code `init` prints is the disk key. Keep it offline: without
+it, and without this machine's key, the pod's data cannot be opened. To
+restore it, write it as `disk.key`'s one line, 0600. The key that owns a
+pod must stay too: while `pods/` holds a disk key, `fragment keys rotate`
+and `fragment login --force` refuse. A pod claimed with another tool is
+used by placing its files here by hand: its disk key as `disk.key`, its
+policy as `policy.json`, its `state.json`, and its owner key as the
+config's `secret_key` (64 hex). That replaces this machine's key, so a
+config already paired with a platform keeps its own: give the pod's key
+a config of its own under another `HOME` (on Linux, `XDG_CONFIG_HOME`).
+
 ## Rules of the road
 
 1. **The event log is truth.** Read `fragment events` before and after
@@ -1242,6 +1315,8 @@ fragment operator include <old> [--key-file F]   # take a withdrawal back
 fragment operator retry <old> [--key-file F]   # a held move tried again where it was held: a new attempt at its stage, or its retirement or (phase 2) import again
 fragment operator restart-old <old> [--key-file F]   # the old agent started again, the move offered again (phase 1, before its retirement)
 fragment operator retire <old> [--key-file F]   # a held move's old agent retired as migrated: the move done
+fragment pod status|init|unlock <pod>    # your pod (host[:port]): its checks, claim it, unlock it
+fragment pod verify <pod> [--tls H:P --sni NAME]
 ```
 
 `fragment operator …` is the deployment's operators' alone: each signs
@@ -1274,6 +1349,7 @@ its wording:
 - `storage_full`: the app's database is at its cap; the change rolled back (507)
 - `unavailable`: the host, or a service behind it, did not answer; retrying is safe
 - `outcome_unknown`: a write's answer was lost; it may have been applied
+- `pod_refused`: a pod failed a check or refused its key (`fragment pod`); the message names which
 - `server_error`: the host failed (500), or the CLI did
 
 Exit codes: 0 ok, 1 failure, 2 usage. Without `--json`, a refusal

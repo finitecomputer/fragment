@@ -1,10 +1,10 @@
-//! The owner's state directory: `owner.key`, `disk.key`, `state.json`,
-//! and the `policy.json` the owner writes. Key files are created 0600
-//! and never overwritten; the directory is created 0700.
+//! A pod's directory on the owner's machine: `disk.key`, `state.json`,
+//! and the `policy.json` the owner writes. The disk key is created 0600
+//! and never overwritten; the directory is created 0700. The owner's
+//! signing key is not here: it is the caller's (the fragment CLI's own).
 
 use anyhow::{bail, Context, Result};
 use crate::unlock::keys::DiskKey;
-use crate::unlock::sign::OwnerKey;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -12,16 +12,18 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-pub const OWNER_KEY: &str = "owner.key";
 pub const DISK_KEY: &str = "disk.key";
 pub const STATE: &str = "state.json";
 pub const POLICY: &str = "policy.json";
+pub const STATE_LOCK: &str = "state.json.lock";
+const STATE_TMP: &str = "state.json.tmp";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PodState {
-    /// The release seq of the last unlock: never release a key to an
-    /// older one (a rollback to a release with a known flaw).
+    /// The floor: the newest release seq this owner checked and sent a key
+    /// to, whether or not the pod's answer came back. A key never goes to
+    /// an older one (a rollback to a release with a known flaw).
     #[serde(default)]
     pub last_unlocked_seq: Option<u64>,
 }
@@ -63,23 +65,6 @@ impl Dir {
         Ok(Zeroizing::new(text))
     }
 
-    pub fn write_owner_key(&self, key: &OwnerKey) -> Result<()> {
-        let text = Zeroizing::new(format!("{}\n", key.to_hex().as_str()));
-        self.create_secret(OWNER_KEY, &text)
-    }
-
-    pub fn owner_key(&self) -> Result<OwnerKey> {
-        OwnerKey::from_hex(&self.read_secret(OWNER_KEY)?).with_context(|| format!("{}", self.path(OWNER_KEY).display()))
-    }
-
-    /// The public key, if there is an owner key here.
-    pub fn owner_public(&self) -> Result<Option<[u8; 32]>> {
-        if !self.path(OWNER_KEY).exists() {
-            return Ok(None);
-        }
-        self.owner_key().map(|k| Some(k.public()))
-    }
-
     pub fn has_disk_key(&self) -> bool {
         self.path(DISK_KEY).exists()
     }
@@ -102,15 +87,27 @@ impl Dir {
         }
     }
 
-    /// Replaced whole through a rename, so a crash keeps the old record.
-    pub fn write_state(&self, state: &PodState) -> Result<()> {
+    /// Raises the floor to `state`'s, never lowers it: under an exclusive
+    /// lock on `state.json.lock`, the saved seq and this one's maximum is
+    /// written to a synced temporary file, renamed over `state.json`, and
+    /// the directory synced. So two runs finishing in either order keep the
+    /// higher, and a crash keeps the old record or the new one. Answers
+    /// what is saved now.
+    pub fn write_state(&self, state: &PodState) -> Result<PodState> {
         self.ensure()?;
         let path = self.path(STATE);
-        let tmp = self.path("state.json.tmp");
-        let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-        f.write_all(&serde_json::to_vec_pretty(state)?)?;
-        f.sync_all()?;
-        fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
+        let at = |what: &'static str, p: &Path| format!("{what} {}", p.display());
+        let lock_path = self.path(STATE_LOCK);
+        let lock = fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(&lock_path).with_context(|| at("opening", &lock_path))?;
+        lock.lock().with_context(|| at("locking", &lock_path))?;
+        let saved = self.state()?;
+        let merged = PodState { last_unlocked_seq: saved.last_unlocked_seq.max(state.last_unlocked_seq) };
+        let tmp = self.path(STATE_TMP);
+        let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).with_context(|| at("creating", &tmp))?;
+        f.write_all(&serde_json::to_vec_pretty(&merged)?).and_then(|_| f.sync_all()).with_context(|| at("writing", &tmp))?;
+        fs::rename(&tmp, &path).with_context(|| at("writing", &path))?;
+        fs::File::open(&self.0).and_then(|d| d.sync_all()).with_context(|| at("syncing", &self.0))?;
+        Ok(merged)
     }
 }
 
@@ -142,23 +139,18 @@ mod tests {
     }
 
     #[test]
-    fn keys_are_private_and_never_overwritten() {
+    fn the_disk_key_is_private_and_never_overwritten() {
         let tmp = Scratch::new("keys");
         let dir = Dir::new(&tmp.0.join("pod"));
-        let k = OwnerKey::generate().unwrap();
-        dir.write_owner_key(&k).unwrap();
-        assert_eq!(mode(&tmp.0.join("pod")), 0o700);
-        assert_eq!(mode(&dir.path(OWNER_KEY)), 0o600);
-        assert_eq!(dir.owner_public().unwrap(), Some(k.public()));
-        let err = dir.write_owner_key(&OwnerKey::generate().unwrap()).unwrap_err();
-        assert!(err.to_string().contains("refusing to overwrite"), "{err}");
-        assert_eq!(dir.owner_key().unwrap().public(), k.public());
-
+        assert!(!dir.has_disk_key());
         let d = DiskKey::random().unwrap();
         dir.write_disk_key(&d).unwrap();
+        assert_eq!(mode(&tmp.0.join("pod")), 0o700);
         assert_eq!(mode(&dir.path(DISK_KEY)), 0o600);
         assert_eq!(dir.disk_key().unwrap().as_bytes(), d.as_bytes());
-        assert!(dir.write_disk_key(&DiskKey::random().unwrap()).is_err());
+        let err = dir.write_disk_key(&DiskKey::random().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+        assert_eq!(dir.disk_key().unwrap().as_bytes(), d.as_bytes());
     }
 
     #[test]
@@ -169,5 +161,20 @@ mod tests {
         dir.write_state(&PodState { last_unlocked_seq: Some(3) }).unwrap();
         assert_eq!(dir.state().unwrap().last_unlocked_seq, Some(3));
         assert_eq!(mode(&dir.path(STATE)), 0o600);
+    }
+
+    /// Two runs that finish out of order never lower the floor: a lower
+    /// seq written over a higher one keeps the higher.
+    #[test]
+    fn the_floor_is_never_lowered() {
+        let tmp = Scratch::new("floor");
+        let dir = Dir::new(&tmp.0);
+        dir.write_state(&PodState { last_unlocked_seq: Some(5) }).unwrap();
+        dir.write_state(&PodState { last_unlocked_seq: Some(3) }).unwrap();
+        assert_eq!(dir.state().unwrap().last_unlocked_seq, Some(5));
+        dir.write_state(&PodState { last_unlocked_seq: None }).unwrap();
+        assert_eq!(dir.state().unwrap().last_unlocked_seq, Some(5));
+        dir.write_state(&PodState { last_unlocked_seq: Some(6) }).unwrap();
+        assert_eq!(dir.state().unwrap().last_unlocked_seq, Some(6));
     }
 }

@@ -66,7 +66,10 @@ RUN --mount=type=cache,id=images-registry,target=/usr/local/cargo/registry \
 # The fragment CLI (cli/), static, for the agents' terminals: it acts as the
 # agent its profile names, through the computer's API egress, with no key
 # (cli/GUIDE.md, "As an agent"; docs/computers.md). Its sources are touched
-# as the build stage's are.
+# as the build stage's are. Without default features: the CLI's `pod`
+# (`fragment pod`, the owner's side of a pod, with its attestation
+# verifier's crates) is a person's, on their own machine, never an
+# agent's, so crates/pod stays a manifest here (cli/Cargo.toml).
 # Its inputs are what the CLI builds from and no more, so a change to the
 # cell, the shell, the chat page or the other blessed templates, the e2e,
 # xtask or the docs leaves this stage cached and the image's digest as it
@@ -106,7 +109,7 @@ RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cli-target,target=/src/target \
     for m in crates/devstack crates/e2e crates/fakes crates/identity-door crates/lan crates/pod crates/pod-init xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
  && find cli crates templates -type f -exec touch {} + \
- && cargo build --release --locked -p fragment-cli \
+ && cargo build --release --locked -p fragment-cli --no-default-features \
  && mkdir -p /out && cp target/release/fragment /out/
 
 # SimpleX's core (the bridge's simplex/run.rs: one per agent its owner

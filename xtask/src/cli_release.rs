@@ -6,10 +6,12 @@ use anyhow::{Context, Result};
 use fragment_core::release::cli_version;
 use serde_json::Value;
 
+// crates/pod whole: the released CLI is built with its default `pod`
+// feature (cli/Cargo.toml), which the images' CLI leaves out.
 const INPUTS: &[&str] = &[
-    "Cargo.toml", "Cargo.lock", "cli", "crates/core", "crates/nip98", "crates/proto", "crates/templates",
+    "Cargo.toml", "Cargo.lock", "cli", "crates/core", "crates/nip98", "crates/proto", "crates/templates", "crates/pod",
     "templates/blank", "templates/board", "templates/calories", "templates/doc", "templates/inbox", "templates/notes", "templates/slides", "templates/todo",
-    "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "crates/identity-door/Cargo.toml", "crates/lan/Cargo.toml", "crates/pod/Cargo.toml", "crates/pod-init/Cargo.toml", "xtask/Cargo.toml",
+    "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "crates/identity-door/Cargo.toml", "crates/lan/Cargo.toml", "crates/pod-init/Cargo.toml", "xtask/Cargo.toml",
     ".github/workflows/release.yml",
 ];
 
@@ -182,15 +184,20 @@ mod tests {
     }
 
     /// The existing Dockerfile/metadata test holds its CLI stage to the
-    /// dependency graph and all scaffolds. Hold this key to that same set.
+    /// dependency graph and all scaffolds. Hold this key to that same set,
+    /// and to crates/pod, which the released CLI's default `pod` builds
+    /// and the image's stage (built without it) holds as a manifest.
     #[test]
     fn the_key_covers_the_cli_build_and_its_release_workflow() {
         let text = fs::read_to_string(crate::devstack::repo_root().join("images/hermes/Dockerfile")).unwrap();
         let stage = text.lines().skip_while(|l| !l.ends_with(" AS cli")).skip(1).take_while(|l| !l.starts_with("FROM "));
+        let covered = |path: &str| INPUTS.iter().any(|p| path == *p || path.starts_with(&format!("{p}/")));
         for line in stage.filter_map(|l| l.strip_prefix("COPY ")) {
             let fields: Vec<_> = line.split_whitespace().collect();
-            for path in &fields[..fields.len() - 1] { assert!(INPUTS.contains(path), "CLI key lacks {path}"); }
+            for path in &fields[..fields.len() - 1] { assert!(covered(path), "CLI key lacks {path}"); }
         }
+        let manifest = fs::read_to_string(crate::devstack::repo_root().join("cli/Cargo.toml")).unwrap();
+        assert!(manifest.contains("default = [\"pod\"]") && INPUTS.contains(&"crates/pod"), "the released CLI builds crates/pod");
         assert!(INPUTS.contains(&".github/workflows/release.yml"));
         for path in ["cell/src", "cell/shell", "templates/chat", "xtask/src", "crates/e2e/src", "docs"] { assert!(!INPUTS.contains(&path)); }
     }

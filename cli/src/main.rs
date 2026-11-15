@@ -8,6 +8,8 @@ mod home;
 mod mcp;
 mod notice;
 mod operator;
+#[cfg(feature = "pod")]
+mod pod;
 mod quote;
 mod search;
 mod session;
@@ -221,6 +223,14 @@ enum Cmd {
     Operator {
         #[command(subcommand)]
         sub: OperatorCmd,
+    },
+    /// Your pod (docs/pod.md): verify it by attestation, claim it, unlock
+    /// it after a restart, with this machine's key as its owner; its
+    /// policy, state and disk key are kept beside the config
+    #[cfg(feature = "pod")]
+    Pod {
+        #[command(subcommand)]
+        sub: pod::PodCmd,
     },
     /// Export everything that is yours (your fragments and your agents',
     /// your computer's newest save, the names of what others share with
@@ -1127,6 +1137,28 @@ fn config_path() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("fragment").join("config.json")
 }
 
+/// A pod claimed here is owned by this key, and opens for no other (its
+/// volume records its owner): a command that replaces the key refuses
+/// while one is. Without the `pod` feature no pod is claimed here.
+fn keep_pods_owner(command: &str) -> Result<()> {
+    #[cfg(feature = "pod")]
+    {
+        let pods = pod::pods_dir(&config_path());
+        let claimed = pod::claimed(&pods)?;
+        if !claimed.is_empty() {
+            return Err(usage(format!(
+                "`fragment {command}` replaces this machine's key, which owns the pod{} {}: no other key unlocks {}. Move {} away first (cli/GUIDE.md, \"Your pod\")",
+                if claimed.len() == 1 { "" } else { "s" },
+                claimed.join(", "),
+                if claimed.len() == 1 { "it" } else { "them" },
+                pods.display()
+            )));
+        }
+    }
+    let _ = command;
+    Ok(())
+}
+
 /// Writes a secret into its own file, readable by its owner only (0600).
 fn write_secret_file(path: &Path, secret: &str) -> Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -1428,6 +1460,7 @@ fn run(cli: Cli) -> Result<()> {
             // the key this machine signs with: the one it has, or a new one
             let key_existed = !force && load_config().secret_key.is_some();
             if !key_existed {
+                keep_pods_owner("login --force")?;
                 save_config("secret_key", &auth::Identity::generate().secret_hex())?;
             }
             let c = require_client(&cli.host, cli.verbose)?;
@@ -1892,6 +1925,22 @@ fn run(cli: Cli) -> Result<()> {
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
             return Ok(());
         }
+        #[cfg(feature = "pod")]
+        Cmd::Pod { sub } => {
+            if let Some(mode) = agent_mode()? {
+                return Err(usage(format!("{} is an agent: a pod's owner is a person's key, never an agent's", mode.agent)));
+            }
+            let key = load_config().secret_key.map(|sk| auth::Identity::from_secret_hex(&sk).ok_or_else(|| anyhow!("the config's secret_key is not a 64-hex secp256k1 secret ({})", config_path().display()))).transpose()?;
+            let pods = pod::pods_dir(&config_path());
+            let live = fragment_pod::checks::attestor::Live::default();
+            let ctx = pod::Ctx { pods: &pods, key: key.as_ref(), attestor: &live, json: j };
+            let report = pod::run(&ctx, sub, &mut std::io::stdout())?;
+            // a failed check survives the envelope as exit 1, as `verify`'s do
+            if j {
+                emit_ok(&report.data);
+            }
+            std::process::exit(report.exit_code());
+        }
         // read here, changing nothing: no platform, no key
         Cmd::Home { sub } if !sub.calls() => {
             let done = home::run(sub, None)?;
@@ -1924,6 +1973,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("host: {}", c.host);
         }
         Cmd::Keys { sub: Some(KeysCmd::Rotate) } => {
+            keep_pods_owner("keys rotate")?;
             let old = c;
             let old_key = old.key()?.clone();
             let fresh = auth::Identity::generate();
@@ -2928,6 +2978,8 @@ fn run(cli: Cli) -> Result<()> {
             println!("{name}: {}", visibility.as_str());
         }
         Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
+        #[cfg(feature = "pod")]
+        Cmd::Pod { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -3446,7 +3498,11 @@ mod tests {
         }
         missing.sort();
         assert!(missing.is_empty(), "GUIDE.md's command reference lacks:\n{}", missing.join("\n"));
-        let commands: Vec<&str> = cli.get_subcommands().map(|c| c.get_name()).collect();
+        let mut commands: Vec<&str> = cli.get_subcommands().map(|c| c.get_name()).collect();
+        // the guide is the released CLI's, which has `pod`; a build without it lists it still
+        if cfg!(not(feature = "pod")) {
+            commands.push("pod");
+        }
         for (names, _) in &entries {
             assert!(names.iter().all(|n| commands.contains(&n.as_str())), "GUIDE.md's reference names {names:?}, no command");
         }

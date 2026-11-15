@@ -1155,6 +1155,8 @@ dependencies = [
  "fragment-core",
  "fragment-fakes",
  "fragment-nip98",
+ "fragment-pod",
+ "fragment-pod-init",
  "fragment-proto",
  "fragment-templates",
  "fs2",

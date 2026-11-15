@@ -42,7 +42,8 @@ pub fn fetch(a: &dyn Attestor, pod: &Pod) -> Result<Fetched> {
     Ok(Fetched { nonce, status, chain, registry })
 }
 
-/// What the checks are held to, from the state directory.
+/// What the checks are held to: the pod's directory, and the owner's
+/// public key (`None`: the owner check is skipped, so nothing is sent).
 pub struct Trust {
     pub policy: Policy,
     pub last_unlocked_seq: Option<u64>,
@@ -50,9 +51,9 @@ pub struct Trust {
 }
 
 impl Trust {
-    pub fn load(dir: &Dir) -> Result<Self> {
+    pub fn load(dir: &Dir, me: Option<[u8; 32]>) -> Result<Self> {
         let policy = Policy::load(&dir.path(super::dir::POLICY)).context("policy.json (docs/pod.md, \"The owner's side\")")?;
-        Ok(Self { policy, last_unlocked_seq: dir.state()?.last_unlocked_seq, me: dir.owner_public()? })
+        Ok(Self { policy, last_unlocked_seq: dir.state()?.last_unlocked_seq, me })
     }
 
     pub fn check(&self, f: &Fetched, mode: Mode) -> Outcome {

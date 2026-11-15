@@ -81,7 +81,7 @@ pub fn check_binding(report_data: &[u8; 64], status: &wire::Status, nonce: [u8; 
 
 pub fn check_owner(state: State, attested: Option<[u8; 32]>, me: Option<[u8; 32]>, mode: Mode) -> Check {
     let Some(me) = me else {
-        return Check::skipped("owner", "no owner.key in --dir");
+        return Check::skipped("owner", "no owner key to compare");
     };
     let r = match (state, attested, mode) {
         (State::Blank, _, Mode::Init) => Ok("blank: no owner yet".to_owned()),

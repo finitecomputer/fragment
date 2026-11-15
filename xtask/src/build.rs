@@ -534,7 +534,8 @@ mod tests {
             dirs.insert(name.clone(), rel(manifest.parent().expect("its directory").to_str().expect("a path")));
             let deps = p["dependencies"].as_array().into_iter().flatten();
             // an optional one is built only by a feature that turns it on,
-            // which the CLI's do not (crates/templates' `bundle`: its
+            // which the stages' builds do not (crates/templates' `bundle`;
+            // the CLI's default `pod`, which they build without, below: its
             // manifest, copied with the members', is all cargo reads)
             let built = deps.filter(|d| d["kind"].is_null() || d["kind"] == "build").filter(|d| d["path"].is_string() && d["optional"] != true);
             needs.insert(name, built.map(|d| d["name"].as_str().expect("a name").to_string()).collect());
@@ -583,6 +584,10 @@ mod tests {
             assert_eq!(&copied_manifests, manifests, "{file}: and the members' manifests its stage copies alone");
             let stubs = stage.iter().find_map(|l| l.trim().strip_prefix("for m in ").and_then(|l| l.split_once(';'))).map(|(list, _)| list.split_whitespace().map(str::to_string).collect::<BTreeSet<_>>());
             assert_eq!(stubs.as_ref(), Some(empties), "{file}: and empties exactly those members' sources (`for m in …;`)");
+            // the CLI's optional crates stay stubs only if no feature turns
+            // them on: each build of it names no default features
+            let builds: Vec<&&str> = stage.iter().filter(|l| l.contains("cargo build") && l.contains("-p fragment-cli")).collect();
+            assert!(!builds.is_empty() && builds.iter().all(|l| l.contains("--no-default-features")), "{file}: the CLI built without its default features (`pod`): {builds:?}");
 
             let copied_templates: BTreeSet<String> = paths.iter().filter(|p| p.starts_with("templates/")).map(|p| p.to_string()).collect();
             assert_eq!(copied_templates, templates, "{file}: and each template the CLI scaffolds: every one but the platform's own");
