@@ -62,9 +62,18 @@ fn run(args: Args, config: Config) -> ExitCode {
         boot,
         ccel: args.ccel,
         hook_timeout: fragment_pod_init::hook::TIMEOUT,
+        open_lock: Default::default(),
         config,
     };
-    service.serve(&listener, None);
+    // The key service, if configured, is asked in the background while
+    // the owner's routes are served here; serve never returns.
+    std::thread::scope(|scope| {
+        if let Some(addr) = &service.config.key_service {
+            eprintln!("pod-init: will ask the key service at {addr} while locked");
+            scope.spawn(|| fragment_pod_init::ask::run(&service, addr, fragment_pod_init::ask::BACKOFF, None));
+        }
+        service.serve(&listener, None);
+    });
     ExitCode::FAILURE
 }
 

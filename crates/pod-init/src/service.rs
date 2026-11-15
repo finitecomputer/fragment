@@ -11,7 +11,7 @@ use crate::quoter::Quoter;
 use crate::volume::Volume;
 use crate::http::{self, HttpError, Request, Response};
 use crate::eventlog;
-use fragment_pod::unlock::binding::State;
+use fragment_pod::unlock::binding::{State, NONCE_LEN};
 use fragment_pod::unlock::keys::BootKey;
 use fragment_pod::unlock::seal::Kind;
 use fragment_pod::unlock::tls::{self, MAX_PEM};
@@ -19,6 +19,7 @@ use fragment_pod::unlock::wire::{self, Status};
 use std::io::{self, Read};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 pub const MAX_BODY: usize = wire::MAX_REQUEST_BODY;
@@ -32,6 +33,9 @@ pub struct Service {
     /// Made when the service starts; lives only in this process.
     pub boot: BootKey,
     pub hook_timeout: Duration,
+    /// Held while a key opens the volume (src/keyreq.rs `open_volume`):
+    /// the owner's request and the key service's delivery take turns.
+    pub open_lock: Mutex<()>,
 }
 
 impl Service {
@@ -114,6 +118,13 @@ impl Service {
     fn status(&self, nonce: Option<&str>) -> Result<Response, ApiError> {
         let nonce = wire::nonce(nonce.unwrap_or_default())
             .map_err(|e| ApiError::new(400, code::BAD_NONCE, format!("/status?nonce=<64 hex>: {e}")))?;
+        let body = self.status_doc(nonce)?.to_json().map_err(|e| ApiError::new(500, code::INTERNAL, e.to_string()))?;
+        Ok(Response::json(200, body))
+    }
+
+    /// The attested state for `nonce`: what `/status` answers, and what
+    /// the pod shows a key service (src/ask.rs).
+    pub fn status_doc(&self, nonce: [u8; NONCE_LEN]) -> Result<Status, ApiError> {
         let state = self.volume.state().map_err(|e| ApiError::new(500, code::VOLUME_FAILED, e.to_string()))?;
         let mut status = Status {
             state,
@@ -124,7 +135,6 @@ impl Service {
         };
         let report_data = status.binding(nonce).report_data();
         status.quote = self.quoter.quote(&report_data).map_err(|e| ApiError::new(500, code::QUOTE_FAILED, e))?;
-        let body = status.to_json().map_err(|e| ApiError::new(500, code::INTERNAL, e.to_string()))?;
-        Ok(Response::json(200, body))
+        Ok(status)
     }
 }

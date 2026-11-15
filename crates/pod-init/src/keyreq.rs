@@ -1,6 +1,7 @@
 //! POST /init and POST /unlock, in this order: shape, the signature
-//! under the named owner, the seal under this boot's secret, the state,
-//! the volume, (unlock) the owner recorded inside it, the open hook.
+//! under the named owner, the seal under this boot's secret, then
+//! `open_volume`: the state, the volume, (unlock) the owner recorded
+//! inside it, the open hook.
 //! Nothing touches the volume until the request is proven to be the
 //! owner's and for this boot; the disk key lives only in this call.
 
@@ -43,6 +44,17 @@ fn volume_error(e: VolumeError) -> ApiError {
 pub fn handle(s: &Service, kind: Kind, body: &[u8]) -> Result<Response, ApiError> {
     let r = KeyRequest::from_json(body).map_err(wire_error)?;
     let key = request::open(kind, &s.boot, &r).map_err(request_error)?;
+    open_volume(s, kind, &r.owner, key)?;
+    let body = serde_json::to_vec(&Opened { state: State::Open }).map_err(|e| ApiError::new(500, code::INTERNAL, e.to_string()))?;
+    Ok(Response::json(200, body))
+}
+
+/// The one way a key opens the volume, whether the owner sent it or the
+/// key service delivered it (src/ask.rs): under the open lock, so two
+/// never race and the second finds the state changed; then the state,
+/// the volume, for unlock the owner recorded inside it, and the hook.
+pub fn open_volume(s: &Service, kind: Kind, owner: &[u8; 32], key: DiskKey) -> Result<(), ApiError> {
+    let _one_at_a_time = s.open_lock.lock().map_err(|_| ApiError::new(500, code::INTERNAL, "open lock poisoned"))?;
     let needed = match kind {
         Kind::Init => State::Blank,
         Kind::Unlock => State::Locked,
@@ -53,15 +65,14 @@ pub fn handle(s: &Service, kind: Kind, body: &[u8]) -> Result<Response, ApiError
         return Err(ApiError::new(409, code::WRONG_STATE, detail));
     }
     match kind {
-        Kind::Init => init(s, &r.owner, &key)?,
-        Kind::Unlock => unlock(s, &r.owner, &key)?,
+        Kind::Init => init(s, owner, &key)?,
+        Kind::Unlock => unlock(s, owner, &key)?,
     }
     drop(key);
     if let Some(h) = &s.config.open_hook {
         hook::run(h, s.hook_timeout).map_err(|e| ApiError::new(500, code::OPEN_HOOK_FAILED, format!("volume is open; {e}")))?;
     }
-    let body = serde_json::to_vec(&Opened { state: State::Open }).map_err(|e| ApiError::new(500, code::INTERNAL, e.to_string()))?;
-    Ok(Response::json(200, body))
+    Ok(())
 }
 
 fn kind_name(kind: Kind) -> &'static str {

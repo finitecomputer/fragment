@@ -9,9 +9,11 @@
 //! through configfs-tsm (`tsm`, behind `quoter::Quoter`); HTTP is the
 //! small server in `http`; the protocol is fragment-pod's `unlock`.
 
+pub mod ask;
 pub mod config;
 pub mod error;
 pub mod eventlog;
+pub mod fetch;
 pub mod hook;
 pub mod http;
 pub mod keyreq;

@@ -33,6 +33,11 @@ pub struct Config {
     /// Run after the volume is mounted.
     #[serde(default)]
     pub open_hook: Option<PathBuf>,
+    /// `host:port` of a key service (pod-keyd) to ask for the disk key
+    /// while locked. Untrusted, like everything the host gives: see
+    /// src/ask.rs for why a wrong one can only fail to unlock.
+    #[serde(default)]
+    pub key_service: Option<String>,
 }
 
 fn default_owner_file() -> PathBuf {
@@ -89,6 +94,9 @@ impl Config {
         if self.volume_size_gb == 0 {
             return bad("volume_size_gb must be at least 1".into());
         }
+        if let Some(k) = &self.key_service {
+            check_host_port(k).map_err(|why| ConfigError(format!("key_service {k:?}: {why}")))?;
+        }
         Ok(())
     }
 
@@ -98,6 +106,23 @@ impl Config {
 
     pub fn mapper_path(&self) -> PathBuf {
         Path::new("/dev/mapper").join(&self.mapper_name)
+    }
+}
+
+/// `host:port`: a DNS name or IPv4 address, or an IPv6 one in brackets,
+/// and a port. It goes into a Host header, so nothing else.
+pub fn check_host_port(text: &str) -> Result<(), &'static str> {
+    let (host, port) = text.rsplit_once(':').ok_or("not host:port")?;
+    port.parse::<u16>().ok().filter(|p| *p != 0).ok_or("not a port")?;
+    let plain = |c: char| c.is_ascii_alphanumeric() || c == '.' || c == '-';
+    let ok = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        Some(v6) => v6.parse::<std::net::Ipv6Addr>().is_ok(),
+        None => !host.is_empty() && host.len() <= 253 && host.chars().all(plain),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err("not a host name or address")
     }
 }
 
@@ -168,7 +193,18 @@ mod tests {
         assert_eq!(c.owner_path(), PathBuf::from("/srv/pod/pod/owner"));
         assert_eq!(c.mapper_path(), PathBuf::from("/dev/mapper/pod"));
         assert_eq!(c.open_hook, None);
+        assert_eq!(c.key_service, None);
         assert_eq!(c.owner_hint, Some(PathBuf::from("/var/lib/pod/owner.hint")));
+    }
+
+    #[test]
+    fn a_key_service_is_host_and_port_only() {
+        for good in ["keyd.internal:7100", "10.0.0.2:7100", "[fd00::2]:7100"] {
+            assert_eq!(with("key_service", good.into()).unwrap().key_service.as_deref(), Some(good));
+        }
+        for bad in ["keyd", "keyd:0", "http://keyd:7100", "keyd:7100/x", "ke yd:1", "a\r\nX:1", ":7100", "[nope]:1"] {
+            assert!(with("key_service", bad.into()).is_err(), "{bad}");
+        }
     }
 
     #[test]

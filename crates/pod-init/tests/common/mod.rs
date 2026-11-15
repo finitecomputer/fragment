@@ -106,6 +106,7 @@ pub fn config(dir: &Path, hook: Option<PathBuf>) -> Config {
         owner_hint: Some(dir.join("owner.hint")),
         tls_root: dir.join("mnt/tls/root.pem"),
         open_hook: hook,
+        key_service: None,
     }
 }
 
@@ -125,6 +126,7 @@ pub fn service_with(dir: &Path, hook: Option<PathBuf>, volume: MakeVolume, heade
         boot: BootKey::generate().unwrap(),
         ccel: dir.join("CCEL"),
         hook_timeout: Duration::from_secs(10),
+        open_lock: Default::default(),
         config,
     }
 }
