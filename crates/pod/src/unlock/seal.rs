@@ -50,7 +50,7 @@ impl fmt::Display for SealError {
         match self {
             Self::Key => write!(f, "not a usable X25519 key"),
             Self::Length(n) => write!(f, "sealed key is {n} bytes; expected {CT_LEN}"),
-            Self::Open => write!(f, "sealed key does not open under this boot's key, kind and owner"),
+            Self::Open => write!(f, "sealed key does not open under this boot's key, for this purpose, owner and sender"),
         }
     }
 }
@@ -70,15 +70,38 @@ pub struct Sealed {
 /// Seal `key` to the boot key a verified quote vouched for. In place
 /// and detached, so the plaintext only ever sits in a zeroizing buffer.
 pub fn seal(boot_pubkey: &[u8; 32], kind: Kind, owner: &[u8; 32], key: &DiskKey) -> Result<Sealed, SealError> {
-    let pk = PublicKey::from_bytes(boot_pubkey).map_err(|_| SealError::Key)?;
+    seal_with(boot_pubkey, None, INFO, &aad(kind, owner, boot_pubkey), key)
+}
+
+pub fn open(boot: &BootKey, kind: Kind, owner: &[u8; 32], enc: &[u8; 32], ct: &[u8]) -> Result<DiskKey, SealError> {
+    open_with(boot, None, INFO, &aad(kind, owner, &boot.public()), enc, ct)
+}
+
+/// The seal under any info and aad. With `sender`, HPKE's auth mode: the
+/// recipient learns that whoever sealed it holds that X25519 secret.
+pub(crate) fn seal_with(
+    recipient: &[u8; 32],
+    sender: Option<&BootKey>,
+    info: &[u8],
+    aad: &[u8],
+    key: &DiskKey,
+) -> Result<Sealed, SealError> {
+    let pk = PublicKey::from_bytes(recipient).map_err(|_| SealError::Key)?;
+    let mode = match sender {
+        None => OpModeS::Base,
+        Some(s) => {
+            let spk = PublicKey::from_bytes(&s.public()).map_err(|_| SealError::Key)?;
+            OpModeS::Auth((s.secret().clone(), spk))
+        }
+    };
     let mut buf = Zeroizing::new(*key.as_bytes());
     // hpke refuses a low-order boot key (an all-zero shared secret).
     let (enc, tag) = hpke::single_shot_seal_in_place_detached::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256, _>(
-        &OpModeS::Base,
+        &mode,
         &pk,
-        INFO,
+        info,
         buf.as_mut(),
-        &aad(kind, owner, boot_pubkey),
+        aad,
         // UnwrapErr panics only if the OS has no randomness to give.
         &mut rand_core::UnwrapErr(rand_core::OsRng),
     )
@@ -89,21 +112,32 @@ pub fn seal(boot_pubkey: &[u8; 32], kind: Kind, owner: &[u8; 32], key: &DiskKey)
     Ok(Sealed { enc: enc_bytes, ct })
 }
 
-pub fn open(boot: &BootKey, kind: Kind, owner: &[u8; 32], enc: &[u8; 32], ct: &[u8]) -> Result<DiskKey, SealError> {
+pub(crate) fn open_with(
+    boot: &BootKey,
+    sender: Option<&[u8; 32]>,
+    info: &[u8],
+    aad: &[u8],
+    enc: &[u8; 32],
+    ct: &[u8],
+) -> Result<DiskKey, SealError> {
     if ct.len() != CT_LEN {
         return Err(SealError::Length(ct.len()));
     }
+    let mode = match sender {
+        None => OpModeR::Base,
+        Some(s) => OpModeR::Auth(PublicKey::from_bytes(s).map_err(|_| SealError::Key)?),
+    };
     let enc = EncappedKey::from_bytes(enc).map_err(|_| SealError::Key)?;
     let tag = AeadTag::<ChaCha20Poly1305>::from_bytes(&ct[DISK_KEY_LEN..]).map_err(|_| SealError::Open)?;
     let mut buf = Zeroizing::new([0u8; DISK_KEY_LEN]);
     buf.copy_from_slice(&ct[..DISK_KEY_LEN]);
     hpke::single_shot_open_in_place_detached::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
-        &OpModeR::Base,
+        &mode,
         boot.secret(),
         &enc,
-        INFO,
+        info,
         buf.as_mut(),
-        &aad(kind, owner, &boot.public()),
+        aad,
         &tag,
     )
     .map_err(|_| SealError::Open)?;

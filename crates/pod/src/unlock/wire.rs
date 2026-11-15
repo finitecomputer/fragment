@@ -62,7 +62,7 @@ pub fn nonce(text: &str) -> Result<[u8; NONCE_LEN], WireError> {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StatusWire {
+pub(crate) struct StatusWire {
     version: u32,
     state: State,
     boot_pubkey: String,
@@ -93,20 +93,27 @@ impl Status {
         }
     }
 
-    pub fn to_json(&self) -> Result<Vec<u8>, WireError> {
-        let wire = StatusWire {
+    pub(crate) fn to_wire(&self) -> StatusWire {
+        StatusWire {
             version: VERSION,
             state: self.state,
             boot_pubkey: hex::encode(self.boot_pubkey),
             owner: self.owner.map(hex::encode),
             tls_root: self.tls_root.map(hex::encode),
             quote: hex::encode(&self.quote),
-        };
-        serde_json::to_vec(&wire).map_err(|e| WireError::Json(e.to_string()))
+        }
+    }
+
+    pub fn to_json(&self) -> Result<Vec<u8>, WireError> {
+        serde_json::to_vec(&self.to_wire()).map_err(|e| WireError::Json(e.to_string()))
     }
 
     pub fn from_json(body: &[u8]) -> Result<Self, WireError> {
-        let w: StatusWire = json(body)?;
+        Self::from_wire(json(body)?)
+    }
+
+    /// Also the status a pod shows a key service (`keyd::delivery`).
+    pub(crate) fn from_wire(w: StatusWire) -> Result<Self, WireError> {
         if w.version != VERSION {
             return Err(WireError::Version(w.version));
         }

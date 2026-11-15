@@ -5,6 +5,10 @@
 //! - [`unlock`]: the lock-and-unlock protocol both sides link: the binding
 //!   a quote's REPORTDATA carries, the disk key sealed to one boot's key,
 //!   the owner's signed request, a release, and the JSON on the wire.
+//! - [`keyd`]: the key service protocol, beside the owner's own: the
+//!   deposit, approval and grant an owner signs for one boot of a key
+//!   service, and the delivery it seals to a boot of the pod. Without a
+//!   feature, because pod-init opens deliveries.
 //! - [`attest`]: the TDX quote layout, nonces, the GCE instance binding in
 //!   MR_OWNER, the CCEL event log and its replay, and the RTMR1 and RTMR2
 //!   a boot of an image must produce, computed from the image's bytes.
@@ -23,6 +27,7 @@
 //! unverified quote is only as good as the verification that follows.
 
 pub mod attest;
+pub mod keyd;
 pub mod unlock;
 
 #[cfg(feature = "verify")]
