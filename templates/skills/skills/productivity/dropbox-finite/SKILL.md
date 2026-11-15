@@ -90,9 +90,10 @@ $DBX request POST /2/files/list_revisions --json '{"path": "/Work/plan.pdf", "li
   `--mode update --rev <rev>` replaces only the revision you read (`get`
   shows its `rev`), so a change someone made since is not lost.
 - `download` saves to a local file (its name, here, by default) and never
-  replaces one unless you pass `--overwrite`. It saves only a whole file:
-  one cut short (`incomplete_answer`) saves nothing and leaves a local file
-  already there as it was.
+  replaces one unless you pass `--overwrite`, not even one that appears
+  while it downloads (`exists`). It saves only a whole file: one cut short
+  (`incomplete_answer`) saves nothing and leaves a local file already there
+  as it was.
 - `delete` removes a file, or a folder with all it holds. Dropbox keeps
   deleted files for a time (as long as the account's plan says), so the
   person can restore one on dropbox.com. Never call

@@ -1,4 +1,5 @@
-"""The Dropbox skill's helper: a body cut short is never taken for the whole.
+"""The Dropbox skill's helper: a body cut short is never taken for the whole,
+and a download writes no local file but its own and the one it was asked for.
 
 Each answer is a real http.client.HTTPResponse parsed from bytes, so the
 helper reads it as it would read Dropbox's. HTTPResponse.read(n) answers b""
@@ -24,6 +25,7 @@ from unittest import mock
 HELPER = Path(__file__).resolve().parents[3] / "templates/skills/skills/productivity/dropbox-finite/scripts/dropbox_api.py"
 FILE = b"0123456789"
 COMPLETE_BEFORE = b"the complete earlier copy"
+NOT_OURS = b"a file of someone else's"
 
 
 def load_helper():
@@ -92,14 +94,18 @@ def metadata(size):
 
 
 class Opener:
-    """The helper's opener, answering every request with `response`."""
+    """The helper's opener, answering every request with `response`, after
+    `meanwhile` (what else happens on the computer once the request is out)."""
 
-    def __init__(self, response):
+    def __init__(self, response, meanwhile=None):
         self.response = response
+        self.meanwhile = meanwhile
         self.requests = []
 
     def open(self, request, timeout):
         self.requests.append(request)
+        if self.meanwhile:
+            self.meanwhile()
         if self.response.status >= 400:
             # what urllib raises for a refusal: the answer, its body unread
             raise urllib.error.HTTPError(request.full_url, self.response.status, self.response.reason, self.response.headers, self.response)
@@ -116,10 +122,10 @@ class HelperCase(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def run_helper(self, response, *argv):
+    def run_helper(self, response, *argv, meanwhile=None):
         """The helper's exit status (0 where it returned), stdout and the
         JSON it printed on stderr, answering with `response`."""
-        self.helper.OPENER = Opener(response)
+        self.helper.OPENER = Opener(response, meanwhile)
         stdout, stderr = io.StringIO(), io.StringIO()
         status = 0
         with mock.patch.object(sys, "argv", ["dropbox_api.py", *argv]), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -130,8 +136,8 @@ class HelperCase(unittest.TestCase):
         error = json.loads(stderr.getvalue()) if stderr.getvalue() else None
         return status, stdout.getvalue(), error
 
-    def download(self, response, *flags):
-        return self.run_helper(response, "download", "/Work/plan.pdf", "--to", self.dest, *flags)
+    def download(self, response, *flags, meanwhile=None):
+        return self.run_helper(response, "download", "/Work/plan.pdf", "--to", self.dest, *flags, meanwhile=meanwhile)
 
     def keep_earlier_copy(self):
         Path(self.dest).write_bytes(COMPLETE_BEFORE)
@@ -143,9 +149,10 @@ class HelperCase(unittest.TestCase):
         self.assertEqual(error["error"], "incomplete_answer")
         self.assertTrue(error["hint"])
 
-    def assert_no_part_left(self):
-        """Nothing in the folder but the destination (where there is one)."""
-        self.assertEqual(set(os.listdir(self.dir.name)) - {"plan.pdf"}, set())
+    def assert_no_part_left(self, *kept):
+        """Nothing in the folder but the destination (where there is one) and
+        the files `kept`: no staged download left behind."""
+        self.assertEqual(set(os.listdir(self.dir.name)) - {"plan.pdf", *kept}, set())
 
 
 class Download(HelperCase):
@@ -221,6 +228,86 @@ class Download(HelperCase):
         self.assertEqual((status, stdout, error["error"]), (1, "", "exists"))
         self.assertEqual(self.helper.OPENER.requests, [])
         self.assertEqual(Path(self.dest).read_bytes(), COMPLETE_BEFORE)
+
+
+class LocalFiles(HelperCase):
+    """A download stages its body in a file of its own, and publishes it
+    without replacing a file it was not asked to replace."""
+
+    def setUp(self):
+        super().setUp()
+        self.part = self.dest + ".part"
+
+    def appear(self):
+        """Another program writes the destination while the download runs."""
+        Path(self.dest).write_bytes(NOT_OURS)
+
+    def test_a_file_named_like_its_part_is_kept_by_a_complete_download(self):
+        Path(self.part).write_bytes(NOT_OURS)
+        status, _stdout, error = self.download(answer(FILE, length=10, result=metadata(10)))
+        self.assertEqual((status, error), (0, None))
+        self.assertEqual(Path(self.dest).read_bytes(), FILE)
+        self.assertEqual(Path(self.part).read_bytes(), NOT_OURS)
+        self.assert_no_part_left("plan.pdf.part")
+
+    def test_a_file_named_like_its_part_is_kept_by_an_early_end(self):
+        Path(self.part).write_bytes(NOT_OURS)
+        self.assert_refused_cut_short(self.download(answer(b"abc", length=10, result=metadata(10))))
+        self.assertFalse(os.path.exists(self.dest))
+        self.assertEqual(Path(self.part).read_bytes(), NOT_OURS)
+        self.assert_no_part_left("plan.pdf.part")
+
+    def test_a_part_link_to_the_destination_leaves_it_whole_on_an_early_end(self):
+        self.keep_earlier_copy()
+        os.symlink(self.dest, self.part)
+        self.assert_refused_cut_short(self.download(answer(b"abc", length=10, result=metadata(10)), "--overwrite"))
+        self.assertEqual(Path(self.dest).read_bytes(), COMPLETE_BEFORE)
+        self.assertEqual(os.readlink(self.part), self.dest)
+        self.assert_no_part_left("plan.pdf.part")
+
+    def test_a_part_link_to_the_destination_is_no_route_for_a_complete_download(self):
+        self.keep_earlier_copy()
+        os.symlink(self.dest, self.part)
+        status, _stdout, error = self.download(answer(FILE, length=10, result=metadata(10)), "--overwrite")
+        self.assertEqual((status, error), (0, None))
+        self.assertFalse(os.path.islink(self.dest))
+        self.assertEqual(Path(self.dest).read_bytes(), FILE)
+        self.assertEqual(os.readlink(self.part), self.dest)
+        self.assert_no_part_left("plan.pdf.part")
+
+    def test_a_link_to_nowhere_at_the_destination_needs_overwrite(self):
+        elsewhere = os.path.join(self.dir.name, "elsewhere")
+        os.symlink(elsewhere, self.dest)
+        status, _stdout, error = self.download(answer(FILE, length=10, result=metadata(10)))
+        self.assertEqual((status, error["error"]), (1, "exists"))
+        self.assertEqual(self.helper.OPENER.requests, [])
+        self.assertEqual(os.readlink(self.dest), elsewhere)
+
+    def test_a_destination_that_appears_meanwhile_is_kept(self):
+        status, stdout, error = self.download(answer(FILE, length=10, result=metadata(10)), meanwhile=self.appear)
+        self.assertEqual((status, stdout, error["error"]), (1, "", "exists"))
+        self.assertEqual(Path(self.dest).read_bytes(), NOT_OURS)
+        self.assert_no_part_left()
+
+    def test_a_link_that_appears_meanwhile_is_kept(self):
+        elsewhere = os.path.join(self.dir.name, "elsewhere")
+        status, _stdout, error = self.download(answer(FILE, length=10, result=metadata(10)), meanwhile=lambda: os.symlink(elsewhere, self.dest))
+        self.assertEqual((status, error["error"]), (1, "exists"))
+        self.assertEqual(os.readlink(self.dest), elsewhere)
+        self.assert_no_part_left()
+
+    def test_overwrite_replaces_a_destination_that_appears_meanwhile(self):
+        status, _stdout, error = self.download(answer(FILE, length=10, result=metadata(10)), "--overwrite", meanwhile=self.appear)
+        self.assertEqual((status, error), (0, None))
+        self.assertEqual(Path(self.dest).read_bytes(), FILE)
+        self.assert_no_part_left()
+
+    def test_a_folder_that_is_gone_saves_nothing(self):
+        to = os.path.join(self.dir.name, "gone", "plan.pdf")
+        status, stdout, error = self.run_helper(answer(FILE, length=10, result=metadata(10)), "download", "/Work/plan.pdf", "--to", to)
+        self.assertEqual((status, stdout, error["error"]), (1, "", "download_failed"))
+        self.assertEqual(self.helper.OPENER.requests, [])
+        self.assert_no_part_left()
 
 
 class Answers(HelperCase):

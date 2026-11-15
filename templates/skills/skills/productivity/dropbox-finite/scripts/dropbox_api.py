@@ -36,10 +36,12 @@ Environment:
 """
 
 import argparse
+import contextlib
 import http.client
 import json
 import os
 import re
+import secrets
 import sys
 import urllib.error
 import urllib.request
@@ -294,7 +296,8 @@ def local_destination(path, to, overwrite):
     if (to is None or into) and path.startswith("id:") and "/" not in path:
         raise DropboxError(0, "bad_destination", "an id names no local file: pass --to and a file's name")
     dest = os.path.join(to, name) if into else (to or name)
-    if os.path.exists(dest) and not overwrite:
+    # lexists: a link there is a file there, even one that points nowhere
+    if os.path.lexists(dest) and not overwrite:
         raise DropboxError(0, "exists", f"{dest} exists already: pass --overwrite to replace it, or --to another path")
     return dest
 
@@ -303,14 +306,46 @@ def download(args):
     path = dropbox_path(args.path)
     dest = local_destination(path, args.to, args.overwrite)
     h = headers({"Dropbox-API-Arg": arg_header({"path": path})})
-    part = dest + ".part"
-    with send(urllib.request.Request(CONTENT + "/2/files/download", headers=h, method="POST"), CONTENT_TIMEOUT_S) as response:
-        result = api_result(response)
-        size = save(response, part, result.get("size"))
-    # only a whole file gets here: one cut short has failed in save, and
-    # whatever was at `dest` is as it was
-    os.replace(part, dest)
+    staged, f = stage(dest)
+    try:
+        with f:
+            with send(urllib.request.Request(CONTENT + "/2/files/download", headers=h, method="POST"), CONTENT_TIMEOUT_S) as response:
+                result = api_result(response)
+                size = save(response, f, result.get("size"))
+        # only a whole file gets here: one cut short has failed in save
+        publish(staged, dest, args.overwrite)
+    finally:
+        # the download's own file alone: published, it is gone (renamed) or
+        # a second name for `dest` (linked)
+        with contextlib.suppress(OSError):
+            os.remove(staged)
     out({"saved_to": dest, "bytes": size, "metadata": brief(result)})
+
+
+def stage(dest):
+    """A new file beside `dest` to hold the download until all of it is
+    here, and its name: one of its own, created exclusively, so it is never
+    a file already there, nor a link to one."""
+    staged = os.path.join(os.path.dirname(dest) or ".", f".dropbox-download-{secrets.token_hex(8)}")
+    try:
+        return staged, open(staged, "xb")
+    except OSError as exc:
+        raise DropboxError(0, "download_failed", f"{dest}: {exc.strerror or exc}") from None
+
+
+def publish(staged, dest, overwrite):
+    """`staged`, whole, becomes `dest` in one step. Unless it may be
+    overwritten, a file that appeared there during the download is kept: a
+    hard link, unlike a rename, fails on a name already taken."""
+    try:
+        if overwrite:
+            os.replace(staged, dest)
+        else:
+            os.link(staged, dest)
+    except FileExistsError:
+        raise DropboxError(0, "exists", f"{dest} appeared during the download, and is kept: pass --overwrite to replace it, or --to another path") from None
+    except OSError as exc:
+        raise DropboxError(0, "download_failed", f"{dest}: {exc.strerror or exc}") from None
 
 
 def api_result(response):
@@ -323,25 +358,21 @@ def api_result(response):
     return result if isinstance(result, dict) else {}
 
 
-def save(response, part, size):
-    """The answer's body written to `part`, its size, once all of it has
-    arrived (`size`: the file's, as Dropbox states it); nothing left of it
-    where the download fails."""
+def save(response, f, size):
+    """The answer's body written to `f` and to disk, its size, once all of
+    it has arrived (`size`: the file's, as Dropbox states it)."""
     if isinstance(size, bool) or not isinstance(size, int):
         size = None
+    saved = 0
     try:
-        saved = 0
-        with open(part, "wb") as f:
-            for chunk in body(response, size):
-                f.write(chunk)
-                saved += len(chunk)
-        return saved
-    except BaseException as exc:
-        if os.path.exists(part):
-            os.remove(part)
-        if isinstance(exc, OSError):
-            raise DropboxError(0, "download_failed", str(exc)) from None
-        raise
+        for chunk in body(response, size):
+            f.write(chunk)
+            saved += len(chunk)
+        f.flush()
+        os.fsync(f.fileno())
+    except OSError as exc:
+        raise DropboxError(0, "download_failed", f"the download could not be saved: {exc.strerror or exc}") from None
+    return saved
 
 
 def write_mode(args):
