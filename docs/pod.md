@@ -23,15 +23,21 @@ On master:
 - `crates/pod-init` (`fragment-pod-init`, binary `pod-init`): the service
   in the TD (below).
 
-- `fragment pod status|verify|init|unlock <pod>` (`cli/src/pod`, the CLI's
-  default `pod` feature, which the computer images' CLI is built without):
-  the owner's command line over `owner`, with the CLI's own key as the
-  owner (cli/GUIDE.md, "Your pod").
+- `crates/pod-keyd` (`fragment-pod-keyd`, binary `pod-keyd`): a key
+  service, in a TD of its own, that gives a pod its disk key after a
+  restart on the owner's terms (below, "A key service"). The protocol is
+  `fragment-pod`'s `keyd`, without a feature, since pod-init opens what it
+  delivers.
+
+- `fragment pod status|verify|init|unlock <pod>` and `fragment pod keyd
+  status|deposit|approve` (`cli/src/pod`, the CLI's default `pod` feature,
+  which the computer images' CLI is built without): the owner's command
+  line over `owner`, with the CLI's own key as the owner (cli/GUIDE.md,
+  "Your pod").
 - `pod-image/`: the measured image's definition (below, "The image"),
   and `cargo xtask pod` (`xtask/src/pod/`): its build, measurement and
   VMs.
 
-Not yet on master: a key service. It is a thin layer over the library.
 
 ## Lock and unlock
 
@@ -144,6 +150,10 @@ sudo pod-init --config /etc/pod-init.json [--bind 0.0.0.0] [--port 7000] [--conf
  "open_hook": "/usr/local/bin/pod-opened"}
 ```
 
+With `"key_service": "<host:port>"`, pod-init asks that key service for
+the disk key while it is locked (below, "A key service"); the owner's
+`/init` and `/unlock` work throughout.
+
 Without `owner_hint`, the hint is kept in the volume's LUKS2 header
 (token 7), for an image whose root is read-only and whose /var is memory.
 It needs root, `cryptsetup`, `mkfs.ext4`, `mount` and `umount` on PATH.
@@ -175,6 +185,142 @@ docker run --rm --privileged -v "$PWD:/src:ro" -w /src rust:1.99-alpine sh -c \
 The measured image's binary: `cargo build --release -p fragment-pod-init
 --bin pod-init --target x86_64-unknown-linux-musl`, with
 `RUSTFLAGS="-C linker=rust-lld"` when the host is not x86_64 Linux.
+
+## A key service
+
+After a restart a pod is locked until its owner unlocks it. A key service
+(`crates/pod-keyd`, binary `pod-keyd`) does it for the owner, on the
+owner's terms: it holds the pod's disk key in memory, and gives it to a
+boot of that pod only when the boot's quote passes the checks the owner's
+CLI runs (`checks`, the same code), against releases the owner approved.
+It acts only on statements signed by the owner's key; nothing Finite or
+the operator says changes what it gives out.
+
+It runs in a TD of its own, attests itself as a pod does, and holds
+nothing at start but the names of the owners it serves. Its operator
+gives it those (`--owner`, each a public key), and it takes a deposit
+from no one else: a signature shows only that a depositor holds a key,
+and anyone can make keys. The list decides who may use the service and
+nothing about what a key is released to. It is not attested, and adding
+an owner is a restart (debt: "A pod's key service serves only the owners
+named when it starts"). A restarted key service holds no record, and its
+pods wait for their owners to deposit again or unlock them by hand (debt:
+"A pod's key service holds its keys in memory only").
+
+| Route | Answer |
+|---|---|
+| `GET /status?nonce=<64 hex>` | `{"version":1,"boot_pubkey","quote"}`: a quote over SHA-512(`"pod-keyd-binding-v1\0"` ‖ nonce ‖ boot key) |
+| `GET /eventlog`, `GET /healthz` | as pod-init's |
+| `POST /deposit` | a deposit from an owner the operator named; the record's public view |
+| `POST /approve` | an owner's approval of one more release; the record's view |
+| `GET /nonce` | `{"nonce"}`: for one `/release`, within a minute. Nothing is kept for it |
+| `POST /release` | a pod's status bound to that nonce; a delivery |
+| `GET /pods/<owner hex>` | the record's public view: its id, instance, TCB statuses, `min_seq`, approvals and last release; never a key |
+
+The statements (`keyd`). Each is signed with BIP-340 by the owner over a
+fixed binary encoding (`keyd::encode`), never over JSON, and names the
+key service's boot key from a quote the owner checked, so none applies to
+another boot of it:
+
+- **Deposit** (`keyd::deposit`): the disk key sealed with HPKE base mode
+  (info `pod-keyd-deposit-v1`, aad owner ‖ key service boot key) to that
+  boot key; the pod's Google instance, the TCB statuses it may have, the
+  approvals and `min_seq`; the id of the record it replaces (none if none:
+  a deposit is taken only over the record it names, so an older one
+  replayed cannot put back what a newer one changed); the **grant**,
+  SHA-256(`"pod-keyd-grant-v1\0"` ‖ owner ‖ boot key) signed; and the
+  signature over SHA-256(`"pod-keyd-deposit-v1\0"` ‖ boot key ‖ owner ‖
+  all of that), which is the record's id. The record a deposit makes
+  takes the `min_seq` of the one it replaces if that is higher: within a
+  boot an owner's `min_seq` never goes down. A record keeps its id while
+  each release it serves raises its `min_seq`, so a replacement signed
+  before a release and arriving after it would otherwise bring the older
+  one back.
+- **Approval** (`keyd::approve`): one release (`unlock::release`'s shape)
+  with an optional `not_before` and `expires` (unix seconds), signed over
+  SHA-256(`"pod-keyd-approve-v1\0"` ‖ boot key ‖ owner ‖ record id ‖ the
+  approval). Refused below the record's `min_seq`, with a seq the record
+  already has (so a replay adds nothing), past 32 approvals, for a record
+  that is gone, or signed by anyone but the record's owner.
+- **Delivery** (`keyd::delivery`): the disk key sealed in HPKE **auth**
+  mode from the key service's boot key (info `pod-keyd-release-v1`, aad
+  owner ‖ pod boot key ‖ key service boot key) to the pod's boot key, with
+  the grant. A pod uses it only if the owner it names signed the grant
+  for the boot key that sealed it, which exists only inside a key service
+  boot the owner attested.
+
+`/release`, in this order: the nonce (one of this boot's, made in the
+last minute, and not one a release was already made for), the record
+of the owner the pod's status names, then the checks, refusing at the
+first that fails: `quote` (the chain, and REPORTDATA is the pod's binding
+of its status and our nonce), `release` (an approval with the quote's
+registers, open now: `not_before <= now < expires`, and not below
+`min_seq`), `platform` (debug off, TCB UpToDate or one the deposit
+allowed), `google_instance` (the record's), and the pod's state is
+`locked`. Then the nonce is spent and `min_seq` is raised to the release
+matched, before the key is sealed, as the owner's CLI saves its floor
+before it sends a key: an older release is refused from then on, even if
+the delivery is lost.
+
+A nonce is the time it was made, eight random bytes and 16 bytes of
+HMAC-SHA256 over both (domain `pod-keyd-nonce-v1`) under a key made when
+the service starts. That time is the latest the service has read from
+its clock, so it never goes back: a nonce whose minute is over stays over
+when the host moves the clock back. `/nonce` keeps nothing, so asking for
+nonces takes room from no one. A refused `/release` keeps nothing either.
+What is kept is the nonces releases were made for, by owner, for their
+minute: 16 an owner, added to only by a boot of that owner's pod that
+passed every check. Past that the owner's pod is told `too_many_releases`
+and asks again; no other owner is affected.
+
+Refusal codes: `bad_request`, `bad_field`, `bad_nonce`, `no_owner` (400);
+`bad_signature`, `bad_grant` (401); `bad_seal`, `unknown_nonce`,
+`not_owner`, `not_admitted`, and the checks `quote`, `release`, `not_yet_valid`,
+`expired`, `rollback`, `platform`, `google_instance` (403);
+`unknown_owner`, `unknown_record`, `not_found` (404);
+`method_not_allowed` (405); `stale_record`, `duplicate_seq`,
+`below_min_seq`, `too_many_approvals`, `wrong_state` (409); `too_large`
+(413); `too_many_releases`, `too_many_records` (503); `quote_failed`,
+`internal` (500). Limits: 1,024 owners, a record each, 32 approvals a
+record, 16 releases an owner in a minute, bodies of 64 KiB (a deposit),
+4 KiB (an approval) and 132 KiB (a release, its quote in hex).
+
+```sh
+pod-keyd --owner <64 hex> [--owner <64 hex>]... [--bind 0.0.0.0] [--port 7100] [--configfs <dir>] [--ccel <file>]
+```
+
+**pod-init's side** (`ask`): with `key_service` set, while locked and a
+hint names an owner, a thread asks (a nonce, its status for it,
+`/release`) with backoff from 2 s to 5 min, and opens the volume with the
+answer through the same path `/unlock` takes, under one lock, owner check
+inside the volume included. Whichever opens first wins; the other gets
+`wrong_state`. The address is untrusted (debt: "A pod learns its key
+service's address from its config"): a wrong or hostile key service
+learns only what `/status` gives anyone and can only fail the unlock.
+
+**The owner's side** (`owner::keyd`; `fragment pod keyd`, cli/GUIDE.md):
+the key service is held to `keyd-policy.json` in the pod's folder,
+policy.json's shape naming its own releases and instance, and four checks
+on a fresh quote (`quote`, `release`, `platform`, `google_instance`) must
+pass before anything is signed for it. A deposit carries policy.json's
+instance, TCB statuses and releases at or above the floor as approvals,
+and the floor (state.json's) as `min_seq`. The floor signed is the
+owner's machine's alone. A record's view is plain HTTP that no one
+vouches for: the id of the record to replace is taken from it, and a
+wrong one only gets the deposit refused; its `min_seq` is not, since
+anyone on the path could raise it and a floor signed that high would
+hold. The key service keeps its own higher `min_seq` itself (above).
+
+The key service decides windows and nonces by the TD's clock, which the
+host sets (debt: "A pod's key service trusts the host's clock").
+
+`pod-keyd` links `fragment-pod` with `verify` (for the checks, and through
+them dcap-qvl and the blocking rustls client that fetches Intel's
+collateral and Google's registry), so it does not build static for musl
+without a C toolchain (ring), unlike pod-init. It takes pod-init's library
+for its quoter, HTTP server and event log. It serves one request at a
+time: a release fetches collateral and the registry (cached while good),
+so a slow one delays the next.
 
 ## The image
 
@@ -315,3 +461,13 @@ image's UKI and are ignored unless asked for, with `POD_IMAGE_A_UKI` or
 `POD_IMAGE_D_UKI` naming it (checked against testdata's `sha256sums`). The
 recorded quotes carry a plain nonce, so no offline test covers the chain
 and the binding together.
+
+`cargo test -p fragment-pod-keyd` runs the key service over a fake
+attestor (playing Intel and Google for a pod's TD and its own) and a
+clock it moves, beside real pod-init services with their fake volume:
+each statement valid, invalid, replayed and after a restart, a refusal at
+each check, an owner the operator did not name, a replacement deposit
+held back past a release, nonces asked for and left unused, and pod-init
+asking it over loopback and opening.
+`crates/pod-init/tests/ask.rs` covers a key service absent, broken or
+hostile; `cli/src/pod/keyd_tests.rs` the owner's commands against both.

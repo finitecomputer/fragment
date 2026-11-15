@@ -74,6 +74,9 @@ fragment-fakes = { path = "../crates/fakes" }
 # `fragment pod` against a real pod-init service in process, with its
 # fake volume and quoter (cli/src/pod/tests.rs)
 fragment-pod-init = { path = "../crates/pod-init" }
+# `fragment pod keyd` against a real pod-keyd in process, with its tests'
+# fake attestor and clock (cli/src/pod/keyd_tests.rs)
+fragment-pod-keyd = { path = "../crates/pod-keyd" }
 # a port bound and never listened on (api.rs's tests: a host never reached),
 # which std's TcpListener cannot hold; already in the lock, through tokio
 socket2 = "=0.6.5"

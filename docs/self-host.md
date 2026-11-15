@@ -622,13 +622,19 @@ pod image carries a pinned fork of the platform". `cargo xtask pod image`
 and `vm` were ported from the proof of concept's scripts and have not run
 against a build host or Compute Engine since.
 
-**Master's path is unchanged:** a pod is an image, `pod-init` and four
-commands of the CLI's, which the computer images' CLI is built without.
+**Master's path is unchanged:** a pod is an image, `pod-init`, a key
+service beside it (`pod-keyd`) and the CLI's `pod` commands, which the
+computer images' CLI is built without.
 Nothing in the cell, the dev stack or the e2e branches on it.
+
+A key service (`crates/pod-keyd`, `fragment pod keyd`; docs/pod.md, "A
+key service") can unlock a pod after a restart on its owner's terms; no
+image carries it or names it yet.
 
 Its debts (docs/technical-debt-ledger.md): the pinned platform, the
 image's shell helpers, RTMR0 taken as observed, a blank pod's first
-settings, and a volume rolled back unseen.
+settings, a volume rolled back unseen, and the key service's memory-only
+state, its clock and how a pod learns its address.
 
 ## Mail
 

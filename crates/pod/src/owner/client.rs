@@ -15,9 +15,12 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(60);
 /// Formatting and mkfs at init, then the open hook (up to 300 s).
 const KEY_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// The pod said no: its stable code and detail.
+/// The pod (or a key service, `owner::keyd`) said no: its stable code
+/// and detail.
 #[derive(Debug)]
 pub struct Refused {
+    /// "pod" or "key service".
+    pub peer: &'static str,
     pub route: &'static str,
     pub status: u16,
     pub body: ErrorBody,
@@ -25,7 +28,7 @@ pub struct Refused {
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the pod refused {} (HTTP {}): {}: {}", self.route, self.status, self.body.error, self.body.detail)
+        write!(f, "the {} refused {} (HTTP {}): {}: {}", self.peer, self.route, self.status, self.body.error, self.body.detail)
     }
 }
 
@@ -36,7 +39,7 @@ pub struct Pod {
     client: reqwest::blocking::Client,
 }
 
-fn read_body(resp: reqwest::blocking::Response) -> Result<(u16, Vec<u8>)> {
+pub(super) fn read_body(resp: reqwest::blocking::Response) -> Result<(u16, Vec<u8>)> {
     let status = resp.status().as_u16();
     let mut body = Vec::new();
     resp.take(MAX_RESPONSE + 1).read_to_end(&mut body)?;
@@ -46,9 +49,9 @@ fn read_body(resp: reqwest::blocking::Response) -> Result<(u16, Vec<u8>)> {
     Ok((status, body))
 }
 
-fn refused(route: &'static str, status: u16, body: &[u8]) -> anyhow::Error {
+pub(super) fn refused(peer: &'static str, route: &'static str, status: u16, body: &[u8]) -> anyhow::Error {
     match serde_json::from_slice::<ErrorBody>(body) {
-        Ok(body) => anyhow!(Refused { route, status, body }),
+        Ok(body) => anyhow!(Refused { peer, route, status, body }),
         Err(_) => anyhow!("{route}: HTTP {status}: {}", String::from_utf8_lossy(body).trim()),
     }
 }
@@ -68,7 +71,7 @@ impl Pod {
         let resp = self.client.get(&url).timeout(STATUS_TIMEOUT).send().with_context(|| format!("GET {url}"))?;
         let (status, body) = read_body(resp)?;
         if status != 200 {
-            return Err(refused(route, status, &body));
+            return Err(refused("pod", route, status, &body));
         }
         Ok(body)
     }
@@ -98,7 +101,7 @@ impl Pod {
             .with_context(|| format!("POST {url}"))?;
         let (status, body) = read_body(resp)?;
         if status != 200 {
-            return Err(refused(route, status, &body));
+            return Err(refused("pod", route, status, &body));
         }
         serde_json::from_slice(&body).with_context(|| format!("{route} answered 200 with {:?}", String::from_utf8_lossy(&body)))
     }

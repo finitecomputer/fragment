@@ -1170,6 +1170,9 @@ fragment pod status <pod>                # its state and the five checks; change
 fragment pod verify <pod> [--tls H:P --sni NAME]   # the checks, then its TLS root (and a server's leaf) against the attested one
 fragment pod init <pod>                  # claim a blank pod: a new disk key, printed once as the recovery code
 fragment pod unlock <pod>                # after a restart or upgrade: the saved disk key
+fragment pod keyd status <pod> --keyd <ks>    # a key service's four checks, and the record it holds for you
+fragment pod keyd deposit <pod> --keyd <ks>   # check it, then deposit the disk key: it unlocks the pod after a restart
+fragment pod keyd approve <pod> --keyd <ks> --release <file> [--delay 2d] [--expires 30d]   # one more release it may unlock
 ```
 
 `<pod>` is `host[:port]`, a DNS name or an IPv4 address (port 7000,
@@ -1203,6 +1206,7 @@ Where a pod's files are: a folder per pod, by host, beside the config
 <config>/pods/<host>/state.json         # {"last_unlocked_seq": N}: the floor; an older release is refused (0600)
 <config>/pods/<host>/state.json.lock    # empty: held while the floor is written
 <config>/pods/<host>/disk.key           # the disk key: 128 hex and a newline (0600, never overwritten)
+<config>/pods/<host>/keyd-policy.json   # yours, for `pod keyd`: the key service's releases and instance
 ```
 
 The folder is made 0700. `<host>` is lower case, with no port. The floor
@@ -1227,6 +1231,50 @@ policy as `policy.json`, its `state.json`, and its owner key as the
 config's `secret_key` (64 hex). That replaces this machine's key, so a
 config already paired with a platform keeps its own: give the pod's key
 a config of its own under another `HOME` (on Linux, `XDG_CONFIG_HOME`).
+
+### A key service
+
+Unlocking by hand after every restart means the pod is down until you
+are at this machine. A key service (`pod-keyd`, in a confidential VM of
+its own; docs/pod.md, "A key service") can do it for you: it holds the
+pod's disk key in memory, and gives it to a boot of the pod only when the
+boot passes the same checks this CLI runs, against releases you approved.
+It acts only on what this key signed.
+
+`<ks>` is the key service's `host[:port]` (port 7100, pod-keyd's, if
+none). Before anything is signed for it, the key service must pass four
+checks on a fresh attestation, against `keyd-policy.json` beside the
+pod's policy (policy.json's format, naming the key service's own releases
+and Google instance): `quote`, `release`, `platform`, `google_instance`.
+
+A key service takes deposits only from the owners its operator named
+when it started (`pod-keyd --owner <key>`). Give them your key in hex:
+`ownerHex` in `fragment pod status <pod> --json`. From anyone else a
+deposit is refused (`not_admitted`).
+
+- `deposit` sends the disk key sealed to that boot of the key service,
+  with your policy's instance and its releases at or above your floor as
+  the approved ones, and the floor as the oldest release it may serve.
+  It replaces what the key service held for you, except the floor if
+  the key service's was higher: it raises its own with each release it
+  serves, and a deposit does not lower it. The pod needs `key_service`
+  set in pod-init's config to ask it.
+- `approve` adds one release, from a release file (one release as
+  policy.json lists them, as `cargo xtask pod measure` writes them), for
+  the key service to serve after `--delay` and until `--expires` (from
+  now: `<n>s`, `m`, `h` or `d`). Your own policy.json is not changed:
+  add the release there too to unlock it by hand.
+- `status` shows the checks and the record it holds for you: its id,
+  instance, approvals, `min seq` (each release it serves raises it; an
+  older one is refused) and when it last gave the pod its key. The record
+  is what the key service says, over plain HTTP: a lie there only makes
+  the next statement refused.
+
+The key service keeps everything in memory: after it restarts it holds
+nothing, `status` says so, and you deposit again; until then the pod
+waits for you, as before. Exit codes and `--json` as above; a refusal is
+`pod_refused`, naming the key service's check or its refusal (such as
+`below_min_seq`).
 
 ## Rules of the road
 
@@ -1317,6 +1365,8 @@ fragment operator restart-old <old> [--key-file F]   # the old agent started aga
 fragment operator retire <old> [--key-file F]   # a held move's old agent retired as migrated: the move done
 fragment pod status|init|unlock <pod>    # your pod (host[:port]): its checks, claim it, unlock it
 fragment pod verify <pod> [--tls H:P --sni NAME]
+fragment pod keyd status|deposit <pod> --keyd <ks>   # a key service: its checks and your record; deposit the disk key
+fragment pod keyd approve <pod> --keyd <ks> --release <file> [--delay D] [--expires D]
 ```
 
 `fragment operator …` is the deployment's operators' alone: each signs
@@ -1349,7 +1399,7 @@ its wording:
 - `storage_full`: the app's database is at its cap; the change rolled back (507)
 - `unavailable`: the host, or a service behind it, did not answer; retrying is safe
 - `outcome_unknown`: a write's answer was lost; it may have been applied
-- `pod_refused`: a pod failed a check or refused its key (`fragment pod`); the message names which
+- `pod_refused`: a pod or a key service failed a check, or refused what it was sent (`fragment pod`); the message names which
 - `server_error`: the host failed (500), or the CLI did
 
 Exit codes: 0 ok, 1 failure, 2 usage. Without `--json`, a refusal

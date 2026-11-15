@@ -3,7 +3,7 @@
 //! quoter). Quotes are fake: five bytes naming the TD, then REPORTDATA.
 //! The fake attestor plays Intel and Google: it "verifies" a quote of a
 //! TD it knows, with the registers, instance and platform the test set.
-//! Also included by pod-cli's tests/keyd.rs, which uses only part of it.
+//! Also included by the CLI's src/pod/keyd_tests.rs, which uses only part of it.
 #![allow(dead_code)]
 
 #[path = "../../../pod-init/tests/common/mod.rs"]

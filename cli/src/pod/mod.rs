@@ -1,5 +1,6 @@
 // `fragment pod status|verify|init|unlock <pod>`: the owner's side of a
-// pod (docs/pod.md), a thin command line over fragment_pod's `owner`.
+// pod (docs/pod.md), a thin command line over fragment_pod's `owner`;
+// `fragment pod keyd …`, a key service for it (keyd.rs).
 // The pod's owner is this CLI's own key (the config's `secret_key`, the
 // one `fragment login` makes): no second key. What the owner keeps per
 // pod is a folder beside the config, `pods/<host>/` (`pod_dir`):
@@ -10,6 +11,14 @@
 // check failed or the pod refused (`pod_refused`, naming which), or the
 // pod did not answer (`unavailable`); 2 for a usage mistake.
 
+mod keyd;
+// The key service's test harness, which includes pod-init's: one copy
+// for both test files, so each module is loaded once.
+#[cfg(test)]
+#[path = "../../../crates/pod-keyd/tests/common/mod.rs"]
+mod harness;
+#[cfg(test)]
+mod keyd_tests;
 mod output;
 #[cfg(test)]
 mod tests;
@@ -68,6 +77,13 @@ pub enum PodCmd {
     /// check, the key sealed to this boot, then a fresh attestation that
     /// it is open and yours
     Unlock { pod: String },
+    /// A key service (pod-keyd) that unlocks this pod after a restart on
+    /// your terms: check it and deposit the disk key, approve a further
+    /// release, or show its checks and the record it holds for you
+    Keyd {
+        #[command(subcommand)]
+        cmd: keyd::KeydCmd,
+    },
 }
 
 /// A pod's address: the host names its folder, the port does not (the
@@ -81,9 +97,14 @@ pub struct Address {
 impl Address {
     /// `host[:port]`: a DNS name or an IPv4 address, lower-cased.
     pub fn parse(text: &str) -> Result<Address> {
+        Self::parse_port(text, DEFAULT_PORT)
+    }
+
+    /// As `parse`, with `default` when the text names no port.
+    pub fn parse_port(text: &str, default: u16) -> Result<Address> {
         let (host, port) = match text.rsplit_once(':') {
             Some((h, p)) => (h, p.parse::<u16>().ok().filter(|p| *p != 0).ok_or_else(|| usage(format!("{text:?}: the port must be 1 to 65535")))?),
-            None => (text, DEFAULT_PORT),
+            None => (text, default),
         };
         let host = host.to_ascii_lowercase();
         let shaped = (1..=HOST_MAX).contains(&host.len())
@@ -91,7 +112,7 @@ impl Address {
             && !host.starts_with(['.', '-'])
             && !host.contains("..");
         if !shaped {
-            return Err(usage(format!("{text:?} is not a pod: host[:port], a DNS name or an IPv4 address (port {DEFAULT_PORT} if none)")));
+            return Err(usage(format!("{text:?} is not a host: host[:port], a DNS name or an IPv4 address (port {default} if none)")));
         }
         Ok(Address { host, port })
     }
@@ -211,6 +232,7 @@ pub fn run(ctx: &Ctx<'_>, cmd: PodCmd, out: &mut dyn Write) -> Result<Report> {
         PodCmd::Verify { pod, tls, sni } => verify(ctx, &Address::parse(&pod)?, tls.as_deref().zip(sni.as_deref()), out),
         PodCmd::Init { pod } => key_request(ctx, &Address::parse(&pod)?, Kind::Init, out),
         PodCmd::Unlock { pod } => key_request(ctx, &Address::parse(&pod)?, Kind::Unlock, out),
+        PodCmd::Keyd { cmd } => keyd::run(ctx, cmd, out),
     }
 }
 

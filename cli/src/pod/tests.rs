@@ -1,5 +1,5 @@
 // `fragment pod` against a real pod-init service on loopback, with
-// pod-init's fake volume and quoter (its tests' own, included here). The
+// pod-init's fake volume and quoter (its tests' own, through mod.rs's `harness`). The
 // fake quote is "QUOTE" and REPORTDATA, unsigned, so the chain and the
 // host registry come from a fake `Attestor` that vouches for it with the
 // registers and instance a test sets: what is proven here is the
@@ -12,8 +12,7 @@
 // restart (the pod between init and unlock, and the CLI: each command
 // reads its files afresh).
 
-#[path = "../../../crates/pod-init/tests/common/mod.rs"]
-mod common;
+use super::harness::pod as common;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
