@@ -270,6 +270,89 @@ class Download(unittest.TestCase):
         self.assert_nothing_changes(lambda: unframed(BODY[:3]))
 
 
+def comments(n):
+    return [{"type": "comment", "id": str(i), "message": f"comment {i}"} for i in range(n)]
+
+
+class CommentPages(unittest.TestCase):
+    """`comments list` answers a page of a file's comments, never silently
+    fewer than the file has: Box's page metadata, and `next_offset` (null
+    at the end)."""
+
+    def setUp(self):
+        self.file_comments = comments(101)
+        self.states_total = True
+        self.asked = []
+        patcher = mock.patch.object(box, "call", self.call)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def call(self, method, path, body=None, query=None):
+        """Box's GET /2.0/files/456/comments, paged by offset."""
+        assert (method, path, body) == ("GET", "/2.0/files/456/comments", None), (method, path, body)
+        assert query["fields"] == box.COMMENT_FIELDS
+        offset, limit = query.get("offset", 0), query["limit"]
+        self.asked.append((offset, limit))
+        page = {"offset": offset, "limit": limit, "entries": self.file_comments[offset:offset + limit]}
+        if self.states_total:
+            page["total_count"] = len(self.file_comments)
+        return page
+
+    def list(self, *flags):
+        args = box.parser().parse_args(["comments", "list", "456", *flags])
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            args.func(args)
+        return json.loads(printed.getvalue())
+
+    def test_the_first_page_of_a_101_comment_file_says_where_the_next_begins(self):
+        page = self.list()
+        self.assertEqual(self.asked, [(0, 100)])
+        self.assertIsInstance(page, dict, f"a page and its metadata, not a bare list of {len(page)}")
+        self.assertEqual(page["entries"], self.file_comments[:100])
+        self.assertEqual((page["total_count"], page["offset"], page["limit"], page["next_offset"]), (101, 0, 100, 100))
+
+    def test_the_last_page_ends_the_list(self):
+        page = self.list("--offset", "100")
+        self.assertEqual(self.asked, [(100, 100)])
+        self.assertEqual(page["entries"], self.file_comments[100:])
+        self.assertEqual((page["total_count"], page["offset"], page["next_offset"]), (101, 100, None))
+
+    def test_following_next_offset_reads_every_comment_once(self):
+        seen, flags = [], []
+        while True:
+            page = self.list("--limit", "30", *flags)
+            seen += page["entries"]
+            if page["next_offset"] is None:
+                break
+            flags = ["--offset", str(page["next_offset"])]
+        self.assertEqual(seen, self.file_comments)
+        self.assertEqual(self.asked, [(0, 30), (30, 30), (60, 30), (90, 30)])
+
+    def test_a_file_of_exactly_one_page_has_no_next_page(self):
+        self.file_comments = comments(100)
+        page = self.list()
+        self.assertIsInstance(page, dict, f"a page and its metadata, not a bare list of {len(page)}")
+        self.assertIsNone(page["next_offset"])
+
+    def test_a_file_with_no_comments_has_no_next_page(self):
+        self.file_comments = []
+        page = self.list()
+        self.assertIsInstance(page, dict, f"a page and its metadata, not a bare list of {len(page)}")
+        self.assertEqual((page["entries"], page["total_count"], page["next_offset"]), ([], 0, None))
+
+    def test_with_no_total_stated_a_page_asks_again_until_one_comes_back_empty(self):
+        self.states_total = False
+        page = self.list("--offset", "100")
+        self.assertEqual((len(page["entries"]), page["total_count"], page["next_offset"]), (1, None, 101))
+        self.assertIsNone(self.list("--offset", "101")["next_offset"])
+
+    def test_limit_and_offset_are_held_to_boxs_bounds(self):
+        self.list("--limit", "5000", "--offset", "-3")
+        self.list("--limit", "0")
+        self.assertEqual(self.asked, [(0, 1000), (0, 1)])
+
+
 class ApiAnswers(unittest.TestCase):
     """The API's answers (`call`, an upload's) are read whole with `read()`,
     which, unlike `read(n)`, raises on a body short of its Content-Length."""

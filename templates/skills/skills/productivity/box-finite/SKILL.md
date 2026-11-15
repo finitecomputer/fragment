@@ -70,7 +70,7 @@ $BOX files upload ./notes.txt --folder 123        # at most 50 MB
 $BOX folders create "Q4 plans" --parent 0
 $BOX move file 456 --to 789
 $BOX copy folder 123 --to 0 --name "Q4 plans (copy)"
-$BOX comments list 456
+$BOX comments list 456                           # 100 a page; --offset the last one's next_offset
 $BOX comments add 456 --message "Looks good to me."
 $BOX share get file 456
 $BOX share create file 456 --access company      # open, company or collaborators
@@ -81,6 +81,10 @@ $BOX share remove file 456
   person's All Files. Find one by `search`, or by listing its folder.
 - `folders list` answers a page and its `next_marker`: pass it as
   `--marker` for the next page, until it is `null`.
+- `comments list` answers a page of a file's comments (`--limit`, at most
+  1000) with Box's `total_count`, `offset` and `limit`, and `next_offset`:
+  pass it as `--offset` for the next page, until it is `null`. A file may
+  have more comments than one page holds.
 - `search` matches names, descriptions, contents, comments and tags; `--in`
   keeps it under one folder; `--limit` (at most 200) and `--offset` page
   through it.
@@ -118,7 +122,8 @@ host: a download's redirect needs none.
 
 Every command prints JSON: Box's own objects (`type`, `id`, `name`, `size`,
 `modified_at` for items; `folders list` adds `next_marker`, `search`
-`total_count` and `offset`); `download` answers `{status, id, path, bytes}`.
+`total_count` and `offset`); `comments list` answers `{total_count, offset,
+limit, entries, next_offset}`; `download` answers `{status, id, path, bytes}`.
 A failure is one JSON line on stderr, `{error, status, message, hint}`, and
 exit 1; Box's own error codes come through as Box names them
 (`not_found`, `item_name_in_use`, `insufficient_scope`).

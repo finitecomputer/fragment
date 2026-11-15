@@ -20,7 +20,7 @@ Usage:
   python box_api.py files upload LOCAL_PATH [--folder 0] [--name NAME]
   python box_api.py move file|folder ID --to FOLDER_ID
   python box_api.py copy file|folder ID --to FOLDER_ID [--name NAME]
-  python box_api.py comments list FILE_ID
+  python box_api.py comments list FILE_ID [--limit 100] [--offset 0]
   python box_api.py comments add FILE_ID --message "…"
   python box_api.py share get file|folder ID
   python box_api.py share create file|folder ID [--access open|company|collaborators]
@@ -48,9 +48,11 @@ import urllib.request
 API = "https://api.box.com"
 UPLOAD = "https://upload.box.com/api"
 TIMEOUT_S = 60
-# a folder's items page at most 1,000, a search's 200 (Box's own limits)
+# a folder's items page at most 1,000, a search's 200, a file's comments
+# 1,000 (Box's own limits)
 ITEMS_MAX = 1000
 SEARCH_MAX = 200
+COMMENTS_MAX = 1000
 # Box's direct upload takes a file of at most 50 MB; larger ones need its
 # chunked upload
 UPLOAD_MAX_BYTES = 50_000_000
@@ -409,8 +411,19 @@ def copy(args):
 
 
 def comments_list(args):
-    page = call("GET", f"/2.0/files/{item_id(args.file, 'file id')}/comments", query={"fields": COMMENT_FIELDS, "limit": 100})
-    out(page.get("entries", []))
+    """A page of a file's comments, with Box's `total_count`, `offset` and
+    `limit`, and `next_offset`: where the next page begins, null once there
+    is none. Box pages a file's comments by offset."""
+    query = {"fields": COMMENT_FIELDS, "limit": bounded(args.limit, COMMENTS_MAX), "offset": max(0, args.offset)}
+    page = call("GET", f"/2.0/files/{item_id(args.file, 'file id')}/comments", query=query)
+    entries = page.get("entries") or []
+    offset = page.get("offset") if isinstance(page.get("offset"), int) else query["offset"]
+    total = page.get("total_count")
+    after = offset + len(entries)
+    # with no total stated, a page that holds any comments may not be the
+    # last: the next, empty, one ends the list
+    more = bool(entries) and (after < total if isinstance(total, int) else True)
+    out({"total_count": total, "offset": offset, "limit": page.get("limit", query["limit"]), "entries": entries, "next_offset": after if more else None})
 
 
 def comments_add(args):
@@ -493,8 +506,10 @@ def change_parsers(sub):
     p.add_argument("--name", help="the copy's name")
     p.set_defaults(func=copy)
     comments = sub.add_parser("comments").add_subparsers(dest="action", required=True)
-    p = comments.add_parser("list")
+    p = comments.add_parser("list", help="a file's comments, a page at a time")
     p.add_argument("file")
+    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--offset", type=int, default=0, help="the previous page's next_offset")
     p.set_defaults(func=comments_list)
     p = comments.add_parser("add")
     p.add_argument("file")
