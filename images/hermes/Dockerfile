@@ -87,6 +87,7 @@ COPY crates/proto crates/proto
 COPY crates/templates crates/templates
 COPY templates/blank templates/blank
 COPY templates/board templates/board
+COPY templates/brainmap templates/brainmap
 COPY templates/calories templates/calories
 COPY templates/doc templates/doc
 COPY templates/inbox templates/inbox

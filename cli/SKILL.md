@@ -61,7 +61,7 @@ a guest only edits what is shared with them.
 ## Build, deploy, share
 
 ```
-fragment init my-app --template todo --title "My app"   # a folder, live, prints its links; templates: blank|board|calories|doc|inbox|notes|slides|todo
+fragment init my-app --template todo --title "My app"   # a folder, live, prints its links; templates: blank|board|brainmap|calories|doc|inbox|notes|slides|todo
 fragment deploy my-app --dir my-app              # after an edit: sync the folder, then put it live
 fragment status my-app                           # its links, its live commit, why its code was refused, its page's errors
 fragment events my-app --tail 30                 # what happened there: believe it over your memory

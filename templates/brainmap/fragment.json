@@ -1,0 +1,30 @@
+{
+  "name": "brainmap",
+  "operations": {
+    "map": {
+      "kind": "query",
+      "role": "public",
+      "description": "The brain map as main holds it: {rev, map} with map.json parsed (README.md, \"The map\": a brain's sources, workflows, wikis, search and readers), or {rev, map: null, problem} saying why there is none. `rev` counts the times map.json moved.",
+      "input": { "type": "object", "additionalProperties": false, "properties": {} }
+    },
+    "touched": {
+      "kind": "mutation",
+      "role": "editor",
+      "description": "map.json moved (its file trigger runs this): every open page's map answers again. Answers {rev}.",
+      "input": {
+        "type": "object",
+        "properties": {
+          "ref": { "type": "string" },
+          "commit": { "type": "string" },
+          "paths": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 300 } },
+          "more": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  },
+  "triggers": [{ "files": "map.json", "run": "touched" }],
+  "meta": {
+    "title": "Brain map",
+    "description": "Where a brain's knowledge comes from and who reads it: its connectors, its agents' routines, its wikis, its search and its readers, on one canvas."
+  }
+}

@@ -228,12 +228,16 @@ lists their templates:
 - `slides`: a deck made with open-slide (each page a React component),
   presented live: everyone watching follows. Its README.md says how to
   build it (Node 20.19 or later, and npm) before you deploy.
+- `brainmap`: a map of one brain, drawn with React Flow: the connectors
+  and agents' routines that feed it, its wikis and search, and who reads
+  it. It opens on a sample; its README.md says how to snapshot a brain
+  you can read (`scripts/snapshot.mjs`) and write the map in.
 - `blank`: one page, to build on.
 
 `fragment create <name> --template T` makes one on the platform with no
 folder, from the platform's own templates: one of `blank`, `todo`,
 `inbox`, `calories`, `doc` is copied in as its first commit (`board`,
-`notes`, `slides` are `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
+`brainmap`, `notes`, `slides` are `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
 `skills`, `sessions`, `telegram`, runs the platform's current release and is named in its
 `fragment.json`. Either way `--title` gives it its own title, its
 `fragment.json`'s `meta.title`, over the template's. Any other is

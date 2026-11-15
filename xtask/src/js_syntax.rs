@@ -319,10 +319,11 @@ mod tests {
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
         // the Worker's restore reads (beside the module it tests), the shell's
-        // tests, and the board's, brain's and Telegram connector's apps' and the slides'
-        // build's and presenter's (beside the templates crate: a file under templates/
-        // would ship with its template)
-        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
+        // tests, and the board's, brain's and Telegram connector's apps', the brain
+        // map's app, graph and snapshot, and the slides' build's and presenter's
+        // (beside the templates crate: a file under templates/ would ship with its
+        // template)
+        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/brainmap_app.test.mjs", "crates/templates/tests/brainmap_graph.test.mjs", "crates/templates/tests/brainmap_snapshot.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
         // sorted, each once, so two changes conflict only where they add
         // beside each other (no count to bump)
         assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");
