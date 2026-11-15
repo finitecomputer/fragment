@@ -83,8 +83,9 @@ $BOX share remove file 456
   `--marker` for the next page, until it is `null`.
 - `comments list` answers a page of a file's comments (`--limit`, at most
   1000) with Box's `total_count`, `offset` and `limit`, and `next_offset`:
-  pass it as `--offset` for the next page, until it is `null`. A file may
-  have more comments than one page holds.
+  pass it as `--offset` for the next page, until it is `null`. A page may
+  hold fewer comments than its limit, or none, and still not be the last:
+  go by `next_offset`, never by how many a page holds.
 - `search` matches names, descriptions, contents, comments and tags; `--in`
   keeps it under one folder; `--limit` (at most 200) and `--offset` page
   through it.

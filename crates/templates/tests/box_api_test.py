@@ -277,11 +277,16 @@ def comments(n):
 class CommentPages(unittest.TestCase):
     """`comments list` answers a page of a file's comments, never silently
     fewer than the file has: Box's page metadata, and `next_offset` (null
-    at the end)."""
+    at the end). Box pages by offset: the next page is the offset plus the
+    page's limit, and `total_count` is where the offsets end, though a page
+    may hold fewer comments than its limit (one the user may not see, say:
+    a None in `file_comments`)."""
 
     def setUp(self):
         self.file_comments = comments(101)
         self.states_total = True
+        # the most Box answers a page with, whatever was asked
+        self.box_limit = None
         self.asked = []
         patcher = mock.patch.object(box, "call", self.call)
         patcher.start()
@@ -293,7 +298,9 @@ class CommentPages(unittest.TestCase):
         assert query["fields"] == box.COMMENT_FIELDS
         offset, limit = query.get("offset", 0), query["limit"]
         self.asked.append((offset, limit))
-        page = {"offset": offset, "limit": limit, "entries": self.file_comments[offset:offset + limit]}
+        limit = min(limit, self.box_limit or limit)
+        shown = [c for c in self.file_comments[offset:offset + limit] if c is not None]
+        page = {"offset": offset, "limit": limit, "entries": shown}
         if self.states_total:
             page["total_count"] = len(self.file_comments)
         return page
@@ -344,8 +351,37 @@ class CommentPages(unittest.TestCase):
     def test_with_no_total_stated_a_page_asks_again_until_one_comes_back_empty(self):
         self.states_total = False
         page = self.list("--offset", "100")
-        self.assertEqual((len(page["entries"]), page["total_count"], page["next_offset"]), (1, None, 101))
-        self.assertIsNone(self.list("--offset", "101")["next_offset"])
+        self.assertEqual((len(page["entries"]), page["total_count"], page["next_offset"]), (1, None, 200))
+        self.assertIsNone(self.list("--offset", "200")["next_offset"])
+
+    def follow(self, *flags):
+        """Every page, by `next_offset`: the comments seen."""
+        seen, more = [], []
+        while True:
+            page = self.list(*flags, *more)
+            seen += page["entries"]
+            if page["next_offset"] is None:
+                return seen
+            more = ["--offset", str(page["next_offset"])]
+
+    def test_short_and_empty_pages_advance_by_the_limit_to_the_total(self):
+        # five offsets, comments at 1 and 4 alone: pages [1], [], [4]
+        c = comments(5)
+        self.file_comments = [None, c[1], None, None, c[4]]
+        self.assertEqual(self.follow("--limit", "2"), [c[1], c[4]])
+        self.assertEqual(self.asked, [(0, 2), (2, 2), (4, 2)])
+
+    def test_an_empty_first_page_short_of_the_total_is_not_the_end(self):
+        c = comments(3)
+        self.file_comments = [None, None, c[2]]
+        page = self.list("--limit", "2")
+        self.assertEqual((page["entries"], page["total_count"], page["next_offset"]), ([], 3, 2))
+
+    def test_a_page_box_limits_below_the_ask_advances_by_boxs_limit(self):
+        self.box_limit = 40
+        page = self.list()
+        self.assertEqual((len(page["entries"]), page["limit"], page["next_offset"]), (40, 40, 40))
+        self.assertEqual(self.follow(), self.file_comments)
 
     def test_limit_and_offset_are_held_to_boxs_bounds(self):
         self.list("--limit", "5000", "--offset", "-3")

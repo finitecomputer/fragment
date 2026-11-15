@@ -413,17 +413,21 @@ def copy(args):
 def comments_list(args):
     """A page of a file's comments, with Box's `total_count`, `offset` and
     `limit`, and `next_offset`: where the next page begins, null once there
-    is none. Box pages a file's comments by offset."""
+    is none. Box pages a file's comments by offset: the next page is the
+    offset plus the page's limit, until `total_count`, which bounds the
+    offsets; a page may hold fewer comments than its limit, or none, and
+    still not be the last (https://developer.box.com/guides/api-calls/pagination/offset-based/)."""
     query = {"fields": COMMENT_FIELDS, "limit": bounded(args.limit, COMMENTS_MAX), "offset": max(0, args.offset)}
     page = call("GET", f"/2.0/files/{item_id(args.file, 'file id')}/comments", query=query)
     entries = page.get("entries") or []
     offset = page.get("offset") if isinstance(page.get("offset"), int) else query["offset"]
+    limit = page.get("limit") if isinstance(page.get("limit"), int) and page.get("limit") > 0 else query["limit"]
     total = page.get("total_count")
-    after = offset + len(entries)
-    # with no total stated, a page that holds any comments may not be the
-    # last: the next, empty, one ends the list
-    more = bool(entries) and (after < total if isinstance(total, int) else True)
-    out({"total_count": total, "offset": offset, "limit": page.get("limit", query["limit"]), "entries": entries, "next_offset": after if more else None})
+    after = offset + limit
+    # with no total stated, the offsets' end is unknown: a page with any
+    # comments may not be the last, and an empty one ends the list
+    more = after < total if isinstance(total, int) else bool(entries)
+    out({"total_count": total, "offset": offset, "limit": limit, "entries": entries, "next_offset": after if more else None})
 
 
 def comments_add(args):
