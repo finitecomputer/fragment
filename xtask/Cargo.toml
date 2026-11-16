@@ -24,4 +24,6 @@ fragment-nip98 = { path = "../crates/nip98" }
 # the release's files, written into the cell's Static Assets at each build (build.rs)
 fragment-templates = { path = "../crates/templates", features = ["embed"] }
 fragment-fakes = { path = "../crates/fakes" }
+# dev's sign-in on celld, as a self-hosted box's (main.rs `dev_door`)
+fragment-identity-door = { path = "../crates/identity-door" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

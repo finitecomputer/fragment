@@ -165,7 +165,9 @@ revoked.
 - **What.** A phase 1 `stop_and_stage` names in `secrets` every kind:
   `telegram_bot_token`, `openrouter_key`, `nostr_nsec`. A Yes hands off
   each the old agent holds, with no question of its own: the Vault is
-  the person's, and nothing uses an entry until they set something up.
+  the person's, and each entry is bound to the new agent alone. A key is
+  handed off once and its hosts are set only with its value, so each
+  entry's hosts are right at the hand-off (the table below).
   The mover reads each from its fixed place in the stopped agent and
   hands off only those it read; it skips the call when it read none.
   The roster's `has` doesn't decide it, because the mover's fleet can't
@@ -201,7 +203,7 @@ revoked.
   |---|---|---|
   | Telegram's bot token | `api.telegram.org` | the default (Settings moves it into the agent's Telegram connector, `fromVault`) |
   | OpenRouter's key | `openrouter.ai` | `Authorization: Bearer` |
-  | The Nostr key, as 64 hex | none: kept, sent nowhere | `{"sign": "nip98"}`, for a signer set up later (FIN-486) |
+  | The Nostr key, as 64 hex | `finite.site` | `{"sign": "nip98"}`: the Vault signs the new agent's calls to finite.site's API and git remotes, so it brings the old agent's sites over itself; the key never leaves |
 
 - **Answers.** `HandedOff {handed}`: the kinds the Vault holds a
   receipt for. One it refuses (its rules, a full Vault, another agent's

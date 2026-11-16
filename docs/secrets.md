@@ -19,6 +19,7 @@ its home; everything that uses it reads it from there.
 | Browser sessions | the registry, as SHA-256 hashes; the tokens only in HttpOnly cookies | no one |
 | The DNS token, a preview's test secret, the Stripe key xtask uses | files on the deploying machine, named by path in the config (Files, below) | Paul |
 | An operator key (a wipe's) | a file on the operator's machine (below) | its operator |
+| A self-hosted box's identity door: its own secret (it seals the door's state at the provider and derives each sign-in's PKCE verifier and nonce) and its client secret at the OpenID Connect provider | files on the box, owner-only (the door refuses one others may read), named by its config (docs/self-host.md, seam 4); the platform's client secret at the door stays in the node's secrets backend as `WORKOS_KEY`, and the door's config holds only its SHA-256 | the box's operator |
 
 A computer's guest holds only placeholders (docs/computers.md). A
 placeholder's tag is an HMAC of (computer, agent, provider) under a key
@@ -78,20 +79,25 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
 
 - **A value goes in and never comes out.** No answer, list, log, event or
   wipe report names one; the person who set it cannot read it back.
-- **Hosts, place and agents are set only with the value**
-  (`fragment_core::vault::check`), so no one sends a value anywhere its
-  setter did not mean. No hosts: parked, it fills nothing.
+- **Only its person says where a value goes** (`fragment_core::vault::check`):
+  its hosts, place and agents, with its value or, set again with none,
+  keeping the one held. A kept value keeps its kind: a Nostr key stays a
+  signer and a token a fill, so a new secret, or one going between the
+  two, needs a value. So a key handed off parked is pointed at its host
+  with no one carrying it by hand. No hosts: parked, it fills nothing.
 - **Only its person writes it**, from their session or their own key;
   their agents are refused every route. The CLI's `fragment vault
   set|list|rm` reads a value from a hidden prompt, or stdin, never argv or
-  the environment, and never prints one.
+  the environment, and never prints one; `set … --keep-value` reads none.
 - **An agent uses one through its computer's swap**, as an own key: its
   view lists each secret bound to it with a host, as `fck_<name>_<tag>`
   toward its hosts, and the computer's egress catches those hosts (armed
   again as the view is read). For a request carrying one, the computer
   asks the Vault (`vault/fill`), which answers only for an agent the
   secret names, toward one of its hosts; the swap plans the request with
-  that secret's row beside the catalog (`Catalog::with`).
+  that secret's row beside the catalog (`Catalog::with`). A request to
+  those hosts carrying no placeholder goes on as it came, its own
+  `Authorization` (a git remote's basic auth) untouched.
 - **A Nostr key signs, never leaves** (`place: {"sign": "nip98"}`): the
   Vault answers a fresh NIP-98 event over the request as it goes (its
   https URL, method and body's SHA-256) in `Authorization: Nostr …`, and
@@ -114,8 +120,9 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   it, then the Vault removes it, for its claimant alone. So it has one
   home and is never lost between: a move into anywhere else is refused
   (409) while the claim stands, and the same move again finishes one cut
-  short. A claim has no clock; setting the secret again or removing it
-  ends it (`fragment_core::vault::Claimed`). A Nostr key never moves.
+  short. A claim has no clock; setting the secret again with a value, or
+  removing it, ends it (`fragment_core::vault::Claimed`); set again with
+  no value, the value claimed is the one held, and its claim stands. A Nostr key never moves.
 
 ## The Secrets Store
 

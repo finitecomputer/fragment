@@ -32,6 +32,9 @@ platform concept.
 - `crates/proto`: wire types; `crates/core`: pure logic and state machines;
   `crates/nip98`: authentication; `crates/templates`: release assets;
   `crates/fakes`, `crates/devstack`, `crates/e2e`: local vendor fakes and harness.
+- `crates/identity-door`: a self-hosted box's sign-in, an OpenID Connect
+  relying party behind the WorkOS endpoints the cell calls
+  (docs/self-host.md, seam 4).
 - `templates/`: fragment templates; `applib/`: reusable app code.
 - `images/`: a separate Rust workspace (bridge, stub, Hermes).
 - `bench/search/`: the benchmark behind each fragment's search index

@@ -1,6 +1,6 @@
 ---
 name: import-agent-home
-description: Become an agent your owner kept on another platform, from a copy of its home (a zip they attach or link, a folder, or a move's stage) — its chats into History, its personality, memories, skills and routines into you, its files into an app. Use when your owner asks you to bring an old agent over, or import an agent's home or its zip, or when a routine says to bring yourself over from finite.computer with a stage.
+description: Become an agent your owner kept on another platform, from a copy of its home (a zip they attach or link, a folder, or a move's stage) — its chats into History, its personality, memories, skills and routines into you, its files into an app. Use when your owner asks you to bring an old agent over, or import an agent's home or its zip, or bring their old sites over from finite.site, or when a routine says to bring yourself over from finite.computer with a stage.
 ---
 
 # Bring an agent's home over
@@ -30,7 +30,10 @@ refers to the old platform, and leave out what can't work, saying why.
   take the safer choice: keep your own name, and keep everything private.
   Make nothing public and share nothing with anyone, except as they
   answered.
-- **Nothing old is changed.** You only read the home.
+- **Nothing old is changed.** You only read the home, and the old
+  agent's sites on finite.site. The one change: an old site your owner
+  makes public here sends its visitors on to its new address (the
+  profile's "Sites on finite.site").
 - **Keep your place.** An import is long. Keep `~/home-import/progress.md`:
   after each step, write what you finished. If you are started again (the
   same message again, or a restart), read it first and go on from the
@@ -61,6 +64,18 @@ you, and your owner already said yes. Follow "From a move's stage" below
 in place of "Get the zip", and open the stage first, before anything
 else. Never ask your owner to accept an offer, attach a zip or send a
 link: there is nothing for them to do.
+
+**Only the old sites.** When your owner asks for their old agent's sites
+from finite.site (after its import, or with none), do only that: the
+finite-computer profile's "Sites on finite.site"
+(`${HERMES_SKILL_DIR}/profiles/finite-computer.md`), with the rules
+above, after loading `apps-finite`. Their answers are which sites (else
+every one) and which to make public (else none). Keep your place in
+`~/home-import/progress.md`, and add to `~/home-import/site-map.json`.
+End with one message: each site's new address, which old addresses now
+send visitors there, and what didn't come over and why. Then, once
+every site asked for is deployed or left out, delete
+`~/home-import/home/sites/`.
 
 Otherwise, your owner's message says three things:
 - **The home:** a zip they attached (the note before their message names
