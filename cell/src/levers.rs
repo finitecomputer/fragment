@@ -142,11 +142,11 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                     return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the list levers reach e2e people's lists (and their agents') alone"));
                 }
             }
-            json_answer(&routed::ask_object::<serde_json::Value>(env, "PRINCIPAL", &t.identity, &format!("test/{}", t.op), &serde_json::json!({})).await?)
+            crate::principal::pass(env, &t.identity, &crate::principal::calls::ListLever { op: t.op }).await
         }
         (Method::Post, ["export"]) => {
             /// `{identity, op, steps?}`: a lever on that person's export (export.rs `export_lever`).
-            #[derive(Deserialize, serde::Serialize)]
+            #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestExport {
                 identity: String,
@@ -161,9 +161,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             if cfg.levers_scoped && !is_e2e(env, &t.identity).await? {
                 return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the export levers reach e2e people's exports alone"));
             }
-            let lever = serde_json::json!({ "op": t.op, "steps": t.steps });
-            let req = routed::internal_request("test/export", &lever.to_string())?;
-            crate::routed::send(env, "PRINCIPAL", &t.identity, req).await
+            crate::principal::pass(env, &t.identity, &crate::principal::calls::ExportLever { op: t.op, steps: t.steps }).await
         }
         (Method::Post, [hook @ ("keys" | "fragment")]) => {
             /// The fragment a lever's body names (the rest is the fragment's to read).

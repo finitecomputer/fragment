@@ -554,7 +554,7 @@ app's own trust and tailnet).
 | Text models | OpenRouter on Finite's key, or Finite Private | an OpenAI-compatible endpoint and key for every slot (`cheap`, `medium`, `fallback`, `vision`, Deep), each priced; a slot left out falls back to Workers AI, which celld lacks. A deployment's `base_url` is https on a host name, no port; dev's models file takes this machine's `http://127.0.0.1:<port>` (seam 3) |
 | Semantic search (embeddings) | Workers AI bge-m3 | an OpenAI-compatible `/embeddings` endpoint, such as TEI (`models.embeddings`) |
 | Agents' paid tools (X, Firecrawl, fal, Browser Use, Perplexity, Places, xAI, ElevenLabs) | Finite's operator keys | its own key per row, or the row dropped |
-| Google, Linear and Salesforce connections | Finite's WorkOS Pipes and OAuth clients | its own OAuth client per provider in its own Pipes; redirect `https://<platform>/api/connections/<provider>/callback`; for Google, an internal Workspace app |
+| Google connections | Finite's WorkOS Pipes and OAuth clients | its own OAuth client per provider in its own Pipes; redirect `https://<platform>/api/connections/<provider>/callback`; for Google, an internal Workspace app |
 | Usage and credit | every call charged; guests and zero balances refused | no Stripe; `default_plan` `seat` or `seat_always_on`; `operators` grant credit; own keys still priced by the book |
 | Apps calling internal or tailnet services | public addresses only | blocked: 10/8, 192.168/16, 100.64/10 (the tailnet's), `.internal`, single-label names; only `FRAGMENT_EGRESS_LOCAL=allow` lifts it, which is never for a shared fleet. **A decision for an intranet** |
 | CLI | defaults to finite.chat | `fragment login --host https://<platform>`, or `FRAGMENT_HOST` |
@@ -572,8 +572,8 @@ app's own trust and tailnet).
 | Public and "anyone with the link" sharing | visitors outside the tailnet | "public" means the tailnet |
 | Stripe | `/api/stripe/webhook` | left out |
 
-OAuth redirects (WorkOS, Google, Linear, Salesforce, OpenRouter) go
-through the person's browser, so the tailnet is enough.
+OAuth redirects (WorkOS, Google, OpenRouter) go through the person's
+browser, so the tailnet is enough.
 
 ### Not on self-host at all
 
@@ -609,8 +609,7 @@ through the person's browser, so the tailnet is enough.
 9. Computers: the krun engine installed and running, its memory budget
    sized for the computers awake at once (6 GiB each); the Hermes image
    built (with `FRAGMENT_HOST`) and loaded into it (seam 2).
-10. Providers: rows dropped or keys brought; OAuth clients for Google,
-    Linear and Salesforce.
+10. Providers: rows dropped or keys brought; an OAuth client for Google.
 11. Connectors: SimpleX alone, for now.
 12. Left out: `stripe`, `mail_from`, `ai_gateway`, `observability_read`,
     `migrations`, `test_secret_file`.

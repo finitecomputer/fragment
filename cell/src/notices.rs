@@ -7,7 +7,7 @@
 //! reads nothing in them: their lists are joined as bytes
 //! (`fragment_core::notice::joined`), each notice as its owner wrote it.
 //! Each owner tells the person's pages when its own change
-//! (`principal::tell_changed`). An owner that does not answer fails the
+//! (`principal::calls::Changed`). An owner that does not answer fails the
 //! read: a page says it couldn't refresh, never that nothing is told.
 
 use futures_util::future::join4;
