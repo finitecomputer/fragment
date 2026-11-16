@@ -191,7 +191,7 @@ private extension View {
 /// Every notice fanned out over the whole app, as Notification Center shows
 /// them: each with all its words and actions, scrolling, each card having
 /// flown from its place in the band's stack (`NoticesBand`), on the
-/// wallpaper frosted. Its X folds them back; so does a stack of one.
+/// wallpaper, as Home's glass is. Its X folds them back; so does a stack of one.
 struct NoticesFan: View {
     let library: Library
     let api: FragmentAPI
@@ -204,7 +204,7 @@ struct NoticesFan: View {
             let now = Int64(context.date.timeIntervalSince1970 * 1000)
             let items = NoticeItem.all(library, now: now)
             ZStack(alignment: .top) {
-                DesktopWallpaper().overlay(Rectangle().fill(.regularMaterial)).ignoresSafeArea()
+                DesktopWallpaper().ignoresSafeArea()
                 ScrollView {
                     VStack(spacing: 10) {
                         ForEach(items) { item in
