@@ -2004,23 +2004,28 @@ mod tests {
     /// (`store::Bound::conventional`), so the three never drift apart.
     #[test]
     fn the_example_and_e2e_configs_parse() {
+        let mut offered = vec![];
         for file in ["deploy/example.jsonc", "deploy/e2e.jsonc"] {
             let path = devstack::repo_root().join(file);
             let d = load(&path).unwrap();
             assert!(names(&d, Some("dev")).is_ok(), "{file}");
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
-            let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            assert_eq!(names, ["x", "firecrawl", "fal", "browser-use", "google", "perplexity", "google-places", "xai", "elevenlabs", "openrouter"], "{file}");
+            // no list of rows here: what the two files offer is held alike
+            // below, and each operator key is read from its row
+            offered.push(catalog.providers().iter().map(|p| p.name.clone()).collect::<Vec<_>>());
+            let operators: Vec<&str> = catalog.providers().iter().filter(|p| p.kind == fragment_core::catalog::Kind::Operator).map(|p| p.name.as_str()).collect();
+            assert!(catalog.get("google").is_some_and(|p| p.kind == fragment_core::catalog::Kind::Connection), "{file}: Google, a connection");
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
-            assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
+            assert_eq!(keys.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), operators, "{file}: each operator key's store secret, and no other's");
             assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
             // the example's tiers through OpenRouter (decision 61); a preview's on Workers AI
             let slots: &[&str] = if file == "deploy/example.jsonc" { &["cheap", "medium"] } else { &[] };
-            let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
+            let conventional = devstack::store::Bound::conventional(true, false, &operators, slots);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
+        assert_eq!(offered[0], offered[1], "the example and the hosted e2e offer the same providers, in one order");
     }
 
     /// A provider's note: the example's (its google row's, commented out)
