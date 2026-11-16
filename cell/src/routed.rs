@@ -185,6 +185,35 @@ impl Routed {
         };
         Ok(Routed { name, url, signed, credential })
     }
+
+    /// A request to the fragment as the router would hand it, made by the
+    /// platform for a person: the share sheet's, their export's reads, a
+    /// search across fragments, a sign-in's look. `inner` is its route
+    /// there (`/api/…`, `/serve/…`, or the platform's own `/search/asked`
+    /// and `/signin/known`, which the router maps no outside path to);
+    /// `body` is JSON, and `range` a byte range of the answer. Asked again
+    /// while the fragment refuses this release (it did nothing); its answer
+    /// as the fragment made it. The router's own forward (lib.rs) is not
+    /// one: it passes a client's headers, and its body may stream through.
+    pub(crate) async fn ask(&self, env: &Env, method: Method, inner: &str, body: Option<&str>, range: Option<&str>) -> CellResult<Response> {
+        let make = || {
+            let headers = Headers::new();
+            self.to_headers(&headers)?;
+            if body.is_some() {
+                headers.set("content-type", "application/json")?;
+            }
+            if let Some(r) = range {
+                headers.set("range", r)?;
+            }
+            let mut init = RequestInit::new();
+            init.with_method(method.clone()).with_headers(headers);
+            if let Some(b) = body {
+                init.with_body(Some(b.into()));
+            }
+            Ok(Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?)
+        };
+        send_again(env, "FRAGMENT", &self.name, make).await
+    }
 }
 
 /// The marker an internal route's caller carries, and its value: the router
