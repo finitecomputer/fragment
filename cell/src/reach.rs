@@ -83,7 +83,7 @@ pub(crate) async fn census(env: &worker::Env, person: &str) -> CellResult<serde_
     if !fragment_core::npub::is_identity(person) {
         return Err(CellError::new(ErrorCode::NotFound, format!("no person {person}")));
     }
-    let owned: Vec<String> = crate::listed(env, person).await?.fragments.into_iter().filter(|f| f.role == fragment_proto::Role::Owner).map(|f| f.name).collect();
+    let owned: Vec<String> = crate::principal::ask(env, person, &crate::principal::calls::List::default()).await?.fragments.into_iter().filter(|f| f.role == fragment_proto::Role::Owner).map(|f| f.name).collect();
     let none = serde_json::Value::Null;
     let asked = futures_util::future::join_all(owned.iter().map(|name| crate::fragment::ask(env, name, "computer/reach", &none))).await;
     let (mut reaching, mut beyond, mut unanswered) = (BTreeMap::<String, u64>::new(), BTreeMap::<String, u64>::new(), 0u64);

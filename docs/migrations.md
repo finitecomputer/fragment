@@ -66,7 +66,7 @@ another person's here, is told nothing.
 
 **Told.** Every change to a bound person's move (their answers, a roster,
 the alarm's deadlines, staff's acts) tells their open pages
-(`principal::tell_changed`, at most 32 people a call), which read their
+(`principal::calls::Changed`, at most 32 people a call), which read their
 notices again.
 
 ## The page (F6)

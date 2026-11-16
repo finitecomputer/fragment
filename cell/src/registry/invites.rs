@@ -221,7 +221,7 @@ impl RegistryCell {
 
     async fn tell_person(&self, person: &str) {
         // their notices changed (the one frame: `GET /api/notices` again)
-        if let Err(e) = crate::principal::tell_changed(&self.env, person).await {
+        if let Err(e) = crate::principal::ask(&self.env, person, &crate::principal::calls::Changed {}).await {
             console_error!("{}", serde_json::json!({ "invites-told": person, "failed": e.message, "code": e.code }));
         }
     }
