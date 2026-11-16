@@ -1,6 +1,8 @@
 //! The guest's word on a hold (docs/computers.md, "The hold"): what its
 //! answer leaves out of a save, and what it says when it has not answered.
 
+use crate::search::cut;
+
 /// A guest's answer to the hold is at most this long, and names at most
 /// `LEFT_OUT_MAX` patterns of at most `LEFT_OUT_PATTERN_MAX_BYTES` each:
 /// room for an image that names each file it copied (ours: four lines a
@@ -56,12 +58,8 @@ pub const UNHELD_MAX_BYTES: usize = 1024;
 /// `None` for none. Only a log line: nothing is decided by it.
 pub fn unheld(text: &str) -> Option<String> {
     let clean: String = text.trim().chars().map(|c| if c.is_control() && c != '\n' { ' ' } else { c }).collect();
-    let mut end = clean.len().min(UNHELD_MAX_BYTES);
-    while !clean.is_char_boundary(end) {
-        end -= 1;
-    }
-    let cut = clean[..end].trim_end();
-    (!cut.is_empty()).then(|| cut.to_string())
+    let said = cut(&clean, UNHELD_MAX_BYTES).trim_end();
+    (!said.is_empty()).then(|| said.to_string())
 }
 
 #[cfg(test)]
@@ -97,15 +95,18 @@ mod tests {
 
     /// A guest's word on a hold it has not answered, as logged: none for
     /// nothing said, its text trimmed, its control characters spaces, and
-    /// never past its bound, cut at a character.
+    /// never past its bound, cut before the character that crosses it (of
+    /// each width).
     #[test]
     fn a_guest_says_why_it_has_not_answered_within_a_bound() {
         assert_eq!(unheld(""), None);
         assert_eq!(unheld(" \n\t"), None);
         assert_eq!(unheld("copy refused: copying /data/a.db: file is not a database\n"), Some("copy refused: copying /data/a.db: file is not a database".into()));
         assert_eq!(unheld("a\u{1b}[31mb\nc"), Some("a [31mb\nc".into()));
-        let long = format!("{}é{}", "x".repeat(UNHELD_MAX_BYTES - 1), "y".repeat(100));
-        let cut = unheld(&long).unwrap();
-        assert!(cut.len() <= UNHELD_MAX_BYTES && cut.chars().all(|c| c == 'x'), "{} bytes", cut.len());
+        for c in ['é', '€', '𝄞'] {
+            let long = format!("{}{c}{}", "x".repeat(UNHELD_MAX_BYTES - 1), "y".repeat(100));
+            assert_eq!(unheld(&long), Some("x".repeat(UNHELD_MAX_BYTES - 1)), "{c:?}");
+        }
+        assert_eq!(unheld(&"x".repeat(UNHELD_MAX_BYTES + 1)), Some("x".repeat(UNHELD_MAX_BYTES)), "at its bound, whole");
     }
 }

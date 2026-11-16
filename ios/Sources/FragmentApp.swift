@@ -554,8 +554,9 @@ struct FragmentRoot: View {
             // as the web's band is over every chat and Settings: one band,
             // never one per page.
             VStack(spacing: 0) {
+                // its notices glass, as iOS's banners are, over what the page
+                // beneath has (below: Home's wallpaper meets it without a seam)
                 NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4)
-                    .background(FragmentStyle.background.ignoresSafeArea(edges: .top))
                     // Your Apps is pushed onto the page it was opened from, so
                     // Back (and swiping back) returns to that chat or page.
                     NavigationStack {
@@ -565,6 +566,18 @@ struct FragmentRoot: View {
                             .toolbar {
                                 ToolbarItem(placement: .topBarLeading) {
                                     Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
+                                }
+                                // Home's name is a glass button, as its neighbors are: Settings
+                                if page == .launcher {
+                                    ToolbarItem(placement: .principal) {
+                                        // the center gets no toolbar glass of its own: drawn as its neighbors'
+                                        Button { page = .settings } label: {
+                                            Text(title).font(.headline).padding(.horizontal, 16).frame(height: 44)
+                                                .glassEffect(.regular.interactive(), in: .capsule)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityHint("Opens Settings").accessibilityIdentifier("homeSettings")
+                                    }
                                 }
                                 ToolbarItemGroup(placement: .topBarTrailing) {
                                     // a chat has no New chat of its own: the sidebar's starts one
@@ -581,6 +594,11 @@ struct FragmentRoot: View {
                                     .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
                             }
                     }
+            }
+            // behind the notices and the page alike: on Home the whole window's
+            // wallpaper, which Home's own lines up with, so it shows behind them
+            .background {
+                if page == .launcher { DesktopWallpaper() } else { FragmentStyle.background.ignoresSafeArea() }
             }
             .accessibilityHidden(sidebar)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
