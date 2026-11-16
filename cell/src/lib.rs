@@ -101,6 +101,7 @@ use worker::*;
 
 use config::Config;
 use error::{CellError, CellResult};
+use principal::calls::{Own, SetOwn};
 use registry::calls::{self, Call};
 use routed::{Credential, Routed, Signed};
 
@@ -120,7 +121,7 @@ const PASSED_HEADERS: [&str; 9] =
 
 /// A WebSocket upgrade's own handshake, passed too, so the fragment's
 /// Durable Object accepts the upgrade the client asked for.
-const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
+pub(crate) const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
 
 /// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, `…/dock`'s,
 /// `{dock}`, and `…/pinned`'s, `{pinned}`, are a few bytes.
@@ -547,19 +548,7 @@ async fn watch_list(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellRe
             ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity.id
         }
     };
-    // a fresh request: the upgrade's handshake, nothing else of the caller's
-    let headers = Headers::new();
-    headers.set("upgrade", "websocket")?;
-    headers.set("connection", "Upgrade")?;
-    for k in WEBSOCKET_HEADERS {
-        if let Some(v) = req.headers().get(k)? {
-            headers.set(k, &v)?;
-        }
-    }
-    let mut init = RequestInit::new();
-    init.with_method(Method::Get).with_headers(headers);
-    let watch = Request::new_with_init("https://principal.internal/watch", &init)?;
-    crate::routed::send(env, "PRINCIPAL", &identity, watch).await
+    principal::watch(env, &identity, req).await
 }
 
 /// Whether `maker`'s ledger lets them make a fragment (`Spend::Create`):
@@ -629,19 +618,15 @@ fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellRe
 
 pub(crate) use json_response::{json_answer, json_passed};
 
-/// An identity's fragments, as its `Principal` cell lists them.
-pub(crate) async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
-    let list = Request::new("https://principal.internal/list", Method::Get)?;
-    Ok(crate::routed::send(env, "PRINCIPAL", identity, list).await?.read_json().await?)
-}
-
 /// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
 /// reaches for whoever asked (docs/cloudflare-v1.md, R17): the asker's, where the
 /// agent or its owner is in too, each with the role the agent acts with
 /// there (`access::listed_role`). A call decides again, live.
 async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<FragmentList> {
     let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?;
-    let (askers, own, owners) = futures_util::future::join3(listed(env, asker), listed(env, &agent.id), listed(env, owner)).await;
+    let list = principal::calls::List::default();
+    let lists = futures_util::future::join3(principal::ask(env, asker, &list), principal::ask(env, &agent.id, &list), principal::ask(env, owner, &list));
+    let (askers, own, owners) = lists.await;
     let roles = |l: FragmentList| -> HashMap<String, Role> { l.fragments.into_iter().map(|f| (f.name, f.role)).collect() };
     let (own, owners) = (roles(own?), roles(owners?));
     let fragments = askers?
@@ -1286,9 +1271,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                 return json_answer(&reachable(env, &principal, asker).await?);
             }
             // the list says what this signer's messages carry (`uploads_for`)
-            let kind = if principal.identity.kind == IdentityKind::Agent { "?agent" } else { "" };
-            let list = Request::new(&format!("https://principal.internal/list{kind}"), Method::Get)?;
-            crate::routed::send(env, "PRINCIPAL", &principal.id, list).await
+            let list = crate::principal::calls::List { agent: principal.identity.kind == IdentityKind::Agent };
+            crate::principal::pass(env, &principal.id, &list).await
         }
         // the signer's own view of a fragment of theirs (principal.rs): it
         // changes nothing of the fragment's, nor anyone else's list
@@ -1297,11 +1281,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let set: fragment_proto::SetArchived = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let who = signer(env, &req, &url, &body).await?;
             let name = named_fragment(name)?;
-            let inner = json!({ "fragment": name, "archived": set.archived }).to_string();
-            let mut init = RequestInit::new();
-            init.with_method(Method::Put).with_body(Some(inner.into()));
-            let put = Request::new_with_init("https://principal.internal/archived", &init)?;
-            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+            principal::ask(env, &who.identity.id, &SetOwn { fragment: name.clone(), own: Own::Archived, on: set.archived }).await?;
+            json_answer(&fragment_proto::Archived { name, archived: set.archived })
         }
         // whether the signer's dock shows a fragment of theirs (principal.rs):
         // their own view again, as archiving is
@@ -1310,11 +1291,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let set: fragment_proto::SetDock = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let who = signer(env, &req, &url, &body).await?;
             let name = named_fragment(name)?;
-            let inner = json!({ "fragment": name, "dock": set.dock }).to_string();
-            let mut init = RequestInit::new();
-            init.with_method(Method::Put).with_body(Some(inner.into()));
-            let put = Request::new_with_init("https://principal.internal/dock", &init)?;
-            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+            principal::ask(env, &who.identity.id, &SetOwn { fragment: name.clone(), own: Own::Dock, on: set.dock }).await?;
+            json_answer(&fragment_proto::Docked { name, dock: set.dock })
         }
         // whether the signer pinned a fragment of theirs (principal.rs):
         // their own view again, as archiving is
@@ -1323,11 +1301,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let set: fragment_proto::SetPinned = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let who = signer(env, &req, &url, &body).await?;
             let name = named_fragment(name)?;
-            let inner = json!({ "fragment": name, "pinned": set.pinned }).to_string();
-            let mut init = RequestInit::new();
-            init.with_method(Method::Put).with_body(Some(inner.into()));
-            let put = Request::new_with_init("https://principal.internal/pinned", &init)?;
-            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+            principal::ask(env, &who.identity.id, &SetOwn { fragment: name.clone(), own: Own::Pinned, on: set.pinned }).await?;
+            json_answer(&fragment_proto::Pinned { name, pinned: set.pinned })
         }
         // the signer has seen a chat's messages (principal.rs): their own
         // view again, so their row counts none of them unread
@@ -1338,11 +1313,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                 return Err(CellError::invalid("PUT …/seen takes no body: it marks what the list holds now"));
             }
             let name = named_fragment(name)?;
-            let inner = json!({ "fragment": name }).to_string();
-            let mut init = RequestInit::new();
-            init.with_method(Method::Put).with_body(Some(inner.into()));
-            let put = Request::new_with_init("https://principal.internal/seen", &init)?;
-            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+            principal::pass(env, &who.identity.id, &principal::calls::MarkSeen { fragment: name }).await
         }
         // search over the signer's own list (principal.rs): agents need none,
         // and acting for someone (`for`) is not honored here
@@ -1352,10 +1323,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let (Some(q), None) = (asked.next(), asked.next()) else {
                 return Err(CellError::invalid("name what to look for, once: ?q="));
             };
-            let mut inner = Url::parse("https://principal.internal/search").map_err(|e| CellError::host(e.to_string()))?;
-            inner.query_pairs_mut().append_pair("q", &q);
-            let search = Request::new(inner.as_str(), Method::Get)?;
-            crate::routed::send(env, "PRINCIPAL", &who.identity.id, search).await
+            principal::pass(env, &who.identity.id, &principal::calls::Search { q }).await
         }
         // one question asked of several fragments' indexes, as the signer
         // (across.rs): the meta-brain's search

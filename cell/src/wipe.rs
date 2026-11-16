@@ -22,8 +22,9 @@
 //! (registry/wipe.rs); each object a step touches does its own part behind
 //! an internal route (`wipe/…`, marked by `WIPE_HEADER`, which the router
 //! never passes): a fragment ends its life (ended.rs `wipe_route`), a
-//! computer empties itself (computer.rs `wipe`), a ledger and a list empty
-//! themselves (ledger.rs, principal.rs). The steps and their order are
+//! computer empties itself (computer.rs `wipe`), a ledger empties itself
+//! (ledger.rs), and a list too, by its own calls (principal/calls.rs
+//! `WipeView`, `WipeEnd`, `WipeExports`). The steps and their order are
 //! `fragment_core::wipe::STEPS`; each is idempotent, and is recorded done
 //! only once it is whole, so a wipe cut anywhere (a crash, a timeout, a
 //! vendor's error) finishes when it is run again, and a finished one run
@@ -39,9 +40,10 @@ use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::principal::calls::{WipeEnd, WipeExports, WipeView};
 use crate::registry::calls::{self, WipeBegin, WipeBilling, WipeFacts, WipeLook, WipeStep};
 use crate::registry::wipe::refused;
-use crate::{acting_for, ask_registry, authenticate, js, json_answer, read_body, routed};
+use crate::{acting_for, ask_registry, authenticate, js, json_answer, principal, read_body, routed};
 
 /// The marker a wipe's internal calls carry (routed.rs `marker`): the
 /// router never passes it, so a request with it came from here.
@@ -278,14 +280,13 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
         Step::Lists => {
             // their export first: its upload aborted and its archive deleted,
             // which the list's own end (one step, no await) cannot
-            let e: Value = routed::ask_object(env, "PRINCIPAL", person, "wipe/exports", &json!({ "person": person })).await?;
-            if e["more"] == true {
+            let e = principal::ask(env, person, &WipeExports { person: person.to_string() }).await?;
+            if e.more {
                 return Ok(Did::going(0, "their export's objects hold more: the next call deletes on".into()));
             }
             let mut rows = 0u64;
-            for (principal, _) in whom(facts) {
-                let v: Value = routed::ask_object(env, "PRINCIPAL", &principal, "wipe/end", &json!({})).await?;
-                rows += v["rows"].as_u64().unwrap_or(0);
+            for (whose, _) in whom(facts) {
+                rows += principal::ask(env, &whose, &WipeEnd {}).await?.rows;
             }
             Ok(Did::finished(rows))
         }
@@ -328,24 +329,14 @@ fn whom(facts: &WipeFacts) -> Vec<(String, IdentityKind)> {
     out
 }
 
-/// A list's rows (`Principal`'s `wipe/view`, a page at a time): each
-/// fragment, and the role it holds there (`None`: one it left, or ended).
+/// A list's rows (`WipeView`, a page at a time): each fragment, and the
+/// role it holds there (`None`: one it left, or ended).
 async fn list(env: &Env, principal: &str) -> CellResult<Vec<(String, Option<Role>)>> {
-    #[derive(Deserialize)]
-    struct Row {
-        fragment: String,
-        role: Option<Role>,
-    }
-    #[derive(Deserialize)]
-    struct Page {
-        rows: Vec<Row>,
-        more: bool,
-    }
     let mut rows = vec![];
     let mut after: Option<String> = None;
     // bounded: LIST_PAGES_MAX pages
     for _ in 0..LIST_PAGES_MAX {
-        let page: Page = routed::ask_object(env, "PRINCIPAL", principal, "wipe/view", &json!({ "after": after })).await?;
+        let page = principal::ask(env, principal, &WipeView { after: after.clone() }).await?;
         after = page.rows.last().map(|r| r.fragment.clone());
         rows.extend(page.rows.into_iter().map(|r| (r.fragment, r.role)));
         if !page.more {

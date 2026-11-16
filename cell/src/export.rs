@@ -44,11 +44,11 @@ use serde_json::{json, Value};
 use worker::wasm_bindgen::JsValue;
 use worker::*;
 
-use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell};
-use crate::principal::PrincipalCell;
+use crate::principal::calls::{ExportDownload, ExportLever, ExportNow, ExportStart, ExportsWiped, List, WipeExports};
+use crate::principal::{self, PrincipalCell};
 use crate::registry::calls::{self, By};
 use crate::routed::{Routed, Signed};
 use crate::{ask_registry, js, read_body};
@@ -68,20 +68,19 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             if !body.is_empty() && body.iter().any(|b| !b.is_ascii_whitespace()) && serde_json::from_slice::<Value>(&body).ok() != Some(json!({})) {
                 return Err(CellError::invalid("POST /api/export takes no body"));
             }
-            principal(env, &who.id, Method::Post, "/export/start", Some(json!({ "person": who.id }).to_string()), None).await
+            principal::pass(env, &who.id, &ExportStart { person: who.id.clone() }).await
         }
         (Method::Get, []) => {
             let who = person(crate::signer(env, &req, url, &[]).await?)?;
-            principal(env, &who.id, Method::Get, "/export/status", None, None).await
+            principal::pass(env, &who.id, &ExportNow {}).await
         }
         (Method::Get | Method::Head, [id, "download"]) => {
             let who = downloader(env, cfg, &req, url).await?;
             if !valid_export_id(id) {
                 return Err(CellError::new(ErrorCode::NotFound, "no such export"));
             }
-            let range = req.headers().get("range")?;
-            let method = req.method();
-            principal(env, &who.id, method, &format!("/export/download?id={id}"), None, range.as_deref()).await
+            let ask = ExportDownload { id: id.to_string(), head: req.method() == Method::Head, range: req.headers().get("range")? };
+            principal::pass(env, &who.id, &ask).await
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }
@@ -112,21 +111,6 @@ async fn downloader(env: &Env, cfg: &Config, req: &Request, url: &Url) -> CellRe
     let token = token.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign in: an export downloads from Settings, or signed (`fragment export`)"))?;
     let live = ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?;
     person(Signed::new(live.identity, None))
-}
-
-/// One of the person's list's export routes, answered as it answers.
-async fn principal(env: &Env, person: &str, method: Method, path: &str, body: Option<String>, range: Option<&str>) -> CellResult<Response> {
-    let headers = Headers::new();
-    if let Some(r) = range {
-        headers.set("range", r)?;
-    }
-    let mut init = RequestInit::new();
-    init.with_method(method).with_headers(headers);
-    if let Some(b) = body {
-        init.with_body(Some(b.into()));
-    }
-    let req = Request::new_with_init(&format!("https://principal.internal{path}"), &init)?;
-    crate::routed::send(env, "PRINCIPAL", person, req).await
 }
 
 // ---- the fragment's side: its app's database, for its owner ----
@@ -484,30 +468,9 @@ impl PrincipalCell {
         Ok(())
     }
 
-    /// The export routes (`/export/…`, the router's).
-    pub(crate) async fn export_route(&self, mut req: Request) -> CellResult<Response> {
-        let url = req.url()?;
-        let query = |k: &str| url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned());
-        match (req.method(), url.path()) {
-            (Method::Post, "/export/start") => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct StartAsk {
-                    person: String,
-                }
-                let b: StartAsk = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                assert!(fragment_core::npub::is_identity(&b.person), "the router names its person");
-                let view = self.start_export(&b.person).await?;
-                Ok(Response::from_json(&view)?)
-            }
-            (Method::Get, "/export/status") => Ok(Response::from_json(&ExportStatus { export: self.newest()?.map(|r| view(&r)).transpose()? })?),
-            (method @ (Method::Get | Method::Head), "/export/download") => {
-                let id = query("id").unwrap_or_default();
-                let range = req.headers().get("range")?;
-                self.download(&id, method == Method::Head, range.as_deref()).await
-            }
-            (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
-        }
+    /// `ExportNow`: the newest export, if any.
+    pub(crate) fn export_now(&self) -> CellResult<ExportStatus> {
+        Ok(ExportStatus { export: self.newest()?.map(|r| view(&r)).transpose()? })
     }
 
     fn newest(&self) -> CellResult<Option<Row>> {
@@ -521,7 +484,8 @@ impl PrincipalCell {
     /// A press of "Export everything": the one building (a replay), a
     /// refusal past the day's count (429), or a new one, which replaces
     /// the last (its archive is deleted).
-    async fn start_export(&self, person: &str) -> CellResult<ExportView> {
+    pub(crate) async fn start_export(&self, person: &str) -> CellResult<ExportView> {
+        assert!(fragment_core::npub::is_identity(person), "the router names its person");
         let now = js::now_ms();
         let begun: Vec<Begun> = self.rows_of::<Row>(ROW, vec![])?.into_iter().map(|b| Begun { building: b.state == "building", id: b.id, started_at: b.started_at }).collect();
         let id = match core::start(&begun, now) {
@@ -552,7 +516,8 @@ impl PrincipalCell {
 
     /// The archive, to its person (this list's), while it is ready; a
     /// download counts as a request, metered with its storage.
-    async fn download(&self, id: &str, head: bool, range: Option<&str>) -> CellResult<Response> {
+    pub(crate) async fn download(&self, ExportDownload { id, head, range }: ExportDownload) -> CellResult<Response> {
+        let id = id.as_str();
         let row = self.row(id)?.filter(|r| r.state == "ready" && r.expires_at.is_some_and(|at| at > js::now_ms()));
         let Some(row) = row else { return Err(CellError::new(ErrorCode::NotFound, "no such export, or it is not ready")) };
         let key = archive_key(&row.person, &row.id);
@@ -568,7 +533,7 @@ impl PrincipalCell {
             h.set("content-length", &row.size.unwrap_or(0).to_string())?;
             return Ok(Response::empty()?.with_headers(h));
         }
-        let b = js::blob_get(&self.env, js::BLOBS, &key, range).await?.ok_or_else(|| CellError::host(format!("export {id}'s archive is missing")))?;
+        let b = js::blob_get(&self.env, js::BLOBS, &key, range.as_deref()).await?.ok_or_else(|| CellError::host(format!("export {id}'s archive is missing")))?;
         let status = match b.range {
             Some((offset, length)) => {
                 h.set("content-range", &format!("bytes {offset}-{}/{}", offset + length.max(1) - 1, b.size))?;
@@ -594,16 +559,8 @@ impl PrincipalCell {
     /// `ARCHIVE_MAX_BYTES`), so a small export meets it. `scale {steps: k |
     /// null}` divides the archive's and a fragment's limits by `k`, so a
     /// small export stands for one as much larger (`null`, 1).
-    pub(crate) fn export_lever(&self, body: &[u8]) -> CellResult<Value> {
+    pub(crate) fn export_lever(&self, l: ExportLever) -> CellResult<Value> {
         assert!(self.test_hooks, "a list's levers answer on fleets with them only");
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Lever {
-            op: String,
-            #[serde(default)]
-            steps: Option<u32>,
-        }
-        let l: Lever = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
         let name = match l.op.as_str() {
             "pace" => "pace",
             "piece" if l.steps.is_none_or(|n| (1024..=limits::PIECE_BYTES as u32).contains(&n)) => "piece",
@@ -642,17 +599,10 @@ impl PrincipalCell {
     /// A wipe of its person (wipe.rs, `lists`): every export ends, its
     /// upload aborted, and everything under the person's exports' prefix
     /// deleted, before the list empties (and again on each wipe call after,
-    /// for anything a slice cut short wrote late). Answers `{exports,
-    /// more}`: `more`, objects are left (call again).
-    pub(crate) async fn wipe_exports(&self, body: &[u8]) -> CellResult<Value> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Ask {
-            person: String,
-        }
-        let ask: Ask = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("wipe/exports: {e}")))?;
+    /// for anything a slice cut short wrote late).
+    pub(crate) async fn wipe_exports(&self, ask: WipeExports) -> CellResult<ExportsWiped> {
         if !fragment_core::npub::is_identity(&ask.person) {
-            return Err(CellError::invalid("wipe/exports names its person"));
+            return Err(CellError::invalid("a wipe of exports names its person"));
         }
         let rows: Vec<Row> = if self.wiped.get() { vec![] } else { self.rows_of(ROW, vec![])? };
         for r in rows.iter().filter(|r| r.person == ask.person) {
@@ -660,11 +610,11 @@ impl PrincipalCell {
                 js::upload_abort(&self.env, js::BLOBS, &archive_key(&r.person, &r.id), upload).await?;
             }
         }
-        let (deleted, more) = js::blob_delete_under(&self.env, js::BLOBS, &format!("exports/{}/", ask.person), 10).await?;
+        let (_, more) = js::blob_delete_under(&self.env, js::BLOBS, &format!("exports/{}/", ask.person), 10).await?;
         if !more && !self.wiped.get() {
             self.run_sql("UPDATE exports SET state = 'expired', job = NULL, upload = NULL, gone_at = COALESCE(gone_at, ?), metered = 1", vec![SqlStorageValue::Integer(js::now_ms())])?;
         }
-        Ok(json!({ "exports": rows.len(), "objects": deleted, "more": more }))
+        Ok(ExportsWiped { more })
     }
 
     /// The alarm: ready archives past their days expire, ended exports'
@@ -1261,9 +1211,7 @@ impl PrincipalCell {
         let mut shared: Vec<core::Shared> = vec![];
         let mut lists: Vec<(String, FragmentList)> = vec![(person.clone(), self.own_list()?)];
         for agent in &me.agents {
-            let req = Request::new("https://principal.internal/list", Method::Get)?;
-            let list: FragmentList = crate::routed::send(&self.env, "PRINCIPAL", agent, req).await?.read_json().await?;
-            lists.push((agent.clone(), list));
+            lists.push((agent.clone(), principal::ask(&self.env, agent, &List::default()).await?));
         }
         for (whose, list) in &lists {
             for f in &list.fragments {
