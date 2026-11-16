@@ -1021,7 +1021,7 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
     if who.kind != IdentityKind::Person {
         return Err(CellError::new(ErrorCode::Forbidden, "the access view is a person's: an agent reads each fragment's members"));
     }
-    let owned: Vec<ListedFragment> = crate::listed(env, &who.id).await?.fragments.into_iter().filter(|f| f.role == Role::Owner).collect();
+    let owned: Vec<ListedFragment> = crate::principal::ask(env, &who.id, &crate::principal::calls::List::default()).await?.fragments.into_iter().filter(|f| f.role == Role::Owner).collect();
     let asked: Vec<String> = owned.iter().filter(|f| f.sharing.is_none_or(|s| s.with_others())).take(limits::ACCESS_ASKED_MAX).map(|f| f.name.clone()).collect();
     assert!(asked.len() <= limits::ACCESS_ASKED_MAX, "the access view asks a bounded number of fragments");
     let mut found: BTreeMap<String, (Vec<Member>, Vec<Invite>)> = BTreeMap::new();

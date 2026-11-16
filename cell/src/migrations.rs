@@ -761,7 +761,7 @@ impl MigrationsCell {
         answer
     }
 
-    /// The people whose moves changed, told (`principal::tell_changed`), so
+    /// The people whose moves changed, told (`principal::calls::Changed`), so
     /// each open page reads its notices again: at most `TELLS_MAX`, best
     /// effort (a page that missed it reads them as it reconnects).
     async fn tell(&self) {
@@ -773,7 +773,7 @@ impl MigrationsCell {
         people.sort_unstable();
         people.dedup();
         for person in people.iter().take(TELLS_MAX) {
-            if let Err(e) = crate::principal::tell_changed(&self.env, person).await {
+            if let Err(e) = crate::principal::ask(&self.env, person, &crate::principal::calls::Changed {}).await {
                 console_error!("migrations.tell-failed: {person}: {}", e.message);
             }
         }

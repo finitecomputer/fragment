@@ -52,6 +52,7 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
+use crate::principal::calls::{Face, IndexChange, List};
 use crate::registry::calls::{ClaimInvite, InviteEmail};
 use crate::registry::invites::ForgetInvite;
 
@@ -76,7 +77,7 @@ pub(crate) const CLAIM_HEADER: &str = "x-fragment-invite-claim";
 /// effort: one not told keeps it out until its person's next yes there,
 /// said in the log.
 pub(crate) async fn agent_made(env: &Env, person: &str, agent: &str) {
-    let theirs: Vec<String> = match crate::listed(env, person).await {
+    let theirs: Vec<String> = match crate::principal::ask(env, person, &List::default()).await {
         Ok(list) => list.fragments.into_iter().filter(|f| matches!(f.role, Role::Viewer | Role::Editor)).map(|f| f.name).collect(),
         Err(e) => return console_error!("{}", json!({ "agent-made": agent, "list": person, "failed": e.message })),
     };
@@ -252,32 +253,15 @@ impl FragmentCell {
         self.index_change(&owner, Some(Role::Owner))
     }
 
-    /// Sends one index change to `principal`'s list: whether it took it.
-    pub(crate) async fn send_index(&self, principal: &str, body: &Value) -> bool {
-        self.tell_index(principal, body).await.is_ok()
-    }
-
     /// Sends one index change to `principal`'s list, and tells apart why
     /// it was not taken (`fragment_core::ended::list_told`): the list's
     /// refusal, or a failure a later try may pass.
-    pub(crate) async fn tell_index(&self, principal: &str, body: &Value) -> Result<(), Failure> {
-        let sent = async {
-            let headers = Headers::new();
-            headers.set("content-type", "application/json")?;
-            let mut init = RequestInit::new();
-            init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
-            let req = Request::new_with_init("https://principal.internal/index", &init)?;
-            let mut resp = crate::routed::send(&self.env, "PRINCIPAL", principal, req).await?;
-            let status = resp.status_code();
-            // what a list says of a change it did not take (its error's message)
-            let detail = if status == 200 { String::new() } else { resp.text().await.unwrap_or_default() };
-            Ok::<(u16, String), CellError>((status, detail))
-        }
-        .await;
-        match sent {
-            Ok((status, detail)) => fragment_core::ended::list_told(Some(status), &detail),
+    pub(crate) async fn tell_index(&self, principal: &str, change: &IndexChange) -> Result<(), Failure> {
+        match crate::principal::ask(&self.env, principal, change).await {
+            Ok(_) => Ok(()),
             // a list of another release refused it unread (a deploy going out): a later try's
-            Err(e) => fragment_core::ended::list_told(None, &e.message),
+            Err(e) if e.release_refused.is_some() => fragment_core::ended::list_told(None, &e.message),
+            Err(e) => fragment_core::ended::list_told(Some(e.code.status()), &e.message),
         }
     }
 
@@ -313,46 +297,61 @@ impl FragmentCell {
             )
             .unwrap_or_default();
         assert!(due.len() as i64 <= INDEX_FLUSH_MAX, "a flush sends a bounded batch");
+        let incarnation = incarnation.parse::<i64>().unwrap_or(0);
         let mut batch = Vec::with_capacity(due.len());
         for row in &due {
             let principal = row["principal"].as_str().unwrap_or("").to_string();
             let version = row["version"].as_i64().unwrap_or(0);
-            let mut body = json!({
-                "fragment": name,
-                "role": row["role"],
-                "incarnation": incarnation.parse::<i64>().unwrap_or(0),
-                "version": version,
-            });
+            let attempts = row["attempts"].as_i64().unwrap_or(0);
+            let role = match row["role"].as_str().map(|r| Role::parse(r).ok_or(r)) {
+                None => None,
+                Some(Ok(role)) => Some(role),
+                // a role this release does not know (a newer one's, read
+                // after a rollback) is never sent as none, which takes the
+                // row away: it waits, as a change its list refused does
+                Some(Err(r)) => {
+                    console_error!("{name}: {principal}'s change names a role this release does not know: {r}");
+                    batch.push((principal, version, attempts, None));
+                    continue;
+                }
+            };
+            let mut change = IndexChange { role, ..IndexChange::gone(name.clone(), incarnation, version) };
             // every row a role names: the channels searched, the
             // fragment's face and its agents, and the listed records of the
             // channels its role reads, as they are now
-            if let Some(role) = row["role"].as_str().and_then(Role::parse) {
-                body["searched"] = json!(searched);
-                body["listed"] = json!(fragment_core::listed::for_role(&listed, role));
+            if let Some(role) = role {
+                change.searched = Some(searched.clone());
+                change.listed = fragment_core::listed::for_role(&listed, role);
                 // none stored yet (no template, one not blessed, a release
                 // read at its making that failed, nothing installed): the
                 // face a list reads a row without one as, an untitled app,
                 // so its agents are in every row from the first
                 match self.meta(MetaKey::Face) {
                     Ok(stored) => {
-                        let shown = stored.unwrap_or_else(|| face(FragmentKind::App, None, None, None));
-                        body["face"] = crate::json_text(&shown).unwrap_or(Value::Null);
-                        body["face"]["agents"] = json!(agents);
+                        let mut shown = stored.and_then(|f| crate::json_text::<Face>(&f).ok()).unwrap_or_default();
+                        shown.agents = agents.clone();
+                        change.face = Some(shown);
                     }
                     Err(e) => console_error!("{name}: its face did not read ({:?}): {}", e.code, e.message),
                 }
-            }
-            // the owner's row: the sharing now, which no later change undoes
-            // (a later one sends a newer version, made after it)
-            if principal == owner && row["role"].is_string() {
-                match self.sharing_counts() {
-                    Ok(sharing) => body["sharing"] = json!(sharing),
-                    Err(e) => console_error!("{name}: its sharing did not read ({:?}): {}", e.code, e.message),
+                // the owner's row: the sharing now, which no later change
+                // undoes (a later one sends a newer version, made after it)
+                if principal == owner {
+                    match self.sharing_counts() {
+                        Ok(sharing) => change.sharing = Some(sharing),
+                        Err(e) => console_error!("{name}: its sharing did not read ({:?}): {}", e.code, e.message),
+                    }
                 }
             }
-            batch.push((principal, version, row["attempts"].as_i64().unwrap_or(0), body));
+            batch.push((principal, version, attempts, Some(change)));
         }
-        let delivered = join_all(batch.iter().map(|(principal, _, _, body)| self.send_index(principal, body))).await;
+        let told = batch.iter().map(|(principal, _, _, change)| async move {
+            match change {
+                Some(change) => self.tell_index(principal, change).await.is_ok(),
+                None => false,
+            }
+        });
+        let delivered = join_all(told).await;
         for ((principal, version, attempts, _), delivered) in batch.into_iter().zip(delivered) {
             if delivered {
                 let _ = self.exec(

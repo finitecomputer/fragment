@@ -35,11 +35,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use worker::*;
 
-use crate::ReadJson;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
-use crate::principal::{SearchApplied, SearchBatch, SearchEntry};
+use crate::principal::calls::{SearchApplied, SearchBatch, SearchEntry};
 
 /// Due cursors one flush sends a batch to (more wait for the next pass,
 /// the alarm armed again at once).
@@ -221,17 +220,6 @@ impl FragmentCell {
     }
 
     async fn deliver_search(&self, principal: &str, batch: &SearchBatch) -> CellResult<SearchApplied> {
-        let body = serde_json::to_string(batch).map_err(|e| CellError::host(format!("a search batch: {e}")))?;
-        let headers = Headers::new();
-        headers.set("content-type", "application/json")?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
-        let req = Request::new_with_init("https://principal.internal/search/entries", &init)?;
-        let mut resp = crate::routed::send(&self.env, "PRINCIPAL", principal, req).await?;
-        if resp.status_code() != 200 {
-            let why: Value = resp.read_json().await.unwrap_or(Value::Null);
-            return Err(CellError::host(format!("their list answered {}: {why}", resp.status_code())));
-        }
-        resp.read_json::<SearchApplied>().await.map_err(|e| CellError::host(format!("their list's answer: {e}")))
+        crate::principal::ask(&self.env, principal, batch).await
     }
 }

@@ -324,8 +324,8 @@ impl FragmentCell {
         };
         assert!(due.len() as i64 <= INDEX_FLUSH_MAX, "a flush tells a bounded batch");
         let told = join_all(due.iter().map(|u| {
-            let body = json!({ "fragment": u.name, "role": null, "incarnation": u.incarnation, "version": u.version });
-            async move { self.tell_index(&u.principal, &body).await }
+            let change = crate::principal::calls::IndexChange::gone(u.name.clone(), u.incarnation, u.version);
+            async move { self.tell_index(&u.principal, &change).await }
         }))
         .await;
         let (mut failed, mut first_error) = (0usize, None::<String>);
