@@ -1006,6 +1006,17 @@ fn env_name_ok(name: &str) -> bool {
         && !name.starts_with("HERMES_")
 }
 
+/// `config` (a profile's, `profile_config`) with `skills` disabled for it
+/// (Hermes' `skills.disabled`, by name): the managed skills of connections
+/// this agent does not hold (`skills::withheld`). With none, as it was.
+pub fn disabling(config: String, skills: &[String]) -> String {
+    const AT: &str = "\nskills:\n  external_dirs: [";
+    let Some(start) = config.find(AT).filter(|_| !skills.is_empty()) else { return config };
+    let end = start + AT.len() + config[start + AT.len()..].find('\n').map(|n| n + 1).unwrap_or(config.len() - start - AT.len());
+    let names: Vec<String> = skills.iter().map(|s| format!("{s:?}")).collect();
+    format!("{}  disabled: [{}]\n{}", &config[..end], names.join(", "), &config[end..])
+}
+
 /// A placeholder, as the platform makes one: `fcx_`/`fck_`, a provider and
 /// a tag, nothing a line or a shell would read as more.
 fn placeholder_ok(p: &str) -> bool {
@@ -1565,6 +1576,11 @@ mod tests {
         assert!(!h.contains("fallback_providers") && !h.contains("stale_timeout_seconds") && !h.contains("api_max_retries"), "the high tier has none: {h}");
         assert!(!m.contains("fallback_providers") && !m.contains("stale_timeout_seconds") && !m.contains("api_max_retries"), "a profile's own, never the overlay's: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n"), "the managed skills and the platform skill's view, after its own: {p}");
+        // the skills of connections it does not hold are disabled for it, by name
+        let withheld = disabling(p.clone(), &["jira-finite".into(), "linear-finite".into()]);
+        assert!(withheld.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n  disabled: [\"jira-finite\", \"linear-finite\"]\n"), "{withheld}");
+        assert_eq!(withheld.replace("  disabled: [\"jira-finite\", \"linear-finite\"]\n", ""), p, "and nothing else changed");
+        assert_eq!(disabling(p.clone(), &[]), p, "none withheld: as it was");
         assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
         assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");

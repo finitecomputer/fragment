@@ -228,6 +228,37 @@ pub fn skill_names(installed: &Installed) -> BTreeSet<String> {
     installed.keys().filter_map(|p| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).map(str::to_string).collect()
 }
 
+/// The connection a managed skill is for, as its frontmatter names it
+/// (`metadata: fragment: connection: <provider>`, templates/skills/README.md):
+/// none for a skill of no connection.
+pub fn skill_connection(text: &str) -> Option<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n");
+    let front = text.strip_prefix("---\n")?.split_once("\n---")?.0;
+    let mut metadata = front.lines().skip_while(|l| l.trim_end() != "metadata:").skip(1).take_while(|l| l.starts_with(' '));
+    metadata.by_ref().find(|l| l.trim_end() == "  fragment:")?;
+    metadata.take_while(|l| l.starts_with("    ")).find_map(|l| l.trim().strip_prefix("connection:")).map(|c| c.trim().to_string()).filter(|c| !c.is_empty())
+}
+
+/// The managed skills an agent is not shown: each connection's skill whose
+/// connection is none of `providers` (the providers of the credentials it
+/// may use now). So its prompt lists the skills of what its owner
+/// connected, however many connections the platform offers, and a skill
+/// appears as its connection does. Their names as Hermes gives them,
+/// sorted; one whose name is not plain is left shown.
+pub fn withheld(dir: &Path, installed: &Installed, providers: &BTreeSet<String>) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    for rel in installed.keys().filter(|p| p.ends_with("/SKILL.md")) {
+        let Ok(text) = std::fs::read_to_string(dir.join(rel)) else { continue };
+        let Some(connection) = skill_connection(&text) else { continue };
+        let name = skill_name(&text, rel.trim_end_matches("/SKILL.md").rsplit('/').next().unwrap_or_default());
+        let plain = !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if plain && !providers.contains(&connection) {
+            names.insert(name);
+        }
+    }
+    names.into_iter().collect()
+}
+
 /// The name Hermes gives the skill whose `SKILL.md` reads `text`, in a
 /// directory named `dir_name`: its frontmatter's `name` (quoted or not),
 /// else the directory's.
@@ -474,6 +505,44 @@ pub fn managed_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A connection's skill is shown to an agent that holds the connection:
+    /// each managed skill that names one (`metadata: fragment: connection`)
+    /// is withheld from an agent whose credentials have no such provider,
+    /// and shown again once they do. A skill of no connection is never
+    /// withheld, nor one whose name is not plain, nor one that is not read.
+    #[test]
+    fn a_connections_skill_is_shown_to_an_agent_that_holds_it() {
+        let dir = std::env::temp_dir().join(format!("hermes-boot-withheld-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill = |name: &str, connection: Option<&str>| {
+            let meta = connection.map(|c| format!("  fragment:\n    connection: {c}\n")).unwrap_or_default();
+            format!("---\nname: {name}\ndescription: d\nmetadata:\n  hermes:\n    tags: [A]\n{meta}---\n\n# {name}\n")
+        };
+        let mut installed = Installed::new();
+        for (rel, text) in [
+            ("productivity/linear-finite/SKILL.md", skill("linear-finite", Some("linear"))),
+            ("productivity/jira-finite/SKILL.md", skill("jira-finite", Some("atlassian"))),
+            ("productivity/confluence-finite/SKILL.md", skill("confluence-finite", Some("atlassian"))),
+            ("productivity/google-workspace-finite/SKILL.md", skill("google-workspace-finite", Some("google"))),
+            ("software-development/apps-finite/SKILL.md", skill("apps-finite", None)),
+            ("odd/SKILL.md", skill("an odd, name", Some("linear"))),
+        ] {
+            write_file(&dir, rel, text.as_bytes()).unwrap();
+            installed.insert(rel.to_string(), "v".into());
+        }
+        installed.insert("gone/SKILL.md".into(), "v".into());
+        let holding = |providers: &[&str]| withheld(&dir, &installed, &providers.iter().map(|p| p.to_string()).collect());
+        assert_eq!(holding(&[]), ["confluence-finite", "google-workspace-finite", "jira-finite", "linear-finite"]);
+        assert_eq!(holding(&["google", "perplexity"]), ["confluence-finite", "jira-finite", "linear-finite"]);
+        assert_eq!(holding(&["atlassian", "linear"]), ["google-workspace-finite"], "both of one connection's skills");
+        assert!(holding(&["atlassian", "google", "linear"]).is_empty());
+        assert_eq!(skill_connection(&skill("a", Some("linear"))), Some("linear".into()));
+        for none in [skill("a", None), "---\nname: a\nconnection: linear\n---\n".into(), "---\nname: a\nmetadata:\n  hermes:\n    connection: linear\n---\n".into(), "no frontmatter".into()] {
+            assert_eq!(skill_connection(&none), None, "{none:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn frag(name: &str, kind: &str, owned: bool) -> FragmentEntry {
         FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
