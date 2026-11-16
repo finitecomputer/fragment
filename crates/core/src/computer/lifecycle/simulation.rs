@@ -44,6 +44,8 @@ fn simulated_interleavings_keep_the_invariants() {
         let mut now = T;
         let mut metered: Vec<(i64, i64)> = vec![];
         let mut generation = 0;
+        // when each start was made: none of the time before it is metered
+        let mut made_at = std::collections::BTreeMap::new();
         let mut came_up = std::collections::BTreeSet::new();
         let mut ended = std::collections::BTreeSet::new();
         // what the DO would report next, for the actions it was handed
@@ -128,6 +130,7 @@ fn simulated_interleavings_keep_the_invariants() {
                 };
             let cancels = matches!(&event, Event::Opened { socket: Socket::Keepalive }) && matches!(l.phase, Phase::Sleeping { .. }) && matches!(l.phase, Phase::Sleeping { owner: false, .. }) && matches!(l.saving, Some(Saving::Hold { .. }));
             let free_before = l.unmetered;
+            let running_before = l.running();
             reached[9] += u32::from(free_before.is_some());
             let s = l.apply_with(event, now, &rules);
             // stored and read again (its isolate gone): the same computer
@@ -191,12 +194,15 @@ fn simulated_interleavings_keep_the_invariants() {
             for a in &s.actions {
                 match a {
                     Action::Start { generation: g } => {
+                        made_at.insert(*g, now);
                         assert!(*g > generation, "a start's generation grows");
                         generation = *g;
                     }
                     Action::Meter { from_ms, to_ms } => {
                         assert!(from_ms < to_ms && *to_ms <= now, "an interval runs forward, up to now");
                         assert!(metered.last().is_none_or(|(_, last)| from_ms >= last), "intervals never overlap");
+                        let of = running_before.expect("only a running start is metered");
+                        assert!(*from_ms >= made_at[&of], "metered from {from_ms}, before its start {of} was made (seed {seed0}, step {step})");
                         // the time kept for failed saves is free: no interval
                         // overlaps the window open before or after this step
                         for (a, b) in [free_before, l.unmetered].into_iter().flatten() {

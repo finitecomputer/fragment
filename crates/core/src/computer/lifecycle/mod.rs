@@ -4,7 +4,7 @@
 use fragment_proto::computer::LifeEnd;
 use serde::{Deserialize, Serialize};
 
-use crate::computer::limits::{IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, WONT_WAKE_RETRY_MS};
+use crate::computer::limits::{ALARM_LATE_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, WONT_WAKE_RETRY_MS};
 
 mod event;
 mod legacy;
@@ -326,6 +326,17 @@ impl Lifecycle {
         }
     }
 
+    /// The last moment its running container was shown up: its last meter,
+    /// its phase's beginning or its sleep's step's, or work done on it.
+    fn shown_up_ms(&self) -> i64 {
+        let phase = match self.phase {
+            Phase::Awake { since_ms, .. } | Phase::Sleeping { since_ms, .. } => since_ms,
+            Phase::Asleep { .. } | Phase::Starting { .. } | Phase::Failed { .. } => i64::MIN,
+        };
+        let step = self.saving.map_or(i64::MIN, Saving::since_ms);
+        self.metered_to_ms.max(phase).max(step).max(self.worked_ms)
+    }
+
     fn next_alarm(&self) -> Option<i64> {
         match &self.phase {
             Phase::Asleep { retry } => retry.map(|r| r.at_ms),
@@ -363,6 +374,15 @@ impl Lifecycle {
     pub fn apply_with(&mut self, event: Event, now_ms: i64, rules: &Rules) -> Step {
         assert!(rules.unsaved_max_ms >= 0, "a bound is a span of time");
         let mut step = Step::default();
+        // heard late (`ALARM_LATE_MS`): metered to the last moment it was
+        // shown up, and none of the time since (FIN-511)
+        if matches!(self.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) {
+            let shown = self.shown_up_ms();
+            if now_ms > shown + ALARM_LATE_MS {
+                self.meter(shown, &mut step);
+                self.metered_to_ms = now_ms;
+            }
+        }
         match (self.phase.clone(), event) {
             (phase, Event::Wake { why }) => {
                 // a message for its agents, or a fragment to follow: work
@@ -619,6 +639,11 @@ impl Lifecycle {
                 }
             }
             (Phase::Starting { generation, .. } | Phase::Awake { generation, .. }, Event::Sleep) => {
+                // a start that never came up was never metered: its sleep is
+                // metered from here, as a life is from its `Ready` (FIN-511)
+                if matches!(self.phase, Phase::Starting { .. }) {
+                    self.metered_to_ms = now_ms;
+                }
                 self.held_until_ms = now_ms;
                 self.keepalives = 0;
                 self.tabs = 0;

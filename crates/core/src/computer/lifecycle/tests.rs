@@ -218,3 +218,154 @@ fn a_keepalive_the_runtime_lost_is_closed_and_a_held_one_never() {
     assert_eq!((many.keepalives_lost(1_000), many.keepalives_lost(usize::MAX)), (0, 0), "none counted open that it did not hear open");
     assert_eq!(Lifecycle::new().keepalives_lost(0), 0, "asleep, nothing to close");
 }
+
+/// What `s` meters, as `(from, to)`.
+fn meters(s: &Step) -> Vec<(i64, i64)> {
+    s.actions.iter().filter_map(|a| if let Action::Meter { from_ms, to_ms } = a { Some((*from_ms, *to_ms)) } else { None }).collect()
+}
+
+/// Three days, the silence an event of FIN-511's paths comes after.
+const DAYS: i64 = 3 * 24 * 3_600_000;
+
+/// Goal (FIN-511, path 1): an awake computer whose alarms went unheard,
+/// heard again long after anything was heard of it (`ALARM_LATE_MS`), is
+/// metered only up to the last moment it was shown up, never the silence
+/// after it, which nothing shows it ran; metered on from there as it is
+/// heard, and its exit, heard late, ends its life as before. Valid: heard
+/// just within the bound, metered to it as ever. Method: a tab opened,
+/// then its next alarm, or its exit, 3 days on.
+#[test]
+fn an_awake_computer_heard_late_is_metered_to_when_it_was_shown_up() {
+    let awake = || {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Tab }, T + 5_000);
+        (l, g)
+    };
+    let late = T + DAYS;
+    let (mut l, _) = awake();
+    assert_eq!(meters(&l.apply(Event::Alarm, late)), vec![(T + 3_000, T + 5_000)], "its next alarm, 3 days late");
+    assert_eq!(meters(&l.apply(Event::Alarm, late + METER_EVERY_MS)), vec![(late, late + METER_EVERY_MS)], "metered on from there, as it is heard again");
+    let (mut l, g) = awake();
+    let s = l.apply(Event::Exited { generation: g }, late);
+    assert_eq!(meters(&s), vec![(T + 3_000, T + 5_000)], "its exit, heard 3 days late");
+    assert!(s.ended.is_some_and(|e| e.by == LifeEnd::Exit && e.at_ms == late), "{s:?}");
+    let (mut l, _) = awake();
+    assert_eq!(meters(&l.apply(Event::Alarm, T + 5_000 + ALARM_LATE_MS)), vec![(T + 3_000, T + 5_000 + ALARM_LATE_MS)], "heard within the bound");
+}
+
+/// Goal (FIN-511, path 2; #1284's review): a computer going to sleep whose
+/// alarms went unheard (its owner's restart, saved, its stop under way)
+/// and whose end is heard days later is metered to its stop's start only;
+/// its restart still ends as one, and its start is still owed. Method: the
+/// restart's steps, then its `Asleep` 3 days on.
+#[test]
+fn a_sleep_heard_late_is_metered_to_its_last_step() {
+    let mut l = Lifecycle::new();
+    let g = started(&mut l, T);
+    l.apply(Event::Restart { generation: g }, T + 10_000);
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 10_500));
+    assert_eq!(l.apply(Event::Saved { generation: g, seq }, T + 12_000).actions, vec![Action::Stop { generation: g, saved: true }]);
+    let late = T + DAYS;
+    let s = l.apply(Event::Asleep { generation: g }, late);
+    assert_eq!(meters(&s), vec![(T + 3_000, T + 12_000)], "metered to its stop's start: {s:?}");
+    assert!(s.ended.is_some_and(|e| e.restart && e.saved), "its restart ends as one: {s:?}");
+    assert_eq!(owed(&mut l, &s, late).actions, vec![Action::Start { generation: g + 1 }], "and its start is owed");
+}
+
+/// Goal (FIN-511, path 3): a start its owner puts to sleep before it comes up
+/// meters only its sleep's steps, never the time before the start was
+/// made: on a computer's first start (none metered before it) or one
+/// asleep for days. Its save failing (the unsaved window) the same.
+/// Method: the start, its owner's sleep, its hold, save and stop.
+#[test]
+fn a_start_put_to_sleep_meters_none_of_the_time_before_it() {
+    let asleep_for_days = || {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Sleep, T + 60_000);
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 61_000));
+        l.apply(Event::Saved { generation: g, seq }, T + 62_000);
+        assert_eq!(meters(&l.apply(Event::Asleep { generation: g }, T + 63_000)), vec![(T + 3_000, T + 63_000)]);
+        l
+    };
+    let at = T + DAYS;
+    for (first, mut l) in [(true, Lifecycle::new()), (false, asleep_for_days())] {
+        let s = l.apply(Event::Wake { why: Wake::Owner }, at);
+        let Some(Action::Start { generation: g }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        let mut failing = l.clone();
+        let mut m = meters(&l.apply(Event::Sleep, at + 10_000));
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 11_000));
+        m.extend(meters(&l.apply(Event::Saved { generation: g, seq }, at + 12_000)));
+        m.extend(meters(&l.apply(Event::Asleep { generation: g }, at + 13_000)));
+        assert_eq!(m, vec![(at + 10_000, at + 13_000)], "its sleep's steps only (first start {first})");
+        // its save failing: nothing before the sleep, and the window free
+        failing.apply(Event::Sleep, at + 10_000);
+        let (_, _, seq) = save_asked(&failing.apply(Event::Held { generation: g, held: true }, at + 11_000));
+        let s = failing.apply(Event::SaveFailed { generation: g, seq, why: "R2 is down".into() }, at + 12_000);
+        assert_eq!(meters(&s), vec![], "nothing before its sleep (first start {first}): {s:?}");
+    }
+}
+
+/// Goal (FIN-511, the other side): a life heard on time is metered as it
+/// always was, every interval of it and nothing more: from its `Ready`,
+/// each alarm's, its sleep's steps, to its end; the days asleep between
+/// two lives, none. Method: two lives three days apart, each alarm at
+/// the time it asked for.
+#[test]
+fn an_ordinary_life_is_metered_as_before() {
+    let mut l = Lifecycle::new();
+    let mut metered = vec![];
+    let life = |l: &mut Lifecycle, at: i64, metered: &mut Vec<(i64, i64)>| {
+        let g = started(l, at);
+        // its record's hold, each alarm heard at the time it asked for
+        let slept = loop {
+            let next = l.next_alarm().expect("awake, an alarm is due");
+            let s = l.apply(Event::Alarm, next);
+            metered.extend(meters(&s));
+            if s.actions.contains(&Action::Sleep { generation: g }) {
+                break next;
+            }
+        };
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, slept + 500));
+        l.apply(Event::Saved { generation: g, seq }, slept + 2_000);
+        metered.extend(meters(&l.apply(Event::Asleep { generation: g }, slept + 4_000)));
+        (at + 3_000, slept + 4_000)
+    };
+    let first = life(&mut l, T, &mut metered);
+    let second = life(&mut l, T + DAYS, &mut metered);
+    for (from, to) in [first, second] {
+        let of_life: Vec<_> = metered.iter().filter(|(a, _)| *a >= from && *a < to).copied().collect();
+        assert_eq!(of_life.first().map(|(a, _)| *a), Some(from), "from its Ready");
+        assert_eq!(of_life.last().map(|(_, b)| *b), Some(to), "to its end");
+        assert!(of_life.windows(2).all(|w| w[0].1 == w[1].0), "every interval, none twice, none missed: {of_life:?}");
+        assert!(of_life.iter().all(|(a, b)| b - a <= METER_EVERY_MS), "each an alarm's: {of_life:?}");
+    }
+    assert_eq!(metered.iter().map(|(a, b)| b - a).sum::<i64>(), (first.1 - first.0) + (second.1 - second.0), "the days asleep, none");
+}
+
+/// Goal (FIN-511, the other side): a computer really awake for days, each
+/// of its alarms heard, is metered for all of it, in `METER_EVERY_MS`
+/// intervals. Method: a tab open three days, each alarm at the time it
+/// asked for.
+#[test]
+fn a_computer_awake_for_days_is_metered_for_all_of_it() {
+    let mut l = Lifecycle::new();
+    started(&mut l, T);
+    let mut s = l.apply(Event::Opened { socket: Socket::Tab }, T + 5_000);
+    let until = T + DAYS;
+    let mut metered = vec![];
+    loop {
+        let at = s.alarm_ms.expect("awake, an alarm is due");
+        if at > until {
+            break;
+        }
+        s = l.apply(Event::Alarm, at);
+        assert!(matches!(l.phase, Phase::Awake { .. }), "a tab open keeps it awake");
+        metered.extend(meters(&s));
+    }
+    assert!(metered.windows(2).all(|w| w[0].1 == w[1].0) && metered.iter().all(|(a, b)| b - a == METER_EVERY_MS), "one interval an alarm, none missed: {:?}", &metered[..3]);
+    let (from, to) = (metered[0].0, metered[metered.len() - 1].1);
+    assert_eq!((from, metered.iter().map(|(a, b)| b - a).sum::<i64>()), (T + 3_000, to - from));
+    assert!(until - to < METER_EVERY_MS, "all three days");
+}

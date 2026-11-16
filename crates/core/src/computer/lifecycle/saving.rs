@@ -21,7 +21,7 @@ pub enum Saving {
 }
 
 impl Saving {
-    fn since_ms(self) -> i64 {
+    pub(super) fn since_ms(self) -> i64 {
         match self {
             Saving::Hold { since_ms } | Saving::Save { since_ms, .. } | Saving::Stop { since_ms, .. } => since_ms,
         }
