@@ -724,6 +724,8 @@ mod tests {
         for (bad, why) in [
             (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"v0:{x-time}"}}}"#, "body"),
             (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{body}","algorithm":"sha1"}}}"#, "algorithm"),
+            (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{body}","fresh":"x-time","within_s":300}}}"#, "{x-time}"),
+            (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{x-time}.{body}","within_s":300}}}"#, "come together"),
             (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{body}"},"header":"x-sig","secret":"S"}}"#, "not both"),
             (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{body}"},"answer":"none"}}"#, "no declared"),
             (r#"{"operations":{"j":{"kind":"job"}},"inbox":{"header":"x-sig","secret":"S","answer":"j"}}"#, "not a query"),

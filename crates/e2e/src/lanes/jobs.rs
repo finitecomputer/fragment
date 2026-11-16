@@ -546,7 +546,8 @@ fn inbox_secret(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// over its time and body, under one of its secrets) takes a delivery
 /// only signed by that secret, now, in that header, with that prefix; and
 /// its `answer` query says back a URL check's challenge, the platform's
-/// own answer otherwise. Nothing refused is stored or runs.
+/// own answer otherwise. Nothing refused is stored or runs, a captured
+/// delivery re-timed included.
 /// Method: the jobs fixture naming one; deliveries before its secret is
 /// set, with its token, and signed well and badly in each way.
 fn inbox_hmac(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
@@ -594,6 +595,7 @@ fn inbox_hmac(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         ("signed by another secret", post(&event, b"another secret", now(), as_is)?, "does not match"),
         ("a bad signature", post(&event, HOOK.as_bytes(), now(), |e| e[1].1 = format!("v0={}", "0".repeat(64)))?, "does not match"),
         ("a stale time, signed well", post(&event, HOOK.as_bytes(), now() - 600, as_is)?, "too far from now"),
+        ("a captured delivery, its time moved to now", post(&event, HOOK.as_bytes(), now() - 600, |e| e[0].1 = (e[0].1.parse::<i64>().unwrap_or(0) + 600).to_string())?, "does not match"),
         ("the wrong prefix", post(&event, HOOK.as_bytes(), now(), |e| e[1].1 = e[1].1.replacen("v0=", "v1=", 1))?, "prefix"),
         ("no signature header", post(&event, HOOK.as_bytes(), now(), |e| e.truncate(1))?, "no x-hook-signature header"),
         ("no time header", post(&event, HOOK.as_bytes(), now(), |e| drop(e.remove(0)))?, "no x-hook-time header"),

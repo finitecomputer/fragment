@@ -1039,7 +1039,8 @@ agent, or carrying code, keeps the last good code and says to fork it.
     `signed` names `{body}` once, and no `{` or `}` but its
     placeholders'. With `fresh`, only while that header's Unix seconds
     are at most `within_s` (1 to `inbox::WITHIN_MAX_S`) from now; the two
-    come together. A webhook signing its body alone is `"signed":
+    come together, and `signed` names that header, so its time is signed
+    (else a captured delivery, re-timed, would be taken again). A webhook signing its body alone is `"signed":
     "{body}"` (GitHub's, with `"prefix": "sha256="`).
 
   A header it names is lower case, never `x-fragment-*`, `cookie`,

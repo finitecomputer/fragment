@@ -21,8 +21,8 @@ pub const WITHIN_MAX_S: u64 = 3600;
 /// and then the hex HMAC-SHA256, under the fragment's secret `secret`, of
 /// `signed` with `{body}` the raw body and each `{<header>}` that header's
 /// value (Slack's `v0:{x-slack-request-timestamp}:{body}`), compared in
-/// constant time; with `fresh`, only while the Unix seconds in that header
-/// are at most `within_s` from now.
+/// constant time; with `fresh`, a header `signed` names, only while the
+/// Unix seconds in it are at most `within_s` from now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HmacDecl {
     pub secret: String,
@@ -95,12 +95,16 @@ impl HmacDecl {
         if signed.len() > SIGNED_MAX_BYTES {
             return Err(format!("inbox.hmac.signed is at most {SIGNED_MAX_BYTES} bytes"));
         }
-        parts(signed)?;
+        let pieces = parts(signed)?;
         let fresh = match (text("fresh")?, o.get("within_s")) {
             (None, None) => None,
             (Some(h), Some(w)) => {
                 if !inbox_header_ok(h) {
                     return Err(format!("inbox.hmac.fresh is a lower-case header name, not the platform's or a browser's ({h:?})"));
+                }
+                // an unsigned time is anyone's to set: a captured delivery, re-timed, would be new again
+                if !pieces.contains(&Part::Header(h)) {
+                    return Err(format!("inbox.hmac.signed names {{{h}}}, the time fresh reads, so its time is signed too"));
                 }
                 let w = w.as_u64().filter(|w| (1..=WITHIN_MAX_S).contains(w)).ok_or_else(|| format!("inbox.hmac.within_s is whole seconds, 1 to {WITHIN_MAX_S}"))?;
                 Some((h.to_string(), w))
@@ -313,12 +317,37 @@ mod tests {
         for r in refused {
             assert!(r.is_err(), "{r:?}");
         }
-        let fresh = |w: Value| HmacDecl::read(&json!({ "secret": "S", "header": "x-sig", "signed": "{body}", "fresh": "x-time", "within_s": w }));
+        let fresh = |w: Value| HmacDecl::read(&json!({ "secret": "S", "header": "x-sig", "signed": "{x-time}.{body}", "fresh": "x-time", "within_s": w }));
         assert_eq!(fresh(json!(1)).unwrap().fresh, Some(("x-time".into(), 1)));
         assert_eq!(fresh(json!(WITHIN_MAX_S)).unwrap().fresh, Some(("x-time".into(), WITHIN_MAX_S)));
         for bad in [json!(0), json!(WITHIN_MAX_S + 1), json!(-1), json!(1.5), json!("300")] {
             assert!(fresh(bad.clone()).is_err(), "{bad}");
         }
+        // its time is signed, or a captured delivery is new again with a new time
+        for signed in ["{body}", "{x-other}.{body}"] {
+            let e = HmacDecl::read(&json!({ "secret": "S", "header": "x-sig", "signed": signed, "fresh": "x-time", "within_s": 300 })).unwrap_err();
+            assert!(e.contains("{x-time}") && e.contains("signed"), "{signed}: {e}");
+        }
+    }
+
+    /// Goal: a captured delivery, its time header set to now, is refused:
+    /// no declaration deploy takes leaves its time unsigned (valid,
+    /// replay). Method: one signed a day ago, re-timed, under Slack's
+    /// template and under one signing its body alone.
+    #[test]
+    fn a_captured_delivery_retimed_is_refused() {
+        let (then, now) = (1_790_000_000_i64, 1_790_000_000 + 86_400);
+        let body = br#"{"type":"event_callback"}"#.as_slice();
+        let mut deployed = 0;
+        for signed in ["v0:{x-time}:{body}", "{body}"] {
+            let Ok(d) = HmacDecl::read(&json!({ "secret": "S", "header": "x-sig", "prefix": "v0=", "signed": signed, "fresh": "x-time", "within_s": 300 })) else { continue };
+            deployed += 1;
+            let sig = d.sign(KEY, &headers(&[("x-time", &then.to_string())]), body).unwrap();
+            assert_eq!(d.check(KEY, &headers(&[("x-time", &then.to_string()), ("x-sig", &sig)]), body, then), Ok(()), "{signed}: taken when it came");
+            let retimed = headers(&[("x-time", &now.to_string()), ("x-sig", &sig)]);
+            assert_eq!(d.check(KEY, &retimed, body, now), Err(Refused::Mismatch), "{signed}: replayed with a new time");
+        }
+        assert_eq!(deployed, 1, "Slack's template deploys, and one leaving its time unsigned does not");
     }
 
     /// Goal: an answer is null or `{body}`, its type its body's.
