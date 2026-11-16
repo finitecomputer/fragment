@@ -14,7 +14,9 @@ your owner makes public here sends its old address on to its new one
 files of facts. Each is optional; when one is missing, take the safer
 choice.
 - `agent/profile.json`: the old agent's `name`, and its `picture_url`.
-- `workspace/finitebrain/<id>.json`: a brain's `name`.
+- `workspace/finitebrain/<id>.json`: a brain's `name`, and whose it is:
+  its `owner` (`agent`, `person`, `other` or `unknown`), and its `kind`
+  (`personal`, or `organization` for a team's).
 - `sites/<site>.json`: a site's old address (`url`), whether it was
   public (`visibility`), the folder it served (`path`), and whether it was
   a single-page app (`spa`).
@@ -27,7 +29,7 @@ there too; leave it if it doesn't download as an image of at most
 ## What its parts become
 
 The survey's `parts` lists them: `brains` (each a folder under
-`workspace/finitebrain/`, only the brains your owner owns) and `sites`
+`workspace/finitebrain/`, every brain the old agent could read) and `sites`
 (each a folder under `sites/`). Do them after step 3 (files), before
 step 4 (personality). Load `brain-finite` before the brains, and
 `apps-finite` before the sites.
@@ -41,8 +43,26 @@ folder whole.
 
 For each brain folder `<id>`: its name is in
 `workspace/finitebrain/<id>.json`, or else the first heading of its
-`index.md`, or else its id. Make the brain once, as `SKILL.md`'s rules
-say (its full name in `progress.md` right after):
+`index.md`, or else its id. That file also says whose it is.
+
+**Whose it is.** The old agent kept a working copy of every brain it
+could read, not only its own. Make only its own and your owner's here.
+A team's brain has one home: two would split what the team writes.
+- **The old agent's own, or your owner's** (`owner` is `agent` or
+  `person`): make it, as below.
+- **A team's, or someone else's** (`other`): don't make it. Someone on
+  the team brings it over and invites your owner, and you come in with
+  them. Until then, keep a reference copy ("A brain you don't make",
+  below). If it is here already, in `fragment list`, keep no copy.
+- **No one can say** (`unknown`, or no `owner`): keep a reference copy
+  too, and ask your owner in the report whether it is theirs or a
+  team's. Say if it was a team's (`kind`): a team's brain holds what
+  teammates wrote too, and no one is added to a new one by itself. If
+  their team is bringing it over, you wait for that one. Don't recommend
+  either way, and don't decide from its size.
+
+Make the brain once, as `SKILL.md`'s rules say (its full name in
+`progress.md` right after):
 
 ```sh
 fragment create <a short label from its name> --visibility members --template brain --title "<its name>"
@@ -91,6 +111,42 @@ fragment call <its name> search --input '{"q": "<a word from one of its pages>"}
 The old brain's folder permissions don't carry over: everyone the brain
 is shared with reads all of it. Invite no one. Your owner reinvites their
 teammates once those teammates have moved.
+
+**A brain you don't make.** Keep its files as a reference copy, in a
+folder of its own that outlasts the import, leaving out what the old
+brain made for itself:
+
+```sh
+C="$HOME/old-finite-brains/<id>" H="$HOME/home-import/home/workspace/finitebrain/<id>" && \
+fragment home extract <source> workspace/finitebrain/<id> --to "$HOME/home-import/home" --layout <L> && \
+mkdir -p "$C" && \
+tar -C "$H" --exclude=AGENTS.md --exclude=_index.md --exclude=.keep --exclude=_wiki --exclude='*/.*' -cf - . | tar -C "$C" -xf - && \
+ls "$C" && find "$C" -type f | wc -l
+```
+
+Bring its assets in as above, into the copy. Then mark what it is:
+- In `$HOME/old-finite-brains/README.md`, a line for it: its name, whose
+  it was, and that it is a copy from finite.computer (the old Finite),
+  to read until you are in the real one.
+- In one memory, for all of them: that reference copies of brains from
+  the old Finite are in that folder, and each goes once you are in its
+  real one.
+
+Read it when it helps, and never write to it: what the team writes from
+now on goes in the real one.
+
+**Once you are in the real one** (it is in `fragment list`), delete its
+copy and its line in the README, and the memory once no copy is left:
+
+```sh
+rm -rf -- "$HOME/old-finite-brains/<id>"
+```
+
+**If no one brings it over**, and your owner runs that team, they may
+ask you to set it up. Make it as above, from the copy: the same steps,
+with `H` the copy's folder and no `fragment home extract`. They invite
+the others, and the copy goes. Do the same for a brain your owner says
+is theirs.
 
 ### Sites, as apps
 
@@ -338,6 +394,14 @@ Tell your owner, in the report:
 - **Sharing:** sites and brains are shared again with people, by them.
 - **Teammates:** they invite teammates to a brain once those teammates
   have moved.
+- **Team brains:** for each one you kept a reference copy of, that it is
+  their team's brain (or whose it is), and that you will join the real
+  one once someone on the team brings it over and invites them. Ask
+  whether anyone is: if every teammate's agent just waited, no one
+  would. If no one is, and they run that team, you can set it up from
+  the copy, and they invite the others.
+- **Brains no one could place:** ask whether each is theirs or a team's
+  ("Whose it is").
 - **Old sites:** one made public here sends its old address's visitors
   to its new one. The others keep serving at their old addresses until
   they are turned off. Give them the new addresses.
