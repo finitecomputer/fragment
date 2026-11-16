@@ -517,12 +517,13 @@ fn reset_page(s: &mut Suite, b: &mut crate::browser::Browser, page: &crate::brow
         b.color_scheme(page, "light")
     };
     let text = |b: &mut crate::browser::Browser| b.eval(page, "document.getElementById('reset-run').textContent").unwrap_or(Value::Null);
-    let shown = b.until(page, "!document.getElementById('reset-all').hidden && !document.getElementById('reset-all').disabled && document.getElementById('reset-confirm').hidden", wait);
+    // what is drawn, not the attribute alone: a stylesheet can show what `hidden` names
+    let shown = b.until(page, "document.getElementById('reset-all').checkVisibility() && !document.getElementById('reset-all').disabled && !document.getElementById('reset-confirm').checkVisibility()", wait);
     shoot(b, "button")?;
     b.click(page, "#reset-all")?;
     let asked = b.until(
         page,
-        "!document.getElementById('reset-confirm').hidden && document.getElementById('reset-all').hidden && document.querySelector('#reset-confirm p').textContent === \"Every person's and org's usage this month goes back to zero. Bought credit stays.\"",
+        "document.getElementById('reset-confirm').checkVisibility() && !document.getElementById('reset-all').checkVisibility() && document.querySelector('#reset-confirm p').textContent === \"Every person's and org's usage this month goes back to zero. Bought credit stays.\"",
         wait,
     );
     shoot(b, "confirm")?;
@@ -531,10 +532,10 @@ fn reset_page(s: &mut Suite, b: &mut crate::browser::Browser, page: &crate::brow
     let lost = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": api.identity(&held)?, "op": "fail-resets", "times": 1 })))?;
     anyhow::ensure!(lost.status == 200, "a ledger loses its next reset's answer: {lost}");
     b.click(page, "#reset-yes")?;
-    let going = b.until(page, "document.getElementById('reset-confirm').hidden && document.getElementById('reset-all').disabled && /^Resetting: \\d+ of \\d+, 1 to try again$/.test(document.getElementById('reset-run').textContent)", wait);
+    let going = b.until(page, "!document.getElementById('reset-confirm').checkVisibility() && document.getElementById('reset-all').checkVisibility() && document.getElementById('reset-all').disabled && /^Resetting: \\d+ of \\d+, 1 to try again$/.test(document.getElementById('reset-run').textContent)", wait);
     let progress = text(b);
     shoot(b, "progress")?;
-    let finished = b.until(page, "document.getElementById('reset-run').textContent.startsWith('Last reset ') && !document.getElementById('reset-all').disabled", Duration::from_secs(120));
+    let finished = b.until(page, "document.getElementById('reset-run').textContent.startsWith('Last reset ') && !document.getElementById('reset-all').disabled && !document.getElementById('reset-confirm').checkVisibility()", Duration::from_secs(120));
     let said = text(b);
     shoot(b, "result")?;
     let newest = api.signed(&s.operator, "GET", "/api/admin/usage-resets", None)?.body["runs"][0].clone();
