@@ -715,11 +715,19 @@ impl RegistryCell {
         };
         let (identity, email) = (session.identity, session.email);
         let (who, at) = (identity.id.as_str(), SqlStorageValue::Integer(js::now_ms()));
+        // an invite waiting comes before any yes kept: its person is asked
+        // to accept it (the router asks the fragment whether it knows them
+        // already), never signed in there as no member
+        if b.invite_first {
+            if let Some(invite) = self.waiting_to(who, &b.fragment)? {
+                return Ok(Minted { redeem: None, identity, email, invite: Some(invite) });
+            }
+        }
         match b.consent {
             Consent::Member => {}
             Consent::Remembered => {
                 if self.count("SELECT COUNT(*) AS n FROM consents WHERE identity = ? AND fragment = ?", vec![who.into(), b.fragment.as_str().into()])? == 0 {
-                    return Ok(Minted { redeem: None, identity, email });
+                    return Ok(Minted { redeem: None, identity, email, invite: None });
                 }
             }
             Consent::Given => {
@@ -735,7 +743,7 @@ impl RegistryCell {
             }
         }
         let redeem = self.new_redemption(&hash, &b.fragment, &b.return_to, b.embedder.as_deref()).await?;
-        Ok(Minted { redeem: Some(redeem), identity, email })
+        Ok(Minted { redeem: Some(redeem), identity, email, invite: None })
     }
 
     /// A person's approved key's own parent session (`mint`), made here when

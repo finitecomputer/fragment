@@ -1,7 +1,9 @@
 //! Invites by email (docs/cloudflare-v1.md, decisions 48 and 63). A
 //! fragment shares with an email: the invite waits on it in the fragment
 //! (members.rs), and here, kept against the email, which the platform
-//! mails a link to its own page. Nobody joins someone else's fragment
+//! mails a link to its own page: the fragment's sign-in there
+//! (`/auth/fragment`), which asks its person to accept it before it opens
+//! the fragment (FIN-502). Nobody joins someone else's fragment
 //! without their own yes (Paul, 2026-10-22: an invite "shouldn't auto add
 //! to their app list"), as nobody joins an org without theirs (offers.rs).
 //! Whoever signs in with the email, verified, sees it (`GET /api/invites`:
@@ -41,6 +43,13 @@ const CLAIMS_AT_ONCE: usize = 32;
 
 /// How soon the alarm's kept claims run again after a run that failed.
 const CLAIMS_LATER_MS: i64 = 60_000;
+
+/// The invites waiting on a person's emails, each as the wire names it
+/// (`waiting_on`): bound to the time now, then the person.
+const WAITING_SELECT: &str = "SELECT w.fragment, w.role, COALESCE(w.title, w.fragment) AS title, w.email, w.expires_at AS \"expiresAt\",
+       (SELECT s.email FROM subjects s WHERE s.identity = w.sharer ORDER BY s.signed_in_at DESC LIMIT 1) AS \"from\"
+     FROM invites_waiting w
+     WHERE w.role IN ('viewer', 'editor') AND w.expires_at > ? AND w.email IN (SELECT email FROM subjects WHERE identity = ?)";
 
 /// `POST /invites/waiting`: the invites waiting on the emails the asker (a
 /// person, or their agent acting `for` them: `invitee_by`) signs in with.
@@ -136,6 +145,10 @@ impl RegistryCell {
         if !mail::valid_address(&i.email) || i.email != i.email.to_ascii_lowercase() {
             return Err(CellError::invalid(format!("{:?} is not a lower-case email", i.email)));
         }
+        // it goes in the mail's link as it is
+        if !fragment_proto::valid_fragment_name(&i.fragment) {
+            return Err(CellError::invalid(format!("{:?} is not a fragment's name", i.fragment)));
+        }
         let now = js::now_ms();
         if i.expires_at <= now {
             return Err(CellError::invalid("an invite expires later than now"));
@@ -162,9 +175,10 @@ impl RegistryCell {
                 i.sharer.as_str().into(),
             ],
         )?;
-        // the platform's own page, where its person accepts it: never the
-        // fragment's, which is no one's to open until they do
-        let link = format!("{}/", self.cfg.platform());
+        // the platform's own page, where its person accepts it, then opens
+        // the fragment (auth.rs `/auth/fragment`, FIN-502): never the
+        // fragment's address, which is no one's to open until they do
+        let link = format!("{}/auth/fragment?name={}", self.cfg.platform(), i.fragment);
         let days = limits::INVITE_TTL_S / (24 * 3600);
         let invite = mail::invite(&i.email, &from, &i.title, i.role == Role::Editor, &link, days);
         let sent = crate::mail::send(&self.env, self.cfg, &invite).await;
@@ -262,12 +276,19 @@ impl RegistryCell {
     /// visitor of its own for them.
     fn waiting_on(&self, person: &str) -> CellResult<Vec<serde_json::Value>> {
         self.rows::<serde_json::Value>(
-            "SELECT w.fragment, w.role, COALESCE(w.title, w.fragment) AS title, w.email, w.expires_at AS \"expiresAt\",
-               (SELECT s.email FROM subjects s WHERE s.identity = w.sharer ORDER BY s.signed_in_at DESC LIMIT 1) AS \"from\"
-             FROM invites_waiting w
-             WHERE w.role IN ('viewer', 'editor') AND w.expires_at > ? AND w.email IN (SELECT email FROM subjects WHERE identity = ?)
-             ORDER BY w.expires_at, w.fragment LIMIT ?",
+            &format!("{WAITING_SELECT} ORDER BY w.expires_at, w.fragment LIMIT ?"),
             vec![SqlStorageValue::Integer(js::now_ms()), person.into(), SqlStorageValue::Integer(limits::INVITES_PER_EMAIL_MAX as i64)],
+        )
+    }
+
+    /// The invite to `fragment` waiting on `person`'s emails, if one does,
+    /// as `waiting_on` reads each (the one that runs out soonest, when two
+    /// of their emails hold one): what a sign-in there asks them to accept
+    /// first (signin.rs `mint`, FIN-502).
+    pub(super) fn waiting_to(&self, person: &str, fragment: &str) -> CellResult<Option<serde_json::Value>> {
+        self.row::<serde_json::Value>(
+            &format!("{WAITING_SELECT} AND w.fragment = ? ORDER BY w.expires_at LIMIT 1"),
+            vec![SqlStorageValue::Integer(js::now_ms()), person.into(), fragment.into()],
         )
     }
 

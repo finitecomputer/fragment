@@ -115,6 +115,8 @@
 .platform-page main.share .tick{width:14px;height:14px;color:var(--accent);visibility:hidden}
 .platform-page main.share .tick.on,.platform-page main.share .menu-radio input:checked~.tick{visibility:visible}
 .platform-page main.share footer{display:flex;margin:0}
+/* An invite's answer (auth/invite.rs): its two buttons centered in the card, as its words are. */
+.platform-page main footer.answer{justify-content:center}
 /* with reach (reach.rs), With link and Public show, unavailable */
 .platform-page main.share .access button[aria-disabled=true]{opacity:.45;cursor:not-allowed}
 /* the lines under the invite form: the chat's trust line, the keys line */
