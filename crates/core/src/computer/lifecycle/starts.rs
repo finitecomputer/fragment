@@ -337,7 +337,7 @@ mod tests {
     /// last strike: failing, it gives up again at once, its pause anew;
     /// coming up, it is a computer like any. Sooner, such a wake is refused;
     /// its owner's never is. Valid, invalid (too soon), replay (a second
-    /// wake as it starts), and a lifecycle stored before `failed_ms` (its
+    /// wake as it starts), and a lifecycle stored before `since_ms` (its
     /// next wake tries). Method: the lifecycle's steps, as the DO hears them.
     #[test]
     fn a_computer_that_wont_wake_tries_again_after_its_pause() {
@@ -381,7 +381,6 @@ mod tests {
         // a lifecycle stored before it kept when it gave up tries at its next wake
         let mut stored = serde_json::to_value(Lifecycle { phase: Phase::Failed { why: "old".into(), since_ms: T }, ..Lifecycle::new() }).unwrap();
         assert!(stored["phase"].as_object_mut().unwrap().remove("since_ms").is_some());
-        assert!(stored.as_object_mut().unwrap().remove("failed_ms").is_some());
         let mut old = Lifecycle::read(&stored.to_string()).unwrap();
         assert_eq!(old.apply(Event::Wake { why: Wake::Presence }, T).actions, vec![Action::Start { generation: 1 }]);
     }
@@ -873,5 +872,99 @@ mod tests {
         assert_eq!((r.save.as_deref(), r.rollback), (Some("b1"), true), "back to its last save: {r:?}");
         let w = c.saves.went_back().expect("told");
         assert_eq!((w.life, w.cause, w.save), (g, LossCause::Restart, Some(1)));
+    }
+
+    /// The 11-03 incident's sequences (#1004, #1005), each step an event and
+    /// when it came, the lifecycle stored and read again (`evict`: an
+    /// isolate that went) wherever a row says so.
+    struct Row {
+        name: &'static str,
+        evict: bool,
+        steps: Vec<(i64, Event)>,
+    }
+
+    /// Goal (#1004, #1005 as table rows): one R2 502 during a restore is one
+    /// strike and its pause, not three strikes in three seconds, its words
+    /// kept, however the start's own destroy is heard and whichever isolate
+    /// hears it; a computer that won't wake tries once every half hour on a
+    /// wake not its owner's, its time kept across a stored lifecycle; and
+    /// its owner's restart always tries. Valid (each row), replay (each
+    /// exit after its start's report), restart (`evict`). Method: the
+    /// production log's order (exits of a start's own destroy before its
+    /// `start_failed`), applied to the lifecycle.
+    #[test]
+    fn the_11_03_sequences_are_one_strike_each_and_a_way_back() {
+        let r502 = || "restore '/data': gateway rejected the range download with HTTP 502".to_string();
+        // a crash while awake (strike one), then each start's own destroy
+        // reported before its 502, as the log has it
+        let log_1004 = |g: u64, at: i64| -> Vec<(i64, Event)> {
+            let mut v = vec![(at, Event::Exited { generation: g })];
+            // the crash owes its start at once; the first 502 is strike two,
+            // so the next try waits twice the pause (`failed`)
+            for (n, t) in [(g + 1, at), (g + 2, at + 2_500 + 2 * RETRY_PAUSE_MS)] {
+                v.push((t, Event::Alarm));
+                v.push((t + 900, Event::StartFailing { generation: n }));
+                v.push((t + 1_000, Event::Exited { generation: n }));
+                v.push((t + 2_500, Event::StartFailed { generation: n, why: r502() }));
+                v.push((t + 2_600, Event::Exited { generation: n }));
+            }
+            v
+        };
+        for evict in [false, true] {
+            let rows = [Row { name: "#1004: a crash, then two starts that each fail on one 502, their destroys heard first", evict, steps: log_1004(1, T + 60_000) }];
+            for row in rows {
+                let mut l = Lifecycle::new();
+                let g = started(&mut l, T);
+                l.apply(Event::Opened { socket: Socket::Tab }, T + 5_000);
+                assert_eq!(g, 1);
+                let mut strikes = vec![];
+                for (at, event) in row.steps {
+                    let was = l.failures;
+                    let s = l.apply(event.clone(), at);
+                    if row.evict {
+                        l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap();
+                    }
+                    if l.failures > was {
+                        // each strike pauses before the next try (a crash's owed start aside)
+                        strikes.push((at, s.alarm_ms, event));
+                    }
+                }
+                assert_eq!(strikes.len(), 3, "{}: the crash and each start's 502, once each: {strikes:?}", row.name);
+                assert!(strikes.iter().all(|(_, _, e)| !matches!(e, Event::Exited { generation } if *generation > 1)), "{}: no start's own destroy is a strike: {strikes:?}", row.name);
+                assert!(matches!(&l.phase, Phase::Failed { why, .. } if why.contains("HTTP 502")), "{}: its words kept: {:?}", row.name, l.phase);
+                let (first, last) = (strikes[0].0, strikes[2].0);
+                assert!(last - first >= RETRY_PAUSE_MS, "{}: its strikes waited their pause, not three in three seconds", row.name);
+            }
+        }
+        // #1005: won't wake, and a way back: a record tries once each half
+        // hour, its time kept across a stored lifecycle, the owner always
+        for evict in [false, true] {
+            let gave_up = T + 33_000;
+            let mut l = Lifecycle { phase: Phase::Failed { why: r502(), since_ms: gave_up }, generation: 4, failures: STARTS_FAILED_MAX, ..Lifecycle::new() };
+            let steps = [
+                (gave_up + 60_000, Event::Wake { why: Wake::Record }, None),
+                (gave_up + WONT_WAKE_RETRY_MS, Event::Wake { why: Wake::Record }, Some(5)),
+                (gave_up + WONT_WAKE_RETRY_MS + 1_000, Event::StartFailing { generation: 5 }, None),
+                (gave_up + WONT_WAKE_RETRY_MS + 1_100, Event::Exited { generation: 5 }, None),
+                (gave_up + WONT_WAKE_RETRY_MS + 1_200, Event::StartFailed { generation: 5, why: r502() }, None),
+                (gave_up + WONT_WAKE_RETRY_MS + 60_000, Event::Wake { why: Wake::Record }, None),
+                (gave_up + 2 * WONT_WAKE_RETRY_MS + 1_200, Event::Wake { why: Wake::Presence }, Some(6)),
+                (gave_up + 2 * WONT_WAKE_RETRY_MS + 1_300, Event::StartFailed { generation: 6, why: r502() }, None),
+                (gave_up + 2 * WONT_WAKE_RETRY_MS + 2_000, Event::Restart { generation: 6 }, None),
+                (gave_up + 2 * WONT_WAKE_RETRY_MS + 2_000, Event::Alarm, Some(7)),
+            ];
+            for (at, event, starts) in steps {
+                let s = l.apply(event.clone(), at);
+                let made = s.actions.iter().find_map(|a| match a {
+                    Action::Start { generation } => Some(*generation),
+                    _ => None,
+                });
+                assert_eq!(made, starts, "#1005 (evict {evict}): {event:?} at +{}: {s:?} {:?}", at - gave_up, l.phase);
+                if evict {
+                    l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap();
+                }
+            }
+            assert_eq!(l.failures, 0, "its owner's restart starts the count again");
+        }
     }
 }
