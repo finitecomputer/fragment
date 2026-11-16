@@ -167,10 +167,12 @@ struct NoticesBand: View {
                         }
                         .frame(height: 36)
                         .padding(.horizontal, CGFloat(depth) * 12)
-                        // laid out where it shows (not an offset), so a card flies from here
-                        .alignmentGuide(.bottom) { $0[.bottom] - CGFloat(depth) * 8 }
+                        // each 8 points lower than the one before: laid out
+                        // where it shows (not an offset), so a card flies from here
+                        .alignmentGuide(.bottom) { $0[.bottom] + CGFloat(edges - depth) * 8 }
                     }
                 }
+                .alignmentGuide(.bottom) { $0[.bottom] - CGFloat(edges) * 8 }
             }
             .padding(.bottom, CGFloat(edges) * 8)
             .contentShape(Rectangle())
