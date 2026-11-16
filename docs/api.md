@@ -547,7 +547,8 @@ A top-level GET or HEAD navigation whose `Accept` names `text/html`, that
 no session admits (401), goes to `<platform>/auth/fragment?name=&return=`
 (`302`, `no-store`). Any other platform refusal a browser navigates to on a
 fragment's origin is a small page with the refusal's status ("You need to
-sign in", "You don't have access to X", "This link has changed"); an API
+sign in", "You don't have access to X" with Request access: Asking for
+access, "This link has changed"); an API
 call, fetch, operation, socket, or a request not asking for HTML keeps the
 JSON error. An app's own answers pass as they are (the fragment marks its
 refusals with `x-fragment-refusal`, dropped before any answer leaves).
@@ -657,6 +658,45 @@ Decline, and the page a sign-in to its fragment shows first
 (`/auth/fragment`), with the same two. Their pages are told when the invites waiting on them change:
 `{type: "changed"}` on `GET /api/fragments/watch`, as for any notice
 (`invited`, sent before FIN-458, no more).
+
+### Asking for access
+
+Someone signed in who is not in a fragment asks its owner for it
+(FIN-502). The fragment's "You don't have access to X" page links to
+`<platform>/auth/fragment/ask?name=&return=`, the platform's page: an
+invite to it waiting on their emails sends them to it
+(`/auth/fragment`); someone in it already (or whose agent is) is told so,
+with the way in. Otherwise the page says its owner sees their email, with
+Request access (a sharing page's protections: unframed, a form token
+bound to the session and this fragment, armed after `form::DELAY_MS`, a
+POST from the platform's origin alone). The requester never learns who
+owns it.
+
+- The fragment names its owner, and the registry keeps the request
+  against them (`registry/asks.rs`): one a fragment and person, waiting
+  `ACCESS_ASK_TTL_S`. It is a notice of the owner's (Notices): its title,
+  "<email> asked for access to it.", with Share as viewer and Share as
+  editor (their own `POST /api/f/<name>/invites` to that email, at that
+  role: Invites by email) and Dismiss. Their pages are told.
+- The owner is mailed who asked for what, with a link to the platform's
+  page, at most `ACCESS_ASK_MAILS_DAILY_MAX` a day; past it, the request
+  is their notice alone. A mail the service does not send is logged; the
+  request stands.
+- An invite to the requester's email answers it: the request is gone
+  (dismissed ones too). So does the fragment's end.
+- Dismissed, it leaves the owner's notices, and stays `ACCESS_ASK_QUIET_S`
+  so asking again tells them nothing. The requester is never told: asking
+  again, waiting or dismissed, is answered as asked already.
+- A person asks at most `ACCESS_ASKS_DAILY_MAX` times a day, and a fragment
+  holds at most `ACCESS_ASKS_PER_FRAGMENT_MAX` (429). Only a person asks,
+  with their session; a request gives them nothing until an invite of the
+  owner's and their own yes (decision 63).
+
+| method & path | who | answer |
+| --- | --- | --- |
+| `GET /auth/fragment/ask?name=&return=` | a person signed in on the platform (signed out: sign-in first) | the page above: an invite waiting, → `/auth/fragment` (302); in it already, a page saying so (200) |
+| `POST /auth/fragment/ask?name=&return=` | that page's form (`form`) | the request kept, then a page: "Request sent", or "Asked already" when one was kept (waiting, or dismissed); refused, a page with its status and words. Another origin, or a missing or stale token, 403 |
+| `POST /api/access-requests/{fragment}/dismiss` | the fragment's owner (their session or a key), or their agent acting `for` them | `{requester}` (the npub that asked; another field, or no identity, 400) → `{ok, dismissed}`; none waiting from them on the caller: 404 (`reason: gone`) |
 
 ### Who has access to what
 
@@ -1989,8 +2029,10 @@ the person's computer's (docs/computers.md, "What its owner is told"),
 then the registry's: their seat, lapsed ("Your seat lapsed", Pay again
 for its admin where seats are sold) or a Stripe trial in its last three
 days ("Your trial ends on November 16", Payment and invoices for whoever
-pays; the date on UTC's calendar), and each invite waiting on an email of
-theirs (Invites by email), then the move's, an offer to bring an old
+pays; the date on UTC's calendar), each invite waiting on an email of
+theirs (Invites by email), and each request for access to a fragment of
+theirs, the newest `ACCESS_ASKS_NOTICED_MAX` (Asking for access), then the
+move's, an offer to bring an old
 agent over (docs/migrations.md, "The offer"). A seat's lapse and return
 are told their pages by their ledger, whose standing follows the seat.
 The ledger tells their pages when what it says changes (its standing, or
@@ -2020,7 +2062,7 @@ in place. Their pages are told when notices change (`watch`'s `changed`).
 
 | method & path | who | answer |
 | --- | --- | --- |
-| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their ledger's (their agents stopped for want of credit), their computer's (none while they have none), then the registry's (their seat, then their invites), then the move's offers |
+| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their ledger's (their agents stopped for want of credit), their computer's (none while they have none), then the registry's (their seat, their invites, then the requests for access to their fragments), then the move's offers |
 
 ## The finite.computer move (docs/migrations.md)
 

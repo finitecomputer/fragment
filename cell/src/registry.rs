@@ -45,6 +45,7 @@ use crate::js;
 pub(crate) const PROFILES_MAX: usize = 64;
 
 pub(crate) mod admin;
+pub(crate) mod asks;
 pub(crate) mod billing;
 pub(crate) mod calls;
 pub(crate) mod content;
@@ -831,6 +832,9 @@ impl RegistryCell {
             return answer;
         }
         if let Some(answer) = self.invites_route(&path, &bytes).await {
+            return answer;
+        }
+        if let Some(answer) = self.asks_route(&path, &bytes).await {
             return answer;
         }
         if let Some(answer) = self.trials_route(&path, &bytes) {

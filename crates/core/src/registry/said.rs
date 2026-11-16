@@ -1,8 +1,9 @@
 //! What the registry tells a person, in words (FIN-458): each invite
 //! waiting on an email of theirs as the `Notice` every client draws the
 //! same way, with its answers' routes (accepted, its answer names the
-//! fragment's page, which the client opens: `InviteAccepted::open`); and
-//! their seat, lapsed or ending by itself soon.
+//! fragment's page, which the client opens: `InviteAccepted::open`); each
+//! request for access to a fragment of theirs (FIN-502); and their seat,
+//! lapsed or ending by itself soon.
 
 use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
 use serde_json::{Map, Value};
@@ -24,6 +25,31 @@ pub fn invite(fragment: &str, edit: bool, title: &str, from: Option<&str>) -> No
         detail: None,
         until: None,
         actions: vec![NoticeAction::post("Accept", at("accept"), empty()), NoticeAction::post("Decline", at("decline"), empty())],
+        must_answer: false,
+        image: None,
+    }
+}
+
+/// A request for access to `fragment` (titled `title` as it was asked)
+/// waiting on its owner: who asked (`requester`, by their email `from`),
+/// and its answers. Sharing it is the owner's own invite to that email, at
+/// the role they pick (`POST /api/f/{fragment}/invites`), which also takes
+/// the request away; Dismiss takes it away alone (FIN-502).
+pub fn access_asked(fragment: &str, requester: &str, from: &str, title: &str) -> Notice {
+    let share = |label: &str, role: &str| NoticeAction::post(label, format!("/api/f/{fragment}/invites"), serde_json::json!({ "email": from, "role": role }));
+    Notice {
+        id: format!("asked:{fragment}:{requester}"),
+        kind: "access_asked".into(),
+        level: NoticeLevel::Info,
+        title: title.to_string(),
+        text: Some(format!("{from} asked for access to it.")),
+        detail: None,
+        until: None,
+        actions: vec![
+            share("Share as viewer", "viewer"),
+            share("Share as editor", "editor"),
+            NoticeAction::post("Dismiss", format!("/api/access-requests/{fragment}/dismiss"), serde_json::json!({ "requester": requester })),
+        ],
         must_answer: false,
         image: None,
     }
@@ -100,6 +126,26 @@ mod tests {
         let routes: Vec<(&str, &str, Value)> = n.actions.iter().map(|a| (a.label.as_str(), a.post.as_deref().unwrap_or(""), a.body.clone().unwrap_or_default())).collect();
         assert_eq!(routes, vec![("Accept", "/api/invites/garden--k3x9/accept", json!({})), ("Decline", "/api/invites/garden--k3x9/decline", json!({}))]);
         assert_eq!(invite("notes--a2b4", false, "notes--a2b4", None).text.as_deref(), Some("Someone invited you to view it."));
+    }
+
+    /// Goal: a request for access is told its owner by the requester's
+    /// email, about the fragment's title, with sharing it at either role
+    /// (the owner's own invite, by that email) and dismissing it as its
+    /// answers, so a client draws it with no code of its own.
+    #[test]
+    fn a_request_for_access_in_words_with_its_answers() {
+        let n = access_asked("garden--k3x9", "npub1bea", "bea@example.com", "Garden plans");
+        assert_eq!((n.id.as_str(), n.kind.as_str(), n.level, n.title.as_str()), ("asked:garden--k3x9:npub1bea", "access_asked", NoticeLevel::Info, "Garden plans"));
+        assert_eq!(n.text.as_deref(), Some("bea@example.com asked for access to it."));
+        let routes: Vec<(&str, &str, Value)> = n.actions.iter().map(|a| (a.label.as_str(), a.post.as_deref().unwrap_or(""), a.body.clone().unwrap_or_default())).collect();
+        assert_eq!(
+            routes,
+            vec![
+                ("Share as viewer", "/api/f/garden--k3x9/invites", json!({ "email": "bea@example.com", "role": "viewer" })),
+                ("Share as editor", "/api/f/garden--k3x9/invites", json!({ "email": "bea@example.com", "role": "editor" })),
+                ("Dismiss", "/api/access-requests/garden--k3x9/dismiss", json!({ "requester": "npub1bea" })),
+            ]
+        );
     }
 
     /// Goal: a lapsed seat is told in Settings' words, Pay again for its

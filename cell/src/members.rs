@@ -791,6 +791,60 @@ impl FragmentCell {
     }
 
     /// Its title as its members' lists show it, if it has one.
+    /// Whether someone signed in may ask for access to it: not in it, nor
+    /// is an agent of theirs (they read what it reads), which is 409,
+    /// saying so. Their identity.
+    fn may_ask(&self, caller: &Caller) -> CellResult<String> {
+        self.name()?;
+        let Some(principal) = caller.principal() else {
+            return Err(CellError::new(ErrorCode::Unauthenticated, "sign in to ask for access"));
+        };
+        let standing = self.standing(caller, false)?;
+        if let Some(role) = standing.member {
+            let what = match role {
+                Role::Owner => "its owner",
+                Role::Editor => "an editor",
+                Role::Viewer | Role::Public => "a viewer",
+            };
+            return Err(CellError::new(ErrorCode::Conflict, format!("you are in it already, as {what}")));
+        }
+        if standing.owns_member_agent {
+            return Err(CellError::new(ErrorCode::Conflict, "an agent of yours is in it: you read what it reads"));
+        }
+        Ok(principal.to_string())
+    }
+
+    /// `GET /signin/asking` (the router's alone: auth/ask.rs, FIN-502):
+    /// whether the caller may ask for access to it (`may_ask`).
+    pub(crate) fn may_ask_route(&self, caller: &Caller) -> CellResult<Response> {
+        self.may_ask(caller)?;
+        json_response(&json!({ "may": true }))
+    }
+
+    /// `POST /signin/ask` (the router's alone: auth/ask.rs, FIN-502): the
+    /// caller's request for access, sent to the registry from here, while
+    /// this life is the fragment's own (its incarnation, its owner and its
+    /// title: registry/asks.rs), so no request names a life that ended
+    /// before it went. The registry's answer, as it was. The requester
+    /// never sees the owner's identity.
+    pub(crate) async fn ask_access(&self, caller: &Caller) -> CellResult<Response> {
+        let requester = self.may_ask(caller)?;
+        let [name, incarnation, owner] = self.metas([MetaKey::Name, MetaKey::CreatedAt, MetaKey::Owner])?;
+        let (name, incarnation, owner) = match (name, incarnation, owner) {
+            (Some(name), Some(incarnation), Some(owner)) => (name, incarnation, owner),
+            _ => return Err(CellError::host("a fragment's life names no name, creation or owner")),
+        };
+        let title = self.title()?.unwrap_or_else(|| crate::share::label(&name).to_string());
+        let ask = crate::registry::asks::AskAccess {
+            by: crate::registry::calls::By::Identity(requester),
+            fragment: name,
+            incarnation,
+            owner: fragment_core::npub::display(&owner),
+            title,
+        };
+        json_response(&crate::ask_registry(&self.env, &ask).await?)
+    }
+
     pub(crate) fn title(&self) -> CellResult<Option<String>> {
         let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok());
         Ok(face.and_then(|f| f["title"].as_str().map(str::to_string)).filter(|t| !t.is_empty()))
