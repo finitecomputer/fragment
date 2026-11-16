@@ -13,7 +13,7 @@
 //!   view tells them what they should know of it (`notices`: it won't
 //!   start, its saves are failing and when that stops it, a start went
 //!   back to an older save, an update is ready), and when that changes the
-//!   computer tells their open pages (`principal::tell_changed`), so the
+//!   computer tells their open pages (`principal::calls::Changed`), so the
 //!   shell shows it while there is still time.
 //! - **Its origin** (`<24 hex>--computer.<suffix>`: `serve_host`) serves
 //!   its ports to its owner, cross-site from the platform, so a page the
@@ -193,7 +193,7 @@ const ALARM_WALL_MS: i64 = 15 * 60_000;
 /// What an alarm's other events take beside those steps (its adopt, a
 /// meter's flush, its owner told), each a call of about a second. Kept
 /// free, not enforced: those calls take no bound of their own (the
-/// ledger's `ask`, `principal::tell_changed`), and one that hung would be
+/// ledger's `ask`, `principal::calls::Changed`), and one that hung would be
 /// ended by the alarm's wall, its step then tried again.
 const ALARM_OTHER_MS: i64 = 60_000;
 /// A save's backups, its records one after the other, answer within this
@@ -1026,7 +1026,7 @@ impl ComputerCell {
     /// reads it as it reconnects, or at its next change: logged, never failed.
     async fn tell_owner(&self) {
         let Ok(Some(owner)) = self.meta(MetaKey::Owner) else { return };
-        if let Err(e) = crate::principal::tell_changed(&self.env, &owner).await {
+        if let Err(e) = crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": e.message }));
         }
     }
