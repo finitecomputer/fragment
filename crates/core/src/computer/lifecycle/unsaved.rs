@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{Action, Lifecycle, Phase, Rules, SaveNote, Saving, Step};
 use crate::computer::limits::{FAILED_WHY_MAX_BYTES, SAVE_DEADLINE_MS, SAVE_EVERY_MS, SAVE_RETRY_MS};
+use crate::search::cut;
 
 /// A run of saves that failed in a row in one life: since when, and the
 /// last one's words.
@@ -26,15 +27,6 @@ pub struct Unsaved {
     /// When it is put to sleep unsaved if no save works first and nothing
     /// new holds it: `None` while it is in use (a socket open) or always on.
     pub stops_at_ms: Option<i64>,
-}
-
-/// `why`, cut to `FAILED_WHY_MAX_BYTES` at a character.
-fn cut_why(why: &str) -> String {
-    let mut end = why.len().min(FAILED_WHY_MAX_BYTES);
-    while !why.is_char_boundary(end) {
-        end -= 1;
-    }
-    why[..end].to_string()
 }
 
 impl Lifecycle {
@@ -68,7 +60,7 @@ impl Lifecycle {
     /// A save of this life failed: one more in the run, since its first.
     fn save_failed(&mut self, why: &str, now_ms: i64) {
         self.save_failures += 1;
-        let why = cut_why(why);
+        let why = cut(why, FAILED_WHY_MAX_BYTES).to_string();
         match &mut self.failing {
             Some(f) => f.why = why,
             None => self.failing = Some(Failing { since_ms: now_ms, why }),
@@ -691,5 +683,22 @@ mod tests {
         c.apply(Event::Saved { generation: g, seq });
         assert_eq!(unsaved(&c), None, "a save worked");
         assert!(c.life.unsaved(&rules).is_none() && c.life.failing.is_none() && c.life.save_failures == 0);
+    }
+
+    /// Goal: why its saves fail is kept within `FAILED_WHY_MAX_BYTES`, cut
+    /// at a character: whole up to its bound, and past it, what fits before
+    /// the character that crosses it, of each width. Method: a failed save's
+    /// why, as the lifecycle keeps it, against the longest prefix that fits.
+    #[test]
+    fn why_a_save_failed_is_cut_at_a_character() {
+        for c in ['x', 'é', '€', '𝄞'] {
+            for pad in FAILED_WHY_MAX_BYTES - 4..=FAILED_WHY_MAX_BYTES {
+                let why = format!("{}{c}y", "x".repeat(pad));
+                let fits = why.char_indices().map(|(i, ch)| i + ch.len_utf8()).take_while(|end| *end <= FAILED_WHY_MAX_BYTES).last().unwrap_or(0);
+                let mut l = Lifecycle::new();
+                l.save_failed(&why, T);
+                assert_eq!(l.failing.map(|f| f.why), Some(why[..fits].to_string()), "{c:?} after {pad} bytes");
+            }
+        }
     }
 }
