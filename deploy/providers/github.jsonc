@@ -1,0 +1,27 @@
+// The person's GitHub account: Pipes' `github` provider, connected through
+// the browser once its GitHub App's client secret is in the store. NOT YET
+// CONNECTED LIVE (FIN-509): three things are to be proven with a real app
+// before a deployment offers it.
+// 1. The app is a GitHub App with expiring user tokens on (its answer then
+//    names a refresh token, which a connection must have; an OAuth App's
+//    token never expires and has none, so its grant is refused here).
+// 2. A GitHub App's user token takes no scopes: what an agent may do is the
+//    app's permissions on the repositories the person installed it on. So
+//    `repo` below is what the row must ask for and GitHub ignores, the
+//    answer names no scope, and the connection offers read and write alone.
+// 3. Git over HTTPS sends the token as a bearer header
+//    (`http.extraHeader`), since a row names the authorization header or
+//    basic auth, never both, and the API takes a bearer token.
+// GitHub documents no RFC 7009 revocation, so the row names none: a
+// disconnect deletes the account at Pipes, and the person revokes the app
+// in their GitHub settings. Its skill is github-finite.
+{ "name": "github", "kind": "connection", "title": "GitHub",
+  "hosts": ["api.github.com", "uploads.github.com", "github.com"],
+  "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+  "note": "Your agents can do what the app may on the repositories you install it on. Choose those repositories as you connect, or later in your GitHub settings.",
+  "key": "<the client secret's store name>",
+  "connection_oauth": { "authorize": "https://github.com/login/oauth/authorize",
+    "exchange": "https://github.com/login/oauth/access_token",
+    "client_id": "<the app's client id>", "access": { "write": { "scopes": ["repo"] } } },
+  "scope_names": { "repo": "The repositories you chose" },
+  "env": ["GH_TOKEN", "GITHUB_TOKEN"] }
