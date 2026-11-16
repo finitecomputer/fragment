@@ -333,7 +333,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     // what a connection's account allows, in words
     const granted = !several && p.kind === "connection" && p.state === "connected" ? p.granted ?? [] : [];
     // (never its sign-in's: openid, email, profile)
-    const scopes = [...new Set(granted.filter((g) => !/^(openid|email|profile|userinfo\.\w+)$/.test(g.split("/").pop())).map((g) => scopeName(p, g)))];
+    const scopes = [...new Set(granted.filter((g) => !/^(openid|email|profile|offline_access|userinfo\.\w+)$/.test(g.split("/").pop())).map((g) => scopeName(p, g)))];
     if (scopes.length) {
       const chips = el("div", "provider-chips");
       chips.append(...scopes.map((g) => el("span", null, g)));
