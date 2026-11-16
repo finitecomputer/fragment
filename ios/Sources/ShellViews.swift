@@ -13,14 +13,17 @@ struct DesktopWallpaper: View {
 struct AgentAvatar: View {
     let agent: FragmentSummary?
     var size: CGFloat = 32
+    /// A circle (on a capsule's end) rather than the rounded square.
+    var round = false
+    private var radius: CGFloat { round ? size / 2 : size * 0.28 }
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: size * 0.28).fill(color.gradient)
+            RoundedRectangle(cornerRadius: radius).fill(color.gradient)
             if let picture = agent?.picture, let url = URL(string: picture) {
                 AuthenticatedImage(url: url) { image in
                     if let image { image.resizable().scaledToFill() } else { Color.clear }
                 }
-                    .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.28))
+                    .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: radius))
             } else {
             Text(String((agent?.displayTitle ?? "?").prefix(1))).font(.system(size: size * 0.46, weight: .semibold)).foregroundStyle(.white)
             }
