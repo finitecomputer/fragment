@@ -82,23 +82,24 @@ private extension View {
     /// The launcher's primary action, the top bar's size. Glass doesn't refract
     /// glass, so on the card the system's goes flat: this one draws what light
     /// does in a glass bead, a tight gloss above and light pooled at the foot
-    /// behind the icon, and a rim and shadow around it.
-    func launcherGlass(tint: Color = Color(uiColor: .label)) -> some View {
-        foregroundStyle(Color(uiColor: .systemBackground)).fontWeight(.semibold)
-            .frame(width: 44, height: 44).contentShape(.circle)
+    /// behind the icon, and a rim and shadow around it. Its light scales with
+    /// `size`, so a smaller bead (the chat's Send) is the same glass.
+    func launcherGlass(tint: Color = Color(uiColor: .label), size: CGFloat = 44) -> some View {
+        let scale = size / 44
+        return foregroundStyle(Color(uiColor: .systemBackground)).fontWeight(.semibold)
+            .frame(width: size, height: size).contentShape(.circle)
             .background {
                 ZStack {
-                    Circle().fill(RadialGradient(colors: [.white.opacity(0.42), .clear], center: .bottom, startRadius: 0, endRadius: 26))
+                    Circle().fill(RadialGradient(colors: [.white.opacity(0.42), .clear], center: .bottom, startRadius: 0, endRadius: 26 * scale))
                     Ellipse().fill(LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.03)], startPoint: .top, endPoint: .bottom))
-                        .frame(width: 30, height: 15).offset(y: -12.5)
+                        .frame(width: 30 * scale, height: 15 * scale).offset(y: -12.5 * scale)
+                    // the rim inside the glass, so it swells with it on a press
+                    // rather than staying behind as a ring
+                    Circle().strokeBorder(LinearGradient(colors: [.white.opacity(0.7), .white.opacity(0.05), .white.opacity(0.5)],
+                                                         startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
                 }.clipShape(.circle)
             }
             .glassEffect(.regular.tint(tint.opacity(0.85)).interactive(), in: .circle)
-            .overlay {
-                Circle().strokeBorder(LinearGradient(colors: [.white.opacity(0.7), .white.opacity(0.05), .white.opacity(0.5)],
-                                                     startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
-                    .allowsHitTesting(false)
-            }
             .shadow(color: .black.opacity(0.28), radius: 8, y: 4)
     }
 }
@@ -524,6 +525,7 @@ struct ComposerView: View {
     var canRecord = true
     var focused: Binding<Bool>? = nil
     @Environment(\.dynamicTypeSize) private var type
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var typed: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments || recording }
     private var stops: Bool { working && !typed }
     private var valid: Bool { (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments) && text.utf8.count <= 32_768 }
@@ -567,6 +569,7 @@ struct ComposerView: View {
             // Send queues the words for the turn after; Steer tells this one now
             Button {
                 submitting = true
+                putKeyboardAway()
                 Task { await steer(); submitting = false }
             } label: {
                 Text("Steer").font(.subheadline.weight(.semibold))
@@ -579,28 +582,48 @@ struct ComposerView: View {
             .accessibilityIdentifier("steer")
         }
         if recordFirst { launcherAction } else { Button {
+            guard canSend else { return }
             submitting = true
-            Task { await (stops ? stop() : send()); submitting = false }
+            if !stops { putKeyboardAway() }
+            Task {
+                let pressed = ContinuousClock.now
+                await (stops ? stop() : send())
+                // a send is often done at once: its spinner holds a moment on
+                // the dark bead rather than flickering as the bead lightens
+                try? await Task.sleep(until: pressed + .milliseconds(600))
+                submitting = false
+            }
         } label: {
+            // the launcher's glass bead at the chat's size, so the two send
+            // alike: one bead whose glass and glyph change, never dimmed;
+            // with nothing to send it's a lighter bead
+            let sending = busy || submitting, off = !canSend && !sending
             ZStack {
-                // The adaptive label color keeps the filled control high-contrast;
-                // the glass foreground style is softened by vibrancy.
-                Circle().fill(canSend ? Color(uiColor: .label) : Color(uiColor: .tertiarySystemFill))
-                if busy || submitting {
-                    ProgressView().tint(.secondary)
+                if sending {
+                    ProgressView().tint(Color(uiColor: .systemBackground)).transition(.opacity.combined(with: .scale(scale: 0.6)))
                 } else {
-                    Image(systemName: stops ? "stop.fill" : "arrow.up")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(canSend ? Color(uiColor: .systemBackground) : Color.secondary)
+                    Image(systemName: stops ? "stop.fill" : "arrow.up").font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(off ? Color.white : Color(uiColor: .systemBackground))
+                        .contentTransition(.symbolEffect(.replace))
+                        .transition(.opacity.combined(with: .scale(scale: 0.6)))
                 }
             }
-            .frame(width: 34, height: 34)
-            .frame(width: 44, height: 44)
-            .contentShape(Circle())
+            .launcherGlass(tint: off ? Color(uiColor: .systemGray3) : Color(uiColor: .label), size: 34)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: off)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: sending)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: stops)
+            .frame(width: 44, height: 44).contentShape(Circle())
         }
-        .disabled(!canSend)
+        // not `disabled`: never dimmed as it sends or waits for words
+        .allowsHitTesting(canSend)
         .accessibilityLabel(stops ? "Stop response" : "Send message")
         .accessibilityIdentifier(stops ? "stop" : "send") }
+    }
+    /// The keyboard goes as a message does, so the reply has the room: the
+    /// focus given (else the field would take it back) and the responder.
+    private func putKeyboardAway() {
+        focused?.wrappedValue = false
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
     @ViewBuilder private var launcherAction: some View {
         if recording {
