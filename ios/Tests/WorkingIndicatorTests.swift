@@ -8,6 +8,31 @@ struct WorkingIndicatorTests {
         .init(channel: "work", seq: seq, at: seq * 1000, principal: agent, kind: "message", body: try JSONDecoder().decode(JSONValue.self, from: Data(body.utf8)))
     }
 
+    /// The one line says what the newest running step does in a plain word,
+    /// Thinking between steps; done, a word for how long it took, the same
+    /// each time for the same card.
+    @Test func theOneLineSaysWhatItDoesInAPlainWord() throws {
+        func step(_ seq: Int64, _ category: String, running: Bool) throws -> ToolStep {
+            ToolStep(record: try work(seq, #"{"kind":"turn.call","turn":"t","tool":"x","category":"\#(category)"}"#), running: running)
+        }
+        var card = ToolCard(id: "work:1", turn: TurnKey(agent: "npub1preview", id: "t"), steps: [], since: 0)
+        #expect(card.nowWord == "Thinking")
+        card.steps = [try step(2, "web", running: false), try step(3, "read", running: true)]
+        #expect(card.nowWord == "Reading")
+        card.steps = [try step(2, "shell", running: true)]
+        #expect(card.nowWord == "Working")
+        card.steps = [try step(2, "read", running: false), try step(3, "shell", running: true)]
+        #expect(card.nowWord == "Running")
+        card.steps = [try step(2, "write", running: false)]
+        #expect(card.nowWord == "Thinking", "between steps")
+
+        card.until = 12_000
+        #expect(["Ran", "Cooked", "Tinkered", "Hustled"].contains(card.doneWord))
+        #expect(card.doneWord == card.doneWord)
+        card.until = 600_000
+        #expect(["Worked hard", "Toiled", "Labored", "Persevered", "Slogged", "Hammered", "Drudged", "Schlepped"].contains(card.doneWord))
+    }
+
     /// chat_polish.rs calls-card fixture: same provider id in two responses,
     /// then a renamed result paired by tool/arguments, replayed out of order.
     @Test func callCardsReplaceTheRightResponseAndKeepAgentOwnership() throws {
