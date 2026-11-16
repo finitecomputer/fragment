@@ -53,7 +53,8 @@ A team's brain has one home: two would split what the team writes.
 - **A team's, or someone else's** (`other`): don't make it. Someone on
   the team brings it over and invites your owner, and you come in with
   them. Until then, keep a reference copy ("A brain you don't make",
-  below). If it is here already, in `fragment list`, keep no copy.
+  below). Keep one even if it is here already, in `fragment list`, until
+  you have checked it ("Once you are in the real one").
 - **No one can say** (`unknown`, or no `owner`): keep a reference copy
   too, and ask your owner in the report whether it is theirs or a
   team's. Say if it was a team's (`kind`): a team's brain holds what
@@ -127,20 +128,29 @@ ls "$C" && find "$C" -type f | wc -l
 Bring its assets in as above, into the copy. Then mark what it is:
 - In `$HOME/old-finite-brains/README.md`, a line for it: its name, whose
   it was, and that it is a copy from finite.computer (the old Finite),
-  to read until you are in the real one.
+  to read until the real one holds what it does.
 - In one memory, for all of them: that reference copies of brains from
-  the old Finite are in that folder, and each goes once you are in its
-  real one.
+  the old Finite are in that folder, and each goes only once its real
+  one holds what the copy does.
 
 Read it when it helps, and never write to it: what the team writes from
 now on goes in the real one.
 
-**Once you are in the real one** (it is in `fragment list`), delete its
-copy and its line in the README, and the memory once no copy is left:
+**Once you are in the real one** (it is in `fragment list`), check it
+before you drop anything. Being listed says you can read it, not that
+its move finished: a teammate may have brought over an older copy, or
+part of one. Sync it as `brain-finite` says, compare its pages and
+assets with the copy's, and read a few of each.
+- **It holds all of it:** delete the copy, its line in the README, and
+  the memory once no copy is left:
 
-```sh
-rm -rf -- "$HOME/old-finite-brains/<id>"
-```
+  ```sh
+  rm -rf -- "$HOME/old-finite-brains/<id>"
+  ```
+- **Some pages or assets are missing, or differ:** keep only those in
+  the copy. Tell your owner which, and suggest someone on the team adds
+  them to the real one. Say in the README line what is left, and why.
+- **You can't tell:** keep the copy, and ask your owner.
 
 **If no one brings it over**, and your owner runs that team, they may
 ask you to set it up. Make it as above, from the copy: the same steps,
