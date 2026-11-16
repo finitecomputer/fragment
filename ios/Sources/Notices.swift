@@ -191,6 +191,27 @@ private extension View {
     }
 }
 
+private extension View {
+    /// A capsule of glass, as `launcherGlass` draws its bead (glass doesn't
+    /// refract glass, so on a card the system's goes flat): a gloss above,
+    /// light pooled at the foot, a rim and a shadow, all inside the glass,
+    /// so they swell with it on a press.
+    func glassBead(tint: Color) -> some View {
+        background {
+            ZStack {
+                Capsule().fill(RadialGradient(colors: [.white.opacity(0.35), .clear], center: .bottom, startRadius: 0, endRadius: 40))
+                Capsule().fill(LinearGradient(colors: [.white.opacity(0.45), .white.opacity(0.02)], startPoint: .top, endPoint: .center))
+                    .padding(.horizontal, 14).padding(.top, 2).padding(.bottom, 22)
+                Capsule().strokeBorder(LinearGradient(colors: [.white.opacity(0.7), .white.opacity(0.05), .white.opacity(0.5)],
+                                                      startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
+            }
+            .clipShape(.capsule)
+        }
+        .glassEffect(.regular.tint(tint.opacity(0.85)).interactive(), in: .capsule)
+        .shadow(color: .black.opacity(0.22), radius: 7, y: 3)
+    }
+}
+
 /// Every notice fanned out over the whole app, as Notification Center shows
 /// them: each with all its words and actions, scrolling, each card having
 /// grown from its place in the band's stack (`NoticesBand`), never faded.
@@ -369,7 +390,17 @@ private struct NoticeItemView: View {
             if let open = action.open, let url = URL(string: open) { openURL(url) }
             else { Task { if let outside = await library.act(notice, action, api: api) { openURL(outside) } } }
         }
-        if main {
+        if wide {
+            // the full screen's: a glass bead, as Send and the search card's mic are;
+            // the main one dark, the rest clear
+            Button(action: tap) {
+                Text(action.label).font(.body.weight(.semibold)).lineLimit(1)
+                    .foregroundStyle(main ? Color(.systemBackground) : Color.primary)
+                    .frame(maxWidth: .infinity).frame(height: 48)
+                    .glassBead(tint: main ? Color(.label) : .clear)
+            }
+            .buttonStyle(.plain).disabled(pressed).opacity(pressed ? 0.6 : 1)
+        } else if main {
             // its words in the page's own colour, on the app's primary tint (dark: white on white otherwise);
             // on one line: the title gives way first
             Button(action: tap) { label(action.label, wide: wide).foregroundStyle(Color(.systemBackground)) }
