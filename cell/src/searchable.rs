@@ -51,14 +51,14 @@ use fragment_core::searchable as rules;
 use fragment_proto::search as wire;
 use fragment_proto::{ErrorCode, IdentityKind, Role};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use worker::*;
 
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::models::{embedded, Embedding, InFragment};
-use crate::search_index::{self as index, Wrote};
+use crate::search_index::{self as index, KnownHashes, Wrote};
 
 /// Forgotten sources a pass deletes from the index, at most.
 const FORGETS_PER_PASS: i64 = 100;
@@ -103,21 +103,6 @@ impl By<'_> {
 #[derive(Deserialize)]
 struct Forget {
     source: String,
-}
-
-/// The index's answer to `known`.
-#[derive(Deserialize)]
-struct KnownHashes {
-    known: Vec<String>,
-}
-
-/// The index's answer to `delete`: `fenced`, the source's higher fence
-/// that refused it.
-#[derive(Deserialize)]
-struct Deleted {
-    deleted: bool,
-    #[serde(default)]
-    fenced: Option<u64>,
 }
 
 /// A question's vector: embedded here, or given by the platform's route
@@ -172,10 +157,17 @@ impl FragmentCell {
         Ok(self.metas([MetaKey::Search])?[0].is_some())
     }
 
-    /// `op` on the index `scope` (search_index.rs), with `body`: its answer.
-    async fn search_index<T: DeserializeOwned>(&self, scope: &str, op: &str, body: &impl Serialize) -> CellResult<T> {
+    /// `call` on the index `scope` (search_index.rs): its answer.
+    async fn search_index<C: index::Call>(&self, scope: &str, call: &C) -> CellResult<C::Answer> {
+        let body = serde_json::to_string(call).map_err(|e| CellError::host(format!("{}'s body: {e}", C::PATH)))?;
+        let bytes = self.search_index_answer(scope, C::PATH, body).await?;
+        serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("the search index's answer to {}: {e}", C::PATH)))
+    }
+
+    /// `search_index`'s round trip, one copy for every call.
+    async fn search_index_answer(&self, scope: &str, path: &str, body: String) -> CellResult<Vec<u8>> {
         self.test_countdown(MetaKey::TestFailSearchIndex, "the search index is out of reach")?;
-        crate::routed::ask_object(&self.env, "SEARCH_INDEX", scope, &format!("index/{op}"), body).await
+        crate::routed::object_answer(&self.env, "SEARCH_INDEX", scope, path, body).await
     }
 
     /// Waits for, then holds, `source`.
@@ -198,7 +190,7 @@ impl FragmentCell {
         if self.rows("SELECT 1 FROM search_forget WHERE source = ?", vec![source.into()])?.is_empty() {
             return Ok(());
         }
-        if let Err(e) = self.search_index::<Deleted>(scope, "delete", &json!({ "source": source })).await {
+        if let Err(e) = self.search_index(scope, &wire::Delete { source: source.to_string(), fence: None }).await {
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("its file's deletion is not yet out of the index ({}): try again", e.message)));
         }
         self.exec("DELETE FROM search_forget WHERE source = ?", vec![source.into()])?;
@@ -276,8 +268,8 @@ impl FragmentCell {
         let mut cleared_before = false;
         for attempt in 0..2 {
             if let Some(space) = &space {
-                let hashes: Vec<&str> = chunks.iter().map(|c| c.hash.as_str()).collect::<HashSet<_>>().into_iter().collect();
-                let held: KnownHashes = if attempt == 0 { self.search_index(&scope, "known", &json!({ "space": space, "hashes": hashes })).await? } else { KnownHashes { known: vec![] } };
+                let hashes: Vec<String> = chunks.iter().map(|c| c.hash.as_str()).collect::<HashSet<_>>().into_iter().map(str::to_string).collect();
+                let held = if attempt == 0 { self.search_index(&scope, &index::Known { space: Some(space.clone()), hashes }).await? } else { KnownHashes { known: vec![] } };
                 let held: HashSet<&str> = held.known.iter().map(String::as_str).collect();
                 let mut seen = HashSet::new();
                 let todo: Vec<&rules::Chunk> = chunks.iter().filter(|c| !held.contains(c.hash.as_str()) && !vectors.contains_key(&c.hash) && seen.insert(c.hash.as_str())).collect();
@@ -286,7 +278,7 @@ impl FragmentCell {
             // the life it began in, still: else nothing is sent
             self.search_same_life(life)?;
             let write = index_write(&up, &chunks, &vectors, space.clone());
-            let wrote: Wrote = self.search_index(&scope, "upsert", &write).await?;
+            let wrote = self.search_index(&scope, &write).await?;
             // and after: an end that overtook it refused it
             self.search_same_life(life)?;
             match wrote {
@@ -348,7 +340,7 @@ impl FragmentCell {
         let scope = rules::scope(&self.state.id().to_string(), life);
         let _held = self.search_hold(&d.source).await;
         self.search_same_life(life)?;
-        let gone: Deleted = self.search_index(&scope, "delete", &json!({ "source": d.source, "fence": d.fence })).await?;
+        let gone = self.search_index(&scope, &d).await?;
         self.search_same_life(life)?;
         if let Some(fence) = gone.fenced {
             let body = json!({ "error": ErrorCode::Conflict, "message": "a newer write or delete of this source was taken (its fence is higher)", "fence": fence });
@@ -371,7 +363,7 @@ impl FragmentCell {
         }
         let scope = self.search_scope()?;
         self.search_drain(&scope).await;
-        let mut page: serde_json::Value = self.search_index(&scope, "sources", &index::Page { after: after.unwrap_or_default(), limit }).await?;
+        let mut page = self.search_index(&scope, &index::Page { after: after.unwrap_or_default(), limit }).await?;
         let pending = self.search_pending()?;
         if let Some(sources) = page["sources"].as_array_mut() {
             sources.retain(|s| !s["source"].as_str().is_some_and(|x| pending.contains(x)));
@@ -388,7 +380,7 @@ impl FragmentCell {
     async fn search_state(&self) -> CellResult<Response> {
         let semantic = if self.search_space().is_some() { "on" } else { "off" };
         let mut status: serde_json::Value = if self.search_indexed()? {
-            let mut s: serde_json::Value = self.search_index(&self.search_scope()?, "status", &json!({})).await?;
+            let mut s = self.search_index(&self.search_scope()?, &index::Status {}).await?;
             // a live life's index is never ended: the levers' to see
             s.as_object_mut().map(|o| o.remove("ended"));
             s
@@ -463,7 +455,7 @@ impl FragmentCell {
         let limit = q.limit.unwrap_or(wire::RESULTS_DEFAULT);
         let ask = index::Ask { q: q.q, limit, mode, fields: q.fields, after: q.after, before: q.before, vector, space: space.clone(), words };
         let t0 = crate::js::now_ms();
-        let answer: serde_json::Value = self.search_index(&scope, "search", &ask).await?;
+        let answer = self.search_index(&scope, &ask).await?;
         laps.took("index", crate::js::now_ms() - t0);
         let pending = self.search_pending()?;
         let hits = answer["results"].as_array().cloned().unwrap_or_default();
@@ -583,7 +575,7 @@ impl FragmentCell {
                 Ok(_) => {}
                 Err(e) => return console_error!("{}", json!({ "event": "search.forget-unread", "error": e.message })),
             }
-            match self.search_index::<Deleted>(scope, "delete", &json!({ "source": f.source })).await {
+            match self.search_index(scope, &wire::Delete { source: f.source.clone(), fence: None }).await {
                 Ok(_) => {
                     if let Err(e) = self.exec("DELETE FROM search_forget WHERE source = ?", vec![f.source.as_str().into()]) {
                         console_error!("{}", json!({ "event": "search.forget-unwritten", "error": e.message }));
@@ -608,14 +600,11 @@ impl FragmentCell {
             None => self.search_life()?,
         };
         let scope = rules::scope(&self.state.id().to_string(), incarnation);
-        let mut ask = json!({});
-        if let Some(hold) = body["hold"].as_bool() {
-            ask["hold"] = json!(hold);
-        }
-        if !body["chunks_max"].is_null() {
-            ask["chunks_max"] = body["chunks_max"].clone();
-        }
-        let index: serde_json::Value = self.search_index(&scope, "test", &ask).await?;
+        let chunks_max = match &body["chunks_max"] {
+            serde_json::Value::Null => None,
+            n => Some(n.as_u64().ok_or_else(|| CellError::invalid(format!("chunks_max is 1 to {}", index::CHUNKS_MAX)))?),
+        };
+        let index = self.search_index(&scope, &index::TestHook { hold: body["hold"].as_bool(), chunks_max }).await?;
         Ok(json!({ "incarnation": incarnation, "index": index }))
     }
 
@@ -624,8 +613,7 @@ impl FragmentCell {
     /// landing late too.
     pub(crate) async fn search_drop(&self, incarnation: i64) -> CellResult<()> {
         let scope = rules::scope(&self.state.id().to_string(), incarnation);
-        self.search_index::<serde_json::Value>(&scope, "end", &json!({})).await?;
-        Ok(())
+        self.search_index(&scope, &index::End {}).await
     }
 }
 

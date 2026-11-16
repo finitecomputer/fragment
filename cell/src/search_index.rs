@@ -38,6 +38,7 @@ use base64::Engine;
 use fragment_core::search_index::{self as engine, Found, Fused};
 use fragment_proto::search as wire;
 use fragment_proto::ErrorCode;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -60,8 +61,93 @@ const RESIDENT_MAX_BYTES: usize = 32 << 20;
 const FOLD_AFTER_MS: i64 = 60 * 60 * 1000;
 /// Bound parameters per statement: DO SQLite's limit is 100.
 const BINDS_MAX: usize = 99;
-/// Test fleets: how long a held write waits at most (`index/test`).
+/// Test fleets: how long a held write waits at most (`TestHook`).
 const HELD_MAX_MS: u64 = 60_000;
+
+/// A call to a life's index (searchable.rs `search_index`): `PATH` names
+/// its route, the implementing type is its body, and `Answer` is what a 200
+/// carries, as its caller reads it (JSON the supervisor edits on its way
+/// out, a `Value`). The index decodes the same body (`route`), as the
+/// Registry's calls and the ledger's routes are.
+pub(crate) trait Call: Serialize {
+    const PATH: &'static str;
+    type Answer: DeserializeOwned;
+}
+
+impl Call for Write {
+    const PATH: &'static str = "index/upsert";
+    type Answer = Wrote;
+}
+
+/// A source gone, unless its fence is below the source's.
+impl Call for wire::Delete {
+    const PATH: &'static str = "index/delete";
+    type Answer = Deleted;
+}
+
+/// `delete`'s answer: `fenced`, the source's higher fence that refused it.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Deleted {
+    pub deleted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fenced: Option<u64>,
+}
+
+/// Which of `hashes` it holds vectors of, in `space`.
+impl Call for Known {
+    const PATH: &'static str = "index/known";
+    type Answer = KnownHashes;
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct KnownHashes {
+    pub known: Vec<String>,
+}
+
+/// `{sources, next}`: its sources a page at a time.
+impl Call for Page {
+    const PATH: &'static str = "index/sources";
+    type Answer = Value;
+}
+
+/// What it holds (`Parts::status`).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Status {}
+
+impl Call for Status {
+    const PATH: &'static str = "index/status";
+    type Answer = Value;
+}
+
+/// A search: its `Answer`.
+impl Call for Ask {
+    const PATH: &'static str = "index/search";
+    type Answer = Value;
+}
+
+/// The life ended (`end`).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct End {}
+
+impl Call for End {
+    const PATH: &'static str = "index/end";
+    type Answer = ();
+}
+
+/// Test fleets (the lever `search-index`): `hold` true or false holds its
+/// next writes before they are written (each counted, `held`), or lets them
+/// go; `chunks_max` lowers the chunks it takes (1 to `CHUNKS_MAX`).
+/// Answers its status, with `held` and the build's SIMD.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct TestHook {
+    pub hold: Option<bool>,
+    pub chunks_max: Option<u64>,
+}
+
+impl Call for TestHook {
+    const PATH: &'static str = "index/test";
+    type Answer = Value;
+}
 
 /// A source, whole, as the supervisor sends it: its chunks embedded
 /// (`vector`, base64 of a held vector's code then its int8, or none:
@@ -257,7 +343,7 @@ pub struct SearchIndexCell {
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
     /// Test fleets: writes wait before they are written while this holds
-    /// (`index/test`), each counted in `held`: a write sent before its
+    /// (`TestHook`), each counted in `held`: a write sent before its
     /// life's end that lands after it.
     holding: std::cell::Cell<bool>,
     held: std::cell::Cell<u32>,
@@ -313,18 +399,17 @@ impl SearchIndexCell {
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         self.schema.ready()?;
         let path = req.path();
-        let op = path.strip_prefix("/index/").ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no route {path}")))?.to_string();
-        // each op reads its own type from the call's bytes, once
+        // each call reads its own type from its bytes, once
         let body = req.bytes().await?;
-        fn read<'a, T: Deserialize<'a>>(op: &str, body: &'a [u8]) -> CellResult<T> {
-            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("index/{op}: {e}")))
+        fn read<'a, C: Call + Deserialize<'a>>(body: &'a [u8]) -> CellResult<C> {
+            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("{}: {e}", C::PATH)))
         }
         fn answer(a: &impl Serialize) -> CellResult<Response> {
-            Ok(Response::from_json(a)?)
+            crate::json_answer(a)
         }
-        match op.as_str() {
-            "upsert" => {
-                let w: Write = read(&op, &body)?;
+        match path.strip_prefix('/').unwrap_or_default() {
+            Write::PATH => {
+                let w: Write = read(&body)?;
                 if self.cfg.test_hooks && self.holding.get() {
                     self.held.set(self.held.get() + 1);
                     let mut waited = 0;
@@ -342,46 +427,47 @@ impl SearchIndexCell {
                 }
                 answer(&wrote)
             }
-            "delete" => {
-                let body: Value = read(&op, &body)?;
-                let source = body["source"].as_str().ok_or_else(|| CellError::invalid("index/delete names its source"))?.to_string();
-                let fence = body["fence"].as_u64();
+            wire::Delete::PATH => {
+                let wire::Delete { source, fence } = read(&body)?;
                 let me = self.parts();
                 // the fence's check, the removal and its tombstone, one transaction
                 let removed = js::transaction_sync(&self.raw, move || me.remove_fenced(&source, fence))?;
                 match removed {
-                    Err(stored) => answer(&json!({ "deleted": false, "fenced": stored })),
+                    Err(stored) => answer(&Deleted { deleted: false, fenced: Some(stored) }),
                     Ok(n) => {
                         if n > 0 {
                             self.after_write().await?;
                         }
-                        answer(&json!({ "deleted": n > 0 }))
+                        answer(&Deleted { deleted: n > 0, fenced: None })
                     }
                 }
             }
-            "known" => {
-                let k: Known = read(&op, &body)?;
-                answer(&json!({ "known": self.parts().known(&k)? }))
+            Known::PATH => {
+                let k: Known = read(&body)?;
+                answer(&KnownHashes { known: self.parts().known(&k)? })
             }
-            "sources" => {
-                let p: Page = read(&op, &body)?;
+            Page::PATH => {
+                let p: Page = read(&body)?;
                 answer(&self.parts().sources(&p)?)
             }
-            "status" => answer(&self.parts().status(self.chunks_max()?)?),
-            "search" => {
-                let a: Ask = read(&op, &body)?;
+            Status::PATH => answer(&self.parts().status(self.chunks_max()?)?),
+            Ask::PATH => {
+                let a: Ask = read(&body)?;
                 answer(&self.parts().search(&a)?)
             }
-            "end" => answer(&self.end().await?),
-            "test" if self.cfg.test_hooks => {
-                let body: Value = read(&op, &body)?;
-                if let Some(hold) = body["hold"].as_bool() {
+            End::PATH => {
+                self.end().await?;
+                answer(&())
+            }
+            TestHook::PATH if self.cfg.test_hooks => {
+                let hook: TestHook = read(&body)?;
+                if let Some(hold) = hook.hold {
                     self.holding.set(hold);
                 }
-                match &body["chunks_max"] {
-                    Value::Null => {}
-                    Value::Number(n) if n.as_u64().is_some_and(|n| (1..=CHUNKS_MAX).contains(&n)) => self.parts().set_meta("test_chunks_max", &n.to_string())?,
-                    _ => return Err(CellError::invalid(format!("chunks_max is 1 to {CHUNKS_MAX}"))),
+                match hook.chunks_max {
+                    None => {}
+                    Some(n) if (1..=CHUNKS_MAX).contains(&n) => self.parts().set_meta("test_chunks_max", &n.to_string())?,
+                    Some(_) => return Err(CellError::invalid(format!("chunks_max is 1 to {CHUNKS_MAX}"))),
                 }
                 let mut status = self.parts().status(self.chunks_max()?)?;
                 status["held"] = json!(self.held.get());
@@ -395,7 +481,7 @@ impl SearchIndexCell {
     }
 
     /// The chunks it holds at most: `CHUNKS_MAX`, or on a test fleet one
-    /// its lever lowered (`index/test`), so a run reaches the cap.
+    /// its lever lowered (`TestHook`), so a run reaches the cap.
     fn chunks_max(&self) -> CellResult<u64> {
         if !self.cfg.test_hooks {
             return Ok(CHUNKS_MAX);
@@ -420,13 +506,12 @@ impl SearchIndexCell {
 
     /// The life ended: its storage released whole, then marked ended (in
     /// the steps its schema makes again), so nothing writes it after.
-    async fn end(&self) -> CellResult<Value> {
+    async fn end(&self) -> CellResult<()> {
         self.state.storage().delete_all().await?;
         self.state.storage().delete_alarm().await?;
         RESIDENT.with(|r| r.borrow_mut().forget(&self.key()));
         self.schema.made_again(&self.raw, self.sql(), &fragment_core::migrate::SEARCH_INDEX, &self.key())?;
-        self.parts().set_meta("ended", &js::now_ms().to_string())?;
-        Ok(json!({ "ended": true }))
+        self.parts().set_meta("ended", &js::now_ms().to_string())
     }
 }
 

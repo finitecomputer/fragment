@@ -416,6 +416,34 @@ impl Route for TestHook {
     type Answer = Value;
 }
 
+/// A wipe's look (wipe.rs): whether it holds anything.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WipeView {}
+
+/// A wipe's end (wipe.rs): every table dropped and made again empty, with
+/// the row that says it was wiped, in one step (no await), and its alarm
+/// deleted. Again, it changes nothing. Answers whether it held anything.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WipeEnd {}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Held {
+    pub held: bool,
+}
+
+impl Route for WipeView {
+    const PATH: &'static str = "/wipe/view";
+    type Answer = Held;
+}
+
+impl Route for WipeEnd {
+    const PATH: &'static str = "/wipe/end";
+    type Answer = Held;
+}
+
 fn decode<R: Route>(body: &[u8]) -> CellResult<R> {
     serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("{}: {e}", R::PATH)))
 }
@@ -787,12 +815,10 @@ impl LedgerCell {
     async fn route(&self, mut req: Request) -> Result<Response, Failed> {
         // a wipe ends a ledger that refuses its schema too, and a wiped
         // ledger answers as one, refused or not (schema.rs)
-        if let Some(route) = req.path().strip_prefix("/wipe/") {
-            // only a wipe's orchestrator sets the header (routed.rs `marker`)
-            if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route /wipe/{route}")).into());
-            }
-            return reply(self.wipe(route).await?);
+        match req.path().as_str() {
+            WipeView::PATH => return reply(Held { held: self.held()? }),
+            WipeEnd::PATH => return reply(self.wipe_end().await?),
+            _ => {}
         }
         if self.wiped.get() {
             return Err(Failed::Refused(Refused::Wiped));
@@ -900,41 +926,33 @@ impl LedgerCell {
         }
     }
 
-    /// A wipe's calls (docs/api.md, Operators; the router's cell/src/wipe.rs):
-    /// `view` → `{wiped, held}`, whether it holds anything; `end` →
-    /// `{wiped, held}`: every table dropped and made again empty, with the
-    /// row that says it was wiped, in one step (no await), and its alarm
-    /// deleted. Again, it changes nothing.
-    async fn wipe(&self, route: &str) -> CellResult<Value> {
-        let held = || -> CellResult<bool> {
-            let rows: Vec<Value> = self
-                .sql()
-                .exec(
-                    "SELECT (SELECT COUNT(*) FROM meta) + (SELECT COUNT(*) FROM head) + (SELECT COUNT(*) FROM entries) + (SELECT COUNT(*) FROM batches)
-                       + (SELECT COUNT(*) FROM commands) + (SELECT COUNT(*) FROM spend) + (SELECT COUNT(*) FROM caps) AS n",
-                    None,
-                )?
-                .to_array()?;
-            Ok(rows.first().and_then(|r| r["n"].as_i64()).ok_or_else(|| CellError::host("COUNT answered no row"))? > 0)
-        };
-        match route {
-            "view" => Ok(json!({ "wiped": self.wiped.get(), "held": held()? })),
-            "end" => {
-                let had = held()?;
-                // one step, no await: emptied and marked, or neither
-                let sql = self.sql();
-                crate::schema::remake(sql.clone(), &fragment_core::migrate::LEDGER)?;
-                if !self.wiped.get() {
-                    sql.exec("INSERT INTO wiped (at) VALUES (?)", vec![SqlStorageValue::Integer(js::now_ms())])?;
-                }
-                self.wiped.set(true);
-                assert!(!held()?, "a wiped ledger holds nothing");
-                self.state.storage().delete_alarm().await?;
-                self.armed.set(None);
-                Ok(json!({ "wiped": true, "held": had }))
-            }
-            other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
+    /// Whether it holds anything (`WipeView`; docs/api.md, Operators).
+    fn held(&self) -> CellResult<bool> {
+        let rows: Vec<Value> = self
+            .sql()
+            .exec(
+                "SELECT (SELECT COUNT(*) FROM meta) + (SELECT COUNT(*) FROM head) + (SELECT COUNT(*) FROM entries) + (SELECT COUNT(*) FROM batches)
+                   + (SELECT COUNT(*) FROM commands) + (SELECT COUNT(*) FROM spend) + (SELECT COUNT(*) FROM caps) AS n",
+                None,
+            )?
+            .to_array()?;
+        Ok(rows.first().and_then(|r| r["n"].as_i64()).ok_or_else(|| CellError::host("COUNT answered no row"))? > 0)
+    }
+
+    /// A wipe's end (`WipeEnd`): whether it held anything.
+    async fn wipe_end(&self) -> CellResult<Held> {
+        let had = self.held()?;
+        // one step, no await: emptied and marked, or neither
+        let sql = self.sql();
+        crate::schema::remake(sql.clone(), &fragment_core::migrate::LEDGER)?;
+        if !self.wiped.get() {
+            sql.exec("INSERT INTO wiped (at) VALUES (?)", vec![SqlStorageValue::Integer(js::now_ms())])?;
         }
+        self.wiped.set(true);
+        assert!(!self.held()?, "a wiped ledger holds nothing");
+        self.state.storage().delete_alarm().await?;
+        self.armed.set(None);
+        Ok(Held { held: had })
     }
 
     /// Fleets with levers: a capped ledger's paid calls used, every model

@@ -19,10 +19,10 @@
 //!
 //! **Where it runs.** Here, in the router, one bounded call at a time; the
 //! Registry records how far it got and locks the person meanwhile
-//! (registry/wipe.rs); each object a step touches does its own part behind
-//! an internal route (`wipe/…`, marked by `WIPE_HEADER`, which the router
-//! never passes): a fragment ends its life (ended.rs `wipe_route`), a
-//! computer empties itself (computer.rs `wipe`), a ledger and a list empty
+//! (registry/wipe.rs); each object a step touches does its own part, by a
+//! call of its own: a fragment ends its life (ended.rs `wipe_route`,
+//! marked by `WIPE_HEADER`, which the router never passes), a computer
+//! empties itself (computer.rs `wipe`), and a ledger and a list empty
 //! themselves (ledger.rs, principal.rs). The steps and their order are
 //! `fragment_core::wipe::STEPS`; each is idempotent, and is recorded done
 //! only once it is whole, so a wipe cut anywhere (a crash, a timeout, a
@@ -271,9 +271,9 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
         // their ledger, and their Vault's secrets with it (vault.rs): each
         // a person's object of one row's worth once wiped
         Step::Ledger => {
-            let v: Value = routed::ask_object(env, "LEDGER", person, "wipe/end", &json!({})).await?;
+            let ledger = crate::ledger::ask(env, person, &crate::ledger::WipeEnd {}).await?;
             let vault: Value = routed::ask_object(env, "VAULT", person, "wipe/end", &json!({})).await?;
-            Ok(Did::finished(u64::from(v["held"] == true) + u64::from(vault["held"] == true)))
+            Ok(Did::finished(u64::from(ledger.held) + u64::from(vault["held"] == true)))
         }
         Step::Lists => {
             // their export first: its upload aborted and its archive deleted,
@@ -412,7 +412,7 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
     }
     let computer = fragment_core::computer::default_computer_of(&facts.identity);
     let c = crate::computer::ask(env, &computer, "computer/wipe-view", &json!({})).await?;
-    let ledger: Value = routed::ask_object(env, "LEDGER", &facts.identity, "wipe/view", &json!({})).await?;
+    let ledger = crate::ledger::ask(env, &facts.identity, &crate::ledger::WipeView {}).await?;
     let vault: Value = routed::ask_object(env, "VAULT", &facts.identity, "wipe/view", &json!({})).await?;
     Ok(Found {
         sign_ins: facts.sign_ins,
@@ -431,7 +431,7 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
             more: c["more"] == true,
             snapshot: c["snapshot"] == true,
         }),
-        ledger: ledger["held"] == true,
+        ledger: ledger.held,
         vault: vault["held"] == true,
         lists,
         orgs: facts.orgs.clone(),
