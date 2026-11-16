@@ -154,7 +154,10 @@ struct NoticesBand: View {
                 ZStack(alignment: .bottom) {
                     ForEach((1...edges).reversed(), id: \.self) { depth in
                         ZStack {
-                            // under the edge: the rest's places, the last edge's
+                            // its card's place, and under the last edge the rest's: as
+                            // wide as the cards, so a card keeps its width (and its
+                            // words their lines) as it flies, and only its height grows
+                            Color.clear.stackPlace(items[depth].id, in: space, held: !fanned)
                             if depth == edges {
                                 ForEach(items.dropFirst(edges + 1)) { item in
                                     Color.clear.stackPlace(item.id, in: space, held: !fanned)
@@ -163,10 +166,9 @@ struct NoticesBand: View {
                             Color.clear
                                 .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                                 .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
-                                .stackPlace(items[depth].id, in: space, held: !fanned)
+                                .padding(.horizontal, CGFloat(depth) * 12)
                         }
                         .frame(height: 36)
-                        .padding(.horizontal, CGFloat(depth) * 12)
                         // each 8 points lower than the one before: laid out
                         // where it shows (not an offset), so a card flies from here
                         .alignmentGuide(.bottom) { $0[.bottom] + CGFloat(edges - depth) * 8 }
