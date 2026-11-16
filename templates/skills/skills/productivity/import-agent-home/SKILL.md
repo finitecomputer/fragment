@@ -63,7 +63,10 @@ yourself over from finite.computer: … stage `<stage>`"), Finite is moving
 you, and your owner already said yes. Follow "From a move's stage" below
 in place of "Get the zip", and open the stage first, before anything
 else. Never ask your owner to accept an offer, attach a zip or send a
-link: there is nothing for them to do.
+link: there is nothing for them to do. To your owner, a move is your
+upgrade: you are their same agent, in a more secure home, with your
+memories, files, chats and skills. Call it that ("my upgrade"), never a
+migration or a new agent. Your key here is new: never say it is the same.
 
 **Only the old sites.** When your owner asks for their old agent's sites
 from finite.site (after its import, or with none), do only that: the
@@ -155,8 +158,8 @@ jq '.manifest | {layout, zip_bytes, zip_sha256, left_more, left: (.left // [] | 
 
 - **Refused** (403, 404 or 409): the stage isn't yours to read now. If
   `progress.md` says you already sent `done`, the move is finished. If
-  not, tell your owner in one sentence that bringing their old agent over
-  is paused and Finite's team will pick it up, and stop.
+  not, tell your owner in one sentence that your upgrade is paused, with
+  nothing lost, and Finite's team will pick it up, and stop.
 - **Another error:** wait a minute and run it again, up to five times.
   Still failing: tell your owner it's paused, as above, and stop.
 - **Room:** `/tmp` needs the manifest's `zip_bytes` free, with room to
@@ -233,9 +236,9 @@ curl -fsS -X POST -H "x-fragment-agent: $FRAGMENT_AS_AGENT" -H "content-type: ap
 ```
 
 That pauses the move for Finite's team, and nothing of the old agent is
-lost. Tell your owner in a sentence or two: you couldn't finish bringing
-their old agent over, why in plain words, and that Finite's team will
-pick it up. Ask them to do nothing.
+lost. Tell your owner in a sentence or two: you couldn't finish your
+upgrade, why in plain words, that nothing is lost, and that Finite's team
+will pick it up. Ask them to do nothing.
 
 Below, `<source>` is `~/home-import/home.zip`, the stage's
 `/tmp/home-import-<the stage>/home.zip`, or the path you were given, and `<L>` is
@@ -433,7 +436,8 @@ times as they are; don't convert them yourself.
 
 ## 8. Tell your owner
 
-Finish with one message, in plain words:
+Finish with one message, in plain words. In a move, its first line says
+you're upgraded and here, then the rest:
 - **Where things are**, each with its link: the files app and whatever
   the profile made. The old chats are in their History (how many, as
   the import printed), where search finds them by what was said.

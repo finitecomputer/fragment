@@ -1,9 +1,11 @@
 // The move's page (`/move`, FIN-463 F6): a person's old finite.computer
 // agents, each where its move is in the server's words
 // (`GET /api/migrations/offers`), and the one question the import needs:
-// which to bring over. Each new agent takes its old one's name.
+// which to upgrade. Each new agent takes its old one's name. Its words call
+// the move the agent's upgrade: the same agent, in a better home, with
+// nothing lost (the server's words say so too).
 //
-// Bring over: the person opens the move (`POST /api/migrations/offers`,
+// Upgrade: the person opens the move (`POST /api/migrations/offers`,
 // which binds them and gives its comp once: a month's seat, so a guest
 // may make agents), then, one at a time, a new agent is made as Settings'
 // Add makes one (onboarding.js `addAgent`, its chat not opened) and its
@@ -17,7 +19,7 @@
 //
 // Once its new agent exists, a move is that agent's to tell (FIN-463: the
 // first move's agent asked its person a question in its own chat while
-// this page said "Bringing it over…"): each such row opens its agent's
+// this page said it was being brought over): each such row opens its agent's
 // chat, and an import that starts while the page shows takes the person
 // there, the first if several do. One importing when the page opened is
 // left to its person, who came here to see it.
@@ -45,7 +47,7 @@ export function createMovePage(root, h) {
   let offers = null;
   let readFailed = null;
   let failed = null;
-  // the old agent whose step is out, and what it is ("Making Juniper…")
+  // the old agent whose step is out, and what it is ("Preparing Juniper's upgrade…")
   let doing = null;
   let busy = false;
   let shown = false;
@@ -54,7 +56,7 @@ export function createMovePage(root, h) {
   // opening it is: a read answered after the page closed is no one's
   let importingAtOpen = null;
   let opening = 0;
-  // what the person chose, kept across drawings, and Bring over as drawn
+  // what the person chose, kept across drawings, and Upgrade as drawn
   const chosen = new Map();
   let go = null;
   const anyChosen = () => (offers ?? []).some((o) => ASKABLE.has(o.state) && (chosen.get(o.old) ?? true));
@@ -90,8 +92,8 @@ export function createMovePage(root, h) {
     li.append(copy);
     if (ASKABLE.has(o.state) && !doing) {
       const pick = el("label", "move-pick");
-      // the shell's check (shell.css `input.check`); a choice changes Bring
-      // over alone, so the box, and the person's focus on it, stay put
+      // the shell's check (shell.css `input.check`); a choice changes
+      // Upgrade alone, so the box, and the person's focus on it, stay put
       const box = el("input", "check");
       box.type = "checkbox";
       box.checked = chosen.get(o.old) ?? true;
@@ -100,7 +102,7 @@ export function createMovePage(root, h) {
         chosen.set(o.old, box.checked);
         if (go) go.disabled = busy || !anyChosen();
       };
-      pick.append(box, el("span", null, "Bring over"));
+      pick.append(box, el("span", null, "Upgrade"));
       copy.append(pick);
     } else if (o.state === "never") {
       const again = el("button", null, "Ask again");
@@ -121,7 +123,7 @@ export function createMovePage(root, h) {
   function draw() {
     if (!shown) return;
     const wrap = el("div", "move-layout");
-    wrap.append(el("h1", null, "Bring your agents over"));
+    wrap.append(el("h1", null, "Upgrade your agents"));
     if (readFailed && !offers) {
       const again = el("button", "primary", "Try again");
       again.type = "button";
@@ -130,7 +132,7 @@ export function createMovePage(root, h) {
       return root.replaceChildren(wrap);
     }
     if (!offers) return root.replaceChildren(wrap);
-    if (!offers.length) wrap.append(el("p", "muted", "You have no agents on finite.computer."));
+    if (!offers.length) wrap.append(el("p", "muted", "You have no agents to upgrade."));
     const list = el("ul", "move-list");
     list.append(...offers.map(row));
     wrap.append(list);
@@ -138,7 +140,7 @@ export function createMovePage(root, h) {
     if (failed) wrap.append(el("p", "form-error", failed));
     go = null;
     if (offers.some((o) => ASKABLE.has(o.state))) {
-      go = el("button", "primary", "Bring over");
+      go = el("button", "primary", "Upgrade");
       go.type = "button";
       go.disabled = busy || !anyChosen();
       go.onclick = () => bring();
@@ -209,7 +211,7 @@ export function createMovePage(root, h) {
     for (const fragment of h.ownAgents()) {
       const json = await api("GET", `/api/f/${fragment}/file?path=agent.json`).catch((e) => {
         if (e?.status === 404) return null;
-        throw new Error(`Couldn't check whether ${o.name} was brought over already, so nothing was made. Try again.`);
+        throw new Error(`Couldn't check whether ${o.name} was upgraded already, so nothing changed. Try again.`);
       });
       if (json?.from !== o.old) continue;
       const id = h.identityOf(fragment);
@@ -236,11 +238,11 @@ export function createMovePage(root, h) {
         // never arrived, a making cut short, a reload) is the one, handed
         // back to Add, which goes on with what it lacks
         const before = await madeFor(o);
-        doing = { old: o.old, said: `Making ${name}…` };
+        doing = { old: o.old, said: `Preparing ${name}'s upgrade…` };
         draw();
         const made = await h.addAgent({ name, role: null, quiet: true, from: o.old, agent: before });
-        if (!made?.id) throw new Error(`${name} wasn't made. Try again.`);
-        doing = { old: o.old, said: `Starting ${o.name}'s move…` };
+        if (!made?.id) throw new Error(`${name}'s upgrade didn't start. Try again.`);
+        doing = { old: o.old, said: `Starting ${o.name}'s upgrade…` };
         draw();
         await api("POST", `/api/migrations/offers/${o.old}/yes`, { agent: made.id });
         doing = null;
