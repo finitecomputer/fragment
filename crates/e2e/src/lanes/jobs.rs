@@ -503,6 +503,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     );
     secret_hosts(s, api, &owner, &upstream)?;
     inbox_secret(s, api, &owner)?;
+    inbox_hmac(s, api, &owner)?;
     channel_run_inputs(s, api, &owner)
 }
 
@@ -538,6 +539,83 @@ fn inbox_secret(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         r.status == 200 && run["status"] == "succeeded" && items.body["result"] == json!([{ "text": "hooked", "source": "hook" }]),
         json!({ "post": r.body, "run": run, "items": items.body }),
     );
+    Ok(())
+}
+
+/// Goal: an inbox whose code names an HMAC (Slack's shape: a signature
+/// over its time and body, under one of its secrets) takes a delivery
+/// only signed by that secret, now, in that header, with that prefix; and
+/// its `answer` query says back a URL check's challenge, the platform's
+/// own answer otherwise. Nothing refused is stored or runs.
+/// Method: the jobs fixture naming one; deliveries before its secret is
+/// set, with its token, and signed well and badly in each way.
+fn inbox_hmac(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    const HOOK: &str = "8f742231b10e8888abcd99e2e4b1d93c";
+    const CHALLENGE: &str = "3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P";
+    let long = Duration::from_secs(40);
+    let hmac = json!({ "secret": "HOOK", "header": "x-hook-signature", "prefix": "v0=", "signed": "v0:{x-hook-time}:{body}", "fresh": "x-hook-time", "within_s": 300 });
+    let decl = fragment_core::inbox::HmacDecl::read(&hmac).map_err(anyhow::Error::msg)?;
+    let (name, c) = jobs_fragment(s, api, owner, "inbox-hmac", |m| {
+        m["operations"]["handshake"] = json!({ "kind": "query" });
+        m["inbox"] = json!({ "hmac": hmac, "answer": "handshake" });
+    })?;
+    let token = c["inboxToken"].as_str().unwrap_or("").to_string();
+    let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    // signed under `key` at `at`, with `edit` to change its headers after
+    type Sent = Vec<(&'static str, String)>;
+    let post = |body: &Value, key: &[u8], at: i64, edit: fn(&mut Sent)| {
+        let body = body.to_string().into_bytes();
+        let at = at.to_string();
+        let sig = decl.sign(key, &|h: &str| (h == "x-hook-time").then(|| at.clone()), &body).unwrap_or_default();
+        let mut extra = vec![("x-hook-time", at.clone()), ("x-hook-signature", sig)];
+        edit(&mut extra);
+        api.call(Call { method: "POST", url: format!("{}/api/f/{name}/inbox", api.base), body: Some(body), content_type: Some("application/json"), extra, ..Call::default() })
+    };
+    let event = json!({ "source": "hook", "payload": { "items": ["signed"] } });
+    let check = json!({ "token": "deprecated", "challenge": CHALLENGE, "type": "url_verification" });
+    let as_is: fn(&mut Sent) = |_| {};
+
+    let r = post(&check, HOOK.as_bytes(), now(), as_is)?;
+    s.ok("an HMAC inbox whose secret is not set takes nothing, its URL check unanswered", r.status == 403 && r.text.contains("x-hook-signature") && !r.text.contains(CHALLENGE), &r);
+    anyhow::ensure!(api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?.status == 200, "made private");
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/secrets/HOOK"), Some(&json!({ "value": HOOK, "hosts": ["api.telegram.org"] })))?;
+    anyhow::ensure!(r.status == 200, "the inbox's secret: {r}");
+    let r = api.call(Call {
+        method: "POST",
+        url: format!("{}/api/f/{name}/inbox", api.base),
+        body: Some(event.to_string().into_bytes()),
+        content_type: Some("application/json"),
+        extra: vec![("x-fragment-inbox-token", token)],
+        ..Call::default()
+    })?;
+    s.ok("its inbox token, which its editors read, admits nothing", r.status == 403, &r);
+
+    let refusals = [
+        ("signed by another secret", post(&event, b"another secret", now(), as_is)?, "does not match"),
+        ("a bad signature", post(&event, HOOK.as_bytes(), now(), |e| e[1].1 = format!("v0={}", "0".repeat(64)))?, "does not match"),
+        ("a stale time, signed well", post(&event, HOOK.as_bytes(), now() - 600, as_is)?, "too far from now"),
+        ("the wrong prefix", post(&event, HOOK.as_bytes(), now(), |e| e[1].1 = e[1].1.replacen("v0=", "v1=", 1))?, "prefix"),
+        ("no signature header", post(&event, HOOK.as_bytes(), now(), |e| e.truncate(1))?, "no x-hook-signature header"),
+        ("no time header", post(&event, HOOK.as_bytes(), now(), |e| drop(e.remove(0)))?, "no x-hook-time header"),
+    ];
+    for (what, r, why) in &refusals {
+        s.ok(&format!("{what} admits nothing, saying why"), r.status == 403 && r.text.contains(why), r);
+    }
+    s.ok("nothing refused is stored", records(api, owner, &name, "inbox").is_empty(), json!(records(api, owner, &name, "inbox")));
+
+    let r = post(&event, HOOK.as_bytes(), now(), as_is)?;
+    let run = settle(api, owner, &name, r.body["runs"][0].as_i64().unwrap_or(0), &["succeeded", "held"], long);
+    let items = api.op(owner, &name, "items", "q", json!({}))?;
+    s.ok(
+        "signed well, a delivery is taken, its trigger runs, and a null answer is the platform's own",
+        r.status == 200 && r.body["ok"] == true && r.body["seq"] == 1 && run["status"] == "succeeded" && items.body["result"] == json!([{ "text": "signed", "source": "hook" }]),
+        json!({ "post": r.body, "run": run, "items": items.body }),
+    );
+    let r = post(&check, HOOK.as_bytes(), now(), as_is)?;
+    let kind = r.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    s.ok("its answer query says back a URL check's challenge, as text", r.status == 200 && r.text == CHALLENGE && kind.starts_with("text/plain"), format!("{r} ({kind})"));
+    let recs = records(api, owner, &name, "inbox");
+    s.ok("the URL check is stored as any delivery is", recs.len() == 2 && recs[1]["body"]["payload"]["challenge"] == CHALLENGE, json!(recs));
     Ok(())
 }
 
