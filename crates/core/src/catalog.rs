@@ -58,6 +58,10 @@ pub const MODEL_NAME_MAX_BYTES: usize = 64;
 /// A provider's note for people, at most, in characters (a post's length:
 /// a line or two under its name).
 pub const NOTE_MAX_CHARS: usize = 280;
+/// The most characters of a provider's title, or of a scope's name.
+pub const TITLE_MAX_CHARS: usize = 40;
+/// The most scopes a connection's row names for people.
+pub const SCOPE_NAMES_MAX: usize = 64;
 /// The most accounts a person connects at one provider: Pipes' own limit
 /// (it answers 409 `connected_account_limit_reached` past it).
 pub const ACCOUNTS_MAX: u8 = 25;
@@ -385,9 +389,26 @@ pub struct Provider {
     /// their state: plain text, one line (`check_note`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// What people call it (HubSpot, GitLab), where its name's words with
+    /// capitals (`notice::provider_name`) are not it: one line, at most
+    /// `TITLE_MAX_CHARS` characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A connection's scopes for people: each scope, as its provider
+    /// spells it, and what settings calls it (`Gmail (read)`). A scope it
+    /// does not name is shown by its last path segment. The row's, so a
+    /// connection is added with no change to the shell (FIN-509).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub scope_names: std::collections::BTreeMap<String, String>,
 }
 
 impl Provider {
+    /// What people call it: its row's `title`, else its name's words.
+    pub fn title(&self) -> String {
+        self.title.clone().unwrap_or_else(|| crate::notice::provider_name(&self.name))
+    }
+
+
     /// How many accounts a person may connect at it (`accounts_max`; 1
     /// when the row names none).
     pub fn accounts_max(&self) -> u8 {
@@ -459,6 +480,9 @@ pub enum CatalogError {
     /// `client_auth` on a row that is no connection with
     /// `connection_oauth`: it has no OAuth client to authenticate.
     ClientAuth { provider: String, why: String },
+    /// A title or a scope's name that is blank, too long or more than one
+    /// line, or scope names on a row that is no connection.
+    Names { provider: String, why: String },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -480,6 +504,7 @@ impl std::fmt::Display for CatalogError {
             CatalogError::Accounts { provider, why } => write!(f, "{provider}'s accounts_max: {why}"),
             CatalogError::AccountHost { provider, why } => write!(f, "{provider}'s account_host: {why}"),
             CatalogError::ClientAuth { provider, why } => write!(f, "{provider}'s client_auth: {why}"),
+            CatalogError::Names { provider, why } => write!(f, "{provider}'s names: {why}"),
         }
     }
 }
@@ -678,6 +703,16 @@ fn check_note(note: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A name people read in settings (a provider's title, a scope's name): 1
+/// to `TITLE_MAX_CHARS` characters, not blank, one line.
+fn check_title(what: &str, said: &str) -> Result<(), String> {
+    let chars = said.chars().count();
+    if !(1..=TITLE_MAX_CHARS).contains(&chars) || said.trim().is_empty() || said.chars().any(char::is_control) {
+        return Err(format!("{what} is one line of 1 to {TITLE_MAX_CHARS} characters, not blank"));
+    }
+    Ok(())
+}
+
 /// A deployment's providers, checked: each is offered as its row says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
@@ -762,6 +797,22 @@ impl Catalog {
             }
             if let Some(n) = &p.note {
                 check_note(n).map_err(|why| CatalogError::Note { provider: provider.clone(), why })?;
+            }
+            let names = |why: String| CatalogError::Names { provider: provider.clone(), why };
+            if let Some(t) = &p.title {
+                check_title("its title", t).map_err(names)?;
+            }
+            if !p.scope_names.is_empty() && p.kind != Kind::Connection {
+                return Err(names(format!("a {} has no scopes to name: only a connection does", p.kind.name())));
+            }
+            if p.scope_names.len() > SCOPE_NAMES_MAX {
+                return Err(names(format!("at most {SCOPE_NAMES_MAX} scope names, not {}", p.scope_names.len())));
+            }
+            for (scope, said) in &p.scope_names {
+                if scope.is_empty() || scope.len() > 256 || !scope.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+                    return Err(names(format!("{scope:?} is no OAuth scope")));
+                }
+                check_title(&format!("{scope}'s name"), said).map_err(names)?;
             }
             if let Some(n) = p.accounts_max {
                 if !(1..=ACCOUNTS_MAX).contains(&n) {
@@ -1038,6 +1089,31 @@ mod tests {
         let mut key = router();
         key["note"] = json!("Your OpenRouter credit pays.");
         assert!(parse(json!([key])).is_ok(), "an own key's too");
+    }
+
+    /// A row's names for people (FIN-509): its title over its name's
+    /// words, and a connection's scopes each by a name; a blank or over-long
+    /// one, one of two lines, or scope names on another kind are refused at
+    /// load, naming the row.
+    #[test]
+    fn a_row_names_itself_and_its_scopes_for_people() {
+        let mut g = google();
+        assert_eq!(parse(json!([g.clone()])).unwrap().get("google").unwrap().title(), "Google", "no title: its name's words");
+        g["title"] = json!("Google Workspace");
+        g["scope_names"] = json!({ "https://www.googleapis.com/auth/gmail.readonly": "Gmail (read)", "repo": "Repositories" });
+        let c = parse(json!([g.clone()])).unwrap();
+        let p = c.get("google").unwrap();
+        assert_eq!((p.title().as_str(), p.scope_names.get("repo").map(String::as_str)), ("Google Workspace", Some("Repositories")));
+        assert_eq!(serde_json::to_value(p).unwrap()["scope_names"]["repo"], "Repositories", "kept as written");
+        for (field, bad) in [("title", json!("")), ("title", json!("a".repeat(TITLE_MAX_CHARS + 1))), ("title", json!("two\nlines")), ("scope_names", json!({ "repo": " " })), ("scope_names", json!({ "a scope": "Spaced" }))] {
+            let mut row = google();
+            row[field] = bad.clone();
+            let refused = parse(json!([row]));
+            assert!(matches!(&refused, Err(CatalogError::Names { provider, .. }) if provider == "google"), "{field} {bad}: {refused:?}");
+        }
+        let mut key = router();
+        key["scope_names"] = json!({ "repo": "Repositories" });
+        assert_eq!(parse(json!([key])).unwrap_err().to_string(), "openrouter's names: a own has no scopes to name: only a connection does");
     }
 
     fn org() -> serde_json::Value {

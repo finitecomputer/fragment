@@ -317,6 +317,18 @@
     { "name": "google", "kind": "connection",
       "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com", "slides.googleapis.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      // its scopes for people, as settings names what an account allows and
+      // what it lacks: the row's, so a connection is added with no change to
+      // the shell (a scope it leaves out shows by its last path segment); and
+      // "title", where a provider's name with capitals is not what people
+      // call it ("title": "HubSpot")
+      "scope_names": {
+        "https://www.googleapis.com/auth/gmail.readonly": "Gmail (read)", "https://www.googleapis.com/auth/gmail.modify": "Gmail (manage)", "https://www.googleapis.com/auth/gmail.send": "Gmail (send)",
+        "https://www.googleapis.com/auth/drive": "Drive", "https://www.googleapis.com/auth/drive.readonly": "Drive (read)",
+        "https://www.googleapis.com/auth/spreadsheets": "Sheets", "https://www.googleapis.com/auth/spreadsheets.readonly": "Sheets (read)",
+        "https://www.googleapis.com/auth/documents": "Docs", "https://www.googleapis.com/auth/documents.readonly": "Docs (read)",
+        "https://www.googleapis.com/auth/calendar": "Calendar", "https://www.googleapis.com/auth/calendar.readonly": "Calendar (read)",
+        "https://www.googleapis.com/auth/contacts.readonly": "Contacts" },
       // while Google reviews the app's sign-in:
       // "note": "Google is still reviewing Finite, so Google shows a warning that the app isn't verified when you connect. Your data is handled the same way either way.",
       // its browser-bound connect, once its OAuth client's secret is in the
