@@ -21,6 +21,7 @@
 //!   own. A row that fails for a passing reason is tried again from the
 //!   alarm; an agent that runs on no computer is told nothing.
 
+use fragment_core::grants::Grants;
 use fragment_core::{connectors::Action, door, npub};
 use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
@@ -73,6 +74,33 @@ struct Assign {
     owner: String,
 }
 
+/// `computer/grants`: what this agent may use of its owner's, asked by the
+/// computer it runs on at each use (`fragment_core::grants`). `taken`: that
+/// computer's row from before the move, held from now on; `change`: its
+/// owner's, in person (their computer's routes, which a signed person alone
+/// reaches: never an agent, whomever it acts for).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantsAsk {
+    computer: String,
+    identity: String,
+    #[serde(default)]
+    taken: Option<Grants>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    change: Option<GrantsChange>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+enum GrantsChange {
+    /// The providers it may use, or every one (`null`).
+    Connections(Option<Vec<String>>),
+    /// The account it uses at `provider`, or the default (`null`).
+    Account { provider: String, account: Option<String> },
+}
+
 #[derive(Deserialize)]
 struct Sign {
     computer: String,
@@ -123,6 +151,46 @@ impl FragmentCell {
         headers.set("x-content-type-options", "nosniff")?;
         let (_, body) = upstream.into_parts();
         Ok(Response::from_body(body)?.with_headers(headers))
+    }
+
+    /// `computer/grants` (`GrantsAsk`): what this agent may use of its
+    /// owner's, as it holds it, after what the call hands over or changes.
+    pub(crate) fn grants(&self, body: &[u8]) -> CellResult<Grants> {
+        self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
+        let b: GrantsAsk = crate::json_body(body)?;
+        self.assigned_to(&b.computer)?;
+        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(b.identity.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "that computer's row is another agent's: this fragment was made again since"));
+        }
+        let was = match self.meta(MetaKey::Grants)? {
+            Some(stored) => Grants::read(&stored).map_err(|e| CellError::host(format!("its stored grants: {e}")))?,
+            None => Grants::default(),
+        };
+        let (moved, changed) = (b.taken.is_some(), b.change.is_some());
+        let mut grants = b.taken.unwrap_or_else(|| was.clone());
+        if let Some(change) = b.change {
+            if b.owner.as_deref() != Some(self.must(MetaKey::Owner)?.as_str()) {
+                return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner, in person, changes what it may use"));
+            }
+            match change {
+                GrantsChange::Connections(list) => grants.connections = list,
+                GrantsChange::Account { provider, account: Some(account) } => {
+                    grants.accounts.insert(provider, account);
+                }
+                GrantsChange::Account { provider, account: None } => {
+                    grants.accounts.remove(&provider);
+                }
+            }
+        }
+        if !grants.valid() {
+            return Err(CellError::invalid("grants name at most a catalog's providers, sorted and once, each account a Pipes id"));
+        }
+        if grants != was {
+            self.set_meta(MetaKey::Grants, &grants.stored())?;
+            let by = if changed { "changed by its owner" } else { "moved from its computer" };
+            self.event("agent.grants", &format!("what it may use of its owner's, {by}"), json!({ "grants": grants, "moved": moved }));
+        }
+        Ok(grants)
     }
 
     /// `computer/…`: the internal calls a computer's routes and egress make.

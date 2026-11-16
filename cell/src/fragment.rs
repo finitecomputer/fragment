@@ -423,6 +423,10 @@ pub(crate) enum MetaKey {
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
     AgentIdentity,
+    /// What this agent may use of its owner's (`fragment_core::grants`):
+    /// set by its owner in person, through their computer (runs_on.rs).
+    /// None: every provider they have, each connection's default account.
+    Grants,
     /// Its door's public key (`<door> <64 hex>`), registered by a link its
     /// owner started, gone once they unlink (fragment_core::door).
     Door,
@@ -540,6 +544,7 @@ impl MetaKey {
             MetaKey::TestWokeHeld => "test_woke_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
+            MetaKey::Grants => "grants",
             MetaKey::Door => "door",
             MetaKey::DoorTicket => "door_ticket",
             MetaKey::DoorActor => "door_actor",
@@ -990,6 +995,9 @@ impl FragmentCell {
             }
             if route == "picture" {
                 return self.picture().await;
+            }
+            if route == "grants" {
+                return json_response(&self.grants(&req.bytes().await?)?);
             }
             let route = route.to_string();
             let body = req.bytes().await?;

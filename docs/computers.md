@@ -656,7 +656,14 @@ provider's own hosts.
   (decision 44); its owner may narrow it to a list, a specialization
   rather than a wall. Where a connection takes several accounts, each
   agent uses the one its owner picked, else the oldest connected; its
-  placeholder is the same.
+  placeholder is the same. Both are the agent fragment's (`meta`
+  `grants`, `fragment_core::grants`), changed only by its owner in
+  person through their computer's routes. The computer asks the agent's
+  fragment for them at each request it swaps and each read of a view,
+  and keeps none: a provider taken away is refused from the next request.
+  A computer from before held them itself; each hands its rows over once
+  (`grants::legacy`) and marks them moved, which the release before reads
+  as no provider at all, so a rollback never widens an agent.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
