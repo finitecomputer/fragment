@@ -210,10 +210,12 @@ struct NoticesFan: View {
             let items = NoticeItem.all(library, now: now)
             ScrollView {
                 VStack(spacing: 10) {
-                    ForEach(items) { item in
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                         NoticeItemView(item: item, library: library, api: api, now: now, open: true, full: true) {}
                             // top to top with its place in the stack: it unfolds down from there
                             .matchedGeometryEffect(id: item.id, in: space, anchor: .top)
+                            // each over the ones below it, as the stack has them: they slide out from under
+                            .zIndex(Double(items.count - index))
                     }
                 }
                 .padding(.horizontal, 12).padding(.bottom, 24)
@@ -370,15 +372,20 @@ private struct NoticeItemView: View {
             else { Task { if let outside = await library.act(notice, action, api: api) { openURL(outside) } } }
         }
         if wide {
-            // the full screen's: the system's own glass buttons, the main one tinted
-            if main {
-                Button(action: tap) { Text(action.label).fontWeight(.semibold).lineLimit(1).frame(maxWidth: .infinity) }
-                    .buttonStyle(.glassProminent).tint(Color(.label)).foregroundStyle(Color(.systemBackground))
-                    .controlSize(.large).disabled(pressed)
-            } else {
-                Button(action: tap) { Text(action.label).fontWeight(.semibold).lineLimit(1).frame(maxWidth: .infinity) }
-                    .buttonStyle(.glass).foregroundStyle(.primary).controlSize(.large).disabled(pressed)
+            // the full screen's: a plain glass pill with a fine rim, the main one tinted
+            Button(action: tap) {
+                Text(action.label).fontWeight(.semibold).lineLimit(1)
+                    .foregroundStyle(main ? Color(.systemBackground) : Color.primary)
+                    .frame(maxWidth: .infinity).frame(height: 50)
+                    // the rim inside the glass, so it swells with it on a press
+                    .background {
+                        Capsule().strokeBorder(LinearGradient(colors: [.white.opacity(0.6), .white.opacity(0.05), .white.opacity(0.35)],
+                                                              startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
+                    }
+                    .glassEffect(.regular.tint(main ? Color(.label).opacity(0.9) : .clear).interactive(), in: .capsule)
+                    .contentShape(.capsule)
             }
+            .buttonStyle(.plain).disabled(pressed).opacity(pressed ? 0.6 : 1)
         } else if main {
             // its words in the page's own colour, on the app's primary tint (dark: white on white otherwise);
             // on one line: the title gives way first
