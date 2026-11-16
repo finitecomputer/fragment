@@ -167,7 +167,8 @@ struct NoticesBand: View {
                         }
                         .frame(height: 36)
                         .padding(.horizontal, CGFloat(depth) * 12)
-                        .offset(y: CGFloat(depth) * 8)
+                        // laid out where it shows (not an offset), so a card flies from here
+                        .alignmentGuide(.bottom) { $0[.bottom] - CGFloat(depth) * 8 }
                     }
                 }
             }
@@ -184,7 +185,7 @@ private extension View {
     /// the stack lets go, so the fan's cards fly from here rather than
     /// the stack's following them (and back, as the fan goes).
     @ViewBuilder func stackPlace(_ id: String, in space: Namespace.ID, held: Bool) -> some View {
-        if held { matchedGeometryEffect(id: id, in: space) } else { self }
+        if held { matchedGeometryEffect(id: id, in: space, anchor: .top) } else { self }
     }
 }
 
@@ -209,7 +210,8 @@ struct NoticesFan: View {
                     VStack(spacing: 10) {
                         ForEach(items) { item in
                             NoticeItemView(item: item, library: library, api: api, now: now, open: true, full: true) {}
-                                .matchedGeometryEffect(id: item.id, in: space)
+                                // top to top with its place in the stack: it unfolds down from there
+                                .matchedGeometryEffect(id: item.id, in: space, anchor: .top)
                         }
                     }
                     .padding(.horizontal, 12).padding(.bottom, 24)
@@ -360,11 +362,15 @@ private struct NoticeItemView: View {
     }
 
     private func card(@ViewBuilder _ content: () -> some View) -> some View {
-        content()
-            .frame(maxWidth: .infinity, alignment: .leading)
+        let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+        // full: as tall as it's given while it flies (its own height at rest,
+        // in the fan's scroll), its words from the top, cut at its edge
+        return content()
+            .frame(maxWidth: .infinity, maxHeight: full ? .infinity : nil, alignment: .topLeading)
             .padding(full ? 14 : 12)
             // an iOS banner's glass and corners
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .glassEffect(.regular, in: shape)
+            .clipShape(shape.inset(by: full ? 0 : -40))
     }
 }
 
