@@ -1,0 +1,27 @@
+// The person's Atlassian sites (Jira): Pipes' `atlassian` provider,
+// Atlassian's one sign-in (OAuth 2.0 3LO) for its products (Pipes' `jira`
+// and `confluence` are providers of their own), connected through the
+// browser once its app's secret is in the store (the app Pipes' Atlassian
+// integration uses, sharing on, with the platform's callback beside
+// Pipes'). Its authorize needs `audience=api.atlassian.com`;
+// `prompt=consent` shows its consent, where the person picks a site, and
+// `offline_access` is what has Atlassian answer a refresh token (which
+// rotates). Its token endpoint takes the form's `client_secret` and S256
+// PKCE. Every site's API is under api.atlassian.com (`/ex/jira/{cloudid}`),
+// its one host. Atlassian documents no revocation for these apps: a
+// disconnect deletes the account at Pipes, and the person removes the app
+// in their Atlassian account's settings (developer.atlassian.com,
+// cloud/jira/platform/oauth-2-3lo-apps, read 2026-11-11). Its skill is
+// jira-finite.
+{ "name": "atlassian", "kind": "connection", "title": "Atlassian",
+  "hosts": ["api.atlassian.com"],
+  "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+  "key": "<the client secret's store name>",
+  "connection_oauth": { "authorize": "https://auth.atlassian.com/authorize?audience=api.atlassian.com&prompt=consent",
+    "exchange": "https://auth.atlassian.com/oauth/token",
+    "client_id": "<the app's client id>", "access": {
+      "read": { "scopes": ["read:jira-work", "read:jira-user", "read:me", "offline_access"] },
+      "write": { "scopes": ["read:jira-work", "write:jira-work", "read:jira-user", "read:me", "offline_access"] } } },
+  "scope_names": { "read:jira-work": "Jira issues (read)", "write:jira-work": "Jira issues",
+    "read:jira-user": "Jira people", "read:me": "Profile" },
+  "env": ["ATLASSIAN_OAUTH_ACCESS_TOKEN"] }
