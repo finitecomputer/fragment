@@ -63,6 +63,7 @@ use crate::ask_registry;
 use crate::auth::{self, enc, esc};
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{FaceOf, Named};
 use crate::js;
 use crate::registry::calls::{self, Profile};
 use crate::registry::invites::{AnswerInvite, InvitesFor};
@@ -385,14 +386,13 @@ pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profi
             asked.push(f);
         }
     }
-    let none = json!({});
-    let faces = join_all(asked.iter().map(|f| crate::fragment::ask(env, f, "computer/face", &none))).await;
-    let faces: BTreeMap<&String, Value> = asked.iter().zip(faces).filter_map(|(f, face)| Some((f, face.ok()?))).gathered();
-    let face = |f: &Option<String>, key: &str| f.as_ref().and_then(|f| faces.get(f)).and_then(|v| v[key].as_str()).map(str::to_string);
+    let faces = join_all(asked.iter().map(|f| crate::fragment::call(env, f, &FaceOf {}))).await;
+    let faces: BTreeMap<&String, Named> = asked.iter().zip(faces).filter_map(|(f, face)| Some((f, face.ok()?))).gathered();
     for p in profiles.values_mut() {
         if p.kind == IdentityKind::Agent && p.fragment.is_some() {
-            p.title = face(&p.fragment, "title");
-            p.picture = face(&p.fragment, "picture");
+            let face = p.fragment.as_ref().and_then(|f| faces.get(f));
+            p.title = face.and_then(|n| n.title.clone());
+            p.picture = face.and_then(|n| n.picture.clone());
         }
     }
 }

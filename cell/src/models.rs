@@ -92,15 +92,15 @@ use fragment_core::{decide, embed, multipart, transcribe};
 use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind, Tier};
 use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{Call, Whose};
 use crate::ledger::{self, FragmentOpen, MaySpend};
-use crate::{js, read_body, routed};
+use crate::{js, read_body};
 
 /// A call's request (`fragment_core::models`): Hermes' shrunk screenshot
 /// and its prompt fit.
@@ -577,14 +577,6 @@ async fn bounded_text(resp: &mut Response) -> String {
     String::from_utf8_lossy(&bytes).chars().take(REFUSAL_MAX_CHARS).collect()
 }
 
-/// The answer a `whose` asks a fragment for: its owner, and whether the
-/// agent naming it is in it.
-#[derive(Deserialize)]
-pub(crate) struct Whose {
-    pub owner: String,
-    pub member: bool,
-}
-
 /// `POST /api/models/v1/chat/completions[?fragment=<name>]`: an agent's
 /// model call, signed by the agent (`for` names whom it acts for), its
 /// `model` one of the route's names (a tier, `vision`, `fallback`) or a
@@ -657,12 +649,11 @@ async fn caller(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<
     if !valid_fragment_name(&name) {
         return Err(CellError::invalid("`fragment` is a fragment's name, <label>--<suffix>"));
     }
-    let ask = routed::internal_request("meter/whose", &json!({ "principal": agent.id }).to_string())?;
-    let mut answer = crate::routed::send(env, "FRAGMENT", &name, ask).await?;
+    let mut answer = crate::fragment::pass(env, &name, &Whose { principal: agent.id.clone() }).await?;
     if answer.status_code() != 200 {
         return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}")));
     }
-    let whose: Whose = answer.read_json().await?;
+    let whose: <Whose as Call>::Answer = answer.read_json().await?;
     if !whose.member {
         return Err(CellError::new(ErrorCode::Forbidden, format!("a model call names a fragment its agent is in, and it is not in {name}")));
     }

@@ -75,13 +75,12 @@ use std::collections::BTreeMap;
 use fragment_core::roundtrip::{self, Trip};
 use fragment_core::{cli_code, form, npub, site};
 use fragment_proto::{ErrorCode, Visibility};
-use serde::{Deserialize, Serialize};
 use worker::*;
 
-use crate::ReadJson;
 use crate::ask_registry;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::VisibilityOf;
 use crate::registry::calls::{self, Consent};
 use crate::routed::{Credential, Signed};
 use crate::{share, Fetched};
@@ -91,10 +90,6 @@ pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
 /// A frame's session cookie: partitioned, for the page that framed it.
 pub const FRAME_COOKIE: &str = "fragment_frame";
-/// The header only a frame's redemption sets on its call to its
-/// fragment's `/signin/visibility` (`anyone_reads`); the router passes no
-/// client's of that name, so the fragment answers that route to nothing else.
-pub const SIGNIN_HEADER: &str = "x-fragment-signin";
 /// How long a frame's redemption waits on its fragment's visibility,
 /// asked beside the registry's Redeem, before it takes the check hop as
 /// if anyone may read it.
@@ -952,25 +947,13 @@ async fn signed_in_here(req: &Request, env: &Env, name: &str, url: &Url) -> Cell
     }
 }
 
-/// `/signin/visibility`'s answer, the fragment's: who may read it now.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct SigninVisibility {
-    pub visibility: Visibility,
-}
-
-/// Whether fragment `name`, asked now (`/signin/visibility`, asked once),
-/// may show its page to a framed request with no cookie: anything but
-/// members-only. Not known is yes: an error, a fragment of another release
-/// (`routed::send` refuses it, as an older fragment refuses this call
-/// before reading it), or no answer in `VISIBILITY_WAIT_MS`.
+/// Whether fragment `name`, asked now (`VisibilityOf`), may show its page
+/// to a framed request with no cookie: anything but members-only. Not
+/// known is yes: an error, a fragment of another release (it refuses the
+/// call before reading it, and goes on refusing past the wait), or no
+/// answer in `VISIBILITY_WAIT_MS`.
 async fn anyone_reads(env: &Env, name: &str) -> bool {
-    let asked = std::pin::pin!(async {
-        let mut resp = crate::routed::send(env, "FRAGMENT", name, crate::routed::internal_request("signin/visibility", "{}")?).await?;
-        match resp.status_code() {
-            200 => Ok(resp.read_json::<SigninVisibility>().await?.visibility),
-            status => Err(CellError::host(format!("its fragment answered {status}"))),
-        }
-    });
+    let asked = std::pin::pin!(crate::fragment::call(env, name, &VisibilityOf {}));
     let waited = std::pin::pin!(Delay::from(std::time::Duration::from_millis(VISIBILITY_WAIT_MS)));
     let why = match futures_util::future::select(asked, waited).await {
         futures_util::future::Either::Left((Ok(visibility), _)) => return visibility != Visibility::Members,

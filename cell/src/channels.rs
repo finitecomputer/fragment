@@ -70,6 +70,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::DoorCheck;
 use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 
@@ -551,10 +552,10 @@ impl FragmentCell {
             return Err(refused("is posted as its door signs it, and this one was signed long ago"));
         }
         let digest = hex::encode(door::record_digest(&r.via, fragment, channel, id, body));
-        let check = json!({ "identity": signed.id, "door": r.via, "digest": digest, "sig": r.sig });
-        match crate::fragment::ask(&self.env, &r.agent, "computer/door-check", &check).await {
+        let check = DoorCheck { identity: signed.id.clone(), door: r.via, digest, sig: r.sig };
+        match crate::fragment::call(&self.env, &r.agent, &check).await {
             Err(e) if e.code == ErrorCode::NotFound => Err(refused("names an agent fragment there is not")),
-            other => other.map(|_| ()),
+            other => other,
         }
     }
 
