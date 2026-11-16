@@ -32,7 +32,8 @@ in the cell: a self-host change to master does not touch `cell/`,
 | 1 | The runtime: celld | dev and the e2e (below) |
 | 2 | Computers on sandcastle nodes | not yet: no computers on celld |
 | 3 | Models from a file | dev's `FRAGMENT_MODELS_FILE` |
-| 4, 9 | Sign-in by OpenID Connect; LAN mode | not yet; locally, dev's WorkOS fake |
+| 4 | Sign-in: the identity door, an OpenID Connect relying party behind WorkOS's endpoints | dev on celld and the e2e's `door` section, against the OpenID Connect fake (below) |
+| 9 | LAN mode | not yet |
 | 5 | Files: macrofiche, the code-store contract | not yet: the code.storage fake |
 | 6 | Blobs | nothing to port: celld's R2, over `celld dev`'s disk |
 | 7 | Preview cards: a renderer | not yet: a card's shot fails (celld's `BROWSER` rejects) |
@@ -125,6 +126,190 @@ self-hosted model names its price in its slot, zero for the box's own:
 ```sh
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model-key cargo xtask dev
 ```
+
+## 4. Sign-in: the identity door
+
+The cell signs people in through WorkOS AuthKit's endpoints, at
+`WORKOS_API_URL` (default `https://api.workos.com`). On a self-hosted box
+those endpoints are the **identity door**'s (`crates/identity-door`): a
+small native service on the box, which the cell reaches by configuration
+alone, as celld reads the Secrets Store's bindings from OpenBao. The cell
+has no code of the door's, and master's WorkOS path is the same path.
+
+Behind those endpoints the door is an **OpenID Connect relying party** of
+the provider its config names: on a tailnet, Tailscale's tsidp, which asks
+tailscaled who the device is; on an intranet, the org's own (Entra, Okta,
+Google Workspace, Keycloak, Authentik, Dex). Identity is the provider's,
+never the network's (Paul, 2026-11-11: "OIDC everywhere, with tsidp as the
+tailnet default"; a true intranet has no Tailscale). Its rules are
+fragment#1244's, brought into the door's crate from the cell.
+
+The cell is configured with:
+
+- `WORKOS_API_URL`: the door's public URL, which browsers and the cell
+  both reach;
+- `WORKOS_CLIENT` (a secret binding): a client id of the door's config;
+- `WORKOS_KEY` (a secret binding): that client's secret, kept in the node's
+  secrets backend as before; the door's config holds its SHA-256 alone;
+- no connection rows in its catalog: WorkOS Pipes stay absent on self-host.
+
+### What the cell assumes of WorkOS, and how the door answers
+
+| The cell's assumption | Where | The door |
+|---|---|---|
+| The browser goes to `{api}/user_management/authorize?client_id&redirect_uri={platform}/auth/callback&response_type=code&provider=authkit&state`, with `login_hint`, `screen_hint` or `invitation_token` when given | `cell/src/auth.rs` `begin` | checks the client and its callback (registered, exactly), then sends the browser to the provider; passes `login_hint` on (tsidp ignores it). `provider`, `screen_hint` and `invitation_token` mean nothing here: who may sign in is the provider's to say |
+| The callback carries `code` and `state`, or `error` and `error_description`, which a page shows | `auth.rs` `callback` | hands the platform's state back as given; a refusal is an OAuth error (`access_denied`, `temporarily_unavailable`, …) whose description says why |
+| `POST {api}/user_management/authenticate` with JSON `client_id`, `client_secret` (`WORKOS_KEY`), `grant_type`, `code`; 200 read for `user.id`, `user.email`, `user.email_verified` and `access_token`; a 400 is the code's (start again), anything else WorkOS failing | `cell/src/keys.rs` `workos_authenticate`; `cell/src/registry/signin.rs` `exchange` | the door's code for `{user: {object, id, email, email_verified: true}}`; 400 `invalid_grant` for a code unknown, spent, expired or another client's; 401 `invalid_client` for a wrong secret |
+| `user.id` names a person, under the issuer `workos:<client id>` | `keys.rs` `WorkOs::issuer`; the registry's `person_for` | `user_` and 32 hex digits of a hash of the provider's issuer and its `sub`: the same person at every sign-in, never another provider's |
+| `email_verified` is true, and an email names one person | `signin.rs` `exchange`, `person_for` | always true, since the door refuses what it cannot vouch for (below); the registry still refuses another person's email (409) |
+| `access_token`, read unverified: `sid` (the session sign-out ends at WorkOS) and `auth_time` (a switch answered from a held session) | `signin.rs` `claims_of`, `spent_if_held` | none: no `sid`, so sign-out ends the platform's session alone and never visits the door; no `auth_time`, so a switch finishes as a sign-in |
+| Sign-out goes to `{api}/user_management/sessions/logout?session_id&return_to` | `auth.rs` `workos_logout` | never reached (no `sid`); answers a redirect to a client's own origin, for a session from before that names one |
+| No JWKS, organization or impersonation of WorkOS's is read | | nothing to answer |
+| Pipes: `/data-integrations/*`, `/user_management/users/*/data_providers` and `connected_accounts` | `keys.rs`, `connections.rs`, `computer.rs`, `registry/connection_signin.rs` | 404. The cell asks only when its catalog has a connection row, and a self-hosted box's has none |
+| The finite.computer move binds a person by their WorkOS user | `cell/src/migrations.rs` | off on self-host (unconfigured) |
+
+### The flow
+
+1. The platform sends the browser to the door's `authorize`, its own state
+   bound to the browser by a cookie, as for WorkOS.
+2. The door sends it to the provider: the code flow, PKCE's S256 (always:
+   tsidp assumes `plain` without it), a nonce, its callback
+   `<public_url>/oidc/callback`, and its own state, which holds the
+   platform's client, callback and state, sealed with an HMAC.
+3. The provider signs the person in and sends the browser to the door's
+   callback. The door redeems the code (`client_secret_basic` or `_post`)
+   and checks the id_token: RS256 or ES256 by a key of the provider's JWKS
+   (ring), then `iss`, `aud`/`azp`, the times, the nonce and `sub`.
+4. The door reads the email (below), issues a one-time code of its own,
+   and sends the browser to the platform's callback with it and the
+   platform's state.
+5. The platform exchanges that code at `authenticate`, with its client's
+   secret, and signs the person in as it signs in WorkOS's.
+
+### Why it is safe
+
+- **The provider is the configured one.** Its metadata's `issuer` is
+  exactly the config's; its endpoints are https (http only beside a
+  loopback issuer: dev and the e2e). An id_token is signed RS256 or ES256
+  by a key its JWKS publishes, never `none`, an HMAC or a key the token
+  carries. A `kid` the JWKS lacks fetches it again at once (a rotation),
+  then not again within 15 s.
+- **Only the door can redeem what it began.** The PKCE verifier and the
+  nonce are derived from the door's secret and its state (HKDF, then an
+  HMAC each), and the state is sealed under that secret: nothing is
+  stored, and no one else can make the verifier.
+- **One browser finishes it.** The platform's own state rides inside the
+  door's and is handed back to its callback, which finishes a sign-in only
+  in the browser holding its cookie.
+- **The email is never guessed.** It must be a mailbox (a domain with a
+  dot), and either the provider verified it (`email_verified: true`) or its
+  domain is one the door's config vouches for (`vouched_domains`). tsidp
+  sends no `email_verified`, so a box on tsidp vouches for its logins'
+  domains; a GitHub login's `user@github` is no mailbox and is refused
+  whatever is vouched.
+- **The door's codes** are 32 random bytes, good for 120 s, once, for the
+  client they were issued to, exchanged only with its secret (its SHA-256,
+  compared in constant time). A wrong secret never burns one.
+- **Callbacks are registered.** The door sends a browser only to a
+  callback its client registered, exactly; before the client and callback
+  are known, or when its state does not open, a refusal is a page, never
+  a redirect.
+- **Its secrets** are files of the operator's, owner-only (refused
+  otherwise): the door's own (32 bytes or more) and its client secret at
+  the provider (docs/secrets.md).
+
+**Restarts.** The door's state lives in the browser, so a door restarted
+while its person is at the provider finishes the sign-in. Its codes for
+the platform live in its memory alone: the one sign-in caught between the
+door's callback and the platform's exchange (about a second) is refused at
+the platform's callback, which says to start the sign-in again (400), and
+no code is replayed after a restart. A changed door secret fails the
+sign-ins under way the same way.
+
+### Running it
+
+```sh
+fragment-identity-door --config /etc/fragment-door/door.json
+```
+
+```json
+{
+  "listen": "127.0.0.1:8803",
+  "public_url": "https://door.<tailnet>.ts.net",
+  "secret_file": "/etc/fragment-door/door.secret",
+  "provider": {
+    "issuer": "https://idp.<tailnet>.ts.net",
+    "client_id": "<tsidp's client id>",
+    "client_secret_file": "/etc/fragment-door/provider.secret"
+  },
+  "vouched_domains": ["example.com"],
+  "clients": [{
+    "client_id": "client_fragment",
+    "client_secret_sha256": "<printf %s \"$WORKOS_KEY\" | sha256sum>",
+    "redirect_uris": ["https://<platform>/auth/callback"]
+  }]
+}
+```
+
+`provider` also takes `scopes` (default `openid email profile`),
+`email_claim` (default `email`; another claim is taken only beside
+`vouched_domains`), `auth` (`client_secret_basic` or `client_secret_post`;
+default, what the provider lists) and `ca_file` (an intranet's CA, beside
+Mozilla's roots). Its log is its standard error, a line a sign-in.
+
+**On tsidp** (v0.0.18, read from its source by fragment#1244, not yet run
+against here): register a client whose redirect URI is the door's
+`<public_url>/oidc/callback`; tsidp signs RS256 alone, requires the client
+secret, sends no `email_verified` (so name the logins' domains in
+`vouched_domains`), ignores `prompt` and `login_hint`, refuses tagged
+devices, and needs the browser on the tailnet.
+
+### Dev and the e2e
+
+- **Dev:** `cargo xtask dev --runtime celld` signs in through the door on
+  :8804, in front of the OpenID Connect fake on :8806, whose form signs in
+  as any email (each email the same person at every start). The door's
+  secret is `target/devstack/identity-door-secret`. Named WorkOS files
+  (`WORKOS_CLIENT_ID_FILE`, `WORKOS_API_KEY_FILE`) still choose a real
+  WorkOS. Dev on wrangler keeps the WorkOS fake.
+- **The e2e:** the `door` section (`crates/e2e/src/lanes/door.rs`, after
+  `signin`) starts the node again shaped as a self-hosted box
+  (`Shape::Door`: the door's client and URL, no Pipes rows), with the
+  OpenID Connect fake
+  behind the door, strict and then shaped as tsidp, on either runtime. The
+  rest of the run signs people in through the WorkOS fake, whose levers
+  and Pipes the other sections drive.
+- **The door's own tests** (`cargo test -p fragment-identity-door`):
+  #1244's rules, the signature checks, the email rule, the sealed state,
+  and the whole flow against the fake: valid, invalid, replay, restart.
+
+### Egress
+
+The door's calls to its provider are its own, a native process outside
+celld's rules. The cell's call to the door (the exchange) is the Worker's
+own `fetch`, under celld's. Dev and the e2e run celld with egress open (no
+`CELLD_EGRESS_PUBLIC_ONLY`), as every fake on loopback needs, so they set
+nothing. A box with `CELLD_EGRESS_PUBLIC_ONLY=1` cannot open a door beside
+celld with `CELLD_EGRESS_ALLOW`: celld never opens loopback, `localhost`
+or the node's own addresses, list or no list, and refuses
+`CELLD_EGRESS_ALLOW` without public-only egress (the fork's
+`crates/celld/egress.rs`; its docs/README.md). Such a box needs celld to
+open one named local service to a Worker's `fetch`: a celld change, not
+built. `FRAGMENT_EGRESS_ALLOW` is never the door's: it is what apps' jobs
+may fetch.
+
+### Not yet
+
+- **A real tsidp run** waits on a tailnet; the fake is shaped as tsidp's
+  source reads.
+- **"Use another account"** goes to the provider again, which signs in
+  whoever it holds a session for (on tsidp, the device's person): the door
+  cannot tell a switch from a sign-in, so it asks for no `prompt=login`.
+- **No TLS of its own:** a box serves it behind the TLS its platform has.
+- **A direct WhoIs mode**, if tsidp proves too weak, would be another
+  source behind the same endpoints: `authorize` asking tailscaled's
+  LocalAPI WhoIs of the connection's own address and port, the door
+  reached directly over the tailnet and never through a proxy.
 
 ## 12. Secrets: the store's bindings, read from the node's backend
 
@@ -241,13 +426,6 @@ The old lane's numbering is kept.
     by it, so every address is `unnamed` and shares one bucket. A front
     proxy that sets the header (a tailnet's, a company's) gives each its
     own.
-49. **The dev WorkOS fake's adoption reads wrangler's state layout**
-    (`devstack::signed_in_subjects`): on celld it finds no one, so a dev
-    stack on celld keeps its fake's subjects in the fake's own file alone.
-    Both runtimes' stacks share that file, so a celld state that outlived
-    it is refused at any dev start, on either runtime
-    (`celld::workos_users_kept`; `--clean` starts afresh): a fresh fake
-    would hand a known subject to another email.
 50. **celld caps an object's requests in flight at 64**
     (`CELLD_MAX_CELL_REQUESTS`; past it, 503 "cell request limit
     reached"). Cloudflare queues an object's requests with no such count,
@@ -280,10 +458,11 @@ Fixed since, in the fork or here:
 ## What a self-hosted org won't have, and its setup steps
 
 **A working list** (2026-11-11), for one box on a tailnet with outbound
-internet, no inbound internet, and the cell on celld. Revisit after the tailnet design: it would remove step 4 (the
-org's own WorkOS: the tailnet's identity instead), and change steps 1 and
-2 (MagicDNS names and a box CA pinned in the apps, the org's own domain
-optional) and the iOS row (the app's own trust and tailnet).
+internet, no inbound internet, and the cell on celld. Sign-in is the
+identity door's (seam 4), not an org's own WorkOS. Revisit after the
+tailnet design: it would change steps 1 and 2 (MagicDNS names and a box CA
+pinned in the apps, the org's own domain optional) and the iOS row (the
+app's own trust and tailnet).
 
 ### Works unchanged, given outbound internet
 
@@ -305,7 +484,7 @@ optional) and the iOS row (the app's own trust and tailnet).
 
 | Feature | Finite's today | What the org brings |
 |---|---|---|
-| Sign-in | Finite's WorkOS AuthKit | its own WorkOS environment: redirect `https://<platform>/auth/callback`, invite URL `/auth/login`, logout `/`; `workos.client_id`, `workos.api_key` |
+| Sign-in | Finite's WorkOS AuthKit | the identity door (seam 4) in front of an OpenID Connect provider: tsidp on a tailnet, the org's own IdP on an intranet; the door's client registered there, the logins' domains vouched for where the provider sends no `email_verified` |
 | Fragment files (git) | Finite's code.storage org | its own code.storage org and PEM key (`codestorage.*`); its files then live at that vendor, off the box, so macrofiche (seam 5) matters |
 | Text models | OpenRouter on Finite's key, or Finite Private | an OpenAI-compatible endpoint and key for every slot (`cheap`, `medium`, `fallback`, `vision`, Deep), each priced; a slot left out falls back to Workers AI, which celld lacks. A deployment's `base_url` is https on a host name, no port; dev's models file takes this machine's `http://127.0.0.1:<port>` (seam 3) |
 | Semantic search (embeddings) | Workers AI bge-m3 | an OpenAI-compatible `/embeddings` endpoint, such as TEI (`models.embeddings`) |
@@ -357,7 +536,7 @@ through the person's browser, so the tailnet is enough.
 4. Secrets: OpenBao (or the org's own Vault), its unseal key kept
    safe (a TPM, an HSM or a KMS once built); the host secret, 32 or more
    random bytes, among the platform's root secrets there (seam 12).
-5. WorkOS: its own environment and the redirects.
+5. Sign-in: the identity door and its provider (seam 4): tsidp's or the IdP's client for the door, the door's config and secrets, the platform bound to the door (`WORKOS_API_URL`, `WORKOS_CLIENT`, `WORKOS_KEY`).
 6. code.storage: its own org and key (or macrofiche, once ported).
 7. Models: endpoints for every slot, and embeddings.
 8. Plans and operators: `fragment operator key`; `operators`;
@@ -395,6 +574,6 @@ FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
   (`CELLD_CONTAINER_ENGINE=none`); celld's Docker engine has no egress
   intercepts or snapshots, which a computer needs; its krun engine
   (sandcastle's) has both.
-- Sign-in by OpenID Connect (seams 4, 9).
+- Sign-in: a real tsidp run, and a box whose celld runs public-only egress (seam 4, Egress); LAN mode (seam 9).
 - Own hardware in points (10), cards (7), macrofiche (5).
 - `celld deploy`: no xtask path yet; this is the dev stack and the e2e.

@@ -83,7 +83,17 @@ enum Shape {
     /// (`repinned_models`): another space, as a deployment that moved its
     /// embeddings model is.
     EmbeddingsRepinned,
+    /// As `Plain`, people signing in through the identity door
+    /// (crates/identity-door; docs/self-host.md, seam 4) at `Suite::door_url`
+    /// instead of the WorkOS fake, as a self-hosted box does: the door's
+    /// client and key bound as `WORKOS_CLIENT` and `WORKOS_KEY`, and no
+    /// Pipes connection in its catalog (Pipes stay absent on self-host).
+    Door,
 }
+
+/// The identity door's client, as a node shaped `Shape::Door` is bound to it.
+pub const DOOR_CLIENT: &str = "client_fragment_e2e_door";
+pub const DOOR_KEY: &str = "sk_door_e2e";
 
 /// Finite Private's key on a node shaped as the private tier (`Shape::PrivateTier`):
 /// a test value, in `fpk_live_`'s shape, which the model fake asks for.
@@ -467,6 +477,9 @@ pub struct Suite {
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
+    /// The identity door a node shaped `Shape::Door` signs people in
+    /// through (`start_through_door`).
+    door_url: Option<String>,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
     /// Where the node's secrets are (`FRAGMENT_E2E_SECRETS`, `secrets_of`):
@@ -772,6 +785,16 @@ impl Suite {
         self.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default())
     }
 
+    /// Starts the node signing people in through the identity door at
+    /// `door_url` (`Shape::Door`).
+    pub fn start_through_door(&mut self, door_url: &str) -> Result<Api> {
+        self.door_url = Some(door_url.to_string());
+        self.shape = Shape::Door;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     /// Starts the node with one operator key more in its catalog
     /// (`Shape::OneKeyMore`).
     pub fn start_with_a_key_more(&mut self) -> Result<Api> {
@@ -821,7 +844,7 @@ impl Suite {
             ai_gateway: None,
             models: match self.shape {
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
-                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore => Some(plain_models().to_string()),
+                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::Door => Some(plain_models().to_string()),
                 Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
             },
             model_keys: {
@@ -843,10 +866,13 @@ impl Suite {
             mail_from: Some(MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
-            workos: Some(devstack::WorkOsVars {
-                client_id: self.workos.node().client_id.clone(),
-                api_key: WORKOS_KEY.into(),
-                api_url: Some(self.workos.node().url.clone()),
+            workos: Some(match self.shape {
+                Shape::Door => devstack::WorkOsVars {
+                    client_id: DOOR_CLIENT.into(),
+                    api_key: DOOR_KEY.into(),
+                    api_url: Some(self.door_url.clone().context("a node shaped Door names its door (start_through_door)")?),
+                },
+                _ => devstack::WorkOsVars { client_id: self.workos.node().client_id.clone(), api_key: WORKOS_KEY.into(), api_url: Some(self.workos.node().url.clone()) },
             }),
             stripe: (self.shape != Shape::SellsNothing).then(|| devstack::StripeVars {
                 key: STRIPE_KEY.into(),
@@ -863,7 +889,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -886,17 +912,24 @@ impl Suite {
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
-                rows.as_array_mut().expect("catalog").push(json!({ "name": "e2e-oauth", "kind": "connection", "hosts": ["oauth.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["E2E_OAUTH_TOKEN"], "connection_oauth": self.workos.node().connection_oauth() }));
-                rows.as_array_mut().expect("catalog").push(json!({ "name": SEVERAL, "kind": "connection", "hosts": [SEVERAL_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [SEVERAL_ENV], "connection_oauth": self.workos.node().one_access_connection_oauth(), "accounts_max": SEVERAL_MAX }));
-                rows.as_array_mut().expect("catalog").push(json!({ "name": ORG_CONNECTION, "kind": "connection", "hosts": [ORG_CONNECTION_HOST], "account_host": { "metadata": "instance_url", "under": fragment_fakes::workos::ACCOUNT_HOSTS_UNDER }, "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [ORG_CONNECTION_ENV], "connection_oauth": self.workos.node().connection_oauth() }));
-                rows.as_array_mut().expect("catalog").push(json!({ "name": BASIC_CONNECTION, "kind": "connection", "hosts": [BASIC_CONNECTION_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [BASIC_CONNECTION_ENV], "client_auth": "basic", "connection_oauth": self.workos.node().basic_connection_oauth() }));
+                // the identity door has no Pipes: a self-hosted box's catalog
+                // has no connection
+                if self.shape != Shape::Door {
+                    rows.as_array_mut().expect("catalog").push(json!({ "name": "e2e-oauth", "kind": "connection", "hosts": ["oauth.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["E2E_OAUTH_TOKEN"], "connection_oauth": self.workos.node().connection_oauth() }));
+                    rows.as_array_mut().expect("catalog").push(json!({ "name": SEVERAL, "kind": "connection", "hosts": [SEVERAL_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [SEVERAL_ENV], "connection_oauth": self.workos.node().one_access_connection_oauth(), "accounts_max": SEVERAL_MAX }));
+                    rows.as_array_mut().expect("catalog").push(json!({ "name": ORG_CONNECTION, "kind": "connection", "hosts": [ORG_CONNECTION_HOST], "account_host": { "metadata": "instance_url", "under": fragment_fakes::workos::ACCOUNT_HOSTS_UNDER }, "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [ORG_CONNECTION_ENV], "connection_oauth": self.workos.node().connection_oauth() }));
+                    rows.as_array_mut().expect("catalog").push(json!({ "name": BASIC_CONNECTION, "kind": "connection", "hosts": [BASIC_CONNECTION_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [BASIC_CONNECTION_ENV], "client_auth": "basic", "connection_oauth": self.workos.node().basic_connection_oauth() }));
+                }
                 if self.shape == Shape::OneKeyMore {
                     rows.as_array_mut().expect("catalog").push(added_key_row());
                 }
                 rows.to_string()
             }),
             operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
-            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into()), (BASIC_CONNECTION.into(), fragment_fakes::workos::BASIC_CLIENT.1.into())],
+            connection_secret_values: match self.shape {
+                Shape::Door => vec![],
+                _ => vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into()), (BASIC_CONNECTION.into(), fragment_fakes::workos::BASIC_CLIENT.1.into())],
+            },
             swap_upstream: Some(self.upstream.node().url.clone()),
             // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
             connectors: self.on_celld().then(devstack::celld::connectors),
@@ -931,7 +964,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => SUFFIX,
+            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => SUFFIX,
         }
     }
 
@@ -1406,6 +1439,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         scratch,
         project,
         shape: Shape::Plain,
+        door_url: None,
         secrets,
         containers_removed: false,
     };
