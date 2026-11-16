@@ -1165,6 +1165,29 @@ fine, and they can use its keys.
 4. **One fragment, one problem.** A second job is a second fragment.
 5. **Plain files.** Markdown, JSON, CSV: things the next agent can diff.
 
+A service the agent's owner connected (Settings → Connections) is called
+with `fragment api`: it finds that connection's placeholder in the
+environment, sends it as a bearer token to the address named (one of the
+service's own hosts, where the computer swaps in a short-lived token),
+and prints the answer. Each connection's skill says its addresses and
+quirks; the command is the same for all of them:
+
+```
+fragment api linear POST https://api.linear.app/graphql --query 'query { viewer { name } }'
+fragment api google GET https://www.googleapis.com/drive/v3/files --param 'q=name contains "plan"' --param pageSize=10
+fragment api hubspot POST https://api.hubapi.com/crm/v3/objects/contacts --body '{"properties": {"email": "ada@example.com"}}'
+fragment api dropbox POST https://content.dropboxapi.com/2/files/download --header 'Dropbox-API-Arg: {"path": "/plan.pdf"}' --out plan.pdf
+```
+
+A refusal is one line of JSON on stderr, `{error, status, message, hint}`,
+and exit 1: `not_connected` (the owner has not connected it, or left this
+agent out) and `forbidden` (read only, or not this service's host) are the
+computer's own, and `hint` says what to tell the owner. A redirect is
+never followed with the token; an answer over 256 KiB is saved to a file
+and the file named, as `--out <file>` saves any answer, whole or not at
+all. Never ask a person for a token, and never run a service's own
+sign-in.
+
 ## Command reference
 
 ```
@@ -1185,6 +1208,7 @@ fragment new <dir> [--template T]        fragment triggers <name>
 fragment new --list                      fragment pause|unpause <name> <op>
 fragment create <name> [--visibility V] [--template T [--title T]] [--show-tokens]
 fragment inbox <name> --payload JSON [--source S]   # the token from $FRAGMENT_INBOX_TOKEN, else stdin
+fragment api <connection> <METHOD> <url> [--param N=V]… [--body JSON|@file|-] [--content-type T] [--query GRAPHQL [--variables JSON]] [--header "N: V"]… [--out FILE] [--timeout S] [--env VAR]   # a connected service's API, as an agent
 fragment list                            fragment rotate <name> [--inbox] [--view]
 fragment status <name>                   fragment visibility <name> [V]
 fragment open <name>                     fragment members list|rm|leave ...

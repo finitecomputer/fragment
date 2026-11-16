@@ -4,6 +4,7 @@ mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod connected;
 mod home;
 mod mcp;
 mod notice;
@@ -302,6 +303,52 @@ enum Cmd {
     Invites {
         #[command(subcommand)]
         sub: Option<InvitesCmd>,
+    },
+    /// Call a connected service's API as this agent (on a computer): the
+    /// service's placeholder is found in the environment and sent as a
+    /// bearer token, which the computer swaps for a short-lived one on the
+    /// way to that service's own hosts. Prints the answer's body; a refusal
+    /// is one line of JSON on stderr ({error, status, message, hint}) and
+    /// exit 1. A redirect is never followed with the token. `fragment api
+    /// linear POST https://api.linear.app/graphql --query 'query { viewer {
+    /// name } }'`
+    Api {
+        /// The connection's name, as Settings' Connections lists it (linear, google)
+        provider: String,
+        /// GET, POST, PUT, PATCH, DELETE or HEAD
+        method: String,
+        /// The whole address, on one of the service's own hosts
+        url: String,
+        /// A query parameter, name=value, encoded for you (repeat it)
+        #[arg(long = "param", value_name = "NAME=VALUE")]
+        params: Vec<String>,
+        /// The body: JSON as written, @<file>, or - for stdin
+        #[arg(long)]
+        body: Option<String>,
+        /// The body's type, when it is not JSON
+        #[arg(long)]
+        content_type: Option<String>,
+        /// A GraphQL document: sent as {query, variables}, and an answer
+        /// that names errors is a refusal
+        #[arg(long)]
+        query: Option<String>,
+        /// The GraphQL document's variables, a JSON object
+        #[arg(long)]
+        variables: Option<String>,
+        /// A header, "Name: value" (repeat it); never Authorization
+        #[arg(long = "header", value_name = "NAME: VALUE")]
+        headers: Vec<String>,
+        /// Save the answer's body to this file, whole or not at all, and
+        /// print where (a download, or an answer too long to read at once)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Read the token from this environment variable instead (off a
+        /// computer: any token of the service's)
+        #[arg(long)]
+        env: Option<String>,
+        /// Seconds the call may take (default 120; a large file takes more)
+        #[arg(long)]
+        timeout: Option<u64>,
     },
     /// Call an operation; prints its result (a retry with the same --id is a replay)
     Call {
@@ -1521,6 +1568,11 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Skill => {
             print!("{}", agent_doc(SKILL, &cli.host));
             return Ok(());
+        }
+        // a connected service's API, never the platform's: no host, no key
+        Cmd::Api { provider, method, url, params, body, content_type, query, variables, headers, out, env, timeout } => {
+            let status = connected::run(connected::Call { provider, method, url, params, body, query, variables, content_type, headers, out, env, timeout }).map_err(|e| usage(format!("{e:#}")))?;
+            std::process::exit(status);
         }
         Cmd::Operator { sub: OperatorCmd::Key { path } } => {
             let npub = operator::make_key(&path, write_secret_file)?;
@@ -2927,7 +2979,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::Api { .. } | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
     }
     Ok(())
 }
