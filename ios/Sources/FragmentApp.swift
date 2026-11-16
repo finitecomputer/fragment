@@ -664,7 +664,7 @@ struct FragmentRoot: View {
     @ViewBuilder private func content(_ api: FragmentAPI) -> some View {
         switch page {
         case .launcher:
-            HomeView(library: library, api: api, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) }, covered: sidebar || openedApp != nil)
+            HomeView(library: library, api: api, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) }, covered: sidebar || openedApp != nil || noticesFanned)
         // a message on its way to a chat not made yet: the launcher is already left
         case .startingChat: ChatLoadingView()
         case .chat(let name):

@@ -138,6 +138,8 @@ struct NoticesBand: View {
     }
 
     private func fan() {
+        // no typing on the fan: the keyboard goes (Home's own waits, covered, until it folds)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         withAnimation(reduceMotion ? nil : .spring(duration: 0.45, bounce: 0.15)) { fanned = true }
     }
 
