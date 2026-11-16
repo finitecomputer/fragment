@@ -84,12 +84,22 @@ enum WebLinks {
     }
 }
 
-/// The page a sheet shows, for its toolbar: the web view, and the address
-/// it is at now (a page's own history changes count).
+/// The page a sheet shows, for its toolbar: the web view, the address it is
+/// at now (a page's own history changes count), and its color once loaded.
 @MainActor @Observable
 final class WebPage {
     @ObservationIgnored weak var view: WKWebView?
     var url: URL?
+    /// The page's `theme-color`, else its background: the sheet's top bar
+    /// wears it. None until a page has loaded.
+    var color: UIColor?
+
+    /// Whether `color` is dark enough for light words on it.
+    static func isDark(_ color: UIColor) -> Bool {
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        guard color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else { return false }
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue < 0.5
+    }
 }
 
 struct FragmentWebSheet: View {
@@ -129,10 +139,17 @@ struct FragmentWebSheet: View {
                     // a new redemption is a new web view: one never reloads a spent one
                     WebContent(url: url, platform: model.api.baseURL, page: page, openLink: openLink, loading: $model.loading, error: $model.error)
                         .id(url)
+                        // the page to the sheet's foot, under the home indicator
+                        // (the web view keeps its content clear of it)
+                        .ignoresSafeArea(edges: .bottom)
                         .overlay { if model.loading { ProgressView() } }
                 } else { ProgressView() }
             }
             .navigationTitle(fragment.displayTitle).navigationBarTitleDisplayMode(.inline)
+            // the top in the page's own color, its words light or dark to read on it
+            .toolbarBackground(page.color.map { Color(uiColor: $0) } ?? Color(uiColor: .systemBackground), for: .navigationBar)
+            .toolbarBackground(page.color == nil ? .automatic : .visible, for: .navigationBar)
+            .toolbarColorScheme(page.color.map { WebPage.isDark($0) ? .dark : .light }, for: .navigationBar)
             .toolbar {
                 if let url = model.url, model.error == nil, !model.needsConsent {
                     ToolbarItemGroup(placement: .topBarTrailing) {
@@ -184,6 +201,11 @@ private struct WebContent: UIViewRepresentable {
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator
         web.allowsBackForwardNavigationGestures = true
+        // clear until its first page draws, so the sheet's own background
+        // (light or dark, as the phone is) shows rather than a white flash
+        web.isOpaque = false
+        web.backgroundColor = .clear
+        web.scrollView.backgroundColor = .clear
         context.coordinator.watch(web)
         web.load(URLRequest(url: url))
         return web
@@ -198,6 +220,8 @@ private struct WebContent: UIViewRepresentable {
         @Binding var loading: Bool
         @Binding var error: String?
         private var watching: NSKeyValueObservation?
+        private var coloring: [NSKeyValueObservation] = []
+        private var drawn = false
         init(origin: URL, platform: URL, page: WebPage, openLink: @escaping (URL) -> Bool, loading: Binding<Bool>, error: Binding<String?>) {
             self.origin = origin; self.platform = platform; self.page = page; self.openLink = openLink
             _loading = loading; _error = error
@@ -208,8 +232,29 @@ private struct WebContent: UIViewRepresentable {
             watching = web.observe(\.url, options: [.initial, .new]) { [weak self] web, _ in
                 MainActor.assumeIsolated { self?.page.url = web.url }
             }
+            // a page that changes its color (a theme switch) changes the top's
+            coloring = [web.observe(\.themeColor) { [weak self] web, _ in MainActor.assumeIsolated { self?.color(web) } },
+                        web.observe(\.underPageBackgroundColor) { [weak self] web, _ in MainActor.assumeIsolated { self?.color(web) } }]
         }
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false }
+        private func color(_ web: WKWebView) {
+            guard drawn else { return }
+            page.color = web.themeColor ?? web.underPageBackgroundColor
+        }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard !drawn else { loading = false; color(webView); return }
+            // finished comes a moment before the page paints: its first frames
+            // first, so neither white nor a blank page's color shows meanwhile
+            Task { [weak self, weak webView] in
+                _ = try? await webView?.callAsyncJavaScript("await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
+                                                           contentWorld: .defaultClient)
+                guard let self, let webView, !drawn else { return }
+                // drawn: opaque again, so a page with no background of its own
+                // is on white, as in Safari
+                drawn = true; webView.isOpaque = true; webView.backgroundColor = .white
+                loading = false
+                color(webView)
+            }
+        }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             self.error = error.localizedDescription; loading = false
         }
