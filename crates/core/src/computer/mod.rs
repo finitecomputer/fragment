@@ -1,0 +1,80 @@
+//! A computer's lifecycle (docs/computers.md), as a pure state machine the
+//! Computer Durable Object drives. The DO keeps `Lifecycle` whole, hands
+//! it each `Event` with the time it happened, and performs the `Action`s
+//! it answers. Every start has a generation, and every completion names
+//! the start it completes, so a late answer from an earlier start (a
+//! container that came up after it was put to sleep) changes nothing.
+//!
+//! What it decides:
+//! - **Waking.** A record on a subscribed channel, an open port tab, a
+//!   page's presence (a pre-wake), one of its agents added to a fragment,
+//!   or the owner. A wake while asleep
+//!   starts the container; one while it starts or is awake holds it
+//!   longer; one while it is going to sleep starts it again once it is
+//!   asleep (the newest push wins: lesson 3 of docs/cloudflare-v1.md).
+//! - **Staying awake.** While the guest holds a keepalive socket or a
+//!   port tab is open; with nothing open, until the latest hold runs out
+//!   (twenty minutes after a record or the last socket closed, a minute
+//!   after a pre-wake). An always-on computer never sleeps.
+//! - **Saving** (docs/computers.md, Durability, step 1). `/data` is saved when
+//!   work ends (the guest's last keepalive closes, and `SAVE_SETTLE_MS`
+//!   pass with none opened again, so turns back to back save once), every
+//!   `SAVE_EVERY_MS` while a keepalive stays open, and at every sleep. A
+//!   save is a hold (the DO touches `/run/computer/hold` and waits for the
+//!   guest's `/run/computer/held`), the save, and, awake, the hold let go.
+//!   A save that fails is tried again after a growing pause.
+//! - **Sleeping.** Its hold and its save, then its stop (snapshot, signal,
+//!   wait, destroy), reported back by `Asleep`. A keepalive that opens
+//!   during an idle sleep's hold cancels the sleep: the guest took work as
+//!   it was held, so it stays awake (docs/computers.md, Lifecycle).
+//!   A sleep whose save fails keeps its container and is tried again, for
+//!   at most `Rules::unsaved_max_ms`; then it sleeps unsaved, and says so.
+//! - **Failing.** A start that fails, never reports ready, or whose
+//!   container stops before it is ready, is tried again with a growing
+//!   pause: one strike, however many ways its failure is heard. After
+//!   `STARTS_FAILED_MAX` in a row the computer "won't wake" until its
+//!   owner asks (lesson 4): no more
+//!   container starts are paid for. A start whose save would not restore
+//!   starts again at once from the save before it, no strike against it.
+//! - **Trying again.** "Won't wake" is never for good: a wake not its
+//!   owner's, `WONT_WAKE_RETRY_MS` after it gave up, tries one start, its
+//!   last strike.
+//! - **Restarting.** Its owner's restart (`Event::Restart`) is the way back
+//!   to working: a sleep that saves if it can and stops whether or not it
+//!   did, then a start owed at once (asleep, or won't wake: the start owed
+//!   alone), which its alarm makes. It names the start it restarts, so
+//!   asked twice it is made once.
+//! - **Metering.** Awake time, in intervals that never overlap, every
+//!   `METER_EVERY_MS` while awake and at sleep.
+//!
+//! And, beside it, what the DO knows of its saves (`Saves`): the newest
+//! `SAVES_KEPT` saves of `/data`, the snapshot that caches the current one,
+//! what each start that came up restored, and whether that went back in
+//! time (a rollback); and of the image its next start runs (`Images`).
+//! From them, what its owner is told (`notices`): a rollback only when
+//! something was done on the life it lost after the save it went back to.
+
+pub mod said;
+
+mod disk;
+mod held;
+mod images;
+mod lifecycle;
+mod limits;
+mod notices;
+mod saves;
+#[cfg(test)]
+mod testing;
+mod which;
+
+pub use disk::{disk_clear, disk_filling, disk_of_df, reads_disk_after, ComputerDisk, DISK_CLEAR_FREE_MIN, DISK_CLEAR_USED_PCT, DISK_READ, DISK_TOLD_FREE_MAX, DISK_TOLD_USED_PCT};
+pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_MAX, LEFT_OUT_PATTERN_MAX_BYTES, UNHELD_MAX_BYTES};
+pub use images::{does_simplex, image_running, valid_version, version_now, version_of, version_running, Images, VERSION_HEX};
+pub use lifecycle::{alive, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};
+pub use limits::{
+    ALIVE_MS, FAILED_WHY_MAX_BYTES, HOLD_DEADLINE_MS, HOLD_WAIT_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, PREWAKE_MS, RETRY_PAUSE_MS, SAVES_KEPT, SAVE_DEADLINE_MS, SAVE_EVERY_MS, SAVE_RETRY_MS,
+    SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, STARTS_OWED_MAX, START_DEADLINE_MS, UNSAVED_MAX_MS_DEFAULT, UNSAVED_NOTICE_FAILURES, WONT_WAKE_RETRY_MS,
+};
+pub use notices::{notices, support_url_ok, SUPPORT_URL_MAX_BYTES};
+pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};
+pub use which::{default_computer_of, prewoken};
