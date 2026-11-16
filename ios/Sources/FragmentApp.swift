@@ -615,9 +615,13 @@ struct FragmentRoot: View {
                 page = destination; showingApps = false; toggleSidebar()
             }
             // over everything: its cards fly from the band's stack, and back
+            // (the cards grow from the stack, unfaded; the wallpaper and title fade around them)
             if noticesFanned {
+                NoticesFanBackdrop().transition(.opacity).zIndex(2)
+                // in, at once from the stack; out, kept as they fly back into it
                 NoticesFan(library: library, api: api, space: noticesSpace) { noticesFanned = false }
-                    .transition(.opacity).zIndex(2)
+                    .transition(.asymmetric(insertion: .identity, removal: .opacity)).zIndex(3)
+                NoticesFanHeader { noticesFanned = false }.transition(.opacity).zIndex(4)
             }
         }
         .sheet(item: $openedApp) { app in

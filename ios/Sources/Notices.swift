@@ -193,8 +193,10 @@ private extension View {
 
 /// Every notice fanned out over the whole app, as Notification Center shows
 /// them: each with all its words and actions, scrolling, each card having
-/// flown from its place in the band's stack (`NoticesBand`), on the
-/// wallpaper, as Home's glass is. Its X folds them back; so does a stack of one.
+/// grown from its place in the band's stack (`NoticesBand`), never faded.
+/// The wallpaper beneath (`NoticesFanBackdrop`) and the title and X above
+/// (`NoticesFanHeader`) fade in and out around them. The X folds them back;
+/// so does a stack of one.
 struct NoticesFan: View {
     let library: Library
     let api: FragmentAPI
@@ -206,39 +208,51 @@ struct NoticesFan: View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
             let now = Int64(context.date.timeIntervalSince1970 * 1000)
             let items = NoticeItem.all(library, now: now)
-            ZStack(alignment: .top) {
-                DesktopWallpaper().ignoresSafeArea()
-                ScrollView {
-                    VStack(spacing: 10) {
-                        ForEach(items) { item in
-                            NoticeItemView(item: item, library: library, api: api, now: now, open: true, full: true) {}
-                                // top to top with its place in the stack: it unfolds down from there
-                                .matchedGeometryEffect(id: item.id, in: space, anchor: .top)
-                        }
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(items) { item in
+                        NoticeItemView(item: item, library: library, api: api, now: now, open: true, full: true) {}
+                            // top to top with its place in the stack: it unfolds down from there
+                            .matchedGeometryEffect(id: item.id, in: space, anchor: .top)
                     }
-                    .padding(.horizontal, 12).padding(.bottom, 24)
                 }
-                .scrollClipDisabled()
-                .safeAreaInset(edge: .top, spacing: 12) {
-                    HStack {
-                        Text("Notices").font(.largeTitle)
-                        Spacer()
-                        Button(action: fold) {
-                            Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 32, height: 32)
-                        }
-                        .buttonStyle(.glass).buttonBorderShape(.circle)
-                        .accessibilityLabel("Close").accessibilityIdentifier("noticesClose")
-                    }
-                    .padding(.horizontal, 20).padding(.top, 8)
-                }
+                .padding(.horizontal, 12).padding(.bottom, 24)
             }
-            .onChange(of: items.count) { _, count in if count <= 1 { fold() } }
+            .scrollClipDisabled()
+            // under the header's title and X
+            .contentMargins(.top, NoticesFanHeader.height, for: .scrollContent)
+            .onChange(of: items.count) { _, count in
+                if count <= 1 { withAnimation(reduceMotion ? nil : NoticesFanHeader.folding, close) }
+            }
         }
         .accessibilityAddTraits(.isModal)
     }
+}
 
-    private func fold() {
-        withAnimation(reduceMotion ? nil : .spring(duration: 0.4, bounce: 0.1), close)
+/// The wallpaper under the fanned notices, as Home's glass sits on it.
+struct NoticesFanBackdrop: View {
+    var body: some View { DesktopWallpaper().ignoresSafeArea() }
+}
+
+/// The fan's title and X, over its cards; the X folds them back into the stack.
+struct NoticesFanHeader: View {
+    static let height: CGFloat = 64
+    static let folding = Animation.spring(duration: 0.4, bounce: 0.1)
+    let close: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack {
+            Text("Notices").font(.largeTitle)
+            Spacer()
+            Button { withAnimation(reduceMotion ? nil : Self.folding, close) } label: {
+                Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 32, height: 32)
+            }
+            .buttonStyle(.glass).buttonBorderShape(.circle)
+            .accessibilityLabel("Close").accessibilityIdentifier("noticesClose")
+        }
+        .padding(.horizontal, 20).padding(.top, 8)
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 }
 
@@ -328,14 +342,16 @@ private struct NoticeItemView: View {
                     }
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 28)
-                    // the full screen: every action under its words; the band: the rest
+                    // the full screen: every action under its words, full size and
+                    // sharing the card's width; the band: the rest, small
                     let shown = full ? Array(notice.actions) : Array(notice.actions.dropFirst())
                     if !shown.isEmpty {
                         HStack(spacing: 8) {
                             ForEach(Array(shown.enumerated()), id: \.offset) { index, action in
-                                button(notice, action, main: full && index == 0)
+                                button(notice, action, main: full && index == 0, wide: full)
                             }
-                        }.padding(.leading, 28)
+                        }
+                        .padding(.leading, full ? 0 : 28).padding(.top, full ? 4 : 0)
                     }
                 }
             }
@@ -346,7 +362,8 @@ private struct NoticeItemView: View {
         .accessibilityIdentifier("notice:\(notice.id)")
     }
 
-    @ViewBuilder private func button(_ notice: Notice, _ action: Notice.Action, main: Bool) -> some View {
+    /// `wide`: full size, as wide as it is given (the full screen's).
+    @ViewBuilder private func button(_ notice: Notice, _ action: Notice.Action, main: Bool, wide: Bool = false) -> some View {
         let pressed = library.acting.contains(notice.id)
         let tap = {
             if let open = action.open, let url = URL(string: open) { openURL(url) }
@@ -355,12 +372,15 @@ private struct NoticeItemView: View {
         if main {
             // its words in the page's own colour, on the app's primary tint (dark: white on white otherwise);
             // on one line: the title gives way first
-            Button(action: tap) { Text(action.label).foregroundStyle(Color(.systemBackground)).lineLimit(1).fixedSize() }
-                .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small).disabled(pressed)
+            Button(action: tap) { label(action.label, wide: wide).foregroundStyle(Color(.systemBackground)) }
+                .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(wide ? .large : .small).disabled(pressed)
         } else {
-            Button(action: tap) { Text(action.label).lineLimit(1).fixedSize() }
-                .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).disabled(pressed)
+            Button(action: tap) { label(action.label, wide: wide) }
+                .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(wide ? .large : .small).disabled(pressed)
         }
+    }
+    @ViewBuilder private func label(_ text: String, wide: Bool) -> some View {
+        if wide { Text(text).lineLimit(1).frame(maxWidth: .infinity) } else { Text(text).lineLimit(1).fixedSize() }
     }
 
     private func card(@ViewBuilder _ content: () -> some View) -> some View {
@@ -372,6 +392,8 @@ private struct NoticeItemView: View {
             .padding(full ? 14 : 12)
             // an iOS banner's glass and corners
             .glassEffect(.regular, in: shape)
+            // full: it grows in sharp from the stack, not materializing (a blur)
+            .glassEffectTransition(full ? .identity : .materialize)
             .clipShape(shape.inset(by: full ? 0 : -40))
     }
 }
