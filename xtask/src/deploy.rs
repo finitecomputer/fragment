@@ -2011,9 +2011,9 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            // the example offers Linear beside Google, and Salesforce; the hosted e2e's preview, not yet
+            // the example offers Linear and GitLab beside Google, and Salesforce; the hosted e2e's preview, not yet
             let example = file == "deploy/example.jsonc";
-            let connections: &[&str] = if example { &["google", "linear"] } else { &["google"] };
+            let connections: &[&str] = if example { &["google", "linear", "gitlab"] } else { &["google"] };
             let orgs: &[&str] = if example { &["salesforce"] } else { &[] };
             let expected: Vec<&str> = ["x", "firecrawl", "fal", "browser-use"]
                 .into_iter()
@@ -2055,6 +2055,34 @@ mod tests {
         assert_eq!((o.client_id.as_str(), o.revoke.as_deref()), ("linear-client", Some("https://api.linear.app/oauth/revoke")));
         assert_eq!((scopes(fragment_core::catalog::ConnectionAccess::Read), scopes(fragment_core::catalog::ConnectionAccess::Write)), (vec!["read".to_string()], vec!["write".to_string()]), "read only asks for read, read and write for write");
         assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_LINEAR".into(), "fragment-linear-oauth-secret")));
+    }
+
+    /// The example's GitLab row, its commented connect uncommented (an
+    /// application id and the secret's store name filled in), loads:
+    /// gitlab.com alone, each access's scopes, no revocation (GitLab's takes
+    /// the client's secret, which a disconnect does not send), and its
+    /// client secret bound as the cell's.
+    #[test]
+    fn the_example_gitlab_connect_loads_once_uncommented() {
+        use fragment_core::catalog::ConnectionAccess::{Read, Write};
+        let example = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let start = example.find(r#"{ "name": "gitlab""#).expect("the example's gitlab row");
+        let row = &example[start..start + example[start..].find(r#""env": ["GITLAB_OAUTH_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-gitlab-oauth-secret").replace("<the app's application id>", "gitlab-client");
+        let dir = devstack::repo_root().join("target/xtask-tests/gitlab-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let p = catalog.get("gitlab").expect("its row");
+        let o = p.connection_oauth.as_ref().expect("its connect");
+        let scopes = |a| o.access.of(a).map(|g| g.scopes.join(" ")).unwrap_or_default();
+        assert_eq!((o.client_id.as_str(), o.revoke.as_deref(), p.hosts.as_slice()), ("gitlab-client", None, &["gitlab.com".to_string()][..]));
+        assert_eq!((scopes(Read), scopes(Write)), ("read_api openid email".to_string(), "api openid email".to_string()), "read only asks for read_api, read and write for api");
+        assert_eq!(o.access.offered(), [Read, Write]);
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_GITLAB".into(), "fragment-gitlab-oauth-secret")));
     }
 
     /// The example's Salesforce row, its commented connect uncommented (a
