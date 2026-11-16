@@ -81,9 +81,10 @@ struct NoticeFailure: Equatable, Sendable {
 /// said it, the most pressing first, and a line when the last read of them
 /// failed (what it said before stays under it, with Try again).
 ///
-/// Each is one line, its title and its main action; a tap opens its words
-/// and detail. Several stack as iOS stacks notifications: the first, with
-/// the edges of the rest behind it, until a tap fans them out.
+/// One is one line, its title and its main action; a tap opens its words.
+/// Several stack as iOS stacks notifications, the first with the edges of
+/// the rest behind it, and a tap opens them all, full screen, as
+/// Notification Center does (`NoticesScreen`): its X folds them back.
 struct NoticesBand: View {
     let library: Library
     let api: FragmentAPI
@@ -91,41 +92,28 @@ struct NoticesBand: View {
     /// height): past it, it scrolls, so the page and its toolbar stay.
     let maxHeight: CGFloat
     @State private var height: CGFloat = 0
-    /// Every one shown, not only the first.
-    @State private var fanned = false
-    /// The ones whose words are open.
-    @State private var opened: Set<String> = []
-    @Environment(\.openURL) private var openURL
+    /// The one notice whose words are open, alone in the band.
+    @State private var opened = false
+    /// All of them, full screen.
+    @State private var all = false
+    @Namespace private var zoom
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private enum Item: Identifiable {
-        case refresh, notice(Notice), refusal(String, NoticeFailure)
-        var id: String {
-            switch self { case .refresh: "refresh"; case .notice(let notice): "notice:" + notice.id; case .refusal(let id, _): "refused:" + id }
-        }
-    }
 
     var body: some View {
         // a countdown says its minutes live, and a notice whose time passed goes
         TimelineView(.periodic(from: .now, by: 15)) { context in
             let now = Int64(context.date.timeIntervalSince1970 * 1000)
-            let items = (library.noticesFailed ? [Item.refresh] : [])
-                + library.notices.filter { $0.shown(at: now) && !$0.mustAnswer }.map(Item.notice)
-                + library.refusals(at: now).map { Item.refusal($0.id, $0.failure) }
+            let items = NoticeItem.all(library, now: now)
             if let first = items.first {
                 ScrollView {
-                    VStack(spacing: 8) {
-                        if fanned || items.count == 1 {
-                            ForEach(items) { item($0, now: now, stacked: false) }
-                            if items.count > 1 {
-                                Button { fan(false) } label: {
-                                    Text("Show less").font(.footnote.weight(.semibold)).padding(.horizontal, 12).padding(.vertical, 6)
-                                }
-                                .buttonStyle(.plain).glassEffect(.regular.interactive(), in: .capsule)
-                                .accessibilityIdentifier("noticesShowLess")
+                    Group {
+                        if items.count == 1 {
+                            NoticeItemView(item: first, library: library, api: api, now: now, open: opened) {
+                                withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { opened.toggle() }
                             }
                         } else {
-                            stacked(item(first, now: now, stacked: true), behind: items.count - 1)
+                            stacked(NoticeItemView(item: first, library: library, api: api, now: now, open: false) { all = true },
+                                    behind: items.count - 1)
                         }
                     }
                     // nothing below: the toolbar's own margin is the gap above its buttons
@@ -141,25 +129,19 @@ struct NoticesBand: View {
                 .scrollClipDisabled(height <= maxHeight)
                 .frame(height: min(height, maxHeight))
                 .clipShape(Rectangle().inset(by: height > maxHeight ? 0 : -32))
-                // one left: nothing to fan
-                .onChange(of: items.count) { _, count in if count <= 1 { fanned = false } }
             }
         }
-        .sensoryFeedback(.impact(weight: .light), trigger: fanned)
+        .fullScreenCover(isPresented: $all) {
+            NoticesScreen(library: library, api: api) { all = false }
+                // it grows out of the stack and folds back into it
+                .navigationTransition(.zoom(sourceID: "notices", in: zoom))
+        }
+        .sensoryFeedback(.impact(weight: .light), trigger: all)
         .sensoryFeedback(.selection, trigger: opened)
     }
 
-    private func fan(_ out: Bool) {
-        withAnimation(reduceMotion ? nil : .snappy(duration: 0.3)) { fanned = out }
-    }
-    private func toggle(_ id: String) {
-        withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) {
-            if opened.contains(id) { opened.remove(id) } else { opened.insert(id) }
-        }
-    }
-
     /// The first, with up to two glass edges of the rest beneath it; a tap
-    /// anywhere but its button fans them out.
+    /// anywhere but its button opens them all.
     private func stacked(_ front: some View, behind: Int) -> some View {
         let edges = min(behind, 2)
         return front
@@ -176,15 +158,85 @@ struct NoticesBand: View {
             }
             .padding(.bottom, CGFloat(edges) * 8)
             .contentShape(Rectangle())
-            .onTapGesture { fan(true) }
-            .accessibilityAction(named: "Show all \(behind + 1)") { fan(true) }
+            .onTapGesture { all = true }
+            .matchedTransitionSource(id: "notices", in: zoom)
+            .accessibilityAction(named: "Show all \(behind + 1)") { all = true }
             .accessibilityIdentifier("noticesStack")
     }
+}
 
-    @ViewBuilder private func item(_ item: Item, now: Int64, stacked: Bool) -> some View {
+/// Every notice, full screen, as Notification Center shows them: each with
+/// all its words and actions, scrolling; the X folds them back into the
+/// band. It closes itself once none is left.
+private struct NoticesScreen: View {
+    let library: Library
+    let api: FragmentAPI
+    let dismiss: () -> Void
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 15)) { context in
+            let now = Int64(context.date.timeIntervalSince1970 * 1000)
+            let items = NoticeItem.all(library, now: now)
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(items) { item in
+                        NoticeItemView(item: item, library: library, api: api, now: now, open: true, full: true) {}
+                    }
+                }
+                .padding(.horizontal, 12).padding(.bottom, 24)
+            }
+            .safeAreaInset(edge: .top, spacing: 12) {
+                HStack {
+                    Text("Notices").font(.largeTitle)
+                    Spacer()
+                    Button(action: dismiss) {
+                        Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.glass).buttonBorderShape(.circle)
+                    .accessibilityLabel("Close").accessibilityIdentifier("noticesClose")
+                }
+                .padding(.horizontal, 20).padding(.top, 8)
+            }
+            .onChange(of: items.isEmpty) { _, empty in if empty { dismiss() } }
+        }
+        // the wallpaper frosted behind them, as Notification Center is over the Lock Screen
+        .presentationBackground { DesktopWallpaper().overlay(Rectangle().fill(.regularMaterial)) }
+    }
+}
+
+/// One thing the band tells: a failed read, a notice, or the refusal of an
+/// answer whose notice is gone.
+private enum NoticeItem: Identifiable {
+    case refresh, notice(Notice), refusal(String, NoticeFailure)
+    var id: String {
+        switch self { case .refresh: "refresh"; case .notice(let notice): "notice:" + notice.id; case .refusal(let id, _): "refused:" + id }
+    }
+    @MainActor static func all(_ library: Library, now: Int64) -> [NoticeItem] {
+        (library.noticesFailed ? [.refresh] : [])
+            + library.notices.filter { $0.shown(at: now) && !$0.mustAnswer }.map(NoticeItem.notice)
+            + library.refusals(at: now).map { .refusal($0.id, $0.failure) }
+    }
+}
+
+/// An item's card. In the band, a notice is one line with its main action,
+/// its words once `open`; `full` (the full screen), all its words and every
+/// action under them.
+private struct NoticeItemView: View {
+    let item: NoticeItem
+    let library: Library
+    let api: FragmentAPI
+    let now: Int64
+    let open: Bool
+    var full = false
+    /// The card's tap (anywhere but a button).
+    let tap: () -> Void
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
         switch item {
-        case .refresh: refresh
-        case .notice(let notice): row(notice, now: now, stacked: stacked)
+        case .refresh:
+            card { NoticesRefresh(library: library, api: api) }.accessibilityIdentifier("noticesRefresh")
+        case .notice(let notice): row(notice)
         case .refusal(let id, let failure): refused(id, failure)
         }
     }
@@ -196,7 +248,7 @@ struct NoticesBand: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 10) {
                     Image(systemName: "exclamationmark.circle.fill").font(.system(size: 18)).foregroundStyle(.red)
-                    Text(failure.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                    Text(failure.title).font(.subheadline.weight(.semibold)).lineLimit(full ? nil : 2)
                     Spacer(minLength: 4)
                     Button { library.failedNotices[id] = nil } label: { Text("OK").foregroundStyle(Color(.systemBackground)) }
                         .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
@@ -205,20 +257,15 @@ struct NoticesBand: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .contentShape(Rectangle()).onTapGesture(perform: tap)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("refused:\(id)")
     }
 
-    private var refresh: some View {
-        card { NoticesRefresh(library: library, api: api) }
-            .accessibilityIdentifier("noticesRefresh")
-    }
-
-    /// In a stack, a tap fans the stack out rather than opening it.
-    private func row(_ notice: Notice, now: Int64, stacked: Bool) -> some View {
+    private func row(_ notice: Notice) -> some View {
         let failure = library.failedNotices[notice.id]
         // why its last answer failed is never hidden
-        let open = opened.contains(notice.id) || failure != nil
+        let open = open || failure != nil
         let more = notice.text != nil || notice.until != nil || notice.detail != nil || notice.actions.count > 1
         return card {
             VStack(alignment: .leading, spacing: 8) {
@@ -226,12 +273,12 @@ struct NoticesBand: View {
                     Image(systemName: notice.warns ? "exclamationmark.circle.fill" : "info.circle.fill")
                         .font(.system(size: 18)).foregroundStyle(notice.warns ? Color.red : Color.secondary)
                     Text(notice.title).font(.subheadline.weight(.semibold)).lineLimit(open ? nil : 2)
-                    if more {
+                    if more && !full {
                         Image(systemName: "chevron.down").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
                             .rotationEffect(.degrees(open ? 180 : 0))
                     }
                     Spacer(minLength: 4)
-                    if let main = notice.actions.first { button(notice, main, main: true) }
+                    if !full, let main = notice.actions.first { button(notice, main, main: true) }
                 }
                 if open {
                     // every word it says, however little room the page leaves (the keyboard up)
@@ -243,17 +290,19 @@ struct NoticesBand: View {
                     }
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 28)
-                    if notice.actions.count > 1 {
+                    // the full screen: every action under its words; the band: the rest
+                    let shown = full ? Array(notice.actions) : Array(notice.actions.dropFirst())
+                    if !shown.isEmpty {
                         HStack(spacing: 8) {
-                            ForEach(Array(notice.actions.dropFirst().enumerated()), id: \.offset) { _, action in
-                                button(notice, action, main: false)
+                            ForEach(Array(shown.enumerated()), id: \.offset) { index, action in
+                                button(notice, action, main: full && index == 0)
                             }
                         }.padding(.leading, 28)
                     }
                 }
             }
             .contentShape(Rectangle())
-            .onTapGesture { if stacked { fan(true) } else if more { toggle(notice.id) } }
+            .onTapGesture { if !full && (more || !open) { tap() } }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("notice:\(notice.id)")
@@ -266,19 +315,20 @@ struct NoticesBand: View {
             else { Task { if let outside = await library.act(notice, action, api: api) { openURL(outside) } } }
         }
         if main {
-            // its words in the page's own colour, on the app's primary tint (dark: white on white otherwise)
+            // its words in the page's own colour, on the app's primary tint (dark: white on white otherwise);
             // on one line: the title gives way first
             Button(action: tap) { Text(action.label).foregroundStyle(Color(.systemBackground)).lineLimit(1).fixedSize() }
                 .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small).disabled(pressed)
         } else {
-            Button(action: tap) { Text(action.label).lineLimit(1).fixedSize() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).disabled(pressed)
+            Button(action: tap) { Text(action.label).lineLimit(1).fixedSize() }
+                .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).disabled(pressed)
         }
     }
 
     private func card(@ViewBuilder _ content: () -> some View) -> some View {
         content()
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
+            .padding(full ? 14 : 12)
             // an iOS banner's glass and corners
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
