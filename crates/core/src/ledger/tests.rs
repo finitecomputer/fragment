@@ -6,7 +6,7 @@
 //! 25–27 and 62) and the port's fix (bug 2), each on its own; and what the
 //! releases before decision 62 kept (holds, reservations) reads.
 
-use fragment_proto::ledger::{GrantCredit, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
+use fragment_proto::ledger::{GrantCredit, MonthReset, Plan, ResetMonthUsage, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
 use fragment_proto::ErrorCode;
 
 use super::sim::{apply, Op, Outcome, T0};
@@ -65,6 +65,15 @@ fn set_book(margin_bp: u32) -> Op {
 
 fn row(reference: &str, usage: Usage, fragment: Option<&str>, at_ms: i64) -> MeterRow {
     MeterRow { reference: reference.into(), usage, fragment: fragment.map(str::to_string), agent: None, computer: None, at_ms }
+}
+
+fn reset(id: &str) -> Op {
+    Op::Reset(ResetMonthUsage { id: id.into() })
+}
+
+/// What a reset in October that paid no debt answers.
+fn reset_answer(id: &str, restored: i64, debt_paid: i64) -> Outcome {
+    Outcome::Reset(MonthReset { id: id.into(), month: "2026-10".into(), restored_micros: restored, debt_paid_micros: debt_paid })
 }
 
 fn meter(batch: &str, rows: Vec<MeterRow>) -> Op {
@@ -312,7 +321,114 @@ fn every_command_refuses_a_bad_id() {
         w.refused(seat(id, SeatState::Canceled, 1), bad);
         w.refused(overdraft(id, USD), bad);
         w.refused(cap(id, "todo.ann", Some(USD)), bad);
+        w.refused(reset(id), bad);
     }
+}
+
+// A month's usage reset (docs/ledger.md, "A month's usage reset")
+
+/// What the month drew of its included credit comes back, as included
+/// credit of the month: the month as it started. The charges stay charged
+/// and each fragment's spend stays as it was: nothing is rewritten.
+#[test]
+fn a_reset_gives_back_what_the_month_drew_of_its_included_credit() {
+    let mut w = World::seat();
+    w.spend_in("b1", 12 * USD, Some("todo.ann"));
+    let before = w.status();
+    assert_eq!((before.included_micros, before.balance_micros), (38 * USD, 38 * USD));
+    assert_eq!(w.replays(reset("r1")), reset_answer("r1", 12 * USD, 0));
+    let s = w.status();
+    assert_eq!((s.included_micros, s.included_granted_micros, s.purchased_micros, s.balance_micros), (50 * USD, 50 * USD, 0, 50 * USD), "the month's credit is whole");
+    assert_eq!(s.fragments, before.fragments, "each fragment's spend this month stays: a cap counts what was charged");
+    let t = w.ledger.totals();
+    assert_eq!((t.included, t.charged, t.expired), (62 * USD, 12 * USD, 0), "what came back is included credit again; the charges stay");
+    // it expires with its month, as included credit does
+    w.now = NOVEMBER;
+    assert_eq!((w.status().included_micros, w.ledger.money_at(NOVEMBER).totals.expired), (50 * USD, 50 * USD));
+}
+
+/// Purchased credit (a pack, an operator's grant) is never touched: only
+/// what the month drew of its included credit comes back.
+#[test]
+fn a_reset_leaves_purchased_credit_as_it_is() {
+    let mut w = World::seat();
+    w.ok(grant("pack:cs_1", 25 * USD));
+    w.spend("b1", 60 * USD);
+    assert_eq!((w.status().included_micros, w.status().purchased_micros), (0, 15 * USD), "a charge past the month's credit spent the pack");
+    assert_eq!(w.replays(reset("r1")), reset_answer("r1", 50 * USD, 0));
+    let s = w.status();
+    assert_eq!((s.included_micros, s.purchased_micros, s.balance_micros), (50 * USD, 15 * USD, 65 * USD));
+    assert_eq!(w.ledger.totals().purchased, 25 * USD, "no credit was bought or granted");
+}
+
+/// A person who owes has drawn the whole month: what comes back pays the
+/// debt first, as included credit that arrives while they owe always
+/// does, and a ledger read-only at its overdraft takes writes again.
+#[test]
+fn a_reset_pays_a_debt_first_as_included_credit_always_does() {
+    let mut w = World::seat();
+    w.spend("b1", 53 * USD);
+    let s = w.status();
+    assert_eq!((s.included_micros, s.purchased_micros, s.standing), (0, -3 * USD, Standing::ReadOnly { why: Why::Overdrawn }));
+    assert_eq!(w.replays(reset("r1")), reset_answer("r1", 50 * USD, 3 * USD));
+    let s = w.status();
+    assert_eq!((s.included_micros, s.purchased_micros, s.balance_micros, s.standing), (47 * USD, 0, 47 * USD, Standing::Ok));
+    // a debt larger than the month's credit stays, less what came back
+    let mut deep = World::seat();
+    deep.ok(overdraft("o1", 100 * USD));
+    deep.spend("b1", 120 * USD);
+    deep.ok(reset("r1"));
+    let s = deep.status();
+    assert_eq!((s.included_micros, s.purchased_micros), (0, -20 * USD));
+}
+
+/// The same reset again (a retry, a run pressed twice, after a restart)
+/// answers as it did and changes nothing, whatever was spent since; a new
+/// one gives back what was drawn since; another command's id is refused.
+#[test]
+fn a_reset_again_changes_nothing() {
+    let mut w = World::seat();
+    w.ok(grant("g1-taken", USD));
+    w.spend("b1", 12 * USD);
+    let first = w.replays(reset("r1"));
+    w.spend("b2", 5 * USD);
+    let mut later = w.restarted();
+    let (ledger, store) = (later.ledger.clone(), later.store.clone());
+    assert_eq!(later.ok(reset("r1")), first, "it answers as it did");
+    assert_eq!((&later.ledger, &later.store), (&ledger, &store), "and changes nothing");
+    assert_eq!(later.status().included_micros, 45 * USD);
+    assert_eq!(later.replays(reset("r2")), reset_answer("r2", 5 * USD, 0), "another reset gives back what was drawn since");
+    assert_eq!(later.replays(reset("r3")), reset_answer("r3", 0, 0), "and one more, nothing");
+    later.refused(reset("g1-taken"), Refused::ConflictingBody);
+}
+
+/// A reset is of its time's month: last month's credit expired with it.
+#[test]
+fn a_reset_gives_back_only_this_months_credit() {
+    let mut w = World::seat();
+    w.spend("b1", 10 * USD);
+    w.now = NOVEMBER;
+    w.spend("b2", USD);
+    let Outcome::Reset(r) = w.ok(reset("r1")) else { panic!("a reset answers Reset") };
+    assert_eq!((r.month.as_str(), r.restored_micros), ("2026-11", USD));
+    assert_eq!(w.ledger.totals().expired, 40 * USD, "October's credit expired, never given back");
+}
+
+/// What the month granted comes back whatever the seat is now; a guest,
+/// granted nothing, gets nothing.
+#[test]
+fn a_reset_gives_back_what_the_month_granted_whatever_the_seat_is_now() {
+    for (state, standing) in [(SeatState::PastDue, Standing::Ok), (SeatState::Canceled, Standing::AgentsStopped { why: Why::SeatCanceled })] {
+        let mut w = World::seat();
+        w.spend("b1", 10 * USD);
+        w.ok(seat("s1", state, 1));
+        assert_eq!(w.replays(reset("r1")), reset_answer("r1", 10 * USD, 0), "{state:?}");
+        assert_eq!((w.status().included_micros, w.status().standing), (50 * USD, standing), "{state:?}");
+    }
+    let mut g = World::guest();
+    g.ok(grant("g1", USD));
+    assert_eq!(g.replays(reset("r1")), reset_answer("r1", 0, 0));
+    assert_eq!(g.balance(), USD);
 }
 
 // Plans and included credit
@@ -1059,6 +1175,10 @@ fn every_mutation_answers_the_same_after_a_restart() {
         (31 * DAY_MS, Op::Sweep),
         (31 * DAY_MS + 1, plan("p2", Plan::SeatAlwaysOn)),
         (31 * DAY_MS + 2, meter("b2", vec![row("awake:1", Usage::Awake { instance: "2vcpu-6gib".into(), ms: 60_000 }, None, T0 + 31 * DAY_MS)])),
+        (31 * DAY_MS + 3, reset("r1")),
+        (31 * DAY_MS + 4, meter("aig:3", vec![row("aig:3", turn(), None, T0 + 31 * DAY_MS + 4)])),
+        (31 * DAY_MS + 5, reset("r1")),
+        (31 * DAY_MS + 6, reset("r2")),
     ];
     let run = |w: &mut World, part: &[(i64, Op)]| -> Vec<Result<Outcome, Refused>> {
         part.iter()
@@ -1404,6 +1524,16 @@ fn what_a_ledger_stored_and_answered_reads_back_byte_for_byte() {
         assert_eq!(serde_json::json!({ "error": body.error, "message": body.message, "refused": body.refused }).to_string(), line);
     }
     assert_eq!(refused.len(), 23, "every refusal, each `Invalid` its own");
+}
+
+/// A reset's record, as a ledger's `commands` keeps it: its text is pinned,
+/// so every later release reads it and a replay answers from it.
+#[test]
+fn a_resets_record_reads_back_from_its_text() {
+    let line = r#"{"reset_month":{"id":"reset:run-1","month":"2026-11","restoredMicros":12000000,"debtPaidMicros":0}}"#;
+    let command: Command = serde_json::from_str(line).unwrap();
+    assert_eq!(command, Command::ResetMonth(MonthReset { id: "reset:run-1".into(), month: "2026-11".into(), restored_micros: 12 * USD, debt_paid_micros: 0 }));
+    assert_eq!(serde_json::to_string(&command).unwrap(), line);
 }
 
 /// A refusal's `refused` is a name, a string, as the tagged reading's tag

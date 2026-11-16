@@ -197,6 +197,46 @@ agent's owner). It is as accurate as the units it is given: a part's
 and a call that falls back is quoted on its own model. It holds and
 keeps nothing: the job is still charged after, never held (decision 62).
 
+## A month's usage reset
+
+An operator may reset this month's usage (FIN-511: a computer billed for
+time it never ran; Paul, 2026-11-16: "give everyone a usage reset so we
+know we're square"). On one ledger it is `ResetMonthUsage {id}`
+(`Ledger::reset_month`), the ledger brought to its time's month first:
+
+- **What comes back** is what the month drew of its included credit,
+  `restored = included_granted − included_left`, as included credit of
+  the month again: it expires at the month's end, as all included credit
+  does. It is counted with what was included (`totals.included`), so the
+  balance stays what moved it, and no charge, row or record is rewritten.
+- **A debt is paid from it first**, as from any included credit that
+  arrives while its person owes: `debt_paid = min(restored, owed)`. One
+  who owed nothing has the month's credit whole again, the month as it
+  started; one who owed more than the month's credit owes the rest.
+- **Nothing else moves**: purchased credit left (packs, operators'
+  grants), the plan, the seat, the overdraft, caps and a budget, rows,
+  batches and commands, and each fragment's spend this month, which caps
+  and budgets count (a reset gives back credit, not room under a limit).
+  The read-only latch is decided again, as after any command.
+- **An org's** gives back nothing: it has no included credit.
+- **Once by its id**: the same id again answers what it did
+  (`MonthReset {id, month, restoredMicros, debtPaidMicros}`) and changes
+  nothing, whatever was spent since; another command's id is refused
+  (`conflicting_body`). A new id gives back what was drawn since.
+
+**Everyone's** is a run the registry keeps (`POST /api/admin/usage-resets`;
+`cell/src/registry/resets.rs`): a row for each person and org there as it
+starts, queued in that turn, reset by its alarm a batch at a time
+(`ledger::reset::BATCH`), each its ledger's `ResetMonthUsage {id:
+"reset:<run>"}`. A failed call is tried again after 10, 20, 40 and 80
+seconds, then given up on with its last refusal; a person wiped meanwhile
+has nothing to reset. A run goes on wherever it was cut off: a row is done
+only once its ledger answered, and a ledger answers the same reset again
+as it did, so a payer asked twice is counted once. One run goes at a time,
+and the same run's id again answers it. The operators' log holds who
+started it and when, and its counts once it is done. A run that crosses a
+month's end resets each payer's month as of when it reaches them.
+
 ## The gate
 
 Before a spend starts, its payer's ledger is asked `may_spend` (an

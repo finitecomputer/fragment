@@ -299,7 +299,7 @@ grant's `by`, the log's).
 `GET /admin` (the operators' page) answers only an operator's platform
 session; to anyone else it is the 404 a missing route is, word for word.
 Its API decides again on every call. `fragment operator
-people|person|pin|orgs|comp|uncomp|trials|health|log|credit|budget|payer`
+people|person|pin|orgs|comp|uncomp|trials|health|log|credit|budget|payer|reset-usage`
 calls the same.
 
 | method & path | who | body → answer |
@@ -314,6 +314,9 @@ calls the same.
 | `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: every comp, trial code, pin and ledger command; the newest 10,000 kept |
 | `POST /api/admin/objects/{class}/wake` | the same | `{id}` → `{class, id, ready: true}`: starts the platform object `id` (as Cloudflare lists it) of `class` (Registry, Principal, Ledger, Fragment, Computer) as a call would, its schema made current, and answers as a deploy's probe; refused, its `schema_refused`. An id of another class 400. Not logged: it changes nothing a call would not |
 | `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code and `/welcome?trial=<code>`; an ended code 400 |
+| `POST /api/admin/usage-resets` | the same, checked again by the registry | `StartUsageReset {id, payer?}` → `UsageReset {id, operator, payer, startedAt, finishedAt, people, orgs, reset, restoredMicros, pending, retrying, failed: [{payer, why}], failedCount}`: resets this month's usage (docs/ledger.md, "A month's usage reset") on every person's and org's ledger, or on `payer`'s (an npub, or `org:<org id>`; none there 404), a batch at a time on the registry's alarm. `id`, 1 to 128 of `A-Z a-z 0-9 - _ . :`, names the run: the same id again answers it, with another `payer` 409 `conflicting_body`; while another run goes, 409 `conflict`. Logged (`usage-reset`) as it starts, and with its counts when it is done. `fragment operator reset-usage --yes` follows it to its end |
+| `GET /api/admin/usage-resets` | the same | → `UsageResets {runs: [UsageReset]}`, the newest first (10 kept) |
+| `GET /api/admin/usage-resets/{id}` | the same | → `UsageReset`, as far as it has gone; none 404 |
 
 Comps, orgs and trial codes are under Seats and orgs.
 

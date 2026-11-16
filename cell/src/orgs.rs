@@ -18,7 +18,7 @@ use crate::registry::content::{AnswerOffer, ContentOf, NominatePayer, OfferAdmin
 use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, Mined, OrgOf, Sleeps, SyncSeat};
 use crate::registry::offers::{AcceptOffer, DeclineOffer, LeaveOrg};
 use crate::registry::seats::{AddAdmin, AddSeat, Added, RemoveAdmin, RemoveSeat};
-use crate::registry::admin;
+use crate::registry::{admin, resets};
 use crate::registry::trials::{TrialChange, TrialGet, TrialList, TrialNew};
 use crate::{acting_for, ask_registry, caller, json_answer, read_body, Caller};
 use fragment_nip98::Payload;
@@ -284,6 +284,12 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             let before = param(url, "before").map(|b| b.parse::<u64>().map_err(|_| CellError::invalid("`before` is an entry's number"))).transpose()?;
             json_answer(&ask_registry(env, &admin::Log { before }).await?)
         }
+        // a reset of this month's usage (docs/ledger.md, "A month's usage
+        // reset"), every person's and org's or one payer's: the registry
+        // checks the operator again, and runs it on its alarm
+        (Method::Post, ["usage-resets"]) => json_answer(&ask_registry(env, &resets::StartReset { by, start: body(&bytes)? }).await?),
+        (Method::Get, ["usage-resets"]) => json_answer(&ask_registry(env, &resets::ResetList {}).await?),
+        (Method::Get, ["usage-resets", id]) => json_answer(&ask_registry(env, &resets::ResetOf { id: id.to_string() }).await?),
         (Method::Post, ["trials"]) => json_answer(&ask_registry(env, &TrialNew { by, code: body(&bytes)? }).await?),
         (Method::Get, ["trials"]) => json_answer(&ask_registry(env, &TrialList {}).await?),
         (Method::Get, ["trials", id]) => json_answer(&ask_registry(env, &TrialGet { id: id.to_string() }).await?),

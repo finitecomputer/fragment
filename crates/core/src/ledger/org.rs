@@ -384,6 +384,32 @@ mod tests {
         assert_eq!(l.org_status(ORG, &s, T0, &PriceBook::defaults()).unwrap().budget_micros, 10 * USD);
     }
 
+    /// An org's reset of the month's usage (docs/ledger.md, "A month's
+    /// usage reset"): an org has no included credit, so it gives back
+    /// nothing; its credit, budget and this month's spend stay as they
+    /// were, and the reset is kept once by its id, after a restart too.
+    #[test]
+    fn an_orgs_reset_gives_back_nothing_and_changes_nothing_else() {
+        use fragment_proto::ledger::{MonthReset, ResetMonthUsage};
+        let (mut l, mut s) = (Ledger::new_org(T0), Memory::default());
+        l.grant(&mut s, &pack("cs_1"), T0).unwrap();
+        l.set_budget(&mut s, &budget("b1", 10 * USD), T0).unwrap();
+        let book = PriceBook::defaults();
+        l.meter(&mut s, &Meter { batch: "frag:1".into(), rows: vec![step_row("step:a", APP, T0)] }, T0, &book).unwrap();
+        let before = l.org_status(ORG, &s, T0, &book).unwrap();
+        assert!(before.spent_micros > 0, "its fragment spent this month");
+        let reset = ResetMonthUsage { id: "reset:run-1".into() };
+        let answer = l.reset_month(&mut s, &reset, T0 + 1).unwrap();
+        assert_eq!(answer, MonthReset { id: "reset:run-1".into(), month: "2026-10".into(), restored_micros: 0, debt_paid_micros: 0 });
+        assert_eq!(l.org_status(ORG, &s, T0 + 1, &book).unwrap(), before, "its credit, budget and spend are as they were");
+        assert_eq!(l.totals().included, 0, "an org's credit is never included");
+        let (mut l, mut s) = restarted(&l, &s);
+        let once = (l.clone(), s.clone());
+        assert_eq!(l.reset_month(&mut s, &reset, T0 + 2 * DAY_MS), Ok(answer), "the same reset answers as it did");
+        assert_eq!((&l, &s), (&once.0, &once.1), "and changes nothing");
+        assert_eq!(l.reset_month(&mut s, &ResetMonthUsage { id: "b1".into() }, T0), Err(Refused::ConflictingBody), "a budget's id is no reset's");
+    }
+
     /// Restart: the org's head reads back, bound as an org's from what is
     /// kept beside it (a person's head is written as before), and a pack
     /// paid after it is still granted once.

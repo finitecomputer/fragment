@@ -153,7 +153,8 @@ of one.
 
 Decision 59: `/admin`, served to an operator's session alone (to anyone
 else, the 404 of a missing path), and `/api/admin/*`. People (comp a seat,
-end a comp, grant credit), invites (a comped seat, or a mailed trial),
+end a comp, grant credit, reset this month's usage: one person's or
+everyone's, docs/ledger.md), invites (a comped seat, or a mailed trial),
 trial codes (a change is compare-and-set, its capacity never below the
 places taken), orgs, billing's health, and an audit log of every write.
 The wipe stays a signed CLI call. It is a row of SPECIAL-CASE-INVENTORY.md.

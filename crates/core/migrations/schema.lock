@@ -23,6 +23,7 @@ step Registry 8 org_content 67159e5ef6e0243b
 step Registry 9 key_sessions 68cfc8333a9ff162
 step Registry 10 comp_until 192cf4964b4e7e5c
 step Registry 11 connection_signin_access dd677fc210bb157d
+step Registry 12 usage_resets bf3675608c2b1b51
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Principal 3 memberships_dock 607987fd7686be8b
@@ -176,6 +177,9 @@ Registry index subjects_identity: CREATE INDEX subjects_identity ON subjects (id
 Registry table trial_codes: CREATE TABLE trial_codes ( id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, kind TEXT NOT NULL, days INTEGER NOT NULL, capacity INTEGER NOT NULL, expires_at INTEGER, active INTEGER NOT NULL, revision INTEGER NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL)
 Registry table trial_uses: CREATE TABLE trial_uses ( person TEXT PRIMARY KEY, code TEXT NOT NULL, at INTEGER NOT NULL, expires_at INTEGER NOT NULL, subscription TEXT, attempts TEXT)
 Registry index trial_uses_code: CREATE INDEX trial_uses_code ON trial_uses (code, expires_at)
+Registry table usage_reset_payers: CREATE TABLE usage_reset_payers ( run TEXT NOT NULL, payer TEXT NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL, done_at INTEGER, restored INTEGER, why TEXT, PRIMARY KEY (run, payer) )
+Registry index usage_reset_payers_due: CREATE INDEX usage_reset_payers_due ON usage_reset_payers (due) WHERE done_at IS NULL
+Registry table usage_resets: CREATE TABLE usage_resets ( id TEXT PRIMARY KEY, operator TEXT NOT NULL, payer TEXT, started_at INTEGER NOT NULL, finished_at INTEGER )
 Registry table wiped_agents: CREATE TABLE wiped_agents ( identity TEXT NOT NULL, agent TEXT NOT NULL, PRIMARY KEY (identity, agent))
 Registry table wiped_orgs: CREATE TABLE wiped_orgs ( identity TEXT NOT NULL, org TEXT NOT NULL, ended INTEGER NOT NULL, canceled INTEGER NOT NULL, lapsed INTEGER NOT NULL, PRIMARY KEY (identity, org))
 Registry table wipes: CREATE TABLE wipes ( identity TEXT PRIMARY KEY, done INTEGER NOT NULL, started_at INTEGER NOT NULL, by TEXT NOT NULL, finished_at INTEGER)

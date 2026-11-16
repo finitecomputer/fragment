@@ -1,6 +1,6 @@
 // The operators' admin page (docs/billing.md, "The operator's admin";
-// decision 59): a glance at who joined and what runs, people, orgs, trial
-// codes, billing's health and the log
+// decision 59): a glance at who joined and what runs, people (and a reset
+// of this month's usage), orgs, trial codes, billing's health and the log
 // of what operators did, through `/api/admin/*` with the operator's own
 // platform session (`x-fragment-shell`, same-origin only). The page is
 // served to an operator's session alone (anyone else gets the 404 of a
@@ -49,6 +49,10 @@ function when(ms) {
   return ms ? new Date(ms).toISOString().slice(0, 16).replace("T", " ") : "";
 }
 
+function usd(micros) {
+  return (micros / 1e6).toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+
 // A seat's kind, shortly: the one sold, or a comp's seat that sleeps.
 const KIND = { seat_always_on: "always-on", seat: "sleeping" };
 
@@ -88,6 +92,54 @@ async function people(more = false) {
   peopleNext = v.next;
   $("people-more").hidden = !v.next;
   say(`${rows.children.length} people`);
+  if (!more) await lastReset();
+}
+
+// ---- a reset of this month's usage (docs/ledger.md, "A month's usage
+// reset"), every person's and org's or one person's: the registry runs it
+// a batch of payers at a time, and the page reads it until it is done
+const RESET_POLL_MS = 1_000;
+let resetTimer = null;
+
+function resetSaid(r) {
+  const total = r.people + r.orgs;
+  if (r.finishedAt == null) return `Resetting: ${r.reset + r.failedCount} of ${total}${r.retrying ? `, ${r.retrying} to try again` : ""}`;
+  return `Last reset ${when(r.finishedAt)}: ${r.reset} of ${total} reset (${r.people} people, ${r.orgs} orgs), ${usd(r.restoredMicros)} restored, ${r.failedCount} failed`;
+}
+
+// the newest run of everyone's, read again each second while it goes; no
+// run starts while any goes
+function showReset(r, going) {
+  const box = $("reset-run");
+  box.replaceChildren();
+  if (r) box.append(el("span", resetSaid(r)));
+  if (r?.failed.length) {
+    const list = el("ul");
+    list.append(...r.failed.map((f) => el("li", `${f.payer}: ${f.why}`)));
+    box.append(list);
+  }
+  $("reset-all").disabled = going;
+  clearTimeout(resetTimer);
+  resetTimer = going ? setTimeout(guard(lastReset), RESET_POLL_MS) : null;
+}
+
+async function lastReset() {
+  const v = await api("GET", "/api/admin/usage-resets");
+  showReset(v.runs.find((r) => r.payer == null), v.runs.some((r) => r.finishedAt == null));
+}
+
+// one person's run, from their page: read until it is done
+async function resetOne(npub, label) {
+  if (!confirm(`${label}'s usage this month goes back to zero. Bought credit stays.`)) return;
+  let r = await api("POST", "/api/admin/usage-resets", { id: `reset-${crypto.randomUUID()}`, payer: npub });
+  while (r.finishedAt == null) {
+    say("Resetting…");
+    await new Promise((done) => setTimeout(done, RESET_POLL_MS));
+    r = await api("GET", `/api/admin/usage-resets/${encodeURIComponent(r.id)}`);
+  }
+  if (r.failedCount) say(`not reset: ${r.failed[0]?.why ?? ""}`, true);
+  else say(`usage reset: ${usd(r.restoredMicros)} restored`);
+  await openPerson(npub);
 }
 
 async function openPerson(npub) {
@@ -134,6 +186,10 @@ async function openPerson(npub) {
     await openPerson(npub);
   }));
   box.append(grant);
+  const reset = el("button", "Reset this month's usage");
+  reset.type = "button";
+  reset.addEventListener("click", guard(() => resetOne(npub, v.person.email || npub)));
+  box.append(reset);
   box.hidden = false;
 }
 
@@ -323,6 +379,22 @@ document.addEventListener("DOMContentLoaded", guard(async () => {
     say(`made ${t.code}`);
   }));
   $("people-more").addEventListener("click", guard(() => people(true)));
+  const confirming = (on) => {
+    $("reset-confirm").hidden = !on;
+    $("reset-all").hidden = on;
+  };
+  $("reset-all").addEventListener("click", () => confirming(true));
+  $("reset-no").addEventListener("click", () => confirming(false));
+  $("reset-yes").addEventListener("click", guard(async () => {
+    confirming(false);
+    try {
+      const r = await api("POST", "/api/admin/usage-resets", { id: `reset-${crypto.randomUUID()}` });
+      showReset(r, r.finishedAt == null);
+    } finally {
+      // one going already (409) is shown as it goes
+      await lastReset();
+    }
+  }));
   $("orgs-more").addEventListener("click", guard(() => orgs(true)));
   $("log-more").addEventListener("click", guard(() => log(true)));
   await show(location.hash.slice(1) in load ? location.hash.slice(1) : "glance");

@@ -27,3 +27,8 @@ code, .mono { font-family: ui-monospace, monospace; font-size: .9em; }
 .tile .small { opacity: .8; font-size: .85rem; }
 section h2 { font-size: 1rem; margin: 1rem 0 .25rem; }
 .quiet { opacity: .6; font-size: .85rem; }
+#reset { margin: .75rem 0; }
+.confirm { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; border: 1px solid #8884; border-radius: .5rem; padding: .6rem .75rem; max-width: 36rem; }
+.confirm p { flex-basis: 100%; margin: 0 0 .2rem; }
+#reset-run { margin: .4rem 0; }
+#reset-run ul { margin: .25rem 0; padding-left: 1.2rem; }

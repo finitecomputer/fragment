@@ -1,7 +1,8 @@
 //! Deterministic simulation of the ledger. Goal: the ledger's money
 //! stays right under what a real deployment does to it. Method: a seeded generator of interleaved
 //! operations from many callers (meter batches, grants, plan and seat
-//! changes, overdrafts, caps, price books, sweeps), with injected crashes (an effect lost before it is applied,
+//! changes, overdrafts, caps, price books, an operator's resets of the
+//! month's usage, sweeps), with injected crashes (an effect lost before it is applied,
 //! or its answer lost after, then retried later), duplicates, reordering,
 //! month rollovers and restarts (the state serialized and read back).
 //! After every step it checks the ledger against a model of its own:
@@ -13,7 +14,10 @@
 //!   and the read-only latch, and the latch follows the balance and the
 //!   overdraft;
 //! - included credit never carries past its month: at each rollover what
-//!   was left expires, and a month grants its plan's credit once;
+//!   was left expires, and a month grants its plan's credit once, and again
+//!   only what a reset gives back of it;
+//! - a reset gives back what the month drew of its included credit, a debt
+//!   paid from it first, and never touches purchased credit left;
 //! - a retry answers as its first delivery did, and a conflicting body
 //!   changes nothing;
 //! - a twin fed the same operations at the same times, never restarted,
@@ -21,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fragment_proto::ledger::{GrantCredit, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing};
+use fragment_proto::ledger::{GrantCredit, MonthReset, Plan, ResetMonthUsage, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing};
 
 use super::*;
 use crate::price::{PriceBook, StorageClass, Usage, USD};
@@ -39,6 +43,7 @@ pub(super) enum Op {
     Book(PriceBook),
     Meter(Meter),
     Sweep,
+    Reset(ResetMonthUsage),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +51,7 @@ pub(super) enum Outcome {
     Done,
     Metered(Metered),
     Swept(Swept),
+    Reset(MonthReset),
 }
 
 pub(super) fn apply(ledger: &mut Ledger, store: &mut impl Store, op: &Op, now_ms: i64, book: &mut PriceBook) -> Result<Outcome, Refused> {
@@ -61,6 +67,7 @@ pub(super) fn apply(ledger: &mut Ledger, store: &mut impl Store, op: &Op, now_ms
         }
         Op::Meter(m) => ledger.meter(store, m, now_ms, book).map(Outcome::Metered),
         Op::Sweep => Ok(Outcome::Swept(ledger.sweep(store, now_ms))),
+        Op::Reset(c) => ledger.reset_month(store, c, now_ms).map(Outcome::Reset),
     }
 }
 
@@ -227,6 +234,8 @@ pub(super) struct Stats {
     agents_stopped: u64,
     forgotten: u64,
     cap_reached: u64,
+    /// Resets that gave back some included credit.
+    resets: u64,
 }
 
 struct Sim {
@@ -329,6 +338,7 @@ impl Sim {
             }
             89 => self.restart(),
             90..=94 => self.conflict(),
+            95 => self.new_reset(),
             _ => self.reads(),
         }
     }
@@ -402,7 +412,8 @@ impl Sim {
         let before = self.ledger.money;
         let granted_before = self.model.included_granted;
         let month = Month::of(self.now);
-        let rolled = month > self.model.month;
+        // a book is the release's, never the ledger's: it rolls no month
+        let rolled = month > self.model.month && !matches!(op, Op::Book(_));
         if rolled {
             // the rollover the ledger makes first: the month's credit, for
             // the plan and seat as they are
@@ -410,8 +421,12 @@ impl Sim {
             self.model.month = month;
             self.model.included_granted = included(self.model.plan, self.model.seat);
         }
-        // a replayed batch answers from its record, as of its first time
-        let replayed = matches!(op, Op::Meter(m) if self.store.batch(&m.batch).is_some());
+        // a replayed batch or reset answers from its record, as of its first time
+        let replayed = match op {
+            Op::Meter(m) => self.store.batch(&m.batch).is_some(),
+            Op::Reset(c) => self.store.command(&c.id).is_some(),
+            _ => false,
+        };
         let answer = apply(&mut self.ledger, &mut self.store, op, self.now, &mut self.book);
         let twin = apply(&mut self.twin, &mut self.twin_store, op, self.now, &mut self.book);
         assert_eq!(answer, twin, "the twin answers {op:?} the same");
@@ -420,13 +435,18 @@ impl Sim {
             self.justify(op, &answer, &before);
         }
         let after = self.ledger.money;
+        // what a new reset gave back is included credit again
+        let restored = match (op, &answer) {
+            (Op::Reset(_), Ok(Outcome::Reset(r))) if !replayed => r.restored_micros,
+            _ => 0,
+        };
         // included credit never carries past its month
         if rolled {
             assert_eq!(after.totals.expired - before.totals.expired, before.included_left, "a rollover expires what was left of the month");
-            assert_eq!(after.totals.included - before.totals.included, self.model.included_granted, "a month grants its credit once");
+            assert_eq!(after.totals.included - before.totals.included, self.model.included_granted + restored, "a month grants its credit once");
         } else {
             assert_eq!(after.totals.expired, before.totals.expired, "credit expires only at a rollover");
-            assert_eq!(after.totals.included - before.totals.included, self.model.included_granted - granted_before, "credit is granted once a month");
+            assert_eq!(after.totals.included - before.totals.included, self.model.included_granted - granted_before + restored, "credit is granted once a month");
         }
         // the latch, from the balance and the overdraft alone
         let balance = after.balance();
@@ -451,6 +471,7 @@ impl Sim {
             Op::Seat(c) => &c.id,
             Op::Overdraft(c) => &c.id,
             Op::Cap(c) => &c.id,
+            Op::Reset(c) => &c.id,
             _ => return false,
         };
         if answer.is_err() || !self.applied.insert(id.clone()) {
@@ -499,6 +520,25 @@ impl Sim {
                 }
             }
             (Op::Sweep, Ok(Outcome::Swept(swept))) => self.stats.forgotten += swept.forgotten,
+            // what the month drew of its included credit comes back, a debt
+            // paid from it first; purchased credit left is never touched
+            (Op::Reset(_), Ok(Outcome::Reset(r))) => {
+                let after = self.ledger.money;
+                let debt = (-before_month.purchased_left).max(0);
+                assert_eq!(r.month, before_month.month.label(), "a reset is of its time's month");
+                assert_eq!(r.restored_micros, before_month.included_granted - before_month.included_left, "a reset gives back what the month drew");
+                assert_eq!(r.debt_paid_micros, r.restored_micros.min(debt), "a debt is paid first");
+                assert_eq!(after.balance() - before_month.balance(), r.restored_micros, "the balance grows by what came back");
+                assert_eq!(after.included_left, before_month.included_left + r.restored_micros - r.debt_paid_micros);
+                assert_eq!(after.included_granted, before_month.included_granted, "the month granted what it did");
+                if debt == 0 {
+                    assert_eq!(after.purchased_left, before_month.purchased_left, "purchased credit is untouched");
+                    assert_eq!(after.included_left, after.included_granted, "the month's credit is whole again");
+                }
+                if r.restored_micros > 0 {
+                    self.stats.resets += 1;
+                }
+            }
             _ => {}
         }
         if let Standing::ReadOnly { .. } = self.ledger.money.standing() {
@@ -623,6 +663,12 @@ impl Sim {
         self.send(Op::Cap(SetFragmentCap { id, fragment, micros }));
     }
 
+    /// An operator's reset of the month's usage.
+    fn new_reset(&mut self) {
+        let id = self.id("reset");
+        self.send(Op::Reset(ResetMonthUsage { id }));
+    }
+
     fn new_book(&mut self) {
         self.book_version += 1;
         let mut book = PriceBook::defaults();
@@ -723,7 +769,7 @@ pub(super) fn simulate(seed: u64, steps: u64) -> Stats {
 }
 
 impl Stats {
-    fn named(&self) -> [(&'static str, u64); 13] {
+    fn named(&self) -> [(&'static str, u64); 14] {
         [
             ("steps", self.steps),
             ("rollovers", self.rollovers),
@@ -738,6 +784,7 @@ impl Stats {
             ("agents stopped", self.agents_stopped),
             ("references forgotten", self.forgotten),
             ("caps reached", self.cap_reached),
+            ("resets that gave credit back", self.resets),
         ]
     }
 }

@@ -56,7 +56,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_proto::ledger::{FragmentSpend, GrantCredit, LedgerStatus, OrgBudget, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
+use fragment_proto::ledger::{FragmentSpend, GrantCredit, LedgerStatus, MonthReset, OrgBudget, Plan, ResetMonthUsage, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
 use fragment_proto::ErrorCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -66,6 +66,7 @@ use crate::price::{self, dollars, PriceBook, PriceError, Priced, Usage, UsageFau
 pub mod gate;
 pub mod org;
 pub mod quote;
+pub mod reset;
 pub mod said;
 #[cfg(test)]
 mod sim;
@@ -283,6 +284,9 @@ pub enum Command {
     SetCap(SetFragmentCap),
     SetBook(SetPriceBook),
     OrgBudget(OrgBudget),
+    /// A month's usage reset, kept with what it did: the same id again
+    /// answers it (`Ledger::reset_month`).
+    ResetMonth(MonthReset),
 }
 
 /// A batch's answer, kept with the batch so a replay answers the same.
@@ -856,6 +860,22 @@ impl Money {
         self.included_left += grant - pay;
     }
 
+    /// What the month drew of its included credit, given back as included
+    /// credit of the month (it expires with it) and counted with what was
+    /// included: the balance stays what moved it, and nothing is rewritten.
+    /// A debt is paid from it first, as from any included credit that
+    /// arrives while the person owes; purchased credit left is untouched.
+    /// Answers what came back, and what of it paid a debt.
+    fn restore(&mut self) -> (i64, i64) {
+        let restored = self.included_granted - self.included_left;
+        let pay = restored.min((-self.purchased_left).max(0));
+        self.totals.included += restored;
+        self.purchased_left += pay;
+        self.included_left += restored - pay;
+        assert!(self.included_left <= self.included_granted, "a reset gives back at most what the month granted");
+        (restored, pay)
+    }
+
     /// A charge, drawn from included credit first.
     fn draw(&mut self, amount: i64) {
         assert!((0..=price::CHARGE_MAX).contains(&amount), "a charge was priced within CHARGE_MAX");
@@ -1218,6 +1238,29 @@ impl Ledger {
         store.set_cap(&c.fragment, c.micros);
         self.done(store, &c.id, command, now_ms);
         Ok(())
+    }
+
+    /// An operator's reset of this month's usage (docs/ledger.md, "A
+    /// month's usage reset"): what the month drew of its included credit
+    /// comes back (`Money::restore`). Kept once by its id with what it did:
+    /// the same id again answers that and changes nothing, whatever was
+    /// spent since. An org's, which has no included credit, gives back
+    /// nothing. Nothing else moves: purchased credit left, the plan, the
+    /// seat, the overdraft, caps, a budget, rows, and each fragment's spend.
+    pub fn reset_month(&mut self, store: &mut impl Store, c: &ResetMonthUsage, now_ms: i64) -> Result<MonthReset, Refused> {
+        self.roll(now_ms);
+        if !valid_id(&c.id) {
+            return Err(invalid(Invalid::Id));
+        }
+        match store.command(&c.id) {
+            None => {}
+            Some(CommandRecord { command: Command::ResetMonth(first), .. }) => return Ok(first),
+            Some(_) => return Err(Refused::ConflictingBody),
+        }
+        let (restored, debt_paid) = self.money.restore();
+        let answer = MonthReset { id: c.id.clone(), month: self.money.month.label(), restored_micros: restored, debt_paid_micros: debt_paid };
+        self.done(store, &c.id, Command::ResetMonth(answer.clone()), now_ms);
+        Ok(answer)
     }
 
     // Meters: usage that already happened, charged once by reference.
