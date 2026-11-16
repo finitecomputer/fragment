@@ -42,6 +42,28 @@ unfinished design, not debt.
   provider and tells the provider a switch (Core 1.0's `prompt=login`),
   proven on preview as the self-host rule asks of a cell change.
 
+## A computer's lifecycle reads its old flags
+
+- **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle
+  phase into the phases that own it (`fragment_core::computer::Phase`:
+  `Asleep`'s `retry`, `Sleeping`'s `owner`, `restarting` and
+  `owes_start`, `Failed`'s `since_ms`). A lifecycle a release before it
+  stored, and nothing has rewritten since, keeps those only in its old
+  flags (`wake_after_sleep`, `retry_at_ms`, `failed_ms`, `owner_sleep`,
+  `restarting`), so `Lifecycle::read` still fills its phase from them
+  (`computer/lifecycle/legacy.rs`), and the Computer DO logs
+  `lifecycle_old_flags` each time it does. Nothing writes them (#1284).
+- **Risk:** none while it reads them. Such a row can outlast its alarms:
+  before FIN-395 C a takeover that failed used up an alarm without a
+  write or another alarm, so a `Sleeping` row can wait until something
+  touches its computer. Read without its flags, its owner's restart or a
+  start its stop owed would be lost.
+- **Delete when:** a sweep has read every computer's lifecycle and found
+  none filled, or production has logged no `lifecycle_old_flags` line for
+  14 days. The log sees only computers something touched, so cutting on
+  it leaves one dormant since before FIN-395 C to lose that start, which
+  its owner can make again: say so when cutting.
+
 ## A chat wiped while its seed runs can keep its template's repo
 
 - **Shortcut:** a chat's create answers before its repo is made

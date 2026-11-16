@@ -225,7 +225,7 @@ mod tests {
         // its stop: its deadline asks for the stop, unsaved
         let mut v = serde_json::to_value(Lifecycle { phase: Phase::Sleeping { generation: 1, since_ms: T, owner: false, restarting: false, owes_start: false }, generation: 1, ..Lifecycle::new() }).unwrap();
         v.as_object_mut().unwrap().retain(|k, _| k != "saving");
-        let mut old = Lifecycle::read(&v.to_string()).unwrap();
+        let (mut old, _) = Lifecycle::read(&v.to_string()).unwrap();
         assert_eq!(old.apply(Event::Alarm, T + SLEEP_DEADLINE_MS).actions, vec![Action::Stop { generation: 1, saved: false }]);
     }
 

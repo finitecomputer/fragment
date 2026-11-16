@@ -175,14 +175,15 @@ const PREV_FLAGS: [&str; 5] = ["wake_after_sleep", "retry_at_ms", "failed_ms", "
 
 fn prev(name: &str) -> Lifecycle {
     let (_, text) = PREV.iter().find(|(n, _)| *n == name).expect("a stored lifecycle of the previous release");
-    Lifecycle::read(text).expect("this release reads the previous one's")
+    Lifecycle::read(text).expect("this release reads the previous one's").0
 }
 
-/// Goal: what the previous release stored reads as the phase it stored;
-/// and what this release stores reads back, in the previous one (a
-/// rollback), as it stored it: every key the same but its flags, which it
-/// writes again from the phase as it reads. Method: the previous release's
-/// own stored lifecycles, read here, then written.
+/// Goal: what the previous release stored reads as the phase it stored,
+/// its flags agreeing (nothing filled, nothing logged); and what this
+/// release stores reads back, in the previous one (a rollback), as it
+/// stored it: every key the same but its flags, which it writes again from
+/// the phase as it reads. Method: the previous release's own stored
+/// lifecycles, read here, then written.
 #[test]
 fn a_lifecycle_stored_by_the_previous_release_reads_as_it_was() {
     assert_eq!(prev("starting").phase, Phase::Starting { generation: 1, since_ms: T, destroying: false });
@@ -192,6 +193,7 @@ fn a_lifecycle_stored_by_the_previous_release_reads_as_it_was() {
     assert_eq!(prev("asleep_retry").failures, 1, "a count of the wake, kept beside the phases");
     assert!(matches!(prev("failed").phase, Phase::Failed { since_ms, .. } if since_ms == T + 33_000));
     for (name, text) in PREV {
+        assert!(!Lifecycle::read(text).unwrap().1, "{name}: nothing filled");
         let mut theirs: Value = serde_json::from_str(text).unwrap();
         for flag in PREV_FLAGS {
             assert!(theirs.as_object_mut().unwrap().remove(flag).is_some(), "{name}: {flag}");

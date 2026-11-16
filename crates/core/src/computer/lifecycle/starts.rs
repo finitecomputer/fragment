@@ -381,7 +381,7 @@ mod tests {
         // a lifecycle stored before it kept when it gave up tries at its next wake
         let mut stored = serde_json::to_value(Lifecycle { phase: Phase::Failed { why: "old".into(), since_ms: T }, ..Lifecycle::new() }).unwrap();
         assert!(stored["phase"].as_object_mut().unwrap().remove("since_ms").is_some());
-        let mut old = Lifecycle::read(&stored.to_string()).unwrap();
+        let (mut old, _) = Lifecycle::read(&stored.to_string()).unwrap();
         assert_eq!(old.apply(Event::Wake { why: Wake::Presence }, T).actions, vec![Action::Start { generation: 1 }]);
     }
 
@@ -922,7 +922,7 @@ mod tests {
                     let was = l.failures;
                     let s = l.apply(event.clone(), at);
                     if row.evict {
-                        l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap();
+                        l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap().0;
                     }
                     if l.failures > was {
                         // each strike pauses before the next try (a crash's owed start aside)
@@ -961,7 +961,7 @@ mod tests {
                 });
                 assert_eq!(made, starts, "#1005 (evict {evict}): {event:?} at +{}: {s:?} {:?}", at - gave_up, l.phase);
                 if evict {
-                    l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap();
+                    l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap().0;
                 }
             }
             assert_eq!(l.failures, 0, "its owner's restart starts the count again");

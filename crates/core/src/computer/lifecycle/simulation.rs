@@ -131,8 +131,8 @@ fn simulated_interleavings_keep_the_invariants() {
             reached[9] += u32::from(free_before.is_some());
             let s = l.apply_with(event, now, &rules);
             // stored and read again (its isolate gone): the same computer
-            let stored = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap();
-            assert_eq!(stored, l, "a stored lifecycle reads back as it was (seed {seed0}, step {step})");
+            let (stored, old) = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap();
+            assert_eq!((&stored, old), (&l, false), "a stored lifecycle reads back as it was, nothing filled (seed {seed0}, step {step})");
             l = stored;
             if work {
                 life_worked = now;

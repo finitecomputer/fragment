@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::computer::limits::{IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, WONT_WAKE_RETRY_MS};
 
 mod event;
+mod legacy;
 mod saving;
 mod starts;
 mod unsaved;
@@ -20,7 +21,9 @@ pub use saving::Saving;
 pub use starts::{alive, Alive};
 pub use unsaved::{Failing, Unsaved};
 
-/// Where its lifecycle is, each phase with what is only true of it.
+/// Where its lifecycle is, each phase with what is only true of it. A
+/// phase stored before FIN-395 C is filled from the flags that release
+/// kept beside it (`Lifecycle::read`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Phase {
@@ -212,13 +215,21 @@ impl Lifecycle {
         }
     }
 
-    /// A stored lifecycle. Decoded here, in one function the cell calls:
-    /// its own decoder (`crate::json_text`) in its place costs the cell's
-    /// Wasm 7,523 bytes more (measured 2026-11-16).
-    pub fn read(text: &str) -> serde_json::Result<Lifecycle> {
+    /// A stored lifecycle, and whether its phase was filled from the flags
+    /// a release before FIN-395 C kept beside it (`legacy`), which the cell
+    /// logs. Decoded here, in one function the cell calls: its own decoder
+    /// (`crate::json_text`) in its place costs the cell's Wasm 7,523 bytes
+    /// more (measured 2026-11-16).
+    pub fn read(text: &str) -> serde_json::Result<(Lifecycle, bool)> {
         // its bytes, never `from_str`: the cell decodes JSON text through
         // one decoder per type (`crate::json_text`, cell/clippy.toml)
-        serde_json::from_slice(text.as_bytes())
+        let mut life: Lifecycle = serde_json::from_slice(text.as_bytes())?;
+        let filled = legacy::filled(text, &life.phase)?;
+        let old = filled.is_some();
+        if let Some(phase) = filled {
+            life.phase = phase;
+        }
+        Ok((life, old))
     }
 
     pub fn generation(&self) -> u64 {
