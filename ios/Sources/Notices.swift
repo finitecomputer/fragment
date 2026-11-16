@@ -83,20 +83,22 @@ struct NoticeFailure: Equatable, Sendable {
 ///
 /// One is one line, its title and its main action; a tap opens its words.
 /// Several stack as iOS stacks notifications, the first with the edges of
-/// the rest behind it, and a tap opens them all, full screen, as
-/// Notification Center does (`NoticesScreen`): its X folds them back.
+/// the rest behind it, and a tap fans them out full screen, as Notification
+/// Center does (`NoticesFan`, over the whole app): each card flies from
+/// its place in the stack to its place in the list, and the X folds them back.
 struct NoticesBand: View {
     let library: Library
     let api: FragmentAPI
     /// The most of the page it takes (`FragmentRoot`'s share of its
     /// height): past it, it scrolls, so the page and its toolbar stay.
     let maxHeight: CGFloat
+    /// All of them, fanned out full screen (`NoticesFan`).
+    @Binding var fanned: Bool
+    /// Where each card is in the stack, for the fan to fly from.
+    let space: Namespace.ID
     @State private var height: CGFloat = 0
     /// The one notice whose words are open, alone in the band.
     @State private var opened = false
-    /// All of them, full screen.
-    @State private var all = false
-    @Namespace private var zoom
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -112,8 +114,8 @@ struct NoticesBand: View {
                                 withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { opened.toggle() }
                             }
                         } else {
-                            stacked(NoticeItemView(item: first, library: library, api: api, now: now, open: false) { all = true },
-                                    behind: items.count - 1)
+                            // fanned: its place kept, empty, while the cards are in the fan
+                            stacked(items, now: now).opacity(fanned ? 0 : 1)
                         }
                     }
                     // nothing below: the toolbar's own margin is the gap above its buttons
@@ -131,76 +133,106 @@ struct NoticesBand: View {
                 .clipShape(Rectangle().inset(by: height > maxHeight ? 0 : -32))
             }
         }
-        .fullScreenCover(isPresented: $all) {
-            NoticesScreen(library: library, api: api) { all = false }
-                // it grows out of the stack and folds back into it
-                .navigationTransition(.zoom(sourceID: "notices", in: zoom))
-        }
-        .sensoryFeedback(.impact(weight: .light), trigger: all)
         .sensoryFeedback(.selection, trigger: opened)
+        .sensoryFeedback(.impact(weight: .light), trigger: fanned)
     }
 
-    /// The first, with up to two glass edges of the rest beneath it; a tap
-    /// anywhere but its button opens them all.
-    private func stacked(_ front: some View, behind: Int) -> some View {
-        let edges = min(behind, 2)
-        return front
+    private func fan() {
+        withAnimation(reduceMotion ? nil : .spring(duration: 0.45, bounce: 0.15)) { fanned = true }
+    }
+
+    /// The first, with up to two glass edges of the rest beneath it, each
+    /// the place its card flies from as they fan out (the rest come from the
+    /// last edge); a tap anywhere but its button fans them out.
+    private func stacked(_ items: [NoticeItem], now: Int64) -> some View {
+        let edges = min(items.count - 1, 2)
+        return NoticeItemView(item: items[0], library: library, api: api, now: now, open: false, tap: fan)
+            .stackPlace(items[0].id, in: space, held: !fanned)
             .background(alignment: .bottom) {
                 ZStack(alignment: .bottom) {
                     ForEach((1...edges).reversed(), id: \.self) { depth in
-                        Color.clear.frame(height: 36)
-                            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                            .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
-                            .padding(.horizontal, CGFloat(depth) * 12)
-                            .offset(y: CGFloat(depth) * 8)
+                        ZStack {
+                            // under the edge: the rest's places, the last edge's
+                            if depth == edges {
+                                ForEach(items.dropFirst(edges + 1)) { item in
+                                    Color.clear.stackPlace(item.id, in: space, held: !fanned)
+                                }
+                            }
+                            Color.clear
+                                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
+                                .stackPlace(items[depth].id, in: space, held: !fanned)
+                        }
+                        .frame(height: 36)
+                        .padding(.horizontal, CGFloat(depth) * 12)
+                        .offset(y: CGFloat(depth) * 8)
                     }
                 }
             }
             .padding(.bottom, CGFloat(edges) * 8)
             .contentShape(Rectangle())
-            .onTapGesture { all = true }
-            .matchedTransitionSource(id: "notices", in: zoom)
-            .accessibilityAction(named: "Show all \(behind + 1)") { all = true }
+            .onTapGesture(perform: fan)
+            .accessibilityAction(named: "Show all \(items.count)", fan)
             .accessibilityIdentifier("noticesStack")
     }
 }
 
-/// Every notice, full screen, as Notification Center shows them: each with
-/// all its words and actions, scrolling; the X folds them back into the
-/// band. It closes itself once none is left.
-private struct NoticesScreen: View {
+private extension View {
+    /// A card's place in the stack, while the stack `held` it: fanned out,
+    /// the stack lets go, so the fan's cards fly from here rather than
+    /// the stack's following them (and back, as the fan goes).
+    @ViewBuilder func stackPlace(_ id: String, in space: Namespace.ID, held: Bool) -> some View {
+        if held { matchedGeometryEffect(id: id, in: space) } else { self }
+    }
+}
+
+/// Every notice fanned out over the whole app, as Notification Center shows
+/// them: each with all its words and actions, scrolling, each card having
+/// flown from its place in the band's stack (`NoticesBand`), on the
+/// wallpaper frosted. Its X folds them back; so does a stack of one.
+struct NoticesFan: View {
     let library: Library
     let api: FragmentAPI
-    let dismiss: () -> Void
+    let space: Namespace.ID
+    let close: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
             let now = Int64(context.date.timeIntervalSince1970 * 1000)
             let items = NoticeItem.all(library, now: now)
-            ScrollView {
-                VStack(spacing: 10) {
-                    ForEach(items) { item in
-                        NoticeItemView(item: item, library: library, api: api, now: now, open: true, full: true) {}
+            ZStack(alignment: .top) {
+                DesktopWallpaper().overlay(Rectangle().fill(.regularMaterial)).ignoresSafeArea()
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(items) { item in
+                            NoticeItemView(item: item, library: library, api: api, now: now, open: true, full: true) {}
+                                .matchedGeometryEffect(id: item.id, in: space)
+                        }
                     }
+                    .padding(.horizontal, 12).padding(.bottom, 24)
                 }
-                .padding(.horizontal, 12).padding(.bottom, 24)
-            }
-            .safeAreaInset(edge: .top, spacing: 12) {
-                HStack {
-                    Text("Notices").font(.largeTitle)
-                    Spacer()
-                    Button(action: dismiss) {
-                        Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 32, height: 32)
+                .scrollClipDisabled()
+                .safeAreaInset(edge: .top, spacing: 12) {
+                    HStack {
+                        Text("Notices").font(.largeTitle)
+                        Spacer()
+                        Button(action: fold) {
+                            Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 32, height: 32)
+                        }
+                        .buttonStyle(.glass).buttonBorderShape(.circle)
+                        .accessibilityLabel("Close").accessibilityIdentifier("noticesClose")
                     }
-                    .buttonStyle(.glass).buttonBorderShape(.circle)
-                    .accessibilityLabel("Close").accessibilityIdentifier("noticesClose")
+                    .padding(.horizontal, 20).padding(.top, 8)
                 }
-                .padding(.horizontal, 20).padding(.top, 8)
             }
-            .onChange(of: items.isEmpty) { _, empty in if empty { dismiss() } }
+            .onChange(of: items.count) { _, count in if count <= 1 { fold() } }
         }
-        // the wallpaper frosted behind them, as Notification Center is over the Lock Screen
-        .presentationBackground { DesktopWallpaper().overlay(Rectangle().fill(.regularMaterial)) }
+        .accessibilityAddTraits(.isModal)
+    }
+
+    private func fold() {
+        withAnimation(reduceMotion ? nil : .spring(duration: 0.4, bounce: 0.1), close)
     }
 }
 

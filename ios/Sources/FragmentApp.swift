@@ -514,6 +514,9 @@ struct FragmentRoot: View {
     @State private var showingConnection = false
     @State private var page = ShellPage.launcher
     @State private var sidebar = false
+    /// Every notice fanned out over the app (`NoticesFan`), from the band's stack.
+    @State private var noticesFanned = false
+    @Namespace private var noticesSpace
     @State private var showingApps = false
     @State private var openedApp: FragmentSummary?
     /// The page's height, of which the notices take at most a share.
@@ -560,7 +563,7 @@ struct FragmentRoot: View {
             VStack(spacing: 0) {
                 // its notices glass, as iOS's banners are, over what the page
                 // beneath has (below: Home's wallpaper meets it without a seam)
-                NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4)
+                NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4, fanned: $noticesFanned, space: noticesSpace)
                     // its glass's shadow over the page's top, not under it
                     .zIndex(1)
                     // Your Apps is pushed onto the page it was opened from, so
@@ -606,10 +609,15 @@ struct FragmentRoot: View {
             .background {
                 if page == .launcher || page == .apps || showingApps { DesktopWallpaper() } else { FragmentStyle.background.ignoresSafeArea() }
             }
-            .accessibilityHidden(sidebar)
+            .accessibilityHidden(sidebar || noticesFanned)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
             SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api) { destination in
                 page = destination; showingApps = false; toggleSidebar()
+            }
+            // over everything: its cards fly from the band's stack, and back
+            if noticesFanned {
+                NoticesFan(library: library, api: api, space: noticesSpace) { noticesFanned = false }
+                    .transition(.opacity).zIndex(2)
             }
         }
         .sheet(item: $openedApp) { app in
