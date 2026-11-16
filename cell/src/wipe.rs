@@ -19,12 +19,11 @@
 //!
 //! **Where it runs.** Here, in the router, one bounded call at a time; the
 //! Registry records how far it got and locks the person meanwhile
-//! (registry/wipe.rs); each object a step touches does its own part behind
-//! an internal route (`wipe/…`, marked by `WIPE_HEADER`, which the router
-//! never passes): a fragment ends its life (ended.rs `wipe_route`), a
-//! computer empties itself (computer.rs `wipe`), a ledger empties itself
-//! (ledger.rs), and a list too, by its own calls (principal/calls.rs
-//! `WipeView`, `WipeEnd`, `WipeExports`). The steps and their order are
+//! (registry/wipe.rs); each object a step touches does its own part, by a
+//! call of its own: a fragment ends its life (ended.rs `wipe_route`,
+//! marked by `WIPE_HEADER`, which the router never passes), a computer
+//! empties itself (computer.rs `wipe`), and a ledger and a list empty
+//! themselves (ledger.rs, principal.rs). The steps and their order are
 //! `fragment_core::wipe::STEPS`; each is idempotent, and is recorded done
 //! only once it is whole, so a wipe cut anywhere (a crash, a timeout, a
 //! vendor's error) finishes when it is run again, and a finished one run
