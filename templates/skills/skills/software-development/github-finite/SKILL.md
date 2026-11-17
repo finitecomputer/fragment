@@ -1,6 +1,6 @@
 ---
 name: github-finite
-description: GitHub repositories, issues, pull requests, reviews and Actions through the person's connected GitHub account, with `fragment api github` and git over HTTPS. No token to paste, no `gh auth login`.
+description: GitHub repositories, issues, pull requests, reviews and Actions through the person's connected GitHub account, with `fragment connection call github` and git over HTTPS. No token to paste, no `gh auth login`.
 version: 1.0.0
 author: Finite
 license: MIT
@@ -15,10 +15,10 @@ metadata:
 
 Your owner's GitHub: the repositories they chose as they connected it,
 with their issues, pull requests, reviews and workflow runs. Your computer
-holds no GitHub credential: `fragment api github` sends the connection's
-placeholder for you, and the computer swaps in a short-lived token for
-your owner's account. Never ask the person for a personal access token,
-and never run `gh auth login`.
+holds no GitHub credential: `fragment connection call github` sends the
+connection's placeholder for you, and the computer swaps in a short-lived
+token for your owner's account. Never ask the person for a personal access
+token, and never run `gh auth login`.
 
 What you do on GitHub is done as your owner: a comment, a commit pushed or
 a pull request opened shows their name. This is not a fragment's own
@@ -27,7 +27,7 @@ repository (that is `git-finite`).
 ## Connected?
 
 ```bash
-GH="fragment api github"
+GH="fragment connection call github"
 $GH GET https://api.github.com/user
 ```
 
@@ -42,11 +42,11 @@ A 404 on a repository you were told exists usually means your owner did
 not choose it when they connected: tell them they can add it in their
 GitHub settings (Applications), and do not guess another name.
 
-On an older computer: `fragment api` came with an image newer than a
-computer awake since before it. If the command is `unrecognized`, your
-computer takes that image when it next restarts. Until then, send the same
-calls with `curl -H "Authorization: Bearer $GH_TOKEN"`: the computer swaps
-that the same way.
+On an older computer: `fragment connection call` came with an image newer
+than a computer awake since before it. If the command is `unrecognized`,
+your computer takes that image when it next restarts. Until then, send the
+same calls with `curl -H "Authorization: Bearer $GH_TOKEN"`: the computer
+swaps that the same way.
 
 ## Reading
 
