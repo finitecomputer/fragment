@@ -17,10 +17,14 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A mapper name of each volume's own: the tests run in parallel, and
-/// device-mapper names are the kernel's, shared by every test.
+/// device-mapper names are the kernel's, shared by every test and by every
+/// container on the VM, whose pids repeat, so the run's start time is in it
+/// too: a mapping a failed run left cannot fail the next.
 fn luks(c: &Config, _dir: &Path) -> Box<dyn Volume + Send + Sync> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let mapper_name = format!("podtest{}x{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    static RUN: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    let run = RUN.get_or_init(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("after 1970").as_nanos());
+    let mapper_name = format!("podtest{}x{run:x}x{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
     Box::new(Luks::new(Config { mapper_name, ..c.clone() }))
 }
 

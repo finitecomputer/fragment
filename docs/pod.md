@@ -174,10 +174,12 @@ to `inblob`, `outblob` read while `generation` holds still), behind a
 and quoter through the real HTTP reader, the owner's client and key
 request against it, and the configfs-tsm sequence against a fake kernel.
 The real volume (`tests/luks.rs`) needs root and loop devices and is
-ignored; on a Mac, build it for Linux and run it in a privileged container:
+ignored; on a Mac, build it for Linux and run it in a privileged container,
+with the VM's own `/dev`, where the loop and device-mapper nodes made during
+the run appear (a container's `/dev` holds only those there when it started):
 
 ```sh
-docker run --rm --privileged -v "$PWD:/src:ro" -w /src rust:1.99-alpine sh -c \
+docker run --rm --privileged -v /dev:/dev -v "$PWD:/src:ro" -w /src rust:1.99-alpine sh -c \
   'apk add -q musl-dev cryptsetup e2fsprogs util-linux \
    && CARGO_TARGET_DIR=/tmp/t cargo test --locked -p fragment-pod-init --test luks -- --ignored'
 ```
