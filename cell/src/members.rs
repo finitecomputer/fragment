@@ -774,12 +774,13 @@ impl FragmentCell {
     /// request's flush, `after_answer`'s, the alarm's) names no agent. Its
     /// rows and its computer's notice are sent as its owner's `PUT
     /// members/{agent}` sends them (`write_member`), the notice once its
-    /// template is in (`fragment_core::seed::Stage::joins_wait`).
-    pub(crate) fn join_own_agent(&self, target: &Identity) -> CellResult<Member> {
+    /// template is in (`fragment_core::seed::Stage::joins_wait`). `since`:
+    /// its maker's in their org (`Actor::since`).
+    pub(crate) fn join_own_agent(&self, target: &Identity, since: i64) -> CellResult<Member> {
         // its maker: a person's fragment's owner, or an org's content admin
         // making it (`own_agent` checked the agent is theirs)
         let by = target.owner.clone().ok_or_else(|| CellError::host("an agent has its owner"))?;
-        let actor = Actor { admin: true, by, for_owner: None, since: 0 };
+        let actor = Actor { admin: true, by, for_owner: None, since };
         self.write_member(&actor, target, SetRole { role: Role::Editor }, false)
     }
 

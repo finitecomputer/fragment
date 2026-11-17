@@ -1370,12 +1370,14 @@ impl FragmentCell {
         let maker = self.caller_id(caller)?.to_string();
         // an org's maker is one of its content admins, as themselves, who
         // comes in as its editor (decisions 69 to 71); the router checked
-        // them, and what they carry says so again here
-        let owner = match org {
-            None => Payer::Person(maker.clone()),
+        // them, and what they carry says so again here, and since when they
+        // are in, by the registry's clock (members.rs `Actor::since`)
+        let (owner, since) = match org {
+            None => (Payer::Person(maker.clone()), 0),
             Some(org) => {
                 self.content_admin(caller, &org)?;
-                Payer::Org(org)
+                let since = caller.signed.as_ref().and_then(|s| s.org_place(&org)).map_or(0, |p| p.since);
+                (Payer::Org(org), since)
             }
         };
         if !valid_fragment_name(&body.name) {
@@ -1508,7 +1510,7 @@ impl FragmentCell {
                 maker.as_str().into(),
                 role.as_str().into(),
                 maker.as_str().into(),
-                SqlStorageValue::Integer(now),
+                SqlStorageValue::Integer(now.max(since)),
                 caller.kind().map_or(SqlStorageValue::Null, |k| k.as_str().into()),
                 caller.owner().map_or(SqlStorageValue::Null, |o| o.into()),
             ],
@@ -1534,7 +1536,7 @@ impl FragmentCell {
         // `join_own_agent`), before the install below awaits: every list
         // row of it names that agent
         if let Some(target) = &agent {
-            self.join_own_agent(target)?;
+            self.join_own_agent(target, since)?;
         }
         // its making is written: the stage its rows say is the one its
         // machine says, and what follows is that step's effects, in order
