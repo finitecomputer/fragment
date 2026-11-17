@@ -182,9 +182,11 @@ computer: the attachment note maps its original name, type and local path
 under `/tmp/bridge-media`. Use that path with your tools to copy or edit
 the original; copy it into your app or work to keep it across a sleep.
 To put it on a website,
-click the site's upload button with your browser tools, then type its
-full path into the file dialog on your desktop with `computer_use` and
-press Enter.
+set it on the page's file input with `browser_exec`'s
+`upload_file(selector, path)` (its full path), then check the page shows
+it before you send the form. Only if the page has no file input, click
+its upload button, type the full path into the file dialog on your
+desktop with `computer_use` and press Enter.
 
 ## Files you send
 
