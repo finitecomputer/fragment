@@ -128,6 +128,22 @@ ADD --checksum=sha256:392cc554eb916b37d585c2ee2e8090cb1efe8d34b1657df77afd2e7a67
 ADD --checksum=sha256:94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz /gws.tgz
 FROM downloads-${TARGETARCH} AS downloads
 
+# sandbox-shim, the Sandbox SDK's in-container half (its DirectoryBackup's
+# saves and restores run through it): Cloudflare's own build on amd64, from
+# its sandbox image at 1.0.0, the SDK the cell runs; on arm64, which that
+# image is not published for, the same source at the same commit (the
+# image's revision label), built as Cloudflare builds it (its
+# images/sandbox-tools/Dockerfile: Alpine's Rust, statically linked).
+# BuildKit checks the commit it fetches.
+FROM docker.io/cloudflare/sandbox:1.0.0 AS sandbox-shim-amd64
+FROM rust:1.99-alpine AS sandbox-shim-arm64
+ADD https://github.com/cloudflare/sandbox-sdk.git#f9e972a14123bef3b93e9bb337bab6e83419fe7e /src
+WORKDIR /src
+RUN --mount=type=cache,id=sandbox-shim-registry,target=/usr/local/cargo/registry \
+    cargo rustc --release --locked --package sandbox-tools --bin sandbox-shim -- -C target-feature=+crt-static \
+ && install -D -m 0755 target/release/sandbox-shim /usr/local/bin/sandbox-shim
+FROM sandbox-shim-${TARGETARCH} AS sandbox-shim
+
 # SimpleX's core (the bridge's simplex/run.rs: one per agent its owner
 # links, run only while the computer is always on): simplex-chat v7.0.3,
 # the latest stable release on 2026-10-22 (`downloads`). It runs on the
@@ -149,7 +165,10 @@ FROM ${HERMES} AS hermes
 # them, and checks it does. Builder trace context changes per step and is
 # not upstream runtime configuration; never capture it into the image.
 RUN mkdir -p /opt/fragment && env | grep -Ev '^(TRACEPARENT|TRACESTATE)=' | sort > /opt/fragment/upstream.env
-COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+COPY --from=sandbox-shim /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+# it runs on this architecture: with no command it says so (a binary of
+# another architecture cannot, and every save of /data would fail)
+RUN test "$(/usr/local/bin/sandbox-shim 2>&1)" = 'sandbox-shim: missing command'
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
 # Pinned (the release current at Hermes v0.21.5's; Hermes' image has none,
