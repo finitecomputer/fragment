@@ -21,11 +21,9 @@ pub use saving::Saving;
 pub use starts::{alive, Alive};
 pub use unsaved::{Failing, Unsaved};
 
-use legacy::Legacy;
-
-/// Where its lifecycle is, each phase with what is only true of it
-/// (FIN-395 C: the flags that sat beside it moved in). A phase stored by
-/// the previous release reads its fields from that release's (`Legacy`).
+/// Where its lifecycle is, each phase with what is only true of it. A
+/// phase stored before FIN-395 C is filled from the flags that release
+/// kept beside it (`Lifecycle::read`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Phase {
@@ -175,20 +173,6 @@ pub struct Lifecycle {
     /// was kept: none of that life's work is counted kept (`Ended::quiet`).
     #[serde(default)]
     kept_ms: i64,
-    /// The previous release's fields (`Legacy`), by its names, kept equal
-    /// to the phase (`Legacy::of`) at every step and stored with it for one
-    /// release. Plain fields, never `#[serde(flatten)]`: its buffering
-    /// costs the cell's Wasm more than its budget had left.
-    #[serde(default)]
-    wake_after_sleep: bool,
-    #[serde(default)]
-    retry_at_ms: Option<i64>,
-    #[serde(default)]
-    failed_ms: i64,
-    #[serde(default)]
-    owner_sleep: bool,
-    #[serde(default)]
-    restarting: bool,
 }
 
 impl Default for Lifecycle {
@@ -228,12 +212,24 @@ impl Lifecycle {
             unmetered: None,
             worked_ms: 0,
             kept_ms: 0,
-            wake_after_sleep: false,
-            retry_at_ms: None,
-            failed_ms: 0,
-            owner_sleep: false,
-            restarting: false,
         }
+    }
+
+    /// A stored lifecycle, and whether its phase was filled from the flags
+    /// a release before FIN-395 C kept beside it (`legacy`), which the cell
+    /// logs. Decoded here, in one function the cell calls: its own decoder
+    /// (`crate::json_text`) in its place costs the cell's Wasm 7,523 bytes
+    /// more (measured 2026-11-16).
+    pub fn read(text: &str) -> serde_json::Result<(Lifecycle, bool)> {
+        // its bytes, never `from_str`: the cell decodes JSON text through
+        // one decoder per type (`crate::json_text`, cell/clippy.toml)
+        let mut life: Lifecycle = serde_json::from_slice(text.as_bytes())?;
+        let filled = legacy::filled(text, &life.phase)?;
+        let old = filled.is_some();
+        if let Some(phase) = filled {
+            life.phase = phase;
+        }
+        Ok((life, old))
     }
 
     pub fn generation(&self) -> u64 {
@@ -738,7 +734,6 @@ impl Lifecycle {
             }
             (Phase::Failed { .. }, Event::Alarm) => {}
         }
-        self.set_legacy();
         step.alarm_ms = self.next_alarm();
         self.assert_valid();
         step
@@ -764,7 +759,6 @@ impl Lifecycle {
         if let Phase::Sleeping { owner, restarting: true, owes_start, .. } = self.phase {
             assert!(owner && owes_start, "a restart is its owner's sleep, a start after it");
         }
-        assert!(self.legacy() == Legacy::of(&self.phase), "the previous release's fields say what the phase does");
         assert!(self.failures <= STARTS_FAILED_MAX, "failures stop counting at the limit");
         if self.ready {
             assert!(matches!(self.phase, Phase::Awake { .. } | Phase::Sleeping { .. }), "only a start that came up, and is not gone, is ready");

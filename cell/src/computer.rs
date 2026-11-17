@@ -766,9 +766,16 @@ impl ComputerCell {
 
     fn lifecycle(&self) -> CellResult<Lifecycle> {
         match self.meta(MetaKey::Lifecycle)? {
-            // this release's, or the previous one's (`Lifecycle::read`, which
-            // reads its bytes, as `crate::json_text` does)
-            Some(text) => Lifecycle::read(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
+            Some(text) => {
+                let (life, old) = Lifecycle::read(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}")))?;
+                // its phase filled from the flags a release before FIN-395 C
+                // kept: the debt goes once these lines stop
+                // (docs/technical-debt-ledger.md)
+                if old {
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lifecycle_old_flags": life.phase }));
+                }
+                Ok(life)
+            }
             None => Ok(Lifecycle::new()),
         }
     }
