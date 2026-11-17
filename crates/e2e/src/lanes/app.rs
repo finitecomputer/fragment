@@ -312,7 +312,7 @@ pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("(nothing sabotages it: the note lands at once)", r.status == 200 && note(s, "three").as_deref() == Some(&b"three"[..]), &r);
     }
     s.ok("its record is published once, and it is applied once", slugs("three") == 1 && applied("n3") == 1, json!(channel("feed")));
-    let packs = s.mark(&repo);
+    let packs = s.mark_global(&repo);
     let r = call("note", "n3", json!({ "slug": "three", "text": "three" }))?;
     s.ok("its replay applies nothing again", r.status == 200 && r.body["replayed"] == true && s.commits_since(&repo, &packs) == 0 && slugs("three") == 1, &r);
 

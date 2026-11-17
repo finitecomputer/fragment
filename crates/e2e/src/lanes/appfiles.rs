@@ -29,7 +29,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     let call = |op: &str, id: &str, input: Value| api.op(&owner, &name, op, id, input);
 
     // a mutation writes a file to main, once
-    let before = s.mark(&repo);
+    let before = s.mark_global(&repo);
     let r = call("add_note", "n1", json!({ "slug": "hello", "text": "# Hello\n" }))?;
     s.ok("a mutation's file write answers once it is committed", r.status == 200 && r.body["result"]["path"] == "notes/hello.md", &r);
     s.ok("the file is on main", s.file_at(&repo, "main", "notes/hello.md").as_deref() == Some(&b"# Hello\n"[..]), "");
@@ -142,7 +142,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     let week = 7 * 24 * 3600 * 1000;
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age", "ms": week + 3_600_000 })))?;
     s.ok("(a test hook ages the write keys past their week)", r.status == 200, &r);
-    let packs = s.mark(&repo);
+    let packs = s.mark_global(&repo);
     let r = call("add_note", "k1", json!({ "slug": "kept", "text": "old\n" }))?;
     s.ok(
         "a replay after its write keys are gone commits nothing: no stale overwrite",

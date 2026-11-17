@@ -377,8 +377,13 @@ impl<T> Deref for Fake<T> {
 /// Where a repo's main stood, to count the commits it took after
 /// (`Suite::commits_since`).
 pub enum Mark {
-    /// The commit packs the fake was sent for the repo.
+    /// The commit packs the fake was sent for the repo, answered or not
+    /// (`CodeStorage::requests`).
     Packs(u32),
+    /// The commit packs the fake was sent for any repo, answered or not
+    /// (`CodeStorage::commit_pack_count`): a check that a write lands in
+    /// no repo at all.
+    Global(u32),
     /// main's head on macrofiche (`None`: no main yet).
     Head(Option<String>),
 }
@@ -1257,6 +1262,16 @@ impl Suite {
         self.store.is_none().then(|| self.fake.requests(repo, route))
     }
 
+    /// Where every repo stands now, to count the commit packs after it:
+    /// on the fake, its global count (every repo's packs, answered or not);
+    /// on macrofiche, which counts no requests, `repo`'s main.
+    pub fn mark_global(&self, repo: &str) -> Mark {
+        match &self.store {
+            None => Mark::Global(self.fake.commit_pack_count()),
+            Some(_) => Mark::Head(self.head(repo, "main")),
+        }
+    }
+
     /// Where `repo`'s main stands now, to count the commits after it
     /// (`commits_since`).
     pub fn mark(&self, repo: &str) -> Mark {
@@ -1266,12 +1281,14 @@ impl Suite {
         }
     }
 
-    /// The commits `repo` took since `mark`: the commit packs it was sent
-    /// (the fake, which counts each one landed), or the commits on main
-    /// past the marked head (macrofiche, which counts no requests).
+    /// The commits `repo` took since `mark`: on the fake, the commit packs
+    /// sent since (`repo`'s, or every repo's for `mark_global`), answered
+    /// or not; on macrofiche, which counts no requests, the commits on main
+    /// past the marked head.
     pub fn commits_since(&self, repo: &str, mark: &Mark) -> u64 {
         match (mark, &self.store) {
             (Mark::Packs(n), None) => u64::from(self.fake.requests(repo, "POST commit-pack") - n),
+            (Mark::Global(n), None) => u64::from(self.fake.commit_pack_count() - n),
             (Mark::Head(marked), Some(store)) => {
                 if self.head(repo, "main").is_none() {
                     return 0;
