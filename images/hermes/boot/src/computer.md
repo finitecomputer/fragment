@@ -140,9 +140,9 @@ hold a real key or token, and never ask anyone for one.
 `GOOGLE_OAUTH_ACCESS_TOKEN` is set while your owner has Google connected
 (in Settings): load the `google-workspace-finite` skill for anything
 Google. Each service they connect has a skill of its own. Call its API
-with `fragment api <connection> <METHOD> <url>`, which sends the
-placeholder for you. Its `not_connected` means your owner has not
-connected it, or left you out: ask them to, in Settings under
+with `fragment connection call <connection> <METHOD> <url>`, which
+sends the placeholder for you. Its `not_connected` means your owner has
+not connected it, or left you out: ask them to, in Settings under
 Connections, and it reaches you within seconds. `PERPLEXITY_API_KEY`,
 `XAI_API_KEY` and the other keys go as each provider's SDK sends them.
 

@@ -1,4 +1,5 @@
-//! `fragment api`: one call to a connected service's API, as the agent.
+//! `fragment connection call`: one call to a connected service's API,
+//! as the agent.
 //!
 //! On a computer an agent holds no credential: each connection it may use
 //! is a placeholder in an environment variable (`fcx_<provider>_<tag>`,
@@ -39,7 +40,7 @@ const REFUSAL_MAX_BYTES: usize = 16 << 10;
 /// The most redirects one call follows.
 const REDIRECTS_MAX: usize = 10;
 
-/// What `fragment api` was asked.
+/// What `fragment connection call` was asked.
 #[derive(Debug, Clone, Default)]
 pub struct Call {
     pub provider: String,
@@ -65,8 +66,8 @@ pub struct Call {
     pub timeout: Option<u64>,
 }
 
-/// A call that did not answer as asked: what `fragment api` says on stderr,
-/// one line of JSON, and exits 1.
+/// A call that did not answer as asked: what `fragment connection call`
+/// says on stderr, one line of JSON, and exits 1.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refused {
     pub status: u16,
@@ -440,11 +441,12 @@ pub fn deliver(answer: &Answer) -> Vec<u8> {
     }
 }
 
-/// `fragment api`: the answer on stdout and 0, or a refusal on stderr and 1.
-/// A mistake in how it was called is the caller's error (exit 2).
+/// `fragment connection call`: the answer on stdout and 0, or a refusal
+/// on stderr and 1. A mistake in how it was called is the caller's error
+/// (exit 2).
 pub fn run(call: Call) -> Result<i32> {
     let vars: Vec<(String, String)> = std::env::vars_os().filter_map(|(n, v)| Some((n.into_string().ok()?, v.into_string().ok()?))).collect();
-    let spill = std::env::temp_dir().join(format!("fragment-api-{:08x}", rand::random::<u32>()));
+    let spill = std::env::temp_dir().join(format!("fragment-connection-call-{:08x}", rand::random::<u32>()));
     match send(&call, &vars, &mut std::io::stdin().lock(), &spill)? {
         Ok(answer) => {
             std::io::stdout().write_all(&deliver(&answer))?;
@@ -511,7 +513,7 @@ mod tests {
     /// Asked with nowhere to spill: an answer too long to print is a test's
     /// own to ask for (`send`, with a file).
     fn asked(c: &Call) -> Result<Answer, Refused> {
-        send(c, &held(), &mut std::io::empty(), Path::new("/nonexistent/fragment-api/never")).unwrap()
+        send(c, &held(), &mut std::io::empty(), Path::new("/nonexistent/fragment-connection-call/never")).unwrap()
     }
 
     fn printed(answer: &Answer) -> &[u8] {
@@ -523,7 +525,7 @@ mod tests {
 
     /// A folder of one test's own.
     fn folder(what: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fragment-api-test-{what}-{}", rand::random::<u64>()));
+        let dir = std::env::temp_dir().join(format!("fragment-connection-call-test-{what}-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
