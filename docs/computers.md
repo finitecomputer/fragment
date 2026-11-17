@@ -662,13 +662,11 @@ provider's own hosts.
   fragment for them at each request it swaps and each read of a view,
   and keeps none: a provider taken away is refused from the next request.
   A computer from before held them itself (`agents.connections`,
-  `agent_accounts`). Each ask carries that row as it stands, marked
-  `MOVED` once answered; the agent's fragment keeps the row it saw last
-  and takes from a row only what changed since (`grants::answered`): all
-  of it the first time, then what the release before wrote during a
-  rollback (a list, an account picked or reset), while a row sent again
-  unchanged (a reply lost) changes nothing. The release before reads the
-  mark as no provider at all, so a rollback never widens a moved agent.
+  `agent_accounts`): an agent's first ask after the deploy carries that
+  row, taken whole by a fragment holding none of its own and ignored by
+  one that does (`grants::answered`), then marked moved and sent no more.
+  The release is forward only (the Computer's step 5): the release before
+  refuses every computer, so it never writes those rows again.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):

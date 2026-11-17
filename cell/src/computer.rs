@@ -313,9 +313,6 @@ enum MetaKey {
     SaveNote,
     /// The test lever's saves still to fail (`fail-saves`).
     FailSaves,
-    /// Test fleets only: while set, an agent's row is never marked moved
-    /// once its fragment answers (`skip-marks`), as when that answer was lost.
-    TestSkipMarks,
     /// The test lever's bound on its saves' backups while its shim hangs
     /// (`hang-backups`), in ms.
     HangBackups,
@@ -367,7 +364,6 @@ impl MetaKey {
             MetaKey::Note => "note",
             MetaKey::SaveNote => "save_note",
             MetaKey::FailSaves => "fail_saves",
-            MetaKey::TestSkipMarks => "test_skip_marks",
             MetaKey::HangBackups => "hang_backups",
             MetaKey::AliveCheck => "alive_check",
             MetaKey::WorkosUser => "workos_user",
@@ -2034,15 +2030,14 @@ impl ComputerCell {
 
     /// What agent fragment `fragment` (its agent `identity`) may use, asked
     /// of it, with its owner's change when they make one (its fields:
-    /// runs_on.rs `grants`). Each ask carries the row this computer kept for
-    /// it before the move, as it stands (`grants::Row`), and an unmarked row
-    /// is marked moved once answered: its fragment takes from it only what
-    /// changed since it saw it last (`grants::answered`), so an ask sent
-    /// again (its reply lost, a stop before the mark) changes nothing, and
-    /// what the release before wrote during a rollback is taken.
+    /// runs_on.rs `grants`). Until its fragment has taken the row this
+    /// computer kept for it before the move, each ask carries that row
+    /// (`taken`); once answered, the row is marked `MOVED` and sent no
+    /// more. A fragment holding grants of its own ignores a row, so one
+    /// sent late or again changes nothing (`grants::answered`).
     async fn grants_of(&self, fragment: &str, identity: &str, change: Option<(&str, Value)>) -> CellResult<Grants> {
-        let row = self.row(fragment)?;
-        let mut ask = json!({ "computer": self.must(MetaKey::Id)?, "identity": identity, "row": row.as_ref().map(grants::Row::value) });
+        let taken = self.row(fragment)?.filter(|r| r.connections != grants::MOVED);
+        let mut ask = json!({ "computer": self.must(MetaKey::Id)?, "identity": identity, "taken": taken.as_ref().map(grants::Row::value) });
         if let Some((owner, change)) = change {
             ask["owner"] = json!(owner);
             for (k, v) in change.as_object().into_iter().flatten() {
@@ -2050,9 +2045,8 @@ impl ComputerCell {
             }
         }
         let grants = self.ask_grants(fragment, &ask).await?;
-        let lost = self.cfg.test_hooks && self.meta(MetaKey::TestSkipMarks)?.is_some();
-        if !lost && row.is_some_and(|r| r.connections != grants::MOVED) {
-            self.exec(grants::MARK, vec![grants::MOVED.into(), fragment.into()])?;
+        if taken.is_some() {
+            self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![grants::MOVED.into(), fragment.into()])?;
         }
         Ok(grants)
     }
@@ -2065,10 +2059,10 @@ impl ComputerCell {
     /// `fragment`'s row as this computer kept what it may use before the
     /// move, as it stands: none for an agent that does not run here.
     fn row(&self, fragment: &str) -> CellResult<Option<grants::Row>> {
-        let rows = self.rows(grants::ROW_CONNECTIONS, vec![fragment.into()])?;
+        let rows = self.rows("SELECT connections FROM agents WHERE fragment = ?", vec![fragment.into()])?;
         let Some(connections) = rows.first().and_then(|r| r["connections"].as_str()).map(str::to_string) else { return Ok(None) };
         let mut accounts = BTreeMap::new();
-        for r in self.rows(grants::ROW_ACCOUNTS, vec![fragment.into()])? {
+        for r in self.rows("SELECT provider, account FROM agent_accounts WHERE agent = ?", vec![fragment.into()])? {
             if let (Some(p), Some(a)) = (r["provider"].as_str(), r["account"].as_str()) {
                 accounts.insert(p.to_string(), a.to_string());
             }
@@ -2076,10 +2070,10 @@ impl ComputerCell {
         Ok(Some(grants::Row { connections, accounts }))
     }
 
-    /// Hands `fragment`'s row to its fragment while its `connections` are
-    /// not marked moved (before this release's upsert or delete takes them):
-    /// a fragment gone, or made again since (another agent's), has no one
-    /// to hand them to, and they go as they are.
+    /// Hands `fragment`'s row to its fragment while it is not yet taken
+    /// (before this release's upsert or delete loses it): a fragment gone,
+    /// or made again since (another agent's), has no one to take it, and
+    /// it goes as it is.
     async fn move_row(&self, fragment: &str) -> CellResult<()> {
         if self.row(fragment)?.is_none_or(|r| r.connections == grants::MOVED) {
             return Ok(());
@@ -2553,8 +2547,7 @@ impl ComputerCell {
     /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
     /// past its time; `legacy-grants {agent, row?}` writes an agent's row as
     /// a release before the grants' move did (`fragment_core::grants`):
-    /// `row.connections`, `row.accounts` or both, then reads it; `skip-marks
-    /// {on}` leaves its agents' rows unmarked, as when an answer was lost.
+    /// `row.connections`, `row.accounts` or both, then reads it.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         if b.op == "schema" {
@@ -2706,15 +2699,6 @@ impl ComputerCell {
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
             }
-            "skip-marks" => {
-                // its agents' rows never marked moved while on, as when each
-                // fragment's answer was lost on its way back (grants_of)
-                match b.on.ok_or_else(|| CellError::invalid("skip-marks names on: true or false"))? {
-                    true => self.set_meta(MetaKey::TestSkipMarks, "1")?,
-                    false => self.delete_meta(MetaKey::TestSkipMarks)?,
-                }
-                Ok(json!({ "computer": id, "skipMarks": b.on }))
-            }
             "legacy-grants" => {
                 // an agent's row as a release before the move wrote it (a
                 // computer from before it, or one rolled back to): written
@@ -2743,7 +2727,7 @@ impl ComputerCell {
                 }
                 Ok(json!({ "computer": id, "agent": agent, "row": { "connections": connections, "accounts": accounts } }))
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in, always-on, skip-marks or legacy-grants"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in, always-on or legacy-grants"))),
         }
     }
 
@@ -3079,9 +3063,6 @@ impl ComputerCell {
                 // assigned again; a row from before the move is handed over
                 // first
                 self.move_row(fragment).await?;
-                // the old picks stay the release before's to change (its
-                // fragment takes what it changes), but another life's go
-                self.exec("DELETE FROM agent_accounts WHERE agent = ? AND agent IN (SELECT fragment FROM agents WHERE fragment = ? AND identity != ?)", vec![(*fragment).into(), (*fragment).into(), identity.into()])?;
                 self.exec(
                     "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, ?) ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity, connections = excluded.connections",
                     vec![(*fragment).into(), identity.into(), who.as_str().into(), js::now_ms().into(), grants::MOVED.into()],
@@ -3218,9 +3199,7 @@ impl ComputerCell {
             None => self.rows("DELETE FROM agents WHERE fragment = ? RETURNING fragment", vec![fragment.into()])?,
         };
         assert!(gone.len() <= 1, "a computer runs a fragment once");
-        // an ended life's old picks go with it; a live agent's stay the
-        // release before's, which its fragment compares (grants::answered)
-        if !gone.is_empty() && identity.is_some() {
+        if !gone.is_empty() {
             self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![fragment.into()])?;
         }
         let view = self.view().await?;

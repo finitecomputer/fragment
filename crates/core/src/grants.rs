@@ -7,18 +7,14 @@
 //! each use and keeps none. Pure: the cell stores and asks, this reads.
 //!
 //! **The move** from the computer, which kept them before (its
-//! `agents.connections` and `agent_accounts`, the release before's only
-//! record): a computer sends its agent's row as it stands (`Row`) with
-//! each ask, then marks its `connections` `MOVED`. The fragment keeps the
-//! row it saw last and takes from a row only what changed since
-//! (`answered`): the whole of it the first time; after that, what the
-//! release before wrote during a rollback (a list, an account picked or
-//! reset), field by field. A row sent again unchanged (a reply lost after
-//! the fragment took it, a stop before the mark) changes nothing, so it
-//! never undoes what its owner set since. This release never writes the
-//! old picks table but to clear another life's rows. The release before
-//! reads the mark as a list naming no provider and never writes it, so a
-//! rollback refuses a moved agent every provider rather than widen it.
+//! `agents.connections` and `agent_accounts`): an agent's first ask after
+//! the deploy carries that row (`Row`), taken whole by a fragment that
+//! holds no grants of its own yet, and ignored by one that does
+//! (`answered`), so a row sent late or again can never undo what its owner
+//! set since. The computer then marks the row `MOVED` and sends it no
+//! more. The release is forward only (the Computer's step 5): the release
+//! before refuses every Computer object, so it never writes those rows
+//! again.
 
 use std::collections::BTreeMap;
 
@@ -28,8 +24,9 @@ use serde_json::{json, Value};
 use crate::catalog::{valid_name, PROVIDERS_MAX};
 use crate::connection_accounts::valid_account_id;
 
-/// A moved row's `agents.connections`: a list whose one name no provider
-/// can have (`catalog::valid_name` refuses a leading `-`).
+/// A taken row's `agents.connections`: its fragment holds it, so its
+/// computer sends it no more. A list whose one name no provider can have
+/// (`catalog::valid_name` refuses a leading `-`), never a value of its own.
 pub const MOVED: &str = r#"["-"]"#;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,13 +87,6 @@ pub fn allows(narrowed: Option<&[String]>, provider: &str) -> bool {
     narrowed.is_none_or(|list| list.iter().any(|p| p == provider))
 }
 
-/// The SQL a computer reads its agent's row with (`?`: the agent fragment),
-/// and marks it moved with (`?`: `MOVED`, the fragment): the cell's, and
-/// the compatibility tests' beside the release before's own writes.
-pub const ROW_CONNECTIONS: &str = "SELECT connections FROM agents WHERE fragment = ?";
-pub const ROW_ACCOUNTS: &str = "SELECT provider, account FROM agent_accounts WHERE agent = ?";
-pub const MARK: &str = "UPDATE agents SET connections = ? WHERE fragment = ?";
-
 /// A computer's row for an agent as it stands: its `agents.connections` as
 /// stored (`MOVED` once marked) and its `agent_accounts`, provider to id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -128,27 +118,20 @@ pub enum Change {
     Account { provider: String, account: Option<String> },
 }
 
-/// What an agent's fragment holds after its computer's ask: what it held,
-/// with what its computer's `row` changed since the row it `seen` last
-/// (all of it, the first time), then its owner's `change`. A `MOVED`
-/// row's `connections` change nothing: this release marked them. Refused
-/// when the row does not read, or the result is no agent's grants.
-pub fn answered(held: Option<&Grants>, seen: Option<&Row>, row: Option<&Row>, change: Option<Change>) -> Result<Grants, String> {
-    let mut grants = held.cloned().unwrap_or_default();
-    if let Some(row) = row {
-        if row.connections != MOVED && seen.is_none_or(|s| s.connections != row.connections) {
-            grants.connections = serde_json::from_slice(row.connections.as_bytes()).map_err(|e| format!("its computer's connections {:?}: {e}", row.connections))?;
+/// What an agent's fragment holds after its computer's ask: what it held;
+/// else, holding none of its own, the row its computer kept before the move
+/// (`taken`), whole; else the default (every provider, each connection's
+/// default account); then its owner's `change`. Refused when the row does
+/// not read, or the result is no agent's grants.
+pub fn answered(held: Option<&Grants>, taken: Option<&Row>, change: Option<Change>) -> Result<Grants, String> {
+    let mut grants = match (held, taken) {
+        (Some(held), _) => held.clone(),
+        (None, Some(row)) if row.connections != MOVED => {
+            let connections = serde_json::from_slice(row.connections.as_bytes()).map_err(|e| format!("its computer's connections {:?}: {e}", row.connections))?;
+            Grants { connections, accounts: row.accounts.clone() }
         }
-        let before = seen.map(|s| &s.accounts);
-        let named = row.accounts.keys().chain(before.into_iter().flat_map(|b| b.keys()));
-        let changed: Vec<String> = named.filter(|p| before.is_none_or(|b| b.get(*p) != row.accounts.get(*p))).cloned().collect();
-        for provider in changed {
-            match row.accounts.get(&provider) {
-                Some(account) => grants.accounts.insert(provider, account.clone()),
-                None => grants.accounts.remove(&provider),
-            };
-        }
-    }
+        (None, _) => Grants::default(),
+    };
     match change {
         Some(Change::Connections(list)) => grants.connections = list,
         Some(Change::Account { provider, account: Some(account) }) => {
@@ -210,209 +193,66 @@ mod tests {
         assert!(!Grants { connections: Some(many), ..Grants::default() }.valid());
     }
 
-    #[test]
-    fn moved_is_no_provider_and_never_written_before() {
-        // the release before reads the mark as a narrowed list (its
-        // `may_use`): no catalog provider is named `-`, so it refuses all
-        let marked: Vec<String> = serde_json::from_str(MOVED).expect("a list");
-        assert!(marked.iter().all(|n| !valid_name(n)), "the release before refuses this name in a write");
-        assert!(!Grants { connections: Some(marked), ..Grants::default() }.may_use("google"));
-    }
-
     fn row(connections: &str, accounts: &[(&str, &str)]) -> Row {
         Row { connections: connections.into(), accounts: accounts.iter().map(|(p, a)| (p.to_string(), a.to_string())).collect() }
     }
 
     #[test]
-    fn a_row_is_taken_whole_the_first_time() {
-        let taken = answered(None, None, Some(&row(r#"["github"]"#, &[("google", "data_1")])), None).expect("reads");
-        assert_eq!(taken.connections, list(&["github"]));
-        assert_eq!(taken.account("google"), Some("data_1"));
-        assert_eq!(answered(None, None, Some(&row("[]", &[])), None), Ok(Grants::none()), "narrowed to none is none, never every");
-        assert_eq!(answered(None, None, Some(&row(MOVED, &[])), None), Ok(Grants::default()), "a row this release made says nothing");
-        assert!(answered(None, None, Some(&row("{}", &[])), None).is_err(), "a row that does not read is a fault, never every provider");
-        assert_eq!(Row::of(&row(MOVED, &[("google", "data_1")]).value()), Some(row(MOVED, &[("google", "data_1")])));
+    fn the_first_ask_takes_the_old_row_whole() {
+        let taken = answered(None, Some(&row(r#"["github"]"#, &[("google", "data_1")])), None).expect("reads");
+        assert_eq!((taken.connections.clone(), taken.account("google")), (list(&["github"]), Some("data_1")));
+        assert_eq!(answered(None, Some(&row("[]", &[])), None), Ok(Grants::none()), "narrowed to none is none, never every");
+        assert!(answered(None, Some(&row("{}", &[])), None).is_err(), "a row that does not read is a fault, never every provider");
+        assert_eq!(Row::of(&row("null", &[("google", "data_1")]).value()), Some(row("null", &[("google", "data_1")])));
     }
 
     #[test]
-    fn a_row_sent_again_unchanged_changes_nothing() {
-        let first = row("null", &[]);
-        // its owner narrowed to none as the row was first sent; the reply
-        // was lost, so its computer never marked it, and sends it again
-        let held = answered(None, None, Some(&first), Some(Change::Connections(Some(vec![])))).expect("taken");
-        assert_eq!(held, Grants::none());
-        assert_eq!(answered(Some(&held), Some(&first), Some(&first), None), Ok(Grants::none()), "never widened back to every");
+    fn a_later_row_is_ignored() {
+        let held = Grants { connections: list(&["github"]), accounts: BTreeMap::from([("google".into(), "data_1".into())]) };
+        for later in [row("null", &[]), row(r#"["github","slack"]"#, &[("google", "data_2")]), row("[]", &[])] {
+            assert_eq!(answered(Some(&held), Some(&later), None), Ok(held.clone()), "{later:?} changes nothing");
+        }
     }
 
     #[test]
-    fn a_rollbacks_edits_are_taken_field_by_field() {
-        let seen = row(MOVED, &[("e2e-several", "data_a")]);
-        let held = Grants { connections: list(&["e2e-several"]), accounts: BTreeMap::from([("e2e-several".into(), "data_a".into())]) };
-        let after = |r: Row| answered(Some(&held), Some(&seen), Some(&r), None).expect("reads");
-        assert_eq!(after(row(MOVED, &[("e2e-several", "data_b")])).account("e2e-several"), Some("data_b"), "A to B");
-        assert_eq!(after(row(MOVED, &[])).account("e2e-several"), None, "A to the default");
-        let listed = after(row(r#"["e2e-several","github"]"#, &[("e2e-several", "data_a")]));
-        assert_eq!((listed.connections, listed.accounts), (list(&["e2e-several", "github"]), held.accounts.clone()), "a list alone keeps the pick");
-        assert_eq!(after(seen.clone()), held, "nothing written, nothing changed");
-    }
-}
-
-/// The release before's own writes (ff82fb88e, cell/src/computer.rs,
-/// verbatim) on a real SQLite holding the Computer's schema, against this
-/// release's computer (its reads and its mark: `ROW_CONNECTIONS`,
-/// `ROW_ACCOUNTS`, `MARK`) and its agent's fragment (`answered`, keeping
-/// what it holds and the row it saw last, as runs_on.rs does).
-#[cfg(all(test, feature = "sqlite"))]
-mod compat {
-    use super::*;
-    use rusqlite::{params, Connection};
-
-    const AGENT: &str = "juniper--k3x9";
-    const SEVERAL: &str = "e2e-several";
-
-    fn computer() -> Connection {
-        let db = Connection::open_in_memory().expect("an in-memory SQLite");
-        for step in crate::migrate::COMPUTER.steps {
-            db.execute_batch(step.sql).expect(step.name);
-        }
-        db
-    }
-
-    /// The release before, as its routes write: assign, a list, an
-    /// account picked or reset, and an unassign.
-    struct Before<'a>(&'a Connection);
-
-    impl Before<'_> {
-        fn assign(&self) {
-            let sql = "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, 'null') ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity";
-            self.0.execute(sql, params![AGENT, "npub1agent", "npub1owner", 1]).expect("assign");
-        }
-
-        fn connections(&self, list: Option<&[&str]>) {
-            let text = serde_json::to_string(&list).expect("a list");
-            self.0.execute("UPDATE agents SET connections = ? WHERE fragment = ?", params![text, AGENT]).expect("connections");
-        }
-
-        fn account(&self, account: Option<&str>) {
-            match account {
-                Some(account) => self.0.execute(
-                    "INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?) ON CONFLICT (agent, provider) DO UPDATE SET account = excluded.account",
-                    params![AGENT, SEVERAL, account],
-                ),
-                None => self.0.execute("DELETE FROM agent_accounts WHERE agent = ? AND provider = ?", params![AGENT, SEVERAL]),
-            }
-            .expect("account");
-        }
-
-        fn unassign(&self) {
-            let gone: Vec<String> = self.0.prepare("DELETE FROM agents WHERE fragment = ? RETURNING fragment").and_then(|mut q| q.query_map(params![AGENT], |r| r.get(0))?.collect()).expect("unassign");
-            if !gone.is_empty() {
-                self.0.execute("DELETE FROM agent_accounts WHERE agent = ?", params![AGENT]).expect("its picks");
-            }
-        }
-    }
-
-    /// This release: its computer's ask, and its agent's fragment.
-    struct Now<'a> {
-        db: &'a Connection,
-        held: Option<Grants>,
-        seen: Option<Row>,
-    }
-
-    impl Now<'_> {
-        fn new(db: &Connection) -> Now<'_> {
-            Now { db, held: None, seen: None }
-        }
-
-        fn row(&self) -> Option<Row> {
-            let connections: Option<String> = self.db.query_row(ROW_CONNECTIONS, params![AGENT], |r| r.get(0)).ok();
-            let mut q = self.db.prepare(ROW_ACCOUNTS).expect("its picks");
-            let picks: Vec<(String, String)> = q.query_map(params![AGENT], |r| Ok((r.get(0)?, r.get(1)?))).expect("read").collect::<Result<_, _>>().expect("rows");
-            connections.map(|connections| Row { connections, accounts: picks.into_iter().collect() })
-        }
-
-        /// One ask, its owner's `change` with it; `lost`: its reply lost
-        /// once the fragment answered, so the computer marks nothing.
-        fn ask(&mut self, change: Option<Change>, lost: bool) -> Grants {
-            let row = self.row();
-            let grants = answered(self.held.as_ref(), self.seen.as_ref(), row.as_ref(), change).expect("answered");
-            self.held = Some(grants.clone());
-            if let Some(row) = &row {
-                self.seen = Some(row.clone());
-                if !lost && row.connections != MOVED {
-                    self.db.execute(MARK, params![MOVED, AGENT]).expect("marked");
-                }
-            }
-            grants
-        }
-    }
-
-    /// Picked A on the release before, then this release's first ask.
-    fn moved_with_a(db: &Connection) -> Now<'_> {
-        let before = Before(db);
-        before.assign();
-        before.account(Some("data_a"));
-        let mut now = Now::new(db);
-        assert_eq!(now.ask(None, false).account(SEVERAL), Some("data_a"), "its pick taken with its row");
-        assert_eq!(now.row().map(|r| r.connections), Some(MOVED.to_string()), "and the row marked");
-        now
-    }
-
-    #[test]
-    fn a_pick_changed_during_a_rollback_is_kept() {
-        let db = computer();
-        let mut now = moved_with_a(&db);
-        Before(&db).account(Some("data_b"));
-        assert_eq!(now.ask(None, false).account(SEVERAL), Some("data_b"), "A to B there is B here");
-    }
-
-    #[test]
-    fn a_pick_reset_during_a_rollback_is_kept() {
-        let db = computer();
-        let mut now = moved_with_a(&db);
-        Before(&db).account(None);
-        assert_eq!(now.ask(None, false).account(SEVERAL), None, "A reset there is the default here, never A again");
-    }
-
-    #[test]
-    fn a_list_alone_during_a_rollback_keeps_the_pick() {
-        let db = computer();
-        let mut now = moved_with_a(&db);
-        Before(&db).connections(Some(&["e2e-several", "github"]));
-        let after = now.ask(None, false);
-        assert_eq!(after.account(SEVERAL), Some("data_a"), "its pick kept");
-        assert_eq!(after.connections, Some(vec!["e2e-several".to_string(), "github".to_string()]), "its list taken");
-    }
-
-    #[test]
-    fn a_reply_lost_after_the_fragment_took_a_narrowing_never_widens() {
-        let db = computer();
-        Before(&db).assign();
-        let mut now = Now::new(&db);
-        let narrowed = now.ask(Some(Change::Connections(Some(vec![]))), true);
+    fn a_narrowing_survives_a_delayed_pre_take_ask() {
+        // Codex round 2 P1: an ask read the old row (every provider) before
+        // the narrowing took it, and arrives after (a release refusal's retry)
+        let legacy = row("null", &[]);
+        let narrowed = answered(None, Some(&legacy), Some(Change::Connections(Some(vec![])))).expect("taken, then narrowed");
         assert_eq!(narrowed, Grants::none());
-        assert_ne!(now.row().map(|r| r.connections), Some(MOVED.to_string()), "its reply lost, the row stays unmarked");
-        assert_eq!(now.ask(None, false), Grants::none(), "the row sent again changes nothing: never every provider");
+        let viewed = answered(Some(&narrowed), None, None).expect("an ask once marked carries no row");
+        assert_eq!(answered(Some(&viewed), Some(&legacy), None), Ok(Grants::none()), "the delayed ask never widens");
+        // and a reply lost: the same row sent again
+        assert_eq!(answered(Some(&narrowed), Some(&legacy), None), Ok(Grants::none()));
     }
 
     #[test]
-    fn this_releases_choices_outlive_a_rollback_that_writes_nothing() {
-        let db = computer();
-        let mut now = moved_with_a(&db);
-        now.ask(Some(Change::Account { provider: SEVERAL.into(), account: Some("data_c".into()) }), false);
-        let narrowed = now.ask(Some(Change::Connections(Some(vec![SEVERAL.into()]))), false);
-        assert_eq!(now.ask(None, false), narrowed, "the row unchanged, as the release before left it");
+    fn an_agent_with_no_old_row_starts_fresh() {
+        assert_eq!(answered(None, None, None), Ok(Grants::default()), "every provider, each connection's default account");
+        assert_eq!(answered(None, Some(&row(MOVED, &[("google", "data_1")])), None), Ok(Grants::default()), "a row marked taken is no row");
+        let picked = answered(None, None, Some(Change::Account { provider: "google".into(), account: Some("data_1".into()) })).expect("picked");
+        assert_eq!((picked.connections.clone(), picked.account("google")), (None, Some("data_1")));
     }
 
+    /// Goal: the release before can never write an agent's old row again,
+    /// so nothing it writes needs merging (docs/MODEL.md: a release whose
+    /// stored value an older one cannot read is forward only). An object
+    /// that took Computer step 5 is refused by the code of the step before,
+    /// so rollout's `eligible` never rolls back across it; rolled forward,
+    /// it is current (valid, rollback, restart). Method: a Computer made by
+    /// this code, then started by the code of one step before, then by this.
     #[test]
-    fn a_reassign_during_a_rollback_is_the_release_befores_fresh_agent() {
-        let db = computer();
-        let mut now = moved_with_a(&db);
-        now.ask(Some(Change::Connections(Some(vec![SEVERAL.into()]))), false);
-        let before = Before(&db);
-        before.unassign();
-        before.assign();
-        let after = now.ask(None, false);
-        assert_eq!((after.connections.clone(), after.account(SEVERAL)), (None, None), "every provider and the default, as that release made it");
+    fn the_code_one_step_before_refuses_the_computer() {
+        use crate::migrate::{self, host::Lite, Db, Ran, SchemaError, COMPUTER};
+        let newest = COMPUTER.steps.len() as u32;
+        assert_eq!((newest, COMPUTER.steps.last().map(|s| s.name)), (5, Some("grants_forward_only")), "the move's step is the newest");
+        let before = migrate::Class { steps: &COMPUTER.steps[..4], ..COMPUTER };
+        let db = Lite::new();
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 0)), Ok(Ran::Made { version: newest }));
+        db.exec("INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES ('juniper--k3x9', 'npub1a', 'npub1o', 1, '[\"-\"]')").expect("a taken row");
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &before, 100)), Err(SchemaError::Newer { class: "Computer", held: newest, known: 4 }), "the release before refuses it");
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 200)), Ok(Ran::Current { version: newest }), "rolled forward, it is current");
+        assert_eq!(db.rows("SELECT connections FROM agents").expect("its row")[0]["connections"], MOVED, "its row as written");
     }
 }

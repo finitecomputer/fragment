@@ -128,13 +128,12 @@ impl FragmentCell {
 
     /// `computer/grants`: what this agent may use of its owner's
     /// (`fragment_core::grants`), asked by the computer it runs on at each
-    /// use (`{computer, identity, row}`): what it holds, with what that
-    /// computer's row from before the move (`row`) changed since the one
-    /// it saw last (`MetaKey::GrantsSeen`), then its owner's change, in
-    /// person (`owner` with `connections`, or with `provider` and
-    /// `account`: their computer's routes, which a signed person alone
-    /// reaches). Read field by field, as this file's other bodies are (the
-    /// cell's Wasm budget).
+    /// use (`{computer, identity}`): what it holds, or, holding none of its
+    /// own, that computer's row from before the move (`taken`), taken once;
+    /// then its owner's change, in person (`owner` with `connections`, or
+    /// with `provider` and `account`: their computer's routes, which a
+    /// signed person alone reaches). Read field by field, as this file's
+    /// other bodies are (the cell's Wasm budget).
     pub(crate) fn grants(&self, body: &[u8]) -> CellResult<Grants> {
         use fragment_core::grants::{answered, Change, Row};
         self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
@@ -148,11 +147,7 @@ impl FragmentCell {
             Some(stored) => Some(Grants::read(&stored).map_err(|e| CellError::host(format!("its stored grants: {e}")))?),
             None => None,
         };
-        let seen = match self.meta(MetaKey::GrantsSeen)? {
-            Some(stored) => Some(crate::json_text::<Value>(&stored).ok().as_ref().and_then(Row::of).ok_or_else(|| CellError::host("the row it saw last does not read"))?),
-            None => None,
-        };
-        let row = match &body["row"] {
+        let taken = match &body["taken"] {
             Value::Null => None,
             v => Some(Row::of(v).ok_or_else(|| CellError::invalid("a row is its connections as stored and its accounts"))?),
         };
@@ -168,14 +163,16 @@ impl FragmentCell {
         if changed && text("owner") != self.must(MetaKey::Owner)? {
             return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner, in person, changes what it may use"));
         }
-        let grants = answered(held.as_ref(), seen.as_ref(), row.as_ref(), change).map_err(|e| CellError::invalid(format!("{e}: {}", invalid().message)))?;
-        if held.clone().unwrap_or_default() != grants {
+        let grants = answered(held.as_ref(), taken.as_ref(), change).map_err(|e| CellError::invalid(format!("{e}: {}", invalid().message)))?;
+        // a row taken is held from then on, the default too: none taken again
+        let keep = match &held {
+            Some(held) => *held != grants,
+            None => taken.is_some() || changed,
+        };
+        if keep {
             self.set_meta(MetaKey::Grants, &grants.stored())?;
             let by = if changed { "changed by its owner" } else { "taken from its computer's row" };
             self.event("agent.grants", &format!("what it may use of its owner's, {by}"), json!({ "grants": grants, "moved": !changed }));
-        }
-        if let Some(row) = row.filter(|r| seen.as_ref() != Some(r)) {
-            self.set_meta(MetaKey::GrantsSeen, &row.value().to_string())?;
         }
         Ok(grants)
     }

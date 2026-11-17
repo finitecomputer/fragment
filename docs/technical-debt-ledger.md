@@ -70,32 +70,22 @@ unfinished design, not debt.
 - **Shortcut:** what an agent may use of its owner's (its narrowed
   providers, its account at each connection of several) moved from its
   computer (`agents.connections`, `agent_accounts`) to its agent fragment
-  (`meta` `grants`, `fragment_core::grants`). The release before reads
-  and writes only the computer's rows, so they stay: each ask carries an
-  agent's row as it stands (`ComputerCell::grants_of`), its `connections`
-  are marked `MOVED` once answered (that release reads the mark as no
-  provider, and never writes it), and its fragment keeps the row it saw
-  last (`grants_seen`) and takes only what changed since
-  (`grants::answered`). This release writes the old picks table only to
-  clear an ended or other life's rows. The test levers `legacy-grants` and
-  `skip-marks` (a computer's) and `forget-grants` (a fragment's) write a
-  row as that release did, leave rows unmarked as a lost answer would,
-  and make a fragment as before the move.
-- **Risk:** a rollback to the release before refuses every moved agent
-  every provider (fail closed) until the next deploy. Its Settings show
-  each such agent narrowed to none, refuse a switch (its list carries the
-  mark) and offer no account pick. What it can still write (a list sent
-  whole, an account picked or reset by a hand-made call, an unassign and
-  assign) is taken at the next deploy, as its owner's newer word. A pick
-  made on this release lives only in the fragment, so that release cannot
-  see it to reset it. A computer that never runs this release keeps its
-  rows unmoved.
-- **Delete when:** production runs this release, so none rolls back past
-  it: a Computer schema step drops `agents.connections` and
-  `agent_accounts`, first copying each row not yet taken by its fragment
-  into the computer's `meta` as one to hand over (a computer asleep
-  through this release included); the row in each ask, `grants_seen`,
-  the mark and the three levers go with them.
+  (`meta` `grants`, `fragment_core::grants`). The columns stay for a
+  release: until an agent's fragment has taken its row, each ask carries
+  it (`ComputerCell::grants_of`, `move_row`); a fragment holding none of
+  its own takes it whole and ignores it after, and the row is marked
+  `MOVED`. The release is forward only (the Computer's step 5), so the
+  release before never writes those rows again. The test levers
+  `legacy-grants` (a computer's) and `forget-grants` (a fragment's) make
+  an agent as before the move.
+- **Risk:** no rollback across this release: rollout's `eligible` refuses
+  it, and a hand-made one finds every Computer object refusing its code.
+  A computer that never runs this release keeps its rows untaken.
+- **Delete when:** production runs this release: a Computer schema step
+  drops `agents.connections` and `agent_accounts`, first copying each row
+  not yet taken into the computer's `meta` as one to hand over (a computer
+  asleep through this release included); `taken` in each ask, the mark,
+  `move_row` and both levers go with them.
 
 ## A chat wiped while its seed runs can keep its template's repo
 
