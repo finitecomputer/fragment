@@ -72,22 +72,28 @@ unfinished design, not debt.
   computer (`agents.connections`, `agent_accounts`) to its agent fragment
   (`meta` `grants`, `fragment_core::grants`). The release before reads
   only the computer's rows, so the columns stay: a computer hands each
-  agent's row over once, at its first ask after the deploy
-  (`ComputerCell::grants_of`, `move_row`), and marks it `MOVED`, which
-  that release reads as no provider at all (and never writes). A row it
-  writes after a rollback is unmarked, and handed over again. The test
-  lever `legacy-grants` writes a row as that release did.
+  agent's row over at its first ask after the deploy, in a call of its own
+  (`ComputerCell::grants_of`, `move_row`), and marks it `MOVED`, which that
+  release reads as no provider at all (and never writes). The fragment
+  takes a hand-over whole only while it holds none; a row handed over
+  again only narrows its providers and never changes its accounts
+  (`grants::handed_over`). The test levers `legacy-grants` (a computer's)
+  and `forget-grants` (a fragment's) write a row as that release did, and
+  a fragment as before the move.
 - **Risk:** a rollback to the release before refuses every moved agent
-  every provider (fail closed) until the next deploy; its Settings show
-  each such agent narrowed to none and refuse a change made there by
-  switch (its list carries the mark), though one sent whole is taken.
-  Nothing widens, and no choice is lost. A computer that never runs this
-  release keeps its rows unmoved.
+  every provider (fail closed) until the next deploy. Its Settings show
+  each such agent narrowed to none, refuse a switch (its list carries the
+  mark) and offer no account pick. What only a hand-made call can still
+  write there comes back narrowed or ignored: a list sent whole is kept
+  only as far as it narrows the agent; an account picked or reset, with
+  or without a list, changes nothing, the agent keeping the account its
+  owner picked before. Nothing widens and no account changes. A computer
+  that never runs this release keeps its rows unmoved.
 - **Delete when:** production runs this release, so none rolls back past
   it: a Computer schema step drops `agents.connections` and
   `agent_accounts`, first copying each unmoved row into the computer's
   `meta` as one to hand over (a computer asleep through this release
-  included), and the move, the mark and the lever go with them.
+  included), and the move, the mark and both levers go with them.
 
 ## A chat wiped while its seed runs can keep its template's repo
 

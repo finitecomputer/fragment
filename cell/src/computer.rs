@@ -723,18 +723,10 @@ struct TestLever {
     /// `legacy-grants`': the agent fragment whose row it reads or writes.
     #[serde(default)]
     agent: Option<String>,
-    /// `legacy-grants`': its row as a release before the move writes it.
+    /// `legacy-grants`': what it writes of the row, as a release before the
+    /// move writes it: `connections` as stored, `accounts` provider → id.
     #[serde(default)]
-    row: Option<LegacyRow>,
-}
-
-/// An agent's row as a release before the move kept what it may use: its
-/// `agents.connections`, as stored, and its `agent_accounts`.
-#[derive(serde::Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyRow {
-    connections: String,
-    accounts: BTreeMap<String, String>,
+    row: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -2041,28 +2033,36 @@ impl ComputerCell {
     }
 
     /// What agent fragment `fragment` (its agent `identity`) may use, asked
-    /// of it, with its owner's change when they make one (`owner`, `change`:
-    /// runs_on.rs `GrantsChange`). Its row from before the move is handed
-    /// over first, once (`fragment_core::grants`): under `moving`, so no
-    /// ask overtakes it, then marked moved.
+    /// of it, after its owner's `change` when they make one (its fields:
+    /// runs_on.rs `grants`). Its row from before the move is handed over
+    /// first, in a call of its own (`fragment_core::grants::handed_over`),
+    /// under `moving` so no ask overtakes it, then marked moved; only then
+    /// does a change go. A stop between the hand-over and the mark hands
+    /// the row over again, which narrows at most.
     async fn grants_of(&self, fragment: &str, identity: &str, change: Option<(&str, Value)>) -> CellResult<Grants> {
-        let mut ask = json!({ "computer": self.must(MetaKey::Id)?, "identity": identity });
+        let id = self.must(MetaKey::Id)?;
+        let mut ask = json!({ "computer": id, "identity": identity });
+        if self.unmoved(fragment)?.is_some() {
+            let _moving = self.moving.lock().await;
+            // another ask may have handed it over while this one waited
+            if let Some(taken) = self.unmoved(fragment)? {
+                ask["taken"] = json!(taken.stored());
+                let held = self.ask_grants(fragment, &ask).await?;
+                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![grants::MOVED.into(), fragment.into()])?;
+                console_log!("{}", json!({ "computer": id, "agent": fragment, "grants": "moved" }));
+                if change.is_none() {
+                    return Ok(held);
+                }
+                ask = json!({ "computer": id, "identity": identity });
+            }
+        }
         if let Some((owner, change)) = change {
             ask["owner"] = json!(owner);
-            ask["change"] = change;
+            for (k, v) in change.as_object().into_iter().flatten() {
+                ask[k] = v.clone();
+            }
         }
-        if self.unmoved(fragment)?.is_none() {
-            return self.ask_grants(fragment, &ask).await;
-        }
-        let _moving = self.moving.lock().await;
-        // another ask may have handed it over while this one waited
-        let Some(taken) = self.unmoved(fragment)? else { return self.ask_grants(fragment, &ask).await };
-        ask["taken"] = json!(taken);
-        let grants = self.ask_grants(fragment, &ask).await?;
-        self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![grants::MOVED.into(), fragment.into()])?;
-        self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![fragment.into()])?;
-        console_log!("{}", json!({ "computer": ask["computer"], "agent": fragment, "grants": "moved" }));
-        Ok(grants)
+        self.ask_grants(fragment, &ask).await
     }
 
     async fn ask_grants(&self, fragment: &str, ask: &Value) -> CellResult<Grants> {
@@ -2397,8 +2397,10 @@ impl ComputerCell {
 
     /// Its view: what its owner is told of it, and its agents, each with
     /// what it may use, asked of its fragment.
-    async fn view(&self) -> CellResult<ComputerView> {
-        self.asked(self.view_unasked()?).await
+    /// Boxed: its callers (about twenty routes) each hold a pointer to it,
+    /// not its state machine inlined (4 KB of the cell's Wasm).
+    fn view(&self) -> futures_util::future::LocalBoxFuture<'_, CellResult<ComputerView>> {
+        Box::pin(async move { self.asked(self.view_unasked()?).await })
     }
 
     fn view_unasked(&self) -> CellResult<Unasked> {
@@ -2556,8 +2558,8 @@ impl ComputerCell {
     /// {on}` is its owner's plan changing (the plan itself does not reach a
     /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
     /// past its time; `legacy-grants {agent, row?}` writes an agent's row as
-    /// a release before the grants' move did (`fragment_core::grants`), and
-    /// reads it.
+    /// a release before the grants' move did (`fragment_core::grants`):
+    /// `row.connections`, `row.accounts` or both, then reads it.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         if b.op == "schema" {
@@ -2715,18 +2717,27 @@ impl ComputerCell {
                 // when named, then read
                 let agent = b.agent.as_deref().ok_or_else(|| CellError::invalid("legacy-grants names its agent"))?;
                 self.runs(agent)?;
-                if let Some(row) = &b.row {
-                    self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![row.connections.as_str().into(), agent.into()])?;
+                let row = b.row.as_ref().unwrap_or(&Value::Null);
+                // each part as that release writes it: its connections (a
+                // list's PUT), or its picks (an account's PUT or reset)
+                if let Some(connections) = row["connections"].as_str() {
+                    self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![connections.into(), agent.into()])?;
+                }
+                if let Some(accounts) = row["accounts"].as_object() {
                     self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![agent.into()])?;
-                    for (provider, account) in &row.accounts {
-                        self.exec("INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?)", vec![agent.into(), provider.as_str().into(), account.as_str().into()])?;
+                    for (provider, account) in accounts {
+                        self.exec("INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?)", vec![agent.into(), provider.as_str().into(), account.as_str().unwrap_or_default().into()])?;
                     }
                 }
                 let connections = self.rows("SELECT connections FROM agents WHERE fragment = ?", vec![agent.into()])?;
                 let connections = connections.first().and_then(|r| r["connections"].as_str()).unwrap_or_default().to_string();
-                let picks = self.rows("SELECT provider, account FROM agent_accounts WHERE agent = ?", vec![agent.into()])?;
-                let accounts = picks.iter().filter_map(|r| Some((r["provider"].as_str()?.to_string(), r["account"].as_str()?.to_string()))).collect();
-                Ok(json!({ "computer": id, "agent": agent, "row": LegacyRow { connections, accounts } }))
+                let mut accounts = serde_json::Map::new();
+                for r in self.rows("SELECT provider, account FROM agent_accounts WHERE agent = ?", vec![agent.into()])? {
+                    if let (Some(p), Some(a)) = (r["provider"].as_str(), r["account"].as_str()) {
+                        accounts.insert(p.to_string(), json!(a));
+                    }
+                }
+                Ok(json!({ "computer": id, "agent": agent, "row": { "connections": connections, "accounts": accounts } }))
             }
             op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in, always-on or legacy-grants"))),
         }
@@ -3137,7 +3148,7 @@ impl ComputerCell {
                     }
                 }
                 let identity = self.runs(fragment)?;
-                let change = json!({ "account": { "provider": provider, "account": account } });
+                let change = json!({ "provider": provider, "account": account });
                 let set = self.grants_of(fragment, &identity, Some((&who, change))).await?;
                 assert_eq!(set.account(provider), account.as_deref(), "its fragment holds the account as its owner picked it");
                 // its owner's other pages read it again

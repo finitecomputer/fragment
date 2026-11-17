@@ -74,33 +74,6 @@ struct Assign {
     owner: String,
 }
 
-/// `computer/grants`: what this agent may use of its owner's, asked by the
-/// computer it runs on at each use (`fragment_core::grants`). `taken`: that
-/// computer's row from before the move, held from now on; `change`: its
-/// owner's, in person (their computer's routes, which a signed person alone
-/// reaches: never an agent, whomever it acts for).
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GrantsAsk {
-    computer: String,
-    identity: String,
-    #[serde(default)]
-    taken: Option<Grants>,
-    #[serde(default)]
-    owner: Option<String>,
-    #[serde(default)]
-    change: Option<GrantsChange>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-enum GrantsChange {
-    /// The providers it may use, or every one (`null`).
-    Connections(Option<Vec<String>>),
-    /// The account it uses at `provider`, or the default (`null`).
-    Account { provider: String, account: Option<String> },
-}
-
 #[derive(Deserialize)]
 struct Sign {
     computer: String,
@@ -153,42 +126,63 @@ impl FragmentCell {
         Ok(Response::from_body(body)?.with_headers(headers))
     }
 
-    /// `computer/grants` (`GrantsAsk`): what this agent may use of its
-    /// owner's, as it holds it, after what the call hands over or changes.
+    /// `computer/grants`: what this agent may use of its owner's
+    /// (`fragment_core::grants`), asked by the computer it runs on at each
+    /// use (`{computer, identity}`), as it holds it after either the
+    /// computer's row from before the move (`taken`, its stored text: taken
+    /// whole only while this holds none, `grants::handed_over`) or its
+    /// owner's change, in person (`owner` with `connections`, or with
+    /// `provider` and `account`: their computer's routes, which a signed
+    /// person alone reaches). Read field by field, as this file's other
+    /// bodies are (the cell's Wasm budget).
     pub(crate) fn grants(&self, body: &[u8]) -> CellResult<Grants> {
         self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
-        let b: GrantsAsk = crate::json_body(body)?;
-        self.assigned_to(&b.computer)?;
-        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(b.identity.as_str()) {
+        let body: Value = crate::json_body(body)?;
+        let text = |k: &str| body[k].as_str().unwrap_or("");
+        self.assigned_to(text("computer"))?;
+        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(text("identity")) {
             return Err(CellError::new(ErrorCode::Forbidden, "that computer's row is another agent's: this fragment was made again since"));
         }
-        let was = match self.meta(MetaKey::Grants)? {
-            Some(stored) => Grants::read(&stored).map_err(|e| CellError::host(format!("its stored grants: {e}")))?,
-            None => Grants::default(),
+        let held = match self.meta(MetaKey::Grants)? {
+            Some(stored) => Some(Grants::read(&stored).map_err(|e| CellError::host(format!("its stored grants: {e}")))?),
+            None => None,
         };
-        let (moved, changed) = (b.taken.is_some(), b.change.is_some());
-        let mut grants = b.taken.unwrap_or_else(|| was.clone());
-        if let Some(change) = b.change {
-            if b.owner.as_deref() != Some(self.must(MetaKey::Owner)?.as_str()) {
-                return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner, in person, changes what it may use"));
-            }
-            match change {
-                GrantsChange::Connections(list) => grants.connections = list,
-                GrantsChange::Account { provider, account: Some(account) } => {
-                    grants.accounts.insert(provider, account);
+        let invalid = || CellError::invalid("grants name at most a catalog's providers, sorted and once, each account a Pipes id");
+        let changed = body.get("connections").is_some() || body.get("provider").is_some();
+        let grants = match (body["taken"].as_str(), changed) {
+            (Some(_), true) => return Err(CellError::invalid("a hand-over and its owner's change are separate calls")),
+            (Some(taken), false) => fragment_core::grants::handed_over(held.as_ref(), Grants::read(taken).map_err(|_| invalid())?),
+            (None, true) => {
+                if text("owner") != self.must(MetaKey::Owner)? {
+                    return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner, in person, changes what it may use"));
                 }
-                GrantsChange::Account { provider, account: None } => {
-                    grants.accounts.remove(&provider);
+                let mut grants = held.clone().unwrap_or_default();
+                match (body.get("connections"), body["provider"].as_str()) {
+                    (Some(Value::Null), _) => grants.connections = None,
+                    (Some(Value::Array(list)), _) => grants.connections = Some(list.iter().map(|p| p.as_str().map(str::to_string)).collect::<Option<Vec<_>>>().ok_or_else(invalid)?),
+                    (None, Some(provider)) => match body["account"].as_str() {
+                        Some(account) => {
+                            grants.accounts.insert(provider.to_string(), account.to_string());
+                        }
+                        None => {
+                            grants.accounts.remove(provider);
+                        }
+                    },
+                    _ => return Err(invalid()),
                 }
+                grants
             }
-        }
+            (None, false) => held.clone().unwrap_or_default(),
+        };
         if !grants.valid() {
-            return Err(CellError::invalid("grants name at most a catalog's providers, sorted and once, each account a Pipes id"));
+            return Err(invalid());
         }
-        if grants != was {
+        // taken, it is held from now on, even as the default: a row handed
+        // over again only narrows it
+        if held.as_ref() != Some(&grants) && (body["taken"].is_string() || changed) {
             self.set_meta(MetaKey::Grants, &grants.stored())?;
             let by = if changed { "changed by its owner" } else { "moved from its computer" };
-            self.event("agent.grants", &format!("what it may use of its owner's, {by}"), json!({ "grants": grants, "moved": moved }));
+            self.event("agent.grants", &format!("what it may use of its owner's, {by}"), json!({ "grants": grants, "moved": !changed }));
         }
         Ok(grants)
     }

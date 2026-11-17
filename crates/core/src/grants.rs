@@ -8,11 +8,14 @@
 //!
 //! **The move** from the computer, which kept them before (its
 //! `agents.connections` and `agent_accounts`): a computer hands each
-//! agent's row to its fragment once (`legacy`), then marks the row
-//! `MOVED`. The release before reads that mark as a list naming no
-//! provider and never writes it, so a rollback refuses the agent every
-//! provider rather than widen it, and a row it writes after (its owner's
-//! change there) is unmarked, handed over again by the next deploy.
+//! agent's row to its fragment (`legacy`), then marks the row `MOVED`. The
+//! fragment takes a hand-over whole only while it holds none of its own
+//! (`handed_over`); after that, a row handed over again (one replayed
+//! after a crash before the mark, or one the release before wrote during
+//! a rollback) can only narrow its providers, never its accounts. The
+//! release before reads the mark as a list naming no provider and never
+//! writes it, so a rollback refuses a moved agent every provider rather
+//! than widen it, and offers no switch and no account pick for it.
 
 use std::collections::BTreeMap;
 
@@ -91,11 +94,34 @@ pub fn legacy(connections: &str, accounts: impl IntoIterator<Item = (String, Str
         return Ok(None);
     }
     let connections: Option<Vec<String>> = serde_json::from_slice(connections.as_bytes()).map_err(|e| format!("its stored connections {connections:?}: {e}"))?;
-    let grants = Grants { connections, accounts: accounts.into_iter().collect() };
+    // inserted, not collected: a collect sorts its pairs first, and a
+    // sort of string pairs is about 3 KB of the cell's Wasm a copy
+    let mut picks = BTreeMap::new();
+    for (provider, account) in accounts {
+        picks.insert(provider, account);
+    }
+    let grants = Grants { connections, accounts: picks };
     if !grants.valid() {
         return Err(format!("its stored row {grants:?} is no agent's grants"));
     }
     Ok(Some(grants))
+}
+
+/// What a fragment holds once a computer hands it `taken` (its row from
+/// before the move), when it held `held`: the row whole, while it held
+/// none; else what it held, its providers narrowed to those the row also
+/// names. A hand-over replayed after the fragment took it (its computer
+/// stopped before marking its row moved), or a row the release before
+/// wrote after the move, never widens what it holds, and never changes
+/// which account it uses: its owner's picks are its own.
+pub fn handed_over(held: Option<&Grants>, taken: Grants) -> Grants {
+    let Some(held) = held else { return taken };
+    let connections = match (&held.connections, taken.connections) {
+        (None, row) => row,
+        (Some(own), None) => Some(own.clone()),
+        (Some(own), Some(row)) => Some(own.iter().filter(|p| row.contains(p)).cloned().collect()),
+    };
+    Grants { connections, accounts: held.accounts.clone() }
 }
 
 #[cfg(test)]
@@ -162,5 +188,36 @@ mod tests {
         assert_eq!(taken, Some(want));
         assert_eq!(legacy("[]", vec![]), Ok(Some(Grants::none())), "narrowed to none is kept as none, never every");
         assert!(legacy("", vec![]).is_err() && legacy("{}", vec![]).is_err(), "a row that does not read is a fault, never every provider");
+    }
+
+    #[test]
+    fn a_hand_over_is_taken_whole_once() {
+        let row = Grants { connections: list(&["github"]), accounts: BTreeMap::from([("google".into(), "data_1".into())]) };
+        assert_eq!(handed_over(None, row.clone()), row, "a fragment holding none takes the row whole");
+        let replayed = handed_over(Some(&row), row.clone());
+        assert_eq!(replayed, row, "the same row again changes nothing");
+    }
+
+    #[test]
+    fn a_replay_never_widens_what_its_owner_set_after() {
+        // its owner narrowed to none after the hand-over; the computer
+        // stopped before marking its row, which still says every provider
+        let narrowed = Grants { connections: Some(vec![]), ..Grants::default() };
+        assert_eq!(handed_over(Some(&narrowed), Grants::default()), narrowed);
+        let some = Grants { connections: list(&["github", "google"]), ..Grants::default() };
+        assert_eq!(handed_over(Some(&some), Grants { connections: list(&["github", "slack"]), ..Grants::default() }).connections, list(&["github"]), "only narrowed");
+        assert_eq!(handed_over(Some(&Grants::default()), some.clone()).connections, some.connections, "every provider, narrowed to the row's list");
+    }
+
+    #[test]
+    fn a_row_written_during_a_rollback_never_changes_an_account() {
+        let held = Grants { connections: None, accounts: BTreeMap::from([("e2e-several".into(), "data_kept".into())]) };
+        // a list alone (its picks gone, as the move left the old table)
+        let list_only = Grants { connections: list(&["e2e-several", "google"]), ..Grants::default() };
+        assert_eq!(handed_over(Some(&held), list_only).accounts, held.accounts, "a list written alone keeps the picks");
+        // another account picked, or the pick reset, with a list
+        let other = Grants { connections: None, accounts: BTreeMap::from([("e2e-several".into(), "data_other".into())]) };
+        assert_eq!(handed_over(Some(&held), other).accounts, held.accounts);
+        assert_eq!(handed_over(Some(&held), Grants::default()).accounts, held.accounts);
     }
 }

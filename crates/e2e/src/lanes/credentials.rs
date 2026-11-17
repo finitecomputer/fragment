@@ -1164,8 +1164,10 @@ pub(super) const GRANT_CHECKS: &[&str] = &[
     "what an agent may use is its owner's alone to change: an agent's own key is refused (403), as is one acting for its owner (400), and its fragment's own route for it answers no one from outside (404); the agent may use what it did",
     "what its owner sets is its agent fragment's, which says so on its events; its computer's row keeps none (marked moved)",
     "a provider taken away is refused at the agent's very next request, reaching no provider; given back, its next request goes",
-    "a computer's row from before the move (narrowed, an account picked) is honoured at the agent's next request, never widened: handed to its fragment once, the row marked moved",
-    "a row the release before writes after the move (its owner's change there, during a rollback) is handed over again at the agent's next request",
+    "a computer's row from before the move (narrowed, an account picked) is honoured at the agent's next request by a fragment that holds none: handed over whole, once, the row marked moved",
+    "a hand-over replayed after the fragment took it (its computer stopped before marking its row moved) never widens: the row's every provider leaves the agent narrowed, its next request refused, reaching no provider",
+    "account picks survive a rollback: a list the release before writes alone (its old picks table as the move left it) only narrows the agent, and keeps its owner's pick",
+    "no edit the release before makes changes the account an agent uses: another account picked there, alone or with a list, or its pick reset with one",
 ];
 
 /// The checks; answers how many turns of the agent's they took. Run while
@@ -1225,7 +1227,10 @@ pub(super) fn grant_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
         json!({ "went": went, "refused": refused, "again": again }),
     );
 
-    let old = json!({ "connections": "[\"elevenlabs\"]", "accounts": { SEVERAL: "data_installation_e2e_old" } });
+    // an agent fragment as before the move: it holds none
+    let forgot = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": w.agent, "op": "forget-grants" })))?;
+    let picks = json!({ SEVERAL: "data_installation_e2e_old" });
+    let old = json!({ "connections": "[\"elevenlabs\"]", "accounts": picks });
     let wrote = row(Some(old.clone()))?;
     let seen = s.upstream.seen().len();
     let refused = say(s, 183, &google(s))?;
@@ -1235,25 +1240,73 @@ pub(super) fn grant_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let event = told();
     s.ok(
         GRANT_CHECKS[3],
-        wrote.body["row"] == old
+        forgot.status == 200
+            && wrote.body["row"] == old
             && refused.starts_with("fetched 403")
             && refused.contains("may not use google")
             && unreached
-            && kept.body["row"] == json!({ "connections": moved, "accounts": {} })
+            && kept.body["row"]["connections"] == moved
             && shown["connections"] == json!(["elevenlabs"])
             && shown["accounts"][SEVERAL] == "data_installation_e2e_old"
             && event["data"]["moved"] == true,
         json!({ "wrote": wrote.body, "refused": refused, "row": kept.body, "shown": shown, "event": event }),
     );
 
-    let wrote = row(Some(json!({ "connections": "null", "accounts": {} })))?;
-    let went = say(s, 184, &google(s))?;
+    // the row as it was before its mark: every provider, as it said
+    let wrote = row(Some(json!({ "connections": "null" })))?;
+    let seen = s.upstream.seen().len();
+    let refused = say(s, 184, &google(s))?;
+    let unreached = s.upstream.seen().len() == seen;
     let kept = row(None)?;
     let shown = view()?;
     s.ok(
         GRANT_CHECKS[4],
-        wrote.status == 200 && went.starts_with("fetched 200") && kept.body["row"] == json!({ "connections": moved, "accounts": {} }) && shown["connections"].is_null() && shown["accounts"].is_null(),
-        json!({ "went": went, "row": kept.body, "shown": shown }),
+        wrote.status == 200
+            && refused.starts_with("fetched 403")
+            && refused.contains("may not use google")
+            && unreached
+            && kept.body["row"]["connections"] == moved
+            && shown["connections"] == json!(["elevenlabs"])
+            && shown["accounts"][SEVERAL] == "data_installation_e2e_old",
+        json!({ "refused": refused, "row": kept.body, "shown": shown }),
     );
+
+    // a list's PUT on the release before writes its connections alone
+    let wrote = row(Some(json!({ "connections": format!("[\"{SEVERAL}\",\"elevenlabs\",\"google\"]") })))?;
+    let seen = s.upstream.seen().len();
+    let refused = say(s, 185, &google(s))?;
+    let unreached = s.upstream.seen().len() == seen;
+    let shown = view()?;
+    let kept = row(None)?;
+    s.ok(
+        GRANT_CHECKS[5],
+        wrote.status == 200
+            && refused.starts_with("fetched 403")
+            && unreached
+            && shown["connections"] == json!(["elevenlabs"])
+            && shown["accounts"][SEVERAL] == "data_installation_e2e_old"
+            && kept.body["row"]["connections"] == moved,
+        json!({ "refused": refused, "shown": shown, "row": kept.body }),
+    );
+
+    // an account's PUT there writes its picks alone; with a list, both
+    let other = json!({ SEVERAL: "data_installation_e2e_other" });
+    let mut seen_picks = vec![];
+    for written in [json!({ "accounts": other }), json!({ "connections": "null", "accounts": other }), json!({ "connections": "null", "accounts": {} })] {
+        let wrote = row(Some(written.clone()))?;
+        let shown = view()?;
+        let kept = row(None)?;
+        seen_picks.push(json!({ "wrote": written, "status": wrote.status, "pick": shown["accounts"][SEVERAL], "connections": shown["connections"], "marked": kept.body["row"]["connections"] == moved }));
+    }
+    s.ok(
+        GRANT_CHECKS[6],
+        seen_picks.iter().all(|p| p["status"] == 200 && p["pick"] == "data_installation_e2e_old" && p["connections"] == json!(["elevenlabs"]) && p["marked"] == true),
+        json!(seen_picks),
+    );
+
+    // as it was: every provider, each connection's default account
+    let back = allow(w.owner, "", Value::Null)?;
+    let unpicked = api.signed(w.owner, "PUT", &format!("/api/computers/{}/agents/{}/accounts/{SEVERAL}", w.id, w.agent), Some(&json!({ "account": null })))?;
+    anyhow::ensure!(back.status == 200 && unpicked.status == 200, "the agent given every provider again, its pick cleared: {back}; {unpicked}");
     Ok(turns)
 }
