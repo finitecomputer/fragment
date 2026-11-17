@@ -188,8 +188,9 @@ release was deployed (`release::DEPLOYED`), which no release reads now
   it does not know reads as written, and a trigger kind it does not know
   starts nothing. A value an older release cannot read makes its release
   forward only, by a schema step (Fragment step 6, FIN-328; Migrations
-  step 7, a move waiting for staff; Computer step 5, an agent's grants
-  taken by its fragment, #1309).
+  step 7, a move waiting for staff; Fragment step 9, an inbox's JSON
+  `inbox_secret`, FIN-508; Computer step 5, an agent's grants taken by
+  its fragment, #1309).
 
 A deploy is all at once (a gradual deployment would refuse between its
 two versions), and done when every object class answers it within 90 s

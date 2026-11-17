@@ -117,6 +117,7 @@ pub const FRAGMENT: Class = Class {
         step!("installed_forward_only", "fragment/0006_installed_forward_only.sql"),
         step!("making", "fragment/0007_making.sql"),
         step!("newest", "fragment/0008_newest.sql"),
+        step!("inbox_forward_only", "fragment/0009_inbox_forward_only.sql"),
     ],
     variants: &[Variant {
         name: "members",
