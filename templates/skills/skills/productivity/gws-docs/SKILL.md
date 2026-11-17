@@ -10,6 +10,8 @@ metadata:
       bins:
         - gws
     cliHelp: "gws docs --help"
+  fragment:
+    connection: google
 ---
 
 # docs (v1)

@@ -228,6 +228,62 @@ pub fn skill_names(installed: &Installed) -> BTreeSet<String> {
     installed.keys().filter_map(|p| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).map(str::to_string).collect()
 }
 
+/// The names a profile's own skills go by (its `skills/`, its agent
+/// fragment's): each `SKILL.md`'s name as Hermes gives it, and its
+/// directory's. Wherever under it one is: Hermes finds a skill at any
+/// depth, and `sync::scan` syncs one. Bounded as that scan is: by the
+/// profile's tree, no link followed, and `FILES_MAX` skills in it.
+fn own_names(own: &Path) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut dirs = vec![own.to_path_buf()];
+    let mut read = 0;
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            // the entry's own kind: a link is neither, and is not followed
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                dirs.push(entry.path());
+            } else if kind.is_file() && entry.file_name() == "SKILL.md" && read < FILES_MAX {
+                read += 1;
+                let dir_name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                    names.insert(skill_name(&text, &dir_name));
+                }
+                names.insert(dir_name);
+            }
+        }
+    }
+    names
+}
+
+/// The managed skills an agent is not shown: each connection's skill whose
+/// connection is none of `providers` (the providers of the credentials it
+/// may use now). So its prompt lists the skills of what its owner
+/// connected, however many connections the platform offers, and a skill
+/// appears as its connection does. Their names as Hermes gives them,
+/// sorted; one whose name is not plain is left shown.
+///
+/// Hermes disables by name, whichever skill holds the name, and a
+/// profile's own skill wins a name over a managed one. So a name one of
+/// the profile's own skills (in `own`) goes by is never withheld: the
+/// agent's own copy stays its own, and the managed one it shadows is not
+/// listed anyway.
+pub fn withheld(dir: &Path, installed: &Installed, providers: &BTreeSet<String>, own: &Path) -> Vec<String> {
+    let kept = own_names(own);
+    let mut names = BTreeSet::new();
+    for rel in installed.keys().filter(|p| p.ends_with("/SKILL.md")) {
+        let Ok(text) = std::fs::read_to_string(dir.join(rel)) else { continue };
+        let Some(connection) = crate::skill_connection::of(&text) else { continue };
+        let name = skill_name(&text, rel.trim_end_matches("/SKILL.md").rsplit('/').next().unwrap_or_default());
+        let plain = !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if plain && !providers.contains(&connection) && !kept.contains(&name) {
+            names.insert(name);
+        }
+    }
+    names.into_iter().collect()
+}
+
 /// The name Hermes gives the skill whose `SKILL.md` reads `text`, in a
 /// directory named `dir_name`: its frontmatter's `name` (quoted or not),
 /// else the directory's.
@@ -474,6 +530,55 @@ pub fn managed_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A connection's skill is shown to an agent that holds the connection:
+    /// each managed skill that names one (`metadata: fragment: connection`)
+    /// is withheld from an agent whose credentials have no such provider,
+    /// and shown again once they do. A skill of no connection is never
+    /// withheld, nor one whose name is not plain, nor one that is not read,
+    /// nor a name the profile's own skill goes by: Hermes disables by name,
+    /// and the agent's own copy is not ours to hide.
+    #[test]
+    fn a_connections_skill_is_shown_to_an_agent_that_holds_it() {
+        let dir = std::env::temp_dir().join(format!("hermes-boot-withheld-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill = |name: &str, connection: Option<&str>| {
+            let meta = connection.map(|c| format!("  fragment:\n    connection: {c}\n")).unwrap_or_default();
+            format!("---\nname: {name}\ndescription: d\nmetadata:\n  hermes:\n    tags: [A]\n{meta}---\n\n# {name}\n")
+        };
+        let mut installed = Installed::new();
+        for (rel, text) in [
+            ("productivity/linear-finite/SKILL.md", skill("linear-finite", Some("linear"))),
+            ("productivity/jira-finite/SKILL.md", skill("jira-finite", Some("atlassian"))),
+            ("productivity/confluence-finite/SKILL.md", skill("confluence-finite", Some("atlassian"))),
+            ("productivity/google-workspace-finite/SKILL.md", skill("google-workspace-finite", Some("google"))),
+            ("software-development/apps-finite/SKILL.md", skill("apps-finite", None)),
+            ("odd/SKILL.md", skill("an odd, name", Some("linear"))),
+        ] {
+            write_file(&dir, rel, text.as_bytes()).unwrap();
+            installed.insert(rel.to_string(), "v".into());
+        }
+        installed.insert("gone/SKILL.md".into(), "v".into());
+        let own = dir.join("own-skills");
+        let holding = |providers: &[&str]| withheld(&dir, &installed, &providers.iter().map(|p| p.to_string()).collect(), &own);
+        assert_eq!(holding(&[]), ["confluence-finite", "google-workspace-finite", "jira-finite", "linear-finite"]);
+        assert_eq!(holding(&["google", "perplexity"]), ["confluence-finite", "jira-finite", "linear-finite"]);
+        assert_eq!(holding(&["atlassian", "linear"]), ["google-workspace-finite"], "both of one connection's skills");
+        assert!(holding(&["atlassian", "google", "linear"]).is_empty());
+        // the agent's own skill of a managed one's name, by its frontmatter or its folder: left shown
+        write_file(&own, "linear-finite/SKILL.md", skill("linear-finite", None).as_bytes()).unwrap();
+        write_file(&own, "tracking/jira-finite/SKILL.md", skill("my jira notes", None).as_bytes()).unwrap();
+        write_file(&own, "notes/SKILL.md", skill("unrelated", None).as_bytes()).unwrap();
+        assert_eq!(holding(&[]), ["confluence-finite", "google-workspace-finite"], "its own linear-finite and jira-finite are not hidden with the managed ones");
+        // and however deep its own skill sits, by its folder or its frontmatter (Hermes finds one at any depth)
+        write_file(&own, "work/tracking/wiki/confluence-finite/SKILL.md", skill("team wiki", None).as_bytes()).unwrap();
+        write_file(&own, "a/b/c/d/mail/SKILL.md", skill("google-workspace-finite", None).as_bytes()).unwrap();
+        // a link back up its own tree is not followed
+        std::os::unix::fs::symlink(&own, own.join("work/again")).unwrap();
+        assert!(holding(&[]).is_empty() && holding(&["atlassian", "google", "linear"]).is_empty(), "none of its own is hidden, connected or not");
+        assert_eq!(own_names(&own).into_iter().collect::<Vec<_>>(), ["confluence-finite", "google-workspace-finite", "jira-finite", "linear-finite", "mail", "my jira notes", "notes", "team wiki", "unrelated"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn frag(name: &str, kind: &str, owned: bool) -> FragmentEntry {
         FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
