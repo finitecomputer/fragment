@@ -181,16 +181,21 @@ struct WorkingIndicator: View {
             Button { toggle(steps: card.steps.count) } label: {
                 HStack(spacing: 6) {
                     // gone once it's done: the line is then a summary, not a working one
+                    let who = agents.first { $0.id == card.turn }
                     if card.running {
-                        BotMark(agent: agents.first { $0.id == card.turn }?.agent, motion: BotMark.motion(card.nowWord),
+                        BotMark(agent: who?.agent, motion: BotMark.motion(card.nowWord),
                                 time: now.timeIntervalSinceReferenceDate, size: lineSize + 5).padding(.trailing, 2)
+                    } else {
+                        // done: who it was, still, by what it says
+                        AgentAvatar(agent: who?.agent, size: lineSize + 5, round: true).padding(.trailing, 2)
                     }
                     if card.running {
                         // a word for what it does now, held long enough to read
                         HeldWord(word: card.nowWord) { shimmer($0, elapsed: elapsed, active: true) }
                         Text("· " + Self.duration(Int64(now.timeIntervalSince1970 * 1000) - card.since)).monospacedDigit()
                     } else {
-                        Text(card.doneWord + " for " + Self.duration((card.until ?? card.since) - card.since))
+                        // "XP cooked · 50s"
+                        Text("\(who?.name ?? "The agent") \(card.doneWord.lowercased()) · " + Self.duration((card.until ?? card.since) - card.since))
                     }
                     glyph("chevron", size: 14).rotationEffect(.degrees(expanded ? 90 : 0)).animation(.easeInOut(duration: 0.14), value: expanded)
                 }.font(.system(size: lineSize)).frame(minHeight: 24).contentShape(Rectangle())
@@ -435,11 +440,11 @@ struct BotMark: View {
     static func pose(_ motion: Motion, _ t: TimeInterval) -> Pose {
         switch motion {
         case .still: return Pose()
-        case .throb: return Pose(scale: 1 + 0.1 * (0.5 - 0.5 * cos(2 * .pi * t / 1.1)))
-        case .breathe: return Pose(scale: 1 + 0.08 * (0.5 - 0.5 * cos(2 * .pi * t / 2.6)))
+        case .throb: return Pose(scale: 1 + 0.22 * (0.5 - 0.5 * cos(2 * .pi * t / 0.9)))
+        case .breathe: return Pose(scale: 1 + 0.16 * (0.5 - 0.5 * cos(2 * .pi * t / 2.2)))
         // a hop: up and back, landing sharp
-        case .bounce: return Pose(lift: -3.5 * abs(sin(.pi * t / 0.55)))
-        case .wobble: return Pose(angle: 12 * sin(2 * .pi * t / 1))
+        case .bounce: return Pose(lift: -6 * abs(sin(.pi * t / 0.5)))
+        case .wobble: return Pose(angle: 20 * sin(2 * .pi * t / 0.8))
         // a turn every 1.5 seconds, the shortest way round (for blending)
         case .spin:
             let turned = (t * 240).truncatingRemainder(dividingBy: 360)
