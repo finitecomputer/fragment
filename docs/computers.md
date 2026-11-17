@@ -823,8 +823,9 @@ note, its file only for work on the recording (`hermes::VOICE`); and that a
 reply line `MEDIA:<absolute path>` attaches a file there
 (`hermes::SENDING`). Hermes keeps the system prompt a chat's session
 began with and replays it on every later turn, so a change to these
-reaches an open chat only at its next new session (its `/new`); a new
-chat has it at once.
+reaches an open chat at its next new session (its `/new`), or when
+Hermes next compresses it or its model changes; a new chat has it at
+once.
 
 ### Its name, in our Hermes image
 
