@@ -1,6 +1,6 @@
 ---
 name: dropbox-finite
-description: Dropbox files and folders (list, search, download, upload, move, copy, temporary links) through the person's connected Dropbox account, with `fragment api dropbox` and Dropbox's API. No OAuth setup, no app key or token on the computer.
+description: Dropbox files and folders (list, search, download, upload, move, copy, temporary links) through the person's connected Dropbox account, with `fragment connection call dropbox` and Dropbox's API. No OAuth setup, no app key or token on the computer.
 version: 2.0.0
 author: Finite
 license: MIT
@@ -15,10 +15,10 @@ metadata:
 
 Your owner's Dropbox: its files and folders, and the team folders of a
 Dropbox Business account. Your computer holds no Dropbox credential:
-`fragment api dropbox` sends the connection's placeholder for you, and the
-computer swaps in a short-lived token for your owner's account. Never ask
-the person for a Dropbox password, an app key or a token, and never run
-`dbxcli login`.
+`fragment connection call dropbox` sends the connection's placeholder for
+you, and the computer swaps in a short-lived token for your owner's
+account. Never ask the person for a Dropbox password, an app key or a
+token, and never run `dbxcli login`.
 
 What you do in Dropbox is done as your owner: a file you upload, move or
 delete is theirs, and their other devices sync it.
@@ -31,7 +31,7 @@ takes none sends no body:
 ```bash
 API=https://api.dropboxapi.com/2          # calls
 CONTENT=https://content.dropboxapi.com/2  # a file's bytes, up and down
-fragment api dropbox POST $API/users/get_current_account
+fragment connection call dropbox POST $API/users/get_current_account
 ```
 
 An answer with `email`: connected, go on.
@@ -46,11 +46,12 @@ a `root_namespace_id` unlike its `home_namespace_id` is in a team: paths
 start in the member's own folder unless a call adds
 `--header 'Dropbox-API-Path-Root: {".tag": "root", "root": "<root_namespace_id>"}'`.
 
-On an older computer: `fragment api` came with an image newer than a
-computer awake since before it. If the command is `unrecognized`, your
-computer takes that image when it next restarts. Until then, send the same
-calls with `curl -H "Authorization: Bearer $DROPBOX_OAUTH_ACCESS_TOKEN"`: the computer swaps
-that the same way.
+On an older computer: `fragment connection call` came with an image newer
+than a computer awake since before it. If the command is `unrecognized`,
+your computer takes that image when it next restarts. Until then, send the
+same calls with
+`curl -H "Authorization: Bearer $DROPBOX_OAUTH_ACCESS_TOKEN"`: the
+computer swaps that the same way.
 
 ## Read only
 
@@ -65,15 +66,15 @@ Connections → Allow changes. Do not retry until they have; go on reading.
 
 ```bash
 # a folder's entries ("" is the root); "recursive": true for all under it
-fragment api dropbox POST $API/files/list_folder --body '{"path": "/Work", "limit": 100}'
-fragment api dropbox POST $API/files/list_folder/continue --body '{"cursor": "AAH…"}'
+fragment connection call dropbox POST $API/files/list_folder --body '{"path": "/Work", "limit": 100}'
+fragment connection call dropbox POST $API/files/list_folder/continue --body '{"cursor": "AAH…"}'
 # names and contents; each option is optional
-fragment api dropbox POST $API/files/search_v2 --body '{"query": "quarterly plan", "options": {"path": "/Work", "file_extensions": ["pdf"], "max_results": 25}}'
-fragment api dropbox POST $API/files/search/continue_v2 --body '{"cursor": "…"}'
+fragment connection call dropbox POST $API/files/search_v2 --body '{"query": "quarterly plan", "options": {"path": "/Work", "file_extensions": ["pdf"], "max_results": 25}}'
+fragment connection call dropbox POST $API/files/search/continue_v2 --body '{"cursor": "…"}'
 # one file's or folder's metadata: a file's size and rev
-fragment api dropbox POST $API/files/get_metadata --body '{"path": "/Work/plan.pdf"}'
+fragment connection call dropbox POST $API/files/get_metadata --body '{"path": "/Work/plan.pdf"}'
 # a link to a file's content, good for four hours
-fragment api dropbox POST $API/files/get_temporary_link --body '{"path": "/Work/plan.pdf"}'
+fragment connection call dropbox POST $API/files/get_temporary_link --body '{"path": "/Work/plan.pdf"}'
 ```
 
 - A path starts with `/` (`""` is the root), and Dropbox matches it
@@ -86,8 +87,8 @@ fragment api dropbox POST $API/files/get_temporary_link --body '{"path": "/Work/
 ## Downloading and uploading
 
 ```bash
-fragment api dropbox POST $CONTENT/files/download --header 'Dropbox-API-Arg: {"path": "/Work/plan.pdf"}' --out ./plan.pdf
-fragment api dropbox POST $CONTENT/files/upload --header 'Dropbox-API-Arg: {"path": "/Work/notes.txt", "mode": "add"}' \
+fragment connection call dropbox POST $CONTENT/files/download --header 'Dropbox-API-Arg: {"path": "/Work/plan.pdf"}' --out ./plan.pdf
+fragment connection call dropbox POST $CONTENT/files/upload --header 'Dropbox-API-Arg: {"path": "/Work/notes.txt", "mode": "add"}' \
   --body @./notes.txt --content-type application/octet-stream
 ```
 
@@ -104,15 +105,15 @@ fragment api dropbox POST $CONTENT/files/upload --header 'Dropbox-API-Arg: {"pat
   the revision you read, so a change someone made since is not lost.
 - A temporary link and a shared link are on other hosts and need no token:
   fetch them with an ordinary download tool (`wget -O`), never with
-  `fragment api`.
+  `fragment connection call`.
 
 ## Changing
 
 ```bash
-fragment api dropbox POST $API/files/create_folder_v2 --body '{"path": "/Work/2026"}'
-fragment api dropbox POST $API/files/move_v2 --body '{"from_path": "/Work/draft.txt", "to_path": "/Archive/draft.txt"}'
-fragment api dropbox POST $API/files/copy_v2 --body '{"from_path": "/Work/plan.pdf", "to_path": "/Work/plan-v2.pdf"}'
-fragment api dropbox POST $API/files/delete_v2 --body '{"path": "/Work/old.txt"}'
+fragment connection call dropbox POST $API/files/create_folder_v2 --body '{"path": "/Work/2026"}'
+fragment connection call dropbox POST $API/files/move_v2 --body '{"from_path": "/Work/draft.txt", "to_path": "/Archive/draft.txt"}'
+fragment connection call dropbox POST $API/files/copy_v2 --body '{"from_path": "/Work/plan.pdf", "to_path": "/Work/plan-v2.pdf"}'
+fragment connection call dropbox POST $API/files/delete_v2 --body '{"path": "/Work/old.txt"}'
 ```
 
 - `delete_v2` removes a file, or a folder with all it holds. Dropbox keeps

@@ -45,10 +45,10 @@ os.environ.update(HOME=home, HERMES_HOME=home)
 os.chdir(home)
 
 import hermes_cli.main  # noqa: E402
-import tool_keys  # noqa: E402
+import relay_stop  # noqa: E402
 import tool_threads  # noqa: E402
 
-tool_keys.install()
+relay_stop.install()
 tool_threads.install()
 
 sys.argv = ["hermes", "gateway", "run"]

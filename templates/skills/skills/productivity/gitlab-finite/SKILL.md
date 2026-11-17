@@ -1,6 +1,6 @@
 ---
 name: gitlab-finite
-description: GitLab.com projects, issues, merge requests, CI pipelines and repository files through the person's connected GitLab account, with `fragment api gitlab` and GitLab's REST API. No OAuth setup, no access token on the computer.
+description: GitLab.com projects, issues, merge requests, CI pipelines and repository files through the person's connected GitLab account, with `fragment connection call gitlab` and GitLab's REST API. No OAuth setup, no access token on the computer.
 version: 2.0.0
 author: Finite
 license: MIT
@@ -15,10 +15,10 @@ metadata:
 
 Your owner's GitLab.com account: its projects, issues, merge requests, CI
 pipelines and repository files, through GitLab's REST API. Your computer
-holds no GitLab credential: `fragment api gitlab` sends the connection's
-placeholder for you, and the computer swaps in a short-lived token for your
-owner's account. Never ask the person for a GitLab password or a personal
-access token, and never set `GITLAB_TOKEN`.
+holds no GitLab credential: `fragment connection call gitlab` sends the
+connection's placeholder for you, and the computer swaps in a short-lived
+token for your owner's account. Never ask the person for a GitLab password
+or a personal access token, and never set `GITLAB_TOKEN`.
 
 GitLab.com only: a self-managed GitLab (one at a host of its own) is not
 connected here, so say so if asked. What you do in GitLab is done as your
@@ -28,23 +28,25 @@ owner: an issue you open or a comment you write shows their name.
 
 ```bash
 G="https://gitlab.com/api/v4"
-fragment api gitlab GET $G/user
+fragment connection call gitlab GET $G/user
 # → {"id": 1234567, "username": "ada", "name": …, "email": …, "web_url": …}
 ```
 
 An answer with `username`: connected, go on. Its `id` is your owner's.
 
-The token goes to `gitlab.com` alone, and as a bearer token alone, which is
-how `fragment api` sends it. The answer is GitLab's JSON on stdout. A
-refusal is one line of JSON on stderr and exit 1. Do what its `hint` says;
-its `body` is GitLab's own answer: `message` (`404 Project Not Found`), or
-`error` and `error_description` (`invalid_token`, `insufficient_scope`).
+The token goes to `gitlab.com` alone, and as a bearer token alone, which
+is how `fragment connection call` sends it. The answer is GitLab's JSON on
+stdout. A refusal is one line of JSON on stderr and exit 1. Do what its
+`hint` says; its `body` is GitLab's own answer: `message`
+(`404 Project Not Found`), or `error` and `error_description`
+(`invalid_token`, `insufficient_scope`).
 
-On an older computer: `fragment api` came with an image newer than a
-computer awake since before it. If the command is `unrecognized`, your
-computer takes that image when it next restarts. Until then, send the same
-calls with `curl -H "Authorization: Bearer $GITLAB_OAUTH_ACCESS_TOKEN"`: the computer swaps
-that the same way.
+On an older computer: `fragment connection call` came with an image newer
+than a computer awake since before it. If the command is `unrecognized`,
+your computer takes that image when it next restarts. Until then, send the
+same calls with
+`curl -H "Authorization: Bearer $GITLAB_OAUTH_ACCESS_TOKEN"`: the computer
+swaps that the same way.
 
 ## Read only
 
@@ -67,24 +69,24 @@ role in that project or group does not allow it.
 P="$G/projects/group%2Fsubgroup%2Fproject"   # a project: its path, URL-encoded, or its numeric id
 
 # the projects your owner is a member of, latest activity first
-fragment api gitlab GET $G/projects --param membership=true --param simple=true --param order_by=last_activity_at --param search=api
-fragment api gitlab GET $P
+fragment connection call gitlab GET $G/projects --param membership=true --param simple=true --param order_by=last_activity_at --param search=api
+fragment connection call gitlab GET $P
 
 # a project's issues; with no project, those your owner opened, or (scope) is assigned
-fragment api gitlab GET $P/issues --param state=opened --param search=login --param labels=bug --param order_by=updated_at
-fragment api gitlab GET $G/issues --param scope=assigned_to_me --param state=opened
-fragment api gitlab GET $P/issues/42
-fragment api gitlab GET $P/issues/42/notes --param sort=asc --param per_page=100    # its comments
+fragment connection call gitlab GET $P/issues --param state=opened --param search=login --param labels=bug --param order_by=updated_at
+fragment connection call gitlab GET $G/issues --param scope=assigned_to_me --param state=opened
+fragment connection call gitlab GET $P/issues/42
+fragment connection call gitlab GET $P/issues/42/notes --param sort=asc --param per_page=100    # its comments
 
 # merge requests, the same way (scope=reviews_for_me: waiting on your owner's review)
-fragment api gitlab GET $P/merge_requests --param state=opened
-fragment api gitlab GET $P/merge_requests/17             # with detailed_merge_status and head_pipeline
-fragment api gitlab GET $P/merge_requests/17/diffs
+fragment connection call gitlab GET $P/merge_requests --param state=opened
+fragment connection call gitlab GET $P/merge_requests/17             # with detailed_merge_status and head_pipeline
+fragment connection call gitlab GET $P/merge_requests/17/diffs
 
 # pipelines, a pipeline's jobs, and a job's log (long: save it, then read its end)
-fragment api gitlab GET $P/pipelines --param ref=main --param status=failed
-fragment api gitlab GET $P/pipelines/123456/jobs
-fragment api gitlab GET $P/jobs/987654/trace --out job.log
+fragment connection call gitlab GET $P/pipelines --param ref=main --param status=failed
+fragment connection call gitlab GET $P/pipelines/123456/jobs
+fragment connection call gitlab GET $P/jobs/987654/trace --out job.log
 ```
 
 - An issue or a merge request is its number in its project (`#42`, `!17`:
@@ -103,9 +105,9 @@ computer swaps the placeholder only as a bearer token, and refuses it as
 the password in a Git URL. (A public project clones with no token.) Instead:
 
 ```bash
-fragment api gitlab GET $P/repository/tree --param path=src --param ref=main --param recursive=true --param per_page=100
-fragment api gitlab GET $P/repository/files/src%2Fapp%2Epy/raw --param ref=main     # a file, printed; --out FILE for one that is not text
-fragment api gitlab GET $P/repository/archive.tar.gz --param sha=main --out project.tar.gz
+fragment connection call gitlab GET $P/repository/tree --param path=src --param ref=main --param recursive=true --param per_page=100
+fragment connection call gitlab GET $P/repository/files/src%2Fapp%2Epy/raw --param ref=main     # a file, printed; --out FILE for one that is not text
+fragment connection call gitlab GET $P/repository/archive.tar.gz --param sha=main --out project.tar.gz
 ```
 
 - A file's path is URL-encoded whole: `/` as `%2F`, `.` as `%2E`. A ref is
@@ -118,12 +120,12 @@ fragment api gitlab GET $P/repository/archive.tar.gz --param sha=main --out proj
 
 ```bash
 # assignee_ids: your owner's id (from /user), to assign it to them
-fragment api gitlab POST $P/issues --body '{"title": "Fix login", "description": "Steps…", "labels": "bug", "assignee_ids": [1234567]}'
-fragment api gitlab POST $P/issues/42/notes --body '{"body": "Fixed in !17."}'     # a comment; a merge request's the same way
-fragment api gitlab PUT $P/issues/42 --body '{"state_event": "close"}'
+fragment connection call gitlab POST $P/issues --body '{"title": "Fix login", "description": "Steps…", "labels": "bug", "assignee_ids": [1234567]}'
+fragment connection call gitlab POST $P/issues/42/notes --body '{"body": "Fixed in !17."}'     # a comment; a merge request's the same way
+fragment connection call gitlab PUT $P/issues/42 --body '{"state_event": "close"}'
 
 # change files: one commit of several, here on a new branch from main
-fragment api gitlab POST $P/repository/commits --body '{"branch": "fix-typo", "start_branch": "main", "commit_message": "Fix a typo",
+fragment connection call gitlab POST $P/repository/commits --body '{"branch": "fix-typo", "start_branch": "main", "commit_message": "Fix a typo",
   "actions": [{"action": "update", "file_path": "README.md", "content": "…"}]}'
 ```
 

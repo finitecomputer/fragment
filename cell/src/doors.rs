@@ -37,6 +37,7 @@ use fragment_proto::{ErrorCode, IdentityKind, Role, SetRole};
 use serde_json::{json, Value};
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::DoorActor;
 use crate::fragment::{Caller, FragmentCell, MetaKey};
 
 /// A connector's binding as its `door_actor` holds it.
@@ -218,8 +219,8 @@ impl FragmentCell {
         // again in the binding's own turn, below
         self.reach_while_private()?;
         // the agent's fragment says it is theirs, and an agent, and records it
-        let asked = json!({ "owner": owner, "door": door, "actor": self.name()? });
-        let identity = crate::fragment::ask(&self.env, agent, "computer/door-actor", &asked).await?["identity"].as_str().map(str::to_string).ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
+        let asked = DoorActor { owner: owner.clone(), door: door.clone(), actor: self.name()? };
+        let identity = crate::fragment::call(&self.env, agent, &asked).await?.identity;
         // another agent bound before: its binding goes first
         if self.meta(MetaKey::DoorActor)?.is_some() {
             self.unbind_door("bound to another of its owner's agents")?;

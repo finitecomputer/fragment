@@ -368,7 +368,7 @@ mod tests {
         assert!(files.len() <= DATA_FILES_MAX && total <= DATA_MAX_BYTES, "{} files, {total} bytes", files.len());
         let mut names = std::collections::BTreeSet::new();
         // each connection's skill: its folder, the connection it names,
-        // and whether it calls it with `fragment api`
+        // and whether it calls it with `fragment connection call`
         let mut connections: Vec<(String, String, bool)> = vec![];
         for f in files.iter().copied() {
             assert!(f.path.starts_with("skills/"), "the managed set is under skills/: {}", f.path);
@@ -394,7 +394,7 @@ mod tests {
                 assert!(front.lines().any(|l| l.starts_with("description:")), "{} says what it is for", f.path);
                 assert!(names.insert(name.to_string()), "{name} twice");
                 if let Some(connection) = skill_connection::of(text) {
-                    let calls = text.contains(&format!("fragment api {connection}"));
+                    let calls = text.contains(&format!("fragment connection call {connection}"));
                     connections.push((f.path.trim_end_matches("SKILL.md").to_string(), connection, calls));
                 }
             }
@@ -409,14 +409,15 @@ mod tests {
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
         assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
         // a connection's skill is its docs and its quirks, and no code; and
-        // the connection's one caller is `fragment api`, which a skill of it
-        // says (another of its skills may be a guide to its provider's own
-        // CLI, as Google's Docs and Slides guides are) (FIN-509)
+        // the connection's one caller is `fragment connection call`, which a
+        // skill of it says (another of its skills may be a guide to its
+        // provider's own CLI, as Google's Docs and Slides guides are)
+        // (FIN-509)
         assert!(connections.iter().any(|(_, c, _)| c == "google"), "Google's skill names its connection");
         for (dir, connection, _) in &connections {
             let code: Vec<&str> = files.iter().map(|f| f.path).filter(|p| p.starts_with(dir.as_str()) && (p.contains("/scripts/") || [".py", ".sh", ".js"].iter().any(|e| p.ends_with(e)))).collect();
             assert!(code.is_empty(), "{connection}'s skill carries code of its own: {code:?}");
-            assert!(connections.iter().any(|(_, c, calls)| c == connection && *calls), "no skill of {connection} calls it with `fragment api {connection}`");
+            assert!(connections.iter().any(|(_, c, calls)| c == connection && *calls), "no skill of {connection} calls it with `fragment connection call {connection}`");
         }
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }

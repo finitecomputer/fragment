@@ -659,7 +659,17 @@ provider's own hosts.
   (decision 44); its owner may narrow it to a list, a specialization
   rather than a wall. Where a connection takes several accounts, each
   agent uses the one its owner picked, else the oldest connected; its
-  placeholder is the same.
+  placeholder is the same. Both are the agent fragment's (`meta`
+  `grants`, `fragment_core::grants`), changed only by its owner in
+  person through their computer's routes. The computer asks the agent's
+  fragment for them at each request it swaps and each read of a view,
+  and keeps none: a provider taken away is refused from the next request.
+  A computer from before held them itself (`agents.connections`,
+  `agent_accounts`): an agent's first ask after the deploy carries that
+  row, taken whole by a fragment holding none of its own and ignored by
+  one that does (`grants::answered`), then marked moved and sent no more.
+  The release is forward only (the Computer's step 5): the release before
+  refuses every computer, so it never writes those rows again.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
@@ -775,8 +785,10 @@ What our Hermes image guarantees beyond the contract:
   refresh is off, and Node's compile cache is outside `/data`. A Claude
   agent's idle `claude` is stopped before the hold is answered
   (docs/bridge.md, "The Claude runtime").
-- **A turn a restart cut** is closed in its Hermes session before the
-  gateway starts, so the next message is a turn of its own (P5).
+- **A turn a restart cut** is settled in its Hermes session before the
+  gateway starts, as Hermes' own `/discard` settles it, so the next
+  message is a turn of its own and the chat is never paused behind it
+  (P5; `hermes::SETTLE_CUT_TURNS`).
 - **Its agents change while it runs**, nothing restarted: one assigned
   is served within seconds; one unassigned stops at once, its profile
   retired at the next start.
@@ -785,8 +797,11 @@ What our Hermes image guarantees beyond the contract:
   and stopped after 10 minutes unused. Take over is that desktop's lease,
   which Hermes' tools obey until Give back. Its agents run as one user
   (decision 44), so only the lease and the platform skill keep an agent
-  off another's desktop. The desktop and the browser tools share one
-  regular Chromium and one saved profile per agent. A link opened on the
+  off another's desktop. The desktop's Browser icon and the agent's
+  `browser_exec` share one regular Chromium and one saved profile per
+  agent, which shows pages `navigator.webdriver` false, as a person's own
+  browser does. It stays up as long as its desktop, whose idle stop closes
+  it first, as a person would, its cookies written. A link opened on the
   desktop (a terminal's sign-in, `xdg-open`) opens there too: it is the
   desktop's default web browser, so no dialog asks which (FIN-351).
 
@@ -919,8 +934,7 @@ for Testing fails.
   downloads nothing. sudo keeps `PLAYWRIGHT_BROWSERS_PATH`, so a browser
   `sudo playwright install` adds is where an agent's own launch looks,
   and `PLAYWRIGHT_SKIP_BROWSER_GC`: that directory is Hermes' tool store,
-  and Playwright's install would collect Hermes' own Chrome for Testing
-  and FFmpeg from it (`uninstall`, which always collects, is refused
+  and Playwright's install would collect Hermes' own FFmpeg from it (`uninstall`, which always collects, is refused
   there). As
   the agent's user, `playwright install` (either runtime's) answers at
   once (`playwright-node`, the Node both run Playwright's CLI on):
@@ -931,9 +945,9 @@ for Testing fails.
   none.
 - **`unzip`, `zip`, `jq` and `sqlite3`**, Debian's. `sqlite3` runs with
   Debian's SQLite library, not the newer one upstream puts first.
-- The image still carries Hermes' Chrome for Testing
-  (docs/technical-debt-ledger.md, "The Hermes image carries two
-  Chromiums").
+- Hermes' own Chrome for Testing is not in the image: every browser
+  here runs the system Chromium, which passes Cloudflare's bot check where
+  Chrome for Testing fails.
 
 ### Claude Code in our Hermes image
 
@@ -969,5 +983,12 @@ gates it.
 
 Awake time, operator keys' calls and model calls are metered to the
 computer's owner, and its saves are not (docs/ledger.md, "Who pays").
+Awake time is time the computer was shown up: from its start's `Ready`
+(or, for a start put to sleep before it, that sleep), in the intervals
+the DO hears, each alarm's at least every five minutes and each step of
+a sleep's. An event that comes when nothing was heard of a running
+computer for `ALARM_LATE_MS` (twenty minutes: its alarms went unheard)
+meters it only to the last moment it was shown up, never the silence
+(FIN-511).
 At zero credit no wake starts, and a computer already awake runs on
 until it sleeps (decision 27).

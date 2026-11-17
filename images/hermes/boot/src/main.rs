@@ -405,14 +405,6 @@ fn pre_init() -> ! {
     ev!("boot.pre_init");
     let _ = std::fs::remove_dir_all(RUN);
     std::fs::create_dir_all(RUN).unwrap_or_else(|e| fail(&format!("{RUN}: {e}")));
-    // The image's Chromium (hermes::CHROMIUM), written at build: stage2
-    // skips its own search, and Hermes starts it for its browser and its
-    // desktop's Browser icon alike.
-    if let Ok(p) = std::fs::read_to_string(format!("{OPT}/browser-path")) {
-        if !p.trim().is_empty() && env("AGENT_BROWSER_EXECUTABLE_PATH").is_none() {
-            std::env::set_var("AGENT_BROWSER_EXECUTABLE_PATH", p.trim());
-        }
-    }
     // What Hermes would guess from whether it sees a container, the same
     // on every runtime (hermes::RUNTIME_ENV); s6 hands it on to `main`.
     for (name, value) in hermes::RUNTIME_ENV {
@@ -518,7 +510,7 @@ fn screen_start(agent: Option<&str>) -> ! {
 /// At image build: what the boot reads instead of finding it each time, and
 /// the platform skill (skills.rs), from the image's own `fragment` CLI.
 fn build_info() -> ! {
-    desktop::install_browser(Path::new("/opt/hermes")).unwrap_or_else(|e| fail(&e));
+    desktop::front_tabs(Path::new("/opt/hermes")).unwrap_or_else(|e| fail(&e));
     let plugins = hermes::lean_plugins(Path::new("/opt/hermes/plugins"));
     std::fs::write(format!("{OPT}/lean-plugins.txt"), plugins.join("\n")).unwrap_or_else(|e| fail(&e.to_string()));
     // The desktop image already contains regular distro Chromium. Its PM
@@ -530,7 +522,6 @@ fn build_info() -> ! {
     }
     std::fs::write(hermes::CHROMIUM, hermes::chromium_script(&full)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
     std::fs::set_permissions(hermes::CHROMIUM, std::fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
-    std::fs::write(format!("{OPT}/browser-path"), hermes::CHROMIUM).unwrap_or_else(|e| fail(&e.to_string()));
     let cli = Command::new(FRAGMENT_CLI).arg("skill").output().unwrap_or_else(|e| fail(&format!("{FRAGMENT_CLI} skill: {e}")));
     if !cli.status.success() {
         fail(&format!("{FRAGMENT_CLI} skill: {}", String::from_utf8_lossy(&cli.stderr)));
@@ -633,7 +624,7 @@ fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
 /// browser profile that is a directory already stays where it is.
 fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
     let work = hermes::work_dir(&a.fragment);
-    let browser = work.join("browser-profile");
+    let browser = hermes::browser_dir(&a.fragment);
     if let Err(e) = std::fs::create_dir_all(&browser) {
         ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() });
         return;
@@ -946,6 +937,14 @@ fn stop_idle_desktops(agents: &[Agent], home: &Path, idle_ms: u64, stopping: &St
         let (agent, home, stopping) = (a.fragment.clone(), home.to_path_buf(), stopping.clone());
         tokio::spawn(async move {
             let t = Instant::now();
+            // Its browser closes first, as a person closes it (its cookies
+            // written), unless a person holds the desktop: Hermes' stop then
+            // refuses, and the browser is theirs.
+            if !desktop::held_by_a_person(&profile) {
+                if let Some(closed) = desktop::close_browser(&profile, &hermes::browser_dir(&agent), Path::new("/proc")).await {
+                    ev!("screen.browser_closed", { "agent": agent, "closed": closed, "ms": t.elapsed().as_millis() as u64 });
+                }
+            }
             match stop_desktop(&agent, &home).await {
                 Ok((code, said)) => ev!("screen.idle_stopped", { "agent": agent, "idleMs": idle, "code": code, "said": said, "ms": t.elapsed().as_millis() as u64 }),
                 Err(e) => ev!("screen.idle_stop_failed", { "agent": agent, "idleMs": idle, "error": e }),
@@ -1127,10 +1126,11 @@ fn start_gateway(home: &Path) -> Option<u32> {
 ///   turn, a compression) are cleared: their holder's PID names a live
 ///   process of this start (PIDs repeat in a fresh namespace: the gateway
 ///   is PID 7 each time), so Hermes would wait out its five-minute TTL.
-/// - Each turn a restart cut is closed in its session, with Hermes' own
-///   failed-turn boundary (`hermes::CLOSE_CUT_TURNS`, docs/computers.md,
-///   Durability, P5): left open, Hermes would join the next message to the
-///   cut request, and its model would do it again.
+/// - Each turn a restart cut is settled in its session as Hermes' own
+///   `/discard` settles it, with its failed-turn boundary
+///   (`hermes::SETTLE_CUT_TURNS`, docs/computers.md, Durability, P5): left
+///   alone, Hermes would pause the chat until its sender sent `/discard`,
+///   or, before its admissions, join the next message to the cut request.
 ///
 /// As the `hermes` user, so the files keep their owner.
 fn end_previous_life(agents: &[Agent], home: &Path) {
@@ -1164,14 +1164,14 @@ for p in sys.argv[1:]:
     }
     // after the leases: a write Hermes guards with them
     let t = Instant::now();
-    let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", hermes::CLOSE_CUT_TURNS]).args(&dbs).env("HOME", home).env("HERMES_HOME", home).current_dir("/").output();
+    let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", hermes::SETTLE_CUT_TURNS]).args(&dbs).env("HOME", home).env("HERMES_HOME", home).current_dir("/").output();
     let ms = t.elapsed().as_millis() as u64;
     match out {
-        Ok(o) if o.status.success() => match hermes::cut_turns_closed(&String::from_utf8_lossy(&o.stdout)) {
-            Ok((sessions, closed)) => ev!("boot.cut_turns_closed", { "dbs": dbs.len(), "sessions": sessions, "closed": closed, "ms": ms }),
+        Ok(o) if o.status.success() => match hermes::cut_turns_settled(&String::from_utf8_lossy(&o.stdout)) {
+            Ok((lost, dropped, closed)) => ev!("boot.cut_turns_settled", { "dbs": dbs.len(), "lost": lost, "dropped": dropped, "closed": closed, "ms": ms }),
             Err(why) => ev!("boot.cut_turns_failed", { "error": why, "ms": ms }),
         },
-        // the next message would be joined to a cut request: said loudly
+        // a chat would stay paused behind its cut turn: said loudly
         Ok(o) => ev!("boot.cut_turns_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>(), "ms": ms }),
         Err(e) => ev!("boot.cut_turns_failed", { "error": e.to_string(), "ms": ms }),
     }
@@ -1323,7 +1323,7 @@ async fn boot_main() {
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
     // each agent's route, in the gateway's config (bots.rs, `profile_routes`)
     let routes = bots::profile_routes(&hermes_agents, &route_chats(&api, &hermes_agents).await);
-    let managed = hermes::managed_config(&lean, card_timeout_s, screen_idle_ms) + &routes;
+    let managed = hermes::managed_config(&lean, card_timeout_s) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));
