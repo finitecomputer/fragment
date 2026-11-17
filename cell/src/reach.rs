@@ -84,19 +84,17 @@ pub(crate) async fn census(env: &worker::Env, person: &str) -> CellResult<serde_
         return Err(CellError::new(ErrorCode::NotFound, format!("no person {person}")));
     }
     let owned: Vec<String> = crate::principal::ask(env, person, &crate::principal::calls::List::default()).await?.fragments.into_iter().filter(|f| f.role == fragment_proto::Role::Owner).map(|f| f.name).collect();
-    let none = serde_json::Value::Null;
-    let asked = futures_util::future::join_all(owned.iter().map(|name| crate::fragment::ask(env, name, "computer/reach", &none))).await;
-    let (mut reaching, mut beyond, mut unanswered) = (BTreeMap::<String, u64>::new(), BTreeMap::<String, u64>::new(), 0u64);
+    let asked = futures_util::future::join_all(owned.iter().map(|name| crate::fragment::call(env, name, &crate::fragment::calls::ReachOf {}))).await;
+    let (mut reaching, mut beyond, mut unanswered) = (BTreeMap::<&str, u64>::new(), BTreeMap::<&str, u64>::new(), 0u64);
     for answer in asked {
         let Ok(a) = answer else {
             unanswered += 1;
             continue;
         };
-        let kind = a["kind"].as_str().unwrap_or("other").to_string();
-        if a["reach"] == true {
-            *reaching.entry(kind.clone()).or_default() += 1;
-            if a["beyond"] == true {
-                *beyond.entry(kind).or_default() += 1;
+        if a.reach {
+            *reaching.entry(a.kind.as_str()).or_default() += 1;
+            if a.beyond {
+                *beyond.entry(a.kind.as_str()).or_default() += 1;
             }
         }
     }

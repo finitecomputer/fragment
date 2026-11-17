@@ -45,6 +45,7 @@ use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::Routine;
 use crate::js;
 
 /// The one object's name.
@@ -72,10 +73,6 @@ const SWEEP_PAGES: usize = 1;
 const ROUTINES_A_PASS: i64 = 16;
 const ROUTINE_TRIES: i64 = 5;
 const ROUTINE_RETRY_MS: i64 = 30_000;
-/// The header a move's routine into an agent's fragment carries
-/// (routed.rs `marker`): the router never passes it. The routine goes as
-/// `stage/routine/<key>`, its text the body: appended once by its key.
-pub(crate) const ROUTINE_HEADER: &str = "x-fragment-move-routine";
 /// A person's pages told of a change to their moves, at most, by one call
 /// (a roster may change many): the rest read theirs as they reconnect.
 const TELLS_MAX: usize = 32;
@@ -1279,8 +1276,7 @@ impl MigrationsCell {
         }
         let fragment = agent_fragment(&self.env, agent).await?;
         let key = m.routine_key().ok_or_else(|| CellError::host(format!("{stage} is no import's")))?;
-        crate::routed::object_answer(&self.env, "FRAGMENT", &fragment, &format!("stage/routine/{key}"), machine::routine_text(stage)).await?;
-        Ok(())
+        crate::fragment::call(&self.env, &fragment, &Routine { key, text: machine::routine_text(stage) }).await
     }
 
     fn cutoff_ms(&self) -> Option<i64> {

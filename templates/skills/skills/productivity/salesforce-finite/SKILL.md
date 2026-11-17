@@ -1,6 +1,6 @@
 ---
 name: salesforce-finite
-description: Salesforce records (accounts, contacts, leads, opportunities, cases, custom objects) through the person's connected Salesforce org, with `fragment api salesforce`, SOQL, SOSL and the REST API. No OAuth setup, no key on the computer.
+description: Salesforce records (accounts, contacts, leads, opportunities, cases, custom objects) through the person's connected Salesforce org, with `fragment connection call salesforce`, SOQL, SOSL and the REST API. No OAuth setup, no key on the computer.
 version: 2.0.0
 author: Finite
 license: MIT
@@ -15,10 +15,10 @@ metadata:
 
 Your owner's Salesforce org: its accounts, contacts, leads, opportunities,
 cases and custom objects. Your computer holds no Salesforce credential:
-`fragment api salesforce` sends the connection's placeholder for you, and
-the computer swaps in a short-lived token for your owner's account. Never
-ask the person for a password, a security token or a session id, and never
-run `sf org login`.
+`fragment connection call salesforce` sends the connection's placeholder
+for you, and the computer swaps in a short-lived token for your owner's
+account. Never ask the person for a password, a security token or a
+session id, and never run `sf org login`.
 
 What you do in Salesforce is done as your owner, with what their Salesforce
 user may do: a record you create or change shows their name.
@@ -30,7 +30,7 @@ the org's own host, `<mydomain>.my.salesforce.com`, alone. Learn that host
 once, and use it for every call after:
 
 ```bash
-fragment api salesforce GET https://login.salesforce.com/services/oauth2/userinfo
+fragment connection call salesforce GET https://login.salesforce.com/services/oauth2/userinfo
 # → {"name": …, "email": …, "organization_id": …, "urls": {"rest": "https://acme.my.salesforce.com/services/data/v{version}/", …}}
 SF="https://acme.my.salesforce.com/services/data/v63.0"   # the host in urls.rest, and the API version
 ```
@@ -46,30 +46,31 @@ stderr and exit 1. Do what its `hint` says; its `body` is Salesforce's own
 answer, a list of `{errorCode, message, fields?}` (`MALFORMED_QUERY`,
 `INVALID_FIELD`, `REQUIRED_FIELD_MISSING`).
 
-On an older computer: `fragment api` came with an image newer than a
-computer awake since before it. If the command is `unrecognized`, your
-computer takes that image when it next restarts. Until then, send the same
-calls with `curl -H "Authorization: Bearer $SALESFORCE_ACCESS_TOKEN"`: the computer swaps
-that the same way.
+On an older computer: `fragment connection call` came with an image newer
+than a computer awake since before it. If the command is `unrecognized`,
+your computer takes that image when it next restarts. Until then, send the
+same calls with
+`curl -H "Authorization: Bearer $SALESFORCE_ACCESS_TOKEN"`: the computer
+swaps that the same way.
 
 ## Reading
 
 ```bash
 # SOQL: --param encodes the query for you
-fragment api salesforce GET "$SF/query" --param 'q=SELECT Id, Name, Industry FROM Account ORDER BY LastModifiedDate DESC LIMIT 10'
+fragment connection call salesforce GET "$SF/query" --param 'q=SELECT Id, Name, Industry FROM Account ORDER BY LastModifiedDate DESC LIMIT 10'
 
 # SOSL: search across objects
-fragment api salesforce GET "$SF/search" --param 'q=FIND {Acme} IN NAME FIELDS RETURNING Account(Id, Name), Contact(Id, Name, Email)'
+fragment connection call salesforce GET "$SF/search" --param 'q=FIND {Acme} IN NAME FIELDS RETURNING Account(Id, Name), Contact(Id, Name, Email)'
 
 # one record, and only the fields you need
-fragment api salesforce GET "$SF/sobjects/Account/001xx000003DGb2AAG" --param fields=Id,Name,Industry,Owner.Name
+fragment connection call salesforce GET "$SF/sobjects/Account/001xx000003DGb2AAG" --param fields=Id,Name,Industry,Owner.Name
 
 # an object's fields, types and picklist values (long: it is saved to a file, and the file named)
-fragment api salesforce GET "$SF/sobjects/Opportunity/describe"
+fragment connection call salesforce GET "$SF/sobjects/Opportunity/describe"
 
 # every object, and the org's API limits
-fragment api salesforce GET "$SF/sobjects"
-fragment api salesforce GET "$SF/limits"
+fragment connection call salesforce GET "$SF/sobjects"
+fragment connection call salesforce GET "$SF/limits"
 ```
 
 - SOQL names fields by their API names (`Owner.Name`, `Custom_Field__c`):
@@ -84,10 +85,10 @@ fragment api salesforce GET "$SF/limits"
 
 ```bash
 # create: answers {id, success, errors}
-fragment api salesforce POST "$SF/sobjects/Contact" --body '{"LastName": "Lovelace", "FirstName": "Ada", "Email": "ada@example.com", "AccountId": "001xx000003DGb2AAG"}'
+fragment connection call salesforce POST "$SF/sobjects/Contact" --body '{"LastName": "Lovelace", "FirstName": "Ada", "Email": "ada@example.com", "AccountId": "001xx000003DGb2AAG"}'
 
 # update: answers nothing (204) when it is done
-fragment api salesforce PATCH "$SF/sobjects/Opportunity/006xx000001a2b3AAA" --body '{"StageName": "Closed Won"}'
+fragment connection call salesforce PATCH "$SF/sobjects/Opportunity/006xx000001a2b3AAA" --body '{"StageName": "Closed Won"}'
 ```
 
 Any other REST resource under `/services/` on the org's host (Reports,

@@ -55,8 +55,8 @@ pub struct Manifest {
     /// the platform's release serves it, and the fragment's own manifest
     /// names only its face (`on_template`).
     pub template: Option<String>,
-    /// How its inbox knows a delivery (`inbox`): by a header that holds one
-    /// of its secrets, not by its inbox token.
+    /// How its inbox knows a delivery (`inbox`): by one of its secrets, not
+    /// by its inbox token; and what it says back.
     pub inbox: Option<InboxDecl>,
     /// Its page as the platform's files view, and that view's layer (`files`).
     pub files: Option<FilesDecl>,
@@ -69,15 +69,36 @@ pub struct Manifest {
     pub ignored: Vec<&'static str>,
 }
 
-/// `inbox: {header, secret}`: a delivery is taken only when its `header`
-/// holds the fragment's secret `secret` (a webhook's own signature header,
-/// Telegram's `x-telegram-bot-api-secret-token`), and the inbox token,
-/// which its editors read, admits nothing.
+/// `inbox`: how its inbox knows a delivery, by one of its secrets, and
+/// the inbox token, which its editors read, admits nothing; and, with
+/// `answer`, what it says back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxDecl {
-    /// Lower case: `^[a-z0-9][a-z0-9-]{0,63}$`, none of `RESERVED_INBOX_HEADERS`.
-    pub header: String,
-    pub secret: String,
+    pub check: InboxCheck,
+    /// A query of its own (`answer`), asked with each delivery once it is
+    /// stored, as its triggers are (`{channel, record}`): its result is
+    /// the delivery's answer (crate::inbox::answer).
+    pub answer: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboxCheck {
+    /// `{header, secret}`: `header` holds the fragment's secret `secret`
+    /// (Telegram's `x-telegram-bot-api-secret-token`).
+    /// `header` is lower case: `^[a-z0-9][a-z0-9-]{0,63}$`, none of `RESERVED_INBOX_HEADERS`.
+    Header { header: String, secret: String },
+    /// `{hmac: {…}}`: a signature over its body (crate::inbox).
+    Hmac(crate::inbox::HmacDecl),
+}
+
+impl InboxCheck {
+    /// The name of the secret it checks by.
+    pub fn secret(&self) -> &str {
+        match self {
+            InboxCheck::Header { secret, .. } => secret,
+            InboxCheck::Hmac(h) => &h.secret,
+        }
+    }
 }
 
 /// Headers an inbox is never told to read a secret from: the platform's
@@ -96,20 +117,61 @@ pub fn inbox_header_ok(header: &str) -> bool {
         && !RESERVED_INBOX_HEADERS.contains(&header)
 }
 
+/// `inbox`'s own shape; `parse` checks that `answer` is a query of its own.
 fn inbox(v: &Value) -> Result<InboxDecl, String> {
-    let o = v.as_object().ok_or("inbox must be an object: {header, secret}")?;
-    if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "header" | "secret")) {
-        return Err(format!("inbox.{k} means nothing: inbox is {{header, secret}}"));
+    let o = v.as_object().ok_or("inbox must be an object: {header, secret} or {hmac}, and answer?")?;
+    if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "header" | "secret" | "hmac" | "answer")) {
+        return Err(format!("inbox.{k} means nothing: inbox is {{header, secret}} or {{hmac}}, and answer?"));
     }
-    let header = o.get("header").and_then(Value::as_str).unwrap_or("");
-    if !inbox_header_ok(header) {
-        return Err(format!("inbox.header is a lower-case header name, not the platform's or a browser's ({header:?})"));
+    let answer = match o.get("answer") {
+        None => None,
+        Some(Value::String(op)) => Some(op.clone()),
+        Some(_) => return Err("inbox.answer names a query of its own".into()),
+    };
+    let check = match o.get("hmac") {
+        Some(_) if o.contains_key("header") || o.contains_key("secret") => return Err("inbox is {header, secret} or {hmac}, not both".into()),
+        Some(h) => InboxCheck::Hmac(crate::inbox::HmacDecl::read(h)?),
+        None => {
+            let header = o.get("header").and_then(Value::as_str).unwrap_or("");
+            if !inbox_header_ok(header) {
+                return Err(format!("inbox.header is a lower-case header name, not the platform's or a browser's ({header:?})"));
+            }
+            let secret = o.get("secret").and_then(Value::as_str).unwrap_or("");
+            if !fragment_proto::valid_secret_name(secret) {
+                return Err(format!("inbox.secret names one of its secrets (^[A-Z][A-Z0-9_]*$), not {secret:?}"));
+            }
+            InboxCheck::Header { header: header.into(), secret: secret.into() }
+        }
+    };
+    Ok(InboxDecl { check, answer })
+}
+
+impl InboxDecl {
+    /// As the cell stores it (its `inbox_secret` meta): `<header> <SECRET>`
+    /// for a header and no answer, as every release has; else its JSON,
+    /// which the release before can't read, so Fragment step 9 makes this
+    /// release forward only (docs/MODEL.md).
+    pub fn stored(&self) -> String {
+        let mut v = match (&self.check, &self.answer) {
+            (InboxCheck::Header { header, secret }, None) => return format!("{header} {secret}"),
+            (InboxCheck::Header { header, secret }, Some(_)) => serde_json::json!({ "header": header, "secret": secret }),
+            (InboxCheck::Hmac(h), _) => serde_json::json!({ "hmac": h.to_json() }),
+        };
+        if let Some(op) = &self.answer {
+            v["answer"] = op.as_str().into();
+        }
+        v.to_string()
     }
-    let secret = o.get("secret").and_then(Value::as_str).unwrap_or("");
-    if !fragment_proto::valid_secret_name(secret) {
-        return Err(format!("inbox.secret names one of its secrets (^[A-Z][A-Z0-9_]*$), not {secret:?}"));
+
+    /// What `stored` wrote, read back.
+    pub fn from_stored(text: &str) -> Result<InboxDecl, String> {
+        if text.starts_with('{') {
+            let v: Value = serde_json::from_slice(text.as_bytes()).map_err(|e| format!("its stored inbox is not JSON: {e}"))?;
+            return inbox(&v);
+        }
+        let (header, secret) = text.split_once(' ').ok_or_else(|| format!("its stored inbox {text:?} is not `<header> <SECRET>`"))?;
+        Ok(InboxDecl { check: InboxCheck::Header { header: header.into(), secret: secret.into() }, answer: None })
     }
-    Ok(InboxDecl { header: header.into(), secret: secret.into() })
 }
 
 impl Manifest {
@@ -513,7 +575,18 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
     }
     match obj.get("inbox") {
         None | Some(Value::Null) => {}
-        Some(v) => m.inbox = Some(inbox(v)?),
+        Some(v) => {
+            let i = inbox(v)?;
+            // asked as its triggered runs are: as the fragment, an editor
+            if let Some(op) = &i.answer {
+                match m.operations.get(op) {
+                    Some(d) if d.kind == OpKind::Query && d.role <= Role::Editor => {}
+                    Some(_) => return Err(format!("inbox.answer: {op} is not a query an editor may ask; the inbox asks it as the fragment, an editor")),
+                    None => return Err(format!("inbox.answer names no declared operation: {op:?}")),
+                }
+            }
+            m.inbox = Some(i);
+        }
     }
     match obj.get("files") {
         None | Some(Value::Null) => {}
@@ -602,10 +675,14 @@ mod tests {
 
     /// Goal: an inbox names a header and one of its secrets, both of their
     /// shapes, and nothing else; a fragment on a template declares none.
+    /// Telegram's is stored as every release before stored it.
     #[test]
     fn an_inbox_reads_a_secret_from_a_header() {
         let m = parse(br#"{"inbox":{"header":"x-telegram-bot-api-secret-token","secret":"TELEGRAM_WEBHOOK_SECRET"}}"#).unwrap();
-        assert_eq!(m.inbox, Some(InboxDecl { header: "x-telegram-bot-api-secret-token".into(), secret: "TELEGRAM_WEBHOOK_SECRET".into() }));
+        let telegram = InboxDecl { check: InboxCheck::Header { header: "x-telegram-bot-api-secret-token".into(), secret: "TELEGRAM_WEBHOOK_SECRET".into() }, answer: None };
+        assert_eq!(m.inbox, Some(telegram.clone()));
+        assert_eq!(telegram.stored(), "x-telegram-bot-api-secret-token TELEGRAM_WEBHOOK_SECRET", "its stored row, unchanged");
+        assert_eq!(InboxDecl::from_stored(&telegram.stored()), Ok(telegram));
         assert_eq!(parse(b"{}").unwrap().inbox, None);
         for bad in [
             r#"{"inbox":"x"}"#,
@@ -623,6 +700,81 @@ mod tests {
         let blessed = parse(br#"{"kind":"chat","inbox":{"header":"x-secret","secret":"S"}}"#).unwrap();
         assert_eq!(on_template(&parse(br#"{"template":"telegram"}"#).unwrap(), &blessed).unwrap().inbox, blessed.inbox, "a template's inbox is its fragments'");
         assert!(on_template(&parse(br#"{"template":"telegram","inbox":{"header":"x-other","secret":"T"}}"#).unwrap(), &blessed).unwrap_err().contains("inbox"));
+    }
+
+    /// Goal: an inbox checks an HMAC instead (crate::inbox), and may name
+    /// a query of its own as its answer; each is refused at deploy unless
+    /// of its shape, and stored as JSON a release before it reads as no
+    /// header, so admits nothing (valid, invalid, restart: read back).
+    #[test]
+    fn an_inbox_checks_an_hmac_and_answers() {
+        let slack = br#"{"operations":{"handshake":{"kind":"query"},"intake":{"kind":"job"}},
+            "inbox":{"hmac":{"secret":"SLACK_SIGNING_SECRET","header":"x-slack-signature","prefix":"v0=",
+              "signed":"v0:{x-slack-request-timestamp}:{body}","fresh":"x-slack-request-timestamp","within_s":300},"answer":"handshake"}}"#;
+        let i = parse(slack).unwrap().inbox.unwrap();
+        let InboxCheck::Hmac(h) = &i.check else { panic!("{i:?}") };
+        assert_eq!((h.secret.as_str(), h.prefix.as_str(), h.fresh.clone()), ("SLACK_SIGNING_SECRET", "v0=", Some(("x-slack-request-timestamp".into(), 300))));
+        assert_eq!(i.answer.as_deref(), Some("handshake"));
+        let stored = i.stored();
+        assert!(stored.starts_with('{') && stored.split_once(' ').is_none(), "no `<header> <SECRET>` for a release before it: {stored}");
+        assert_eq!(InboxDecl::from_stored(&stored), Ok(i));
+        let header = parse(br#"{"operations":{"hi":{"kind":"query"}},"inbox":{"header":"x-secret","secret":"S","answer":"hi"}}"#).unwrap().inbox.unwrap();
+        assert!(header.stored().starts_with('{'), "an answer is stored as JSON");
+        assert_eq!(InboxDecl::from_stored(&header.stored()), Ok(header));
+        assert!(InboxDecl::from_stored("nospace").is_err() && InboxDecl::from_stored("{").is_err());
+        for (bad, why) in [
+            (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"v0:{x-time}"}}}"#, "body"),
+            (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{body}","algorithm":"sha1"}}}"#, "algorithm"),
+            (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{body}","fresh":"x-time","within_s":300}}}"#, "{x-time}"),
+            (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{x-before}:{x-time}:{x-after}:{body}","fresh":"x-time","within_s":300}}}"#, "one reading"),
+            (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{x-time}.{body}","within_s":300}}}"#, "come together"),
+            (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{body}"},"header":"x-sig","secret":"S"}}"#, "not both"),
+            (r#"{"inbox":{"hmac":{"secret":"S","header":"x-sig","signed":"{body}"},"answer":"none"}}"#, "no declared"),
+            (r#"{"operations":{"j":{"kind":"job"}},"inbox":{"header":"x-sig","secret":"S","answer":"j"}}"#, "not a query"),
+            (r#"{"operations":{"q":{"kind":"query","role":"owner"}},"inbox":{"header":"x-sig","secret":"S","answer":"q"}}"#, "not a query an editor"),
+            (r#"{"operations":{"q":{"kind":"query"}},"inbox":{"header":"x-sig","secret":"S","answer":1}}"#, "answer"),
+            (r#"{"inbox":{"answer":"q"}}"#, "inbox.header"),
+        ] {
+            let e = parse(bad.as_bytes()).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+    }
+
+    /// Goal: a row the release before can't read never reaches it
+    /// (docs/MODEL.md: such a value makes its release forward only). Both
+    /// new shapes, an HMAC and a header with an answer, are JSON that its
+    /// reader (`split_once(' ')`) reads as no `<header> <SECRET>`, while
+    /// Telegram's header-only row reads as it always has. An object that
+    /// took Fragment step 9 is refused by the code of eight steps before
+    /// it reads a row, so rollout's `eligible` never rolls back across it
+    /// (the schema changed); rolled forward, the row reads as written
+    /// (valid, rollback, restart). Method: each row written to this code's
+    /// object as the cell writes it (`inbox_secret`); started by the code
+    /// of eight steps; then by this code again.
+    #[test]
+    fn an_inbox_the_release_before_cannot_read_makes_it_forward_only() {
+        use crate::migrate::{self, host::Lite, Db, Ran, SchemaError, FRAGMENT};
+        // the release before's reader (cell/src/fragment.rs, 2c45cb5f7)
+        let before_reads = |row: &str| row.split_once(' ').is_some_and(|(h, s)| inbox_header_ok(h) && fragment_proto::valid_secret_name(s));
+        let telegram = InboxDecl { check: InboxCheck::Header { header: "x-telegram-bot-api-secret-token".into(), secret: "TELEGRAM_WEBHOOK_SECRET".into() }, answer: None };
+        assert!(before_reads(&telegram.stored()) && InboxDecl::from_stored(&telegram.stored()) == Ok(telegram.clone()), "Telegram's row reads as it always has");
+        let hmac = parse(br#"{"operations":{"hi":{"kind":"query"}},"inbox":{"hmac":{"secret":"S","header":"x-sig","prefix":"v0=",
+            "signed":"v0 at {x-time}: {body}","fresh":"x-time","within_s":300},"answer":"hi"}}"#);
+        let answered = parse(br#"{"operations":{"hi":{"kind":"query"}},"inbox":{"header":"x-secret","secret":"S","answer":"hi"}}"#);
+        let (newest, before) = (FRAGMENT.steps.len() as u32, migrate::Class { steps: &FRAGMENT.steps[..8], ..FRAGMENT });
+        for decl in [hmac, answered].map(|m| m.unwrap().inbox.unwrap()) {
+            let row = decl.stored();
+            assert!(!before_reads(&row), "the release before reads no header and secret in {row}");
+            let db = Lite::new();
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &FRAGMENT, 0)), Ok(Ran::Made { version: newest }));
+            db.exec(&format!("INSERT INTO meta (key, value) VALUES ('inbox_secret', '{}')", row.replace('\'', "''"))).expect("written as the cell writes it");
+            let refused = db.transaction(|db| migrate::migrate(db, &before, 100));
+            assert_eq!(refused, Err(SchemaError::Newer { class: "Fragment", held: newest, known: 8 }), "the release before refuses the object");
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &FRAGMENT, 200)), Ok(Ran::Current { version: newest }));
+            let back = db.rows("SELECT value FROM meta WHERE key = 'inbox_secret'").expect("its row");
+            assert_eq!(back[0]["value"].as_str().map(InboxDecl::from_stored), Some(Ok(decl)), "rolled forward, it reads as written");
+        }
+        assert_eq!((newest, FRAGMENT.steps[8].name), (9, "inbox_forward_only"));
     }
 
     #[test]

@@ -51,6 +51,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use fragment_core::inbox::Answer;
+use fragment_core::manifest::{InboxCheck, InboxDecl};
 use fragment_core::secrets::placeholders;
 use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
 use fragment_core::{cron::Cron, egress, glob, npub};
@@ -312,10 +314,11 @@ struct FinishCall {
 }
 
 /// What admits a delivery to a fragment's inbox: its inbox token, or, when
-/// its code names an inbox secret (`InboxSecret`), that header holding it.
+/// its code names an inbox (`InboxSecret`), its secret, by the delivery's
+/// headers.
 pub(crate) enum Admits {
     Token(String),
-    Secret { header: String, name: String, given: String },
+    Code { inbox: InboxDecl, headers: Headers },
 }
 
 impl FragmentCell {
@@ -1611,21 +1614,39 @@ impl FragmentCell {
     /// the cap a post is refused, so overload is a 429, not memory.
     pub(crate) async fn inbox(&self, given: Admits, hops: u32, body: &[u8]) -> CellResult<Response> {
         self.name()?;
-        match given {
+        let answer = match given {
             Admits::Token(token) => {
                 if !crate::serve::eq_ct(&token, &self.must(MetaKey::InboxToken)?) {
                     return Err(CellError::new(ErrorCode::Forbidden, "bad inbox token (x-fragment-inbox-token, or ?t=)"));
                 }
+                None
             }
-            Admits::Secret { header, name, given } => {
-                let refused = || CellError::new(ErrorCode::Forbidden, format!("bad inbox secret ({header}): this inbox takes a delivery only with its secret there"));
-                let stored = self.stored_secret(&name)?.ok_or_else(refused)?;
-                let value = self.open_secret(&name, &stored.sealed).await?;
-                if given.is_empty() || !crate::serve::eq_ct(&given, &String::from_utf8_lossy(&value)) {
-                    return Err(refused());
+            Admits::Code { inbox, headers } => {
+                let name = inbox.check.secret();
+                // nothing is taken before its secret is set
+                let key = match self.stored_secret(name)? {
+                    Some(stored) => Some(self.open_secret(name, &stored.sealed).await?),
+                    None => None,
+                };
+                let read = |h: &str| headers.get(h).ok().flatten();
+                match &inbox.check {
+                    InboxCheck::Header { header, .. } => {
+                        let refused = || CellError::new(ErrorCode::Forbidden, format!("bad inbox secret ({header}): this inbox takes a delivery only with its secret there"));
+                        let key = key.ok_or_else(refused)?;
+                        let given = read(header).unwrap_or_default();
+                        if given.is_empty() || !crate::serve::eq_ct(&given, &String::from_utf8_lossy(&key)) {
+                            return Err(refused());
+                        }
+                    }
+                    InboxCheck::Hmac(h) => {
+                        let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("bad inbox signature ({}): this inbox takes a delivery only signed by its secret{why}", h.header));
+                        let key = key.ok_or_else(|| refused(""))?;
+                        h.check(&key, &read, body, js::now_ms() / 1000).map_err(|why| refused(&format!(": {}", why.message())))?;
+                    }
                 }
+                inbox.answer
             }
-        }
+        };
         // a delivery to the inbox is a write
         self.writable().await?;
 
@@ -1652,7 +1673,35 @@ impl FragmentCell {
         // triggers is the sender's error to see, never a silent 200
         let record = self.append("inbox", "inbox", "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
         let runs = self.published(&record, true, hops, &mut js::Laps::start()).await?;
-        json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs }))
+        let answered = match answer {
+            Some(op) => self.inbox_answer(&op, &record, hops).await?,
+            None => Answer::Platform,
+        };
+        match answered {
+            Answer::Platform => json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs })),
+            Answer::Json(text) => crate::json_response::json_bytes(text.into_bytes()),
+            Answer::Text(text) => {
+                let h = Headers::new();
+                h.set("content-type", "text/plain; charset=utf-8")?;
+                h.set("cache-control", "no-store")?;
+                h.set("x-content-type-options", "nosniff")?;
+                Ok(Response::ok(text)?.with_headers(h))
+            }
+        }
+    }
+
+    /// Its `answer` query, asked with a delivery it stored as its triggers
+    /// are (as the fragment, an editor), its result bounded as any query's
+    /// (`RESULT_MAX_BYTES`): what it says back.
+    async fn inbox_answer(&self, op: &str, record: &ChannelRecord, depth: u32) -> CellResult<Answer> {
+        let decl = self.declared(op)?;
+        // its install checked it, and stored both in one step
+        assert!(decl.kind == OpKind::Query, "an inbox's answer is a query (manifest::parse)");
+        let own = self.own_key()?;
+        let input = json!({ "channel": record.channel, "record": record });
+        let inv = Invocation { principal: &own, asker: None, role: Role::Editor, op, decl, id: format!("record:inbox:{}:{op}", record.seq), input, depth, via: Via::Channel, trigger: Some("inbox".into()) };
+        let result: Value = crate::json_text(self.invoke(inv).await?.result.get()).map_err(|e| CellError::host(format!("{op}'s result is not JSON: {e}")))?;
+        fragment_core::inbox::answer(&result).map_err(|why| CellError::new(ErrorCode::AppFailed, format!("{op}: {why}")))
     }
 
     /// A secret as it is stored: sealed, and the hosts it may go to.
