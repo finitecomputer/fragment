@@ -44,8 +44,8 @@ an image may rely on this:
 - **It stays awake** while a port tab is open or the guest holds its
   keepalive socket, and `IDLE_MS` (20 minutes) after neither does. An
   always-on seat's computer never sleeps (decision 25; docs/billing.md).
-- **It is saved** when its work ends (its last keepalive closes and 30 s
-  pass with none opened again), every 15 minutes while a keepalive stays
+- **It is saved** when its work ends (its last keepalive or its last
+  port tab closes, and 30 s pass with no keepalive opened again), every 15 minutes while a keepalive stays
   open, and at every sleep (below, "Saves and what a wake restores").
 - **A sleep** is, in order: the hold, the save, a container snapshot
   (only after a save that worked), SIGTERM, up to 5 s for the guest to
