@@ -497,6 +497,20 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
             && gus_opens.status == 200 && ran_in == 1 && gus_opens_after.status == 200 && ran_out == 1 && ada_opens.status == 200 && ran_ada == 2,
         json!({ "made": made3.body, "gusPosts": gus_posts.body, "gusAfter": [gus_after.status, gus_after.body.clone()], "adaAgent": [ada_agent_posts.status, ada_agent_posts.body.clone()], "runs": [ran_in, ran_out, ran_ada] }),
     );
+    // a post no trigger naming `from` would run for asks no one who counts
+    // now (the review's): its trigger runs while that question would fail
+    let asked = || super::jobs::runs(api, &ada, &name3, "").iter().filter(|r| r["trigger"] == "ask").count();
+    let asked_before = asked();
+    let places_down = |times: u32| api.unsigned("POST", "/api/test/registry", Some(&json!({ "downFor": { "path": "/content/places", "times": times } })));
+    let down = places_down(1)?;
+    let ask = api.signed(&ada, "POST", &format!("/api/f/{name3}/channels/ask"), Some(&json!({ "id": "q1", "body": { "text": "two eggs" } })))?;
+    places_down(0)?;
+    let asked_after = asked();
+    s.ok(
+        "an org's post that no trigger naming `from` would run for waits on no registry read: its trigger runs while who counts now could not be read",
+        down.status == 200 && ask.status == 200 && asked_after == asked_before + 1,
+        json!({ "ask": [ask.status, ask.body.clone()], "runs": [asked_before, asked_after] }),
+    );
 
     // a link-visible org fragment (the review's): its share link's floor is
     // a link holder's alone, so a viewer who never held it, offboarded, is
