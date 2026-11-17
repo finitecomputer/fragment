@@ -16,10 +16,9 @@
 { "name": "atlassian", "kind": "connection", "title": "Atlassian",
   "hosts": ["api.atlassian.com"],
   "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-  "key": "<the client secret's store name>",
   "connection_oauth": { "authorize": "https://auth.atlassian.com/authorize?audience=api.atlassian.com&prompt=consent",
     "exchange": "https://auth.atlassian.com/oauth/token",
-    "client_id": "<the app's client id>", "access": {
+    "access": {
       "read": { "scopes": ["read:jira-work", "read:jira-user", "read:me", "offline_access"] },
       "write": { "scopes": ["read:jira-work", "write:jira-work", "read:jira-user", "read:me", "offline_access"] } } },
   "scope_names": { "read:jira-work": "Jira issues (read)", "write:jira-work": "Jira issues",

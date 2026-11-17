@@ -15,8 +15,7 @@
 { "name": "gitlab", "kind": "connection", "title": "GitLab",
   "hosts": ["gitlab.com"],
   "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-  "key": "<the client secret's store name>",
   "connection_oauth": { "authorize": "https://gitlab.com/oauth/authorize", "exchange": "https://gitlab.com/oauth/token",
-    "client_id": "<the app's client id>", "access": { "read": { "scopes": ["read_api", "openid", "email"] }, "write": { "scopes": ["api", "openid", "email"] } } },
+    "access": { "read": { "scopes": ["read_api", "openid", "email"] }, "write": { "scopes": ["api", "openid", "email"] } } },
   "scope_names": { "read_api": "API (read)", "api": "API" },
   "env": ["GITLAB_OAUTH_ACCESS_TOKEN"] }

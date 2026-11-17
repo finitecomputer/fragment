@@ -14,10 +14,9 @@
 { "name": "dropbox", "kind": "connection", "title": "Dropbox",
   "hosts": ["api.dropboxapi.com", "content.dropboxapi.com"],
   "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-  "key": "<the client secret's store name>",
   "connection_oauth": { "authorize": "https://www.dropbox.com/oauth2/authorize?token_access_type=offline&prompt=consent",
     "exchange": "https://api.dropboxapi.com/oauth2/token",
-    "client_id": "<the app's client id>", "access": {
+    "access": {
       "read": { "scopes": ["openid", "email", "account_info.read", "files.metadata.read", "files.content.read"] },
       "write": { "scopes": ["openid", "email", "account_info.read", "files.metadata.read", "files.content.read", "files.metadata.write", "files.content.write"] } } },
   "scope_names": { "account_info.read": "Account info", "files.metadata.read": "File details (read)", "files.content.read": "Files (read)",

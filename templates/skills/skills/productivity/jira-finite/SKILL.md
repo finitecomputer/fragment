@@ -42,20 +42,18 @@ J="https://api.atlassian.com/ex/jira/1324a887-45db-1bf4-1e99-ef0ff456d421/rest/a
   they add a site by connecting again (Settings → Connections: Disconnect,
   then Connect) and picking it.
 - `[]`: no site was granted. They connect Atlassian again and pick one.
-- `not_connected`: your owner has not connected Atlassian, or must
-  authorize it again. Ask them to connect it in Settings, under
-  Connections, then try again: your computer is given it within seconds.
-- `forbidden`: your owner narrowed your connections and left Atlassian
-  out, or the call went to another host. Say so, and stop.
-- 401 `Unauthorized` on this read: Atlassian refused the token (the person
-  removed the app's access, say). Ask them to reconnect Atlassian.
 
 The answer is Jira's JSON on stdout. A refusal is one line of JSON on
-stderr, `{error, status, message, hint}`, and exit 1. Atlassian's and
-Jira's own refusals have no code worth reading: go by `status`, and by
-`message`, which holds Jira's `errorMessages` and `errors` (the field, and
-what is wrong with it). An issue's link for people is
-`<the site's url>/browse/ENG-123`.
+stderr and exit 1. Do what its `hint` says, but for a 401 on a change
+(below, "Read only"); its `body` is Jira's own answer: `errorMessages`, and
+`errors` (the field, and what is wrong with it). An issue's link for people
+is `<the site's url>/browse/ENG-123`.
+
+On an older computer: `fragment api` came with an image newer than a
+computer awake since before it. If the command is `unrecognized`, your
+computer takes that image when it next restarts. Until then, send the same
+calls with `curl -H "Authorization: Bearer $ATLASSIAN_OAUTH_ACCESS_TOKEN"`: the computer swaps
+that the same way.
 
 ## Read only
 
@@ -102,6 +100,9 @@ fragment api atlassian GET https://api.atlassian.com/me
   `startAt` and `maxResults`, and say `isLast` or `total`.
 - Descriptions and comment bodies answer as Atlassian Document Format
   (ADF), a tree of nodes: the words are its `text` nodes.
+- An attachment's bytes (`$J/attachment/content/<id>`) answer a redirect
+  to a signed address on another host: `--out FILE` follows it there,
+  without the token.
 
 ## Changing
 
@@ -143,13 +144,10 @@ at https://developer.atlassian.com/cloud/jira/platform/rest/v3/.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| Atlassian's answer | Fix |
 |---------|-----|
-| `not_connected` | Your owner connects Atlassian in Settings → Connections |
-| `forbidden` | Your owner left Atlassian off this agent's connections, or the call went to a host that is not `api.atlassian.com` |
-| 401 `Unauthorized`, reads too | Your owner reconnects Atlassian in Settings → Connections |
+| 401 `Unauthorized`, reads too | Atlassian refused the token (the person removed the app's access, say): your owner reconnects Atlassian in Settings → Connections |
 | 401 `scope does not match` | A change refused while reads work: connected read only (they allow changes in Settings → Connections). On a read: the cloud id is not a site they picked |
 | 403 | Their Jira permissions don't allow it in that project |
 | 404 | The key is wrong, or the issue is one they may not see |
-| 400 | The message says which field: an issue type, priority or field the project doesn't have, or a JQL that is not bounded |
-| `redirected` | Atlassian answered a redirect (an attachment's content), which is never followed with the token: say so, and stop |
+| 400 | `errors` says which field: an issue type, priority or field the project doesn't have, or a JQL that is not bounded |

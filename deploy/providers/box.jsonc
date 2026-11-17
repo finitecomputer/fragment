@@ -13,9 +13,8 @@
   "hosts": ["api.box.com", "upload.box.com"],
   "placements": [{ "header": "authorization", "format": "Bearer {}" }],
   "note": "Box lets read only list, search and see your files and folders, but not download what is in them. To let your agents read a file's contents, connect with read and write.",
-  "key": "<the client secret's store name>",
   "connection_oauth": { "authorize": "https://account.box.com/api/oauth2/authorize",
     "exchange": "https://api.box.com/oauth2/token",
-    "client_id": "<the app's client id>", "access": { "read": { "scopes": ["root_readonly"] }, "write": { "scopes": ["root_readwrite"] } } },
+    "access": { "read": { "scopes": ["root_readonly"] }, "write": { "scopes": ["root_readwrite"] } } },
   "scope_names": { "root_readonly": "Files and folders (read)", "root_readwrite": "Files and folders" },
   "env": ["BOX_OAUTH_ACCESS_TOKEN"] }

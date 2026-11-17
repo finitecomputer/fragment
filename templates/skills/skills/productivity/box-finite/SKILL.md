@@ -29,19 +29,19 @@ BOX=https://api.box.com/2.0
 fragment api box GET $BOX/users/me --param fields=id,name,login
 ```
 
-- An answer with `login`: connected, go on.
-- `not_connected`: your owner has not connected Box, or must authorize it
-  again. Ask them to connect it in Settings, under Connections, then try
-  again: your computer is given it within seconds.
-- `forbidden`: your owner left Box out of your connections. Say so, and stop.
-- A 401 from Box (`error` empty, or `unauthorized`): Box refused the token
-  (the person removed the app's access, say). Ask them to reconnect Box.
+An answer with `login`: connected, go on. The token goes to `api.box.com`
+(the API) and `upload.box.com` (uploads) only.
 
-The answer is Box's JSON on stdout. A refusal is one line of JSON on
-stderr, `{error, status, message, hint}`, and exit 1. Box's own codes come
-through as Box names them (`not_found`); where Box sends no body, `error`
-is empty: go by `status`. The token goes to `api.box.com` (the API) and
-`upload.box.com` (uploads) only.
+The answer is Box's JSON on stdout. A refusal is one line of JSON on stderr
+and exit 1. Do what its `hint` says; its `body` is Box's own answer: `code`
+(`not_found`, `item_name_in_use`) and `message`. Where Box sends no body,
+go by `status`.
+
+On an older computer: `fragment api` came with an image newer than a
+computer awake since before it. If the command is `unrecognized`, your
+computer takes that image when it next restarts. Until then, send the same
+calls with `curl -H "Authorization: Bearer $BOX_OAUTH_ACCESS_TOKEN"`: the computer swaps
+that the same way.
 
 ## Read only
 
@@ -76,23 +76,20 @@ fragment api box GET $BOX/files/456/comments --param fields=message,created_by,c
 
 ## Downloading
 
-Box answers a download with a redirect to a signed address on another host
-(`dl.boxcloud.com`). `fragment api` never follows it: its refusal
-(`redirected`) names the address, which an ordinary tool fetches, no token:
-
 ```bash
 fragment api box GET $BOX/files/456 --param fields=name,size
-URL=$(fragment api box GET $BOX/files/456/content 2>&1 | sed -n 's/.*a redirect to \(https:[^ ]*\), which.*/\1/p')
-wget -O ./plan.pdf "$URL"
+fragment api box GET $BOX/files/456/content --header 'Accept: */*' --out ./plan.pdf
 ```
 
-- Never fetch the signed address with `fragment api`, nor with an
-  `Authorization` header: the token goes to Box's two hosts alone. The
-  address lasts minutes: ask for a fresh one each time.
-- An empty `$URL`: run the call alone and read what it says. No output and
-  exit 0 is Box still preparing a file just uploaded: try again shortly.
-- Hold the saved file's size to the `size` Box stated. A download that
-  broke off leaves a short file: remove it, and download again.
+Box answers a download with a redirect to a signed address on another host
+(`dl.boxcloud.com`). `fragment api` follows it there without the token, and
+`--out` saves the file whole or not at all: a download that breaks off
+(`incomplete`) keeps nothing, and leaves a file already there as it was.
+
+- It answers `{"saved": …, "bytes": …}`: hold `bytes` to the `size` Box
+  stated.
+- `"status": 202` and no bytes is Box still preparing a file just uploaded:
+  try again shortly.
 
 ## Changing
 
@@ -142,13 +139,9 @@ trying again: it may have landed.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| Box's answer | Fix |
 |---------|-----|
-| `not_connected` | Your owner connects Box in Settings → Connections |
-| `forbidden` | Your owner left Box off this agent's connections |
-| 401 from Box | Your owner reconnects Box in Settings → Connections |
 | 403, `access_denied_insufficient_permissions` | Read only (they allow changes in Settings → Connections), or their Box user may not do this to this item |
 | `not_found` | The id is wrong, or their Box user cannot see it |
 | `item_name_in_use` | Pick another name, or another folder |
 | `rate_limit_exceeded` (429) | Wait, then ask again; ask for less at a time |
-| `redirected` | A download's answer: fetch the address it names with no token (see Downloading). From any other call: say so, and stop |

@@ -1179,14 +1179,20 @@ fragment api hubspot POST https://api.hubapi.com/crm/v3/objects/contacts --body 
 fragment api dropbox POST https://content.dropboxapi.com/2/files/download --header 'Dropbox-API-Arg: {"path": "/plan.pdf"}' --out plan.pdf
 ```
 
-A refusal is one line of JSON on stderr, `{error, status, message, hint}`,
-and exit 1: `not_connected` (the owner has not connected it, or left this
-agent out) and `forbidden` (read only, or not this service's host) are the
-computer's own, and `hint` says what to tell the owner. A redirect is
-never followed with the token; an answer over 256 KiB is saved to a file
-and the file named, as `--out <file>` saves any answer, whole or not at
-all. Never ask a person for a token, and never run a service's own
-sign-in.
+A refusal is one line of JSON on stderr, `{error, status, message, hint,
+body}`, and exit 1. `body` is what the service answered, as it came: read
+it for the service's own code and the field it names. `not_connected` (the
+owner has not connected it, or left this agent out) and `forbidden` (read
+only, or not this service's host) are the computer's own, and `hint` says
+what to tell the owner. A GraphQL answer that names `errors`
+is a refusal too (`graphql_errors`).
+
+A redirect is followed, and the token goes to no other host: a download
+that answers a signed address is fetched there without it. `--out <file>`
+saves an answer as it comes, whole or not at all (a file already there is
+kept unless the whole answer came), and an answer over 64 KiB with no
+`--out` is saved to a file and the file named. Never ask a person for a
+token, and never run a service's own sign-in.
 
 ## Command reference
 

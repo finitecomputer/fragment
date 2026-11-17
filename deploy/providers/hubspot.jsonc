@@ -17,10 +17,9 @@
   "hosts": ["api.hubapi.com"],
   "placements": [{ "header": "authorization", "format": "Bearer {}" }],
   "note": "Only a HubSpot super admin, or a user with Marketplace Access, can connect HubSpot. Your agents then reach the whole account's records, not only those your HubSpot user can see.",
-  "key": "<the client secret's store name>",
   "connection_oauth": { "authorize": "https://app.hubspot.com/oauth/authorize",
     "exchange": "https://api.hubapi.com/oauth/2026-09/token",
-    "client_id": "<the app's client id>", "access": {
+    "access": {
     "read": { "scopes": ["oauth", "crm.objects.contacts.read", "crm.objects.companies.read", "crm.objects.deals.read", "crm.objects.tickets.read", "crm.objects.owners.read"] },
     "write": { "scopes": ["oauth", "crm.objects.contacts.read", "crm.objects.contacts.write", "crm.objects.companies.read", "crm.objects.companies.write",
       "crm.objects.deals.read", "crm.objects.deals.write", "crm.objects.tickets.read", "crm.objects.tickets.write", "crm.objects.owners.read"] } } },
