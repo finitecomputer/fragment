@@ -2028,10 +2028,10 @@ async fn a_regular_browser_is_shared_by_the_desktop_and_tools() {
     for unwanted in ["--enable-automation", "--remote-debugging-pipe", "--headless"] {
         assert!(!argv.iter().any(|arg| arg.starts_with(unwanted)), "no {unwanted}: {argv:?}");
     }
-    // Hermes' janitor keeps the browser it started for as long as its
-    // desktop: the managed overlay's bound, read as the gateway reads it
+    // Hermes' janitor leaves the browser it started to the desktop's idle
+    // stop: the managed overlay's day, read as the gateway reads it
     let idle = hermes_python(&c, &[], "import json\nfrom tools.browser_session import BROWSER_SESSION_INACTIVITY_TIMEOUT as t\nprint(json.dumps({'idle': t}))");
-    assert_eq!(idle["idle"], json!(600), "the browser's idle bound is its desktop's ten minutes (hermes-boot's IDLE_STOP_MS): {idle}");
+    assert_eq!(idle["idle"], json!(86_400), "the janitor's bound is the overlay's day (hermes-boot's BROWSER_IDLE_S): {idle}");
     let webdriver = "inspect browser: navigator.webdriver === false ? 'ordinary-browser' : 'automation-enabled'";
     let ordinary = tool_said(&fake, &chat, &c, webdriver).await;
     assert!(ordinary.contains("ordinary-browser"), "the page sees webdriver false: {ordinary}");
@@ -2049,10 +2049,10 @@ async fn a_regular_browser_is_shared_by_the_desktop_and_tools() {
     open_browser_icon(&c, profile);
     assert_eq!(desktop_browser(&c, profile)["pid"], first["pid"], "the icon reuses the tool's browser, which outlived the turns that used it");
 
-    // A desktop stops after `IDLE_STOP_MS` unused, long after Chromium has
-    // written a cookie to disk (it commits its store every 30 s); the
-    // computer's own stop has Hermes close its browser first. This stop
-    // comes at once, so it waits for that write as an idle stop would.
+    // This stop is Hermes' own, at once, which ends the browser with its
+    // display: it waits for Chromium to write the cookie (every 30 s). The
+    // boot's idle stop closes the browser first and needs no wait
+    // (`the_agents_browser_lives_as_long_as_its_desktop`).
     cookie_on_disk(&c, profile, "fragment_browser_probe").await;
     let stopped = c.exec_code(&["env", "HERMES_HOME=/data/hermes", "/command/s6-setuidgid", "hermes", "hermes", "-p", profile, "computer-use", "screen", "stop"]);
     assert_eq!(stopped.0, 0, "desktop stop: {stopped:?}");
@@ -2082,6 +2082,81 @@ async fn a_regular_browser_is_shared_by_the_desktop_and_tools() {
     let navigated = tool_said(&fake, &chat, &c, "browse: https://example.com").await;
     let cookie = tool_said(&fake, &chat, &c, read_cookie).await;
     assert!(cookie.contains("cookie-kept"), "the cookie survives a computer restart: {cookie}; {navigated}");
+}
+
+/// A page server on the computer (127.0.0.1:8770): `/set?v=<v>` sets the
+/// cookie `fresh=<v>` (an hour), and `/get` names the cookie it was sent in
+/// its title.
+const COOKIE_SERVER: &str = r#"from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path.startswith('/set?v='):
+            v = self.path.split('=', 1)[1]
+            body, cookie = f'<title>set {v}</title>set'.encode(), f'fresh={v}; Max-Age=3600; Path=/'
+        else:
+            body, cookie = f"<title>cookie {self.headers.get('cookie') or 'none'}</title>".encode(), None
+        self.send_response(200)
+        if cookie:
+            self.send_header('set-cookie', cookie)
+        self.send_header('content-type', 'text/html'); self.send_header('content-length', str(len(body))); self.end_headers(); self.wfile.write(body)
+ThreadingHTTPServer(('127.0.0.1', 8770), H).serve_forever()
+"#;
+
+/// Goal: the agent's browser lives exactly as long as its desktop. Unwatched,
+/// the desktop stops at its idle bound (here 15 s) and its browser is closed
+/// first as a person would close it, so a cookie a page set moments before
+/// is kept: Chromium writes its cookies every 30 s, and a desktop stopped
+/// under it lost them (a site that rotates its sign-in cookie signs the
+/// agent out). Watched (a viewer, no Take over), the desktop stays up past
+/// its bound, and so does the browser browser_exec started: Hermes' own
+/// janitor counts only its tool's calls and a Take over, never a viewer.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn the_agents_browser_lives_as_long_as_its_desktop() {
+    use support::rfb::Viewer;
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("browser-life", &["juniper"]);
+    let c = Container::run_on(Runtime::Hosted, &tag, fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SCREEN_IDLE_MS", "15000")]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let profile = "juniper--k3x9";
+    assert!(c.exec(&["sh", "-c", &format!("cat > /tmp/cookie_server.py <<'SERVER'\n{COOKIE_SERVER}SERVER\nsetsid python3 /tmp/cookie_server.py > /tmp/cookie_server.log 2>&1 < /dev/null &")]));
+    async fn gone(c: &Container, profile: &str, what: &str) {
+        let t = Instant::now();
+        // bounded: its idle bound, a look every 3.75 s, and Hermes' own stop
+        while desktop_up(c, profile) && t.elapsed() < Duration::from_secs(90) {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert!(!desktop_up(c, profile), "{what}: the unwatched desktop stops: {}", c.logs().lines().filter(|l| l.contains("screen.")).collect::<Vec<_>>().join("\n"));
+        assert!(desktop_browser(c, profile).is_null(), "{what}: and its browser with it");
+    }
+
+    // unwatched: a cookie set, then the desktop's idle stop at once
+    let set = tool_said(&fake, &chat, &c, "browse: http://127.0.0.1:8770/set?v=fresh-1").await;
+    assert!(set.contains("set fresh-1"), "the page set its cookie: {set}");
+    gone(&c, profile, "after the cookie").await;
+    let read = tool_said(&fake, &chat, &c, "browse: http://127.0.0.1:8770/get").await;
+    assert!(read.contains("cookie fresh=fresh-1"), "a cookie set moments before the idle stop is kept: {read}");
+
+    // watched: the agent's browser outlives its idle bound and Hermes' janitor's tick
+    let base = fragment_bridge::net::Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
+    let mut viewer = Viewer::open(&base, "watcher", profile, Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("the screen: {e}\n{}", c.logs()));
+    tool_said(&fake, &chat, &c, "browse: http://127.0.0.1:8770/get").await;
+    let first = desktop_browser(&c, profile);
+    assert!(first.is_object(), "browser_exec's browser, watched: {first}");
+    let t = Instant::now();
+    // bounded: 75 s, past the idle bound and two of the janitor's 30 s ticks
+    while t.elapsed() < Duration::from_secs(75) {
+        let _ = tokio::time::timeout(Duration::from_secs(2), viewer.frame()).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(desktop_up(&c, profile), "a watched desktop stays up");
+    assert_eq!(desktop_browser(&c, profile)["pid"], first["pid"], "and the browser the agent left on it, while a person watches");
+    drop(viewer);
+    gone(&c, profile, "once no one watches").await;
 }
 
 /// Waits (at most 60 s) until `profile`'s desktop browser has written its

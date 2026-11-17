@@ -386,9 +386,16 @@ pub fn relay_hint() -> String {
     format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}")
 }
 
+/// How long Hermes' janitor leaves a browser browser_exec started and no
+/// longer uses (its `browser.inactivity_timeout`, in seconds): a day, so the
+/// desktop's own idle stop, which counts a person watching, is what closes
+/// it.
+pub const BROWSER_IDLE_S: u64 = 86_400;
+
 /// The managed overlay: how every profile streams, shows progress, asks
-/// (nothing technical; a card waits `card_timeout_s`), when its desktop and
-/// the browser on it are idle (`screen_idle_ms`), and what it never runs.
+/// (nothing technical; a card waits `card_timeout_s`), when its desktop is
+/// idle (`screen_idle_ms`), how long its browser is left (`BROWSER_IDLE_S`),
+/// and what it never runs.
 pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_idle_ms: u64) -> String {
     let mut y = String::new();
     y.push_str("# Written by hermes-boot at every boot (images/hermes): Hermes' managed overlay,\n");
@@ -466,12 +473,14 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     let minutes = screen_idle_ms as f64 / 60_000.0;
     y.push_str(&format!("bot_desktop:\n  auto_start: true\n  idle_stop_minutes: {minutes}\n"));
     // The browser browser_exec starts on that desktop stays up as long as
-    // the desktop does, as the screen shows it: Hermes' own janitor stops a
-    // browser its tool started once that tool goes unused this long (its
-    // default, two minutes, closed the agent's browser under a person who
-    // watched it). Hermes reads this once, process-wide, so the overlay
-    // carries it, in its whole seconds (30 at least).
-    y.push_str(&format!("browser:\n  inactivity_timeout: {}\n", (screen_idle_ms / 1000).max(30)));
+    // the desktop does, as the screen shows it: its idle stop, which counts
+    // a person watching, closes it first (desktop.rs, `close_browser`).
+    // Hermes' own janitor stops a browser its tool started once that tool
+    // goes unused `BROWSER_IDLE_S`, counting a Take over but never a viewer
+    // (its default, two minutes, closed the agent's browser under a person
+    // who watched it). Hermes reads this once, process-wide, so the overlay
+    // carries it.
+    y.push_str(&format!("browser:\n  inactivity_timeout: {BROWSER_IDLE_S}\n"));
     // Lazy installs are off (upstream's image turns them on): they fetch
     // Hermes' own optional backends (providers, platforms, speech) into its
     // home, which a computer configures none of (its model is the platform's
@@ -1544,8 +1553,8 @@ mod tests {
             "disabled_toolsets: [\"cronjob\"]",
             "    - \"platforms/discord\"",
             "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 10\n",
-            // the agent's browser stays as long as its desktop
-            "\nbrowser:\n  inactivity_timeout: 600\n",
+            // the agent's browser is the desktop's idle stop's to close
+            "\nbrowser:\n  inactivity_timeout: 86400\n",
             "\nmodel_catalog:\n  enabled: false\n",
             "\nsessions:\n  auto_prune: false\n",
             "\nsecurity:\n  allow_lazy_installs: false\n",
@@ -1572,8 +1581,8 @@ mod tests {
         let short = managed_config(&[], 20, crate::desktop::IDLE_STOP_MS);
         assert!(short.contains("\napprovals:\n  mode: \"off\"\n  timeout: 20\n") && short.contains("\nagent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: 20\n"), "{short}");
         assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
-        assert!(managed_config(&[], 20, 30_000).contains("\nbrowser:\n  inactivity_timeout: 30\n"), "and its browser's, in Hermes' seconds");
-        assert!(managed_config(&[], 20, 2_000).contains("\nbrowser:\n  inactivity_timeout: 30\n"), "no shorter than Hermes' own floor");
+        assert!(managed_config(&[], 20, 30_000).contains("\nbrowser:\n  inactivity_timeout: 86400\n"), "its browser left to the desktop's idle stop, whatever its bound");
+        const _: () = assert!(BROWSER_IDLE_S >= 100 * crate::desktop::IDLE_STOP_MS / 1000, "Hermes' janitor never beats the desktop's idle stop");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
         let p = profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Medium.into(), DEFAULT_REASONING, &route("http://model.fragment.internal/"), &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
@@ -1628,7 +1637,7 @@ mod tests {
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n"), "the managed skills and the platform skill's view, after its own: {p}");
         assert!(p.contains("browser:\n  headed: true\n  executable_path: \"/opt/fragment/bin/chromium\"\n"), "Hermes' browser, headed, on the image's Chromium, in the profile's own config: {p}");
         let overlay_browser: Vec<&str> = m.lines().skip_while(|l| *l != "browser:").skip(1).take_while(|l| l.starts_with("  ")).collect();
-        assert_eq!(overlay_browser, ["  inactivity_timeout: 600"], "the overlay's browser setting is its idle bound alone; the rest is each profile's: {m}");
+        assert_eq!(overlay_browser, ["  inactivity_timeout: 86400"], "the overlay's browser setting is its idle bound alone; the rest is each profile's: {m}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
         assert!(p.contains("\n  cwd: \"/data/work/juniper--k3x9\"\n"), "its terminal works in its work directory: {p}");
         assert_eq!(work_dir("juniper--k3x9"), PathBuf::from("/data/work/juniper--k3x9"));

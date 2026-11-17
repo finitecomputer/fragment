@@ -931,6 +931,14 @@ fn stop_idle_desktops(agents: &[Agent], home: &Path, idle_ms: u64, stopping: &St
         let (agent, home, stopping) = (a.fragment.clone(), home.to_path_buf(), stopping.clone());
         tokio::spawn(async move {
             let t = Instant::now();
+            // Its browser closes first, as a person closes it (its cookies
+            // written), unless a person holds the desktop: Hermes' stop then
+            // refuses, and the browser is theirs.
+            if !desktop::held_by_a_person(&profile) {
+                if let Some(closed) = desktop::close_browser(&profile, Path::new("/proc")).await {
+                    ev!("screen.browser_closed", { "agent": agent, "closed": closed, "ms": t.elapsed().as_millis() as u64 });
+                }
+            }
             match stop_desktop(&agent, &home).await {
                 Ok((code, said)) => ev!("screen.idle_stopped", { "agent": agent, "idleMs": idle, "code": code, "said": said, "ms": t.elapsed().as_millis() as u64 }),
                 Err(e) => ev!("screen.idle_stop_failed", { "agent": agent, "idleMs": idle, "error": e }),

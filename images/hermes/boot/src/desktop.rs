@@ -68,6 +68,112 @@ pub fn front_tabs(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// How long a desktop's browser is given to close before its desktop stops
+/// all the same.
+pub const CLOSE_MS_MAX: u64 = 10_000;
+
+/// The browser on `profile`'s desktop (its Chromium's own `SingletonLock`,
+/// `<host>-<pid>`, in `hermes::BROWSER_PROFILE`), as `proc` (`/proc`) has
+/// it: a live process, no zombie, whose command line names that browser
+/// profile and is not one of its helpers (`--type=`). A pid the lock names
+/// that is now another process's is none.
+pub fn browser_pid(profile: &Path, proc: &Path) -> Option<u32> {
+    let browser = profile.join(hermes::BROWSER_PROFILE);
+    let lock = std::fs::read_link(browser.join("SingletonLock")).ok()?;
+    let pid: u32 = lock.to_string_lossy().rsplit_once('-')?.1.parse().ok()?;
+    let at = proc.join(pid.to_string());
+    let stat = std::fs::read_to_string(at.join("stat")).ok()?;
+    if stat.rsplit_once(") ").is_none_or(|(_, rest)| rest.starts_with('Z')) {
+        return None;
+    }
+    let cmdline = std::fs::read(at.join("cmdline")).ok()?;
+    let mut args: Vec<String> = cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    // Chromium rewrites its process title: its arguments then read as one,
+    // joined by spaces (as psutil, Hermes' reader, splits them again)
+    if let [title] = args.as_slice() {
+        args = title.split(' ').map(str::to_string).collect();
+    }
+    let named = |dir: &str| Path::new(dir) == browser || std::fs::canonicalize(dir).ok().zip(std::fs::canonicalize(&browser).ok()).is_some_and(|(a, b)| a == b);
+    let ours = args.iter().any(|a| a.strip_prefix("--user-data-dir=").is_some_and(named));
+    (ours && !args.iter().any(|a| a.starts_with("--type="))).then_some(pid)
+}
+
+/// Closes `profile`'s desktop browser, if it has one, as a person closing
+/// it would: CDP's `Browser.close` over its own DevTools socket, Chromium's
+/// normal shutdown, which writes its cookies. Hermes' stop ends the
+/// desktop's process group, or its display, under the browser, and a
+/// SIGTERM is Chromium's end-of-session exit: either way the cookies a page
+/// set in Chromium's last 30 s (it writes them that often) were lost, and a
+/// site that rotates its sign-in cookie signed the agent out. The socket
+/// is the one its `DevToolsActivePort` names, which the agent can write,
+/// so it is used only once CDP itself names this browser's process; else
+/// a SIGTERM. Waits at most `CLOSE_MS_MAX`. Whether a browser was there,
+/// and whether it had gone.
+pub async fn close_browser(profile: &Path, proc: &Path) -> Option<bool> {
+    let pid = browser_pid(profile, proc)?;
+    if ask_to_close(profile, pid).await.is_err() {
+        // SAFETY: kill(2) with a pid read and checked just now; no memory is shared.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    let t = std::time::Instant::now();
+    // bounded by CLOSE_MS_MAX
+    while t.elapsed() < Duration::from_millis(CLOSE_MS_MAX) {
+        if browser_pid(profile, proc) != Some(pid) {
+            return Some(true);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Some(false)
+}
+
+/// The most a DevTools answer is read, and how many it reads for its own.
+const CDP_REPLY_BYTES: usize = 64 * 1024;
+const CDP_REPLIES_MAX: usize = 16;
+
+/// Sends `Browser.close` to the browser `pid` on `profile`, once CDP's
+/// `SystemInfo.getProcessInfo` names `pid` as the browser behind the
+/// socket its `DevToolsActivePort` names (a port reused, or a file written
+/// to point elsewhere, closes nothing).
+async fn ask_to_close(profile: &Path, pid: u32) -> Result<(), String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let file = std::fs::read_to_string(profile.join(hermes::BROWSER_PROFILE).join("DevToolsActivePort")).map_err(|e| e.to_string())?;
+    let mut lines = file.lines();
+    let port: u16 = lines.next().and_then(|p| p.trim().parse().ok()).filter(|p| *p > 0).ok_or("no DevTools port")?;
+    let path = lines.next().map(str::trim).filter(|p| p.strip_prefix("/devtools/browser/").is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))).ok_or("no DevTools browser path")?;
+    let base = fragment_bridge::net::Base::parse(&format!("http://127.0.0.1:{port}"))?;
+    let mut ws = fragment_bridge::net::connect_ws(&base, path, &[]).await?;
+    let send = |id: u32, method: &str| Message::text(serde_json::json!({ "id": id, "method": method }).to_string());
+    ws.send(send(1, "SystemInfo.getProcessInfo")).await.map_err(|e| e.to_string())?;
+    let read = async {
+        // bounded: CDP_REPLIES_MAX messages
+        for _ in 0..CDP_REPLIES_MAX {
+            let Some(Ok(Message::Text(text))) = ws.next().await else { return Err("the DevTools socket closed".to_string()) };
+            if text.len() > CDP_REPLY_BYTES {
+                return Err("a DevTools answer too large".into());
+            }
+            let answer: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            if answer["id"] == 1 {
+                let ours = answer["result"]["processInfo"].as_array().is_some_and(|ps| ps.iter().any(|p| p["type"] == "browser" && p["id"] == pid));
+                return if ours { Ok(()) } else { Err("the DevTools socket is another process's".into()) };
+            }
+        }
+        Err("no answer from DevTools".into())
+    };
+    tokio::time::timeout(Duration::from_secs(2), read).await.map_err(|_| "no answer from DevTools in 2 s".to_string())??;
+    ws.send(send(2, "Browser.close")).await.map_err(|e| e.to_string())
+}
+
+/// Whether a person holds `profile`'s desktop (its lease, as the bridge
+/// writes it and Hermes reads it, failing closed: one that does not read is
+/// a person's). None written is the agent's.
+pub fn held_by_a_person(profile: &Path) -> bool {
+    match std::fs::read(profile.join(LEASE)) {
+        Ok(bytes) => !matches!(fragment_bridge::lease::parse(&bytes).holder, fragment_bridge::lease::Holder::Agent),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// A desktop up and unused this long is stopped. Hermes' own default is
 /// 30 minutes; ten keeps a computer whose agents each opened a browser once
 /// from holding gigabytes for half an hour, and a person's pause while
@@ -137,6 +243,82 @@ pub fn screens_file(agents: &[Agent], home: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: the desktop's browser is the live process Chromium's lock
+    /// names, on that browser profile; never a helper, another profile's
+    /// browser, a zombie, or a pid recycled since. Then it is closed by a
+    /// signal to it alone, and the close is waited for.
+    #[tokio::test]
+    async fn the_desktops_browser_is_closed_alone_and_waited_for() {
+        let root = std::env::temp_dir().join(format!("close-browser-{}", std::process::id()));
+        let profile = root.join("profile");
+        let browser = profile.join(hermes::BROWSER_PROFILE);
+        std::fs::create_dir_all(&browser).unwrap();
+        let fake = root.join("proc");
+        let process = |pid: u32, state: char, args: &[&str]| {
+            let at = fake.join(pid.to_string());
+            std::fs::create_dir_all(&at).unwrap();
+            std::fs::write(at.join("stat"), format!("{pid} (chromium) {state} 1 1")).unwrap();
+            std::fs::write(at.join("cmdline"), args.iter().map(|a| format!("{a}\0")).collect::<String>()).unwrap();
+        };
+        let ours = format!("--user-data-dir={}", browser.display());
+        let lock = |pid: u32| {
+            let _ = std::fs::remove_file(browser.join("SingletonLock"));
+            std::os::unix::fs::symlink(format!("box-{pid}"), browser.join("SingletonLock")).unwrap();
+        };
+        assert_eq!(browser_pid(&profile, &fake), None, "no lock, no browser");
+        process(41, 'S', &["/usr/lib/chromium/chromium", "--no-sandbox", &ours]);
+        lock(41);
+        assert_eq!(browser_pid(&profile, &fake), Some(41));
+        // Chromium's own process title: its arguments in one, by spaces
+        process(40, 'S', &[&format!("/usr/lib/chromium/chromium --no-sandbox {ours} about:blank")]);
+        lock(40);
+        assert_eq!(browser_pid(&profile, &fake), Some(40), "a rewritten title");
+        process(39, 'S', &[&format!("/usr/lib/chromium/chromium --type=renderer {ours}")]);
+        lock(39);
+        assert_eq!(browser_pid(&profile, &fake), None, "a helper's rewritten title");
+        process(42, 'S', &["/usr/lib/chromium/chromium", "--type=renderer", &ours]);
+        lock(42);
+        assert_eq!(browser_pid(&profile, &fake), None, "a helper");
+        process(43, 'S', &["/usr/lib/chromium/chromium", "--user-data-dir=/data/work/fred--k3x9/browser-profile"]);
+        lock(43);
+        assert_eq!(browser_pid(&profile, &fake), None, "another profile's");
+        process(44, 'Z', &[]);
+        lock(44);
+        assert_eq!(browser_pid(&profile, &fake), None, "a zombie");
+        lock(45);
+        assert_eq!(browser_pid(&profile, &fake), None, "a pid no process has");
+        // a real process holding the profile (its argv names it), closed
+        let mut child = std::process::Command::new("sh").args(["-c", "sleep 30; :", &ours]).spawn().unwrap();
+        lock(child.id());
+        let proc = Path::new("/proc");
+        // bounded: 2 s for the child's exec to show its arguments
+        let t = std::time::Instant::now();
+        while browser_pid(&profile, proc).is_none() && t.elapsed() < Duration::from_secs(2) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(browser_pid(&profile, proc), Some(child.id()));
+        let waited = tokio::spawn(async move { child.wait().unwrap() });
+        assert_eq!(close_browser(&profile, proc).await, Some(true), "with no DevTools socket of its own: closed by its signal, and waited for");
+        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&waited.await.unwrap()), Some(libc::SIGTERM));
+        assert_eq!(close_browser(&profile, proc).await, None, "replay: none left to close");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal: a person holding the desktop is never interrupted by its idle
+    /// stop; a lease that does not read is a person's (fail closed); none is
+    /// the agent's.
+    #[test]
+    fn a_desktop_a_person_holds_is_theirs() {
+        let profile = std::env::temp_dir().join(format!("held-{}", std::process::id()));
+        std::fs::create_dir_all(profile.join("bot-desktop")).unwrap();
+        assert!(!held_by_a_person(&profile), "no lease: the agent's");
+        for (lease, held) in [(r#"{"holder": "agent", "epoch": 2}"#, false), (r#"{"holder": "human", "viewer_id": "v", "epoch": 3}"#, true), ("not json", true)] {
+            std::fs::write(profile.join(LEASE), lease).unwrap();
+            assert_eq!(held_by_a_person(&profile), held, "{lease}");
+        }
+        let _ = std::fs::remove_dir_all(&profile);
+    }
 
     /// Goal: the image's one change to Hermes' tab activation applies once
     /// to the pinned source, its old bytecode dropped. Replay: a source

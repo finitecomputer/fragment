@@ -787,7 +787,8 @@ What our Hermes image guarantees beyond the contract:
   off another's desktop. The desktop's Browser icon and the agent's
   `browser_exec` share one regular Chromium and one saved profile per
   agent, which shows pages `navigator.webdriver` false, as a person's own
-  browser does. It stays up as long as its desktop. A link opened on the
+  browser does. It stays up as long as its desktop, whose idle stop closes
+  it first, as a person would, its cookies written. A link opened on the
   desktop (a terminal's sign-in, `xdg-open`) opens there too: it is the
   desktop's default web browser, so no dialog asks which (FIN-351).
 

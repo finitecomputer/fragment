@@ -311,6 +311,25 @@ unfinished design, not debt.
   `a_regular_browser_is_shared_by_the_desktop_and_tools` (its second page
   `visible`) without the change.
 
+## The desktop's idle stop, not Hermes, ends the agent's browser
+
+- **Shortcut:** Hermes' desktop stop ends the desktop's process group or
+  its display under the browser, so the cookies Chromium had not yet
+  written (it writes them every 30 s) were lost; and Hermes' janitor
+  closes a browser browser_exec started once its tool goes unused,
+  counting a Take over but not a person watching. So hermes-boot's idle
+  stop sends the browser alone a SIGTERM first, Chromium's own clean
+  shutdown (images/hermes/boot/src/desktop.rs `close_browser`), and the
+  managed overlay gives the janitor a day (`BROWSER_IDLE_S`).
+- **Risk:** a desktop stopped another way (`hermes computer-use screen
+  stop`, which nothing of ours runs but tests) still loses a page's last
+  30 s of cookies; a browser that will not close in 10 s is stopped with
+  its desktop as before.
+- **Delete when:** a pinned Hermes closes its desktop's browser cleanly
+  before it stops the desktop, and its janitor counts the desktop's own
+  activity, proven by `the_agents_browser_lives_as_long_as_its_desktop`
+  without them.
+
 ## Each agent's Hermes profile config is rewritten at every boot
 
 - **Shortcut:** Hermes' managed scope cannot carry per-profile settings,
