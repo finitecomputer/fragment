@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 use super::jobs::{events, records};
 use super::ledger::{charged, entries, quiet, usage};
 use crate::api::{Api, Call, Socket};
-use super::credentials::{model_checks, placeholder, swap_checks, vault_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
+use super::credentials::{grant_checks, model_checks, placeholder, swap_checks, vault_checks, Swapping, GRANT_CHECKS, MODEL_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
@@ -1486,16 +1486,16 @@ export class App extends DurableObject {
 }
 
 fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
-    use fragment_core::models::{DEEPSEEK_FLASH, GLM_FLASH, MEDIUM_MODEL};
+    use fragment_core::models::{DEEPSEEK_FLASH, INKLING_SMALL, MEDIUM_MODEL};
     let said = fetched(s, 80, "models")?;
     let (listed, given) = said.strip_prefix("models: ").and_then(|r| r.split_once("; given: ")).unwrap_or_default();
     let given: Value = serde_json::from_str(given).unwrap_or(Value::Null);
     // each tier's route as the guest reads it (2026-10-24): the node's labels, its fallback's and vision's ids
-    let route = |label: &str| json!({ "label": label, "private": false, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH });
+    let route = |label: &str| json!({ "label": label, "private": false, "fallback": INKLING_SMALL, "vision": DEEPSEEK_FLASH });
     let routes = json!({ "cheap": route(crate::RECOMMENDED_LABEL), "medium": route(crate::STANDARD_LABEL) });
     s.ok(
         "the intercept lists the route's models' ids (GET /v1/models, naming no agent, as Hermes' /model asks it), each once, and they are the ids its view names by the route's names (GET /api/computer's models), each tier's route beside them",
-        listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "images": [], "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH, "routes": routes }),
+        listed == format!("{DEEPSEEK_FLASH}, {MEDIUM_MODEL}, {INKLING_SMALL}") && given == json!({ "images": [], "cheap": DEEPSEEK_FLASH, "medium": MEDIUM_MODEL, "fallback": INKLING_SMALL, "vision": DEEPSEEK_FLASH, "routes": routes }),
         &said,
     );
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
@@ -2134,7 +2134,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(VAULT_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
+        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(VAULT_CHECKS).chain(GRANT_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
@@ -2173,6 +2173,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("narrowed, it is refused a provider its owner has", said.starts_with("fetched 403") && said.contains("may not use google") && s.upstream.seen().len() == seen_before, &said);
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
+        replies_so_far += grant_checks(s, api, &swapping, &fetched)?;
     }
 
     // the model intercept: the agent's call is the platform's model route, its owner paying

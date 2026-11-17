@@ -1159,15 +1159,7 @@ impl PrincipalCell {
         };
         let url = Url::parse(&url).map_err(|e| CellError::host(format!("{url}: {e}")))?;
         let routed = Routed { name: name.to_string(), url, signed: Some(Signed::new(identity, None)), credential: None };
-        let headers = Headers::new();
-        routed.to_headers(&headers)?;
-        if let Some(r) = range {
-            headers.set("range", r)?;
-        }
-        let mut init = RequestInit::new();
-        init.with_method(method).with_headers(headers);
-        let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
-        crate::routed::send(&self.env, "FRAGMENT", name, req).await
+        routed.ask(&self.env, method, &inner, None, range).await
     }
 
     /// A fragment's route as the person: its answer's bytes, or its refusal

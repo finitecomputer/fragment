@@ -65,7 +65,7 @@ otherwise); the registry's, the move's and the mail lever are no route.
 | `POST /api/test/keys` | `{fragment, op, plaintext \| sealed}` |
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
-| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?}` |
+| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?}` |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -732,7 +732,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`; none 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent) | its app's database, for an export (`__dump`, cell/platform.mjs). No `table`: `{schema: [{type, name, table, sql}], tables}`, the platform's own tables left out. A `table`: `{table, offset, rows, next}`, at most 1000 rows and about 4 MiB from `offset`, each a JSON object (a blob `{"$base64"}`); not in the schema 404. No app code: 404 `no_code` |
-| `POST /api/f/{name}/inbox` | the inbox token, or the secret its code's `inbox` names (Apps) | the token in `x-fragment-inbox-token` or `?t=`, or, when its code names an inbox secret, that header holding it (and no token: 403 otherwise); JSON `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; `INBOX_PENDING_MAX` pending 429 |
+| `POST /api/f/{name}/inbox` | the inbox token, or the secret its code's `inbox` names (Apps) | the token in `x-fragment-inbox-token` or `?t=`, or, when its code names an inbox, its secret in its header or its HMAC signature (and no token: 403 otherwise, saying why a signature is refused); JSON `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`, or its `answer` query's. Bad token 403; `INBOX_PENDING_MAX` pending 429 |
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record POSTed to `url` as `{type: "record", fragment, channel, record}` (unsigned: the URL is the capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go). `{channel, wake: true}` in place of `url`, from a computer's egress alone (400 from anywhere else), wakes its computer instead (docs/computers.md) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
@@ -1027,15 +1027,43 @@ agent, or carrying code, keeps the last good code and says to fork it.
   name looks: a bundler's output folder, whose names change with their
   bytes, is the one to name. A fragment on a blessed template declares
   none (its release's own built names are kept for good).
-- `inbox` (optional): `{"header": "x-telegram-bot-api-secret-token",
-  "secret": "TELEGRAM_WEBHOOK_SECRET"}`: the inbox takes a delivery only
-  with that header (lower case; never `x-fragment-*`, `cookie`, `host`,
-  `authorization` or `content-type`) holding the fragment's secret of
-  that name, compared in constant time; the inbox token then admits
+- `inbox` (optional): how its inbox knows a delivery, by one of its
+  secrets, in one of two ways:
+  - `{"header": "x-telegram-bot-api-secret-token", "secret":
+    "TELEGRAM_WEBHOOK_SECRET"}`: that header holds the fragment's secret
+    of that name, compared in constant time.
+  - `{"hmac": {"secret": "SLACK_SIGNING_SECRET", "header":
+    "x-slack-signature", "prefix": "v0=", "signed":
+    "v0:{x-slack-request-timestamp}:{body}", "fresh":
+    "x-slack-request-timestamp", "within_s": 300}}`: `header` holds
+    `prefix` (optional, at most `inbox::PREFIX_MAX_BYTES`) and then the
+    hex HMAC-SHA256, under the secret, of `signed` (at most
+    `inbox::SIGNED_MAX_BYTES`) with `{body}` the delivery's raw bytes and
+    `{<fresh>}` that header's value, compared in constant time. With
+    `fresh`, only while that header's Unix seconds, in digits alone, are
+    at most `within_s` (1 to `inbox::WITHIN_MAX_S`) from now; the two come
+    together. `signed` is `<text>{body}`, or with `fresh`
+    `<text>{<fresh>}<text>{body}`, its text after the time starting with
+    no digit (the text before is optional): what is signed has one
+    reading, so no bytes can move between its pieces to make an old,
+    captured delivery's time new. A webhook signing its body alone is
+    `"signed": "{body}"` (GitHub's, with `"prefix": "sha256="`; Linear's).
+
+  A header it names is lower case, never `x-fragment-*`, `cookie`,
+  `host`, `authorization` or `content-type`. The inbox token then admits
   nothing, and nothing is taken before the secret is set. So a delivery
   is forged only by whoever may set that secret (its editors; on a
-  connector, its owner alone), never by a reader of the inbox token. A
-  fragment on a blessed template declares none.
+  connector, its owner alone), never by a reader of the inbox token.
+  `answer` (optional) names a query of its own an editor may ask: once a
+  delivery is stored and its triggers' runs started, it is asked as they
+  are (as the fragment, an editor, with `{channel, record}`), and its
+  result is the delivery's answer: `null` answers `{ok, seq, runs}`, and
+  `{body}` answers its body, a string as `text/plain` and any other JSON
+  as JSON, at most `RESULT_MAX_BYTES` (a webhook's handshake, such as
+  echoing Slack's `challenge`); anything else, or a query that fails, is
+  the delivery's error, the delivery stored all the same. Any other key,
+  here or in `hmac`, is refused at deploy. A fragment on a blessed
+  template declares none.
 
 `app.mjs` exports `class App extends DurableObject` with a method per
 operation, called `(input, call)`: `call.principal` (an identity, `anon:…`,
