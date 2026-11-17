@@ -64,6 +64,28 @@ unfinished design, not debt.
   it leaves one dormant since before FIN-395 C to lose that start, which
   its owner can make again: say so when cutting.
 
+## A computer keeps its agents' old grant rows until they are moved
+
+- **Shortcut:** what an agent may use of its owner's (its narrowed
+  providers, its account at each connection of several) moved from its
+  computer (`agents.connections`, `agent_accounts`) to its agent fragment
+  (`meta` `grants`, `fragment_core::grants`). The columns stay for a
+  release: until an agent's fragment has taken its row, each ask carries
+  it (`ComputerCell::grants_of`, `move_row`); a fragment holding none of
+  its own takes it whole and ignores it after, and the row is marked
+  `MOVED`. The release is forward only (the Computer's step 5), so the
+  release before never writes those rows again. The test levers
+  `legacy-grants` (a computer's) and `forget-grants` (a fragment's) make
+  an agent as before the move.
+- **Risk:** no rollback across this release: rollout's `eligible` refuses
+  it, and a hand-made one finds every Computer object refusing its code.
+  A computer that never runs this release keeps its rows untaken.
+- **Delete when:** production runs this release: a Computer schema step
+  drops `agents.connections` and `agent_accounts`, first copying each row
+  not yet taken into the computer's `meta` as one to hand over (a computer
+  asleep through this release included); `taken` in each ask, the mark,
+  `move_row` and both levers go with them.
+
 ## A chat wiped while its seed runs can keep its template's repo
 
 - **Shortcut:** a chat's create answers before its repo is made

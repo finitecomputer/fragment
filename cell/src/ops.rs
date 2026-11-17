@@ -629,6 +629,13 @@ impl FragmentCell {
                 }
                 json!({ "calls": body["calls"] })
             }
+            Some("forget-grants") => {
+                // an agent fragment as before the grants' move: it holds
+                // none, so its computer's row is taken whole at its next ask
+                // (fragment_core::grants::answered)
+                self.del_meta(MetaKey::Grants)?;
+                json!({ "forgot": true })
+            }
             Some("posted-kept") => {
                 // a channel people may post to keeps fewer records, trimmed
                 // at its next append (channels.rs `posted_kept`); no number,
