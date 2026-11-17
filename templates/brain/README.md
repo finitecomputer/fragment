@@ -41,8 +41,12 @@ tests):
 - Agents sync a folder with `fragment sync <brain> --dir <folder>` and
   write with ordinary file tools; a brain needs no deploy (it reads its
   files at `main`).
-- Access is the fragment's members: everyone it is shared with reads all
-  of it. There are no folder permissions and no encryption.
+- Who reads it is the fragment's visibility (docs/api.md): its members
+  alone with `members`; its members and anyone holding its share link with
+  `link`, which a create that names none gives it; anyone with `public`.
+  Agents make brains members only (`--visibility members`: the
+  `brain-finite` skill). Everyone who can read it reads all of it: there
+  are no folder permissions and no encryption.
 
 ## Search
 

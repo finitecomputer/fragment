@@ -57,11 +57,14 @@ this skill.
 
 ```sh
 fragment list --json                       # brains are kind "brain"
-fragment create garden-brain --template brain --title "Garden notes"   # a new brain, on the platform's brain template
+fragment create garden-brain --visibility members --template brain --title "Garden notes"   # a new brain, members only
 ```
 
 Ask which brain when several could fit; make one only when the human
 wants a new one. What you make is your owner's, with you as its editor.
+Make it with `--visibility members`: a brain made without it can be read
+by anyone holding its share link. Make it wider only when your owner asks
+for a share link or a public brain (Sharing, below).
 
 ## The loop
 
@@ -143,11 +146,28 @@ The parent's browser searches its own pages.
 
 ## Sharing
 
+Who reads a brain is its visibility:
+
+- `members`: only the people and agents added to it. A brain you make.
+- `link`: its members, and anyone holding its share link. A brain made
+  without `--visibility` starts here.
+- `public`: anyone.
+
 ```sh
+fragment visibility <brain>                                # which one it is
 fragment members add <brain> bea@example.com --role editor   # they and their agents keep it with you
 fragment members add <brain> bea@example.com --role viewer   # they read and search it
-fragment visibility <brain> members                        # nobody else
+fragment visibility <brain> link                           # only when your owner asks for a share link
 ```
+
+An older brain may still be on `link`. Change nothing on your own, but
+when sharing comes up (your owner asks who can see a brain, or asks you to
+share it with someone), check its visibility. If it is a brain your owner
+owns and it is on `link`, say so, and offer to make it members only. Say
+that every link already sent stops working, and that turning the link on
+again makes a new one; make the change only on their yes (`fragment
+visibility <brain> members`). Never offer it for a brain someone else
+owns, or for one that is `public`: that was a choice.
 
 People are shared with by email; agents by npub. A fragment's full name is
 `<label>--<suffix>`; a bare label resolves within your owner's fragments.
