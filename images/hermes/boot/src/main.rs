@@ -230,11 +230,25 @@ fn sqlite_report(args: &[String]) -> ! {
 struct Quiet {
     paused: std::sync::atomic::AtomicBool,
     busy: std::sync::atomic::AtomicUsize,
+    /// The holds begun, counted at each one's start: a round that writes
+    /// what a hold copies tells by it whether one began while it ran.
+    holds: std::sync::atomic::AtomicU64,
 }
 
 impl Quiet {
     fn paused(&self) -> bool {
         self.paused.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn holds(&self) -> u64 {
+        self.holds.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Paused for a hold (each poll of it says so again): a hold begun.
+    fn pause(&self) {
+        if !self.paused.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.holds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
@@ -296,7 +310,7 @@ async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
             continue;
         }
         let first = *since.get_or_insert_with(Instant::now);
-        quiet.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+        quiet.pause();
         // answered: the platform clears the answer before it holds again
         if Path::new(held::HELD).exists() || failed_at.is_some_and(|t| t.elapsed() < Duration::from_millis(COPY_RETRY_MS)) {
             continue;
@@ -1081,7 +1095,13 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
                 if held.paused() {
                     ev!("prompts.refresh_deferred", { "why": "skills", "because": "held" });
                 } else {
-                    let refreshing = tokio::task::spawn_blocking(|| refresh_stored_prompts(&home(), "skills"));
+                    // a hold begun while it ran (one slower than the hold's
+                    // wait for rounds under way, a database long locked)
+                    // may have copied its databases before the request: its
+                    // stamp is left then, and the next round asks again
+                    let since = held.holds();
+                    let overlapped = move || held.paused() || held.holds() != since;
+                    let refreshing = tokio::task::spawn_blocking(move || refresh_stored_prompts(&home(), "skills", &overlapped));
                     match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => ev!("prompts.refresh_failed", { "why": "skills", "error": e.to_string() }),
@@ -1198,8 +1218,10 @@ for p in sys.argv[1:]:
 /// stamped. `why` says which moment asks: the boot, its skills settled,
 /// before the gateway takes a turn, or an install of the managed skills
 /// while it runs (`spawn_skills`). A failure is said and leaves the stamp,
-/// so the next one asks again; the chats keep the prompts they had.
-fn refresh_stored_prompts(home: &Path, why: &str) {
+/// so the next one asks again; the chats keep the prompts they had; so does
+/// a hold that may have copied the databases before the request
+/// (`overlapped`, asked before the stamp is written).
+fn refresh_stored_prompts(home: &Path, why: &str, overlapped: &dyn Fn() -> bool) {
     let stamp = home.join(hermes::PROMPT_STAMP);
     let (indexed, cut) = skills::indexed(&[&skills::managed_dir(), Path::new(skills::PLATFORM_VIEW)]);
     if cut {
@@ -1229,6 +1251,9 @@ fn refresh_stored_prompts(home: &Path, why: &str) {
             Err(e) => return ev!("prompts.refresh_failed", { "why": why, "error": e.to_string(), "ms": ms }),
         }
     }
+    if overlapped() {
+        return ev!("prompts.stamp_deferred", { "why": why, "because": "held" });
+    }
     if let Err(e) = write_stamp(&stamp, &inputs) {
         ev!("prompts.stamp_failed", { "why": why, "error": e.to_string() });
     }
@@ -1237,14 +1262,17 @@ fn refresh_stored_prompts(home: &Path, why: &str) {
 /// The stamp (`hermes::PROMPT_STAMP`) as the last refresh left it: a
 /// regular file's first bytes alone, never a link, a fifo or a directory
 /// followed or waited on (its home is the hermes user's to write), which
-/// read as no stamp.
+/// read as no stamp: opened without following a link or waiting on a fifo,
+/// then known a regular file by what was opened, never by its name.
 fn read_stamp(stamp: &Path) -> Option<String> {
     use std::io::Read;
-    if !std::fs::symlink_metadata(stamp).ok()?.file_type().is_file() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(stamp).ok()?;
+    if !f.metadata().ok()?.file_type().is_file() {
         return None;
     }
     let mut text = String::new();
-    std::fs::File::open(stamp).ok()?.take(256).read_to_string(&mut text).ok()?;
+    f.take(256).read_to_string(&mut text).ok()?;
     Some(text)
 }
 
@@ -1443,7 +1471,7 @@ async fn boot_main() {
     // chat's stored prompt rebuilt from today's inputs at its next turn
     let refreshing = {
         let home = home.clone();
-        tokio::task::spawn_blocking(move || refresh_stored_prompts(&home, "boot"))
+        tokio::task::spawn_blocking(move || refresh_stored_prompts(&home, "boot", &|| false))
     };
     match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await {
         Ok(Ok(())) => {}
