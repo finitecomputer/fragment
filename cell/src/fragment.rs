@@ -628,6 +628,13 @@ impl Facts {
 /// (`create_org_fragment`), which never passes a caller's own headers.
 pub(crate) const ORG_HEADER: &str = "x-fragment-org";
 
+/// Why an org's fragment is no `what`, at its create and at each install
+/// (plane.rs): an org owns apps and brains; a person's agents, chats and
+/// skills stay theirs.
+pub(crate) fn persons_own(what: &str) -> String {
+    format!("an org owns apps and brains; a {what} stays a person's own")
+}
+
 pub(crate) fn missing(key: MetaKey) -> CellError {
     CellError::host(format!("a created fragment has no {}", key.key()))
 }
@@ -1380,9 +1387,8 @@ impl FragmentCell {
             let names: Vec<&str> = fragment_templates::CATALOG.iter().map(|t| t.name).chain(blessed::BLESSED).collect();
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
         }
-        // an org owns apps and brains: a person's agents, chats and skills stay theirs
         if let (Payer::Org(_), Some(t)) = (&owner, body.template.as_deref().filter(|t| blessed::PERSONS_OWN.contains(t))) {
-            return Err(CellError::invalid(format!("an org owns apps and brains; a {t} stays a person's own")));
+            return Err(CellError::invalid(persons_own(t)));
         }
         if let Some(title) = &body.title {
             if body.template.is_none() {

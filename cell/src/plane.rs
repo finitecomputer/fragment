@@ -558,6 +558,9 @@ impl FragmentCell {
                 Err(why) => return self.code_refused(sha, &format!("fragment.json: {why}")),
             },
         };
+        if manifest.kind().persons_own() && self.owner()?.org().is_some() {
+            return self.code_refused(sha, &crate::fragment::persons_own(manifest.kind().as_str()));
+        }
         // and the release's code, never its own (forking makes code its own)
         let code = match &blessed {
             Some(t) => {

@@ -98,6 +98,24 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     let all = refused.iter().all(|(_, r, status)| r.status == *status);
     s.ok("and refused: each says why", all, json!(refused.iter().map(|(w, r, _): &(&str, Reply, u16)| json!([w, r.status, r.body])).collect::<Vec<_>>()));
 
+    // nor does a deploy make one a person's kind (the review's): by a
+    // blessed template it names, or by the kind it declares
+    let made5 = api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgkind") })))?;
+    let name5 = made5.body["name"].as_str().context("the org's plain fragment")?.to_string();
+    let mut kinds = vec![];
+    for (key, manifest) in [("chat", json!({ "template": "chat" })), ("agent", json!({ "kind": "agent" }))] {
+        let files = json!([{ "path": "fragment.json", "text": manifest.to_string() }]);
+        let wrote = api.signed(&ada, "POST", &format!("/api/f/{name5}/files"), Some(&json!({ "key": format!("kind-{key}"), "message": "a person's kind", "files": files })))?;
+        let deployed = api.signed(&ada, "POST", &format!("/api/f/{name5}/deploy"), Some(&json!({})))?;
+        let status = api.signed(&ada, "GET", &format!("/api/f/{name5}/status"), None)?;
+        kinds.push((wrote.status, deployed.status, status.body["kind"].clone(), status.body["code"]["error"].clone()));
+    }
+    s.ok(
+        "an org's fragment installs no person's kind: one naming the chat template, or declaring an agent, is refused at its deploy, saying why, and stays an app",
+        made5.status == 200 && kinds.iter().all(|(w, d, kind, error)| *w == 200 && *d == 200 && kind == "app" && error.as_str().is_some_and(|e| e.contains("stays a person's own"))),
+        json!(kinds),
+    );
+
     // a content admin who is no member administers it, and may give themselves access
     let to_ben = api.signed(&ada, "POST", &format!("{root}/content-admin-offers"), Some(&json!({ "id": "ben", "email": Api::email_of(&ben) })))?;
     api.signed(&ben, "POST", &format!("{root}/content-admin-offers/{}/accept", to_ben.body["id"].as_str().unwrap_or("")), Some(&json!({})))?;
