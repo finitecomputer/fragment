@@ -1,6 +1,6 @@
 ---
 name: jira-finite
-description: Jira issues, comments, transitions and projects through the person's connected Atlassian account, with `fragment api atlassian` and Jira's REST API. No OAuth setup, no API token on the computer.
+description: Jira issues, comments, transitions and projects through the person's connected Atlassian account, with `fragment connection call atlassian` and Jira's REST API. No OAuth setup, no API token on the computer.
 version: 2.0.0
 author: Finite
 license: MIT
@@ -14,11 +14,12 @@ metadata:
 # Jira
 
 Jira issues, comments, transitions and projects on your owner's Atlassian
-sites. Your computer holds no Atlassian credential: `fragment api
-atlassian` sends the connection's placeholder for you, and the computer
-swaps in a short-lived token for your owner's account. There is no app to
-make and no API token to paste: never ask the person for an Atlassian
-password, an API token or a client secret, and never run `acli auth login`.
+sites. Your computer holds no Atlassian credential:
+`fragment connection call atlassian` sends the connection's placeholder
+for you, and the computer swaps in a short-lived token for your owner's
+account. There is no app to make and no API token to paste: never ask the
+person for an Atlassian password, an API token or a client secret, and
+never run `acli auth login`.
 
 What you do in Jira is done as your owner: an issue you create or a comment
 you write shows their name.
@@ -30,7 +31,7 @@ under its cloud id, never at the site's own host (`acme.atlassian.net`).
 Learn the cloud id once, and use it for every call after:
 
 ```bash
-fragment api atlassian GET https://api.atlassian.com/oauth/token/accessible-resources
+fragment connection call atlassian GET https://api.atlassian.com/oauth/token/accessible-resources
 # → [{"id": "1324a887-45db-1bf4-1e99-ef0ff456d421", "name": "acme", "url": "https://acme.atlassian.net", "scopes": ["read:jira-work", …]}]
 J="https://api.atlassian.com/ex/jira/1324a887-45db-1bf4-1e99-ef0ff456d421/rest/api/3"
 ```
@@ -49,11 +50,12 @@ stderr and exit 1. Do what its `hint` says, but for a 401 on a change
 `errors` (the field, and what is wrong with it). An issue's link for people
 is `<the site's url>/browse/ENG-123`.
 
-On an older computer: `fragment api` came with an image newer than a
-computer awake since before it. If the command is `unrecognized`, your
-computer takes that image when it next restarts. Until then, send the same
-calls with `curl -H "Authorization: Bearer $ATLASSIAN_OAUTH_ACCESS_TOKEN"`: the computer swaps
-that the same way.
+On an older computer: `fragment connection call` came with an image newer
+than a computer awake since before it. If the command is `unrecognized`,
+your computer takes that image when it next restarts. Until then, send the
+same calls with
+`curl -H "Authorization: Bearer $ATLASSIAN_OAUTH_ACCESS_TOKEN"`: the
+computer swaps that the same way.
 
 ## Read only
 
@@ -72,21 +74,21 @@ own: their Jira permissions don't allow it in that project.
 
 ```bash
 # search by JQL: name the fields, or Jira answers ids alone
-fragment api atlassian POST "$J/search/jql" --body '{"jql": "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",
+fragment connection call atlassian POST "$J/search/jql" --body '{"jql": "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",
   "maxResults": 25, "fields": ["summary", "status", "assignee", "priority", "issuetype", "updated"]}'
 
 # one issue, with its description and comments
-fragment api atlassian GET "$J/issue/ENG-123" --param fields=summary,status,assignee,reporter,priority,issuetype,project,labels,created,updated,duedate,parent,description,comment
+fragment connection call atlassian GET "$J/issue/ENG-123" --param fields=summary,status,assignee,reporter,priority,issuetype,project,labels,created,updated,duedate,parent,description,comment
 
 # where an issue may go now: each transition's id, name and the status it goes to
-fragment api atlassian GET "$J/issue/ENG-123/transitions"
+fragment connection call atlassian GET "$J/issue/ENG-123/transitions"
 
 # projects, and people (their accountId, to assign)
-fragment api atlassian GET "$J/project/search" --param query=eng --param maxResults=50 --param orderBy=name
-fragment api atlassian GET "$J/user/search" --param query=ada --param maxResults=10
+fragment connection call atlassian GET "$J/project/search" --param query=eng --param maxResults=50 --param orderBy=name
+fragment connection call atlassian GET "$J/user/search" --param query=ada --param maxResults=10
 
 # your owner: {account_id, name, email}
-fragment api atlassian GET https://api.atlassian.com/me
+fragment connection call atlassian GET https://api.atlassian.com/me
 ```
 
 - An issue is named by its key (`ENG-123`) or its id; a project by its key
@@ -111,18 +113,18 @@ A description or a comment is written as ADF: a `doc` of paragraphs, a
 
 ```bash
 # create (type: Task, Bug, Story, Epic, Subtask; a subtask or an epic's child names "parent": {"key": "ENG-1"})
-fragment api atlassian POST "$J/issue" --body '{"fields": {"project": {"key": "ENG"}, "issuetype": {"name": "Bug"}, "summary": "Login fails",
+fragment connection call atlassian POST "$J/issue" --body '{"fields": {"project": {"key": "ENG"}, "issuetype": {"name": "Bug"}, "summary": "Login fails",
   "description": {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Steps…"}]}]},
   "priority": {"name": "High"}, "labels": ["login"], "assignee": {"accountId": "<account id>"}}}'
 
 # comment
-fragment api atlassian POST "$J/issue/ENG-123/comment" --body '{"body": {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Fixed in #42."}]}]}}'
+fragment connection call atlassian POST "$J/issue/ENG-123/comment" --body '{"body": {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Fixed in #42."}]}]}}'
 
 # move it on its workflow, by a transition's id (read them first): answers nothing (204)
-fragment api atlassian POST "$J/issue/ENG-123/transitions" --body '{"transition": {"id": "31"}}'
+fragment connection call atlassian POST "$J/issue/ENG-123/transitions" --body '{"transition": {"id": "31"}}'
 
 # change fields: answers nothing (204)
-fragment api atlassian PUT "$J/issue/ENG-123" --body '{"fields": {"summary": "Login fails on Safari"}}'
+fragment connection call atlassian PUT "$J/issue/ENG-123" --body '{"fields": {"summary": "Login fails on Safari"}}'
 ```
 
 A long body is easier as a file: `--body @issue.json`. Anything else of the

@@ -1,6 +1,6 @@
 ---
 name: google-workspace-finite
-description: Gmail, Calendar, Drive, Contacts, Sheets, Docs, and Slides through the person's connected Google account, with `gws` (Google's Workspace CLI, in your computer's image) or `fragment api google`. No OAuth setup, no keys on the computer.
+description: Gmail, Calendar, Drive, Contacts, Sheets, Docs, and Slides through the person's connected Google account, with `gws` (Google's Workspace CLI, in your computer's image) or `fragment connection call google`. No OAuth setup, no keys on the computer.
 version: 3.0.0
 author: Nous Research (rewritten for fragment)
 license: MIT
@@ -27,8 +27,8 @@ create a Google Cloud project for them.
 (github.com/googleworkspace/cli), on your PATH, and it takes the
 placeholder as its access token by itself: every Google API it knows, as
 `gws <service> <resource> <method>`, JSON out. Where `gws` is not on your
-PATH, `fragment api google` calls any Google REST API the same way
-(below, "Without gws").
+PATH, `fragment connection call google` calls any Google REST API the same
+way (below, "Without gws").
 
 Hermes' standalone `google-workspace` skill is omitted from this image:
 its OAuth setup and token-file helpers are for a different authentication
@@ -48,8 +48,8 @@ connection and authentication.
 curl -sS -H "Authorization: Bearer $GOOGLE_OAUTH_ACCESS_TOKEN" https://www.googleapis.com/oauth2/v2/userinfo
 ```
 
-(`curl` here, and not `fragment api`: this check is the same on a computer
-of any age.)
+(`curl` here, and not `fragment connection call`: this check is the same
+on a computer of any age.)
 
 - `{"email": …}`: connected, as that account. Go on.
 - `not_connected`: your owner has not connected Google, or must authorize
@@ -144,19 +144,21 @@ fails or the match is ambiguous.
 ## Without gws
 
 `gws` is in your computer's image, so this is for a computer without it.
-`fragment api` came with an image newer than a computer awake since before
-it: if the command is `unrecognized`, use `gws` (above), which every image
-has, or `curl -H "Authorization: Bearer $GOOGLE_OAUTH_ACCESS_TOKEN"`.
+`fragment connection call` came with an image newer than a computer awake
+since before it: if the command is `unrecognized`, use `gws` (above),
+which every image has, or
+`curl -H "Authorization: Bearer $GOOGLE_OAUTH_ACCESS_TOKEN"`.
 
-Where `gws` is not on your PATH, the same APIs with `fragment api google
-<METHOD> <url>`: it sends the connection's placeholder for you, `--param`
-encodes a query parameter, `--body` is the JSON sent, and the answer is
-Google's JSON. A refusal is one line of JSON on stderr and exit 1: its
-`hint` says what to tell your owner, and its `body` is Google's own answer
-(`error.status`, `error.message`).
+Where `gws` is not on your PATH, the same APIs with
+`fragment connection call google <METHOD> <url>`: it sends the
+connection's placeholder for you, `--param` encodes a query parameter,
+`--body` is the JSON sent, and the answer is Google's JSON. A refusal is
+one line of JSON on stderr and exit 1: its `hint` says what to tell your
+owner, and its `body` is Google's own answer (`error.status`,
+`error.message`).
 
 ```bash
-G="fragment api google"
+G="fragment connection call google"
 # Gmail: search (ids), then read one; --param encodes the query
 $G GET https://gmail.googleapis.com/gmail/v1/users/me/messages --param 'q=is:unread newer_than:1d' --param maxResults=10
 $G GET https://gmail.googleapis.com/gmail/v1/users/me/messages/MESSAGE_ID --param format=full

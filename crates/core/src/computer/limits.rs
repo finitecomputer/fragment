@@ -30,6 +30,19 @@ pub const START_DEADLINE_MS: i64 = 15 * 60_000;
 pub const SLEEP_DEADLINE_MS: i64 = 60_000;
 /// Awake time is metered at least this often.
 pub const METER_EVERY_MS: i64 = 5 * 60_000;
+/// A running computer is heard from at least every `METER_EVERY_MS` (its
+/// alarm), or each step of a save (`SAVE_DEADLINE_MS`), behind whose run
+/// that alarm can wait (the cell's `ALARM_WALL_MS`). An event that comes
+/// when nothing was heard of it for longer than this was heard late: its
+/// alarms went unheard (a handler that failed before it asked for
+/// another, or the platform's delay), and nothing shows it ran meanwhile,
+/// so that time is not metered (FIN-511).
+pub const ALARM_LATE_MS: i64 = 20 * 60_000;
+/// No awake row longer than this is charged (`awake_batch`): the longest the
+/// lifecycle meters is a meter's wait and a sleep's steps, each heard within
+/// `ALARM_LATE_MS`, about twenty minutes in all, so one longer came from a
+/// path it should not have, and is logged, never billed (FIN-511).
+pub const AWAKE_ROW_MAX_MS: i64 = 60 * 60_000;
 /// The pause before a failed start is tried again, doubled for each
 /// failure before it.
 pub const RETRY_PAUSE_MS: i64 = 5_000;
@@ -100,3 +113,8 @@ const _: () = assert!(SAVES_KEPT >= 2, "a save to fall back to");
 const _: () = assert!(UNSAVED_NOTICE_FAILURES >= 1, "told after a failure, never before");
 const _: () = assert!(ALIVE_MS < START_DEADLINE_MS, "a start's wait for its guest fits its deadline");
 const _: () = assert!(WONT_WAKE_RETRY_MS > START_DEADLINE_MS, "a computer that won't wake tries one start at a time");
+const _: () = assert!(ALARM_LATE_MS > SAVE_DEADLINE_MS && ALARM_LATE_MS > METER_EVERY_MS, "an alarm held up behind a save, or one meter's wait, is on time");
+const _: () = assert!(
+    METER_EVERY_MS + ALARM_LATE_MS + HOLD_DEADLINE_MS + SAVE_DEADLINE_MS + SLEEP_DEADLINE_MS < AWAKE_ROW_MAX_MS,
+    "the longest row the lifecycle meters (a meter's wait heard late, then a sleep's steps) is charged"
+);

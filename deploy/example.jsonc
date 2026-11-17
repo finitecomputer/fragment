@@ -126,8 +126,8 @@
   // reads images), one that reads images behind a slot images go to: a
   // call falls back as the slot it runs does, however it named it. A slot
   // left out is on
-  // Workers AI: cheap GLM-5.3 Flash, medium GLM-5.3, fallback DeepSeek V4
-  // Flash, vision GLM-5.3 Flash. Every model is one the price book prices
+  // Workers AI: cheap DeepSeek V4.1 Flash, medium GLM-5.3, fallback
+  // Inkling 2 Small, vision DeepSeek V4.1 Flash. Every model is one the price book prices
   // (fragment_core::price), one its slot names a price for, or one on
   // OpenRouter at its slot's ceiling (below), or the deploy is refused.
   // Leave `models` out (as a preview without a key does)
@@ -138,8 +138,8 @@
   // provider routing, openrouter.ai/docs/guides/routing/provider-selection):
   // only zero-data-retention endpoints, the fastest first, each taking every
   // parameter the call sends, at fp8 or bf16, at most $0.15 a million
-  // tokens in and $0.50 out; Workers AI's GLM-5.3 Flash behind them and for
-  // images. Any model id OpenRouter serves works here (say
+  // tokens in and $0.50 out; Workers AI's DeepSeek V4.1 Flash behind them
+  // and for images (GLM-5.3 Flash there until its retirement on 2026-11-20). Any model id OpenRouter serves works here (say
   // "deepseek/deepseek-v4.1-flash"): a slot on OpenRouter is priced at its
   // own `max_price`, every input token at `prompt` and output at
   // `completion` with OpenRouter's fee (docs/ledger.md, OpenRouter's price),
@@ -156,8 +156,8 @@
                 "body": { "provider": { "zdr": true, "sort": "throughput", "require_parameters": true,
                                         "quantizations": ["fp8", "bf16"],
                                         "max_price": { "prompt": 0.15, "completion": 0.5 } } } },
-    "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" },
-    "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
+    "fallback": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" },
+    "vision": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" }
     // Embeddings (docs/api.md, Models): BGE-M3 on Workers AI unnamed, as
     // if named so:
     //   "embeddings": { "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024 }
@@ -177,16 +177,16 @@
   //              "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
   //   "medium": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
   //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
-  //   "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" },
-  //   "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
+  //   "fallback": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" },
+  //   "vision": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" }
   // },
   // Or Private and Standard (Paul, 2026-10-22 and 10-24), the routes
   // Settings offers, each falling back and seeing within itself: Private,
   // the cheap tier and every agent's default, on Finite Private, Tinfoil's
   // DeepSeek V4.1 Flash behind it, text and images, on Tinfoil's own key
   // (tinfoil.sh's confidential inference, its list price named here);
-  // Standard, the medium tier, on our OpenRouter key, Cloudflare's GLM-5.3
-  // Flash behind it and for its images. Each runs Fast and Deep (Paul,
+  // Standard, the medium tier, on our OpenRouter key, Cloudflare's DeepSeek
+  // V4.1 Flash behind it and for its images. Each runs Fast and Deep (Paul,
   // 2026-10-27; decision 65): a tier's own slot is its Fast, its agents'
   // turns, and the slot its `"deep"` names its Deep, their delegates';
   // `"reasoning"` (low, high or max, on a tier or a Deep) is how hard a
@@ -217,7 +217,7 @@
   //                 "price": { "input": 0.65, "cached_input": 0.13, "output": 1.45 }, "images": true, "private": true },
   //   "vision": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
   //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash", "private": true },
-  //   "cloudflare": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash", "images": true }
+  //   "cloudflare": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017", "images": true }
   // },
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",

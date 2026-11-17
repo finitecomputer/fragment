@@ -1,6 +1,6 @@
 ---
 name: linear-finite
-description: Linear issues, comments, teams and projects through the person's connected Linear account, with `fragment api linear` and Linear's GraphQL API. No OAuth setup, no API key on the computer.
+description: Linear issues, comments, teams and projects through the person's connected Linear account, with `fragment connection call linear` and Linear's GraphQL API. No OAuth setup, no API key on the computer.
 version: 2.0.0
 author: Finite
 license: MIT
@@ -14,11 +14,11 @@ metadata:
 # Linear
 
 Linear issues, comments, teams and projects through your owner's connected
-Linear account. Your computer holds no Linear credential: `fragment api
-linear` sends the connection's placeholder for you, and the computer swaps
-in a short-lived token for your owner's account. There is no OAuth app to
-make and no API key to paste: never ask the person for a Linear key, and
-never set `LINEAR_API_KEY`.
+Linear account. Your computer holds no Linear credential:
+`fragment connection call linear` sends the connection's placeholder for
+you, and the computer swaps in a short-lived token for your owner's
+account. There is no OAuth app to make and no API key to paste: never ask
+the person for a Linear key, and never set `LINEAR_API_KEY`.
 
 What you do in Linear is done as your owner: an issue you create or a
 comment you write shows their name.
@@ -29,7 +29,7 @@ Linear is one GraphQL endpoint. Every read and change is this command with
 another document:
 
 ```bash
-L="fragment api linear POST https://api.linear.app/graphql"
+L="fragment connection call linear POST https://api.linear.app/graphql"
 $L --query 'query { viewer { name email } organization { name urlKey } }'
 ```
 
@@ -47,11 +47,12 @@ The connection reaches `api.linear.app` (the GraphQL API) and
 `uploads.linear.app` (files attached to issues) only. It is one Linear
 workspace: the one your owner picked when they connected it.
 
-On an older computer: `fragment api` came with an image newer than a
-computer awake since before it. If the command is `unrecognized`, your
-computer takes that image when it next restarts. Until then, send the same
-calls with `curl -H "Authorization: Bearer $LINEAR_OAUTH_ACCESS_TOKEN"`: the computer swaps
-that the same way.
+On an older computer: `fragment connection call` came with an image newer
+than a computer awake since before it. If the command is `unrecognized`,
+your computer takes that image when it next restarts. Until then, send the
+same calls with
+`curl -H "Authorization: Bearer $LINEAR_OAUTH_ACCESS_TOKEN"`: the computer
+swaps that the same way.
 
 ## Read only
 

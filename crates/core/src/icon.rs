@@ -6,7 +6,7 @@
 //!
 //! This is its pure part, run by the cell (cell/src/icon.rs), which calls:
 //!
-//! 1. GLM-5.3 Flash on Workers AI, for its subject (`subject_input`,
+//! 1. Gemma 4 26B on Workers AI, for its subject (`subject_input`,
 //!    `subject_of`): the app's title and description named as one
 //!    concrete object. An abstract name drawn as it is comes back a flat
 //!    rounded square, the look an icon must not have (the spike,
@@ -43,8 +43,12 @@ pub const CANDIDATES: usize = 4;
 /// A drawing's side: the smallest the model's price counts in, and four
 /// times `SIZE`'s area to crop from.
 pub const DRAWN_PX: u32 = 512;
-/// The subject's model, by its Workers AI catalog id (in the price book).
-pub const SUBJECT_MODEL: &str = "@cf/zai-org/glm-5.3-flash";
+/// The subject's model, by its Workers AI catalog id (in the price book):
+/// Gemma 4 26B (4B active), Workers AI's cheapest chat model, $0.10 a
+/// million tokens in and $0.30 out (developers.cloudflare.com/workers-ai/
+/// models/gemma-4-26b-a4b-it/, read 2026-11-16), for a noun phrase. Until
+/// 2026-11-20 it was GLM-5.3 Flash, which Workers AI retires then.
+pub const SUBJECT_MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 /// The drawings' model (its catalog entry, 2026-10-24): JPEGs of 256 to
 /// 1920 a side, its input multipart form fields.
 pub const IMAGE_MODEL: &str = "@cf/black-forest-labs/flux-2-klein-4b";
@@ -63,7 +67,8 @@ pub const BACKDROP: &str = "#3a6ea5";
 pub const HINT_MAX_CHARS: usize = 200;
 /// The longest subject drawn; a longer answer is the model's mistake.
 pub const SUBJECT_MAX_CHARS: usize = 120;
-/// The subject's answer, its reasoning included (GLM reasons at `low`).
+/// The subject's answer: a noun phrase, with no reasoning (`subject_input`
+/// turns Gemma's off), well under this.
 pub const SUBJECT_MAX_TOKENS: u32 = 400;
 /// What a title and a description may add to the subject's question.
 const ABOUT_MAX_CHARS: usize = 600;
@@ -86,13 +91,13 @@ pub const MEDIA_TYPE: &str = "image/png";
 /// is checked after (`examine`, `check`): the prompt only makes it rarer.
 const STYLE: &str = "A clean 3D CG render of one object, like a product shot for a desktop icon: smooth satin plastic and metal, soft diffuse studio lighting, gentle ambient occlusion, crisp clean edges, slight 3/4 view, clear friendly colours. Centered, filling about 70% of the frame, isolated on a plain flat light grey background. No text, letters or numbers on it. No rounded square, no tile, no app frame, no border.";
 
-/// What the subject's question tells GLM, before the app it is asked of,
-/// when its asker gave no hint: GLM chooses.
+/// What the subject's question tells its model, before the app it is
+/// asked of, when its asker gave no hint: the model chooses.
 pub const SUBJECT_SYSTEM: &str = "You name the one physical object that a desktop icon for an app should show. Answer with a short noun phrase only (at most 12 words): one concrete, colourful, everyday object, optionally with one small accessory touching it. Never an abstract shape, a logo, a screen, a person, or anything with writing or numbers on it. Examples: \"a red apple with a green leaf\", \"a blue mail tray holding letters\".";
 
-/// What it tells GLM when its asker gave a hint: the object they name is
-/// the subject, with what they say of it, cleaned into a noun phrase; GLM
-/// chooses one only when they name none ("make it purple"). Their words
+/// What it tells the model when its asker gave a hint: the object they
+/// name is the subject, with what they say of it, cleaned into a noun
+/// phrase; the model chooses one only when they name none ("make it purple"). Their words
 /// are not drawn as they are: a negation ("no bear") drawn names what it
 /// refuses, and writing is refused by `check` (`STYLE` says "No text").
 /// Asked under `SUBJECT_SYSTEM`'s rules instead, GLM swapped a computer
@@ -151,7 +156,7 @@ pub fn admit(started: &[i64], now_ms: i64) -> Result<Vec<i64>, Refusal> {
     Ok(within)
 }
 
-/// The subject's question, for GLM on Workers AI: the fragment's title
+/// The subject's question, for `SUBJECT_MODEL`: the fragment's title
 /// and description, and its asker's hint.
 pub fn subject_input(title: &str, description: Option<&str>, hint: Option<&str>) -> Value {
     let mut about = format!("App: {}.", clip(title, 100));
@@ -167,11 +172,13 @@ pub fn subject_input(title: &str, description: Option<&str>, hint: Option<&str>)
     json!({
         "messages": [{ "role": "system", "content": if hint.is_some() { HINTED_SYSTEM } else { SUBJECT_SYSTEM } }, { "role": "user", "content": asked }],
         "max_tokens": SUBJECT_MAX_TOKENS,
-        "reasoning_effort": "low",
+        // Gemma 4 thinks unless told not to (its catalog entry: enable_thinking
+        // defaults to true), and takes no reasoning_effort
+        "chat_template_kwargs": { "enable_thinking": false },
     })
 }
 
-/// The subject GLM named (`{choices: [{message: {content}}]}`): its first
+/// The subject its model named (`{choices: [{message: {content}}]}`): its first
 /// line, unquoted, without a last full stop; `None` when it named none
 /// (an empty answer, one of its reasoning only, or one too long), and the
 /// cell draws the hint, or the title, instead.
