@@ -97,15 +97,8 @@ async fn question_vector(env: &Env, cfg: &Config, who: &Signed, asked: &Across, 
 
 /// `name` asked the question as the signer: its status and answer's bytes.
 async fn ask(env: &Env, url: &Url, who: &Signed, name: &str, inner: &str) -> CellResult<(u16, Vec<u8>)> {
-    let make = || {
-        let headers = Headers::new();
-        Routed { name: name.to_string(), url: url.clone(), signed: Some(who.clone()), credential: None }.to_headers(&headers)?;
-        headers.set("content-type", "application/json")?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Post).with_headers(headers).with_body(Some(inner.into()));
-        Ok(Request::new_with_init("https://fragment.internal/search/asked", &init)?)
-    };
-    let mut resp = crate::routed::send_again(env, "FRAGMENT", name, make).await?;
+    let routed = Routed { name: name.to_string(), url: url.clone(), signed: Some(who.clone()), credential: None };
+    let mut resp = routed.ask(env, Method::Post, "/search/asked", Some(inner), None).await?;
     let status = resp.status_code();
     Ok((status, resp.bytes().await?))
 }

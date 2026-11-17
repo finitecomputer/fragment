@@ -75,8 +75,8 @@ pub fn migrations(s: &mut Suite, _: &Api) -> Result<()> {
         let r = api.unsigned("POST", "/api/test/registry", Some(&json!("schema")))?;
         s.ok("and the registry", r.status == 200 && holds_all(&r.body, &migrate::REGISTRY, "ran"), &r);
     }
-    if s.on_celld() {
-        s.skip("and their computer", "celld runs no computers here: they need egress intercepts and snapshots its Docker engine lacks (docs/self-host.md, seam 2)");
+    if !s.runs_computers() {
+        s.skip("and their computer", "this celld node runs no computers: they need egress intercepts and snapshots, which only the krun engine has (docs/self-host.md, seam 2)");
     } else if !s.hosted() {
         let made = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
         let id = made.body["computer"].as_str().unwrap_or_default().to_string();

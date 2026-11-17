@@ -127,19 +127,6 @@ impl Call for InviteEmail {
     type Answer = ();
 }
 
-/// A fragment's `invites/claim` (and `invites/decline`): the person
-/// `identity`, who signs in as `email`, verified, accepts (declines) the
-/// invite waiting on it there; or, for an invite from before invites
-/// waited for a yes, signed in as it and meets it. `agents` are theirs,
-/// which come in with them (decision 64), at most `AGENTS_PER_OWNER_MAX`.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ClaimInvite {
-    pub email: String,
-    pub identity: String,
-    #[serde(default)]
-    pub agents: Vec<String>,
-}
-
 /// `POST /agents`: an agent its owner vouches for (the key's proof was
 /// checked by the router).
 #[derive(Serialize, Deserialize)]

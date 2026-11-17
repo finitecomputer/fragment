@@ -51,7 +51,8 @@ use std::collections::BTreeMap;
 
 use fragment_core::{form, npub};
 use fragment_proto::{
-    limits, Access, AccessMember, AccessRow, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
+    limits, Access, AccessMember, AccessRow, CreateInvite, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, SetRole,
+    SetVisibility, Shared, Visibility,
 };
 use futures_util::future::{join, join_all};
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -63,6 +64,7 @@ use crate::ask_registry;
 use crate::auth::{self, enc, esc};
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{FaceOf, Named};
 use crate::js;
 use crate::registry::calls::{self, Profile};
 use crate::registry::invites::{AnswerInvite, InvitesFor};
@@ -306,29 +308,24 @@ pub async fn route(req: Request, env: &Env, cfg: &Config, url: &Url, segments: &
 /// A fragment's handler at `inner`, asked as the signed-in person: its
 /// answer, read from its bytes once as `T` (`IgnoredAny`: only whether it
 /// answered), or its refusal as it made it.
-pub(crate) async fn ask<T: DeserializeOwned>(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<Value>) -> CellResult<T> {
+pub(crate) async fn ask<T: DeserializeOwned>(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<String>) -> CellResult<T> {
     let bytes = answered(env, url, name, who, method, inner, body).await?;
     serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("{inner}'s answer: {e}")))
 }
 
+/// A request's body, as JSON.
+fn body(value: &impl serde::Serialize) -> Option<String> {
+    Some(serde_json::to_string(value).expect("a request's body serializes"))
+}
+
 /// `ask`'s round trip, one copy for every answer's type: its 200's bytes,
 /// or its refusal.
-async fn answered(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<Value>) -> CellResult<Vec<u8>> {
+async fn answered(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<String>) -> CellResult<Vec<u8>> {
     // the page's own query string is nothing the fragment reads
     let mut at = url.clone();
     at.set_query(None);
-    let headers = Headers::new();
-    Routed { name: name.to_string(), url: at, signed: Some(who.clone()), credential: None }.to_headers(&headers)?;
-    if body.is_some() {
-        headers.set("content-type", "application/json")?;
-    }
-    let mut init = RequestInit::new();
-    init.with_method(method).with_headers(headers);
-    if let Some(b) = body {
-        init.with_body(Some(b.to_string().into()));
-    }
-    let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
-    let mut resp = crate::routed::send(env, "FRAGMENT", name, req).await?;
+    let routed = Routed { name: name.to_string(), url: at, signed: Some(who.clone()), credential: None };
+    let mut resp = routed.ask(env, method, inner, body.as_deref(), None).await?;
     let status = resp.status_code();
     let bytes = resp.bytes().await?;
     if status == 200 {
@@ -385,14 +382,13 @@ pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profi
             asked.push(f);
         }
     }
-    let none = json!({});
-    let faces = join_all(asked.iter().map(|f| crate::fragment::ask(env, f, "computer/face", &none))).await;
-    let faces: BTreeMap<&String, Value> = asked.iter().zip(faces).filter_map(|(f, face)| Some((f, face.ok()?))).gathered();
-    let face = |f: &Option<String>, key: &str| f.as_ref().and_then(|f| faces.get(f)).and_then(|v| v[key].as_str()).map(str::to_string);
+    let faces = join_all(asked.iter().map(|f| crate::fragment::call(env, f, &FaceOf {}))).await;
+    let faces: BTreeMap<&String, Named> = asked.iter().zip(faces).filter_map(|(f, face)| Some((f, face.ok()?))).gathered();
     for p in profiles.values_mut() {
         if p.kind == IdentityKind::Agent && p.fragment.is_some() {
-            p.title = face(&p.fragment, "title");
-            p.picture = face(&p.fragment, "picture");
+            let face = p.fragment.as_ref().and_then(|f| faces.get(f));
+            p.title = face.and_then(|n| n.title.clone());
+            p.picture = face.and_then(|n| n.picture.clone());
         }
     }
 }
@@ -895,7 +891,7 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
             Err(e) => Err(e),
         },
         "role" => match (member(), role()) {
-            (Ok(m), Ok(r)) => ask(env, url, name, &who, Method::Put, &format!("/api/members/{m}"), Some(json!({ "role": r }))).await,
+            (Ok(m), Ok(r)) => ask(env, url, name, &who, Method::Put, &format!("/api/members/{m}"), body(&SetRole { role: r })).await,
             (Err(e), _) | (_, Err(e)) => Err(e),
         },
         "remove" => match member() {
@@ -907,12 +903,12 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
             _ => Err(CellError::invalid("name an invite by its email")),
         },
         "visibility" => match Visibility::parse(field("visibility")) {
-            Some(v) => ask(env, url, name, &who, Method::Put, "/api/visibility", Some(json!({ "visibility": v }))).await,
+            Some(v) => ask(env, url, name, &who, Method::Put, "/api/visibility", body(&SetVisibility { visibility: v })).await,
             None => Err(CellError::invalid("choose who can open it")),
         },
         // the share link only: the inbox's token is an integration's,
         // rotated with the CLI
-        "rotate" => match ask::<IgnoredAny>(env, url, name, &who, Method::Post, "/api/rotate", Some(json!({ "scopes": ["view"] }))).await {
+        "rotate" => match ask::<IgnoredAny>(env, url, name, &who, Method::Post, "/api/rotate", Some(r#"{"scopes":["view"]}"#.to_string())).await {
             Ok(_) => return shown(env, cfg, url, name, &who, &session, Some(Flash::Done("A new share link: the old one no longer opens it.")), 200).await,
             Err(e) => Err(e),
         },
@@ -976,7 +972,7 @@ async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, se
         return drawn(&before, Some(Flash::Already { who: email, role: m.role }), 200);
     }
     let again = before.invites.iter().any(|i| i.email == email);
-    let flash = match ask::<Shared>(env, url, name, who, Method::Post, "/api/invites", Some(json!({ "email": email, "role": role }))).await? {
+    let flash = match ask::<Shared>(env, url, name, who, Method::Post, "/api/invites", body(&CreateInvite { email: email.to_string(), role })).await? {
         Shared::Invited(i) => Flash::Invited { who: email, role: i.role, again },
         Shared::Member(_) => return Err(CellError::host("an invite made a member at once: invites wait for a yes (decision 63)")),
     };
