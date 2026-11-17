@@ -118,9 +118,8 @@ lands whole or not at all (`fragment write <parent> --dir <folder>
 <path>...`), never a sync, updating stable paths; after restart, reconcile
 from the parent's files (`fragment read`) before writing again.
 
-Synthesis publishes to the parent's audience. Create with
-`--visibility members`; keep that audience inside every child's, including
-owners and agents. If a child becomes unreadable, mark dependent pages
+Synthesis publishes to the parent's audience: keep it inside every
+child's, including owners and agents. If a child becomes unreadable, mark dependent pages
 stale or withdrawn; never regenerate from cached copies. Withdraw content
 that should no longer be disclosed. Old git history cannot be recalled.
 Search the parent and its children as one, as the reader (`fragment search
