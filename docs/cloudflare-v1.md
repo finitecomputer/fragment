@@ -308,8 +308,8 @@ computers) returns once this product works.
     route Settings offers for it (Private, Standard), picked per agent as
     its tier. A private tier's every slot must be private, and never
     falls back to one that is not. Finite Private
-    is priced as Workers AI's GLM-5.3 Flash, so a person pays the same
-    whichever answered.
+    is priced as Workers AI's GLM-5.3 Flash was ($0.15 in, $0.50 out a
+    million tokens; retired there on 2026-11-20).
 
 ### Billing never stops an agent
 

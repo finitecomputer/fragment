@@ -156,7 +156,7 @@ mod tests {
         refused(local, None, super::MODEL_KEY_FILE_ENV);
         refused(&local.replace("http://127.0.0.1:18087", "http://192.168.50.7:18087"), Some("k"), "base_url");
         refused(&local.replace(r#", "price": { "input": 0, "output": 0 }"#, ""), Some("k"), "price book");
-        refused(r#"{ "cheap": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" } }"#, Some("k"), "Workers AI");
+        refused(r#"{ "cheap": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" } }"#, Some("k"), "Workers AI");
     }
 
     /// Goal: `--real-agent` runs real models as a deploy would, and only
@@ -178,7 +178,7 @@ mod tests {
                         "body": { "provider": { "zdr": true, "max_price": { "prompt": 0.15, "completion": 0.75 } } } },
             "medium": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "key": "fragment-openrouter-key", "model": "deepseek/deepseek-v4.1-flash",
                         "body": { "provider": { "zdr": true, "max_price": { "prompt": 0.15, "completion": 0.75 } } } },
-            "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" } } }"#;
+            "fallback": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" } } }"#;
         assert_eq!(models_of(preview, Some("k".into())).unwrap().1, ["cheap", "medium"]);
 
         let refused = |text: &str, key: Option<&str>, says: &str| {
@@ -186,7 +186,7 @@ mod tests {
             assert!(e.contains(says), "{text}: {e}");
         };
         refused(r#"{ "zone": "x" }"#, Some("k"), "names no models");
-        refused(r#"{ "models": { "cheap": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" } } }"#, Some("k"), "Workers AI");
+        refused(r#"{ "models": { "cheap": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" } } }"#, Some("k"), "Workers AI");
         refused(
             r#"{ "models": { "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "key": "k1", "model": "z-ai/glm-5.3-flash",
                                         "body": { "provider": { "max_price": { "prompt": 0.15, "completion": 0.5 } } } },

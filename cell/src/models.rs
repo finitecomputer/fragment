@@ -8,7 +8,7 @@
 //! capped caller past a fragment's cap) is refused; a ledger that does not
 //! answer refuses nothing. Then it is made, bounded
 //! (`fragment_core::models`: the tier's model, the capped `max_tokens`,
-//! GLM's `reasoning_effort` clamped, none of the client's headers), and
+//! its `reasoning_effort` clamped, none of the client's headers), and
 //! charged after its answer, never in its way: its last, cumulative usage
 //! (input less what was cached) as one meter row under a reference of its
 //! own (`aig:<hex>`), sent to the payer's ledger on the ledger's queue
@@ -27,9 +27,9 @@
 //! same, on its slot's own fallback (`fragment_core::models::Models::
 //! fallback_of`, `Tries`), however the call named the slot: a tier's, its
 //! route's (the deployment's `models.fallback` unless it names another:
-//! DeepSeek V4 Flash unless named, behind the cheap tier's GLM-5.3 Flash);
-//! `vision`'s, `fallback` only when that slot says its model reads images
-//! (`images: true`; the default fallback, DeepSeek, reads none); any other
+//! Inkling 2 Small unless named, behind the cheap tier's DeepSeek V4.1
+//! Flash); `vision`'s, `fallback` only when that slot says its model reads
+//! images (`images: true`); any other
 //! slot's, the one it names, if any. It is logged as `model.fallback`, and
 //! charged as the fallback's. Not a race: the fallback is called only
 //! after the model failed. An answer that began is final, and the

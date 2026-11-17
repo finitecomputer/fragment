@@ -86,7 +86,7 @@ use fragment_bridge::net::{self, Body};
 /// /api/computer`'s `models`), as Finite's deployment names them: its tiers
 /// on OpenRouter's GLM-5.3 Flash, its fallback and vision on Workers AI's.
 pub const CHEAP_ID: &str = "z-ai/glm-5.3-flash";
-pub const FALLBACK_ID: &str = "@cf/zai-org/glm-5.3-flash";
+pub const FALLBACK_ID: &str = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 /// The cheap tier's route's own fallback (2026-10-24): what its agent's
 /// stall falls back to, by its id.
 pub const ROUTE_FALLBACK_ID: &str = "deepseek-v4-1-flash";
