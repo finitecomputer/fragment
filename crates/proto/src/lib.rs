@@ -1694,6 +1694,13 @@ impl Identity {
     pub fn org_place(&self, org: &str) -> Option<&OrgPlace> {
         self.orgs.iter().find(|p| p.org == org)
     }
+
+    /// Whether they are one of `org`'s content admins now, acting as
+    /// themselves: a person (an agent's place is never an admin's, and only
+    /// an agent acts `for` anyone).
+    pub fn administers(&self, org: &str) -> bool {
+        self.kind == IdentityKind::Person && self.org_place(org).is_some_and(|p| p.admin)
+    }
 }
 
 /// A person's place in an org's content, as a request carries it.

@@ -207,7 +207,7 @@ pub(crate) async fn named(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         // only by a grant their events show (decision 71)
         (Method::Get, ["fragments"]) => {
             let who = crate::signer(env, &req, url, &bytes).await?;
-            if !who.org_place(org).is_some_and(|p| p.admin) {
+            if !who.administers(org) {
                 return Err(CellError::new(ErrorCode::Forbidden, "only an org's content admins list its fragments"));
             }
             let list = crate::principal::ask(env, &ledger, &crate::principal::calls::List::default()).await?;

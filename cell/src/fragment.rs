@@ -968,8 +968,7 @@ impl FragmentCell {
     /// registry's answer at this request (`Identity::orgs`).
     pub(crate) fn content_admin<'a>(&self, caller: &'a Caller, org: &str) -> CellResult<&'a str> {
         let signed = caller.signed.as_ref().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))?;
-        let admin = signed.kind == IdentityKind::Person && signed.acting_for.is_none() && signed.org_place(org).is_some_and(|p| p.admin);
-        match admin {
+        match signed.administers(org) {
             true => Ok(&signed.id),
             false => Err(CellError::new(ErrorCode::Forbidden, "only its org's content admins do this, each as themselves")),
         }
@@ -1368,8 +1367,7 @@ impl FragmentCell {
         let owner = match org {
             None => Payer::Person(maker.clone()),
             Some(org) => {
-                let signed = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Person && s.acting_for.is_none());
-                signed.and_then(|s| s.org_place(&org)).filter(|p| p.admin).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's content admins make its fragments"))?;
+                self.content_admin(caller, &org)?;
                 Payer::Org(org)
             }
         };

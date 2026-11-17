@@ -473,7 +473,7 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
             let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None, orgs: vec![] };
             (Signed::new(identity, None), Some(principal.identity.id))
         }
-        (IdentityKind::Person, Some(org)) if principal.acting_for.is_none() && principal.org_place(org).is_some_and(|p| p.admin) => (principal, None),
+        (_, Some(org)) if principal.administers(org) => (principal, None),
         (_, Some(_)) => return Err(CellError::new(ErrorCode::Forbidden, "only an org's content admins make its fragments, each as themselves")),
     };
     assert_eq!(maker.kind, IdentityKind::Person, "a fragment is a person's: an agent's maker is its owner");

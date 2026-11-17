@@ -415,8 +415,7 @@ impl FragmentCell {
             // the registry answered for this request; never an agent
             (IdentityKind::Person, Some(org)) => {
                 assert!(signed.acting_for.is_none(), "a person acts as themselves (the router refuses `for` from one)");
-                let place = signed.org_place(org).filter(|p| p.admin);
-                Ok(Actor { admin: place.is_some(), by: signed.id.clone(), for_owner: None })
+                Ok(Actor { admin: signed.administers(org), by: signed.id.clone(), for_owner: None })
             }
             (IdentityKind::Agent, Some(_)) => Err(CellError::new(ErrorCode::Forbidden, "an org's fragment is shared by its content admins, each as themselves: no agent shares it")),
             (IdentityKind::Person, None) => {
