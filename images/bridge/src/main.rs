@@ -54,15 +54,22 @@ fn runtimes() -> Runtimes {
         let (uid, gid) = u.split_once(':').unwrap_or_else(|| fail("BRIDGE_CLAUDE_USER is uid:gid"));
         (uid.parse().unwrap_or_else(|_| fail("BRIDGE_CLAUDE_USER's uid is a number")), gid.parse().unwrap_or_else(|_| fail("BRIDGE_CLAUDE_USER's gid is a number")))
     });
+    // the person's home, where they installed it and signed in (its
+    // `.claude`): the agent runs that same Claude Code
+    let home = PathBuf::from(env_or("BRIDGE_CLAUDE_HOME", "/data/claude"));
     let config = ClaudeConfig {
         bin: PathBuf::from(bin),
-        config_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_CONFIG_DIR", "/data/claude")),
+        config_dir: home.join(".claude"),
+        home,
         work_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_WORK_DIR", "/data/work")),
         state_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_STATE_DIR", "/data/bridge/claude")),
         model: env("BRIDGE_CLAUDE_MODEL"),
         idle: Duration::from_millis(parse_ms("BRIDGE_CLAUDE_IDLE_MS", 300_000)),
         drain: Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT),
         run_as,
+        // its person installs it from a turn's card (Paul, FIN-233), with
+        // Anthropic's installer, or the stand-in a test image names
+        installer: Some(env_or("BRIDGE_CLAUDE_INSTALLER", fragment_bridge::runtime::claude::INSTALLER)),
     };
     r.with("claude", Box::new(Claude { config }))
 }
@@ -83,6 +90,7 @@ fn runtime() -> Box<dyn Runtime> {
                 gateway_id: env_or("GATEWAY_RELAY_ID", "fragment-computer"),
                 secret,
                 media_dir: PathBuf::from(env_or("BRIDGE_RELAY_MEDIA_DIR", "/tmp/bridge-relay-media")),
+                media_max_bytes: limits::SCRATCH_MAX_BYTES,
                 // a test's fake servers, local and plain http (runtime/relay/fetch.rs)
                 media_local: match env("BRIDGE_MEDIA_LOCAL").as_deref() {
                     None | Some("") => false,
@@ -179,6 +187,7 @@ async fn main() {
                 api,
                 state_dir: PathBuf::from(env_or("BRIDGE_STATE_DIR", "/data/bridge")),
                 media_dir: PathBuf::from(env_or("BRIDGE_MEDIA_DIR", "/tmp/bridge-media")),
+                media_max_bytes: limits::SCRATCH_MAX_BYTES,
                 restore_pending: env("RESTORE_PENDING").is_some_and(|v| v == "1"),
                 restored: PathBuf::from(env_or("BRIDGE_RESTORED", "/run/computer/restored")),
                 hold: PathBuf::from(env_or("BRIDGE_HOLD", "/run/computer/hold")),

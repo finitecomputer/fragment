@@ -8,7 +8,7 @@
 //! Only what a page may show, from where the public may serve it: `https`;
 //! a host whose every address is public (never this computer's own, its
 //! network's, a link-local metadata service, nor the platform's
-//! `*.internal` intercepts); at most `ATTACHMENT_MAX_BYTES`; a media type
+//! `*.internal` intercepts); at most `HERMES_MEDIA_MAX_BYTES`, whole; a media type
 //! the fragment serves as itself (`SERVED`); within `MEDIA_FETCH_MS`,
 //! following at most `MEDIA_REDIRECTS_MAX` redirects, each checked as the
 //! first. The connection goes to the address checked, so a name that
@@ -81,7 +81,7 @@ impl std::fmt::Display for Refused {
             Refused::Url(why) => write!(f, "not a URL the bridge fetches: {why}"),
             Refused::Address(a) => write!(f, "{a} is not a public address"),
             Refused::Type(t) => write!(f, "{t:?} is not a type a chat shows"),
-            Refused::TooLarge => write!(f, "over {} bytes", limits::ATTACHMENT_MAX_BYTES),
+            Refused::TooLarge => write!(f, "over {} bytes", limits::HERMES_MEDIA_MAX_BYTES),
             Refused::Status(s) => write!(f, "answered {s}"),
             Refused::Redirects => write!(f, "more than {} redirects", limits::MEDIA_REDIRECTS_MAX),
             Refused::TimedOut => write!(f, "not fetched within {} ms", limits::MEDIA_FETCH_MS),
@@ -214,9 +214,9 @@ async fn follow(url: &str, local: bool) -> Result<Fetched, Refused> {
         }
         let declared = res.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         let media_type = served(&declared).ok_or_else(|| Refused::Type(declared.clone()))?;
-        let max = usize::try_from(limits::ATTACHMENT_MAX_BYTES).expect("fits");
+        let max = usize::try_from(limits::HERMES_MEDIA_MAX_BYTES).expect("fits");
         let length = res.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
-        if length.is_some_and(|n| n > limits::ATTACHMENT_MAX_BYTES) {
+        if length.is_some_and(|n| n > limits::HERMES_MEDIA_MAX_BYTES) {
             return Err(Refused::TooLarge);
         }
         let bytes = match Limited::new(res.into_body(), max).collect().await {

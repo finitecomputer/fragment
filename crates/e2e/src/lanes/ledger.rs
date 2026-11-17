@@ -14,13 +14,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use fragment_core::price::{PriceBook, Usage};
-use fragment_fakes::workers_ai::{embedding as fake_embedding, heard as fake_heard, image_bytes, spoken_wav, Used, EMBEDDING_DIMENSIONS, IMAGE_MODEL, TRANSCRIBE_MODEL};
+use fragment_fakes::workers_ai::{embedding as fake_embedding, heard as fake_heard, image_bytes, spoken_wav, Pace, Used, EMBEDDING_DIMENSIONS, IMAGE_MODEL, TRANSCRIBE_MODEL};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use super::app::ship;
 use super::jobs::{settle, started};
-use crate::api::{url_enc, Api, Call, Reply};
+use crate::api::{url_enc, Api, Call, Reply, Socket};
 
 use crate::Suite;
 
@@ -104,6 +104,42 @@ fn hello() -> Value {
 }
 
 /// What the default book charges for `usage`.
+/// A stream's text with the fake's ids masked (`fake` and 8 hex digits,
+/// `call_` and digits): they count the fake's answers, so they move with
+/// the lanes' order.
+pub(super) fn ids_masked(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    // bounded by the text: each pass takes at least one byte of it
+    while let Some(c) = rest.chars().next() {
+        let (prefix, digits): (&str, fn(&u8) -> bool) = match () {
+            () if rest.starts_with("\"fake") => ("\"fake", u8::is_ascii_hexdigit),
+            () if rest.starts_with("\"call_") => ("\"call_", u8::is_ascii_digit),
+            () => {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+                continue;
+            }
+        };
+        let n = rest.as_bytes()[prefix.len()..].iter().take_while(|b| digits(b)).count();
+        out.push_str(prefix);
+        out.push('#');
+        rest = &rest[prefix.len() + n..];
+    }
+    out
+}
+
+/// The client's bytes of the Workers AI fake's streamed answer to "hello"
+/// (prompt 40, cached 10, completion 30), ids masked: usage dropped from
+/// each chunk with choices, its last line OpenAI's last chunk.
+const STREAMED_WORKERS_AI: &str = "\
+    data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{\"content\":\"echo: hello\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":0,\"prompt_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":0}}\n\n\
+    data: {\"choices\":[],\"id\":\"fake#\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":30,\"neurons\":1.8,\"prompt_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":10},\"total_tokens\":70}}\n\n\
+    data: [DONE]\n\n";
+
 pub(super) fn charge(usage: &Usage) -> i64 {
     PriceBook::defaults().price(usage).expect("the book prices the tiers' models").charge
 }
@@ -229,6 +265,43 @@ pub(super) fn forget_gate(api: &Api, identity: &str) -> Result<()> {
     Ok(())
 }
 
+/// What the router's gate holds for `identity` within the window
+/// (`gate-heard`): `{refused, allowed}`.
+pub(super) fn gate_heard(api: &Api, identity: &str) -> Result<Value> {
+    let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "gate-heard" })))?;
+    anyhow::ensure!(r.status == 200, "what the gate heard: {r}");
+    Ok(r.body)
+}
+
+/// Waits until the router's gate holds `identity`'s `answer` (`"refused"`
+/// or `"allowed"`): what an ask beside a call heard, kept for the next
+/// call. A barrier on the gate's own state, not a timer.
+pub(super) fn gate_hears(s: &Suite, api: &Api, identity: &str, answer: &str) -> bool {
+    s.eventually(Duration::from_secs(30), || gate_heard(api, identity).is_ok_and(|h| h[answer] == true))
+}
+
+/// Pins `identity`'s ledger to this month for the lane: its test clock
+/// (`clock {offsetMs}`) runs on from the 15th, its now and the rows it
+/// hears alike, so the lane's spends and the checks against its caps are
+/// in one month however late in a month it runs (one run over midnight on
+/// the 31st checked October's spend against November's: CI run
+/// 41254067181). Before anything the lane spends.
+fn pin_month(api: &Api, identity: &str) -> Result<()> {
+    let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "clock", "offsetMs": mid_month_offset_ms() })))?;
+    anyhow::ensure!(r.status == 200, "the ledger's clock moves: {r}");
+    Ok(())
+}
+
+/// How far a test clock moves to run on from the 15th of this month (UTC):
+/// a lane pinned so has two weeks before its month ends, however late in a
+/// month it starts.
+pub(super) fn mid_month_offset_ms() -> i64 {
+    const DAY_MS: i64 = 24 * 3600 * 1000;
+    let now = crate::api::now_ms();
+    let (_, _, day) = fragment_core::cron::civil(now.div_euclid(DAY_MS));
+    (15 - i64::from(day)) * DAY_MS - now.rem_euclid(DAY_MS)
+}
+
 /// How many of the node's log lines name `event`: what the cell said aloud.
 pub(super) fn logged(s: &Suite, event: &str) -> usize {
     let log = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
@@ -249,6 +322,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- plans: a new person is the deployment's default (a seat here)
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
+    pin_month(api, &owner_id)?;
     let v = ledger(api, &owner);
     s.ok(
         "a new person is a seat here (FRAGMENT_DEFAULT_PLAN), with the month's included credit",
@@ -332,11 +406,27 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("a guest pays for nothing")) && s.ai.calls().len() == calls,
         &run,
     );
+    // the gate forgets what it heard, as an isolate made anew holds nothing
+    forget_gate(api, &guest_id)?;
+    let first = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
+    let taught = gate_hears(s, api, &guest_id, "refused");
+    let calls = s.ai.calls().len();
     let r = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
     s.ok(
-        "a guest's agent's model call is refused, 403, saying why, and never reaches the model",
-        r.status == 403 && r.message().contains("a guest pays for nothing") && s.ai.calls().len() == calls,
-        &r,
+        "a guest's agent's model call: the first, its gate cold, goes on (the ledger asked beside it); the next is refused, 403, saying why, and never reaches the model",
+        first.status == 200 && taught && r.status == 403 && r.message().contains("a guest pays for nothing") && s.ai.calls().len() == calls,
+        json!({ "first": first.status, "taught": taught, "next": r.body }),
+    );
+    // its ledger slowed past the gate's wait: had a call asked it, the call
+    // would have gone on once the wait ran out
+    let slow = |ms: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": guest_id, "op": "slow", "ms": ms })));
+    let slowed = slow(10_000)?;
+    let again = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
+    let restored = slow(0)?;
+    s.ok(
+        "and the calls after, within the minute, are refused from what the gate heard, asking the ledger nothing (slowed to 10 s, it would have let one go on)",
+        slowed.status == 200 && again.status == 403 && again.message().contains("a guest pays for nothing") && s.ai.calls().len() == calls && restored.status == 200,
+        json!({ "again": again.body }),
     );
     let r = api.op(&guest, &guest_app, "note", "gn-1", json!({ "text": "a guest writes" }))?;
     s.ok("a guest's fragment still takes writes (it is billed nothing)", r.status == 200, &r);
@@ -501,31 +591,66 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "succeeded" && m(&v, "balanceMicros") < 0 && m(&v, "balanceMicros") > -2 * USD && v["standing"] == json!({ "standing": "agents_stopped", "why": "no_credit" }),
         &v,
     );
-    let calls = s.ai.calls().len();
-    // the gate heard the owner within the minute, when they had credit: it asks afresh
-    forget_gate(api, &owner_id)?;
-    let r = api.op(&owner, &name, "summarize", "t-zero", json!({ "text": "at zero", "tier": "cheap" }))?;
-    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    // what they are told (FIN-458): their ledger's words for it, first, with
+    // a pack to buy where packs are sold (a seat's holder, as they are)
+    let notices_now = |k: &Keys| -> Result<Value> {
+        let r = api.signed(k, "GET", "/api/notices", None)?;
+        anyhow::ensure!(r.status == 200, "their notices: {r}");
+        Ok(r.body["notices"].clone())
+    };
+    let credit = |notices: &Value| notices.as_array().into_iter().flatten().find(|n| n["id"] == "credit").cloned();
+    // a pack is for a seat the registry gave them (`PackBegin`): this lane's
+    // person is a seat by the deployment's default plan, which is none
+    let mine = api.signed(&owner, "GET", "/api/seat", None)?.body;
+    let sold = !mine["offer"].is_null() && !mine["seat"].is_null();
+    let buy = if sold { json!([{ "label": "Buy $25 of credit", "post": "/api/billing/packs", "body": {} }]) } else { json!(null) };
+    let notices = notices_now(&owner)?;
     s.ok(
-        "at zero an AI step is refused, saying why",
-        run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("agents are stopped: the credit is used up")) && s.ai.calls().len() == calls,
-        &run,
+        "out of credit, they are told so first, in Settings' words, with a pack to buy only where they may buy one (sold, and a seat the registry gave them)",
+        notices[0]["id"] == "credit"
+            && notices[0]["kind"] == "credit"
+            && notices[0]["level"] == "warn"
+            && notices[0]["title"] == "Your agents are stopped"
+            && notices[0]["text"] == "The credit is used up; adding credit starts them again."
+            && (if sold { notices[0]["actions"] == buy } else { notices[0]["actions"].as_array().is_none_or(|a| a.is_empty()) }),
+        json!({ "notices": notices, "sold": sold, "seat": mine }),
     );
+    let calls = s.ai.calls().len();
+    // the gate heard the owner within the minute, when they had credit: it
+    // asks afresh, where the lever reaches the isolate a step's object runs in
     let decision = json!({ "input": "chips", "questions": { "snack": { "type": "predicate", "instructions": "Is it a snack?" } } });
-    let r = api.op(&owner, &name, "decide", "decision-zero", decision.clone())?;
-    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
-    s.ok("at zero a decision is refused before its vendor call", run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("credit is used up")) && s.ai.calls().len() == calls, &run);
+    if s.one_isolate() {
+        forget_gate(api, &owner_id)?;
+        let r = api.op(&owner, &name, "summarize", "t-zero", json!({ "text": "at zero", "tier": "cheap" }))?;
+        let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+        s.ok(
+            "at zero an AI step is refused, saying why",
+            run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("agents are stopped: the credit is used up")) && s.ai.calls().len() == calls,
+            &run,
+        );
+        let r = api.op(&owner, &name, "decide", "decision-zero", decision.clone())?;
+        let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+        s.ok("at zero a decision is refused before its vendor call", run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("credit is used up")) && s.ai.calls().len() == calls, &run);
+    } else {
+        s.skip(
+            "at zero an AI step and a decision are refused at once, the gate forgotten",
+            "the lever forgets the router's isolate's gate, and celld runs the step's object in an isolate of its own, whose gate heard the owner within the minute",
+        );
+    }
     let hand = Keys::generate();
     let reg = "/api/identities";
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
     anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
-    // the gate may have heard the owner within the minute: it asks afresh
+    // the gate forgets what it heard, as an isolate made anew holds nothing
     forget_gate(api, &owner_id)?;
+    let first = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
+    let taught = gate_hears(s, api, &owner_id, "refused");
+    let calls = s.ai.calls().len();
     let r = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
     s.ok(
-        "and so is their agent's model call (402)",
-        r.status == 402 && r.message().contains("agents are stopped") && s.ai.calls().len() == calls,
-        &r,
+        "and so is their agent's model call: a gate that heard nothing lets the first start at once, asking the ledger beside it, and refuses the next (402) before its vendor call",
+        first.status == 200 && taught && r.status == 402 && r.message().contains("agents are stopped") && s.ai.calls().len() == calls,
+        json!({ "first": first.status, "taught": taught, "next": r.body }),
     );
     let w = api.op(&owner, &name, "note", "n-zero", json!({ "text": "at zero" }))?;
     let q = api.op(&owner, &name, "notes", "q", json!({}))?;
@@ -552,7 +677,19 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let pinged = s.eventually(wait, || pings() == 1);
     s.ok("before, its cron runs (a mutation, as the fragment), and its scheduled record appends", ran && scheduled.status == 200 && pinged, json!({ "tick": runs("tick"), "scheduled": scheduled.body }));
     let back = m(&ledger(api, &owner), "balanceMicros").unsigned_abs() as i64 + USD;
+    // their pages watch their list: told when the standing changes, and not before
+    let url = format!("{}/api/fragments/watch", api.base);
+    let mut tab = Socket::connect(api, &url, Some(&owner), None, None).map(|(w, _)| w).and_then(|mut w| w.expect("hello").map(|_| w));
+    // (what the lane did before, its cron's runs, told first: read until a read waits 5 s for nothing)
+    let quiet = tab.as_mut().map(|w| (0..10).take_while(|_| w.next().is_ok()).count() < 10).unwrap_or(false);
     command(&owner_id, "grant", json!({ "id": "g-back", "micros": back, "by": op_id, "why": "back above zero" }))?;
+    let lifted = tab.as_mut().map(|w| w.next().unwrap_or_else(|e| json!(format!("{e:#}")))).unwrap_or_else(|e| json!(format!("{e:#}")));
+    let notices = notices_now(&owner)?;
+    s.ok(
+        "credit back above zero: their pages, quiet before, are told it changed, and they are told of credit no more",
+        quiet && lifted == json!({ "type": "changed" }) && credit(&notices).is_none(),
+        json!({ "quiet": quiet, "lifted": lifted, "notices": notices }),
+    );
     let v = ledger(api, &owner);
     let n = tokens_costing(GLM, 10, m(&v, "balanceMicros") + 3 * USD);
     s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: n }]);
@@ -566,6 +703,13 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         "a charge past the $2 overdraft makes the person's fragments read-only",
         run["status"] == "succeeded" && m(&v, "balanceMicros") <= -2 * USD && v["standing"] == json!({ "standing": "read_only", "why": "overdrawn" }),
         &v,
+    );
+    let notices = notices_now(&owner)?;
+    let said = credit(&notices).unwrap_or_default();
+    s.ok(
+        "past the overdraft, they are told that too, in Settings' words",
+        said["title"] == "Your fragments are read-only, and your agents are stopped" && said["text"] == "The balance reached the overdraft; credit that brings it above zero ends it." && (if sold { said["actions"] == buy } else { true }),
+        &notices,
     );
     // the fragment trusts what it heard of its owner's standing for up to a minute
     lever(api, &name, "forget-standing", json!({}))?;
@@ -614,6 +758,8 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let w = api.op(&owner, &name, "note", "n-top", json!({ "text": "after the top-up" }))?;
     let v = ledger(api, &owner);
     s.ok("a top-up above zero restores writes", w.status == 200 && v["standing"]["standing"] == "ok", format!("{w} | {v}"));
+    let notices = notices_now(&owner)?;
+    s.ok("and they are told of credit no more", credit(&notices).is_none(), &notices);
     lever(api, &trig, "forget-standing", json!({}))?;
     lever(api, &trig, "cron-now", json!({}))?;
     let cron = s.eventually(wait, || succeeded("tick", "cron") == 2);
@@ -693,7 +839,24 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let streamed = charge(&tokens(CHEAP, 30, 10, 30));
     let landed = s.eventually(wait, || aig().iter().any(|e| charged(e) == Some(streamed)));
     s.ok("a streamed call reaches the client in OpenAI's shape (usage once, last)", r.status == 200 && shaped, &r.text);
+    s.ok("its bytes are the ones pinned", ids_masked(&r.text) == STREAMED_WORKERS_AI, ids_masked(&r.text));
     s.ok("and is charged from its last, cumulative usage only", landed, json!(aig()));
+    // a client that goes away mid-answer: the call is read on, and charged
+    s.ai.set_usage(&[Used { prompt: 41, cached: 0, completion: 7 }]);
+    s.ai.pace_next(&[Pace { every_ms: 0, thinking: 0, hold_ms: 0 }]);
+    s.ai.hold_streams();
+    let before = aig().len();
+    let hung = api.signed_hung_up(&hand, route, &chat(true));
+    s.ai.release_streams();
+    let (status, read) = hung?;
+    let gone = charge(&tokens(CHEAP, 41, 0, 7));
+    let landed = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(gone)));
+    s.ok(
+        "a client that hangs up after the answer's first event leaves the call read on to its usage, and charged from it",
+        status == 200 && read.starts_with("data: ") && !read.contains("[DONE]") && landed,
+        json!({ "status": status, "read": read, "entries": aig() }),
+    );
+    quote(s, api, &hand, &owner, &owner_id, wait)?;
     let (before, said) = (aig().len(), logged(s, "ledger.unknown-usage"));
     s.ai.break_next();
     let r = api.signed(&hand, "POST", route, Some(&chat(true)))?;
@@ -704,6 +867,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "loud": loud, "entries": aig().len() - before }),
     );
     gate_waits_on_no_ledger(s, api, &hand, &owner_id)?;
+    cap_mid_stream(s, api, wait)?;
     fallback(s, api, &hand, &owner_id, wait)?;
     let r = api.signed(&hand, "POST", route, Some(&json!({ "model": "high", "messages": [{ "role": "user", "content": "hi" }] })))?;
     s.ok("the high tier is refused, saying why (decision 23)", r.status == 400 && r.message().contains("high tier is off"), &r);
@@ -720,14 +884,89 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a call names only a fragment its agent is in", r.status == 403, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", fragment_core::npub::encode(hand.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c4", "micros": 1_000 })))?;
-    let r = api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&visitor_id)), Some(&chat(false)))?;
-    s.ok("an agent turn for someone else in a fragment past its cap is refused, 402", r.status == 402 && r.message().contains("cap this month"), &r);
+    let for_visitor = || api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&visitor_id)), Some(&chat(false)));
+    forget_gate(api, &owner_id)?;
+    let first = for_visitor()?;
+    let taught = gate_hears(s, api, &owner_id, "refused");
+    let r = for_visitor()?;
+    s.ok(
+        "an agent turn for someone else in a fragment past its cap: the first, its gate cold, goes on; the next is refused, 402",
+        first.status == 200 && taught && r.status == 402 && r.message().contains("cap this month"),
+        json!({ "first": first.status, "taught": taught, "next": r.body }),
+    );
     let r = api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&owner_id)), Some(&chat(false)))?;
     s.ok("and one for its owner goes on", r.status == 200, &r);
 
     // ---- the meters: requests, dynamic workers and storage, once each
     s.ai.clear_script();
     meters(s, api, wait)
+}
+
+/// A quote (FIN-448; docs/ledger.md, A quote): an agent quotes a job of
+/// model calls for its owner, by the tier's name and by its model's id,
+/// beside names the book does not price; the answer is the owner's ledger
+/// beside each item's charge, and the calls, made, are charged what it
+/// said.
+fn quote(s: &mut Suite, api: &Api, hand: &Keys, owner: &Keys, owner_id: &str, wait: Duration) -> Result<()> {
+    const QUOTE: &str = "/api/ledger/quote";
+    // tokens no other call of the lane's reports
+    let (input, output) = (321u64, 47u64);
+    let ask = json!({ "items": [
+        { "model": "cheap", "input": input, "output": output, "calls": 2 },
+        { "model": CHEAP, "input": input, "output": output },
+        { "key": "e2e-no-such-key", "calls": 3 },
+        { "model": "e2e-no-such-model", "input": 1 },
+    ] });
+    let each = charge(&tokens(CHEAP, input, 0, output));
+    // the owner's ledger read beside it: a meter landing between the two
+    // reads moves one, so they are read again until both are one moment's
+    let (mut status, mut quoted, mut theirs) = (0, Value::Null, Value::Null);
+    let same = s.eventually(wait, || {
+        (status, quoted) = api.signed(hand, "POST", QUOTE, Some(&ask)).map_or((0, Value::Null), |r| (r.status, r.body));
+        theirs = ledger(api, owner);
+        status == 200 && quoted["ledger"] == theirs
+    });
+    let items = &quoted["items"];
+    s.ok(
+        "an agent's quote is its owner's: its owner's ledger beside each item priced as the ledger charges it, a tier by the model it runs, and what is left",
+        same
+            && items[0] == json!({ "pricedAs": CHEAP, "eachMicros": each, "calls": 2, "chargeMicros": 2 * each })
+            && items[1] == json!({ "pricedAs": CHEAP, "eachMicros": each, "calls": 1, "chargeMicros": each })
+            && m(&quoted, "totalMicros") == 3 * each
+            && m(&quoted, "leftMicros") == m(&theirs, "balanceMicros").max(0),
+        &quoted,
+    );
+    s.ok(
+        "a name the book does not price is said so, never guessed, and adds nothing",
+        items[2] == json!({ "pricedAs": "e2e-no-such-key", "calls": 3, "unknown": "no_price" }) && items[3] == json!({ "pricedAs": "e2e-no-such-model", "calls": 1, "unknown": "no_price" }),
+        &quoted,
+    );
+    let theirs_too = api.signed(owner, "POST", QUOTE, Some(&json!({ "items": [] })))?;
+    let bad = api.signed(hand, "POST", QUOTE, Some(&json!({ "items": [{ "key": "fal", "calls": 0 }] })))?;
+    let misspelt = api.signed(hand, "POST", QUOTE, Some(&json!({ "items": [{ "model": "cheap", "inputs": 5 }] })))?;
+    let unsigned = api.unsigned("POST", QUOTE, Some(&ask))?;
+    s.ok(
+        "a person quotes nothing to read what is left; calls out of bounds and a misspelt field are refused (400), and no one unsigned is quoted",
+        theirs_too.status == 200 && theirs_too.body["items"] == json!([]) && theirs_too.body["totalMicros"] == 0 && bad.status == 400 && misspelt.status == 400 && unsigned.status == 401,
+        format!("{theirs_too} | {bad} | {misspelt} | {unsigned}"),
+    );
+    // the job, made: three calls of those tokens
+    let rows = || entries(api, owner_id, "aig:").into_iter().filter(|e| *usage(e) == json!(tokens(CHEAP, input, 0, output))).filter_map(|e| charged(&e)).collect::<Vec<_>>();
+    let before = rows();
+    s.ai.set_usage(&[Used { prompt: input, cached: 0, completion: output }; 3]);
+    let mut answered = vec![];
+    for _ in 0..3 {
+        answered.push(api.signed(hand, "POST", MODEL_ROUTE, Some(&hello()))?.status);
+    }
+    let landed = s.eventually(wait, || rows().len() == before.len() + 3);
+    let after = rows();
+    let charged_total: i64 = after.iter().sum::<i64>() - before.iter().sum::<i64>();
+    s.ok(
+        "the calls quoted, made, are charged what the quote said",
+        answered == [200, 200, 200] && landed && charged_total == m(&quoted, "totalMicros"),
+        json!({ "quoted": quoted["totalMicros"], "charged": charged_total, "rows": after, "answered": answered }),
+    );
+    Ok(())
 }
 
 /// A model by its own id (Paul, 2026-10-16: "be able to run `/model` with
@@ -798,26 +1037,62 @@ fn gate_waits_on_no_ledger(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str
     // the gate hears the owner now
     let warm = call()?;
     let slowed = slow(10_000)?;
-    let t0 = Instant::now();
-    let quick = call();
-    let quick_took = t0.elapsed();
+    let quick = call()?;
     forget_gate(api, owner_id)?;
-    let t0 = Instant::now();
-    let cold = call();
-    let cold_took = t0.elapsed();
+    let cold = call()?;
+    // the ask beside it waits longer than the gate once did: kept when the slowed ledger answers
+    let learned = gate_hears(s, api, owner_id, "allowed");
     // the queue's consumer waits on the slowed ledger, and its rows land after
     let all = s.eventually(Duration::from_secs(90), || aig().len() == before + 3);
     let restored = slow(0)?;
-    let (quick, cold) = (quick?, cold?);
     s.ok(
-        "with its payer's ledger slowed to 10 s an answer, a call whose gate heard the payer within the minute answers at once: it waits on no ledger",
-        warm.status == 200 && slowed.status == 200 && quick.status == 200 && quick.body["choices"][0]["message"]["content"] == "echo: quick" && quick_took < Duration::from_secs(5),
-        format!("{quick_took:?}: {quick}"),
+        "with its payer's ledger slowed to 10 s an answer, a call whose gate heard the payer within the minute answers, asking nothing",
+        warm.status == 200 && slowed.status == 200 && quick.status == 200 && quick.body["choices"][0]["message"]["content"] == "echo: quick",
+        &quick,
     );
     s.ok(
-        "one whose gate must ask waits at most the gate's 1.5 s, then goes on (the ledger refuses nothing it did not answer), and every call is charged once the ledger answers",
-        cold.status == 200 && cold_took < Duration::from_secs(8) && all && restored.status == 200,
-        format!("{cold_took:?}: {cold}; {} rows", aig().len() - before),
+        "one whose gate heard nothing answers, its ledger asked beside it, and that ledger's answer, 10 s late, is kept for the next call; every call is charged once the ledger answers",
+        cold.status == 200 && (learned || !s.one_isolate()) && all && restored.status == 200,
+        json!({ "cold": cold.status, "learned": learned, "rows": aig().len() - before }),
+    );
+    Ok(())
+}
+
+/// A cap reached mid-stream (FIN-320: the gate off the call path): a
+/// payer's ledger refuses (its lending used up) while their agent's
+/// streamed call is held after its first delta, the gate cold. The stream
+/// still ends whole and is charged once at its usage; the refusal, heard
+/// beside it, stops the next call before its vendor call.
+fn cap_mid_stream(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    let payer = api.person()?;
+    let payer_id = api.identity(&payer)?;
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&payer, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &payer) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the payer's: {r}");
+    let lent = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": payer_id, "op": "paid-calls", "max": 0 })))?;
+    anyhow::ensure!(lent.status == 200, "the payer's lending: {lent}");
+    let aig = || entries(api, &payer_id, "aig:");
+    let before = aig().len();
+    forget_gate(api, &payer_id)?;
+    s.ai.pace_next(&[Pace { every_ms: 0, thinking: 0, hold_ms: 0 }]);
+    s.ai.hold_streams();
+    let chat = json!({ "model": "cheap", "stream": true, "messages": [{ "role": "user", "content": "a long one" }] });
+    let (streamed, taught) = std::thread::scope(|t| {
+        let streaming = t.spawn(|| api.signed(&hand, "POST", MODEL_ROUTE, Some(&chat)));
+        // the stream is held mid-way while the gate hears the refusal
+        let taught = gate_hears(s, api, &payer_id, "refused");
+        s.ai.release_streams();
+        (streaming.join().expect("the streamed call's thread"), taught)
+    });
+    let streamed = streamed?;
+    let charged = s.eventually(wait, || aig().len() == before + 1);
+    let calls = s.ai.calls().len();
+    let next = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
+    s.ok(
+        "a cap reached mid-stream: the stream, begun with its gate cold, ends whole ([DONE]) and is charged once; the refusal heard beside it stops the next call (402) before its vendor call",
+        streamed.status == 200 && streamed.text.contains("data: [DONE]") && taught && charged && next.status == 402 && s.ai.calls().len() == calls,
+        json!({ "taught": taught, "charged": aig().len() - before, "next": next.body }),
     );
     Ok(())
 }
@@ -958,7 +1233,7 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
 
     // Hermes shrinks a screenshot a call refused as too large to 5 MiB of
     // data URL and tries once more: that call fits
-    let calls = s.ai.calls().len();
+    let (calls, charged) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let shrunk = png_url(fragment_core::models::IMAGE_DATA_URL_MAX_BYTES);
     let r = api.signed(hand, "POST", route, Some(&look(&shrunk)))?;
     let sent = s.ai.calls().get(calls).map(|c| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str().map_or(0, str::len));
@@ -967,14 +1242,32 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         r.status == 200 && sent == Some(shrunk.len()),
         json!({ "status": r.status, "sent": sent, "message": r.message() }),
     );
-    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
+    // its charge lands through the ledger's queue after its answer (on celld
+    // more than a second after): the count the next call is held to is
+    // taken once it has landed
+    let landed = s.eventually(wait, || aig().len() == charged + 1);
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    anyhow::ensure!(landed, "the shrunk call's charge lands: {before} rows, {charged} before it");
     let over = png_url(fragment_core::models::MODEL_BODY_MAX_BYTES + 1024);
-    let r = api.signed(hand, "POST", route, Some(&look(&over)))?;
-    s.ok(
-        "one past the route's cap is refused, 413, nothing charged or sent",
-        r.status == 413 && s.ai.calls().len() == calls && aig().len() == before,
-        json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls }),
-    );
+    let sent = api.signed(hand, "POST", route, Some(&look(&over)));
+    let untouched = s.ai.calls().len() == calls && aig().len() == before;
+    over_cap(s, "one past the route's cap is refused, 413, nothing charged or sent", sent, untouched)
+}
+
+/// A body past a route's cap: refused, 413, with nothing charged or sent
+/// (`untouched`). celld answers the 413 from the declared length at once
+/// and closes the connection on the body it never read, so this client's
+/// upload breaks before it reads the answer (docs/self-host.md, found 31):
+/// there, the 413 is a skip, and nothing charged or sent still a check.
+fn over_cap(s: &mut Suite, label: &str, sent: Result<Reply>, untouched: bool) -> Result<()> {
+    match sent {
+        Ok(r) => s.ok(label, r.status == 413 && untouched, json!({ "status": r.status, "message": r.message() })),
+        Err(e) if s.on_celld() => {
+            s.skip(label, "celld closes the connection under the upload it refused, so this client never reads its 413 (docs/self-host.md, found 31)");
+            s.ok(&format!("{label}: nothing charged or sent"), untouched, format!("{e:#}"));
+        }
+        Err(e) => return Err(e),
+    }
     Ok(())
 }
 
@@ -1125,6 +1418,9 @@ fn embeddings_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         r.status == 200 && decoded.len() == EMBEDDING_DIMENSIONS && dot(&decoded, &fake_embedding(&texts[0], EMBEDDING_DIMENSIONS)) > 0.9999,
         json!({ "status": r.status, "bytes": bytes.len() }),
     );
+    // its charge lands before the refusals are counted: a ledger's queue
+    // may take longer than `quiet`'s second to deliver it (celld's does)
+    s.eventually(wait, || aig().len() == before + 2);
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let mut refused = Vec::new();
     for (body, why) in [
@@ -1190,10 +1486,14 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         r.status == 200 && r.text == "hello from a voice memo" && asked == Some(json!("de")) && r.headers.get("content-type").is_some_and(|t| t.to_str().unwrap_or("").starts_with("text/plain")),
         json!({ "status": r.status, "answer": r.text, "language": asked }),
     );
+    // its charge lands before the refusals are counted: a ledger's queue
+    // may take longer than `quiet`'s second to deliver it (celld's does)
+    s.eventually(wait, || aig().len() == before + 2);
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let over = vec![0u8; fragment_core::transcribe::AUDIO_MAX_BYTES + 1];
-    let r = transcription_call(api, hand, &[("model", "whisper")], &over)?;
-    s.ok("audio past 10 MiB is refused, 413, nothing charged or sent", r.status == 413 && s.ai.calls().len() == calls && aig().len() == before, json!({ "status": r.status, "message": r.message() }));
+    let sent = transcription_call(api, hand, &[("model", "whisper")], &over);
+    let untouched = s.ai.calls().len() == calls && aig().len() == before;
+    over_cap(s, "audio past 10 MiB is refused, 413, nothing charged or sent", sent, untouched)?;
     let r = transcription_call(api, hand, &[("model", "whisper-1")], &memo)?;
     let r2 = api.signed(hand, "POST", TRANSCRIBE_ROUTE, Some(&json!({ "model": "whisper" })))?;
     s.ok(
@@ -1243,8 +1543,12 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let c = s.create(api, &owner, &name)?;
     let live = ship(s, &c, LEDGER_APP, LEDGER_JSON);
     landed(s, api, &owner, &name, wait);
-    // the deploy's preview card, whose browser time is metered too
-    let card = super::site::card_showing(s, api, &owner, &name, &live);
+    // the deploy's preview card, whose browser time is metered too (none
+    // on celld, which has no Browser Rendering)
+    let card = match s.shoots_cards() {
+        true => super::site::card_showing(s, api, &owner, &name, &live),
+        false => None,
+    };
     for _ in 0..5 {
         api.op(&owner, &name, "notes", "q", json!({}))?;
     }
@@ -1272,15 +1576,19 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         matches!(usage, Some(Usage::Browser { ms }) if ms > 0) && usage.as_ref().is_some_and(|u| e["entry"]["charge"] == charge(u)) && e["entry"]["row"]["fragment"] == name.as_str()
     };
     let shots = || rows("card");
-    let metered = s.eventually(wait, || {
-        let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
-        shots().iter().any(shot)
-    });
-    s.ok(
-        "its preview card's shot reaches the owner's ledger: its browser time, priced at Browser Rendering's hour",
-        card.is_some() && metered && shots().iter().all(shot),
-        json!({ "card": super::site::card_detail(&card), "ledger": shots() }),
-    );
+    if s.shoots_cards() {
+        let metered = s.eventually(wait, || {
+            let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
+            shots().iter().any(shot)
+        });
+        s.ok(
+            "its preview card's shot reaches the owner's ledger: its browser time, priced at Browser Rendering's hour",
+            card.is_some() && metered && shots().iter().all(shot),
+            json!({ "card": super::site::card_detail(&card), "ledger": shots() }),
+        );
+    } else {
+        s.skip_card("its preview card's shot reaches the owner's ledger");
+    }
     s.ok(
         "a storage sample bills its SQLite as byte-hours",
         rows("store").iter().any(|e| e["entry"]["row"]["usage"]["class"] == "sqlite" && e["entry"]["row"]["usage"]["byte_hours"].as_u64().is_some_and(|b| b > 0)),

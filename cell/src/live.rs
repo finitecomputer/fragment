@@ -29,13 +29,16 @@
 //!
 //! A signed-in socket acts as who it connected as for `LIVE_IDENTITY_MS`;
 //! at its next frame after that, the registry is asked again with the
-//! credential it connected with, which this activation holds in memory
-//! only. A socket whose credential no longer names its principal (a
-//! sign-out, an ended session, a revoked key), whose membership in an
-//! org's fragment no longer counts (an offboarding: fragment.rs `fence`),
-//! or whose credential this activation does not hold (it woke from
-//! hibernation), is closed with 4001, and its page reconnects as whoever
-//! it is now.
+//! credential it connected with. A key is a public key, kept in the
+//! socket's attachment, so it is asked about after waking too; a cookie's
+//! token is a secret, held in this activation's memory only. A socket
+//! whose credential no longer names its principal (a sign-out, an ended
+//! session, a revoked key), whose membership in an org's fragment no
+//! longer counts (an offboarding: fragment.rs `fence`), or whose cookie
+//! this activation does not hold (it woke from hibernation), is closed
+//! with 4001, and its page reconnects as whoever it is now. A computer's
+//! follower and a phone sign with a key: each reconnect costs them a
+//! catch-up, and a phone shows it. A page's (a cookie's) is unseen.
 //!
 //! A fragment holds at most `LIVE_SOCKETS_MAX` sockets, and a principal at
 //! most `LIVE_SOCKETS_PER_PRINCIPAL`. Presence comes whole in `hello`,
@@ -114,6 +117,12 @@ pub struct LiveState {
     pub presence_at: i64,
     /// When the registry last said who a signed-in socket is.
     pub checked_at: i64,
+    /// The key (64 hex, public) a socket signed in with: what the registry
+    /// is asked again, however long the object slept. None on a cookie's
+    /// socket, and in attachments written before releases kept it (closed
+    /// at their next check, as all were); an older release ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 impl LiveState {
@@ -142,10 +151,11 @@ pub(crate) struct LiveMemory {
     changes: u64,
     /// Each principal's query budget, shared by its sockets.
     queries: BTreeMap<String, QueryBudget>,
-    /// The credential each signed-in socket connected with, by socket id:
-    /// what the registry is asked again once `LIVE_IDENTITY_MS` passed.
-    /// Memory only, never an attachment (a credential is not stored); a
-    /// socket this activation holds none for is closed at that point.
+    /// The cookie (a session's or a frame's) each signed-in socket
+    /// connected with, by socket id: what the registry is asked again once
+    /// `LIVE_IDENTITY_MS` passed. Memory only, never an attachment (a
+    /// token is a secret, never stored); a cookie's socket this activation
+    /// holds none for is closed at that point. A key is `LiveState::key`.
     credentials: BTreeMap<String, Credential>,
     /// When the fragment's next draft is due at its steady pace
     /// (`presence_admit`'s, across its drafts).
@@ -154,6 +164,18 @@ pub(crate) struct LiveMemory {
 
 fn state_of(ws: &WebSocket) -> Option<LiveState> {
     ws.deserialize_attachment::<LiveState>().ok().flatten()
+}
+
+/// What a broadcast reads of a socket's attachment: its id and the
+/// channels it follows, and no more (its presence is any JSON a page set).
+#[derive(Deserialize)]
+struct Follows {
+    id: String,
+    subs: Vec<String>,
+}
+
+fn follows_of(ws: &WebSocket) -> Option<Follows> {
+    ws.deserialize_attachment::<Follows>().ok().flatten()
 }
 
 fn send(ws: &WebSocket, frame: &LiveOut) {
@@ -223,6 +245,12 @@ impl FragmentCell {
         let tags = [LIVE_TAG, &tag, &who];
         self.state.accept_websocket_with_tags(&pair.server, &tags);
         let signed_in = caller.principal().is_some();
+        // a key goes in the attachment, a cookie's token in memory alone
+        let (key, cookie) = match credential.filter(|_| signed_in) {
+            Some(Credential::Key(key)) => (Some(key), None),
+            cookie => (None, cookie),
+        };
+        assert!(key.as_deref().is_none_or(npub::is_hex_key), "the router forwards a key it checked");
         let st = LiveState {
             id: js::random_hex::<8>(),
             principal: display,
@@ -231,13 +259,14 @@ impl FragmentCell {
             presence: None,
             presence_at: 0,
             checked_at: if signed_in { js::now_ms() } else { 0 },
+            key,
         };
         assert_eq!(st.signed(), signed_in, "a signed-in socket's principal is not an anonymous one");
-        if let (true, Some(credential)) = (signed_in, credential) {
-            self.live.borrow_mut().credentials.insert(st.id.clone(), credential);
+        if let Some(cookie) = cookie {
+            self.live.borrow_mut().credentials.insert(st.id.clone(), cookie);
         }
         pair.server.serialize_attachment(&st)?;
-        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, platform: self.cfg.platform(), presence });
+        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, platform: self.cfg.platform(), presence, limits: Some(self.cfg.uploads) });
         Ok(Response::from_websocket(pair.client)?)
     }
 
@@ -259,7 +288,7 @@ impl FragmentCell {
         let frame = LiveOut::record_frame(r);
         let mut found = BTreeSet::new();
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
-            let Some(st) = state_of(&ws) else { continue };
+            let Some(st) = follows_of(&ws) else { continue };
             if st.subs.contains(&r.channel) {
                 let _ = ws.send_with_str(&frame);
                 found.insert(st.id);
@@ -284,7 +313,7 @@ impl FragmentCell {
         }
         let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now, thinking };
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
-            if state_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
+            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
                 send(&ws, &frame);
             }
         }
@@ -305,7 +334,7 @@ impl FragmentCell {
         let mut memory = self.live.borrow_mut();
         let followers = memory.followers.get_or_insert_with(|| {
             let mut gathered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-            for st in self.state.get_websockets_with_tag(LIVE_TAG).iter().filter_map(state_of) {
+            for st in self.state.get_websockets_with_tag(LIVE_TAG).iter().filter_map(follows_of) {
                 for c in st.subs {
                     gathered.entry(c).or_default().insert(st.id.clone());
                 }
@@ -364,7 +393,7 @@ impl FragmentCell {
         if !self.still_who(ws, &mut st).await {
             return;
         }
-        let answered = match serde_json::from_str::<LiveIn>(text) {
+        let answered = match crate::json_text::<LiveIn>(text) {
             Ok(LiveIn::Query(query)) => {
                 send(ws, &LiveOut::Result(self.live_query(&st, query).await));
                 Ok(())
@@ -451,7 +480,10 @@ impl FragmentCell {
         if !st.signed() || now - st.checked_at < limits::LIVE_IDENTITY_MS {
             return true;
         }
-        let credential = self.live.borrow().credentials.get(&st.id).cloned();
+        let credential = match &st.key {
+            Some(key) => Some(Credential::Key(key.clone())),
+            None => self.live.borrow().credentials.get(&st.id).cloned(),
+        };
         let same = match (credential, self.meta(MetaKey::Name)) {
             (Some(credential), Ok(Some(name))) => match credential.resolve(&self.env, &name).await {
                 // and, in an org's fragment, a membership that still counts at
@@ -485,7 +517,7 @@ impl FragmentCell {
             }
             Err(e) => Err(e),
         };
-        Answer { id, outcome: outcome.map_err(|e| ErrorBody { error: e.code, message: e.message, reason: e.reason }) }
+        Answer { id, outcome: outcome.map_err(|e| ErrorBody { error: e.code, message: e.message, reason: e.reason, retry_after_ms: e.retry_after_ms }) }
     }
 
     fn admit_query(&self, principal: &str, socket: &str, id: &str) -> CellResult<Running<'_>> {

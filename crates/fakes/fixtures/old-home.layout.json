@@ -1,0 +1,11 @@
+{
+  "format": "fragment-home-layout/1",
+  "name": "old-home",
+  "hermes_home": "agent/hermes-home",
+  "work": "workspace",
+  "config": "agent/hermes-home/config.public.yaml",
+  "managed_skills": "agent/managed-skills/finite/current",
+  "parts": { "brains": "workspace/finitebrain", "sites": "sites" },
+  "secret": ["agent/identity/**", "agent/hermes-home/config.yaml", "agent/agentd/**", "agent/client.sqlite3*", "agent/simplex/**", "**/pairing/*-approved.json"],
+  "attention": ["fsite", "fbrain", "finitebrain", "finite.site", "/data/agent", "/data/workspace"]
+}

@@ -3,7 +3,8 @@
 //! with what arrived (its host, from `x-fragment-upstream-host`, its
 //! method, path, query and auth headers, and any platform header that
 //! leaked), so a test reads what the provider would have seen, and each is
-//! recorded. A vendor faked in full (`start_with`: OpenRouter's) answers
+//! recorded; with `?e2e_status=<4xx>`, at that status, as a provider
+//! refusing it. A vendor faked in full (`start_with`: OpenRouter's) answers
 //! its own host's requests, each still recorded here.
 
 use std::sync::{Arc, Mutex};
@@ -32,6 +33,7 @@ fn seen_of(req: &Request) -> Value {
         "host": req.header("x-fragment-upstream-host"),
         "method": req.method,
         "path": req.path,
+        "target": req.target,
         "query": req.pairs.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
         "auth": auth,
         "agent": req.header("x-fragment-agent"),
@@ -54,9 +56,22 @@ impl Upstream {
             if let Some((_, vendor)) = vendors.iter().find(|(host, _)| req.header("x-fragment-upstream-host") == Some(host.as_str())) {
                 return vendor(req);
             }
+            // what arrived echoed as an event stream, and among bytes that are
+            // no text: the swap names a Vault's value in either (FIN-466)
+            if req.path == "/echo-stream" {
+                return Response::bytes(200, "text/event-stream", format!("data: {v}\n\n").into_bytes());
+            }
+            if req.path == "/echo-binary" {
+                return Response::bytes(200, "application/octet-stream", [&[0xff, 0xfe][..], v.to_string().as_bytes(), &[0x00]].concat());
+            }
             // a redirect, for the test that the swap never follows one
             if req.path == "/redirect" {
                 return Response::bytes(302, "text/plain", b"elsewhere".to_vec()).with_header("location", "https://elsewhere.test/");
+            }
+            // a provider refusing the call (`?e2e_status=429`), for the
+            // tests of what a refused call is charged
+            if let Some(code) = req.query.get("e2e_status").and_then(|c| c.parse::<u16>().ok()).filter(|c| (400..500).contains(c)) {
+                return Response::json(code, &v);
             }
             Response::json(200, &v)
         });

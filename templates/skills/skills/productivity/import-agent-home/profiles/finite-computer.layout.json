@@ -1,0 +1,25 @@
+{
+  "format": "fragment-home-layout/1",
+  "name": "finite-computer",
+  "hermes_home": "agent/hermes-home",
+  "work": "workspace",
+  "config": "agent/hermes-home/config.public.yaml",
+  "managed_skills": "agent/managed-skills/finite/current",
+  "parts": { "brains": "workspace/finitebrain", "sites": "sites" },
+  "secret": [
+    "agent/identity/**",
+    "agent/hermes-home/.env",
+    "agent/hermes-home/config.yaml",
+    "agent/agentd/**",
+    "agent/client.sqlite3*",
+    "agent/simplex/**",
+    "**/pairing/*-approved.json",
+    ".finite-stage/**"
+  ],
+  "attention": [
+    "fsite", "fbrain", "finitebrain", "finite.site", "finite sites", "finite brain", "finite chat",
+    "/data/agent", "/data/workspace", "FINITE_", "FINITECHAT", "hermes cron", "cronjob",
+    "google_token", "gws auth", "managed-skills", "/nix/store", "LD_LIBRARY_PATH", "nix-shell",
+    "nix run", "nix shell", "nix develop", "nix profile"
+  ]
+}

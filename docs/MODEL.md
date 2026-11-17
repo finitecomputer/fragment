@@ -55,6 +55,17 @@ facet's own transaction. The app has no network (`globalOutbound: null`):
 a job reaches out only through `job.fetch` steps, which the supervisor
 takes.
 
+Where a fetch, a push endpoint or a subscription may go
+(`fragment_core::egress::check`): public addresses only, unless the
+deployment's `egress_allow` lists a local host (a self-hosted org's
+intranet: names, `*.` globs, addresses, networks). The list never opens
+loopback, link-local, unspecified, multicast or broadcast addresses,
+`localhost`, or the platform's own host and fragment suffix; an entry
+that names one is refused at the deploy and at the cell's start. The
+cell judges the URL; a self-hosted node's resolver judges where a name
+lands, from the same list (`Allow::celld`, its `CELLD_EGRESS_ALLOW`).
+Empty, the default, it changes nothing.
+
 ## Where each fact lives
 
 Every change is checked against this table.
@@ -66,16 +77,19 @@ Every change is checked against this table.
 | Tree index (path, size, SHA per pinned commit) | derived from git | the cell's copy names its pinned SHA; moved by the platform's own moves, a writer's refresh after its push, or the poll backstop |
 | Manifest and declared operations | `fragment.json` in git | the cell's copy at the pin; an invalid one keeps the last good and says why (`status.code.error`) |
 | Members, roles, invites | the fragment's supervisor | grants and revokes transactional, each in `events`; the registry's copy of an invite waiting on an email (decision 63) is a pointer the fragment overrules |
+| How far a fragment's making has got (claimed, made, its template's repo, commit, deploy, install, landed) | its supervisor's `meta` rows and its template's commit key, read by `fragment_core::seed::stage` | none: never stored, so a restart, or an older release, reads the same stage |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | A fragment's search index | what its app writes (`…/search/upsert`), held in a `SearchIndex` object of the life's own (docs/api.md, A fragment's search) | a projection its app writes again whole when asked (a new embeddings space empties it); the supervisor holds who reads it, the forgets still to send, and whether the life wrote one (`MetaKey::Search`) |
+| The wire's shapes: what each route a client calls takes and answers, and its socket frames | `crates/proto`'s types and `src/routes.rs` | `docs/wire` (OpenAPI 3.1 and its reference) and `crates/proto/wire.lock`, which `cargo xtask wire` writes and `cargo xtask check` holds to proto and to master's facts; docs/api.md says what they mean |
 | A platform object's schema | its class's steps, `crates/core/migrations/<class>/` (Schemas, below) | each object's `_schema`, which refuses code whose steps differ; `schema.lock`, which `cargo xtask check` holds the tree to |
 | The release a call between objects was made by | the caller's `FRAGMENT_DEPLOY_ID` (Calls between releases, below) | stamped on each call and checked first by the object; never stored. Its deploy time (`FRAGMENT_DEPLOYED_AT`) is stamped too, read by no release (the debt ledger) |
 | The release a platform page runs | the page as answered (its `fragment-release` meta), and each answer's `x-fragment-deploy` | the page reloads once they differ, at a safe moment, never in a loop (docs/api.md, The shell, "A new release") |
 | A chat's unsent words | the chat's page | its origin's `localStorage` (`fragment.chat.draft.v1`), for the principal it was typed as alone; emptied as sent, and when its person signs out |
-| Identities and keys, a person's own key (sealed), sign-ins and verified emails, agents' owners, sessions | the registry (decisions 45 to 50) | an npub never changes; an email names at most one person; no session or cache outlives a revocation; cookies hold tokens, the registry their hashes |
+| Identities and keys, a person's own key (sealed), sign-ins and verified emails, agents' owners, sessions | the registry (decisions 45 to 50) | an npub never changes; an email names at most one person; no session or cache outlives a revocation (a key's site sessions, through `sessions.device_key`, its own); cookies hold tokens, the registry their hashes |
 | Public addresses | the registry's `public_addresses`: one label, one fragment npub, never reassigned | the router resolves them there and the fragment checks the npub; a delete or wipe keeps the reservation |
 | A person's wipe | the registry's `wipes` (docs/api.md, "Operators: wiping a person") | a wiped person's ledger, list and computer each keep one row saying so |
 | Secrets | the object that owns each, sealed; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
+| A person's secrets for their agents (FIN-466) | their `Vault` object, each value sealed for it (docs/secrets.md, "A person's Vault") | none: no answer, list, log or export names a value |
 | A person's connections | WorkOS Pipes (one account a provider, or several: `accounts_max`); one being made, the registry's `connection_signins` (docs/pipes-browser-binding.md) | which account each agent uses, its computer's `agent_accounts`; a guest holds placeholders only |
 | Orgs, their admins and seats | the registry (docs/billing.md) | each holder's plan and standing pushed to their ledger in the registry's order (`SetSeat.seq`); the registry is the seat's one writer |
 | An org's credit and monthly budget (decisions 66 to 68) | its ledger (`org:<id>`) | none: operators grant and set them; its billing admins read them |
@@ -87,7 +101,7 @@ Every change is checked against this table.
 | The image a computer's next start runs | each image name's reference in the Worker version; a computer's pin names one | the Computer DO's last look, recorded as the image each life runs |
 | An agent's name and picture | its fragment at live: `meta.title` and `avatar.png` (docs/api.md, "An agent's name and picture") | its cell's face, and everything read from it; its computer's profile and SimpleX profile follow a rename; no chat title or `SOUL.md` copies it; its label never changes |
 | An agent's role | its fragment at live: `meta.role` | its status's `agentRole`, which its runtime tells it at each turn |
-| An agent's runtime, tier, or its own models and efforts | its `agent.json` in git (`runtime`, `hermes` unless named; docs/computers.md) | its computer's bridge and profile config; Settings and the agent's page read it |
+| An agent's runtime, tier, or its own models and efforts | its `agent.json` in git (`runtime`, `hermes` unless named; `claude.model` and `claude.effort` for Claude Code; docs/computers.md, docs/bridge.md) | its computer's bridge and profile config; Settings and the agent's page read it |
 | An agent's home | its `agent.json` `home` in git (docs/api.md, "An agent's home") | read by the shell, its computer's profile and the bridge; none kept |
 | An agent's SimpleX chat | its owner's chat `<agent label>-simplex`, the agent in it | its name in the link's file, chosen once, before the chat is made |
 | An agent's SimpleX door | the agent fragment's `meta` `door`, written only by redeeming its owner's latest ticket (docs/api.md, "An agent's doors") | its private key on the computer; a relayed record is taken only signed by the key the fragment holds |
@@ -96,18 +110,22 @@ Every change is checked against this table.
 | An agent's colour | its identity, through one function (`agent-color.js`) | none: never stored |
 | The model route's models, and each tier's Fast and Deep | the deployment's `models` (`FRAGMENT_MODELS`) | ids only, in each computer's view and its owner's; `GET /v1/models` reads the config |
 | A computer's agents | the Computer DO's `agents` | the agent fragment's `computer` and the registry's `agent_fragments`; a delete unassigns it (cell/src/ended.rs) |
+| A shared key's charges this last hour, per person | their computer's `key_hour` (`fragment_core::key_hour`), counted as `computer/used` counts each call | none |
+| A person's hourly cap on a shared key | their computer's `key_caps` (no row: `key_hour::KEY_HOUR_CAP`) | none: its pause notice is worked out on read |
 | A computer's XFTP relays | the Computer DO: leases in memory, the day's bytes in `relay_day` | none |
 | A fragment's scheduled records | its supervisor's `record_schedules` (docs/api.md, "Scheduled records") | each fire appended once, keyed by schedule and minute; a computer keeps none |
 | Money | each payer's ledger (docs/ledger.md) | meters batch rows to it, idempotently; each isolate's gate keeps an answer a minute at most |
-| A job's paid AI answer | the supervisor's `paid` receipts, by incarnation, run and step | its charge in the meter outbox (`step:<key>`), charged once; no provider call once a receipt exists |
+| A job's paid AI answer | the supervisor's `paid` receipts, by incarnation, run and step | its charge in the meter outbox (`step:<key>`), charged once; no provider call once a receipt exists, nor a video's while its attempt's call is in `making` |
 | Audit trail | the `events` channel | pin moves recorded as events |
 | The agent docs | `cli/SKILL.md` and `cli/GUIDE.md`, naming no host | compiled into the CLI and the release's files (`/llms.txt`), each filled with its host |
 | The release's files: templates, the shell's, the agent docs | the repo | the cell's index and its Static Assets, by hash, from one build; the CLI embeds the templates |
 | A fragment's icon | its meta, naming one of its blobs (cell/src/icon.rs) | members' list rows carry its address |
-| A person's session archive | its conversations' files, `sessions/<key>.json`, in a fragment of theirs of kind `sessions` (templates/sessions/README.md) | its indexes (`index/<kind>.json`), a projection rewritten by each import; the store an import read is never written |
+| A person's session archive | its conversations' files, `sessions/<key>.json`, in a fragment of theirs of kind `sessions` (templates/sessions/README.md) | its indexes (`index/<kind>.json`), a projection rewritten by each import; its search, a projection of `sessions/` each import writes (a source a file, its revision the file's sha256) and reconciles against the indexes; the store an import read is never written |
 | A fragment's preview card | its own storage (`fragment_core::card::Cards`) | status's `page`; errors also an `events` row |
 | What members are doing: each one's newest listed record | the channel's records | the fragment's `listed`, and each member's list row (docs/api.md, Listed records) |
+| Native iPhone drafts and pending sends | protected, backup-excluded Application Support files, scoped to platform and person (`ios/Sources/ChatDraftStore.swift`) | bounded to 32 saved chats, 16 pending sends each; a send is saved before HTTP, retried only with the same id and body, never once refused; editing, saving and loading hold one set of bounds (`SavedChat`), and no saved file stops a chat; device keys live only in Keychain |
 | A person's own view of their fragments (archived, docked, read up to) | their list, the `Principal` cell | none |
+| A finite.computer old agent's move: its roster row, its person's answers, its state and deadlines, the mover's command | the `Migrations` object (docs/migrations.md; removable with the move) | none: the mover acts on its commands alone, and staff read and act through its operators' routes |
 | A person's export | their list, the `Principal` cell, and its archive in R2 | the archive is a copy as read, never updated, deleted after seven days (docs/api.md, Export) |
 
 ## Schemas: the platform objects' steps
@@ -166,6 +184,11 @@ release was deployed (`release::DEPLOYED`), which no release reads now
   until its asks run out.
 - **What outlives a deploy is not a call.** A queue message or a stored
   row one release writes, the next reads, so its shape stays readable.
+  A release tolerates what the next writes where it can: a run's `via`
+  it does not know reads as written, and a trigger kind it does not know
+  starts nothing. A value an older release cannot read makes its release
+  forward only, by a schema step (Fragment step 6, FIN-328; Migrations
+  step 7, a move waiting for staff).
 
 A deploy is all at once (a gradual deployment would refuse between its
 two versions), and done when every object class answers it within 90 s
@@ -184,5 +207,8 @@ deploy too, and reloads once the platform's release differs from its own
 Every limit is a named constant with its reason beside it, in
 `fragment_proto::limits` (crates/proto/src/lib.rs) unless it belongs to
 one module; each is enforced and tested. A value lives there, never in a
-doc. Channels keep what their constants say (`AUDIT_RETENTION_MS`,
+doc. A limit a client checks before it asks is served to it, never copied
+into it: what a person's message carries is `UploadLimits` (a deployment's
+`upload_max_bytes`, its zone's), on the list and a page's hello, and a
+source guard refuses a file bound written anywhere else (xtask/src/guards.rs). Channels keep what their constants say (`AUDIT_RETENTION_MS`,
 `AUDIT_KEPT`, `POSTED_KEPT`); an app's other channels keep everything.

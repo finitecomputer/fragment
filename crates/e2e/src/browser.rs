@@ -28,14 +28,21 @@ use serde_json::{json, Value};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
-/// Chrome starts tried before a lane gives up on it, and how long each may
-/// take to answer on its DevTools port.
-const CHROME_STARTS_MAX: u32 = 2;
-const CHROME_START_WAIT: Duration = Duration::from_secs(30);
+/// How long a starting Chrome's browser main thread, where its start runs,
+/// may do nothing (no CPU time, no page fault) before its DevTools port is
+/// up: one idle that long is stuck. One still working is waited on,
+/// however slow: a CI runner's first Chrome is 7 to 19 s on half of shard
+/// 1's runs and was past 30 s once, alive and starting (FIN-496). Where
+/// its thread can't be read (no `/proc`), the bound runs from its start.
+const CHROME_IDLE_MAX: Duration = Duration::from_secs(30);
 /// How long a reloaded page has to load its new document, resources and
 /// all (`reload`), and how many reloads it is given.
 const RELOAD_LOAD: Duration = Duration::from_secs(30);
 const RELOADS_MAX: u32 = 2;
+/// A page `open` asks for has its document within this, or the open fails:
+/// the browser reports its commit and its default context
+/// (`Browser::navigate`); one that never comes is the stack's to explain.
+const NAVIGATED_MAX: Duration = Duration::from_secs(60);
 /// A watched page keeps at most this many of its events; past it, they are
 /// counted (`Watched::dropped`). A small app's page says a few hundred.
 pub const WATCHED_EVENTS_MAX: usize = 20_000;
@@ -152,6 +159,34 @@ pub struct Page {
     target: String,
 }
 
+/// How a page's document came back (`Browser::back`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Came {
+    /// The document that left, as the back/forward cache kept it.
+    Restored,
+    /// A new document, loaded: the browser's reasons the cache had none
+    /// to give (`notRestoredExplanations`).
+    Loaded(Value),
+}
+
+impl std::fmt::Display for Came {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Came::Restored => f.write_str("restored from the back/forward cache"),
+            Came::Loaded(why) => write!(f, "loaded again, the cache unused: {why}"),
+        }
+    }
+}
+
+/// A page's fetch held where a test says, then let go: a script for a
+/// page's `eval`. `window.__hold`, a RegExp, holds each fetch whose URL it
+/// matches (`window.__held` its releases: `window.__held.splice(0).forEach((go) => go())`);
+/// each held answer's body, once read (`json`, `arrayBuffer`, `text`),
+/// counts `window.__consumed`. The page's continuation after that read
+/// runs in the same turn, so an evaluation that sees the count sees all it
+/// did: a test waits on the count, never a clock (FIN-372's review).
+pub const HOLD_FETCH: &str = "(() => { window.__held = []; window.__consumed = 0; const real = window.fetch; const counted = (r) => { for (const m of ['json', 'arrayBuffer', 'text']) { const read = r[m].bind(r); r[m] = () => read().finally(() => window.__consumed++); } return r; }; window.fetch = (u, o) => window.__hold?.test(String(u)) ? new Promise((done, fail) => window.__held.push(() => real(u, o).then((r) => done(counted(r)), fail))) : real(u, o); return true; })()";
+
 /// For `open_with_script`: the page's first WebSocket whose URL holds
 /// `part`, held as an upgrade never answered is (a dropped connection, a
 /// phone's network changing under it): it stays connecting, never opening
@@ -228,6 +263,154 @@ fn without_surrogates(t: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The DevTools port a Chrome started with `--remote-debugging-port=0`
+/// bound, as it writes it in its profile (`DevToolsActivePort`: the port,
+/// then its browser's path); none until it has.
+fn devtools_port(profile: &Path) -> Option<u16> {
+    let text = std::fs::read_to_string(profile.join("DevToolsActivePort")).ok()?;
+    let mut lines = text.lines();
+    let port = lines.next()?.trim().parse().ok().filter(|p| *p != 0)?;
+    // both lines, so a file read as it was written is not taken
+    lines.next().filter(|path| path.starts_with("/devtools/browser/"))?;
+    Some(port)
+}
+
+/// One process, as its `/proc/<pid>/stat` says.
+#[derive(Debug, Clone, PartialEq)]
+struct Process {
+    pid: u32,
+    ppid: u32,
+    name: String,
+    /// R running, S sleeping, D waiting on a disk, T stopped, Z exited.
+    state: char,
+    /// CPU time in clock ticks, its reaped children's included.
+    ticks: u64,
+    /// Page faults, its reaped children's included.
+    faults: u64,
+    /// Those of them that read a disk.
+    reads: u64,
+}
+
+impl Process {
+    /// A process's (or one thread's) `stat` file, read.
+    fn read(path: &str) -> Option<Process> {
+        Process::parse(&std::fs::read_to_string(path).ok()?)
+    }
+
+    /// `pid (name) state ppid …`: the name may hold spaces and parentheses,
+    /// so the fields are counted from its last `)`.
+    fn parse(stat: &str) -> Option<Process> {
+        let (head, tail) = stat.trim_end().rsplit_once(") ")?;
+        let (pid, name) = head.split_once(" (")?;
+        let f: Vec<&str> = tail.split(' ').collect();
+        let n = |i: usize| f.get(i)?.parse::<u64>().ok();
+        Some(Process {
+            pid: pid.trim().parse().ok()?,
+            ppid: f.get(1)?.parse().ok()?,
+            name: name.to_string(),
+            state: f.first()?.chars().next()?,
+            // minflt cminflt majflt cmajflt utime stime cutime cstime
+            faults: n(7)? + n(8)?,
+            reads: n(9)? + n(10)?,
+            ticks: n(11)? + n(12)? + n(13)? + n(14)?,
+        })
+    }
+}
+
+/// A process and every process under it.
+#[derive(Debug)]
+struct Tree(Vec<Process>);
+
+/// What a tree's processes have done so far. Any change is work: a tree
+/// that stays the same did nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Work {
+    processes: usize,
+    ticks: u64,
+    faults: u64,
+    reads: u64,
+}
+
+impl std::fmt::Display for Work {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // /proc counts in USER_HZ, 100 a second on Linux
+        write!(f, "{} processes, {:.2}s of CPU, {} page faults, {} of them read from disk", self.processes, self.ticks as f64 / 100.0, self.faults, self.reads)
+    }
+}
+
+impl Tree {
+    /// `root`'s tree as `/proc` has it now (`None`: no `/proc`, or no such process).
+    fn read(root: u32) -> Option<Tree> {
+        let all = std::fs::read_dir("/proc").ok()?.filter_map(|e| {
+            let e = e.ok()?;
+            e.file_name().to_str()?.parse::<u32>().ok()?;
+            Process::read(e.path().join("stat").to_str()?)
+        });
+        Tree::of(root, all.collect())
+    }
+
+    fn of(root: u32, all: Vec<Process>) -> Option<Tree> {
+        let (mut inside, mut rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| p.pid == root);
+        if inside.is_empty() {
+            return None;
+        }
+        loop {
+            let (under, left): (Vec<_>, Vec<_>) = rest.into_iter().partition(|p| inside.iter().any(|q| q.pid == p.ppid));
+            rest = left;
+            if under.is_empty() {
+                return Some(Tree(inside));
+            }
+            inside.extend(under);
+        }
+    }
+
+    fn work(&self) -> Work {
+        let sum = |f: fn(&Process) -> u64| self.0.iter().map(f).sum();
+        Work { processes: self.0.len(), ticks: sum(|p| p.ticks), faults: sum(|p| p.faults), reads: sum(|p| p.reads) }
+    }
+}
+
+impl std::fmt::Display for Tree {
+    /// Each process, its state, and what it waits in (`wchan`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:", self.work())?;
+        for p in &self.0 {
+            let wchan = std::fs::read_to_string(format!("/proc/{}/wchan", p.pid)).unwrap_or_default();
+            write!(f, " {} {} {} (in {})", p.pid, p.name, p.state, if wchan.is_empty() { "-" } else { &wchan })?;
+        }
+        Ok(())
+    }
+}
+
+/// What a profile holds, for a start's report: its files and directories
+/// two levels down, by path, with each file's size (at most 40).
+fn held(profile: &Path) -> String {
+    let mut found = vec![];
+    let mut dirs = vec![(profile.to_path_buf(), 0)];
+    while let Some((dir, depth)) = dirs.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = e.path();
+            let name = path.strip_prefix(profile).unwrap_or(&path).display().to_string();
+            match e.file_type().is_ok_and(|t| t.is_dir()) {
+                true if depth == 0 => {
+                    found.push(format!("{name}/"));
+                    dirs.push((path, depth + 1));
+                }
+                true => found.push(format!("{name}/")),
+                false => found.push(format!("{name} ({} B)", e.metadata().map_or(0, |m| m.len()))),
+            }
+        }
+    }
+    found.sort();
+    let more = found.len().saturating_sub(40);
+    found.truncate(40);
+    match (found.is_empty(), more) {
+        (true, _) => "nothing".to_string(),
+        (false, 0) => found.join(", "),
+        (false, more) => format!("{} and {more} more", found.join(", ")),
+    }
+}
+
 pub(crate) fn chrome() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CHROME_BIN") {
         return Some(PathBuf::from(p));
@@ -248,17 +431,7 @@ impl Browser {
     /// `preferences` (Chrome's own settings file) in its profile first.
     pub fn launch_with(scratch: &Path, args: &[&str], preferences: Option<&Value>) -> Result<Option<Browser>> {
         let Some(bin) = chrome() else { return Ok(None) };
-        // a start that never comes up (a slow runner, a port taken between
-        // free_port and Chrome's bind) is tried once more, on a fresh port
-        let mut tries = 0;
-        let (child, url, profile) = loop {
-            tries += 1;
-            match Browser::start(&bin, scratch, args, preferences) {
-                Ok(started) => break started,
-                Err(e) if tries < CHROME_STARTS_MAX => eprintln!("      (Chrome did not come up, trying again: {e:#})"),
-                Err(e) => return Err(e),
-            }
-        };
+        let (child, url, profile) = Browser::start(&bin, scratch, args, preferences)?;
         let (ws, _) = tungstenite::connect(url.as_str())?;
         if let MaybeTlsStream::Plain(s) = ws.get_ref() {
             s.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -270,8 +443,7 @@ impl Browser {
     /// profile, whose `chrome.log` keeps what it said (a start that fails
     /// says why).
     fn start(bin: &Path, scratch: &Path, args: &[&str], preferences: Option<&Value>) -> Result<(Child, String, PathBuf)> {
-        let port = fragment_devstack::free_port()?;
-        let profile = scratch.join(format!("chrome-{port}"));
+        let profile = scratch.join(format!("chrome-{}", fragment_devstack::random_hex(4)));
         std::fs::create_dir_all(profile.join("Default"))?;
         if let Some(p) = preferences {
             std::fs::write(profile.join("Default/Preferences"), p.to_string())?;
@@ -281,7 +453,10 @@ impl Browser {
             .args(args)
             .args([
                 "--headless=new",
-                &format!("--remote-debugging-port={port}"),
+                // a port of its own picking, which it writes in its profile
+                // (`DevToolsActivePort`): one picked for it and let go
+                // before it bound could be another socket's by then
+                "--remote-debugging-port=0",
                 &format!("--user-data-dir={}", profile.display()),
                 "--no-first-run",
                 "--no-default-browser-check",
@@ -306,21 +481,44 @@ impl Browser {
             .context("start Chrome")?;
         let t0 = Instant::now();
         let said = || std::fs::read_to_string(profile.join("chrome.log")).unwrap_or_default().lines().rev().take(5).collect::<Vec<_>>().join(" | ");
+        let pid = child.id();
+        // its browser's main thread, where its start runs (its other threads
+        // and processes may stay busy while that is stuck): what it had done
+        // when it last did more
+        let main = || Process::read(&format!("/proc/{pid}/task/{pid}/stat")).map(|p| (p.ticks, p.faults, p.reads));
+        let (mut done, mut since) = (main(), Instant::now());
         loop {
-            let found = reqwest::blocking::get(format!("http://127.0.0.1:{port}/json/version"))
-                .ok()
-                .and_then(|r| r.json::<Value>().ok())
-                .and_then(|v| v["webSocketDebuggerUrl"].as_str().map(str::to_string));
+            let found = devtools_port(&profile).and_then(|port| {
+                reqwest::blocking::get(format!("http://127.0.0.1:{port}/json/version"))
+                    .ok()
+                    .and_then(|r| r.json::<Value>().ok())
+                    .and_then(|v| v["webSocketDebuggerUrl"].as_str().map(str::to_string))
+            });
             if let Some(u) = found {
+                // how each start went: a slow one's disk reads say whether it waited on the disk
+                let work = Tree::read(pid).map(|t| format!(": {}", t.work())).unwrap_or_default();
+                println!("      (Chrome started in {:.1?}{work})", t0.elapsed());
                 return Ok((child, u, profile));
             }
             if let Ok(Some(status)) = child.try_wait() {
-                bail!("Chrome exited ({status}) before its DevTools endpoint came up on :{port}: {}", said());
+                bail!("Chrome exited ({status}) {:.1?} after it started, before its DevTools endpoint came up: it said: {}; its profile held: {}", t0.elapsed(), said(), held(&profile));
             }
-            if t0.elapsed() > CHROME_START_WAIT {
+            let now = main();
+            if now != done {
+                (done, since) = (now, Instant::now());
+            }
+            if since.elapsed() > CHROME_IDLE_MAX {
+                // read while they still are: what each waits in goes when it is killed
+                let processes = Tree::read(pid).map_or_else(|| "unread (no /proc)".to_string(), |t| t.to_string());
                 let _ = child.kill();
                 let _ = child.wait();
-                bail!("Chrome's DevTools endpoint did not come up on :{port} in {CHROME_START_WAIT:?}: {}", said());
+                bail!(
+                    "Chrome's main thread did nothing for {CHROME_IDLE_MAX:?} ({:.1?} after it started) and its DevTools endpoint is not up (its port: {:?}): its processes: {processes}; it said: {}; its profile held: {}",
+                    t0.elapsed(),
+                    devtools_port(&profile),
+                    said(),
+                    held(&profile),
+                );
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -448,10 +646,10 @@ impl Browser {
 
     /// A browser-only transport fault installed before the page starts.
     pub fn open_with_script(&mut self, url: &str, script: &str) -> Result<Page> {
-        let page = self.open("about:blank")?;
+        let page = self.blank_at(self.context.clone().as_deref())?;
         self.send("Page.enable", json!({}), Some(&page.session))?;
         self.send("Page.addScriptToEvaluateOnNewDocument", json!({ "source": script }), Some(&page.session))?;
-        self.send("Page.navigate", json!({ "url": url }), Some(&page.session))?;
+        self.navigate(&page, url)?;
         Ok(page)
     }
 
@@ -464,10 +662,10 @@ impl Browser {
     /// characters) are refused from its first document, as a resource that
     /// never comes; `unblock` lets them through again.
     pub fn open_blocking(&mut self, url: &str, patterns: &[&str]) -> Result<Page> {
-        let page = self.open("about:blank")?;
+        let page = self.blank_at(self.context.clone().as_deref())?;
         self.send("Network.enable", json!({}), Some(&page.session))?;
         self.send("Network.setBlockedURLs", json!({ "urls": patterns }), Some(&page.session))?;
-        self.send("Page.navigate", json!({ "url": url }), Some(&page.session))?;
+        self.navigate(&page, url)?;
         Ok(page)
     }
 
@@ -476,13 +674,79 @@ impl Browser {
         Ok(())
     }
 
+    /// A page at `url`, its document there by the time it is answered
+    /// (`navigate`): a first `eval` runs in it.
     fn open_at(&mut self, context: Option<&str>, url: &str) -> Result<Page> {
-        let mut params = json!({ "url": url });
+        let page = self.blank_at(context)?;
+        if url != "about:blank" {
+            self.navigate(&page, url)?;
+        }
+        Ok(page)
+    }
+
+    /// A new blank page in `context` (the lease's when `None`), attached.
+    fn blank_at(&mut self, context: Option<&str>) -> Result<Page> {
+        let mut params = json!({ "url": "about:blank" });
         if let Some(context) = context {
             params["browserContextId"] = json!(context);
         }
         let target = self.send("Target.createTarget", params, None)?["targetId"].as_str().unwrap_or("").to_string();
-        self.attach(&target)
+        let page = self.attach(&target)?;
+        // its click guard first on each document's window (`CLICK_GUARD`)
+        self.send("Page.enable", json!({}), Some(&page.session))?;
+        self.send("Page.addScriptToEvaluateOnNewDocument", json!({ "source": format!("({CLICK_GUARD})()") }), Some(&page.session))?;
+        Ok(page)
+    }
+
+    /// Navigates `page` to `url` and waits for its new document's default
+    /// execution context, as the browser reports them: the main frame
+    /// committed to this navigation (`Page.frameNavigated`, its loader),
+    /// then that frame's default context made after it
+    /// (`Runtime.executionContextCreated`). So a first `eval` runs in the
+    /// page asked for, never in the blank one before it, nor between the
+    /// two ("Cannot find default execution context"). A navigation that
+    /// failed (`errorText`) answers at once, the browser's error page shown.
+    /// Its frame's events may come before the navigation's answer, so the
+    /// command is sent and read here, every other message kept as `send`
+    /// keeps it.
+    pub fn navigate(&mut self, page: &Page, url: &str) -> Result<()> {
+        self.send("Page.enable", json!({}), Some(&page.session))?;
+        self.send("Runtime.enable", json!({}), Some(&page.session))?;
+        self.next += 1;
+        let id = self.next;
+        let msg = json!({ "id": id, "method": "Page.navigate", "params": { "url": url }, "sessionId": page.session });
+        self.ws.send(Message::Text(msg.to_string().into()))?;
+        // the main frame's id is its target's; its default context made
+        // since the command was sent, while no later event ended it
+        let (mut loader, mut committed, mut context) = (None::<String>, None::<String>, None::<Value>);
+        let t0 = Instant::now();
+        while t0.elapsed() < NAVIGATED_MAX {
+            let Message::Text(t) = self.ws.read()? else { continue };
+            let v = message(&t)?;
+            if v["id"].as_u64() == Some(id) {
+                if !v["error"].is_null() {
+                    bail!("Page.navigate {url}: {}", v["error"]);
+                }
+                if v["result"]["errorText"].as_str().is_some_and(|e| !e.is_empty()) {
+                    return Ok(());
+                }
+                loader = v["result"]["loaderId"].as_str().map(str::to_string);
+            } else if v["sessionId"] == page.session.as_str() {
+                let p = &v["params"];
+                match v["method"].as_str() {
+                    Some("Page.frameNavigated") if p["frame"]["id"] == page.target.as_str() => committed = p["frame"]["loaderId"].as_str().map(str::to_string),
+                    Some("Runtime.executionContextCreated") if p["context"]["auxData"]["isDefault"] == true && p["context"]["auxData"]["frameId"] == page.target.as_str() => context = Some(p["context"]["id"].clone()),
+                    Some("Runtime.executionContextDestroyed") if context.as_ref() == Some(&p["executionContextId"]) => context = None,
+                    Some("Runtime.executionContextsCleared") => context = None,
+                    _ => {}
+                }
+            }
+            if loader.is_some() && loader == committed && context.is_some() {
+                return Ok(());
+            }
+            self.keep(v);
+        }
+        bail!("{url}: its document did not come in {NAVIGATED_MAX:.0?} (committed: {committed:?}, navigation: {loader:?})")
     }
 
     /// A page `pages` listed (a popup a page opened), to drive as one `open` answered.
@@ -690,21 +954,25 @@ impl Browser {
     }
 
     /// One key pressed and let go on the focused element (`Enter`, `Escape`,
-    /// `Tab`, `ArrowDown`, `ArrowUp`), with Shift held when `shift`.
+    /// `Tab`, the arrows), with Shift held when `shift`.
     pub fn press(&mut self, page: &Page, key: &str, shift: bool) -> Result<()> {
         let code = match key {
             "Enter" => 13,
             "Escape" => 27,
             "Tab" => 9,
+            " " => 32,
+            "ArrowLeft" => 37,
             "ArrowUp" => 38,
+            "ArrowRight" => 39,
             "ArrowDown" => 40,
             _ => bail!("no key code for {key}"),
         };
         for kind in ["keyDown", "keyUp"] {
-            let mut event = json!({ "type": kind, "key": key, "code": key, "windowsVirtualKeyCode": code, "modifiers": if shift { 8 } else { 0 } });
-            // a key that types: Enter's keydown carries its character
-            if kind == "keyDown" && key == "Enter" {
-                event["text"] = json!("\r");
+            let named = if key == " " { "Space" } else { key };
+            let mut event = json!({ "type": kind, "key": key, "code": named, "windowsVirtualKeyCode": code, "modifiers": if shift { 8 } else { 0 } });
+            // a key that types: Enter's and Space's keydown carry their character
+            if kind == "keyDown" && (key == "Enter" || key == " ") {
+                event["text"] = json!(if key == "Enter" { "\r" } else { " " });
             }
             self.send("Input.dispatchKeyEvent", event, Some(&page.session))?;
         }
@@ -737,6 +1005,24 @@ impl Browser {
     pub fn touch(&mut self, page: &Page, on: bool) -> Result<()> {
         let params = if on { json!({ "enabled": true, "maxTouchPoints": 5 }) } else { json!({ "enabled": false }) };
         self.send("Emulation.setTouchEmulationEnabled", params, Some(&page.session))?;
+        Ok(())
+    }
+
+    /// Fingers on a touch screen (`touch` on): `touchStart`, `touchMove` or
+    /// `touchEnd` with every finger down at its point (none for an end), as
+    /// a phone sends them; the page hears them as pointers.
+    pub fn touches(&mut self, page: &Page, kind: &str, points: &[(f64, f64)]) -> Result<()> {
+        let points: Vec<Value> = points.iter().enumerate().map(|(id, (x, y))| json!({ "x": x, "y": y, "id": id })).collect();
+        self.send("Input.dispatchTouchEvent", json!({ "type": kind, "touchPoints": points }), Some(&page.session))?;
+        Ok(())
+    }
+
+    /// The page frozen (`true`: its scripts and tasks wait, as a phone's
+    /// background tab's do) or running again (`false`), when it hears what
+    /// it missed meanwhile, or reconnects.
+    pub fn freeze(&mut self, page: &Page, frozen: bool) -> Result<()> {
+        let state = if frozen { "frozen" } else { "active" };
+        self.send("Page.setWebLifecycleState", json!({ "state": state }), Some(&page.session))?;
         Ok(())
     }
 
@@ -836,6 +1122,18 @@ impl Browser {
         Ok(self.held.get(&page.session).into_iter().flatten().map(|(_, url)| url.clone()).collect())
     }
 
+    /// A cookie of `cookies`' (its name, domain, path, and partition key,
+    /// if it has one) deleted, as a browser that keeps none drops it.
+    pub fn delete_cookie(&mut self, page: &Page, cookie: &Value) -> Result<()> {
+        let mut params = json!({ "name": cookie["name"], "domain": cookie["domain"], "path": cookie["path"] });
+        // (an object in newer Chrome's protocol, a site's string in older)
+        if !cookie["partitionKey"].is_null() {
+            params["partitionKey"] = cookie["partitionKey"].clone();
+        }
+        self.send("Network.deleteCookies", params, Some(&page.session))?;
+        Ok(())
+    }
+
     /// Every held request sent on, or (`fail`) failed as a dropped
     /// connection fails one; none held from now on.
     pub fn release(&mut self, page: &Page, fail: bool) -> Result<()> {
@@ -865,10 +1163,130 @@ impl Browser {
         Ok(())
     }
 
-    /// `click_at` the middle of the first element `selector` matches.
+    /// `click_at` the middle of the first element `selector` matches, as a
+    /// hand presses what it sees. Its aim and its press are separate calls,
+    /// and a page draws again between them on its own (the shell's list
+    /// reads itself again a moment after any change, and a row comes or
+    /// folds away), so the page's click guard (`CLICK_GUARD`, its scope and
+    /// limits there) holds each press to the element: one that would start
+    /// on another element of the page is stopped before the page hears it,
+    /// and aimed again where the element is now (Playwright's hit-target
+    /// check, its way). A press that starts on it goes through whole, as any
+    /// press does: a pointer the page captures, a label's click, a disabled
+    /// button's none. One that never reaches it in CLICK_AIMS (the element
+    /// covered) is an error naming what it hit. A frame is pressed with
+    /// `click_at`, or from its own page.
     pub fn click(&mut self, page: &Page, selector: &str) -> Result<()> {
-        let at = self.middle_of(page, selector)?;
-        self.click_at(page, at)
+        self.click_aimed(page, selector, CLICK_AIMS, Self::click_at)
+    }
+
+    /// `click` aimed once: an element that moves on approach (the page
+    /// drawn again between the aim and the press) is an error, for a check
+    /// that says it holds still.
+    pub fn click_strict(&mut self, page: &Page, selector: &str) -> Result<()> {
+        self.click_aimed(page, selector, 1, Self::click_at)
+    }
+
+    /// `click`'s aims, at most `aims`, each pressed by `press`: armed in the
+    /// page (`arm`, the element scrolled into view and its middle the one
+    /// thing at that point), pressed, then settled (`settle`) whatever the
+    /// press came to, so no guard is left armed past it. A settle that finds
+    /// no aim of its own is a document the press replaced, so long as the
+    /// frame's document changed (its loader); anything else is an error.
+    pub(crate) fn click_aimed(&mut self, page: &Page, selector: &str, aims: u32, press: fn(&mut Self, &Page, (f64, f64)) -> Result<()>) -> Result<()> {
+        let sel = serde_json::to_string(selector)?;
+        let mut hit = Vec::new();
+        for _ in 0..aims {
+            let document = self.document_of(page)?;
+            self.next += 1;
+            let token = self.next;
+            let armed = self.eval(page, &format!("({CLICK_GUARD})(), window.__clickGuard.arm({sel}, {token})"))?;
+            let (Some(x), Some(y)) = (armed["at"][0].as_f64(), armed["at"][1].as_f64()) else { bail!("nothing on the page matches {selector}") };
+            let missed = match armed["covered"].as_str() {
+                Some(cover) => format!("found {cover}, and pressed nothing"),
+                None => {
+                    let pressed = press(self, page, (x, y));
+                    let settled = self.eval(page, &format!("window.__clickGuard?.settle({token}) ?? {{ \"replaced\": true }}"));
+                    pressed?;
+                    let replaced = |b: &mut Self| b.document_of(page).is_ok_and(|now| now != document);
+                    let settled = match settled {
+                        Ok(v) => v,
+                        Err(e) if replaced(self) => json!({ "replaced": true, "error": e.to_string() }),
+                        Err(e) => return Err(e),
+                    };
+                    if settled["replaced"] == true {
+                        anyhow::ensure!(replaced(self), "a click aimed at {selector} lost its aim, its document the same: {settled}");
+                        return Ok(());
+                    }
+                    let Some(missed) = settled["missed"].as_str() else { return Ok(()) };
+                    match settled["stopped"] == true {
+                        true => format!("would have pressed {missed}, and was stopped"),
+                        false => format!("pressed {missed}: no listener here heard it (a frame over the point, the guard's limit)"),
+                    }
+                }
+            };
+            println!("      (a click aimed at {selector} {missed})");
+            hit.push(missed);
+        }
+        bail!("a click aimed at {selector} never reached it: {}", hit.join("; then "))
+    }
+
+    /// The page's history entry before this one, as Back takes it, and how
+    /// its document came, as the browser reports it: the one the
+    /// back/forward cache kept (`Page.frameNavigated`'s `type`), or a new
+    /// one, answered once its default context is there (as `navigate`'s)
+    /// with the browser's reasons it kept none (`Page.backForwardCacheNotUsed`,
+    /// in either order with the commit). A page left before it finished
+    /// loading is not kept while it still parses (`Loading`), and once
+    /// parsed is kept and finishes that load after it is restored, its
+    /// first `load` and `pageshow` then (FIN-460).
+    pub fn back(&mut self, page: &Page) -> Result<Came> {
+        let history = self.send("Page.getNavigationHistory", json!({}), Some(&page.session))?;
+        let at = history["currentIndex"].as_u64().context("a page's history names its entry")?;
+        anyhow::ensure!(at > 0, "no history entry before this one");
+        let entry = history["entries"][at as usize - 1]["id"].clone();
+        self.send("Page.enable", json!({}), Some(&page.session))?;
+        self.send("Runtime.enable", json!({}), Some(&page.session))?;
+        self.next += 1;
+        let id = self.next;
+        let msg = json!({ "id": id, "method": "Page.navigateToHistoryEntry", "params": { "entryId": entry }, "sessionId": page.session });
+        self.ws.send(Message::Text(msg.to_string().into()))?;
+        let (mut answered, mut kind, mut why, mut context) = (false, None::<String>, None::<Value>, None::<Value>);
+        let t0 = Instant::now();
+        while t0.elapsed() < NAVIGATED_MAX {
+            let Message::Text(t) = self.ws.read()? else { continue };
+            let v = message(&t)?;
+            if v["id"].as_u64() == Some(id) {
+                if !v["error"].is_null() {
+                    bail!("Page.navigateToHistoryEntry: {}", v["error"]);
+                }
+                answered = true;
+            } else if v["sessionId"] == page.session.as_str() {
+                let p = &v["params"];
+                match v["method"].as_str() {
+                    Some("Page.frameNavigated") if p["frame"]["id"] == page.target.as_str() => kind = p["type"].as_str().map(str::to_string),
+                    Some("Page.backForwardCacheNotUsed") if p["frameId"] == page.target.as_str() => why = Some(p["notRestoredExplanations"].clone()),
+                    Some("Runtime.executionContextCreated") if p["context"]["auxData"]["isDefault"] == true && p["context"]["auxData"]["frameId"] == page.target.as_str() => context = Some(p["context"]["id"].clone()),
+                    Some("Runtime.executionContextDestroyed") if context.as_ref() == Some(&p["executionContextId"]) => context = None,
+                    Some("Runtime.executionContextsCleared") => context = None,
+                    _ => {}
+                }
+            }
+            match kind.as_deref() {
+                Some("BackForwardCacheRestore") if answered => return Ok(Came::Restored),
+                Some(_) if answered && context.is_some() && why.is_some() => return Ok(Came::Loaded(why.unwrap_or_default())),
+                _ => {}
+            }
+            self.keep(v);
+        }
+        bail!("back: its document did not come in {NAVIGATED_MAX:.0?} (answered: {answered}, committed as: {kind:?}, the cache's reasons: {why:?})")
+    }
+
+    /// The page's (or frame's) document now, as its loader names it: a new
+    /// one for each document a navigation brings.
+    fn document_of(&mut self, page: &Page) -> Result<String> {
+        let tree = self.send("Page.getFrameTree", json!({}), Some(&page.session))?;
+        tree["frameTree"]["frame"]["loaderId"].as_str().map(str::to_string).context("a frame tree names its document's loader")
     }
 
     /// The mouse moved to the middle of the first element `selector`
@@ -892,6 +1310,62 @@ impl Browser {
     }
 }
 
+/// How many presses `click` makes at its element, each stopped that would
+/// have started on another: a page drawn again between an aim and its
+/// press moves once, not on every aim; one that never reaches it is covered.
+const CLICK_AIMS: u32 = 3;
+
+/// A page's click guard (`window.__clickGuard`), for `click`. Its scope:
+/// a press lands on the element it was aimed at, never on another element
+/// of the same document that the page, drawing again between the aim and
+/// the press, moved under the point.
+///
+/// Installed by each page `open` makes before its first document's scripts
+/// (`Page.addScriptToEvaluateOnNewDocument`), so its listeners are the
+/// first of the window's to hear a press. Dormant until `arm(selector,
+/// token)`, which scrolls the element into view and answers its middle
+/// (`at`), or what is there instead (`covered`: another element, or any
+/// frame, the element's own included, or nothing, the element having no
+/// box; no press is made). The first trusted
+/// `pointerdown` decides: inside the element (the same one, or the one
+/// drawn in its place) it is accepted, and the press is the page's, whole;
+/// outside, it and the rest of that press are stopped before any other
+/// listener. `settle(token)` disarms, whatever came, and answers `reached`
+/// (a pointerdown accepted), `missed` (what it pressed instead, `stopped`;
+/// or nothing here, a press no listener of this document heard), or
+/// `replaced` (no aim of its own: another document). An outgoing document
+/// (`pagehide`, into the back/forward cache among them) keeps no aim.
+///
+/// Its limits, which no lane meets: a frame drawn over the point between
+/// the aim and the press takes the press, in a document this guard never
+/// reaches (the click then reports a miss, as any press with no pointerdown
+/// accepted here, and aims again); and a document attached once loaded (a
+/// popup, a frame's own page) gets the guard at its first click, after the
+/// listeners it had already put on its window.
+const CLICK_GUARD: &str = "() => { if (window.__clickGuard) return; \
+    const kinds = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']; \
+    const named = (n) => n?.nodeType === 1 ? `<${n.localName}${n.id ? '#' + n.id : ''}${n.dataset?.key ? ` data-key=\"${n.dataset.key}\"` : ''}>` : String(n); \
+    const frames = /^(iframe|frame|object|embed)$/; \
+    let aim = null; \
+    const check = (ev) => { if (!aim || !ev.isTrusted) return; \
+      if (aim.state === 'armed' && ev.type === 'pointerdown') { \
+        if (document.querySelector(aim.sel)?.contains(ev.target)) { aim.state = 'reached'; return; } \
+        aim.state = 'missed'; aim.missed = named(ev.target); } \
+      if (aim.state === 'missed') { ev.preventDefault(); ev.stopImmediatePropagation(); } }; \
+    for (const k of kinds) addEventListener(k, check, true); \
+    addEventListener('pagehide', () => { aim = null; }); \
+    Object.defineProperty(window, '__clickGuard', { value: Object.freeze({ \
+      arm(sel, token) { aim = null; const e = document.querySelector(sel); if (!e) return null; \
+        e.scrollIntoView({ block: 'nearest' }); const r = e.getBoundingClientRect(); const at = [r.x + r.width / 2, r.y + r.height / 2]; \
+        if (!r.width || !r.height) return { at, covered: 'it with no box (hidden, or not drawn)' }; \
+        const hit = document.elementFromPoint(...at); if (!hit || !e.contains(hit) || frames.test(hit.localName)) return { at, covered: `${named(hit)} over it` }; \
+        aim = { sel, token, state: 'armed', missed: null }; return { at }; }, \
+      settle(token) { const a = aim; aim = null; if (a?.token !== token) return { replaced: true }; \
+        if (a.state === 'reached') return { reached: true }; \
+        return a.state === 'missed' ? { missed: a.missed, stopped: true } : { missed: 'nothing on this page', stopped: false }; }, \
+      armed() { return aim !== null; }, \
+    }) }); }";
+
 impl Drop for Browser {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -914,6 +1388,99 @@ mod tests {
         assert_eq!((c["name"].as_str(), c.get("secure")), (Some("fragment_session"), None));
         let c = cookie("https://e2e.finite.place/", "theme", "dark");
         assert_eq!((c["name"].as_str(), c.get("secure")), (Some("theme"), None));
+    }
+
+    /// Chrome's own port is read from its profile once it has written it
+    /// whole: the port, then its browser's path. A file not there yet, one
+    /// line of it, a port 0 or no number, and another path are none.
+    #[test]
+    fn chromes_port_is_read_from_its_profile() {
+        let dir = std::env::temp_dir().join(format!("e2e-devtools-port-{}", fragment_devstack::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let with = |text: &str| {
+            std::fs::write(dir.join("DevToolsActivePort"), text).unwrap();
+            devtools_port(&dir)
+        };
+        assert_eq!(devtools_port(&dir), None, "not written yet");
+        assert_eq!(with("40123\n/devtools/browser/0e1f-a2b3"), Some(40123));
+        assert_eq!(with("40123\n/devtools/browser/0e1f-a2b3\n"), Some(40123));
+        for half in ["40123", "40123\n", "0\n/devtools/browser/0e1f", "port\n/devtools/browser/0e1f", "40123\n/devtools/page/0e1f"] {
+            assert_eq!(with(half), None, "{half:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A process's stat is read from its last `)`, whatever its name
+    /// holds; its reaped children's time and faults count as its own.
+    #[test]
+    fn a_process_is_read_from_its_stat() {
+        let stat = "8114 (chrome (main) x) S 8000 8114 8000 0 -1 4194560 100 20 3 4 50 7 2 1 20 0 30 0 99 1 2 3\n";
+        let p = Process::parse(stat).expect("a stat");
+        assert_eq!(p, Process { pid: 8114, ppid: 8000, name: "chrome (main) x".into(), state: 'S', ticks: 60, faults: 120, reads: 7 });
+        for bad in ["", "8114 chrome S 8000", "8114 (chrome) S", "x (chrome) S 8000 1 1 0 -1 0 1 1 1 1 1 1 1 1"] {
+            assert_eq!(Process::parse(bad), None, "{bad:?}");
+        }
+    }
+
+    /// A tree is its root and every process under it, however deep, and
+    /// nothing beside it; a root that is gone is none.
+    #[test]
+    fn a_tree_is_its_root_and_all_under_it() {
+        let p = |pid, ppid| Process { pid, ppid, name: format!("p{pid}"), state: 'S', ticks: pid as u64, faults: 1, reads: 0 };
+        // 10 → 11 → 13 → 14, 10 → 12; 20 → 21 beside it; 1 above it
+        let all = vec![p(14, 13), p(1, 0), p(11, 10), p(21, 20), p(10, 1), p(13, 11), p(12, 10), p(20, 1)];
+        let tree = Tree::of(10, all.clone()).expect("its tree");
+        let mut pids: Vec<u32> = tree.0.iter().map(|p| p.pid).collect();
+        pids.sort();
+        assert_eq!(pids, [10, 11, 12, 13, 14]);
+        assert_eq!(tree.work(), Work { processes: 5, ticks: 60, faults: 5, reads: 0 });
+        assert!(Tree::of(99, all).is_none());
+    }
+
+    /// Read from `/proc`, a process's tree holds the children it started,
+    /// and a process at work (a shell's busy loop) shows its main thread's
+    /// CPU time growing; a stopped one's stays as it was.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_working_thread_shows_its_work() {
+        struct Killed(std::process::Child);
+        impl Drop for Killed {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Killed(Command::new("sh").args(["-c", "while :; do :; done"]).spawn().expect("sh"));
+        let pid = child.0.id();
+        assert!(Tree::read(std::process::id()).expect("ours").0.iter().any(|p| p.pid == pid), "ours holds the child");
+        let main = || Process::read(&format!("/proc/{pid}/task/{pid}/stat")).expect("its main thread");
+        let before = main();
+        let t0 = Instant::now();
+        while main().ticks == before.ticks {
+            assert!(t0.elapsed() < Duration::from_secs(10), "a busy loop's CPU time never grew");
+        }
+        assert!(Command::new("kill").args(["-STOP", &pid.to_string()]).status().is_ok_and(|s| s.success()), "the shell stops");
+        while main().state != 'T' {}
+        let stopped = main();
+        assert_eq!((main().ticks, main().faults), (stopped.ticks, stopped.faults), "a stopped thread does nothing");
+    }
+
+    /// Chromes started together each answer on the port each picked and
+    /// wrote, never another's. By hand, with a Chrome:
+    /// `cargo test -p fragment-e2e chromes_started_together -- --ignored`.
+    #[test]
+    #[ignore = "needs Chrome"]
+    fn chromes_started_together_each_answer_on_their_own_port() {
+        let scratch = std::env::temp_dir().join(format!("e2e-chromes-{}", fragment_devstack::random_hex(4)));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let started: Vec<Browser> = std::thread::scope(|s| {
+            let starts: Vec<_> = (0..4).map(|_| s.spawn(|| Browser::launch(&scratch).expect("Chrome starts").expect("a Chrome"))).collect();
+            starts.into_iter().map(|t| t.join().expect("a start")).collect()
+        });
+        let ports: std::collections::BTreeSet<u16> = started.iter().map(|b| devtools_port(&b.profile).expect("its port")).collect();
+        assert_eq!(ports.len(), started.len(), "each its own port: {ports:?}");
+        drop(started);
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// A message serde_json reads is read as it is; one holding a body's

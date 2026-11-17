@@ -47,10 +47,12 @@ use worker::*;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell};
-use crate::principal::PrincipalCell;
+use crate::principal::calls::{ExportDownload, ExportLever, ExportNow, ExportStart, ExportsWiped, List, WipeExports};
+use crate::principal::{self, PrincipalCell};
 use crate::registry::calls::{self, By};
 use crate::routed::{Routed, Signed};
 use crate::{ask_registry, js, read_body};
+use fragment_core::gather::Gathered;
 
 /// A request to start or read one carries no body.
 const BODY_MAX_BYTES: usize = 1024;
@@ -66,20 +68,19 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             if !body.is_empty() && body.iter().any(|b| !b.is_ascii_whitespace()) && serde_json::from_slice::<Value>(&body).ok() != Some(json!({})) {
                 return Err(CellError::invalid("POST /api/export takes no body"));
             }
-            principal(env, &who.id, Method::Post, "/export/start", Some(json!({ "person": who.id }).to_string()), None).await
+            principal::pass(env, &who.id, &ExportStart { person: who.id.clone() }).await
         }
         (Method::Get, []) => {
             let who = person(crate::signer(env, &req, url, &[]).await?)?;
-            principal(env, &who.id, Method::Get, "/export/status", None, None).await
+            principal::pass(env, &who.id, &ExportNow {}).await
         }
         (Method::Get | Method::Head, [id, "download"]) => {
             let who = downloader(env, cfg, &req, url).await?;
             if !valid_export_id(id) {
                 return Err(CellError::new(ErrorCode::NotFound, "no such export"));
             }
-            let range = req.headers().get("range")?;
-            let method = req.method();
-            principal(env, &who.id, method, &format!("/export/download?id={id}"), None, range.as_deref()).await
+            let ask = ExportDownload { id: id.to_string(), head: req.method() == Method::Head, range: req.headers().get("range")? };
+            principal::pass(env, &who.id, &ask).await
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }
@@ -110,21 +111,6 @@ async fn downloader(env: &Env, cfg: &Config, req: &Request, url: &Url) -> CellRe
     let token = token.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign in: an export downloads from Settings, or signed (`fragment export`)"))?;
     let live = ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?;
     person(Signed::new(live.identity, None))
-}
-
-/// One of the person's list's export routes, answered as it answers.
-async fn principal(env: &Env, person: &str, method: Method, path: &str, body: Option<String>, range: Option<&str>) -> CellResult<Response> {
-    let headers = Headers::new();
-    if let Some(r) = range {
-        headers.set("range", r)?;
-    }
-    let mut init = RequestInit::new();
-    init.with_method(method).with_headers(headers);
-    if let Some(b) = body {
-        init.with_body(Some(b.into()));
-    }
-    let req = Request::new_with_init(&format!("https://principal.internal{path}"), &init)?;
-    crate::routed::send(env, "PRINCIPAL", person, req).await
 }
 
 // ---- the fragment's side: its app's database, for its owner ----
@@ -183,7 +169,7 @@ fn dumped(v: &Value) -> CellResult<Dumped> {
     struct Envelope {
         result: Dumped,
     }
-    serde_json::from_str::<Envelope>(text).map(|e| e.result).map_err(|e| app_dump(&e.to_string()))
+    crate::json_text::<Envelope>(text).map(|e| e.result).map_err(|e| app_dump(&e.to_string()))
 }
 
 fn app_dump(why: &str) -> CellError {
@@ -456,9 +442,12 @@ struct Run {
     /// (`PIECE_BYTES`; smaller on a test fleet's lever, so a small export
     /// puts its entries aside in many pieces, as a large one does).
     piece_bytes: usize,
-    /// The most the archive holds (`ARCHIVE_MAX_BYTES`; smaller on a test
-    /// fleet's lever, so a small export meets its limit).
+    /// The most the archive holds (`ARCHIVE_MAX_BYTES`), and one
+    /// fragment's part of it (`FRAGMENT_MAX_BYTES`); smaller on a test
+    /// fleet's levers, so a small export meets them, or passes the limits
+    /// of before.
     archive_max: u64,
+    fragment_max: u64,
 }
 
 /// How a slice ended.
@@ -479,30 +468,9 @@ impl PrincipalCell {
         Ok(())
     }
 
-    /// The export routes (`/export/…`, the router's).
-    pub(crate) async fn export_route(&self, mut req: Request) -> CellResult<Response> {
-        let url = req.url()?;
-        let query = |k: &str| url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned());
-        match (req.method(), url.path()) {
-            (Method::Post, "/export/start") => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct StartAsk {
-                    person: String,
-                }
-                let b: StartAsk = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                assert!(fragment_core::npub::is_identity(&b.person), "the router names its person");
-                let view = self.start_export(&b.person).await?;
-                Ok(Response::from_json(&view)?)
-            }
-            (Method::Get, "/export/status") => Ok(Response::from_json(&ExportStatus { export: self.newest()?.map(|r| view(&r)).transpose()? })?),
-            (method @ (Method::Get | Method::Head), "/export/download") => {
-                let id = query("id").unwrap_or_default();
-                let range = req.headers().get("range")?;
-                self.download(&id, method == Method::Head, range.as_deref()).await
-            }
-            (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
-        }
+    /// `ExportNow`: the newest export, if any.
+    pub(crate) fn export_now(&self) -> CellResult<ExportStatus> {
+        Ok(ExportStatus { export: self.newest()?.map(|r| view(&r)).transpose()? })
     }
 
     fn newest(&self) -> CellResult<Option<Row>> {
@@ -516,7 +484,8 @@ impl PrincipalCell {
     /// A press of "Export everything": the one building (a replay), a
     /// refusal past the day's count (429), or a new one, which replaces
     /// the last (its archive is deleted).
-    async fn start_export(&self, person: &str) -> CellResult<ExportView> {
+    pub(crate) async fn start_export(&self, person: &str) -> CellResult<ExportView> {
+        assert!(fragment_core::npub::is_identity(person), "the router names its person");
         let now = js::now_ms();
         let begun: Vec<Begun> = self.rows_of::<Row>(ROW, vec![])?.into_iter().map(|b| Begun { building: b.state == "building", id: b.id, started_at: b.started_at }).collect();
         let id = match core::start(&begun, now) {
@@ -547,7 +516,8 @@ impl PrincipalCell {
 
     /// The archive, to its person (this list's), while it is ready; a
     /// download counts as a request, metered with its storage.
-    async fn download(&self, id: &str, head: bool, range: Option<&str>) -> CellResult<Response> {
+    pub(crate) async fn download(&self, ExportDownload { id, head, range }: ExportDownload) -> CellResult<Response> {
+        let id = id.as_str();
         let row = self.row(id)?.filter(|r| r.state == "ready" && r.expires_at.is_some_and(|at| at > js::now_ms()));
         let Some(row) = row else { return Err(CellError::new(ErrorCode::NotFound, "no such export, or it is not ready")) };
         let key = archive_key(&row.person, &row.id);
@@ -563,7 +533,7 @@ impl PrincipalCell {
             h.set("content-length", &row.size.unwrap_or(0).to_string())?;
             return Ok(Response::empty()?.with_headers(h));
         }
-        let b = js::blob_get(&self.env, &key, range).await?.ok_or_else(|| CellError::host(format!("export {id}'s archive is missing")))?;
+        let b = js::blob_get(&self.env, js::BLOBS, &key, range.as_deref()).await?.ok_or_else(|| CellError::host(format!("export {id}'s archive is missing")))?;
         let status = match b.range {
             Some((offset, length)) => {
                 h.set("content-range", &format!("bytes {offset}-{}/{}", offset + length.max(1) - 1, b.size))?;
@@ -586,23 +556,18 @@ impl PrincipalCell {
     /// (1 KiB to `PIECE_BYTES`; `null`, `PIECE_BYTES`), so a small export
     /// puts its entries aside in many pieces, as a large one does. `cap
     /// {steps: bytes | null}` makes the archive's limit `bytes` (`null`,
-    /// `ARCHIVE_MAX_BYTES`), so a small export meets it.
-    pub(crate) fn export_lever(&self, body: &[u8]) -> CellResult<Value> {
+    /// `ARCHIVE_MAX_BYTES`), so a small export meets it. `scale {steps: k |
+    /// null}` divides the archive's and a fragment's limits by `k`, so a
+    /// small export stands for one as much larger (`null`, 1).
+    pub(crate) fn export_lever(&self, l: ExportLever) -> CellResult<Value> {
         assert!(self.test_hooks, "a list's levers answer on fleets with them only");
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Lever {
-            op: String,
-            #[serde(default)]
-            steps: Option<u32>,
-        }
-        let l: Lever = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
         let name = match l.op.as_str() {
             "pace" => "pace",
             "piece" if l.steps.is_none_or(|n| (1024..=limits::PIECE_BYTES as u32).contains(&n)) => "piece",
             "piece" => return Err(CellError::invalid(format!("a piece is 1024 to {} bytes", limits::PIECE_BYTES))),
             "cap" => "cap",
-            other => return Err(CellError::new(ErrorCode::NotFound, format!("no export lever {other}: pace, piece, or cap"))),
+            "scale" => "scale",
+            other => return Err(CellError::new(ErrorCode::NotFound, format!("no export lever {other}: pace, piece, cap, or scale"))),
         };
         match l.steps {
             Some(n) => self.run_sql("INSERT INTO export_levers (name, value) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value", vec![name.into(), SqlStorageValue::Integer(i64::from(n))])?,
@@ -634,29 +599,22 @@ impl PrincipalCell {
     /// A wipe of its person (wipe.rs, `lists`): every export ends, its
     /// upload aborted, and everything under the person's exports' prefix
     /// deleted, before the list empties (and again on each wipe call after,
-    /// for anything a slice cut short wrote late). Answers `{exports,
-    /// more}`: `more`, objects are left (call again).
-    pub(crate) async fn wipe_exports(&self, body: &[u8]) -> CellResult<Value> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Ask {
-            person: String,
-        }
-        let ask: Ask = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("wipe/exports: {e}")))?;
+    /// for anything a slice cut short wrote late).
+    pub(crate) async fn wipe_exports(&self, ask: WipeExports) -> CellResult<ExportsWiped> {
         if !fragment_core::npub::is_identity(&ask.person) {
-            return Err(CellError::invalid("wipe/exports names its person"));
+            return Err(CellError::invalid("a wipe of exports names its person"));
         }
         let rows: Vec<Row> = if self.wiped.get() { vec![] } else { self.rows_of(ROW, vec![])? };
         for r in rows.iter().filter(|r| r.person == ask.person) {
             if let Some(upload) = &r.upload {
-                js::upload_abort(&self.env, &archive_key(&r.person, &r.id), upload).await?;
+                js::upload_abort(&self.env, js::BLOBS, &archive_key(&r.person, &r.id), upload).await?;
             }
         }
-        let (deleted, more) = js::blob_delete_under(&self.env, &format!("exports/{}/", ask.person), 10).await?;
+        let (_, more) = js::blob_delete_under(&self.env, js::BLOBS, &format!("exports/{}/", ask.person), 10).await?;
         if !more && !self.wiped.get() {
             self.run_sql("UPDATE exports SET state = 'expired', job = NULL, upload = NULL, gone_at = COALESCE(gone_at, ?), metered = 1", vec![SqlStorageValue::Integer(js::now_ms())])?;
         }
-        Ok(json!({ "exports": rows.len(), "objects": deleted, "more": more }))
+        Ok(ExportsWiped { more })
     }
 
     /// The alarm: ready archives past their days expire, ended exports'
@@ -699,7 +657,7 @@ impl PrincipalCell {
         for r in self.rows_of::<Row>(ROW, vec![])? {
             match r.state.as_str() {
                 "building" => {
-                    let wait = r.job.as_deref().and_then(|j| serde_json::from_str::<Job>(j).ok()).map_or(0, |j| j.wait_until);
+                    let wait = r.job.as_deref().and_then(|j| crate::json_text::<Job>(j).ok()).map_or(0, |j| j.wait_until);
                     let paced = self.pace()? == Some(0);
                     due.push(wait.max(if paced { now + 1000 } else { now }));
                 }
@@ -727,9 +685,9 @@ impl PrincipalCell {
         for r in ended {
             if r.gone_at.is_none() {
                 if let Some(upload) = &r.upload {
-                    js::upload_abort(&self.env, &archive_key(&r.person, &r.id), upload).await?;
+                    js::upload_abort(&self.env, js::BLOBS, &archive_key(&r.person, &r.id), upload).await?;
                 }
-                let (_, more) = js::blob_delete_under(&self.env, &prefix(&r.person, &r.id), 10).await?;
+                let (_, more) = js::blob_delete_under(&self.env, js::BLOBS, &prefix(&r.person, &r.id), 10).await?;
                 if more {
                     continue;
                 }
@@ -788,7 +746,7 @@ impl PrincipalCell {
     /// up, then its place kept (`arm_export` sets when the next is due).
     async fn slice(&self, r: &Row) -> CellResult<()> {
         let now = js::now_ms();
-        let job: Job = serde_json::from_str(r.job.as_deref().unwrap_or("null")).map_err(|e| CellError::host(format!("export {}'s job: {e}", r.id)))?;
+        let job: Job = crate::json_text(r.job.as_deref().unwrap_or("null")).map_err(|e| CellError::host(format!("export {}'s job: {e}", r.id)))?;
         if job.wait_until > now || self.pace()? == Some(0) {
             return Ok(());
         }
@@ -808,8 +766,10 @@ impl PrincipalCell {
             }
         }
         let piece_bytes = self.lever("piece")?.map_or(limits::PIECE_BYTES, |n| n as usize);
-        let archive_max = self.lever("cap")?.map_or(limits::ARCHIVE_MAX_BYTES, u64::from);
-        let mut run = Run { id: r.id.clone(), key: archive_key(&r.person, &r.id), tail: Tail::new(limits::PART_BYTES, kept), job, piece: vec![], new_parts: vec![], upload: r.upload.clone(), files: None, piece_bytes, archive_max };
+        let scale = self.lever("scale")?.map_or(1, |k| u64::from(k.max(1)));
+        let archive_max = self.lever("cap")?.map_or(limits::ARCHIVE_MAX_BYTES / scale, u64::from);
+        let fragment_max = limits::FRAGMENT_MAX_BYTES / scale;
+        let mut run = Run { id: r.id.clone(), key: archive_key(&r.person, &r.id), tail: Tail::new(limits::PART_BYTES, kept), job, piece: vec![], new_parts: vec![], upload: r.upload.clone(), files: None, piece_bytes, archive_max, fragment_max };
         let mut pace = self.pace()?;
         let outcome = self.steps(&mut run, now + limits::SLICE_MS, &mut pace).await;
         let outcome = match outcome {
@@ -823,7 +783,7 @@ impl PrincipalCell {
             Err(Stop::Fail(e)) => self.end_failed(r, e).await,
             Err(Stop::Retry(why)) => {
                 // the slice is lost: its place is the last one kept
-                let mut kept: Job = serde_json::from_str(r.job.as_deref().unwrap_or("null")).map_err(|e| CellError::host(e.to_string()))?;
+                let mut kept: Job = crate::json_text(r.job.as_deref().unwrap_or("null")).map_err(|e| CellError::host(e.to_string()))?;
                 kept.attempt += 1;
                 console_error!("{}", json!({ "export": r.id, "retry": kept.attempt, "why": why }));
                 if kept.attempt >= limits::ATTEMPTS_MAX {
@@ -841,7 +801,7 @@ impl PrincipalCell {
     async fn end_failed(&self, r: &Row, e: ExportError) -> CellResult<()> {
         console_log!("{}", json!({ "export": r.id, "failed": e.code, "message": e.message }));
         let error = serde_json::to_string(&e).map_err(|e| CellError::host(e.to_string()))?;
-        let requests = r.job.as_deref().and_then(|j| serde_json::from_str::<Job>(j).ok()).map_or(0, |j| j.requests);
+        let requests = r.job.as_deref().and_then(|j| crate::json_text::<Job>(j).ok()).map_or(0, |j| j.requests);
         self.run_sql("UPDATE exports SET state = 'failed', error = ?, job = NULL, requests = ? WHERE id = ?", vec![error.into(), SqlStorageValue::Integer(requests as i64), r.id.as_str().into()])?;
         self.run_sql("DELETE FROM export_tail WHERE export = ?", vec![r.id.as_str().into()])?;
         self.run_sql("DELETE FROM export_parts WHERE export = ?", vec![r.id.as_str().into()])?;
@@ -896,14 +856,14 @@ impl PrincipalCell {
             self.upload_part(&mut run, last).await?;
         }
         let kept = self.rows_of::<Value>("SELECT part, etag FROM export_parts WHERE export = ?", vec![run.id.as_str().into()])?;
-        let mut parts: BTreeMap<u32, String> = kept.iter().filter_map(|p| Some((p["part"].as_u64()? as u32, p["etag"].as_str()?.to_string()))).collect();
+        let mut parts: BTreeMap<u32, String> = kept.iter().filter_map(|p| Some((p["part"].as_u64()? as u32, p["etag"].as_str()?.to_string()))).gathered();
         parts.extend(run.new_parts.iter().cloned());
         let parts: Vec<(u16, String)> = parts.into_iter().filter(|(n, _)| *n <= run.job.parts).map(|(n, e)| (n as u16, e)).collect();
         if parts.len() as u32 != run.job.parts {
             return Err(fail(ExportFailure::Unavailable, format!("{} of its {} parts are named", parts.len(), run.job.parts)));
         }
         let upload = run.upload.clone().ok_or_else(|| Stop::Retry("the archive's upload has no id".into()))?;
-        let size = match js::upload_complete(&self.env, &run.key, &upload, &parts).await {
+        let size = match js::upload_complete(&self.env, js::BLOBS, &run.key, &upload, &parts).await {
             Ok(size) => size,
             // completed by a finish cut short: the archive is there
             Err(e) => match js::blob_head(&self.env, &run.key).await? {
@@ -937,7 +897,7 @@ impl PrincipalCell {
             Ok(())
         })?;
         console_log!("{}", json!({ "export": r.id, "ready": size }));
-        if let Err(e) = js::blob_delete_under(&self.env, &format!("{}spool/", prefix(&r.person, &r.id)), 10).await {
+        if let Err(e) = js::blob_delete_under(&self.env, js::BLOBS, &format!("{}spool/", prefix(&r.person, &r.id)), 10).await {
             console_error!("{}", json!({ "export": r.id, "spool": "left, for its expiry", "error": e.message }));
         }
         if let Some(to) = job.plan.as_ref().and_then(|p| p.email.clone()) {
@@ -978,7 +938,8 @@ impl PrincipalCell {
                 At::Plan => self.plan(run).await?,
                 At::Owners { next } => self.owners(run, next, deadline).await?,
                 At::Readme => {
-                    self.entry(run, &core::readme_path(), core::README.as_bytes(), false).await?;
+                    let readme = crate::assets::read(&self.env, &fragment_templates::EXPORT_README).await?;
+                    self.entry(run, &core::readme_path(), &readme, false).await?;
                     run.job.at = At::Manifest;
                 }
                 At::Manifest => {
@@ -1014,9 +975,9 @@ impl PrincipalCell {
         if fragment {
             let f = run.job.frag();
             f.bytes += n;
-            if f.bytes > limits::FRAGMENT_MAX_BYTES {
+            if f.bytes > run.fragment_max {
                 let name = f.meta["name"].as_str().unwrap_or("").to_string();
-                return Err(fail(ExportFailure::TooLarge, format!("{name} would pass {}, the most one fragment's part of an export holds", bytes_text(limits::FRAGMENT_MAX_BYTES))));
+                return Err(fail(ExportFailure::TooLarge, format!("{name} would pass {}, the most one fragment's part of an export holds", bytes_text(run.fragment_max))));
             }
         }
         run.job.written += n;
@@ -1032,17 +993,17 @@ impl PrincipalCell {
         let upload = match &run.upload {
             Some(u) => u.clone(),
             None => {
-                let u = js::upload_start(&self.env, &run.key, "application/x-tar").await?;
+                let u = js::upload_start(&self.env, js::BLOBS, &run.key, "application/x-tar").await?;
                 self.run_sql("UPDATE exports SET upload = ? WHERE id = ?", vec![u.as_str().into(), run.id.as_str().into()])?;
                 run.upload = Some(u.clone());
                 u
             }
         };
         run.job.parts += 1;
-        if run.job.parts as usize > 10_000 {
-            return Err(fail(ExportFailure::TooLarge, "the archive would pass R2's 10,000 parts"));
+        if run.job.parts as usize > limits::R2_PARTS_MAX {
+            return Err(fail(ExportFailure::TooLarge, format!("the archive would pass R2's {} parts", limits::R2_PARTS_MAX)));
         }
-        let etag = js::upload_part(&self.env, &run.key, &upload, run.job.parts as u16, part).await?;
+        let etag = js::upload_part(&self.env, js::BLOBS, &run.key, &upload, run.job.parts as u16, part).await?;
         run.new_parts.push((run.job.parts, etag));
         run.job.requests += 1;
         Ok(())
@@ -1090,9 +1051,9 @@ impl PrincipalCell {
         if run.job.written + held > run.archive_max {
             return Err(fail(ExportFailure::TooLarge, format!("the archive would pass {}, the most an export holds", bytes_text(run.archive_max))));
         }
-        if open.fragment && run.job.frag.as_ref().is_some_and(|f| f.bytes + held > limits::FRAGMENT_MAX_BYTES) {
+        if open.fragment && run.job.frag.as_ref().is_some_and(|f| f.bytes + held > run.fragment_max) {
             let name = run.job.frag().meta["name"].as_str().unwrap_or("").to_string();
-            return Err(fail(ExportFailure::TooLarge, format!("{name} would pass {}, the most one fragment's part of an export holds", bytes_text(limits::FRAGMENT_MAX_BYTES))));
+            return Err(fail(ExportFailure::TooLarge, format!("{name} would pass {}, the most one fragment's part of an export holds", bytes_text(run.fragment_max))));
         }
         if run.piece.len() >= run.piece_bytes {
             self.spool(run).await?;
@@ -1108,7 +1069,7 @@ impl PrincipalCell {
         let n = run.job.spooled;
         let piece = std::mem::take(&mut run.piece);
         let size = piece.len() as u64;
-        js::blob_put_bytes(&self.env, &spool_key(&run.job.person, &run.id, n), &piece).await?;
+        js::blob_put_bytes(&self.env, js::BLOBS, &spool_key(&run.job.person, &run.id, n), &piece).await?;
         run.job.spooled += 1;
         run.job.requests += 1;
         run.job.open.as_mut().expect("a piece is an open entry's").pieces.push((n, size));
@@ -1221,11 +1182,7 @@ impl PrincipalCell {
         if status == 200 {
             return Ok(Ok(bytes));
         }
-        let refusal: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        let e = match (refusal["error"].as_str().and_then(|c| serde_json::from_value::<ErrorCode>(json!(c)).ok()), refusal["message"].as_str()) {
-            (Some(code), Some(message)) => CellError::new(code, message),
-            _ => CellError::host(format!("{name}'s {path} answered {status}")),
-        };
+        let e = crate::routed::refusal(&bytes, || format!("{name}'s {path} answered {status}"));
         if status >= 500 || status == 429 {
             return Err(Stop::Retry(e.message));
         }
@@ -1256,9 +1213,7 @@ impl PrincipalCell {
         let mut shared: Vec<core::Shared> = vec![];
         let mut lists: Vec<(String, FragmentList)> = vec![(person.clone(), self.own_list()?)];
         for agent in &me.agents {
-            let req = Request::new("https://principal.internal/list", Method::Get)?;
-            let list: FragmentList = crate::routed::send(&self.env, "PRINCIPAL", agent, req).await?.json().await?;
-            lists.push((agent.clone(), list));
+            lists.push((agent.clone(), principal::ask(&self.env, agent, &List::default()).await?));
         }
         for (whose, list) in &lists {
             for f in &list.fragments {
@@ -1299,11 +1254,11 @@ impl PrincipalCell {
         let fragments = rows
             .into_iter()
             .filter_map(|r| {
-                let face: Value = r["face"].as_str().and_then(|f| serde_json::from_str(f).ok()).unwrap_or(Value::Null);
+                let face: Value = r["face"].as_str().and_then(|f| crate::json_text(f).ok()).unwrap_or(Value::Null);
                 Some(fragment_proto::ListedFragment {
                     name: r["fragment"].as_str()?.to_string(),
                     role: Role::parse(r["role"].as_str()?)?,
-                    kind: serde_json::from_value(face["kind"].clone()).unwrap_or_default(),
+                    kind: crate::members::face_kind(&face),
                     title: face["title"].as_str().map(str::to_string),
                     picture: face["picture"].as_str().map(str::to_string),
                     agent_role: face["role"].as_str().map(str::to_string),
@@ -1320,7 +1275,7 @@ impl PrincipalCell {
                 })
             })
             .collect();
-        Ok(FragmentList { fragments })
+        Ok(FragmentList { fragments, limits: None })
     }
 
     /// Each shared fragment's owner, from its status as the person reads it.
@@ -1500,7 +1455,7 @@ impl PrincipalCell {
                     self.open(run, core::channel_path(&name, &c), true);
                     run.job.frag().counted = 0;
                 }
-                let page = if after < newest { self.page(run, &person, &name, &c, after).await? } else { vec![] };
+                let (page, more) = if after < newest { self.page(run, &person, &name, &c, after).await? } else { (vec![], false) };
                 let mut text = Vec::new();
                 let mut last = after;
                 for r in page.iter().filter(|r| r.seq <= newest) {
@@ -1511,7 +1466,7 @@ impl PrincipalCell {
                     run.job.frag().counted += 1;
                 }
                 self.more(run, &text).await?;
-                if page.len() < limits::CHANNEL_PAGE || last >= newest {
+                if !more || last >= newest {
                     self.close(run).await?;
                     let counted = run.job.frag().counted;
                     note(run, "channels", core::Counted { name: c.clone(), count: counted, file: core::within(&core::channel_path(&name, &c), &core::fragment_dir(&name)) });
@@ -1528,11 +1483,11 @@ impl PrincipalCell {
                     let head = core::transcript_head(&name, item.title.as_deref(), run.job.made_at);
                     self.more(run, head.as_bytes()).await?;
                 }
-                let chats = if chat < chat_max { self.page(run, &person, &name, "chat", chat).await? } else { vec![] };
-                let works = if work < work_max { self.page(run, &person, &name, "work", work).await? } else { vec![] };
-                let chat_end = chats.len() < limits::CHANNEL_PAGE || chats.last().is_some_and(|r| r.seq >= chat_max);
-                let work_end = works.len() < limits::CHANNEL_PAGE || works.last().is_some_and(|r| r.seq >= work_max);
-                let parse = |rs: &[Record], max: i64| -> Vec<(i64, i64, String, Value)> { rs.iter().filter(|r| r.seq <= max).map(|r| (r.seq, r.at, r.principal.clone(), serde_json::from_str(r.body.get()).unwrap_or(Value::Null))).collect() };
+                let (chats, chat_more) = if chat < chat_max { self.page(run, &person, &name, "chat", chat).await? } else { (vec![], false) };
+                let (works, work_more) = if work < work_max { self.page(run, &person, &name, "work", work).await? } else { (vec![], false) };
+                let chat_end = !chat_more || chats.last().is_some_and(|r| r.seq >= chat_max);
+                let work_end = !work_more || works.last().is_some_and(|r| r.seq >= work_max);
+                let parse = |rs: &[Record], max: i64| -> Vec<(i64, i64, String, Value)> { rs.iter().filter(|r| r.seq <= max).map(|r| (r.seq, r.at, r.principal.clone(), crate::json_text(r.body.get()).unwrap_or(Value::Null))).collect() };
                 let (a, b) = (parse(&chats, chat_max), parse(&works, work_max));
                 let names = core::Names(run.job.frag().names.clone());
                 let (mut ai, mut bi, mut out) = (0, 0, String::new());
@@ -1731,16 +1686,23 @@ impl PrincipalCell {
     }
 
     /// A page of a channel's records after `after`, as the person reads it.
-    async fn page(&self, run: &mut Run, person: &str, name: &str, channel: &str, after: i64) -> Step<Vec<Record>> {
+    async fn page(&self, run: &mut Run, person: &str, name: &str, channel: &str, after: i64) -> Step<(Vec<Record>, bool)> {
         #[derive(Deserialize)]
         struct Page {
             records: Vec<Record>,
+            // a page cut by its bytes says so (`ChannelPage::more`)
+            more: Option<bool>,
         }
         match self.read_bytes(person, name, &format!("channels/{channel}"), &format!("?after={after}&limit={}", limits::CHANNEL_PAGE)).await? {
-            Ok(bytes) => serde_json::from_slice::<Page>(&bytes).map(|p| p.records).map_err(|e| Stop::Retry(format!("{name}'s {channel} records: {e}"))),
+            Ok(bytes) => serde_json::from_slice::<Page>(&bytes)
+                .map(|p| {
+                    let more = p.more.unwrap_or(p.records.len() >= limits::CHANNEL_PAGE);
+                    (p.records, more)
+                })
+                .map_err(|e| Stop::Retry(format!("{name}'s {channel} records: {e}"))),
             Err(e) => {
                 skip(run, &format!("channels/{channel}"), &e);
-                Ok(vec![])
+                Ok((vec![], false))
             }
         }
     }
@@ -1753,7 +1715,7 @@ impl PrincipalCell {
             #[serde(default)]
             attachments: Vec<Value>,
         }
-        let Ok(b) = serde_json::from_str::<Body>(body) else { return Ok(()) };
+        let Ok(b) = crate::json_text::<Body>(body) else { return Ok(()) };
         for sha in b.attachments.iter().filter_map(|a| a["sha256"].as_str()).filter(|s| fragment_core::blob::valid_sha(s)) {
             let added = self.rows_of::<Value>("INSERT INTO export_blobs (export, fragment, sha) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING sha", vec![run.id.as_str().into(), name.into(), sha.into()])?;
             if !added.is_empty() {
@@ -1871,13 +1833,13 @@ fn view(r: &Row) -> CellResult<ExportView> {
         "expired" => ExportState::Expired,
         other => return Err(CellError::host(format!("export {} is {other:?}", r.id))),
     };
-    let job: Option<Job> = r.job.as_deref().and_then(|j| serde_json::from_str(j).ok());
+    let job: Option<Job> = r.job.as_deref().and_then(|j| crate::json_text(j).ok());
     let progress = match (&job, state) {
         (Some(j), _) => ExportProgress { done: j.done, total: j.total, bytes: j.written },
         (None, ExportState::Ready) => ExportProgress { done: 1, total: 1, bytes: r.size.unwrap_or(0) as u64 },
         (None, _) => ExportProgress::default(),
     };
-    let error = r.error.as_deref().map(serde_json::from_str::<ExportError>).transpose().map_err(|e| CellError::host(format!("export {}'s error: {e}", r.id)))?;
+    let error = r.error.as_deref().map(crate::json_text::<ExportError>).transpose().map_err(|e| CellError::host(format!("export {}'s error: {e}", r.id)))?;
     let ready = state == ExportState::Ready;
     Ok(ExportView {
         id: r.id.clone(),

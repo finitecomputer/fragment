@@ -11,7 +11,8 @@
 //     own agent and turn, so an answer to one agent's card is never another
 //     agent's that reused its prompt id; id `pr:<a hash of the three>`).
 //   - `work`: an agent's progress, which only the chat's agents post
-//     (`"from": "agent"`): `turn.start`, `turn.step`, `turn.prompt`,
+//     (`"from": "agent"`): `turn.start`, `turn.call` (a tool call asked
+//     for, before it runs), `turn.step` (one ended), `turn.prompt`,
 //     `turn.prompt.closed`, `turn.end`.
 //
 // The page follows both (`subscribe`, from near their ends), and the chat's
@@ -27,13 +28,13 @@
 // recorded here (MediaRecorder) and shown as a player wherever audio is.
 // "Notify me" subscribes this browser for its person, from a click
 // (`fragment.push.register`; framed by the shell, the shell holds the
-// subscription, `{fragment: "alerts"}`), and the page's presence says
+// subscription, `{fragment: KIND.alerts}`), and the page's presence says
 // whether the chat is on screen (`looking`), so its person is not pushed
 // while it is.
 // `@` lists the chat's agents, then (when the shell framing it is its
 // owner's) the owner's other agents, which the shell hands over on asking
-// (`{fragment: "agents?"}`); a message to one of those asks the shell to
-// add it first (`{fragment: "add-agent"}`; the shell asks its person, in
+// (`{fragment: KIND.agentsAsk}`); a message to one of those asks the shell to
+// add it first (`{fragment: KIND.addAgent}`; the shell asks its person, in
 // its own dialog), then names it in `to`.
 // `/` lists the commands an agent's runtime takes from its owner (its menu,
 // `{kind: "commands"}` on `work`), for the agent's owner alone; one typed
@@ -49,12 +50,16 @@
 
 import * as fragment from "./__fragment.js";
 import { colorOf } from "./agent-color.js";
-import { controlledBy, controllerOf, running } from "./control.js";
+import { controlledBy, controllerOf, running as ran } from "./control.js";
 import { icon } from "./icons.js";
 import { inline, renderMarkdown } from "./markdown.js";
 import { renderAttachments as renderMessageAttachments } from "./media.js";
 import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
+import { KIND } from "./frame-messages.js";
+import { moreOf } from "./pages.js";
+import { over, refusal } from "./limits.js";
+import { noteSaid, relayedOwner as relayedOwnerOf, saidSince, speakerOf } from "./speakers.js";
 
 // A message's text and files (docs/chat-records.md).
 const TEXT_MAX_BYTES = 32 * 1024;
@@ -62,12 +67,19 @@ const TEXT_MAX_BYTES = 32 * 1024;
 // kept this long after a change.
 const DRAFT_KEY = "fragment.chat.draft.v1";
 const DRAFT_SAVE_MS = 300;
-const ATTACHMENTS_MAX = 8;
-const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 // The backlog a page reads: the chat's last messages, and enough of `work`
-// for their turns (each turn writes two records or more there).
-const CHAT_LAST = 400;
+// for their turns (each turn writes two records or more there). Older
+// messages come a page of CHAT_LAST at a time as the reader scrolls up.
+const CHAT_LAST = 100;
 const WORK_LAST = 1000;
+// How far above (or below) the reader's view the next page starts loading.
+const EARLIER_MARGIN_PX = 800;
+// The messages a page holds at most, a window over the chat: past it, the
+// side away from the reader goes, read again as the reader comes back.
+const WINDOW_MAX = 600;
+// Messages come while the reader is up the chat, kept aside for when the
+// window reaches the end (each counted when it comes); the newest kept.
+const ASIDE_MAX = 1000;
 // After a message of one's own, wait for the agent's turn. Past this long
 // the line says plainly that no reply has started; a wake can be slow.
 const PENDING_MS = 90000;
@@ -77,6 +89,14 @@ const TYPING_MS = 4000;
 const DRAFT_STALE_MS = 120000;
 // Faces shown in the "here" line; more are counted.
 const HERE_FACES_MAX = 5;
+// Helpers the open bar lists, the oldest first; more are counted.
+const HELPERS_SHOWN_MAX = 4;
+// The `work` kinds of a turn this page reads (docs/chat-records.md). Any
+// other (a later bridge's) is kept for paging, and changes nothing shown.
+const TURN_KINDS = new Set(["turn.start", "turn.step", "turn.call", "turn.notice", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"]);
+// Those that say a turn went on past its question in words (`turn.asked`):
+// it waits on no one then. Its asker's answer is read from the chat.
+const WENT_ON = new Set(["turn.step", "turn.call", "turn.end"]);
 // Identities one `__people` call names (the platform's limit).
 const PROFILES_PER_ASK = 64;
 // The members are read again at most this often (an agent added later).
@@ -98,6 +118,10 @@ const SENDING_OPACITY = 0.55;
 // The first run's steps a shell may show here (its `setup`), and their states.
 const SETUP_STEPS_MAX = 6;
 const SETUP_STEP = ["done", "doing", "todo", "failed"];
+// A code for the computer alone (`computerField`): masked by CSS where it
+// can be, and each password manager's own hint to leave its field be.
+const MASKS = typeof CSS !== "undefined" && CSS.supports("-webkit-text-security", "disc");
+const IGNORED_BY_MANAGERS = [["data-bwignore", "true"], ["data-1p-ignore", "true"], ["data-lpignore", "true"], ["data-form-type", "other"]];
 const HANDLE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 // A command's name (docs/chat-records.md), and the commands one agent's
 // menu offers, at most.
@@ -146,9 +170,11 @@ const NOTICE_ICON = { info: "info", warning: "alert", memory: "brain" };
 /// it runs (`now`) or once it ran ("Failed running", for `ok: false`;
 /// "Timed out running", for its `status`); the
 /// verb ends as it joins its arguments ("Searched the web for") unless it
-/// stands alone (`joined` false: an icon's name).
+/// stands alone (`joined` false: an icon's name). A call whose turn ended
+/// with no step for it (`maybe`) may have run: no more is known.
 export function stepSays(s, now = false, joined = true) {
   const args = typeof s.args === "string" ? s.args : "";
+  if (s.maybe) return { icon: Object.hasOwn(STEP_SAYS, s.category) ? STEP_SAYS[s.category][0] : "wrench", verb: "May have run", args };
   const failed = Object.hasOwn(ENDED, s.status) ? `${ENDED[s.status]} ` : s.ok === false ? "Failed " : "";
   if (!Object.hasOwn(STEP_SAYS, s.category)) {
     const tool = typeof s.tool === "string" && s.tool ? s.tool : "a tool";
@@ -157,6 +183,14 @@ export function stepSays(s, now = false, joined = true) {
   const [icon, doing, did, joins] = STEP_SAYS[s.category];
   const verb = failed ? `${failed}${doing.charAt(0).toLowerCase()}${doing.slice(1)}` : now ? doing : did;
   return { icon, verb: `${verb}${args && joined ? joins : ""}`, args };
+}
+
+// How long a helper has run, as its bar says it: "<1 min", "4 min", "1h 5m".
+function minutes(ms) {
+  const m = Math.floor(Math.max(0, ms) / 60000);
+  if (m < 1) return "<1 min";
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
 // How long, as a card's head says it: "40s", "3m 05s", "1h 5m".
@@ -301,13 +335,13 @@ function avatar(color, extra = "", picture = null) {
   return mark;
 }
 
-/// A record's files, as docs/chat-records.md names them: at most 8, each
-/// a blob of this fragment by its hash.
+/// A record's files, as docs/chat-records.md names them: at most the
+/// platform's `filesPerMessage`, each a blob of this fragment by its hash.
 function attachmentsOf(body) {
   if (!Array.isArray(body.attachments)) return [];
   return body.attachments
     .filter((a) => a && typeof a === "object" && SHA256.test(a.sha256))
-    .slice(0, ATTACHMENTS_MAX)
+    .slice(0, fragment.limits()?.filesPerMessage)
     .map((a) => ({ sha256: a.sha256, size: Number(a.size), type: typeof a.type === "string" ? a.type : "", name: typeof a.name === "string" ? a.name : "" }));
 }
 
@@ -371,7 +405,8 @@ export function mount(root) {
   const state = {
     me: null, // { id, principal, role } once the socket said hello
     members: [], // the fragment's members (`__members`), the first added first
-    chat: [], // messages, commands and replies, in seq order: { seq, at, n, principal, text, command, turn, to, attachments, replyTo }
+    chat: [], // the window's messages, commands and replies (`windowed`), in the order read: { seq, at, n, principal, text, command, turn, to, attachments, replyTo }
+    spoke: new Map(), // `principal relayed.by relayed.for` -> { m: {principal, relayed}, at }: when each said something not of a turn (`waitsOnWords`), its speaker found as members say now
     history: null, // the chat's first `history` record, as its poster wrote it: { seq, principal, body } (shown only its owner's)
     seen: new Set(), // the chat's seqs taken
     turns: new Map(), // `turnKey(agent, turn)` -> its records (`turnOf`)
@@ -379,6 +414,8 @@ export function mount(root) {
     answers: new Map(), // `cardKey` (or a bare prompt id) -> Map(poster -> option): each poster's first prompt_response on `chat`
     answering: new Map(), // `cardKey` -> the option this page posted, until its card closes
     typed: new Map(), // `cardKey` -> what is typed in its card's field (an option answered in words)
+    handed: new Map(), // `cardKey` -> what came of an answer this page handed its agent's computer, in words
+    toComputer: new Map(), // a nonce -> the `cardKey` whose answer it handed the shell, until the shell says
     stopping: new Set(), // turns this page asked to stop
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
     here: [], // the fragment's presence: [{ id, principal, data }]
@@ -389,6 +426,8 @@ export function mount(root) {
     sending: new Map(), // post id -> a message of this page's the platform has not answered yet
     menus: new Map(), // agent -> { seq, commands: [{ name, description, args }] }: what its runtime takes from its owner
     replyTo: null, // { seq, principal, m }: the message the composer quotes
+    helpers: new Map(), // agent -> { seq, until, helpers: [{ child, parent, goal, since }] }: its newest helpers set (`turn.helpers`)
+    helpersOpen: false, // the helpers' bar shows each one's task
   };
   const sendReducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const outgoingOrigins = new Map(); // post id -> the composer's place as it was sent: its bubble's one entrance
@@ -431,8 +470,12 @@ export function mount(root) {
   // where the shell that handed the roster is (its answers come from there)
   let rosterOrigin = null;
   // Each channel's seq keeps history ordered even when a page arrives
-  // backwards and several records have the same timestamp.
-  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, loading: false, anchor: null };
+  // backwards and several records have the same timestamp. `done`: the
+  // chat's first record is read (no older page to ask for).
+  // `live`: the window reaches the chat's newest message (else `last` is
+  // the newest it holds, and `aside` what came past it); `gen` changes as
+  // Jump to latest starts the window again, so a page read before is let go.
+  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, workFailed: false, loading: false, done: false, failed: false, watch: false, anchor: null, live: true, last: null, aside: [], gen: 0, laterFailed: false };
   const workSeen = new Set();
   const workLatest = new Map(); // each progress field's newest seq
   function remember(channel, record) {
@@ -441,49 +484,225 @@ export function mount(root) {
     if (channel === "work") history.workAt = Math.min(history.workAt, record.at);
   }
 
-  async function historyReady() {
-    if (history.first.chat === null) return;
-    try {
-      const page = await fragment.read("chat", { before: history.first.chat, limit: 1 });
-      $("earlier").hidden = !page.records.length;
-    } catch {
-      // A failed availability check must still let the reader try.
-      $("earlier").hidden = false;
-    }
-  }
+  // The work of the oldest message shown: `work` read back a page at a time
+  // until its records reach that message's time (every record tied at it
+  // included), however many pages that is (a turn may write dozens of
+  // records a message), whether or not older messages remain. Bounded by
+  // the channel: each page moves its cursor back.
   async function earlierWork() {
-    const oldest = Math.min(...state.chat.map((m) => m.at));
-    // Both postable channels retain at most 10,000 records. Include every
-    // work record tied at the boundary time before considering it caught up.
-    for (let pages = 0; pages < 10 && history.workReady && !history.workDone && history.workAt >= oldest; pages++) {
+    // (the oldest shown read again before each page: one shown meanwhile, an
+    // older page of messages come while a read was out, widens it)
+    const oldest = () => Math.min(...state.chat.map((m) => m.at));
+    while (history.workReady && !history.workDone && history.workAt >= oldest()) {
       const page = await fragment.read("work", { before: history.first.work ?? Number.MAX_SAFE_INTEGER, limit: WORK_LAST });
       for (const record of page.records) onWork(record);
-      history.workDone = page.records.length < WORK_LAST;
+      // (the cursor moves past the page whatever it held)
+      if (page.records.length) history.first.work = Math.min(history.first.work ?? Infinity, page.records[0].seq);
+      history.workDone = !moreOf(page, WORK_LAST);
     }
   }
-  $("earlier").onclick = async () => {
-    if (history.loading) return;
+  // Older messages come as the reader nears the top: a sentinel above the
+  // timeline, watched once the newest page is drawn (`watchEarlier`). A
+  // page that leaves it in view is followed by the next once drawn.
+  // What the top says, from the history's state: a read in flight, or what
+  // failed (older messages, or the work of those shown: each its own, so the
+  // chat's start reached never hides the work's Try again).
+  function historyStatus() {
+    $("history-status").textContent = history.loading ? "Loading earlier messages…"
+      : history.failed ? "Couldn't load earlier messages."
+      : history.workFailed ? "Couldn't load earlier progress."
+      : "";
+    $("earlier-again").hidden = history.loading || !(history.failed || history.workFailed);
+    // (kept while a page loads, so a keyboard's focus stays on it, and
+    // after a failure: only the chat's start takes it away)
+    $("earlier-load").hidden = history.done || !caughtUp;
+    $("earlier-load").setAttribute("aria-disabled", String(history.loading));
+    $("scroll").dataset.history = history.loading ? "loading" : history.failed || history.workFailed ? "failed" : history.done ? "done" : "more";
+  }
+  // The work of the oldest message shown read back, once at a time (its
+  // subscription's readiness, a page of older messages, a retry). A caller
+  // that comes while a read is out asks for a pass more, made before that
+  // read's promise settles, so none sees the work as read before it covers
+  // what it shows. A failure is said, with Try again, until a read succeeds.
+  let readingWork = null;
+  let workAgain = false;
+  function readWork() {
+    if (readingWork) {
+      workAgain = true;
+      return readingWork;
+    }
+    readingWork = (async () => {
+      try {
+        // bounded: a pass more only when asked during the one before
+        do {
+          workAgain = false;
+          await earlierWork();
+        } while (workAgain);
+        history.workFailed = false;
+      } catch (err) {
+        history.workFailed = true;
+        console.error("chat: earlier progress", err);
+      } finally {
+        readingWork = null;
+        historyStatus();
+        schedule();
+      }
+    })();
+    return readingWork;
+  }
+  async function earlier() {
+    if (history.loading || history.done || history.failed || !caughtUp) return;
+    const gen = history.gen;
     history.anchor = visibleAnchor();
     history.loading = true;
-    const button = $("earlier");
-    button.disabled = true;
-    button.textContent = "Loading earlier messages…";
-    $("history-error").textContent = "";
-    stuck = false;
+    historyStatus();
+    schedule();
     try {
-      const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
-      for (const record of page.records) onChat(record, true);
-      button.hidden = page.records.length < CHAT_LAST;
-      await earlierWork();
-    } catch (err) {
-      button.hidden = false;
-      $("history-error").textContent = `Could not load earlier messages: ${err.message}. Try again.`;
-    } finally {
+      if (history.first.chat !== null) {
+        const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
+        if (gen !== history.gen) return;
+        for (const record of page.records) onChat(record, true);
+        // (the cursor goes by the page, whatever of it was seen before: a
+        // reply's card answer, a Stop, shown or not, never holds it)
+        if (page.records.length) history.first.chat = Math.min(history.first.chat, page.records[0].seq);
+        history.done = !moreOf(page, CHAT_LAST);
+        windowed("older");
+      } else history.done = true;
       history.loading = false;
-      button.disabled = false;
-      button.textContent = "Load earlier messages";
+      await readWork();
+    } catch (err) {
+      if (gen !== history.gen) return;
+      history.loading = false;
+      history.failed = true;
+      console.error("chat: earlier messages", err);
+      historyStatus();
+    } finally {
+      history.watch = true;
       schedule();
     }
+  }
+  // The window kept to WINDOW_MAX messages: reading `older`, its newest go
+  // (the reader is up the chat); reading newer, its oldest.
+  function windowed(reading) {
+    if (state.chat.length <= WINDOW_MAX) return;
+    state.chat.sort((a, b) => a.seq - b.seq);
+    const gone = reading === "older" ? state.chat.splice(WINDOW_MAX) : state.chat.splice(0, state.chat.length - WINDOW_MAX);
+    for (const m of gone) state.seen.delete(m.seq);
+    if (reading === "older") {
+      history.live = false;
+      history.last = state.chat.at(-1).seq;
+    } else {
+      history.done = false;
+      history.first.chat = state.chat[0].seq;
+    }
+    windowStatus();
+  }
+  function windowStatus() {
+    $("scroll").dataset.window = history.live ? "live" : "up";
+    $("later").hidden = history.live;
+  }
+  // The window reaches the chat's end: what came meanwhile joins it.
+  function reachedEnd() {
+    history.live = true;
+    history.last = null;
+    const aside = history.aside;
+    history.aside = [];
+    // (counted as each came)
+    for (const record of aside) onChat(record, true);
+    windowStatus();
+  }
+  // The page below the window, as the reader nears its bottom.
+  async function later() {
+    if (history.live || history.loading || history.laterFailed || !caughtUp) return;
+    const gen = history.gen;
+    history.loading = true;
+    schedule();
+    try {
+      const page = await fragment.read("chat", { after: history.last, limit: CHAT_LAST });
+      if (gen !== history.gen) return;
+      for (const record of page.records) onChat(record, true);
+      history.last = Math.max(history.last, page.next);
+      if (!moreOf(page, CHAT_LAST)) reachedEnd();
+      windowed("newer");
+      history.loading = false;
+    } catch (err) {
+      if (gen !== history.gen) return;
+      history.loading = false;
+      // (said where the reader is; Jump to latest reads again)
+      history.laterFailed = true;
+      console.error("chat: later messages", err);
+      problem("Couldn't load later messages. Jump to latest to try again.");
+    } finally {
+      history.watch = true;
+      schedule();
+    }
+  }
+  // Jump to latest, the window up the chat: it starts again at the newest page.
+  // Answers whether the window is at the end now (a failed read leaves it
+  // where it was, said in the banner, Jump to latest there to try again).
+  async function toLatest() {
+    const gen = ++history.gen;
+    history.loading = true;
+    history.failed = false;
+    history.laterFailed = false;
+    historyStatus();
+    try {
+      const page = await fragment.read("chat", { before: Number.MAX_SAFE_INTEGER, limit: CHAT_LAST });
+      if (gen !== history.gen) return false;
+      for (const m of state.chat) state.seen.delete(m.seq);
+      state.chat = [];
+      history.first.chat = null;
+      for (const record of page.records) onChat(record, true);
+      // (by the page, not what of it is shown: a page of answers alone, seen
+      // before, still says where older messages are)
+      history.first.chat = page.records[0]?.seq ?? null;
+      history.done = !moreOf(page, CHAT_LAST);
+      reachedEnd();
+      // (what came meanwhile joins it: the window at its bound again)
+      windowed("newer");
+      return true;
+    } catch (err) {
+      if (gen !== history.gen) return false;
+      console.error("chat: latest messages", err);
+      problem("Couldn't show the latest messages.");
+      return false;
+    } finally {
+      if (gen === history.gen) {
+        history.loading = false;
+        history.watch = true;
+        historyStatus();
+      }
+      schedule();
+    }
+  }
+  const earlierSeen = new IntersectionObserver((entries) => {
+    if (entries.at(-1).isIntersecting) earlier();
+    $("scroll").dataset.watching = "1";
+  }, { root: $("scroll"), rootMargin: `${EARLIER_MARGIN_PX}px 0px 0px 0px` });
+  // (again after a draw: an observer says only what changes, and a page
+  // drawn while the sentinel stays in view changes nothing)
+  const laterSeen = new IntersectionObserver((entries) => {
+    if (entries.at(-1).isIntersecting) later();
+  }, { root: $("scroll"), rootMargin: `0px 0px ${EARLIER_MARGIN_PX}px 0px` });
+  function watchEarlier() {
+    earlierSeen.unobserve($("earlier"));
+    earlierSeen.observe($("earlier"));
+    laterSeen.unobserve($("later"));
+    laterSeen.observe($("later"));
+  }
+  // a keyboard's or a screen reader's way to the page above: the
+  // sentinel's loader (nothing while a page is in flight)
+  // (a try again after a failure, too)
+  $("earlier-load").onclick = () => {
+    history.failed = false;
+    earlier();
+  };
+  $("earlier-again").onclick = () => {
+    if (history.failed) {
+      history.failed = false;
+      return earlier();
+    }
+    readWork();
   };
 
   // ---- who: names and pictures from the fragment (`__people`), asked in
@@ -522,8 +741,8 @@ export function mount(root) {
       }
       // unanswered, one known already stays as it was
       for (const id of batch) profiles.set(id, found ? (found[id] ?? {}) : (profiles.get(id) ?? {}));
+      schedule();
     }
-    schedule();
   }
   const inRoster = (principal) => state.roster.find((r) => r.identity === principal) ?? null;
   function isAgent(principal) {
@@ -562,9 +781,16 @@ export function mount(root) {
     return [...here, ...state.roster.map((r) => r.identity).filter((id) => !here.includes(id))];
   };
   const lead = () => chatAgents()[0] ?? [...state.turns.values()].find(started)?.agent ?? null;
+  // Both backlogs in (chat's, `caughtUp`; work's, `workReady`). They come
+  // a record at a time, so before then an ended turn's start may be here
+  // without its end, or a question without the answer said after it: no
+  // turn is shown running until then (each load said an idle agent was
+  // working for a moment).
+  const settled = () => caughtUp && history.workReady;
+  const running = (t) => settled() && ran(t);
   // this page's person's turn running now, the newest: theirs to stop and
   // command (an answer come back is its agent's owner's: control.js)
-  const myTurn = () => controlledBy(state.turns.values(), state.members, state.me?.principal);
+  const myTurn = () => (settled() ? controlledBy(state.turns.values(), state.members, state.me?.principal) : null);
   // an agent's turn running in the chat, whoever asked it
   const workingOn = (agent) => [...state.turns.values()].find((t) => running(t) && t.agent === agent) ?? null;
   // whom a command goes to: the agent working for this person, else the lead
@@ -633,11 +859,33 @@ export function mount(root) {
   function turnOf(agent, id) {
     const key = turnKey(agent, id);
     if (!state.turns.has(key)) {
-      state.turns.set(key, { key, id, agent, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), asked: null, end: null });
+      state.turns.set(key, { key, id, agent, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), calls: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), asked: null, end: null });
     }
     return state.turns.get(key);
   }
   const started = (t) => t.startAt !== null;
+  // The calls a turn asked for (`turn.call`, recorded before each ran) that
+  // no step ended: a step ends a call of its own response (any, for a step
+  // that names none), by its `tool_call_id`, else (its runtime renamed the
+  // call) by its tool and arguments; one step to one call, the first still
+  // open (docs/chat-records.md).
+  function unended(t) {
+    if (!t.calls.size) return [];
+    const open = [...t.calls.values()].sort((a, b) => a.n - b.n);
+    const steps = [...t.steps.values()];
+    const paired = new Set();
+    const rules = [(c, s) => typeof s.tool_call_id === "string" && c.tool_call_id === s.tool_call_id, (c, s) => c.tool === s.tool && c.args === s.args];
+    for (const same of rules) {
+      for (const s of steps) {
+        if (paired.has(s)) continue;
+        const i = open.findIndex((c) => (s.response === undefined || c.response === s.response) && same(c, s));
+        if (i < 0) continue;
+        open.splice(i, 1);
+        paired.add(s);
+      }
+    }
+    return open;
+  }
   // A card by its turn and its prompt: prompt ids are each agent's own, so
   // two agents' cards may share one.
   const cardKey = (turnKey, prompt) => `${turnKey}:${prompt}`;
@@ -663,21 +911,43 @@ export function mount(root) {
   const doorId = (v) => typeof v === "string" && /^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}$/.test(v);
   const DOOR_NAMES = { simplex: "SimpleX", telegram: "Telegram" };
   const doorName = (v) => DOOR_NAMES[v] ?? v;
-  const relayedOwner = (m) => {
-    if (!m.relayed || !state.members.length) return null;
-    const by = state.members.find((x) => x.principal === m.relayed.by);
-    return !by || (by.kind === "agent" && by.owner === m.relayed.for) ? m.relayed.for : null;
-  };
-  const speaker = (m) => relayedOwner(m) ?? m.principal;
-  const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => speaker(m) === t.asked.asks && !m.turn && m.at >= t.asked.at);
+  const relayedOwner = (m) => relayedOwnerOf(m, state.members);
+  const speaker = (m) => speakerOf(m, state.members);
+  const waitsOnWords = (t) => running(t) && !!t.asked && !saidSince(state.spoke, state.members, t.asked.asks, t.asked.at);
   // a card that takes words (an option answered in words): its asker's
   // message in the chat while it is open answers it as that option, as if
   // typed on the card (docs/chat-records.md, "A person's message")
-  const takesWords = (p) => p.options.some((o) => o.words === true);
+  // a card answered in words in the message box too: never one whose words
+  // are the computer's alone (a sign-in's code), which no message carries
+  const takesWords = (p) => p.options.some((o) => o.words === true && o.computer !== true);
   const cardFor = (t, principal) => running(t) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === principal && !t.closed.has(p.prompt) && !expired(p));
+  // an agent waiting on this person's words, or on their card that takes
+  // words: what they type is the answer
+  const answeringMe = () => [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || cardFor(t, state.me?.principal));
+  // a card this page's person may answer now: theirs, neither closed nor
+  // gone (expired, or its turn stopped); open past its turn's end, as a
+  // card outlives its turn (docs/bridge.md)
+  const mayAnswer = (t, p) => !!state.me && p.asks === state.me.principal && !t.closed.has(p.prompt) && !expired(p) && t.end?.outcome !== "stopped";
   // whether message `m` answered one of turn `t`'s cards: by its asker, said
   // after the card and before its close
   const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
+
+  // A message the window holds; one past its newest end while the reader is
+  // up the chat is kept aside (and read again as the window reaches it).
+  // At the end, the window lets its oldest go as new ones come.
+  function keep(record, historical, m) {
+    noteSaid(state.spoke, m);
+    if (!historical && !history.live && record.seq > history.last) {
+      state.seen.delete(record.seq);
+      history.aside.push(record);
+      if (history.aside.length > ASIDE_MAX) history.aside.shift();
+      return;
+    }
+    state.chat.push(m);
+    // at the end, the oldest go; the reader up the window, the newest (the
+    // window goes up: what comes is counted and read again as it reaches it)
+    if (!historical) windowed(stuck ? "newer" : "older");
+  }
 
   function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
@@ -716,7 +986,7 @@ export function mount(root) {
     if (body.kind === "command") {
       // a person's command for an agent's runtime: shown as they typed it
       if (typeof body.command !== "string" || !COMMAND.test(body.command)) return;
-      state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null });
+      keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null });
       if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
       latestSeq = Math.max(latestSeq, record.seq);
       want(record.principal);
@@ -735,7 +1005,7 @@ export function mount(root) {
     // a message an agent relays from its owner through a door (shown as theirs: `speaker`)
     const r = body.relayed;
     const relayed = !turn && r && typeof r === "object" && doorId(r.via) && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal, via: r.via } : null;
-    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
+    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
@@ -756,20 +1026,26 @@ export function mount(root) {
     remember("work", record);
     const b = record.body;
     if (b?.kind === "commands") return onMenu(record, b);
+    // a helpers set moves nothing in the chat: its bar alone (it names no
+    // `turn`, so pages from before it pass it over)
+    if (b?.kind === "turn.helpers") return onHelpers(record, b);
     if (b === null || typeof b !== "object" || typeof b.turn !== "string") return;
+    // a kind this page does not know moves nothing: no turn, no place, no question
+    if (!TURN_KINDS.has(b.kind)) return;
     // A turn is its poster's: the platform stamps `record.principal`, and
     // only the chat's agents post on `work` (`"from": "agent"`). Whatever a
     // body says of an agent, a record counts toward, and can replace a card
     // of, only the turn of that id its own poster began (`turn.start`):
     // one agent's records never touch another's turn.
     const t = turnOf(record.principal, b.turn);
-    const field = `${t.key}:${b.kind}:${b.step ?? b.prompt ?? ""}`;
+    // (a call is one record: its own seq)
+    const field = `${t.key}:${b.kind}:${b.kind === "turn.call" ? record.seq : b.step ?? b.prompt ?? ""}`;
     if ((workLatest.get(field) ?? 0) > record.seq) return;
     workLatest.set(field, record.seq);
     const n = record.seq;
     touch(t, record.at, n);
     // the turn went on past its question: it waits on no one now
-    if (t.asked && b.kind !== "turn.asked" && record.seq > t.asked.seq) t.asked = null;
+    if (t.asked && WENT_ON.has(b.kind) && record.seq > t.asked.seq) t.asked = null;
     if (b.kind === "turn.asked" && typeof b.asks === "string") {
       if (!t.asked || record.seq > t.asked.seq) t.asked = { asks: b.asks, at: record.at, seq: record.seq };
       want(b.asks);
@@ -780,6 +1056,8 @@ export function mount(root) {
       if (state.pending && b.cause?.channel === "chat" && b.cause?.seq === state.pending.seq) state.pending = null;
     } else if (b.kind === "turn.step" && Number.isInteger(b.step)) {
       t.steps.set(b.step, { ...b, at: record.at, n });
+    } else if (b.kind === "turn.call" && typeof b.tool === "string") {
+      t.calls.set(record.seq, { ...b, at: record.at, n });
     } else if (b.kind === "turn.notice" && typeof b.text === "string" && b.text.trim()) {
       t.notices.set(record.seq, { text: b.text, category: Object.hasOwn(NOTICE_ICON, b.category) ? b.category : "info", at: record.at, n, seq: record.seq });
     } else if (b.kind === "turn.prompt" && typeof b.prompt === "string") {
@@ -802,6 +1080,22 @@ export function mount(root) {
     schedule();
   }
 
+  // An agent's helpers set (`turn.helpers`): every helper it has working in
+  // this chat, as its computer's bridge holds them, shown until `until`.
+  // Its poster's, whatever a body names; its newest wins (the newest read
+  // as the page opens and the live stream may bring one twice, or an older
+  // one after).
+  function onHelpers(record, b) {
+    if (!Array.isArray(b.helpers) || !Number.isFinite(b.until)) return;
+    if ((state.helpers.get(record.principal)?.seq ?? 0) >= record.seq) return;
+    const helpers = b.helpers.filter((h) => typeof h?.goal === "string" && Number.isFinite(h.since));
+    state.helpers.set(record.principal, { seq: record.seq, until: b.until, helpers });
+    want(record.principal);
+    // an agent this page did not know is in the chat: it was added since
+    if (!state.members.some((m) => m.principal === record.principal)) membersAgain();
+    schedule();
+  }
+
   // An agent's menu, as it posted it itself (its latest): what `/` offers
   // its owner.
   function onMenu(record, b) {
@@ -815,13 +1109,19 @@ export function mount(root) {
     schedule();
   }
 
+  // A draft's next text is drawn in its own node alone (`redrawDrafts`); a
+  // draft come or gone changes the timeline, drawn whole.
   function onDraft(d) {
     if (typeof d.turn !== "string" || typeof d.principal !== "string") return;
     const key = turnKey(d.principal, d.turn);
+    const had = state.drafts.has(key);
     if (typeof d.text !== "string") state.drafts.delete(key);
     else state.drafts.set(key, { principal: d.principal, turn: d.turn, text: d.text, at: Date.now() });
     want(d.principal);
-    schedule();
+    if (had && typeof d.text === "string") {
+      drafted.add(key);
+      drawNext();
+    } else schedule();
   }
 
   // A card's expiry shows without a record: the page looks again then.
@@ -845,20 +1145,36 @@ export function mount(root) {
     const items = [];
     // the history its owner continued it from, before everything
     const h = state.history;
-    if (h && state.members.some((m) => m.principal === h.principal && m.role === "owner")) items.push({ at: -Infinity, n: 0, type: "history", h });
+    if (h && history.done && state.members.some((m) => m.principal === h.principal && m.role === "owner")) items.push({ at: -Infinity, n: 0, type: "history", h });
+    // the window's span: a turn shows when it runs (outside the window, so
+    // Stop and its working line stay), or when it meets the span
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const m of state.chat) {
+      lo = Math.min(lo, m.at);
+      hi = Math.max(hi, m.at);
+    }
+    if (history.done) lo = -Infinity;
+    if (history.live) hi = Infinity;
     // each turn's replies, by its agent: the words an older bridge kept on a
     // step that its turn also replied with show once, as the reply
     const replies = new Map();
+    // each turn's calls no step ended, as many as there are, and when it
+    // last said something
+    const open = new Map();
+    const lastSaid = new Map();
     for (const m of state.chat) {
       items.push({ at: m.at, n: m.n, type: "message", m });
       if (!m.turn) continue;
       const key = turnKey(m.principal, m.turn);
+      lastSaid.set(key, Math.max(lastSaid.get(key) ?? -Infinity, m.at));
       if (!replies.has(key)) replies.set(key, []);
       replies.get(key).push(m.text.trim());
     }
     for (const t of state.turns.values()) {
       // a turn its agent never began here (no turn.start of its own) shows nothing
       if (!started(t)) continue;
+      if (!running(t) && (t.lastAt < lo || t.startAt > hi)) continue;
       for (const s of t.steps.values()) {
         // what an older bridge recorded as a step's `text`, the agent's words
         // before the call: they are its reply, shown whole just before the
@@ -866,6 +1182,24 @@ export function mount(root) {
         const said = typeof s.text === "string" ? s.text.trim() : "";
         if (said && !repliedWith(replies.get(t.key) ?? [], said)) items.push({ at: s.at, n: s.n - 0.5, type: "said", t, s, text: said });
         items.push({ at: s.at, n: s.n, type: "step", t, s });
+      }
+      // a call no step ended: while its turn works (and waits on no one),
+      // one of its latest response's is running, its live line after all
+      // the turn said (its words before the call are a reply the step
+      // comes after); any other may have run (a runtime ends a response's
+      // calls before it asks again), shown where it was asked for, as is
+      // every one once the turn ended
+      const calls = unended(t);
+      const latest = [...t.calls.values()].reduce((a, c) => (!a || c.n > a.n ? c : a), null)?.response;
+      const live = running(t);
+      const now = live ? calls.filter((c) => c.response === latest) : [];
+      open.set(t.key, now.length);
+      const after = Math.max(t.lastAt, lastSaid.get(t.key) ?? -Infinity);
+      for (const c of calls) {
+        const runs = now.includes(c);
+        if (runs && (waiting(t) || waitsOnWords(t))) continue;
+        const s = { ...c, step: `c${c.n}`, call: true, maybe: !runs };
+        items.push(runs ? { at: after, n: Number.MAX_SAFE_INTEGER - now.length + now.indexOf(c), type: "step", t, s } : { at: c.at, n: c.n, type: "step", t, s });
       }
       for (const p of t.prompts.values()) items.push({ at: p.at, n: p.n, type: "prompt", t, p });
       for (const x of t.notices.values()) items.push({ at: x.at, n: x.n, type: "notice", t, x });
@@ -882,7 +1216,8 @@ export function mount(root) {
       else if (isAgent(d.principal)) items.push({ at: t?.lastAt ?? Infinity, n: (t?.lastN ?? 0) + 0.5, type: "draft", key, d });
     }
     for (const t of state.turns.values()) {
-      if (running(t) && !state.drafts.has(t.key) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
+      // (a live call's card says it works)
+      if (running(t) && !state.drafts.has(t.key) && !waiting(t) && !(open.get(t.key) && !waitsOnWords(t))) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
     }
     if (state.pending) items.push({ at: state.pending.at, n: state.pending.n + 0.5, type: "working", t: null });
     for (const m of state.sending.values()) items.push({ at: m.at, n: m.n, type: "message", m });
@@ -916,14 +1251,26 @@ export function mount(root) {
     return node;
   }
 
+  // What the next frame draws: the whole timeline (`schedule`), or only the
+  // drafts whose text alone changed (`drafted`).
   let scheduled = false;
-  function schedule() {
-    if (scheduled) return;
-    scheduled = true;
+  let drawAsked = false;
+  const drafted = new Set();
+  function drawNext() {
+    if (drawAsked) return;
+    drawAsked = true;
     requestAnimationFrame(() => {
+      drawAsked = false;
+      const whole = scheduled;
+      const drafts = [...drafted];
       scheduled = false;
-      render();
+      drafted.clear();
+      if (whole || !redrawDrafts(drafts)) render();
     });
+  }
+  function schedule() {
+    scheduled = true;
+    drawNext();
   }
 
   function itemNode(it) {
@@ -1000,6 +1347,7 @@ export function mount(root) {
     fresh.clear();
     renderChrome();
     renderHere();
+    renderHelpers();
     // The reader's place is its item, not its node: one made again in this
     // draw (its poster's name come since, say, while earlier messages load)
     // is found by its key, so the place holds through the draw that adds
@@ -1009,10 +1357,38 @@ export function mount(root) {
     else if (placed?.isConnected) {
       $("scroll").scrollTop += placed.getBoundingClientRect().top - top;
       if (history.anchor) history.anchor.node = placed;
+      held = { node: placed, top };
     }
     if (!history.loading) history.anchor = null;
+    if (history.watch && !history.loading) {
+      history.watch = false;
+      watchEarlier();
+    }
     showLatest();
     animateSentMessages();
+  }
+
+  // Drafts whose text alone changed, each drawn in its node: a draft's place
+  // is its turn's, which its text does not move. One not shown, or made
+  // anew (its poster's name changed), another gone stale (`timeline` drops
+  // it), or earlier messages loading (their place is `render`'s): false,
+  // and the whole timeline is drawn.
+  function redrawDrafts(keys) {
+    const now = Date.now();
+    if (history.anchor || history.watch || [...state.drafts.values()].some((d) => now - d.at > DRAFT_STALE_MS)) return false;
+    const { node: anchor, top } = !stuck ? visibleAnchor() : {};
+    for (const key of keys) {
+      const d = state.drafts.get(key);
+      const shown = nodes.get(`d:${key}`)?.node;
+      if (!d || !shown?.isConnected || draftNode(key, d)[1] !== shown) return false;
+    }
+    if (stuck) toEnd();
+    else if (anchor?.isConnected) {
+      $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
+      held = { node: anchor, top };
+    }
+    showLatest();
+    return true;
   }
 
   // A message sent from this page rises from the composer into the thread
@@ -1101,7 +1477,7 @@ export function mount(root) {
         retry.onclick = () => {
           if (!rosterOrigin) return;
           retry.disabled = true;
-          window.parent.postMessage({ fragment: "retry-setup" }, rosterOrigin);
+          window.parent.postMessage({ fragment: KIND.retrySetup }, rosterOrigin);
         };
         error.append(retry);
         card.append(error);
@@ -1135,18 +1511,21 @@ export function mount(root) {
       const others = mentionable().length > 1;
       // while it works, a message waits its turn (marked queued); its owner may steer it instead
       const steers = mine && menuOf(mine.agent).some((c) => c.name === "steer");
-      // an agent waiting on this person's words, or on their card that takes
-      // words: what they type is the answer
-      const askedMe = [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || cardFor(t, state.me?.principal));
+      const askedMe = answeringMe();
+      // one waiting on a card of theirs no message answers (its buttons, or
+      // a code only their computer reads): it waits for them, not works
+      const waitsOnMe = [...state.turns.values()].find((t) => [...t.prompts.values()].some((p) => mayAnswer(t, p)));
       input.placeholder = askedMe
         ? `Your answer for ${who(askedMe.agent).name}`
-        : mine
-          ? `${who(mine.agent).name} is working: a message waits its turn${steers ? ", or Steer it now" : ""}`
-          : !firstName
-            ? "Message"
-            : others
-              ? `Message ${firstName}, or @ someone else`
-              : `Message ${firstName}`;
+        : waitsOnMe
+          ? `${who(waitsOnMe.agent).name} is waiting for you`
+          : mine
+            ? `${who(mine.agent).name} is working: a message waits its turn${steers ? ", or Steer it now" : ""}`
+            : !firstName
+              ? "Message"
+              : others
+                ? `Message ${firstName}, or @ someone else`
+                : `Message ${firstName}`;
     }
     refreshSend();
     if (setupHolds()) {
@@ -1165,7 +1544,10 @@ export function mount(root) {
       const box = el("section", "history-block");
       const day = (at) => (typeof at === "string" && at ? new Date(at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "");
       const when = [day(b.started_at), day(b.ended_at)].filter((d, i, all) => d && all.indexOf(d) === i).join(" – ");
-      box.append(el("p", "history-head", [`From “${typeof b.title === "string" ? b.title : "an earlier chat"}”`, when].filter(Boolean).join(" · ")));
+      // from an import (`archive`, `key`) or an archived chat (`chat`); `agent`:
+      // who it was with, when not this chat's agent
+      const from = typeof b.title === "string" ? b.title : "an earlier chat";
+      box.append(el("p", "history-head", [`From “${from}”`, typeof b.agent === "string" && b.agent ? `with ${b.agent}` : "", when].filter(Boolean).join(" · ")));
       if (typeof b.summary === "string" && b.summary.trim()) {
         const d = el("details", "tools");
         const s = el("summary");
@@ -1175,7 +1557,7 @@ export function mount(root) {
         d.append(s, detail);
         box.append(d);
       }
-      if (Number.isInteger(b.earlier) && b.earlier > 0) box.append(el("p", "history-head", `${b.earlier} earlier ${b.earlier === 1 ? "message" : "messages"} in your Session Archive`));
+      if (Number.isInteger(b.earlier) && b.earlier > 0) box.append(el("p", "history-head", `${b.earlier} earlier ${b.earlier === 1 ? "message" : "messages"} ${typeof b.chat === "string" ? `in “${from}”` : "in your Session Archive"}`));
       for (const m of Array.isArray(b.messages) ? b.messages : []) {
         if (typeof m?.text !== "string" || !m.text.trim()) continue;
         const msg = el("div", `msg ${m.role === "user" ? "user mine" : "agent"}`);
@@ -1374,7 +1756,7 @@ export function mount(root) {
 
   // A link to another fragment's page (an app an agent made) gets "Open":
   // the shell that frames the chat opens it beside the chat, in its viewer
-  // (`{fragment: "open", url}`; docs/api.md, The shell). The link itself
+  // (`{fragment: KIND.open, url}`; docs/api.md, The shell). The link itself
   // still opens a tab.
   function openBeside(md) {
     if (!framed) return;
@@ -1385,7 +1767,7 @@ export function mount(root) {
       open.title = "Open beside the chat";
       open.replaceChildren(icon("panel"));
       open.append("Open");
-      open.onclick = () => window.parent.postMessage({ fragment: "open", url: a.href }, "*");
+      open.onclick = () => window.parent.postMessage({ fragment: KIND.open, url: a.href }, "*");
       a.after(open);
     }
   }
@@ -1408,6 +1790,10 @@ export function mount(root) {
   // Each live card's head counts the time its turn has worked.
   setInterval(() => {
     for (const n of $("messages").querySelectorAll(".tools [data-since]")) n.textContent = `Working for ${took(Date.now() - Number(n.dataset.since))}`;
+    for (const n of $("messages").querySelectorAll(".tools [data-running-since]")) n.textContent = took(Date.now() - Number(n.dataset.runningSince));
+    for (const n of $("helpers").querySelectorAll("[data-since]")) n.textContent = minutes(Date.now() - Number(n.dataset.since));
+    // (a set whose `until` passed leaves the bar)
+    renderHelpers();
   }, 1000);
   // Where a card's work ends: the first record of its own turn after its
   // last step (a reply, a card, a notice, its next step), else the turn's
@@ -1428,7 +1814,8 @@ export function mount(root) {
   }
   function stepsNode(t, steps) {
     const key = `s:${t.key}:${steps[0].step}`;
-    const live = running(t) && steps[steps.length - 1].n === t.lastN;
+    const last = steps[steps.length - 1];
+    const live = running(t) && (last.n === t.lastN || (last.call && !last.maybe));
     const agent = profiles.get(t.agent)?.fragment ?? null;
     const until = live ? null : cardEnd(t, steps);
     const sig = JSON.stringify([steps, live, agent, until]);
@@ -1440,7 +1827,7 @@ export function mount(root) {
         d.dataset.turn = t.id;
         d.style.setProperty("--step-agent", colorOf(t.agent));
         // the turn's first card counts from its start, any later one from its first step
-        const first = Math.min(...[...t.steps.values()].map((s) => s.at));
+        const first = Math.min(...[...t.steps.values(), ...steps].map((s) => s.at));
         const from = steps[0].at === first ? t.startAt : steps[0].at;
         const summary = el("summary");
         if (live) {
@@ -1461,7 +1848,7 @@ export function mount(root) {
         // the step it is on now: the last of a card its turn works in, unless
         // it failed (a runtime's progress may say `ok` before its result) or
         // is a call's observed end (`status`: it ran already)
-        const lines = steps.map((s, i) => stepLine(t, s, live && i === steps.length - 1 && s.ok !== false && !s.status, agent));
+        const lines = steps.map((s, i) => stepLine(t, s, (live && i === steps.length - 1 && s.ok !== false && !s.status) || (live && s.call && !s.maybe), agent));
         d.dataset.lines = String(lines.length);
         d.append(summary, ...lines);
         // a line come since the last draw arrives as the ones before it step back
@@ -1502,14 +1889,14 @@ export function mount(root) {
   // alone would say so).
   function stepLine(t, s, now, agent) {
     const says = stepSays(s, now);
-    const step = el("div", `step${s.ok === false ? " error" : ""}${now ? " running" : ""}`);
+    const step = el("div", `step${s.ok === false ? " error" : ""}${now ? " running" : ""}${s.maybe ? " maybe" : ""}`);
     const known = Object.hasOwn(STEP_SAYS, s.category);
     step.dataset.category = known ? s.category : "other";
     const opens = !!(says.args || s.excerpt);
     const line = el(opens ? "button" : "div", "step-name");
     const label = el("span", "step-label");
     const glyph = icon(says.icon);
-    if (known && says.args && s.ok !== false) {
+    if (known && says.args && s.ok !== false && !s.maybe) {
       glyph.removeAttribute("aria-hidden");
       glyph.setAttribute("role", "img");
       glyph.setAttribute("aria-label", stepSays(s, now, false).verb);
@@ -1519,6 +1906,12 @@ export function mount(root) {
       args.title = says.args;
       args.dataset.short = args.textContent;
       label.append(args);
+    }
+    // a call running now: for how long, since it was asked for
+    if (s.call && now) {
+      const since = el("span", "step-since", took(Date.now() - s.at));
+      since.dataset.runningSince = String(s.at);
+      label.append(since);
     }
     line.append(glyph, label);
     step.append(line);
@@ -1552,11 +1945,12 @@ export function mount(root) {
     // only the card's asker's answer counts here, as only theirs counts to the agent
     const card = cardKey(t.key, p.prompt);
     const sent = state.answering.get(card) ?? state.answers.get(card)?.get(p.asks) ?? state.answers.get(p.prompt)?.get(p.asks) ?? null;
+    const handed = state.handed.get(card) ?? null;
     const gone = !closed && (expired(p) || t.end?.outcome === "stopped");
-    const mayAnswer = !!state.me && p.asks === state.me.principal && !closed && !gone;
+    const theirs = mayAnswer(t, p);
     const asks = who(p.asks);
     const by = closed?.by ? who(closed.by).name : "";
-    const sig = JSON.stringify([closed?.outcome, closed?.option, by, sent, gone, mayAnswer, asks.name, who(t.agent).name]);
+    const sig = JSON.stringify([closed?.outcome, closed?.option, by, sent, handed, !!rosterOrigin, gone, theirs, asks.name, who(t.agent).name]);
     return [
       key,
       cached(key, sig, () => {
@@ -1577,21 +1971,27 @@ export function mount(root) {
         else {
           const options = el("div", "options");
           for (const o of p.options) {
+            if (o.computer) {
+              // answered on its agent's computer alone, never a record
+              options.append(computerField(t, p.prompt, o, !theirs || sent !== null || !rosterOrigin));
+              continue;
+            }
             if (o.words) {
               // answered in words: typed on the card, Enter sends them with it
-              options.append(wordsField(t, p.prompt, o, !mayAnswer || sent !== null));
+              options.append(wordsField(t, p.prompt, o, !theirs || sent !== null));
               continue;
             }
             const b = el("button", o.style === "primary" || o.style === "danger" ? o.style : "", o.label || o.id);
             b.type = "button";
             b.dataset.option = o.id;
-            b.disabled = !mayAnswer || sent !== null;
+            b.disabled = !theirs || sent !== null;
             if (sent === o.id) b.classList.add("chosen");
             b.onclick = () => answer(t, p.prompt, o.id);
             options.append(b);
           }
           card.append(options);
-          const note = !mayAnswer ? `Only ${asks.name} can answer this.` : sent !== null ? "Sent…" : "";
+          const onComputer = p.options.some((o) => o.computer);
+          const note = !theirs ? `Only ${asks.name} can answer this.` : sent !== null ? "Sent…" : onComputer && !rosterOrigin ? "Open this chat in Finite to answer it." : onComputer ? handed ?? "This goes straight to your computer. It isn't kept in this chat." : "";
           if (note) card.append(el("div", "prompt-note", note));
         }
         return card;
@@ -1628,6 +2028,56 @@ export function mount(root) {
       e.preventDefault();
       const words = cutBytes(field.value.trim(), TEXT_MAX_BYTES);
       if (words && !disabled) answer(t, prompt, o.id, words);
+    };
+    form.append(field, go);
+    return form;
+  }
+  // An option answered on the agent's computer, never in a record (a
+  // sign-in's code: docs/chat-records.md, `computer`): typed on the card,
+  // masked, and handed to the shell (`KIND.cardToComputer`), which hands it
+  // to that computer alone; what came of it is said on the card. Neither
+  // kept nor shown here.
+  //
+  // Masked by its look, not as a password: a password field is one every
+  // password manager offers to save, and a code used once is not one to
+  // keep (Paul, 2026-11-02, Bitwarden). So a text field, masked by CSS
+  // (`.masked`), with each manager's own hint to leave it be, no name, and
+  // no form history; a password field only where the CSS is unsupported.
+  function computerField(t, prompt, o, disabled) {
+    const card = cardKey(t.key, prompt);
+    const form = el("form", "words");
+    form.autocomplete = "off";
+    const field = el("input", "masked");
+    field.type = MASKS ? "text" : "password";
+    field.autocomplete = "off";
+    field.spellcheck = false;
+    field.setAttribute("autocapitalize", "off");
+    field.setAttribute("autocorrect", "off");
+    for (const [name, value] of IGNORED_BY_MANAGERS) field.setAttribute(name, value);
+    field.dataset.option = o.id;
+    field.placeholder = o.label || o.id;
+    field.setAttribute("aria-label", o.label || o.id);
+    field.maxLength = TEXT_MAX_BYTES;
+    field.enterKeyHint = "send";
+    field.disabled = disabled;
+    const go = el("button", "send");
+    go.type = "submit";
+    go.title = "Send to your computer (Enter)";
+    go.setAttribute("aria-label", "Send to your computer");
+    go.replaceChildren(icon("send"));
+    const ready = () => (go.disabled = disabled || !field.value.trim());
+    field.oninput = ready;
+    ready();
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const value = field.value.trim();
+      if (!value || disabled || !rosterOrigin) return;
+      const nonce = crypto.randomUUID();
+      state.toComputer.set(nonce, card);
+      state.handed.set(card, "Sending to your computer…");
+      field.value = "";
+      window.parent.postMessage({ fragment: KIND.cardToComputer, agent: t.agent, turn: t.id, prompt, option: o.id, value, nonce }, rosterOrigin);
+      schedule();
     };
     form.append(field, go);
     return form;
@@ -1803,6 +2253,64 @@ export function mount(root) {
     line.replaceChildren(faces, el("span", null, said));
   }
 
+  // The helpers working now (each agent's newest set, until its `until`), in
+  // a bar above the composer: how many, and opened, each one's task (the
+  // oldest first, at most HELPERS_SHOWN_MAX) and how long it has run. In a
+  // chat of several agents, whose they are, by face. None working, it hides.
+  let helpersSig = "";
+  function renderHelpers() {
+    const bar = $("helpers");
+    const now = Date.now();
+    const running = [...state.helpers].filter(([, set]) => set.until > now).flatMap(([principal, set]) => set.helpers.map((h) => ({ ...h, principal }))).sort((a, b) => a.since - b.since);
+    if (!running.length) state.helpersOpen = false;
+    const agents = [...new Set(running.map((h) => h.principal))];
+    const group = agents.length > 1 || chatAgents().length > 1;
+    const sig = JSON.stringify([state.helpersOpen, group, running.map((h) => [h.principal, h.goal, h.since]), agents.map((a) => [who(a).name, who(a).picture ?? ""])]);
+    if (sig === helpersSig) return;
+    helpersSig = sig;
+    bar.hidden = !running.length;
+    bar.classList.toggle("open", state.helpersOpen);
+    if (!running.length) return bar.replaceChildren();
+    const focused = bar.contains(document.activeElement);
+    const head = el("button", "helpers-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(state.helpersOpen));
+    head.setAttribute("aria-controls", "helpers-list");
+    head.addEventListener("click", () => {
+      state.helpersOpen = !state.helpersOpen;
+      renderHelpers();
+    });
+    const count = `${plural(running.length, "helper")} working`;
+    if (group) {
+      const faces = el("span", "faces");
+      for (const a of agents.slice(0, HERE_FACES_MAX)) faces.append(face(a));
+      const names = agents.map((a) => who(a).name);
+      const list = names.length === 1 ? names[0] : names.length === 2 ? `${names[0]} and ${names[1]}` : `${names[0]} and ${names.length - 1} others`;
+      head.append(faces, el("span", "helpers-said", `${list}: ${count}`));
+    } else head.append(icon("users", "helpers-icon"), el("span", "helpers-said", count));
+    head.append(icon("chevron", "chev"));
+    const parts = [head];
+    if (state.helpersOpen) {
+      const list = el("ul", "helpers-list");
+      list.id = "helpers-list";
+      for (const h of running.slice(0, HELPERS_SHOWN_MAX)) {
+        const line = el("li", "helper");
+        if (group) line.append(face(h.principal));
+        const goal = el("span", "helper-goal", h.goal || "A task");
+        goal.title = h.goal;
+        const since = el("span", "helper-since", minutes(now - h.since));
+        since.dataset.since = String(h.since);
+        line.append(goal, since);
+        list.append(line);
+      }
+      const more = running.length - HELPERS_SHOWN_MAX;
+      if (more > 0) list.append(el("li", "helpers-more", `and ${more} more`));
+      parts.push(list);
+    }
+    bar.replaceChildren(...parts);
+    if (focused) head.focus();
+  }
+
   // A wrapped bubble shrinks to its longest line, not the width cap.
   function fitUserBubbles(bubbles = [...$("messages").querySelectorAll(".bubble")]) {
     const live = bubbles.filter((b) => b.isConnected);
@@ -1828,6 +2336,7 @@ export function mount(root) {
       fitUserBubbles();
     }
     if (stuck) toEnd();
+    else keepPlace();
   }).observe($("messages"));
   document.fonts?.ready.then(() => fitUserBubbles());
 
@@ -1858,6 +2367,15 @@ export function mount(root) {
   let caughtUp = false;
   let latestSeq = 0;
   let newMessages = 0;
+  // The reader's item and where it was, as last scrolled or drawn: an item
+  // above it that grows (a picture that loaded) moves it back, as a
+  // browser's scroll anchoring would; Safari before 27 has none.
+  let held = null;
+  function keepPlace() {
+    if (!held?.node?.isConnected) return;
+    const moved = held.node.getBoundingClientRect().top - held.top;
+    if (Math.abs(moved) > 0.5) $("scroll").scrollTop += moved;
+  }
   function visibleAnchor() {
     const top = $("scroll").getBoundingClientRect().top;
     const node = [...$("messages").children].find((item) => item.getBoundingClientRect().bottom > top);
@@ -1866,9 +2384,11 @@ export function mount(root) {
   // A reader who moves while an older page is in flight chooses a new
   // position. Automatic scroll events from restoring the anchor do not.
   for (const event of ["wheel", "touchmove", "keydown"]) $("scroll").addEventListener(event, () => { history.anchor = null; }, { passive: true });
+  // (written only when it changed: a draft's frame writes nothing else)
   function showLatest() {
-    $("latest").hidden = stuck;
-    $("latest").textContent = newMessages ? `Jump to latest · ${plural(newMessages, "new message")}` : "Jump to latest";
+    const said = newMessages ? `Jump to latest · ${plural(newMessages, "new message")}` : "Jump to latest";
+    if ($("latest").hidden !== stuck) $("latest").hidden = stuck;
+    if ($("latest").textContent !== said) $("latest").textContent = said;
   }
   const toEnd = () => {
     const s = $("scroll");
@@ -1877,14 +2397,17 @@ export function mount(root) {
     newMessages = 0;
     showLatest();
   };
-  $("latest").onclick = () => {
+  $("latest").onclick = async () => {
+    if (!history.live && !(await toLatest())) return;
     stuck = true;
     toEnd();
   };
   $("scroll").addEventListener("scroll", () => {
     const s = $("scroll");
-    if (s.scrollHeight - s.scrollTop - s.clientHeight < 160) stuck = true;
+    // (the window's bottom is the chat's end only once it reaches it)
+    if (history.live && s.scrollHeight - s.scrollTop - s.clientHeight < 160) stuck = true;
     else if (s.scrollTop < lastTop) stuck = false;
+    held = stuck ? null : visibleAnchor();
     lastTop = s.scrollTop;
     if (stuck) newMessages = 0;
     showLatest();
@@ -1942,10 +2465,11 @@ export function mount(root) {
     $("stop").hidden = !stops;
     $("send").hidden = stops;
     // words typed while its agent works: Send queues them, Steer tells the
-    // running turn at once (its owner's `/steer`)
+    // running turn at once (its owner's `/steer`); while an agent waits for
+    // their answer, what they type is that answer, so no Steer
     const words = input.value.trim();
     const target = commandTarget();
-    const steers = !!words && !words.startsWith("/") && !attachments.length && !recording && !!workingOn(target) && menuOf(target).some((c) => c.name === "steer");
+    const steers = !!words && !words.startsWith("/") && !attachments.length && !recording && !!workingOn(target) && menuOf(target).some((c) => c.name === "steer") && !answeringMe();
     $("steer").hidden = !steers;
     $("steer").disabled = sending;
     tellBusy();
@@ -2062,13 +2586,13 @@ export function mount(root) {
     try {
       localStorage.removeItem(DRAFT_KEY);
     } catch {}
-    window.parent.postMessage({ fragment: "draft-forgotten" }, event.origin);
+    window.parent.postMessage({ fragment: KIND.draftForgotten }, event.origin);
   }
   // ---- what this page holds that no storage keeps: files chosen, a voice
   // memo, a message on its way, one that failed (its Retry, and a retry
   // under way: newer words may be in the composer), a quote chosen, a
   // card's answer typed and not sent, or on its way. The shell that frames
-  // it is told as it changes (`{fragment: "busy", busy}`), and reloads it
+  // it is told as it changes (`{fragment: KIND.busy, busy}`), and reloads it
   // for a new release only while it is not, and stops a reload under way
   // if it becomes so. ----
   function tellBusy() {
@@ -2076,7 +2600,7 @@ export function mount(root) {
     const busy = attachments.length > 0 || !!recording || sending || state.sending.size > 0 || state.failed.size > 0 || !!state.replyTo || answersOnTheirWay > 0 || answerTyped;
     if (!framed || !state.me || busy === busyTold) return;
     busyTold = busy;
-    window.parent.postMessage({ fragment: "busy", busy }, state.me.platform);
+    window.parent.postMessage({ fragment: KIND.busy, busy }, state.me.platform);
   }
   function renderAttachments() {
     const list = $("attachments");
@@ -2102,15 +2626,16 @@ export function mount(root) {
       }),
     );
   }
+  // the platform's word now (limits.js): a deploy may change it while the
+  // page is open, and `send` checks the files again
   function addFiles(files) {
     if (!canAttach()) return;
+    const limits = fragment.limits();
     for (const file of files) {
-      if (attachments.length >= ATTACHMENTS_MAX) {
-        problem(`A message carries at most ${ATTACHMENTS_MAX} files.`);
-        break;
-      }
-      if (file.size > ATTACHMENT_MAX_BYTES) {
-        problem(`${file.name} is over 25 MB, the most a chat takes.`);
+      const why = refusal(limits, [file], attachments.length);
+      if (why) {
+        problem(why);
+        if (attachments.length >= limits.filesPerMessage) break;
         continue;
       }
       attachments.push({ file, name: file.name || "a file", size: file.size, type: file.type, uploading: false });
@@ -2170,8 +2695,9 @@ export function mount(root) {
   }
   async function startMemo() {
     if (ended || recording || !canAttach() || !recordable()) return;
-    if (attachments.length >= ATTACHMENTS_MAX) return problem(`A message carries at most ${ATTACHMENTS_MAX} files.`);
-    const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: false };
+    const full = refusal(fragment.limits(), [{ size: 0 }], attachments.length);
+    if (full) return problem(full);
+    const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: null };
     // held while the browser asks for the microphone, so a second press waits
     recording = memo;
     renderRecording();
@@ -2195,8 +2721,9 @@ export function mount(root) {
       if (!e.data?.size) return;
       memo.chunks.push(e.data);
       memo.bytes += e.data.size;
-      if (memo.bytes > ATTACHMENT_MAX_BYTES && memo.recorder.state !== "inactive") {
-        memo.tooLarge = true;
+      const limits = fragment.limits();
+      if (limits && memo.bytes > limits.uploadMaxBytes && memo.recorder.state !== "inactive") {
+        memo.tooLarge = limits;
         memo.recorder.stop();
       }
     };
@@ -2231,7 +2758,7 @@ export function mount(root) {
     renderRecording();
     if (memo.discard) return;
     if (memo.failed) return problem(`Your voice memo was not kept: ${memo.failed}`);
-    if (memo.tooLarge) return problem("That voice memo is over 25 MB, the most a chat takes.");
+    if (memo.tooLarge) return problem(`That voice memo is ${over(memo.tooLarge)}.`);
     const type = essence(memo.recorder?.mimeType || memo.chunks[0]?.type);
     if (!memo.bytes || !SHOWN_AUDIO.test(type)) return problem("Nothing was recorded.");
     const file = new File(memo.chunks, `voice-memo.${MEMO_EXT[type]}`, { type });
@@ -2403,12 +2930,20 @@ export function mount(root) {
         reject(new Error("the shell did not answer"));
       }, ADD_WAIT_MS);
       adding.set(nonce, { resolve, reject, timer });
-      window.parent.postMessage({ fragment: "add-agent", identity, nonce }, rosterOrigin);
+      window.parent.postMessage({ fragment: KIND.addAgent, identity, nonce }, rosterOrigin);
     });
   }
   function fromShell(event) {
     const d = event.data;
-    if (d?.fragment === "agents" && Array.isArray(d.agents)) {
+    // what came of an answer this page handed its agent's computer
+    if (d?.fragment === KIND.computerAnswered && typeof d.nonce === "string" && event.origin === rosterOrigin) {
+      const card = state.toComputer.get(d.nonce);
+      state.toComputer.delete(d.nonce);
+      if (card) state.handed.set(card, d.ok === true ? "Sent to your computer." : typeof d.error === "string" && d.error ? d.error.slice(0, 300) : "Your computer did not take it: try again.");
+      schedule();
+      return;
+    }
+    if (d?.fragment === KIND.agents && Array.isArray(d.agents)) {
       rosterOrigin = event.origin;
       state.roster = d.agents
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
@@ -2427,12 +2962,12 @@ export function mount(root) {
       } else setup = null;
       schedule();
       if (picking) updateMentions();
-    } else if (d?.fragment === "alerts" && typeof d.nonce === "string" && event.origin === state.me?.platform) {
+    } else if (d?.fragment === KIND.alerts && typeof d.nonce === "string" && event.origin === state.me?.platform) {
       const waiting = askingShell.get(d.nonce);
       if (!waiting) return;
       askingShell.delete(d.nonce);
       waiting(d);
-    } else if (d?.fragment === "agent-added" && typeof d.nonce === "string" && event.origin === rosterOrigin) {
+    } else if (d?.fragment === KIND.agentAdded && typeof d.nonce === "string" && event.origin === rosterOrigin) {
       const waiting = adding.get(d.nonce);
       if (!waiting) return;
       adding.delete(d.nonce);
@@ -2548,6 +3083,26 @@ export function mount(root) {
   let unsent = null; // { id, body }
   async function send(text) {
     if (sending || !canPost() || setupHolds()) return;
+    if (!text.trim() && !attachments.length) return;
+    // said away from the end (the window up the chat, or the reader up within
+    // it): the window goes to the end first, where the message shows. Its
+    // words stay in the composer until it is there, so a read that fails
+    // keeps them (and whatever was typed meanwhile, sent with them after).
+    if (!history.live || !stuck) {
+      const fromComposer = text === input.value;
+      sending = true;
+      let there = true;
+      try {
+        if (!history.live) there = await toLatest();
+      } finally {
+        sending = false;
+      }
+      if (!there) return problem("Your message was not sent: the latest messages could not be shown.");
+      stuck = true;
+      toEnd();
+      if (fromComposer) text = input.value;
+      if (!text.trim() && !attachments.length) return;
+    }
     text = cutBytes(text.trim(), TEXT_MAX_BYTES);
     const files = attachments.slice();
     if (!text && !files.length) return;
@@ -2574,8 +3129,13 @@ export function mount(root) {
         await fragment.post("chat", body, { id });
         unsent = null;
         $("banner").hidden = true;
+        tellSaid();
         return;
       }
+      // its files against the platform's word now, which a deploy may have
+      // changed since they were taken: refused, the message stays to send
+      const why = refusal(fragment.limits(), files);
+      if (why) throw new Error(why);
       const to = addressed(text);
       // an agent of the owner's not in the chat yet is added first, so its
       // bridge follows the chat and takes the message (bounded: the roster)
@@ -2590,7 +3150,7 @@ export function mount(root) {
       }
       if (outside.length) await readMembers();
       const named = [];
-      // bounded: at most ATTACHMENTS_MAX files
+      // bounded: at most the platform's filesPerMessage (just checked)
       for (const f of files) named.push(await fragment.blob(f.file, { name: f.name }));
       const replyTo = state.replyTo?.seq ?? null;
       const body = { text, ...(to.length ? { to } : {}), ...(named.length ? { attachments: named } : {}), ...(replyTo ? { reply_to: replyTo } : {}) };
@@ -2605,6 +3165,7 @@ export function mount(root) {
       renderQuoting();
       $("banner").hidden = true;
       expectTurn(record, to, text);
+      tellSaid();
     } catch (err) {
       if (!input.value) input.value = typed;
       for (const f of files) f.uploading = false;
@@ -2615,6 +3176,13 @@ export function mount(root) {
       grow();
       input.focus();
     }
+  }
+
+  // The shell that frames this page is told the person sent a message here
+  // (`{fragment: KIND.said}`): a chat they archived comes back to their
+  // sidebar (frame-messages.js, `said`).
+  function tellSaid() {
+    if (framed && state.me) window.parent.postMessage({ fragment: KIND.said }, state.me.platform);
   }
 
   // Someone signed in, in a chat with an agent: a turn starts on it soon
@@ -2743,15 +3311,15 @@ export function mount(root) {
   async function alertsOn() {
     const { key } = await fetch("./__push-key", { credentials: "same-origin" }).then((r) => r.json()).catch(() => ({}));
     if (typeof key !== "string" || !key) return { ok: false, reason: "error", error: "this chat has no key to push with" };
-    const a = await askShell({ fragment: "alerts", on: true, key }, ALERTS_ASK_MS);
+    const a = await askShell({ fragment: KIND.alerts, on: true, key }, ALERTS_ASK_MS);
     if (a?.state !== "on" || !a.subscription) return unsubscribed(a);
     const stored = await pushPost("./__push-sub", { who: state.me.principal, ...a.subscription });
     // not stored here: the shell lets it go
-    if (stored.ok === false) await askShell({ fragment: "alerts", on: false }, ALERTS_ASK_MS);
+    if (stored.ok === false) await askShell({ fragment: KIND.alerts, on: false }, ALERTS_ASK_MS);
     return stored;
   }
   async function alertsOff() {
-    const a = await askShell({ fragment: "alerts", on: false }, ALERTS_ASK_MS);
+    const a = await askShell({ fragment: KIND.alerts, on: false }, ALERTS_ASK_MS);
     if (a?.state !== "off") return unsubscribed(a);
     return a.endpoint ? pushPost("./__push-unsub", { endpoint: a.endpoint }) : { ok: true, removed: 0 };
   }
@@ -2773,7 +3341,7 @@ export function mount(root) {
     if (framed) {
       // shown once it is known whose it is (a press before would ask the frame)
       $("notify").hidden = true;
-      const a = await askShell({ fragment: "alerts?" }, ALERTS_READ_MS);
+      const a = await askShell({ fragment: KIND.alertsAsk }, ALERTS_READ_MS);
       shellAlerts = !!a;
       if (a?.state === "unsupported") return;
       $("notify").hidden = false;
@@ -2809,24 +3377,40 @@ export function mount(root) {
   addEventListener("message", (event) => {
     if (!framed || event.source !== window.parent) return;
     const d = event.data;
-    if (d && d.fragment === "theme" && (d.mode === "light" || d.mode === "dark")) {
+    if (d && d.fragment === KIND.theme && (d.mode === "light" || d.mode === "dark")) {
       document.documentElement.dataset.theme = d.mode;
       if (typeof d.mobile === "boolean") document.documentElement.dataset.mobile = String(d.mobile);
     }
-    else if (d && d.fragment === "compose" && typeof d.text === "string") compose(event, d.text);
-    else if (d && d.fragment === "forget-draft") forgetDraft(event);
+    else if (d && d.fragment === KIND.compose && typeof d.text === "string") compose(event, d.text);
+    else if (d && d.fragment === KIND.forgetDraft) forgetDraft(event);
     else fromShell(event);
   });
   // asks once: a shell that is its owner's answers (and again on a change)
-  if (framed) window.parent.postMessage({ fragment: "agents?" }, "*");
+  if (framed) window.parent.postMessage({ fragment: KIND.agentsAsk }, "*");
   addEventListener("keydown", event => {
     if (!framed || event.isComposing || event.repeat || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.code !== "KeyK") return;
     event.preventDefault();
-    window.parent.postMessage({ fragment: "open-launcher" }, rosterOrigin || "*");
+    window.parent.postMessage({ fragment: KIND.openLauncher }, rosterOrigin || "*");
   });
 
   // ---- who this page is, then the channels it may read, and who is here ----
-  fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft, onReady: () => { caughtUp = true; historyReady(); arrive(); schedule(); } });
+  fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft, onReady: () => {
+    // the chat's first record shown: nothing older to read (a trimmed
+    // chat's oldest kept is found by one read that comes back with none)
+    if (!caughtUp && (history.first.chat === null || history.first.chat <= 1)) history.done = true;
+    caughtUp = true;
+    // connected again (a reconnect after a blip): older messages that failed
+    // are read again as the sentinel is next seen, or from the button; work
+    // that failed is read again now (its Try again said until it is in)
+    history.failed = false;
+    history.laterFailed = false;
+    if (history.workFailed && history.workReady) readWork();
+    historyStatus();
+    windowStatus();
+    history.watch = true;
+    arrive();
+    schedule();
+  } });
   readMembers();
   fragment.presence.set({ ...shared });
   fragment.presence.on((list) => {
@@ -2837,11 +3421,18 @@ export function mount(root) {
     state.me = hello;
     // mine and theirs, and who may answer a card, are known now
     nodes.clear();
-    if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: async () => {
-      history.workReady = true;
-      try { await earlierWork(); }
-      catch (err) { $("history-error").textContent = `Could not load earlier progress: ${err.message}.`; $("earlier").hidden = false; }
-    } });
+    if (atLeast(hello.role, "viewer")) {
+      fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: async () => {
+        history.workReady = true;
+        schedule();
+        await readWork();
+      } });
+      // the helpers working, however long ago each agent last said so: its
+      // newest set (the live stream brings the next; a failure, until then)
+      fragment.newest("work").then((page) => {
+        for (const record of page.records) if (record.body?.kind === "turn.helpers") onHelpers(record, record.body);
+      }, (err) => console.error("chat: helpers working", err));
+    }
     // what they had typed here before the page last went (any reload), theirs alone; anyone else's goes
     restoreDraft(hello.principal);
     const note = $("note");

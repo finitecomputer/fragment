@@ -83,6 +83,12 @@
   //   "tax": true,
   //   "key_file": "~/.config/fragment/secrets/stripe-restricted-key"
   // },
+  // The operators' glance (`/admin`, `GET /api/admin/glance`): a key to
+  // this account's Workers Logs, read only (an account API token with
+  // Workers Observability Read and nothing else), by its name in the
+  // store. Leave it out and the glance shows the registry's numbers and
+  // says the logs' are not configured.
+  // "observability_read": "fragment-observability-read",
   // The AI Gateway the model route and image steps call through: one of
   // your own, named (never "default", which makes one that logs), with
   // Unified Billing, zero data retention on and its logs off. Without it,
@@ -219,6 +225,15 @@
   // or a mailto address, linked from the shell's notice. Without it, the
   // shell shows them what to tell whoever runs the deployment.
   // "support_url": "mailto:help@example.dev",
+  // One file a person may send, at most, in bytes: the zone's request body
+  // limit on its Cloudflare plan. Without it, a Free or Pro zone's 100 MB.
+  // "upload_max_bytes": 200000000,
+  // Local hosts a self-hosted org opens to its apps' jobs, push endpoints
+  // and subscriptions, beside the public internet (its intranet): host
+  // names, one-level `*.` globs, IP addresses and networks, at most 64.
+  // Loopback, link-local, localhost and this deployment's own hosts are
+  // never opened; an entry naming one is refused. Left out: public only.
+  // "egress_allow": ["*.corp.example", "wiki.corp.example", "10.20.0.0/16", "100.101.102.103"],
   // The sender the platform's mail (invites, seats) comes from: a bare
   // address or an unquoted Name <address> (no comments or lists), on a
   // domain onboarded to Cloudflare Email Sending (`wrangler email sending
@@ -229,6 +244,10 @@
   // with an operator key no person holds (`fragment operator key <file>`
   // makes one and prints the npub to list here).
   "operators": [],
+  // The finite.computer move (docs/migrations.md), while it runs: the
+  // mover's npub (its NIP-98 key signs the mover's routes; the mover holds
+  // the key), and phase 2's cutoff in ms since the epoch, once set.
+  // "migrations": { "mover": "npub1…", "cutoff_ms": 1800000000000 },
   // Computers (docs/computers.md): the images they run, by name, and the
   // one a new computer is pinned to. Without this the deployment makes no
   // computers. Each is built from the tree at every deploy (its Dockerfile
@@ -249,7 +268,8 @@
   },
   // The connectors: the doors its people may open (docs/computers.md,
   // "Connector policy"), [{id, relayTargets: [{host, port}]}]. Omitted: the
-  // cell's default, SimpleX with its twelve XFTP hosts on 443. [] is the
+  // cell's default, SimpleX with its twelve XFTP hosts on 443, and Telegram
+  // (a connector fragment, no relay). [] is the
   // kill switch: no connector may be linked, redeemed or relayed (an
   // unlink still works), and no computer relay opens.
   // "connectors": [{ "id": "simplex", "relayTargets": [{ "host": "xftp1.simplex.im", "port": 443 }] }],
@@ -269,7 +289,18 @@
   // (`fragment_core::own_signin`); its `models` are what their agents may
   // run on, paid by their account at the provider. Any row may carry a
   // `note`, which settings' Connections shows under its name, connected or
-  // not: plain text, one line, at most 280 characters (google's, below).
+  // not: plain text, one line, at most 280 characters (google's, below). A
+  // connection whose accounts each live at a host of their own (Salesforce's
+  // orgs) names `"account_host": {"metadata": "instance_url", "under":
+  // "my.salesforce.com"}`: its token also goes to a host under `under`, but
+  // only the one its account's Pipes metadata names (docs/computers.md,
+  // "An account's own host"). A connection whose provider wants its OAuth
+  // client's secret as an HTTP Basic header (Zoom, Airtable, Xero, Notion),
+  // never in the code exchange's body, names `"client_auth": "basic"`
+  // beside its `connection_oauth`: the header goes with its code exchange
+  // and its revocation (docs/pipes-browser-binding.md). Name it only once
+  // a release that knows the field is deployed: an older one refuses the
+  // catalog.
   "providers": [
     { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
@@ -294,7 +325,7 @@
       // "key": "<the client secret's store name>",
       // "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent",
       //   "exchange": "https://oauth2.googleapis.com/token", "revoke": "https://oauth2.googleapis.com/revoke",
-      //   "client_id": "<the client's id>", "scopes": <the Google skill's references/google-workspace-scopes.json> },
+      //   "client_id": "<the client's id>", "access": <the Google skill's references/google-workspace-access.json> },
       // several Google accounts a person (personal and work), each agent
       // using the one picked for it in Settings, once WorkOS has enabled
       // additional connections and a release that knows the field is

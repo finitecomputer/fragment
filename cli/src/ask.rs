@@ -416,7 +416,8 @@ fn records_after(c: &Client, chat: &str, channel: &str, after: i64) -> Result<(V
         let page = c.call(c.get(&format!("/api/f/{chat}/channels/{channel}?after={cursor}"))?)?;
         let records = page["records"].as_array().cloned().unwrap_or_default();
         let next = page["next"].as_i64().unwrap_or(cursor);
-        let full = records.len() >= 1000;
+        // a page cut by its bytes says `more` (an older platform's does not)
+        let full = page["more"].as_bool().unwrap_or(records.len() >= 1000);
         out.extend(records);
         if next <= cursor || !full {
             cursor = next.max(cursor);
@@ -508,11 +509,11 @@ mod tests {
         me.owner = "npub1paul".into();
         for acting_for in [Some("npub1paul".to_string()), None] {
             let signer = Signer::Agent(AgentMode { agent: me.fragment.clone(), acting_for: acting_for.clone() });
-            let sent = signer.path(&names_path(&signer, Some(&me)));
+            let sent = signer.path("GET", &names_path(&signer, Some(&me)));
             assert_eq!(sent, "/api/fragments?for=npub1paul", "acting for {acting_for:?}");
         }
         let alone = Signer::Agent(AgentMode { agent: me.fragment.clone(), acting_for: None });
-        assert_eq!(alone.path(&names_path(&alone, None)), "/api/fragments", "a person's ask (no asker) names no one");
+        assert_eq!(alone.path("GET", &names_path(&alone, None)), "/api/fragments", "a person's ask (no asker) names no one");
     }
 
     /// Goal: what the CLI prints calls an agent by its name, else its label;

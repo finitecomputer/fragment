@@ -264,6 +264,23 @@ pub fn turn(work: &[Record], agent: &str, turn: &str) -> Option<Cut> {
     cut(&work[i..], agent, turn, &work[i].body, work[i].at)
 }
 
+/// Whether the agent's turn `turn`, as `work` holds it, waited on its
+/// person: a card it showed that never closed, or a question it asked in
+/// words (`turn.asked`). What a life's own state says of a turn it ran
+/// (`asking`, `Phase::Waiting`), read from the journal for one another
+/// life ran after the `/data` this life restored (its claim answered 409),
+/// read once its lost end is this life's (`Effect::ReadCut`), so a restart
+/// continues neither (engine.rs, `continued`). A question in words counts
+/// answered or not: an answer that life heard is a message this life reads
+/// again and no life claimed, so it runs as its own turn. A card closed
+/// for a late answer (`answerSeq`, cards.rs) was open as that life left
+/// it: still waiting, the answer's fresh turn its next.
+pub fn waited(work: &[Record], agent: &str, turn: &str) -> bool {
+    let mine = |r: &&Record| r.principal == agent && r.body["turn"] == turn;
+    let closed = |prompt: &Value| work.iter().filter(mine).any(|r| r.body["kind"] == "turn.prompt.closed" && r.body["prompt"] == *prompt && r.body.get("answerSeq").is_none());
+    work.iter().filter(mine).any(|r| r.body["kind"] == "turn.asked" || (r.body["kind"] == "turn.prompt" && !closed(&r.body["prompt"])))
+}
+
 /// What a fresh turn from a late answer to its card is told (cards.rs),
 /// bounded (`NOTE_MAX_BYTES`): that the card's turn ended before the
 /// answer and is not resumed, and to check what it did before doing any of
@@ -310,6 +327,29 @@ fn steps(cut: &Cut) -> Option<String> {
         steps.push(format!("and {} more", cut.steps_total - cut.steps.len()));
     }
     Some(format!("Its steps, as recorded: {}", steps.join("; ")))
+}
+
+/// How long ago a turn's message was said, in plain words, when it is
+/// handed at least `MESSAGE_AGE_TOLD_MS` after it (an outage, a restart, a
+/// sleep, a backlog), so its agent can judge whether it is still wanted;
+/// `None` sooner, for a time unknown (`said_at` 0), or for a routine or a
+/// command (`exempt`: a routine's message says its hour). A continuation
+/// (`continues`) is told the age of what its cut turn was answering.
+pub fn age(said_at: i64, now: u64, exempt: bool, continues: bool) -> Option<String> {
+    let late = i64::try_from(now).ok()?.checked_sub(said_at)?;
+    if said_at <= 0 || exempt || late < i64::try_from(limits::MESSAGE_AGE_TOLD_MS).ok()? {
+        return None;
+    }
+    let minutes = late / 60_000;
+    let ago = match minutes {
+        ..120 => format!("{minutes} minutes"),
+        120..2880 => format!("{} hours", minutes / 60),
+        _ => format!("{} days", minutes / 1440),
+    };
+    let what = if continues { format!("What that turn was answering was sent about {ago} ago.") } else { format!("This message was sent about {ago} ago, and is only reaching you now.") };
+    let line = format!("{what} If it may no longer be wanted, check before acting on it.");
+    assert!(line.len() <= limits::AGE_NOTE_MAX_BYTES, "an age is one short line: {line}");
+    Some(line)
 }
 
 /// The calls a turn asked for and never heard the end of, on one line:
@@ -430,10 +470,18 @@ pub fn history(r: &Record, owner: &str) -> Option<String> {
     let named = |k: &str, ok: fn(u8) -> bool| Some(field(b, k)).filter(|v| !v.is_empty() && v.len() <= 160 && v.bytes().all(ok));
     let archive = named("archive", |c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
     let key = named("key", |c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'));
+    // an archived chat of theirs (`chat`), or an import's; with another
+    // agent (`agent`, its name), or with this one
+    let chat = named("chat", |c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+    let other = Some(short("agent", 120)).filter(|a| !a.trim().is_empty());
+    let with = other.as_deref().unwrap_or("you");
+    let moved = if chat.is_some() { "" } else { " before they moved here" };
     let mut head = vec![format!(
-        "This chat goes on from a conversation your owner had with you before they moved here, “{title}”{when}. It is read-only history: what was said there, not new messages."
+        "This chat goes on from a conversation your owner had with {with}{moved}, “{title}”{when}. It is read-only history: what was said there, not new messages."
     )];
-    if let (Some(a), Some(k)) = (archive, key) {
+    if let Some(c) = chat {
+        head.push(format!("All of it is in their chat {c}."));
+    } else if let (Some(a), Some(k)) = (archive, key) {
         head.push(format!("All of it is in their Session Archive: `fragment sync {a} --dir <folder> --mode pull`, then sessions/{k}.json."));
     }
     let summary = field(b, "summary").trim();
@@ -448,7 +496,7 @@ pub fn history(r: &Record, owner: &str) -> Option<String> {
             let text = m["text"].as_str().map(str::trim).filter(|t| !t.is_empty())?;
             let who = match m["role"].as_str() {
                 Some("user") => "Your owner",
-                Some("assistant") => "You",
+                Some("assistant") => other.as_deref().unwrap_or("You"),
                 _ => return None,
             };
             Some(format!("{who}: {}", records::cut_bytes(text, limits::HISTORY_NOTE_MAX_BYTES / 4)))
@@ -470,7 +518,8 @@ pub fn history(r: &Record, owner: &str) -> Option<String> {
     let dropped = earlier + (said.len() - kept.len()) as u64;
     let mut text = head;
     if !kept.is_empty() {
-        let before = if dropped > 0 { format!(" ({dropped} earlier ones are in the archive)") } else { String::new() };
+        let place = if chat.is_some() { "that chat" } else { "the archive" };
+        let before = if dropped > 0 { format!(" ({dropped} earlier ones are in {place})") } else { String::new() };
         text.push_str(&format!("\n\nIts last messages, oldest first{before}:\n"));
         text.push_str(&kept.iter().map(|l| l.as_str()).collect::<Vec<_>>().join("\n"));
     }
@@ -548,6 +597,25 @@ mod tests {
         assert!(big.contains("Your owner: 39 ") && !big.contains("Your owner: 0 ") && big.contains("earlier ones are in the archive"), "the newest kept");
     }
 
+    /// Goal: a history continued with another agent than the one the
+    /// conversation was with (`agent`) tells this one whose words they
+    /// were, never "you"; one from an archived chat (`chat`) says that chat
+    /// is where the rest is. Valid: both; a history saying neither reads as
+    /// before.
+    #[test]
+    fn a_history_says_whose_words_and_where_the_rest_is() {
+        let body = json!({ "kind": "history", "title": "Beans", "chat": "fred-chat--k3x9", "agent": "Fred", "started_at": "2026-10-01T09:00:00.000Z", "earlier": 2,
+            "messages": [{ "role": "user", "text": "plant beans?" }, { "role": "assistant", "text": "in spring" }] });
+        let text = history(&history_record("npub1paul", body), "npub1paul").expect("its owner's history");
+        assert!(text.starts_with("This chat goes on from a conversation your owner had with Fred, “Beans” (2026-10-01)."), "{text}");
+        assert!(text.contains("All of it is in their chat fred-chat--k3x9."), "{text}");
+        assert!(text.ends_with("(2 earlier ones are in that chat):\nYour owner: plant beans?\nFred: in spring"), "{text}");
+        assert!(!text.contains("You:") && !text.contains("moved here") && !text.contains("fragment sync"), "{text}");
+        let imported = json!({ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-ab", "agent": "Juniper", "messages": [{ "role": "assistant", "text": "hi" }] });
+        let text = history(&history_record("npub1paul", imported), "npub1paul").unwrap();
+        assert!(text.contains("had with Juniper before they moved here") && text.ends_with("Juniper: hi") && text.contains("sessions/hermes-ab.json"), "{text}");
+    }
+
     fn step(tool: &str, args: &str, ok: bool) -> Step {
         Step { tool: tool.into(), args: args.into(), ok, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None }
     }
@@ -561,6 +629,28 @@ mod tests {
 
     fn call(response: &str, position: u32, id: &str, tool: &str, args: &str) -> crate::records::Call {
         crate::records::Call { response: response.into(), position, tool_call_id: id.into(), tool: tool.into(), args: args.into(), category: crate::records::Category::Shell }
+    }
+
+    /// Goal (FIN-236): a message handed at least `MESSAGE_AGE_TOLD_MS` after
+    /// it was said is told its age in plain words; sooner, or a routine's or
+    /// a command's (`exempt`), or a time unknown (0, or one ahead of the
+    /// clock), none. A continuation is told what its cut turn answered.
+    #[test]
+    fn a_late_message_is_told_its_age() {
+        let (minute, now) = (60_000_i64, 100 * 86_400_000_u64);
+        let at = |late: i64| i64::try_from(now).expect("a time") - late;
+        let bound = i64::try_from(limits::MESSAGE_AGE_TOLD_MS).expect("a bound");
+        let told = |late: i64| age(at(late), now, false, false);
+        assert_eq!(told(1_000), None, "fresh");
+        assert_eq!(told(bound - 1), None, "under the bound");
+        let then = " If it may no longer be wanted, check before acting on it.";
+        for (late, ago) in [(bound, "5 minutes"), (119 * minute, "119 minutes"), (3 * 60 * minute + 59_000, "3 hours"), (47 * 60 * minute, "47 hours"), (3 * 1440 * minute, "3 days")] {
+            assert_eq!(told(late), Some(format!("This message was sent about {ago} ago, and is only reaching you now.{then}")), "{late} ms");
+        }
+        assert_eq!(age(at(2 * 60 * minute), now, false, true), Some(format!("What that turn was answering was sent about 2 hours ago.{then}")));
+        assert_eq!(age(at(3 * 60 * minute), now, true, false), None, "a routine's or a command's");
+        assert_eq!(age(0, now, false, false), None, "a time unknown");
+        assert_eq!(age(at(-minute), now, false, false), None, "a time ahead of the clock");
     }
 
     /// Goal (phase 4): a cut turn's note names, first, each call it asked
@@ -671,6 +761,40 @@ mod tests {
         assert_eq!(previous(w.before(after), ME, true), Before::Kept, "said once");
         // and the cut turn's own claim is told of the turn before it, not of itself
         assert_eq!(previous(w.before(3), ME, true), Before::Kept);
+    }
+
+    /// Goal: the journal says a turn waited on its person as its own state
+    /// would: while a card of its stayed open, or once it asked in words.
+    /// Valid: its card closed (answered or expired), steps alone. Invalid:
+    /// another agent's card under the same turn, a turn not in the records.
+    /// A late answer's closure (`answerSeq`) leaves it waiting.
+    #[test]
+    fn a_turn_waited_while_its_card_stayed_open_or_once_it_asked_in_words() {
+        let card = |turn: &str, prompt: &str| json!({ "kind": "turn.prompt", "turn": turn, "prompt": prompt, "text": "Run it?", "options": [], "asks": "npub1paul", "expiresAt": 1 });
+        let mut w = Work::default();
+        w.start(ME, "ran", 1);
+        w.post(ME, turn_step("ran", 1, &step("terminal", "ls", true)));
+        w.start(ME, "carded", 2);
+        w.post(ME, card("carded", "p1"));
+        w.start(ME, "answered", 3);
+        w.post(ME, card("answered", "p2"));
+        w.post(ME, turn_prompt_closed("answered", "p2", Closed::Answered, Some(("once", "npub1paul", None))));
+        w.start(ME, "expired", 4);
+        w.post(ME, card("expired", "p3"));
+        w.post(ME, turn_prompt_closed("expired", "p3", Closed::Expired, None));
+        w.start(ME, "worded", 5);
+        w.post(ME, records::turn_asked("worded", "npub1paul"));
+        w.start(ME, "late", 6);
+        w.post(ME, card("late", "p5"));
+        let mut late = turn_prompt_closed("late", "p5", Closed::Answered, Some(("once", "npub1paul", None)));
+        late["answerSeq"] = json!(9);
+        w.post(ME, late);
+        w.post("npub1rowan", card("ran", "p4"));
+        let waits = |turn: &str| waited(&w.0, ME, turn);
+        assert!(waits("carded") && waits("worded"), "an open card, a question in words");
+        assert!(waits("late"), "a card closed for a late answer was open as its life left it");
+        assert!(!waits("answered") && !waits("expired") && !waits("ran"), "a card closed, steps alone, another agent's card");
+        assert!(!waits("nowhere"), "a turn not in the records");
     }
 
     /// Goal: only a recorded loss is a cut. A turn that ended any other way,

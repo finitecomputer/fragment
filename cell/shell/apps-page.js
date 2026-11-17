@@ -1,9 +1,12 @@
-// The Apps page (`/apps`): every fragment in the
-// person's list but their chats, agents and skills (apps, brains, a kind
-// this page does not know), each with what they may change of it here, as
-// the server says it is:
+// The Apps page (`/apps`) and the Brains page (`/brains`): every fragment
+// in the person's list but their chats, agents and skills (apps, brains, a
+// kind this page does not know), and any that reaches their accounts (a
+// connector's chat), each on its shelf (`shelfOf`: a brain on Brains, the
+// rest on Apps), with what they may change of it here, as the server says
+// it is:
 // - Dock: whether their own dock shows it (`PUT /api/fragments/{name}/dock`),
-//   an app's or a brain's; the switch moves only once the list says so.
+//   an app's or a brain's; the switch moves only once the list says so. A
+//   brain on its own page is on the dock all the same until taken off.
 // - New preview: its card shot again (`POST /api/f/{name}/card`), an
 //   editor's; "Taking a new preview…" until the shot's report comes
 //   (status's `page.at`), then the card read again.
@@ -11,6 +14,13 @@
 // - Who has access (`GET /api/access`, the owner's), and inline Sharing
 //   (the owner's) or People (a member's), the platform's sharing view.
 // - A display name edited inline, and the owner's optional public address.
+// - Reaches (FIN-291; Paul, 2026-11-01), only on one that reaches their
+//   accounts: the keys it holds, by name and the hosts each may go to
+//   (never a value), with Remove; the agent it speaks to when it is a
+//   connector's door (`/api/f/{name}/door`), with Unlink; their own agents
+//   in it. Such an app has no share link and is not public for now: the
+//   cell refuses them, and its share sheet (its Sharing here) says so, and
+//   that the people added can use its keys (reach.rs, share.rs).
 // Archived ones are folded at the end, each with Unarchive.
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
@@ -20,12 +30,28 @@
 import { activity } from "./activity.js";
 import { createIconEditor } from "./app-icon.js";
 
-const KIND = { brain: "Brain", other: "Other" };
 const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
 const GENERAL = { members: ["lock", "Restricted"], link: ["link", "Anyone with the link"], public: ["globe", "Public"] };
 // the list's kinds the dock shows, and a card is shot of (card::is_app)
 const dockable = (f) => f.kind === "app" || f.kind === "brain";
-const listed = (f) => f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions";
+// What the page lists: every fragment but their chats, agents, skills and
+// Session Archives, and a chat that reaches their accounts (its row's
+// `sharing.reach`: a connector, such as Telegram's chat, with its keys and
+// its door), so what reaches them is in one place (Paul, 2026-11-01). An
+// agent with a door (its SimpleX link) is not: that door is opened and
+// closed in Settings, from its own page (Alex on #918).
+export const listed = (f) => (f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions") || (f.kind === "chat" && f.sharing?.reach === true);
+// The two pages of what is listed: a brain is a knowledge base, not a tool,
+// so it is kept on a page of its own; everything else is an app. One
+// module, so both pages act on a row the same way. `ask`, each visit's
+// kind (asks.js); `noun`, what a row is called.
+export const SHELVES = {
+  apps: { title: "Apps", noun: "app", empty: "No apps yet.", ask: "apps" },
+  brains: { title: "Brains", noun: "brain", empty: "No brains yet. Ask your agent to start one.", ask: "brains" },
+};
+export const shelfOf = (f) => (f.kind === "brain" ? "brains" : "apps");
+// what a row is, said beside it where its page's title does not say so
+const kindWord = (f) => (f.kind === "app" || f.kind === "brain" ? "" : "Other");
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
@@ -37,20 +63,117 @@ const CARD_READS_MAX = 6;
 // how many names a row says of who has access
 const NAMES_SHOWN = 2;
 
-export function createAppsPage(page, h) {
+// The Apps page's cards (`GET /api/f/<name>/card`), read with the page's
+// session as the dock's are: every one on a visit's open; afterwards a new
+// or changed row's, and one whose card is not there yet, asked again with
+// bounded backoff and retries. `visit()` is the page's visit now (a read
+// made in an earlier one, or one a newer read of its row superseded,
+// changes nothing), `shown()` whether the page is open, `rows()` the apps
+// it may show a card for, `draw()` draws the page again. Its own function
+// so its tests (cell/shell-tests/apps-cards.test.mjs) drive it as the page
+// does; `fetch`, `urls` and `timers` are the page's own, looked up as each
+// is used.
+export function createCards({ rows, visit, shown, draw, fetch = (url, options) => globalThis.fetch(url, options), urls = URL, timers = globalThis }) {
+  const cards = new Map();
+  const reads = new Map();
+  const attempts = new Map();
+  const drawn = new Map();
+  const load = { wait: 0, timer: null, batch: 0 };
+
+  // its card: "new", "same", "none" or "stale" (a newer read or visit owns the row)
+  async function read(name, mine) {
+    const request = (reads.get(name) ?? 0) + 1;
+    reads.set(name, request);
+    const current = () => mine === visit() && reads.get(name) === request;
+    const known = cards.get(name);
+    const headers = { ...SHELL, ...(known ? { "if-none-match": known.etag } : {}) };
+    const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
+    if (!current()) return "stale";
+    if (r.status === 304) return "same";
+    if (!r.ok) return "none";
+    const body = await r.blob();
+    if (!current()) return "stale";
+    const url = urls.createObjectURL(body);
+    if (known) urls.revokeObjectURL(known.url);
+    cards.set(name, { etag: r.headers.get("etag"), url });
+    return "new";
+  }
+
+  async function loadAll(all = false) {
+    if (!shown()) return;
+    timers.clearTimeout(load.timer);
+    const mine = visit();
+    const batch = ++load.batch;
+    let fresh = false;
+    const asked = [];
+    for (const f of rows()) {
+      const fingerprint = JSON.stringify(f);
+      if (!all && cards.has(f.name) && drawn.get(f.name) === fingerprint) continue;
+      if (all || attempts.get(f.name)?.fingerprint !== fingerprint) {
+        attempts.set(f.name, { fingerprint, count: 0 });
+        fresh = true;
+      }
+      const attempt = attempts.get(f.name);
+      if (attempt.count < CARD_READS_MAX) {
+        ++attempt.count;
+        asked.push(f);
+      }
+    }
+    if (fresh) load.wait = 0;
+    const got = await Promise.all(asked.map(async (f) => [f, await read(f.name, mine).catch(() => "none")]));
+    if (mine !== visit()) return;
+    // a card its read set is drawn, though a newer batch began: that one's
+    // read asks with this card's etag and, told it is the same, draws nothing
+    if (got.some(([, result]) => result === "new")) draw();
+    if (batch !== load.batch) return;
+    for (const [f, result] of got) if (result === "new" || result === "same") drawn.set(f.name, JSON.stringify(f));
+    if (got.some(([, result]) => result === "none") && load.wait < 60_000) {
+      load.wait = Math.min(60_000, load.wait ? load.wait * 2 : 2_000);
+      load.timer = timers.setTimeout(() => { if (mine === visit()) loadAll().catch(() => {}); }, load.wait);
+    }
+  }
+
+  return {
+    get: (name) => cards.get(name),
+    read,
+    load: loadAll,
+    // a visit's open asks every card at once; its close lets every batch go
+    opened() { load.wait = 0; },
+    closed() {
+      ++load.batch;
+      timers.clearTimeout(load.timer);
+    },
+  };
+}
+
+export function createAppsPage(page, h, shelf = "apps") {
+  if (!SHELVES[shelf]) throw new RangeError(`no shelf ${shelf}`);
+  const { title, noun, empty, ask } = SHELVES[shelf];
+  // what this page lists: the list's, on its shelf
+  const onShelf = (f) => listed(f) && shelfOf(f) === shelf;
+  // a visit of the page (its open, its close) is an ask (asks.js `apps`,
+  // `brains`): what answers for an earlier visit changes nothing
+  const { asks } = h;
   // per app: an action in flight ("dock", "card", "archive"), what the
   // last one said (a refusal, or a preview still being taken), and its card
   const busy = new Map();
   const said = new Map();
-  const cards = new Map();
-  const cardReads = new Map();
-  const cardAttempts = new Map();
-  const cardRows = new Map();
-  const cardsLoad = { wait: 0, timer: null, batch: 0 };
+  const cards = createCards({
+    rows: () => h.state.fragments.filter((f) => onShelf(f) && dockable(f)),
+    visit: () => asks.now(ask),
+    shown: () => shown,
+    draw: () => render(),
+  });
   const shots = new Map();
   const addresses = new Map();
   const addressInfo = new Map();
   const addressEditors = new Map();
+  // What each app can reach (FIN-291, a design's prototype): its secrets by
+  // name with the hosts each may go to (an editor's read, values never),
+  // and the agent it speaks to for its owner when it is a door (the
+  // owner's), as the server says now; and a removal asked (a second press)
+  const reach = new Map();
+  const confirming = new Map();
   const expanded = new Map();
   const editing = new Map();
   const iconEditors = new Map();
@@ -59,7 +182,6 @@ export function createAppsPage(page, h) {
   let accessed = "";
   let accessRead = 0;
   let operation = 0;
-  let visit = 0;
   let shown = false;
 
   const say = (name, text) => {
@@ -76,8 +198,8 @@ export function createAppsPage(page, h) {
   };
 
   async function loadAddresses(force = false) {
-    const mine = visit;
-    const rows = h.state.fragments.filter(listed);
+    const mine = asks.now(ask);
+    const rows = h.state.fragments.filter(onShelf);
     // The server supplies the actual scheme, suffix and preview mark.
     // Eight at a time, rather than one request per app all at once.
     for (let offset = 0; offset < rows.length; offset += 8) {
@@ -87,82 +209,141 @@ export function createAppsPage(page, h) {
           h.originOf(f.name).catch(() => null),
           h.api("GET", `/api/f/${seg(f.name)}/address`).catch((error) => ({ error: error.message })),
         ]);
-        if (mine !== visit) return;
+        if (!asks.current(mine)) return;
         if (origin) addresses.set(f.name, info.address?.url ?? origin);
         addressInfo.set(f.name, info);
         addressEditors.delete(f.name);
       }));
-      if (mine !== visit) return;
+      if (!asks.current(mine)) return;
       render();
     }
   }
 
-  // its card, read with this page's session as the dock's are; "new",
-  // "same", "none" or "stale" (a newer read or visit owns the row)
-  async function loadCard(name, mine) {
-    const request = (cardReads.get(name) ?? 0) + 1;
-    cardReads.set(name, request);
-    const current = () => mine === visit && cardReads.get(name) === request;
-    const known = cards.get(name);
-    const headers = { ...SHELL, ...(known ? { "if-none-match": known.etag } : {}) };
-    const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
-    if (!current()) return "stale";
-    if (r.status === 304) return "same";
-    if (!r.ok) return "none";
-    const body = await r.blob();
-    if (!current()) return "stale";
-    const url = URL.createObjectURL(body);
-    if (known) URL.revokeObjectURL(known.url);
-    cards.set(name, { etag: r.headers.get("etag"), url });
-    return "new";
+  // An app's reach, read now: its secrets (an editor's) and its door (its
+  // owner's); what cannot be read is left unsaid.
+  async function readReach(f) {
+    const [secrets, door] = await Promise.all([
+      h.api("GET", `/api/f/${seg(f.name)}/secrets`).then((r) => r.secrets ?? [], () => null),
+      owns(f) ? h.api("GET", `/api/f/${seg(f.name)}/door`).then((r) => r.bound ?? null, () => null) : null,
+    ]);
+    return { secrets, door };
   }
-
-  // Every card on open; afterwards, a new or changed row's, and one whose
-  // card is not there yet, asked again with bounded backoff and retries.
-  async function loadCards(all = false) {
-    if (!shown) return;
-    clearTimeout(cardsLoad.timer);
-    const mine = visit;
-    const batch = ++cardsLoad.batch;
-    const rows = h.state.fragments.filter((f) => listed(f) && dockable(f));
-    let fresh = false;
-    const asked = [];
-    for (const f of rows) {
-      const fingerprint = JSON.stringify(f);
-      if (!all && cards.has(f.name) && cardRows.get(f.name) === fingerprint) continue;
-      if (all || cardAttempts.get(f.name)?.fingerprint !== fingerprint) {
-        cardAttempts.set(f.name, { fingerprint, count: 0 });
-        fresh = true;
-      }
-      const attempt = cardAttempts.get(f.name);
-      if (attempt.count < CARD_READS_MAX) {
-        ++attempt.count;
-        asked.push(f);
-      }
+  // Each app's reach, eight at a time.
+  async function loadReach() {
+    const mine = asks.now(ask);
+    const rows = h.state.fragments.filter((f) => onShelf(f) && edits(f));
+    for (let offset = 0; offset < rows.length; offset += 8) {
+      await Promise.all(rows.slice(offset, offset + 8).map(async (f) => {
+        const read = await readReach(f);
+        if (!asks.current(mine)) return;
+        reach.set(f.name, read);
+      }));
+      if (!asks.current(mine)) return;
+      render();
     }
-    if (fresh) cardsLoad.wait = 0;
-    const got = await Promise.all(asked.map(async (f) => [f, await loadCard(f.name, mine).catch(() => "none")]));
-    if (mine !== visit || batch !== cardsLoad.batch) return;
-    for (const [f, result] of got) if (result === "new" || result === "same") cardRows.set(f.name, JSON.stringify(f));
-    if (got.some(([, result]) => result === "new")) render();
-    if (got.some(([, result]) => result === "none") && cardsLoad.wait < 60_000) {
-      cardsLoad.wait = Math.min(60_000, cardsLoad.wait ? cardsLoad.wait * 2 : 2_000);
-      cardsLoad.timer = setTimeout(() => { if (mine === visit) loadCards().catch(() => {}); }, cardsLoad.wait);
+  }
+  // Whether an app reaches the person's accounts (Paul, 2026-11-01: only
+  // then its Reaches tab and line show, and it stays theirs and their
+  // agents' alone): a key it holds or a door it is, as their own row says
+  // it (`sharing.reach`, the cell's own rule), else, on one shared with
+  // them they edit, as read here.
+  const reaches = (f) => {
+    if (owns(f)) return f.sharing?.reach === true;
+    const r = reach.get(f.name);
+    return !!r && ((r.secrets?.length ?? 0) > 0 || !!r.door);
+  };
+  // Their own agents in it, by name and what they may do (Paul: a line of
+  // its Reaches); none, nothing.
+  function agentsLine(f) {
+    const row = access?.fragments?.find((x) => x.name === f.name);
+    const mine = (row?.members ?? []).filter((m) => m.kind === "agent" && m.owner === h.state.me?.id);
+    const named = mine.map((m) => {
+      const fragment = h.state.agents.get(m.principal)?.fragment;
+      return `${fragment ? h.titleOf(fragment) : "An agent of yours"} (${m.role === "editor" ? "can edit" : "can view"})`;
+    });
+    return named.length ? h.el("p", "app-reach-agents", `Your agents in it: ${named.join(", ")}`) : null;
+  }
+  // what it reaches, in a line: the hosts its secrets go to, and whom it speaks to
+  function reachLine(f) {
+    const r = reach.get(f.name);
+    const hosts = [...new Set((r?.secrets ?? []).flatMap((s) => s.hosts))];
+    const parts = [hosts.length ? `Reaches ${hosts.join(", ")}` : "", r?.door ? `Speaks for you to ${h.titleOf(r.door.agent)}` : ""].filter(Boolean);
+    return parts.length ? h.el("span", "app-row-meta app-reach-line", parts.join(" · ")) : null;
+  }
+  // the panel: each secret with its hosts and Remove; the door with Unlink;
+  // a press asks once more before it acts
+  function reachPanel(f) {
+    const r = reach.get(f.name);
+    const box = h.el("section", "app-reach");
+    if (!r) {
+      box.append(h.el("p", "muted", "Reading what it can reach…"));
+      return box;
     }
+    const ask = (key, label, act) => {
+      const b = button(confirming.get(f.name) === key ? `${label}? Yes` : label, "reach", () => {
+        if (confirming.get(f.name) !== key) {
+          confirming.set(f.name, key);
+          return render();
+        }
+        confirming.delete(f.name);
+        act();
+      }, busy.get(f.name)?.kind === "reach");
+      b.classList.add("quiet");
+      return b;
+    };
+    const keys = r.secrets ?? [];
+    box.append(h.el("h2", null, "Keys it holds"));
+    if (r.secrets === null) box.append(h.el("p", "muted", "Its keys could not be read."));
+    else if (!keys.length) box.append(h.el("p", "muted", "None. It reaches none of your accounts by a key."));
+    for (const k of keys) {
+      const line = h.el("div", "app-reach-item");
+      const what = h.el("div", "app-reach-what");
+      what.append(h.el("code", null, k.name), h.el("span", "muted", `sent only to ${k.hosts.join(", ")}`));
+      line.append(what, ask(`secret:${k.name}`, "Remove", () => revoke(f.name, "DELETE", `/api/f/${seg(f.name)}/secrets/${encodeURIComponent(k.name)}`)));
+      box.append(line);
+    }
+    if (owns(f) && r.door) {
+      box.append(h.el("h2", null, "Door"));
+      const line = h.el("div", "app-reach-item");
+      const what = h.el("div", "app-reach-what");
+      what.append(h.el("span", null, `Speaks for you to ${h.titleOf(r.door.agent)}`), h.el("span", "muted", `through ${r.door.door}`));
+      line.append(what, ask("door", "Unlink", () => revoke(f.name, "POST", `/api/f/${seg(f.name)}/door`, { act: "unlink" })));
+      box.append(line);
+    }
+    const through = owns(f) && r.door ? "the keys and door above" : "the keys above";
+    const agents = agentsLine(f);
+    if (agents) box.append(agents);
+    box.append(h.el("p", "muted app-reach-note", `Any app can read public web pages. It reaches your accounts only through ${keys.length || r.door ? through : "a key or a door"}.`));
+    return box;
+  }
+  async function revoke(name, method, path, body) {
+    const operation = beginBusy(name, "reach");
+    say(name, "");
+    render();
+    try {
+      await h.api(method, path, body);
+    } catch (e) {
+      say(name, e.message);
+    } finally {
+      endBusy(name, operation);
+    }
+    const f = h.state.fragments.find((x) => x.name === name);
+    if (f) reach.set(name, await readReach(f));
+    render();
   }
 
   async function loadAccess() {
-    const mine = visit;
+    const mine = asks.now(ask);
     const request = ++accessRead;
     const fingerprint = sharingOf();
     const next = await h.api("GET", "/api/access").catch((e) => ({ error: e.message }));
-    if (mine !== visit || request !== accessRead) return false;
+    if (!asks.current(mine) || request !== accessRead) return false;
     access = next;
     accessed = fingerprint;
     return true;
   }
   // what the list says of who is in each of theirs: a change asks again
-  const sharingOf = () => JSON.stringify(h.state.fragments.filter((f) => listed(f) && owns(f)).map((f) => [f.name, f.sharing ?? null]));
+  const sharingOf = () => JSON.stringify(h.state.fragments.filter((f) => onShelf(f) && owns(f)).map((f) => [f.name, f.sharing ?? null]));
 
   // who may open one of the person's own, at a glance
   function whoLine(f) {
@@ -200,6 +381,17 @@ export function createAppsPage(page, h) {
     if (expanded.get(name) === section) expanded.delete(name);
     else expanded.set(name, section);
     render();
+    // its Reaches opened: what it reaches read again, so a key or a door
+    // given it since the page was read shows
+    const f = h.state.fragments.find((x) => x.name === name);
+    if (expanded.get(name) === "reach" && f) {
+      const mine = asks.now(ask);
+      readReach(f).then((read) => {
+        if (!asks.current(mine)) return;
+        reach.set(name, read);
+        render();
+      });
+    }
   }
 
   function titleEditor(f) {
@@ -231,7 +423,7 @@ export function createAppsPage(page, h) {
     input.value = edit.draft;
     input.maxLength = 120;
     input.required = true;
-    input.setAttribute("aria-label", "App name");
+    input.setAttribute("aria-label", `${noun[0].toUpperCase()}${noun.slice(1)} name`);
     input.disabled = edit.saving;
     input.oninput = () => { edit.draft = input.value; };
     const cancel = button("Cancel", "rename-cancel", () => { editing.delete(name); render(); }, edit.saving);
@@ -261,7 +453,8 @@ export function createAppsPage(page, h) {
   function row(f) {
     const name = f.name;
     const doing = busy.get(name)?.kind;
-    const section = expanded.get(name);
+    // its Reaches closes with its reach (its last key removed, its door unlinked)
+    const section = expanded.get(name) === "reach" && !reaches(f) ? null : expanded.get(name);
     const item = h.el("article", "app-row");
     item.dataset.key = name;
     item.dataset.fragment = name;
@@ -280,9 +473,11 @@ export function createAppsPage(page, h) {
       url.rel = "noopener";
       text.append(url);
     }
-    const about = [KIND[f.kind] ?? (f.kind === "app" ? "" : KIND.other), owns(f) ? "" : `Shared with you · ${ROLE[f.role] ?? f.role}`].filter(Boolean).join(" · ");
+    const about = [kindWord(f), owns(f) ? "" : `Shared with you · ${ROLE[f.role] ?? f.role}`].filter(Boolean).join(" · ");
     if (about) text.append(h.el("span", "app-row-meta", about));
     if (owns(f)) text.append(whoLine(f));
+    const reachSaid = reaches(f) && reachLine(f);
+    if (reachSaid) text.append(reachSaid);
     const head = h.el("div", "app-row-head");
     head.append(art, text);
     const card = cards.get(name);
@@ -318,6 +513,7 @@ export function createAppsPage(page, h) {
       return b;
     };
     if (!f.archived && edits(f)) tools.append(tab("Appearance", "appearance"));
+    if (edits(f) && reaches(f)) tools.append(tab("Reaches", "reach"));
     tools.append(tab(owns(f) ? "Sharing" : "People", "sharing"));
     if (owns(f) && !f.archived) tools.append(tab("Address", "address"));
     item.append(tools);
@@ -336,6 +532,8 @@ export function createAppsPage(page, h) {
         }
       } else if (section === "sharing") {
         panel.dataset.shareEditor = name;
+      } else if (section === "reach") {
+        panel.append(reachPanel(f));
       } else if (section === "address") {
         panel.dataset.addressEditor = name;
         panel.append(h.el("p", "muted", "Loading address…"));
@@ -352,7 +550,7 @@ export function createAppsPage(page, h) {
     const words = said.get(name);
     if (words) { const p = h.el("p", "app-row-said", words); p.setAttribute("role", "status"); item.append(p); }
     const edit = editing.get(name);
-    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null]);
+    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null, reach.get(name) ?? null, confirming.get(name) ?? null]);
     item.dataset.art = artReadiness(item);
     return item;
   }
@@ -416,7 +614,7 @@ export function createAppsPage(page, h) {
     const message = h.el("p", "app-address-said");
     message.setAttribute("role", "status");
     form.append(field, claim);
-    box.append(form, h.el("p", "muted app-address-note", "First come, first served. This address stays with this app."), message);
+    box.append(form, h.el("p", "muted app-address-note", `First come, first served. This address stays with this ${noun}.`), message);
     form.onsubmit = async (event) => {
       event.preventDefault();
       if (claim.disabled) return;
@@ -496,7 +694,7 @@ export function createAppsPage(page, h) {
 
   function render() {
     if (!shown) return;
-    const all = h.state.fragments.filter(listed);
+    const all = h.state.fragments.filter(onShelf);
     const live = all.filter((f) => !f.archived);
     const archived = all.filter((f) => f.archived);
     let list = page.querySelector(".apps-list");
@@ -504,7 +702,7 @@ export function createAppsPage(page, h) {
     if (!list) {
       const wrap = h.el("div", "apps-layout");
       const head = h.el("header", "apps-intro");
-      head.append(h.el("h1", null, "Apps"));
+      head.append(h.el("h1", null, title));
       list = h.el("div", "apps-list");
       folded = h.el("details", "apps-archived");
       folded.append(h.el("summary"), h.el("div", "apps-list"));
@@ -514,7 +712,7 @@ export function createAppsPage(page, h) {
     if (access?.error && !page.querySelector(".apps-access-failed")) list.before(h.el("p", "settings-warning apps-access-failed", `Who has access did not load: ${access.error}`));
     if (!access?.error) page.querySelector(".apps-access-failed")?.remove();
     place(list, live.map(row));
-    if (!live.length) list.replaceChildren(h.el("p", "muted apps-empty", "No apps yet."));
+    if (!live.length) list.replaceChildren(h.el("p", "muted apps-empty", empty));
     folded.hidden = !archived.length;
     folded.querySelector("summary").textContent = `Archived (${archived.length})`;
     place(folded.querySelector(".apps-list"), archived.map(row));
@@ -554,7 +752,7 @@ export function createAppsPage(page, h) {
   // a shot asked for: waited for by its report (status's `page.at` from
   // when it was wanted on), then its card read again
   async function newPreview(name) {
-    const mine = visit;
+    const mine = asks.now(ask);
     const operation = beginBusy(name, "card");
     say(name, "");
     render();
@@ -562,27 +760,27 @@ export function createAppsPage(page, h) {
     try {
       asked = await h.api("POST", `/api/f/${seg(name)}/card`);
     } catch (e) {
-      if (mine === visit) say(name, e.message);
+      if (asks.current(mine)) say(name, e.message);
       return;
     } finally {
       endBusy(name, operation);
-      if (mine === visit) render();
+      if (asks.current(mine)) render();
     }
-    if (mine !== visit) return;
+    if (!asks.current(mine)) return;
     shots.set(name, { since: asked.since, started: Date.now() });
     render();
     const until = Date.now() + SHOT_WAIT_MS;
     let done = false;
     // bounded: until the report comes, the page closes, or SHOT_WAIT_MS
-    while (shown && mine === visit && Date.now() < until) {
+    while (shown && asks.current(mine) && Date.now() < until) {
       const status = await h.api("GET", `/api/f/${seg(name)}/status`).catch(() => null);
       if (status?.page && status.page.at >= asked.since) { done = true; break; }
       await new Promise((r) => setTimeout(r, 1_000));
     }
-    if (mine !== visit) return;
+    if (!asks.current(mine)) return;
     shots.delete(name);
-    await loadCard(name, mine).catch(() => "same");
-    if (mine !== visit) return;
+    await cards.read(name, mine).catch(() => "same");
+    if (!asks.current(mine)) return;
     say(name, done ? "" : "The preview is still being taken.");
     render();
   }
@@ -591,25 +789,25 @@ export function createAppsPage(page, h) {
     // shown at `/apps`: the list as it is, who has access, and each card
     async open() {
       shown = true;
-      ++visit;
+      asks.ask(ask);
       // preview presentation is a visit's; a Dock or archive mutation is
       // still the one server write this app may have in flight
       for (const [name, operation] of busy) if (operation.kind === "card") busy.delete(name);
       shots.clear();
       page.replaceChildren();
-      cardsLoad.wait = 0;
+      cards.opened();
       render();
-      const reading = loadCards(true).catch(() => {});
+      const reading = cards.load(true).catch(() => {});
       const urls = loadAddresses(true);
+      loadReach().catch(() => {});
       if (await loadAccess()) render();
       await reading;
       await urls;
     },
     close() {
       shown = false;
-      ++visit;
-      ++cardsLoad.batch;
-      clearTimeout(cardsLoad.timer);
+      asks.ask(ask);
+      cards.closed();
       shots.clear();
       for (const editor of iconEditors.values()) editor.dispose();
       iconEditors.clear();
@@ -622,7 +820,7 @@ export function createAppsPage(page, h) {
     async listed() {
       if (!shown) return;
       render();
-      loadCards().catch(() => {});
+      cards.load().catch(() => {});
       loadAddresses().catch(() => {});
       if (sharingOf() !== accessed && await loadAccess()) render();
     },
@@ -630,7 +828,7 @@ export function createAppsPage(page, h) {
     async shared() {
       if (!shown) return;
       render();
-      loadCards().catch(() => {});
+      cards.load().catch(() => {});
       if (await loadAccess()) render();
     },
   };

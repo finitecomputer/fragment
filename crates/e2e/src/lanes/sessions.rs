@@ -15,12 +15,13 @@ use serde_json::{json, Value};
 use sha2::Digest;
 
 use crate::api::Api;
+use crate::browser::{Browser, Page};
 use crate::Suite;
 
 /// The old Finite's export's chats, as its export.py writes them: a chat,
 /// a chat large enough to be a blob, a month's scheduled runs, and a chat
 /// past what a conversation may hold.
-fn export(root: &Path) -> Result<()> {
+pub(super) fn export(root: &Path) -> Result<()> {
     export_with(root, false)
 }
 
@@ -110,11 +111,30 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let page = b.open(&format!("{}/settings", api.base))?;
     b.viewport(&page, 1400, 900, false)?;
-    let listed = b.until(&page, "document.querySelectorAll('#archive:not([hidden]) #archive-rows .row').length === 2", wait);
-    let rows = b.eval(&page, "[...document.querySelectorAll('#archive-rows .row')].map((r) => r.textContent)")?;
-    s.ok("the shell lists the archive's chats under Session Archive, newest first", listed && rows == json!(["A long letter", "Beans"]), &rows);
+    // History lists them, imported, newest first
+    let imported = "document.querySelectorAll('.history-row[data-kind=\"imported\"]')";
+    // the shell started (its layout shown, the link with it)
+    b.until(&page, "!document.getElementById('layout').hidden && !!document.getElementById('history-link')?.offsetParent", wait);
+    b.click(&page, "#history-link")?;
+    b.until(&page, "!!document.querySelector('.history-filter[data-filter=\"imported\"]')?.offsetParent", wait);
+    b.click(&page, ".history-filter[data-filter=\"imported\"]")?;
+    let listed = b.until(&page, &format!("{imported}.length === 2"), wait);
+    let rows = b.eval(&page, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent)"))?;
+    s.ok("History lists the archive's chats as imported, newest first", listed && rows == json!(["A long letter", "Beans"]), &rows);
+    let beans = ".history-row[data-key=\"imported:hermes-e2e_beans\"]";
 
-    b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
+    // History's search finds one by words its title and first words lack,
+    // in the archive's own search (the import wrote it)
+    b.click(&page, ".history-search input")?;
+    b.type_text(&page, "spring")?;
+    let found = b.until(&page, &format!("{imported}.length === 1 && !!document.querySelector('{beans} .history-preview.found')?.textContent.includes('spring')"), wait);
+    let seen = b.eval(&page, &format!("({{ rows: [...{imported}].map((r) => r.querySelector('.history-preview')?.textContent ?? ''), status: document.querySelector('.history-status')?.textContent ?? '' }})"))?;
+    s.ok("History's search finds an imported chat by the words in it, with its snippet", found, &seen);
+    b.screenshot(&page, &shots.join("history-search.png"))?;
+    b.eval(&page, "(() => { const i = document.querySelector('.history-search input'); i.value = ''; i.dispatchEvent(new Event('input')); return true; })()")?;
+    b.until(&page, &format!("{imported}.length === 2"), wait);
+
+    b.click(&page, &format!("{beans} .history-open"))?;
     let opened = b.until(&page, "document.getElementById('chat-title').textContent === 'Beans' && document.getElementById('chat-options').hidden", wait);
     let frame = "?s=hermes-e2e_beans";
     let drawn = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelectorAll('.msg').length === 2").is_ok_and(|v| v == true));
@@ -137,18 +157,25 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let folded = s.eventually(wait, || {
         b.eval_in_frame(&page, &name, "[...document.querySelectorAll('details.kind')].map((d) => [d.open, d.querySelector('summary').textContent]).join('|') === 'false,Scheduled runs (1)'").is_ok_and(|v| v == true)
     });
-    let headed = b.until(&page, "document.getElementById('chat-title').textContent === 'Session Archive' && !document.querySelector('#archive-rows .row.active')", wait);
+    let headed = b.until(&page, "document.getElementById('chat-title').textContent === 'Session Archive'", wait);
     s.ok(
         "the archive's own list shows its chats and folds its scheduled runs away, and the shell's heading follows it there",
         folded && headed,
         b.eval_in_frame(&page, &name, "document.body.innerText.slice(0, 300)").unwrap_or_default(),
     );
     b.screenshot(&page, &shots.join("list.png"))?;
+    still_loading_in_frame(s, &mut b, &page, &name, &shots)?;
 
-    // Continue: a chat with their agent, its history first
-    b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
+    // Continue: the shell asks with which agent (one here: "Continue"), and
+    // makes a chat with it, its history first
+    b.click(&page, "#history-link")?;
+    b.until(&page, &format!("!!document.querySelector('{beans} .history-open')"), wait);
+    b.click(&page, &format!("{beans} .history-open"))?;
     let offered = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelector('.archive-continue:not([hidden])')?.textContent === 'Continue'").is_ok_and(|v| v == true));
     b.eval_in_frame(&page, frame, "(document.querySelector('.archive-continue').click(), true)")?;
+    let asked = b.until(&page, "document.querySelector('dialog.continue-ask[open] .continue-go')?.textContent === 'Continue'", wait);
+    b.screenshot(&page, &shots.join("continue-ask.png"))?;
+    b.eval(&page, "(document.querySelector('dialog.continue-ask .continue-go').click(), true)")?;
     let me = api.identity(&keys)?;
     let mut chat = String::new();
     let made = s.eventually(wait, || {
@@ -165,7 +192,7 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let tail: Vec<&str> = first["body"]["messages"].as_array().into_iter().flatten().filter_map(|m| m["text"].as_str()).collect();
     s.ok(
         "Continue makes a chat with the person's agent, titled as the conversation, whose first record is its history, theirs",
-        offered && made && first["body"]["kind"] == "history" && first["principal"] == me.as_str() && tail == ["plant beans?", "in spring"] && first["body"]["key"] == "hermes-e2e_beans",
+        offered && asked && made && first["body"]["kind"] == "history" && first["principal"] == me.as_str() && tail == ["plant beans?", "in spring"] && first["body"]["key"] == "hermes-e2e_beans",
         &first,
     );
     let shown = s.eventually(wait, || b.eval_in_frame(&page, &chat, "document.querySelector('.history-block .history-head')?.textContent?.startsWith('From “Beans”') ?? false").is_ok_and(|v| v == true));
@@ -181,16 +208,60 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
         !reply.is_empty()
     });
     s.ok(
-        "the agent is told what was said there at its first turn in the chat, as a note",
-        said.status == 200 && answered && reply.contains("(told: This chat goes on from a conversation your owner had with you before they moved here, “Beans”") && reply.contains("Your owner: plant beans?\nYou: in spring"),
+        "the agent is told what was said there at its first turn in the chat, as a note, whose words they were",
+        // this agent is not named as the conversation's was (Juniper): the
+        // note says whose words they were, never "you"
+        said.status == 200 && answered && reply.contains("(told: This chat goes on from a conversation your owner had with Juniper before they moved here, “Beans”") && reply.contains("Your owner: plant beans?\nJuniper: in spring"),
         &reply,
     );
 
-    // the archive offers that chat now
-    let linked = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=continued/hermes-e2e_beans.json"), None)?;
-    b.click(&page, "#archive-rows [data-key=\"archived:hermes-e2e_beans\"]")?;
-    let again = s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelector('.archive-continue:not([hidden])')?.textContent === 'Open the chat'").is_ok_and(|v| v == true));
-    s.ok("the archive keeps the chat it was continued in, and offers it", linked.body["chat"] == chat.as_str() && again, &linked.body);
+    // History offers that chat now (one a conversation and agent), its row's
+    // Continue an Open, and opens it
+    b.click(&page, "#history-link")?;
+    let control = format!("{beans} .continue-control .continue-go");
+    let open = b.until(&page, &format!("document.querySelector({control:?})?.textContent === 'Open'"), wait);
+    b.screenshot(&page, &shots.join("history-open.png"))?;
+    b.click(&page, &control)?;
+    let reopened = b.until(&page, &format!("[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {chat:?}"), wait);
+    let listed = api.signed(&keys, "GET", "/api/fragments", None)?;
+    let beans = listed.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "chat" && f["title"] == "Beans").count();
+    s.ok("Continue asked again offers the chat it made with that agent, and opens it, making none other", open && reopened && beans == 1, beans);
+    Ok(())
+}
+
+/// The archive's page whose bundle does not come, in the shell's frame (a
+/// tab of the last release asks for a `sessions.<hash>.js` this one lacks):
+/// after a while it says it is still loading, with a reload of its own
+/// page, in its frame. Valid: a page that loads never says it (its script
+/// takes it away). Its bundle refused and the frame loaded again: nothing
+/// for a while, then "Still loading… Reload", the link to the frame's own
+/// page; its Reload, the bundle let through, draws the list again.
+fn still_loading_in_frame(s: &mut Suite, b: &mut Browser, page: &Page, name: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let line = "document.getElementById('still-loading')";
+    let listed = format!("!{line} && !!document.querySelector('details.kind')");
+    let gone = b.eval_in_frame(page, name, &format!("!{line}"))?;
+    s.ok("the archive's page that loads never says it is still loading (its script took the line away)", gone == true, &gone);
+    let frame = b.frame(name)?;
+    b.block(&frame, &["*/sessions.*.js"])?;
+    b.eval(&frame, "(location.reload(), true)")?;
+    let styled = format!("!!{line} && getComputedStyle({line}).position === 'fixed'");
+    let quiet = b.until(&frame, &format!("{styled} && getComputedStyle({line}).visibility === 'hidden'"), wait);
+    let t0 = std::time::Instant::now();
+    let shown = quiet && b.until(&frame, &format!("{styled} && getComputedStyle({line}).visibility === 'visible'"), wait);
+    let after = t0.elapsed();
+    let seen = b.eval(&frame, &format!("({{ said: {line}?.textContent ?? null, link: {line}?.querySelector('a')?.href ?? null, here: location.href }})"))?;
+    let _ = b.screenshot(page, &shots.join("still-loading.png"));
+    s.ok(
+        "its bundle refused, the archive's frame says nothing for a while, then \"Still loading… Reload\", the link to its own page",
+        shown && after >= std::time::Duration::from_secs(8) && seen["said"] == "Still loading… Reload" && seen["link"] == seen["here"],
+        json!({ "seen": seen, "afterMs": after.as_millis() as u64 }),
+    );
+    b.block(&frame, &[])?;
+    b.eval(&frame, "(document.querySelector('#still-loading a')?.click(), true)")?;
+    let back = b.until(&frame, &listed, wait);
+    s.ok("its Reload, the bundle let through, draws the archive's list again", back, b.eval(&frame, "document.body.innerText.slice(0, 200)").unwrap_or_default());
+    b.detach(frame)?;
     Ok(())
 }
 
@@ -225,6 +296,12 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         "an export's chats are imported into an archive made for its person, the one past the limit refused alone",
         first["made"] == true && first["added"] == 3 && refused == ["e2e_huge"] && first["holds"] == json!({ "chat": 2, "cron": 1, "subagent": 0 }),
         &first,
+    );
+    // every fragment has its search (the search section checks what it holds)
+    s.ok(
+        "the import writes its archive's search, one source each conversation it keeps",
+        first["search"]["state"] == "written" && first["search"]["written"] == 3 && first["search"]["refused_count"] == 0,
+        &first["search"],
     );
     let status = api.status(&keys, &name)?;
     let listed = api.signed(&keys, "GET", "/api/fragments", None)?;
@@ -287,6 +364,13 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         &from_hermes,
     );
 
+    // a home's zip, as a stage brings one (FIN-463), read through its
+    // layout: its database copied out, the same conversations, nothing twice
+    let zipped = s.dir("sessions-zip").join("home.zip");
+    fragment_fakes::old_home::zip(&zipped, &[("agent/hermes-home/state.db".to_string(), std::fs::read(hermes.join("state.db"))?)])?;
+    let from_zip = s.cli_json(api, &home, &["session", "import", &path(&zipped), "--layout", &path(&fragment_fakes::old_home::layout()), "--json"])?;
+    s.ok("a home's zip, read through its layout, holds the same conversations, and adds none twice", from_zip["added"] == 0 && from_zip["unchanged"] == 6, &from_zip);
+
     // restart: an import that stopped after its conversations, before its
     // indexes, is put right by the next
     let orphan = Session {
@@ -333,6 +417,18 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         "an agent acting for its owner finds their archive, owned by them, reads it and writes to it",
         found["name"] == name.as_str() && found["owned"] == true && read.status == 200 && wrote.status == 200,
         json!({ "found": found, "read": read.status, "wrote": wrote.status }),
+    );
+    // what its import may send (`limits`, which the CLI reads): an agent's
+    // uploads go from its computer, a blob's at most; its owner's are the
+    // deployment's (this fleet's own, on a hosted run its zone's)
+    let owners = api.signed(&keys, "GET", "/api/fragments", None)?.body["limits"].clone();
+    let blob = fragment_proto::limits::BLOB_MAX_BYTES;
+    s.ok(
+        "an agent's list, acting for its owner, says its files may be a blob's size, past its owner's bound",
+        theirs.body["limits"] == json!({ "uploadMaxBytes": blob, "filesPerMessage": fragment_proto::limits::FILES_PER_MESSAGE })
+            && (s.hosted() || owners["uploadMaxBytes"] == crate::UPLOAD_MAX_BYTES)
+            && owners["uploadMaxBytes"].as_u64().is_some_and(|o| o < blob),
+        json!({ "agent": theirs.body["limits"], "owner": owners }),
     );
     // and one whose owner has none makes theirs, as the CLI does for them
     let other = api.person()?;

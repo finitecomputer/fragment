@@ -208,7 +208,8 @@ pub(crate) async fn named(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             if !who.org_place(org).is_some_and(|p| p.admin) {
                 return Err(CellError::new(ErrorCode::Forbidden, "only an org's content admins list its fragments"));
             }
-            json_answer(&crate::listed(env, &fragment_core::ledger::org::Payer::Org(org.to_string()).name()).await?)
+            let list = crate::principal::calls::List::default();
+            crate::principal::pass(env, &fragment_core::ledger::org::Payer::Org(org.to_string()).name(), &list).await
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/orgs/{org}/{}", m.as_ref(), rest.join("/")))),
     }
@@ -296,8 +297,14 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Get, ["orgs", org]) => json_answer(&ask_registry(env, &OrgOf { by: None, org: Some(org.to_string()) }).await?),
         (Method::Get, ["people"]) => json_answer(&ask_registry(env, &admin::People { q: param(url, "q"), after: param(url, "after") }).await?),
         (Method::Get, ["people", person]) => json_answer(&person_page(env, person).await?),
+        // FIN-352's census: reach open by link or public, counted (reach.rs)
+        (Method::Get, ["people", person, "reach"]) => json_answer(&crate::reach::census(env, person).await?),
         (Method::Put, ["people", person, "computer", "image"]) => json_answer(&pin(env, &by, person, &bytes).await?),
         (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
+        (Method::Get, ["glance"]) => json_answer(&crate::glance::glance(env, cfg, url).await?),
+        // the finite.computer move's moves, and staff's acts on one
+        (m, ["migrations", rest @ ..]) => crate::migrations::admin(env, cfg, &by, m, rest, url, &bytes).await,
+        (Method::Post, ["objects", class, "wake"]) => json_answer(&crate::routed::wake(env, class, body(&bytes)?).await?),
         (Method::Get, ["log"]) => {
             let before = param(url, "before").map(|b| b.parse::<u64>().map_err(|_| CellError::invalid("`before` is an entry's number"))).transpose()?;
             json_answer(&ask_registry(env, &admin::Log { before }).await?)
@@ -458,7 +465,7 @@ async fn mail_comp(env: &Env, cfg: &Config, comped: &Comped) -> bool {
 /// learns whether it stays awake (a push before it was made found none, and
 /// counted as done). The computer is made whatever this answers; a push
 /// not queued fails the making, so its caller makes it again (the same
-/// one: `computer/init` is idempotent), which asks again.
+/// one: `POST /api/computers` is idempotent), which asks again.
 pub(crate) async fn computer_made(env: &Env, person: &str) -> CellResult<()> {
     ask_registry(env, &SyncSeat { person: person.to_string() }).await.inspect_err(|e| {
         console_error!("{}", serde_json::json!({ "seat-sync": person, "failed": e.message }));

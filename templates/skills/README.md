@@ -10,7 +10,7 @@ default agent. A fragment on it names it and holds nothing else:
 ## The contract
 
 - **Its files are the release's managed set.** Every file of this template
-  but its manifest, this README and `site/` is its *data*
+  but its manifest and this README is its *data*
   (crates/templates `blessed::is_data`). A fragment on the template lists
   and reads that data as its own files, from the platform's current
   release: `GET /api/f/{name}/files` (each such row `release: true`, its
@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Sixteen skills. Seven are Fragment platform contracts:
+Eighteen skills. Eight are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -47,6 +47,7 @@ Sixteen skills. Seven are Fragment platform contracts:
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
 | chat-attachments-finite | A file sent in a Fragment chat as an attachment (`MEDIA:` in a reply), not by email or a path |
+| slides-finite | The slides template: a deck's build, its notes and presenting live |
 
 And six are integrations Paul retains:
 
@@ -65,6 +66,13 @@ It follows the project's visual system and checks contrast for readable text,
 including placeholders. `apps-finite` points to it for art direction and keeps
 the Fragment build, publish and sharing contract. Image generation follows
 `image-generation-finite` and its platform limits.
+
+`import-agent-home` brings an agent's home over from where it ran (a
+folder, a zip, or a stage): the judgment around `fragment home` and
+`fragment session import` (its SOUL, memories, skills and routines). A
+platform's own paths and habits are a profile beside it,
+`profiles/<layout>.md` and `profiles/<layout>.layout.json`, removed with
+that platform's move.
 
 `gws-docs` is Google Workspace CLI's Docs command guide,
 pinned to v0.22.5 like the image's CLI (source and Apache-2.0 license in
@@ -107,6 +115,7 @@ the baseline again.
 
 ## Its page
 
-`site/` lists the skills by category and shows each one's `SKILL.md`,
-reading the fragment's own `__files` and `__file`, so it shows what its
-owner's agents have.
+The platform's files view (`fragment.json` `files.page`, as brains and
+notes have): its folders and each skill's `SKILL.md`, read from the
+fragment's own `__files` and `__file`, so it shows what its owner's agents
+have.

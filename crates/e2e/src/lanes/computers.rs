@@ -35,10 +35,10 @@ use serde_json::{json, Value};
 
 use sha2::{Digest, Sha256};
 
-use super::jobs::records;
-use super::ledger::{charged, entries, quiet};
+use super::jobs::{events, records};
+use super::ledger::{charged, entries, quiet, usage};
 use crate::api::{Api, Call, Socket};
-use super::credentials::{model_checks, placeholder, swap_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS};
+use super::credentials::{model_checks, placeholder, swap_checks, vault_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
@@ -84,6 +84,22 @@ pub(super) fn told(api: &Api, owner: &crate::Keys, agent: &str, fragment: &str) 
 /// or null.
 pub(super) fn notice(v: &Value, kind: &str) -> Value {
     v["notices"].as_array().and_then(|l| l.iter().find(|n| n["kind"] == kind).cloned()).unwrap_or(Value::Null)
+}
+
+/// Its owner's restart of start `asked` (docs/api.md): the answer, once the
+/// restart is under way (`starting`, its start owed to its alarm, whatever
+/// it restarted), and its view, read until it is awake on a newer start or
+/// won't wake, within `within`: whether it got there, and the last view
+/// read. FIN-399: a restart answered `awake` or `starting` by timing.
+pub(super) fn restart_followed(s: &Suite, api: &Api, owner: &crate::Keys, id: &str, asked: u64, within: Duration) -> Result<(crate::api::Reply, Value, bool)> {
+    let r = api.patient(within + Duration::from_secs(60)).signed(owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({ "generation": asked })))?;
+    let mut last = Value::Null;
+    let done = r.status == 200
+        && s.eventually(within, || {
+            last = api.signed(owner, "GET", &format!("/api/computers/{id}"), None).map(|v| v.body).unwrap_or(Value::Null);
+            last["generation"].as_u64().is_some_and(|g| g > asked) && (last["phase"] == "awake" || last["phase"] == "wont_wake")
+        });
+    Ok((r, last, done))
 }
 
 /// A computer's phase, as its owner reads it.
@@ -134,6 +150,15 @@ pub(super) fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::
     api.unsigned("POST", "/api/test/computer", Some(&body))
 }
 
+/// Pins computer `id`'s uses to this month for the lane (its `clock` lever,
+/// run on from the 15th), so the uses the lane makes and its reads of the
+/// month's are in one month however late in a month it runs: its month.
+pub(super) fn pin_month(api: &Api, id: &str) -> Result<String> {
+    let r = lever_with(api, id, json!({ "op": "clock", "offsetMs": super::ledger::mid_month_offset_ms() }))?;
+    anyhow::ensure!(r.status == 200, "the computer's clock moves: {r}");
+    Ok(r.body["month"].as_str().unwrap_or_default().to_string())
+}
+
 /// The newest save computer `id` keeps (the lever's `saves`), if any.
 pub(super) fn newest_save(api: &Api, id: &str) -> Value {
     lever(api, id, "saves").map(|r| r.body["saves"][0].clone()).unwrap_or(Value::Null)
@@ -146,6 +171,12 @@ const SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::
 /// On a preview, a model call Hermes makes after its reply (a title) can
 /// keep its work open a while, and a save of its `/data` takes seconds more.
 const HOSTED_SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 120);
+/// An awake save's disk read follows its `Saved` in the same event, once
+/// the save is listed: after the pass forgetting older saves, its hold let
+/// go (an exec), and the `df` (an exec), each bounded by the cell at 30 s
+/// at most (cell/src/computer.rs `FORGET_PASS_MS`, `MARK_EXEC_MS`,
+/// `DISK_READ_MS`), and a few seconds more.
+const DISK_READ_AFTER_SAVE: Duration = Duration::from_secs(30 + 30 + 5 + 10);
 /// The deployment's own image answers the hold: before its saves, awake
 /// and at its sleep (the hosted rung of the stub's save checks).
 const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered the hold (held)";
@@ -154,8 +185,8 @@ const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered 
 /// the stub and the fakes.
 const SAVE_CHECKS: [&str; 7] = [
     "awake and idle after a turn, it has a save newer than the turn, held",
-    "it keeps at most three saves, newest first, and its view lists them",
-    "an always-on computer is saved without sleeping",
+    "and its disk is read again after that awake save",
+    "it keeps its newest three saves (and the one it came up from), newest first, and its view lists them",
     "a save leaves out what its guest's answer to the hold names, and keeps the rest (DirectoryBackup's exclude)",
     "a save is two records, /data and its work (/data/work), and a wake restores both",
     "a sleep whose save fails keeps its container, and its view says so",
@@ -163,10 +194,13 @@ const SAVE_CHECKS: [&str; 7] = [
 ];
 
 /// Its saves (docs/computers.md, Lifecycle): a turn's end
-/// saves it awake, an always-on computer is saved, a failed save keeps
-/// its container (the lever's `fail-saves`), and one that works sleeps it.
-/// Starts awake, ends asleep. Answers how many replies of its agent it
-/// added.
+/// saves it awake, and its disk is read after (`reads_disk_after`), a
+/// failed save keeps its container (the lever's `fail-saves`), and one that
+/// works sleeps it. That an always-on computer is saved awake too is the
+/// core's decision (`always_on_is_saved_without_sleeping`,
+/// `always_on_never_sleeps_nor_meters`): the cell carries out the same
+/// save either way. Starts awake, ends asleep. Answers how many replies of
+/// its agent it added.
 fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
     let view = || api.signed(c.owner, "GET", &format!("/api/computers/{}", c.id), None).map(|r| r.body).unwrap_or(Value::Null);
     let reply_of = |seq: i64| {
@@ -187,23 +221,23 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
         saved && v["phase"] == "awake" && newest["held"] == true && newest["generation"] == v["restored"]["generation"],
         format!("replied at {replied_at}; newest save {newest}; {v}"),
     );
+    // the cell reads its disk once that save's `Saved` is applied (after
+    // it, so the read may still be under way): a read at or after the save,
+    // with no start since (the same generation)
+    let saved_at = newest["atMs"].as_i64().unwrap_or(i64::MAX);
+    let mut disk = Value::Null;
+    let read = saved && s.eventually(DISK_READ_AFTER_SAVE, || {
+        disk = lever(api, c.id, "saves").map(|r| r.body["disk"].clone()).unwrap_or(Value::Null);
+        disk["at"].as_i64().is_some_and(|at| at >= saved_at)
+    });
+    s.ok(SAVE_CHECKS[1], read && disk["total"].as_u64().is_some_and(|t| t > 0) && view()["restored"]["generation"] == v["restored"]["generation"], json!({ "save": newest, "disk": disk }));
     let all = lever(api, c.id, "saves")?.body["saves"].clone();
     let numbers: Vec<u64> = all.as_array().map(|l| l.iter().filter_map(|x| x["number"].as_u64()).collect()).unwrap_or_default();
     s.ok(
-        SAVE_CHECKS[1],
-        (1..=3).contains(&numbers.len()) && numbers.windows(2).all(|w| w[0] > w[1]) && v["saves"].as_array().map(|l| l.len()) == Some(numbers.len()) && v["saves"][0]["id"] == newest["id"],
+        SAVE_CHECKS[2],
+        ((1..=3).contains(&numbers.len()) || (numbers.len() == 4 && all[3]["id"] == v["restored"]["save"])) && numbers.windows(2).all(|w| w[0] > w[1]) && v["saves"].as_array().map(|l| l.len()) == Some(numbers.len()) && v["saves"][0]["id"] == newest["id"],
         format!("{all} / {}", v["saves"]),
     );
-    // always on: a turn's end saves it, and it never sleeps for it
-    let r = lever_with(api, c.id, json!({ "op": "always-on", "on": true }))?;
-    let said = say(61, "a turn while always on")?;
-    let answered = r.status == 200 && s.eventually(c.wake, || reply_of(seq_of(&said)).is_some());
-    let replied_at = reply_of(seq_of(&said)).and_then(|r| r["at"].as_i64()).unwrap_or(i64::MAX);
-    let saved = answered && s.eventually(SAVED_AFTER_WORK, || saved_after(replied_at));
-    let generation = view()["restored"]["generation"].clone();
-    let v = view();
-    s.ok(SAVE_CHECKS[2], saved && v["phase"] == "awake" && v["restored"]["generation"] == generation, format!("{r} / {}", newest_save(api, c.id)));
-    lever_with(api, c.id, json!({ "op": "always-on", "on": false }))?;
     // what the guest's answer to the hold names is left out of its save (the
     // stub names `*.scratch`), and the rest is kept, across a sleep and a wake
     let said = |n: u32, text: &str| -> Result<String> {
@@ -249,7 +283,47 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
         r.body["phase"] == "asleep" && r.body.get("why").is_none() && newest["generation"] == generation && newest["id"] != saves_before["id"],
         format!("{r} / {newest}"),
     );
-    Ok(8)
+    Ok(7)
+}
+
+/// The disk checks (docs/computers.md, "What its owner is told"), each
+/// skipped off the stub and the fakes.
+const DISK_CHECKS: [&str; 2] = [
+    "its disk is read in its start, before its guest runs: its size and what is free, read by that start",
+    "and in its next start, by that start",
+];
+
+/// Its disk, read (`df`) in each start before its guest is let go
+/// (`try_start`; its read after an awake save is the save checks'), as the
+/// `saves` lever shows it, each read naming its start. A start that came up
+/// has read it, so a view that says awake (an owner's wake, or the recovery
+/// checks' restart, which its alarm made) finds that start's read there: no
+/// wait. FIN-462: read once a start was ready, the read raced its guest's
+/// first seconds, the start's slowest moment, and could run out its bound
+/// (`DISK_READ_MS`) on a loaded box, the read never to come.
+/// When a read finds it filling is `disk_filling`'s, proved by the core's
+/// and the shell's tests: a test fleet's computers share their host's
+/// disk. Starts and ends awake.
+fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
+    let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
+    let view = || api.signed(c.owner, "GET", &path(""), None).map(|r| r.body).unwrap_or(Value::Null);
+    let disk = || lever(api, c.id, "saves").map(|r| r.body["disk"].clone()).unwrap_or(Value::Null);
+    let at = |d: &Value| d["at"].as_i64().unwrap_or(0);
+    // read by the start that came up at `restored`, before it came up
+    let read_by = |d: &Value, restored: &Value| d["generation"].as_u64().is_some_and(|g| g > 0) && d["generation"] == restored["generation"] && at(d) <= restored["at"].as_i64().unwrap_or(0);
+    let (v, d) = (view(), disk());
+    let (total, free) = (d["total"].as_u64().unwrap_or(0), d["free"].as_u64().unwrap_or(u64::MAX));
+    s.ok(DISK_CHECKS[0], v["phase"] == "awake" && read_by(&d, &v["restored"]) && total > 0 && free <= total, json!({ "disk": d, "restored": v["restored"] }));
+    // a sleep and a wake: read in the start the wake made
+    api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let started = disk();
+    s.ok(
+        DISK_CHECKS[1],
+        woke.body["phase"] == "awake" && read_by(&started, &woke.body["restored"]) && at(&started) > at(&d) && started["total"].as_u64() == Some(total),
+        json!({ "disk": started, "restored": woke.body["restored"] }),
+    );
+    Ok(())
 }
 
 /// The bound checks (r4, r6: a sick container after a wake, and a sleep
@@ -531,10 +605,10 @@ fn keepalive_across_a_reload(s: &mut Suite, api: &Api, owner: &crate::Keys, id: 
 /// The recovery checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes (the lever fails saves, and the
 /// node's bound is short: `crate::UNSAVED_MAX_MS`).
-const RECOVERY_CHECKS: [&str; 12] = [
+const RECOVERY_CHECKS: [&str; 13] = [
     "a sleep whose save fails tells its owner at once: since when its work is in no save, the save a stop goes back to, and when the bound stops it",
     "no one else restarts it",
-    "its owner's restart, its save failing too: it starts again at once, from its last save",
+    "its owner's restart, its save failing too: it answers starting, and comes up again from its last save",
     "the same restart asked again (the same start named) restarts nothing more",
     "its owner is told what the restart went back to: which save, and when it was taken",
     "seen, it is told no more; seen again, the same; a notice never told is refused",
@@ -544,6 +618,7 @@ const RECOVERY_CHECKS: [&str; 12] = [
     "asleep, its owner's restart starts it, fresh from its save",
     "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from the start of a sleep's try whose save failed to its bound, or to the restart that ended it; the time before and after is",
     "a restart whose save fails, with nothing done since the save it came up from: it goes back to that save and tells its owner nothing, since nothing was lost (Paul, 2026-10-23); a notice of it is refused",
+    "its owner told late (the lever's slow-tell), the restart still answers starting, its view as its start was owed, though the alarm made that start while it waited; then awake",
 ];
 
 /// What its owner is told, and the way back to working (
@@ -604,12 +679,12 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     // told
     let restart = || api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": g })));
     let restarted_at = crate::api::now_ms();
-    let r = restart()?;
-    let restored = r.body["restored"].clone();
+    let (r, v, up) = restart_followed(s, api, c.owner, c.id, g, c.wake)?;
+    let restored = v["restored"].clone();
     s.ok(
         RECOVERY_CHECKS[2],
-        r.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(g + 1) && restored["rollback"] == true && restored["from"] == "backup" && restored["save"] == newest["id"],
-        &r,
+        r.status == 200 && r.body["phase"] == "starting" && up && v["phase"] == "awake" && v["generation"].as_u64() == Some(g + 1) && restored["rollback"] == true && restored["from"] == "backup" && restored["save"] == newest["id"],
+        json!({ "restart": r.body, "view": v }),
     );
     let again = restart()?;
     s.ok(RECOVERY_CHECKS[3], again.status == 200 && again.body["generation"].as_u64() == Some(g + 1) && again.body["restored"] == restored, &again);
@@ -719,16 +794,46 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
     let asleep = r.body["generation"].as_u64().unwrap_or(0);
-    let woke = api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": asleep })))?;
+    let (pressed, woke, up) = restart_followed(s, api, c.owner, c.id, asleep, c.wake)?;
     s.ok(
         RECOVERY_CHECKS[9],
         r.body["phase"] == "asleep"
-            && woke.body["phase"] == "awake"
-            && woke.body["generation"].as_u64() == Some(asleep + 1)
-            && woke.body["restored"]["from"] == "backup"
-            && woke.body["restored"]["rollback"] == false
-            && woke.body["notices"].as_array().is_none_or(|l| l.is_empty()),
-        format!("{r} / {woke}"),
+            && pressed.status == 200
+            && pressed.body["phase"] == "starting"
+            && pressed.body["generation"].as_u64() == Some(asleep)
+            && up
+            && woke["phase"] == "awake"
+            && woke["generation"].as_u64() == Some(asleep + 1)
+            && woke["restored"]["from"] == "backup"
+            && woke["restored"]["rollback"] == false
+            && woke["notices"].as_array().is_none_or(|l| l.is_empty()),
+        format!("{r} / {pressed} / {woke}"),
+    );
+    // its owner's notification slow (the lever): the alarm makes the start
+    // the restart owed, and the stub's comes up, while the restart's request
+    // waits; its answer is still the view as that start was owed (Codex on
+    // #1053: it was the view at the request's end, awake)
+    std::thread::sleep(QUEUE_DRAIN);
+    let r = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let asleep = r.body["generation"].as_u64().unwrap_or(0);
+    let slow = Duration::from_secs(20);
+    let slowed = lever_with(api, c.id, json!({ "op": "slow-tell", "ms": slow.as_millis() as u64 }))?;
+    let t0 = std::time::Instant::now();
+    let pressed = api.patient(slow + Duration::from_secs(60)).signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": asleep })))?;
+    let took = t0.elapsed();
+    let then = view();
+    let up = s.eventually(c.wake, || view()["phase"] == "awake" && view()["generation"].as_u64() == Some(asleep + 1));
+    s.ok(
+        RECOVERY_CHECKS[12],
+        r.body["phase"] == "asleep"
+            && slowed.status == 200
+            && pressed.status == 200
+            && pressed.body["phase"] == "starting"
+            && pressed.body["generation"].as_u64() == Some(asleep)
+            && took >= slow
+            && then["generation"].as_u64() == Some(asleep + 1)
+            && up,
+        format!("answered in {took:.1?}: {pressed} / then {then}"),
     );
     // a life on which nothing is done: its owner's sleep saves it once its
     // guest settled (a start after a rollback first ends what its save left
@@ -742,7 +847,7 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
     let life = woke.body["generation"].as_u64().unwrap_or(0);
     let failing = lever_with(api, c.id, json!({ "op": "fail-saves", "times": 100 }))?;
-    let quiet = api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": life })))?;
+    let (pressed, quiet, up) = restart_followed(s, api, c.owner, c.id, life, c.wake)?;
     let never_told = api.signed(c.owner, "POST", &path("/notices/seen"), Some(&json!({ "life": life })))?;
     lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;
     s.ok(
@@ -750,13 +855,15 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
         slept.body["phase"] == "asleep"
             && woke.body["restored"]["save"] == kept["id"]
             && failing.status == 200
-            && quiet.status == 200
-            && quiet.body["generation"].as_u64() == Some(life + 1)
-            && quiet.body["restored"]["rollback"] == true
-            && quiet.body["restored"]["save"] == kept["id"]
-            && notice(&quiet.body, "went_back").is_null()
+            && pressed.status == 200
+            && pressed.body["phase"] == "starting"
+            && up
+            && quiet["generation"].as_u64() == Some(life + 1)
+            && quiet["restored"]["rollback"] == true
+            && quiet["restored"]["save"] == kept["id"]
+            && notice(&quiet, "went_back").is_null()
             && never_told.status == 400,
-        format!("{woke} / {quiet} / {never_told}"),
+        format!("{woke} / {pressed} / {quiet} / {never_told}"),
     );
     Ok(3)
 }
@@ -832,6 +939,299 @@ struct Doors<'a> {
     identity: &'a str,
 }
 
+/// The Telegram connector (templates/telegram), end to end, on the stub
+/// agent and Telegram's fake: its owner's setup (the bot's token and the
+/// webhook's secret as its secrets, `connect`), pairing (a single-use link
+/// whose account its owner confirms), the door (its owner binds it to their
+/// agent, which joins as a viewer); then a direct message from the paired
+/// account reaches the agent as its owner's (asked as them), and the
+/// agent's reply goes back to Telegram, its interim words not, its file
+/// named, the bot typing there while it works. Only its owner's words are its owner's: the agent, acting for its
+/// owner, sets none of its secrets, writes it no page, gets no token to
+/// push its code, and shares it no way (visibility, invite, share link),
+/// as it still shares its owner's other fragments; a delivery without the webhook's secret, a stranger's
+/// message, an update again, a message while the deployment has it off, and
+/// one once its owner unlinked it (from its page) reach no one; and a fork
+/// lets its binding go for good. Between, Settings' Telegram
+/// (telegram_settings.rs): this connector, set up as its page did before,
+/// a release later; and, once it is no door, another its agent's Set up
+/// makes. Answers the replies its agent's pokes made in the lane's own chat.
+fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>, wake: Duration) -> Result<usize> {
+    use fragment_fakes::telegram::{Telegram, BOT_USERNAME};
+    const TOKEN: &str = "7001000:e2e-telegram-bot-token";
+    const HOOK: &str = "e2e5ec4e7a9f0b1c2d3e4f5061728394a5b6c7d8e9f00112233445566778899a";
+    const HOOK2: &str = "e2e7a0b1c2d3e4f5061728394a5b6c7d8e9f00112233445566778899aabbccdd";
+    const PAUL: i64 = 424_242;
+    const STRANGER: i64 = 999_001;
+    let tg = Telegram::start(TOKEN)?;
+    let name = s.named(api, c.owner, "telegram")?;
+    let made = api.create_with(c.owner, json!({ "name": name, "template": "telegram" }))?;
+    anyhow::ensure!(made.status == 200, "making the Telegram connector: {made}");
+    s.owned(&made.body, c.owner);
+    // its secrets as its owner's page sets them (`__secrets`), toward the fake's host
+    for (key, value) in [("TELEGRAM_BOT_TOKEN", TOKEN), ("TELEGRAM_WEBHOOK_SECRET", HOOK)] {
+        let r = api.signed(c.owner, "PUT", &format!("/api/f/{name}/secrets/{key}"), Some(&json!({ "value": value, "hosts": ["127.0.0.1"] })))?;
+        anyhow::ensure!(r.status == 200, "its secret {key}: {r}");
+    }
+    let state = || api.op(c.owner, &name, "state", "state", json!({})).map(|r| r.body["result"].clone()).unwrap_or_default();
+    let r = api.op(c.owner, &name, "connect", "connect", json!({ "platform": api.base, "api": tg.url }))?;
+    let connected = s.eventually(wake, || state()["bot"]["username"] == BOT_USERNAME);
+    let inbox = format!("{}/api/f/{name}/inbox", api.base);
+    s.ok(
+        "its owner's connect checks the bot's token and points its webhook at the chat's inbox, with the webhook's secret",
+        r.status == 200 && connected && tg.webhook() == Some((inbox.clone(), HOOK.into())),
+        json!({ "connect": r.body, "state": state(), "webhook": tg.webhook() }),
+    );
+    // Telegram's deliveries, as it makes them: each answers the runs it started
+    let deliver = |update: Value, secret: Option<&str>| {
+        let extra = secret.map(|v| vec![("x-telegram-bot-api-secret-token", v.to_string())]).unwrap_or_default();
+        api.call(Call { method: "POST", url: inbox.clone(), body: Some(update.to_string().into_bytes()), content_type: Some("application/json"), extra, ..Call::default() })
+    };
+    let ran = |r: &crate::api::Reply| super::jobs::settle(api, c.owner, &name, r.body["runs"][0].as_i64().unwrap_or(0), &["succeeded", "held"], wake);
+
+    // two accounts answering one link (one of them a member's choosing, who
+    // read its nonce in the inbox): no one is proposed, and its owner pairs again
+    let r = api.op(c.owner, &name, "pair", "pair-raced", json!({}))?;
+    let raced = r.body["result"]["link"].as_str().unwrap_or("").rsplit("start=").next().unwrap_or("").to_string();
+    let first = ran(&deliver(Telegram::message(10, STRANGER, "Paul", &format!("/start {raced}")), Some(HOOK))?);
+    let second = ran(&deliver(Telegram::message(11, PAUL, "Paul", &format!("/start {raced}")), Some(HOOK))?);
+    s.ok(
+        "two accounts answering one pairing link propose no one",
+        first["output"]["proposed"] == true && second["output"]["conflict"] == true && state()["pairing"].is_null() && state()["paired"].is_null(),
+        json!({ "first": first, "second": second, "state": state() }),
+    );
+    // pairing: a single-use link, the account that answers it proposed, its owner confirming
+    let r = api.op(c.owner, &name, "pair", "pair", json!({}))?;
+    let link = r.body["result"]["link"].as_str().unwrap_or("").to_string();
+    let nonce = link.rsplit("start=").next().unwrap_or("").to_string();
+    s.ok("its owner's pair makes a link that opens the bot", r.status == 200 && link.starts_with(&format!("https://t.me/{BOT_USERNAME}?start=")) && nonce.len() == 32, &r);
+    let wrong = deliver(Telegram::message(1, STRANGER, "Mallory", &format!("/start {}", "0".repeat(32))), Some(HOOK))?;
+    let wrong_run = ran(&wrong);
+    let answered = deliver(Telegram::message(2, PAUL, "Paul", &format!("/start {nonce}")), Some(HOOK))?;
+    let answered_run = ran(&answered);
+    let st = state();
+    s.ok(
+        "the account that answers its link is proposed, not paired; another nonce proposes no one",
+        wrong_run["output"]["proposed"] == false && answered_run["output"]["proposed"] == true && st["pairing"]["candidate"]["user"] == PAUL && st["paired"].is_null(),
+        json!({ "wrong": wrong_run, "answered": answered_run, "state": st }),
+    );
+    let r = api.op(c.stranger, &name, "confirm", "confirm", json!({ "user": PAUL }))?;
+    s.ok("no one else confirms it", matches!(r.status, 403 | 404), &r);
+    let r = api.op(c.owner, &name, "confirm", "confirm", json!({ "user": PAUL }))?;
+    s.ok("its owner confirms it, and it is paired", r.status == 200 && state()["paired"]["name"] == "Paul", &r);
+    let again = ran(&deliver(Telegram::message(3, STRANGER, "Mallory", &format!("/start {nonce}")), Some(HOOK))?);
+    s.ok("its link, used, pairs no one else", again["output"]["proposed"] == false && state()["paired"]["name"] == "Paul", json!({ "run": again, "state": state() }));
+    let r = deliver(Telegram::message(4, PAUL, "Paul", "forged"), None)?;
+    s.ok("a delivery without the webhook's secret is refused, and starts nothing", r.status == 403, &r);
+
+    // the door: its owner binds it to their agent, which joins it as a viewer
+    let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
+    let bound = api.signed(c.owner, "GET", &format!("/api/f/{name}/door"), None)?;
+    let role_of = |id: &str| api.signed(c.owner, "GET", &format!("/api/f/{name}/members"), None).ok().and_then(|m| m.body["members"].as_array().and_then(|l| l.iter().find(|x| x["principal"] == id).map(|x| x["role"].clone())));
+    s.ok(
+        "its owner binds it as their agent's telegram door, and the agent joins it as a viewer",
+        r.status == 200 && r.body["door"] == "telegram" && r.body["agent"] == c.agent && bound.body["bound"] == json!({ "door": "telegram", "agent": c.agent }) && role_of(c.identity) == Some(json!("viewer")),
+        format!("{r} {bound} {:?}", role_of(c.identity)),
+    );
+
+    // a direct message from the paired account: their words to their agent,
+    // asked as them, and its reply back to Telegram
+    let r = deliver(Telegram::message(5, PAUL, "Paul", "hello from telegram"), Some(HOOK))?;
+    let run = ran(&r);
+    let relayed = records(api, c.owner, &name, "chat").into_iter().find(|r| r["body"]["text"] == "hello from telegram").unwrap_or_default();
+    s.ok(
+        "a direct message from the paired account is published in the chat as its owner's, to their agent, through its telegram door",
+        run["output"]["relayed"] == true && relayed["body"]["relayed"] == json!({ "via": "telegram", "for": c.owner_id, "agent": c.agent }) && relayed["body"]["to"] == json!([c.identity]),
+        json!({ "run": run, "record": relayed }),
+    );
+    let sent = |text: &str| tg.sent().into_iter().find(|m| m["chat_id"] == PAUL && m["text"].as_str().is_some_and(|t| t.contains(text)));
+    let replied = s.eventually(wake, || sent("hello from telegram").is_some());
+    let reply = agent_replies(&records(api, c.owner, &name, "chat"), c.identity).into_iter().find(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("hello from telegram"))).unwrap_or_default();
+    let start = records(api, c.owner, &name, "work").into_iter().find(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == reply["body"]["turn"]).unwrap_or_default();
+    s.ok(
+        "its agent answers it asked as its owner, and the reply goes back to Telegram",
+        replied && start["body"]["asker"] == c.owner_id,
+        json!({ "sent": tg.sent(), "reply": reply, "turn.start": start }),
+    );
+    let stranger = ran(&deliver(Telegram::message(6, STRANGER, "Mallory", "let me in"), Some(HOOK))?);
+    let twice = ran(&deliver(Telegram::message(5, PAUL, "Paul", "hello from telegram"), Some(HOOK))?);
+    s.ok(
+        "a stranger's message reaches no one, and an update Telegram sends again is taken once",
+        stranger["output"]["ignored"] == "not its owner's" && twice["output"]["ignored"] == "taken already",
+        json!({ "stranger": stranger, "twice": twice }),
+    );
+    // set up as its page did before its setup moved to Settings: a release
+    // later, it works as it did, and Settings shows it and reconnects it
+    // (FIN-393, telegram_settings.rs)
+    let settings = super::telegram_settings::Connector { owner: c.owner, owner_id: c.owner_id, agent: c.agent, identity: c.identity, tg: &tg, token: TOKEN, wake };
+    super::telegram_settings::after_a_release(s, api, &settings, &name, HOOK)?;
+    // its words before a tool call stay in the chat; a reply's file, which a
+    // viewer cannot upload, is named in its words
+    deliver(Telegram::message(12, PAUL, "Paul", "tool please"), Some(HOOK))?;
+    let tooled = s.eventually(wake, || sent("tool please").is_some());
+    s.ok("its agent's interim words are not sent to Telegram, its answer is", tooled && sent("Let me look.").is_none(), json!(tg.sent()));
+    deliver(Telegram::message(13, PAUL, "Paul", "draw me something"), Some(HOOK))?;
+    let named = s.eventually(wake, || sent("could not be attached").is_some());
+    s.ok("a reply whose file a viewer cannot attach goes with its words, saying so", named, json!(tg.sent()));
+    // while its agent works on a message from Telegram (a slow tool call),
+    // Telegram shows the bot typing, and no longer once its answer went
+    let relay = ran(&deliver(Telegram::message(14, PAUL, "Paul", "tool please, slowly"), Some(HOOK))?);
+    let answered = s.eventually(wake, || sent("tool please, slowly").is_some());
+    let typing = super::jobs::settle(api, c.owner, &name, relay["output"]["typing"].as_i64().unwrap_or(0), &["succeeded", "held"], wake);
+    let answer = tg.sent().iter().position(|m| m["chat_id"] == PAUL && m["text"].as_str().is_some_and(|t| t.contains("tool please, slowly")));
+    let actions: Vec<Value> = tg.actions().into_iter().filter(|a| a["chat_id"] == PAUL).collect();
+    s.ok(
+        "its agent working on a message from Telegram shows the bot typing there until its answer goes, and not after",
+        answered
+            && typing["status"] == "succeeded"
+            && typing["output"]["why"] == "answered"
+            && answer.is_some_and(|at| actions.iter().any(|a| a["after"] == at) && actions.iter().all(|a| a["action"] == "typing" && a["after"].as_u64().is_some_and(|n| n <= at as u64))),
+        json!({ "relay": relay, "typing": typing, "answer": answer, "actions": actions, "sent": tg.sent() }),
+    );
+
+    // only its owner edits it: the agent, acting for its owner, sets none of
+    // its secrets (it would know the webhook's and forge a delivery), writes
+    // it no page (one its owner opened would run as them), gets no token to
+    // push its code (a code swap would rewrite its pairing)
+    let mut pokes = 0;
+    for (n, what) in [(430, "secret"), (431, "files"), (432, "token"), (433, "seen"), (434, "propose")] {
+        let said = fetched(s, n, &format!("door poke {name} {what}"))?;
+        pokes += 1;
+        s.ok(&format!("the agent, acting for its owner, is refused an editor's {what} on its owner's connector"), said.starts_with("door refused: 403"), &said);
+    }
+    // nor shares it, as it shares its owner's other fragments (Paul,
+    // 2026-10-04): a share link would show its chat, Telegram's words
+    // included, to whoever holds it
+    for (n, what) in [(436, "visibility"), (437, "invite"), (438, "rotate")] {
+        let said = fetched(s, n, &format!("door poke {name} {what}"))?;
+        pokes += 1;
+        s.ok(&format!("the agent, acting for its owner, is refused the sharer's {what} on its owner's connector"), said.starts_with("door refused: 403") && said.contains("shares a connector"), &said);
+    }
+    let said = fetched(s, 439, &format!("door poke {name} status"))?;
+    pokes += 1;
+    s.ok("the agent, acting for its owner, is shown no share link of its owner's connector", said == "door poked status", &said);
+    // on another fragment of its owner's, no connector, it still shares
+    // for them
+    let plain = s.named(api, c.owner, "plain")?;
+    s.create(api, c.owner, &plain)?;
+    let r = api.signed(c.owner, "PUT", &format!("/api/f/{plain}/members/{}", c.identity), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "the agent a viewer of its owner's fragment: {r}");
+    let mut shared = vec![];
+    for (n, what) in [(440, "visibility"), (441, "invite"), (442, "rotate"), (443, "status")] {
+        shared.push(fetched(s, n, &format!("door poke {plain} {what}"))?);
+        pokes += 1;
+    }
+    s.ok(
+        "on its owner's other fragment, no connector, the agent acting for them sets its visibility, invites, renews its share link and is shown it",
+        shared[..2] == ["door poked visibility", "door poked invite"] && shared[2..] == ["door poked rotate, its share link shown", "door poked status, its share link shown"],
+        json!(shared),
+    );
+    // nor, as itself, a viewer of it; and no one is made more than a viewer
+    // of a connector, so its members list says the role that counts
+    let made_editor = api.signed(c.owner, "PUT", &format!("/api/f/{name}/members/{}", c.identity), Some(&json!({ "role": "editor" })))?;
+    let said = fetched(s, 435, &format!("door poke {name} secret itself"))?;
+    pokes += 1;
+    s.ok(
+        "no one is made an editor of a connector, and its agent, as itself, is refused its secrets too",
+        made_editor.status == 400 && made_editor.text.contains("no editor but its owner") && role_of(c.identity) == Some(json!("viewer")) && said.starts_with("door refused: 403"),
+        format!("{made_editor} {said}"),
+    );
+
+    // its owner rotates the webhook's secret: the old one takes nothing
+    let r = api.signed(c.owner, "PUT", &format!("/api/f/{name}/secrets/TELEGRAM_WEBHOOK_SECRET"), Some(&json!({ "value": HOOK2, "hosts": ["127.0.0.1"] })))?;
+    let old = deliver(Telegram::message(21, PAUL, "Paul", "with the old secret"), Some(HOOK))?;
+    let new = ran(&deliver(Telegram::message(22, PAUL, "Paul", "with the new secret"), Some(HOOK2))?);
+    s.ok("its owner rotates the webhook's secret: the old one is refused, the new one taken", r.status == 200 && old.status == 403 && new["output"]["relayed"] == true, json!({ "old": old.status, "new": new }));
+
+    // the deployment turns Telegram off (here the test lever's stand-in, on
+    // this connector): what comes is published nowhere, nothing is sent
+    let policy = |p: Value| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "connectors", "policy": p })));
+    anyhow::ensure!(policy(json!([{ "id": "simplex" }]))?.status == 200, "the connectors lever");
+    let before = tg.sent().len();
+    let off = ran(&deliver(Telegram::message(20, PAUL, "Paul", "while it is off"), Some(HOOK2))?);
+    let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "while it is off");
+    s.ok("with Telegram off, its owner's message is published nowhere and nothing is sent", off["output"]["ignored"] == "not linked" && !published && tg.sent().len() == before, json!({ "run": off, "sent": tg.sent() }));
+    anyhow::ensure!(policy(Value::Null)?.status == 200, "the connectors lever");
+
+    // unlinked from its page (its owner's session there): the door is shut
+    // at once, and Telegram is told; its agent stays a viewer of its chat,
+    // and what it says there goes nowhere else
+    let session = api.sign_in(&Api::email_of(c.owner))?;
+    let site = format!("fragment_site={}", super::signin::site_cookie(api, &session, &name)?);
+    let page = |method: &'static str, body: Option<Value>| {
+        api.call(Call { method, url: api.site_url(&name, "__door"), body: body.map(|b| b.to_string().into_bytes()), content_type: Some("application/json"), cookie: Some(site.clone()), ..Call::default() })
+    };
+    let unlinked = page("POST", Some(json!({ "act": "unlink" })))?;
+    let seen = page("GET", None)?;
+    let after = ran(&deliver(Telegram::message(7, PAUL, "Paul", "after the unlink"), Some(HOOK2))?);
+    let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "after the unlink");
+    s.ok(
+        "unlinked from its page, its owner's next message is published nowhere, and Telegram is told so",
+        unlinked.status == 200 && seen.body["bound"].is_null() && after["output"]["ignored"] == "not linked" && !published && sent("This chat isn't linked to your agent.").is_some(),
+        json!({ "unlink": unlinked.body, "bound": seen.body, "run": after, "sent": tg.sent() }),
+    );
+    let typed = api.signed(c.owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "typed-after-unlink", "body": { "text": "typed after the unlink" } })))?;
+    let answered = s.eventually(wake, || agent_replies(&records(api, c.owner, &name, "chat"), c.identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("typed after the unlink"))));
+    s.ok(
+        "its agent, still a viewer there, answers on the web, and nothing goes to Telegram",
+        typed.status == 200 && role_of(c.identity) == Some(json!("viewer")) && answered && sent("typed after the unlink").is_none(),
+        json!({ "role": role_of(c.identity), "sent": tg.sent() }),
+    );
+
+    // its own template deployed again (a title its owner gave it) is still
+    // the connector: its secrets stay
+    let secrets = || -> Vec<String> {
+        let r = api.signed(c.owner, "GET", &format!("/api/f/{name}/secrets"), None).ok();
+        r.and_then(|r| r.body["secrets"].as_array().map(|a| a.iter().filter_map(|s| s["name"].as_str().map(str::to_string)).collect())).unwrap_or_default()
+    };
+    let installed = |s: &Suite, tip: &str| s.eventually(wake, || api.status(c.owner, &name).is_ok_and(|r| r.body["code"]["sha"] == tip));
+    let ours = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET"];
+    s.commit(&made.body, &[("fragment.json", Some(br#"{"template":"telegram","meta":{"title":"My Telegram"}}"#.as_slice()))]);
+    let tip = s.deploy(&made.body);
+    let again = installed(s, &tip);
+    s.ok("its own template deployed again is still the connector, its secrets kept", again && secrets() == ours, json!({ "installed": again, "secrets": secrets() }));
+
+    // a fork lets its binding go for good, and its secrets (Paul,
+    // 2026-10-31: the new code, and its editors, send none of them): its own
+    // code, then the template again, and it is no door, with none back
+    let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
+    anyhow::ensure!(r.status == 200, "bound again: {r}");
+    let own = br#"import { DurableObject } from "cloudflare:workers";
+export class App extends DurableObject { noop() { return {}; } }
+"#;
+    s.commit(&made.body, &[("fragment.json", Some(br#"{"operations":{"noop":{"kind":"mutation"}}}"#.as_slice())), ("app.mjs", Some(own.as_slice()))]);
+    let tip = s.deploy(&made.body);
+    let forked = installed(s, &tip);
+    let unmade = s.eventually(wake, || api.signed(c.owner, "GET", &format!("/api/f/{name}/door"), None).is_ok_and(|r| r.body["bound"].is_null()));
+    let event = events(api, c.owner, &name).into_iter().find(|e| e["kind"] == "door.unmade");
+    s.ok(
+        "a fork unmakes it and removes its secrets, its event naming them",
+        forked && unmade && secrets().is_empty() && event.as_ref().is_some_and(|e| e["data"]["secrets"] == json!(ours)),
+        json!({ "secrets": secrets(), "event": event }),
+    );
+    s.commit(&made.body, &[("fragment.json", Some(br#"{"template":"telegram"}"#.as_slice())), ("app.mjs", None)]);
+    let tip = s.deploy(&made.body);
+    let back = installed(s, &tip);
+    // its webhook's secret gone, its inbox takes no delivery at all, the
+    // old secret's or none (403), so nothing comes to publish
+    let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
+    let later = deliver(Telegram::message(30, PAUL, "Paul", "after the fork"), Some(HOOK2))?;
+    let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "after the fork");
+    s.ok(
+        "with its template again it is no door, and its secrets do not come back: its inbox takes no delivery, nothing published",
+        back && r.status == 403 && r.text.contains("is no connector") && later.status == 403 && later.text.contains("bad inbox secret") && !published && secrets().is_empty(),
+        json!({ "bind": r.body, "delivery": later.status, "secrets": secrets() }),
+    );
+    // its agent, with no Telegram chat now, set up from Settings (FIN-393):
+    // this chat, no door for good since its fork, deleted first, so its
+    // agent has no Telegram chat at all, and Settings' shots show only what
+    // Set up makes
+    let gone = api.signed(c.owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    anyhow::ensure!(matches!(gone.status, 200 | 204), "the forked connector deleted: {gone}");
+    super::telegram_settings::from_settings(s, api, &settings, "telegram-settings")?;
+    Ok(pokes)
+}
+
 /// The XFTP relay (fragment_core::relay), through the stub's `relay`
 /// commands: a host it does not carry is refused before anything is
 /// opened, and an app's answer that carries the relay's own headers (an
@@ -871,6 +1271,21 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     let ticket = |who: &crate::Keys, act: &str| api.signed(who, "POST", &path, Some(&json!({ "door": "simplex", "act": act })));
     let r = ticket(c.stranger, "link")?;
     s.ok("no one but its owner is given a ticket to the agent's door", r.status == 404, &r);
+    // an agent its link opens is given no door (FIN-352); members only
+    // again, it is, and an invite waiting (someone named) refuses none
+    let visibility = |v: &str| api.signed(c.owner, "PUT", &format!("/api/f/{}/visibility", c.agent), Some(&json!({ "visibility": v })));
+    let linked = visibility("link")?;
+    let shared = ticket(c.owner, "link")?;
+    let narrowed = visibility("members")?;
+    let outsider = format!("door-outsider-{}@e2e.test", &crate::Keys::generate().pubkey_hex()[..8]);
+    let invited = api.signed(c.owner, "POST", &format!("/api/f/{}/invites", c.agent), Some(&json!({ "email": outsider, "role": "viewer" })))?;
+    let named = ticket(c.owner, "link")?;
+    let revoked = api.signed(c.owner, "DELETE", &format!("/api/f/{}/invites/{outsider}", c.agent), None)?;
+    s.ok(
+        "an agent its link opens is given no link ticket to a door (403 unshare_first); members only again, with an invite waiting, it is",
+        linked.status == 200 && shared.status == 403 && shared.body["reason"] == "unshare_first" && narrowed.status == 200 && invited.status == 200 && named.status == 200 && revoked.status == 200,
+        json!({ "linked": linked.status, "ticket": shared.body, "narrowed": narrowed.status, "invited": invited.body, "named": named.status, "revoked": revoked.status }),
+    );
     let t = ticket(c.owner, "link")?;
     let key = fragment_core::npub::parse(c.identity).unwrap_or_default();
     let read = serde_json::from_value::<fragment_core::door::Ticket>(t.body.clone()).ok().filter(fragment_core::door::Ticket::well_formed);
@@ -881,9 +1296,9 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
         t.status == 200 && t.body["act"] == "link" && t.body["agent"] == c.agent && t.body["computer"] == c.id && signed && within,
         &t,
     );
-    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "telegram", "act": "link" })))?;
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "signal", "act": "link" })))?;
     s.ok("a door the deployment's connectors do not name is refused its link ticket, by the platform", r.status == 403 && r.text.contains("does not allow"), &r);
-    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "telegram", "act": "unlink" })))?;
+    let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "signal", "act": "unlink" })))?;
     s.ok("and may still be unlinked: an owner closes a door the deployment no longer allows", r.status == 200 && r.body["act"] == "unlink", &r);
     let r = api.signed(c.owner, "POST", &path, Some(&json!({ "door": "../simplex", "act": "link" })))?;
     s.ok("a door that is no connector's id is 400", r.status == 400, &r);
@@ -967,6 +1382,33 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     s.ok("the agent binds no fragment as its own door, acting for its owner", agent.starts_with("door refused: 403") && agent.contains("in person"), &agent);
     // two of them its owner's words, each answered
     Ok(14)
+}
+
+/// A 40 MB file its agent syncs from its computer (FIN-405): `fragment
+/// sync` on the guest (the stub's `sync`), into an app its owner made it an
+/// editor of. Its bytes are a blob, streamed through the egress's `PUT
+/// …/blobs/{sha256}` (past the 32 MiB the egress reads whole: 413 before),
+/// its pointer in git. One reply.
+fn large_sync_through_egress(s: &mut Suite, api: &Api, owner: &crate::Keys, identity: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let r = api.signed(owner, "POST", "/api/fragments", Some(&json!({ "label": "bigsync", "template": "blank", "title": "Big sync" })))?;
+    anyhow::ensure!(r.status == 200, "the app it syncs into: {r}");
+    let name = r.body["name"].as_str().unwrap_or("").to_string();
+    let joined = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(joined.status == 200, "its agent, an editor of it: {joined}");
+    let size = 40 * 1024 * 1024;
+    let said = fetched(s, 89, &format!("sync {name} 40"))?;
+    let sha = said.strip_prefix("synced ").and_then(|r| r.split_whitespace().next()).unwrap_or("").to_string();
+    let files = api.signed(owner, "GET", &format!("/api/f/{name}/files"), None)?;
+    let listed = files.body["files"].as_array().and_then(|a| a.iter().find(|f| f["path"] == "big.bin").cloned()).unwrap_or(Value::Null);
+    let blob = api.signed(owner, "GET", &format!("/api/f/{name}/blobs/{sha}"), None)?;
+    s.ok(
+        "a 40 MB file its agent syncs from its computer streams through its egress: its bytes the app's blob, its pointer in git",
+        said == format!("synced {sha} {size}") && listed["blob"] == true && listed["sha256"] == sha.as_str() && listed["size"] == size && blob.status == 200 && fragment_core::blob::sha256_hex(&blob.bytes) == sha,
+        json!({ "said": said, "listed": listed, "blob": blob.status, "bytes": blob.bytes.len() }),
+    );
+    let r = api.signed(owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    anyhow::ensure!(r.status == 200, "{name} deleted: {r}");
+    Ok(1)
 }
 
 /// The route's models by their ids, through the intercept (Paul,
@@ -1167,6 +1609,37 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
+/// What the `saves` lever says of computer `id` (its phase, its failures,
+/// whether a container runs), or null.
+fn saves_of(api: &Api, id: &str) -> Value {
+    lever(api, id, "saves").map(|r| r.body).unwrap_or(Value::Null)
+}
+
+/// Computer `id` brought to its last strike's start, left destroying: two
+/// starts fail (the lever `fail-starts`), and the third's guest is frozen
+/// (`alive-check`) and its failure held between storing that it fails and
+/// its destroy (`stall-failing-start`), as an isolate that goes there
+/// leaves it. Whether it got there, and what it read there.
+fn last_start_destroying(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> Result<(bool, Value)> {
+    std::thread::sleep(QUEUE_DRAIN);
+    api.signed(owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    let two = lever_with(api, id, json!({ "op": "fail-starts", "times": 2 }))?;
+    // its wake waits on what follows: given up on here, as a page's would be
+    let _ = api.impatient(Duration::from_secs(20)).signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let striking = s.eventually(Duration::from_secs(60), || {
+        let v = saves_of(api, id);
+        v["failures"] == 2 && v["phase"]["phase"] == "asleep"
+    });
+    let froze = lever_with(api, id, json!({ "op": "alive-check", "ms": 3_000, "freeze": true }))?;
+    let stall = lever_with(api, id, json!({ "op": "stall-failing-start", "ms": 600_000 }))?;
+    let mut held = Value::Null;
+    let gap = s.eventually(Duration::from_secs(60), || {
+        held = saves_of(api, id);
+        held["phase"]["phase"] == "starting" && held["phase"]["destroying"] == true && held["running"] == true && held["failures"] == 2
+    });
+    Ok((two.status == 200 && striking && froze.status == 200 && stall.status == 200 && gap, held))
+}
+
 /// The computer put to sleep, asked until it is (a turn's last record may
 /// wake it again): whether it slept, and its last view.
 fn put_to_sleep(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> (bool, Value) {
@@ -1200,6 +1673,42 @@ const ROUTINE_AGENT_CHECKS: [&str; 4] = [
     "the agent lists its fragment's schedules",
     "the agent removes its own schedule",
 ];
+
+/// The characters of the speech call the swap's checks make
+/// (credentials.rs `SPOKEN`'s text, "Hello there, friend.").
+const SPOKEN_CHARS: u64 = 20;
+
+/// The quote's checks beside the swap's (FIN-448), skipped as they are.
+const QUOTE_CHECKS: [&str; 2] = [
+    "its owner quotes a speech job through the CLI (`fragment quote elevenlabs:speech 20chars`): one line, about what it costs and what is left, and the quote with --json",
+    "the speech its owner quoted, made through the swap, is charged what the quote said",
+];
+
+/// Its owner's quote, through the CLI, of the speech call the swap's
+/// checks are about to make (FIN-448): `fragment quote`'s line, and its
+/// `--json` answer, which this answers.
+fn quote_speech(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Value> {
+    let home = s.dir("computers-quote");
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": owner.secret_hex() }).to_string())?;
+    let chars = format!("{SPOKEN_CHARS}chars");
+    let said = s.cli(api, &home, &["quote", "elevenlabs:speech", &chars]);
+    let line = String::from_utf8_lossy(&said.stdout).into_owned();
+    let quoted = s.cli_json(api, &home, &["quote", "elevenlabs:speech", &chars, "--json"])?;
+    let total = quoted["totalMicros"].as_i64().unwrap_or(-1);
+    s.ok(
+        QUOTE_CHECKS[0],
+        said.status.success()
+            && line.lines().count() == 1
+            && line.starts_with(&format!("about {}; you ", fragment_core::price::dollars(total)))
+            && quoted["items"][0]["pricedAs"] == "elevenlabs:speech"
+            && quoted["items"][0]["calls"] == 1
+            && total > 0,
+        json!({ "said": line, "stderr": String::from_utf8_lossy(&said.stderr), "quoted": quoted }),
+    );
+    Ok(quoted)
+}
 
 /// An agent's routines (decision 38): scheduled records on its own agent
 /// fragment's `tasks` (docs/api.md, "Scheduled records"), which its owner
@@ -1280,10 +1789,15 @@ fn routine_checks(s: &mut Suite, api: &Api, c: &Routined, say: &dyn Fn(u32, &str
     // a restart of its computer (Paul, 2026-10-20: the loop an agent started
     // in it died at the next one) touches no schedule: they are its fragment's
     let generation = api.signed(c.owner, "GET", &format!("/api/computers/{}", c.id), None)?.body["generation"].as_u64().unwrap_or(0);
-    let r = api.patient(c.wake + Duration::from_secs(60)).signed(c.owner, "POST", &format!("/api/computers/{}/restart", c.id), Some(&json!({ "generation": generation })))?;
-    // it answers once its start is up (a real Hermes on a preview answered
-    // `starting` while its container's exit report made that start)
-    s.ok("its computer restarts, and its routine is kept as it was", r.status == 200 && r.body["phase"] == "awake" && list(api) == vec![first.clone()], json!({ "restart": r.body, "schedules": list(api) }));
+    // it answers once the restart is under way, `starting`, and is awake
+    // again within its wake's bound (FIN-399: a real Hermes on a preview
+    // answered `starting` while the stub answered `awake`)
+    let (r, v, up) = restart_followed(s, api, c.owner, c.id, generation, c.wake + Duration::from_secs(60))?;
+    s.ok(
+        "its computer restarts, and its routine is kept as it was",
+        r.status == 200 && r.body["phase"] == "starting" && up && v["phase"] == "awake" && v["generation"].as_u64() == Some(generation + 1) && list(api) == vec![first.clone()],
+        json!({ "restart": r.body, "view": v, "schedules": list(api) }),
+    );
 
     // asleep, due: its record on tasks wakes the computer, and the agent does it in the chat
     let (slept, last) = put_to_sleep(s, api, c.owner, c.id);
@@ -1376,6 +1890,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
+    let month = pin_month(api, &id)?;
     // The stub's scripted runtime (images/stub) answers its commands ("tool
     // please", "slow…", "fetch …", "think …") and echoes the rest; the
     // deployment's own image (our Hermes) answers as its real model does.
@@ -1398,6 +1913,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = s.create(api, &owner, &agent_name)?;
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON))]);
     s.deploy(&agent);
+    // members only, as one made from the agent template is: a door is
+    // linked only on an agent its link does not open (FIN-352)
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{agent_name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "the agent made members-only: {r}");
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     s.ok("its owner assigns the agent fragment to it", r.status == 200 && fragment_core::npub::is_identity(&identity) && r.body["agents"][0]["fragment"] == agent_name.as_str(), &r);
@@ -1587,13 +2106,26 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
+        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(VAULT_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
-        let swapping = Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity };
+        let swapping = Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity, month: &month };
+        // a quote (FIN-448): its owner quotes the speech the swap's checks
+        // are about to make, through the CLI; once made, it is charged that
+        let quoted = quote_speech(s, api, &owner)?;
         replies_so_far += swap_checks(s, api, &swapping, &fetched)?;
+        let rows = entries(api, &owner_id, &format!("key:{id}:"));
+        // each speech call of the quoted size (the cap's checks make longer
+        // ones too, and more of that size)
+        let spoken: Vec<&Value> = rows.iter().filter(|r| usage(r)["key"] == "elevenlabs:speech" && usage(r)["units"] == SPOKEN_CHARS).collect();
+        s.ok(
+            QUOTE_CHECKS[1],
+            !spoken.is_empty() && spoken.iter().all(|r| charged(r).is_some_and(|c| Some(c) == quoted["totalMicros"].as_i64())),
+            json!({ "quoted": quoted, "rows": spoken }),
+        );
         replies_so_far += model_checks(s, api, &swapping, &fetched)?;
+        replies_so_far += vault_checks(s, api, &swapping, &fetched)?;
         let r = allow(&stranger, json!([]))?;
         s.ok("no one else narrows its agents' providers", r.status == 404, &r);
         let r = allow(&owner, json!(["notion"]))?;
@@ -1631,9 +2163,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
             replies_so_far += intercept_takes_model_ids(s, api, &owner_id, &fetched)?;
             replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
+            replies_so_far += large_sync_through_egress(s, api, &owner, &identity, &fetched)?;
         }
         let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
         replies_so_far += door_checks(s, api, &doors, &fetched, wake)?;
+        if fakes {
+            // SimpleX from Settings (FIN-393), its sidebar clean for its
+            // screenshots: before Telegram's chats are made
+            let sx = super::simplex_settings::Agent { owner: &owner, computer: &id, agent: &agent_name, chat: &chat_name, identity: &identity, wake };
+            replies_so_far += super::simplex_settings::checks(s, api, &sx, &fetched)?;
+            replies_so_far += telegram_checks(s, api, &doors, &fetched, wake)?;
+        }
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
         // a real runtime called its model to answer at all: each call went
@@ -1720,8 +2260,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         bound_checks(s, api, &crashing)?;
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
+        disk_checks(s, api, &crashing)?;
     } else {
-        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()) {
+        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(DISK_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
         }
     }
@@ -1964,11 +2505,19 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         std::thread::sleep(QUEUE_DRAIN);
         let ran = fakes.then(|| runs(s, api, &owner, &owner_id, &id));
         let generation = view()["generation"].as_u64().unwrap_or(0);
-        let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({ "generation": generation })))?;
+        let (r, v, up) = restart_followed(s, api, &owner, &id, generation, wake)?;
         s.ok(
             PINS[7],
-            r.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(generation + 1) && r.body["version"] == latest.as_str() && r.body["latest"] == latest.as_str() && notice(&r.body, "update").is_null() && version() == "2",
-            json!({ "served": version(), "view": r.body }),
+            r.status == 200
+                && r.body["phase"] == "starting"
+                && up
+                && v["phase"] == "awake"
+                && v["generation"].as_u64() == Some(generation + 1)
+                && v["version"] == latest.as_str()
+                && v["latest"] == latest.as_str()
+                && notice(&v, "update").is_null()
+                && version() == "2",
+            json!({ "served": version(), "restart": r.body, "view": v }),
         );
         say(30, "after the upgrade")?;
         replies_so_far += 1;
@@ -2093,6 +2642,91 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
         return Ok(());
     }
+    // a start's last strike, its isolate gone between storing that it fails
+    // and destroying its container (the node crashed there): a new isolate
+    // and host take the computer over (Codex on #1079: a new host destroyed
+    // no start's container but its own; it kept no alarm when that failed;
+    // a second review: an event during that destroy acted as if it were
+    // done). (A) a request takes it over, its destroy held while an alarm
+    // comes: one strike, the container gone, its exit reported again nothing
+    let (ready, held) = last_start_destroying(s, api, &owner, &id)?;
+    let stall = lever_with(api, &id, json!({ "op": "stall-takeover", "ms": 10_000 }))?;
+    s.crash()?;
+    let fresh = s.start(false)?;
+    let api = &fresh;
+    let found = saves_of(api, &id);
+    let generation = found["generation"].as_u64().unwrap_or(0);
+    let soon = lever_with(api, &id, json!({ "op": "alarm-in", "ms": 3_000 }))?;
+    let reported = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let first = saves_of(api, &id);
+    let replayed = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let again = saves_of(api, &id);
+    s.ok(
+        "a start's last strike, its isolate gone before it destroyed its container (the node crashed in that gap): a new isolate and host destroy that container, an alarm coming as they do waiting for it, and count the start failed once; its exit, reported again, counts nothing",
+        ready
+            && stall.status == 200
+            && found["running"] == true
+            && found["phase"]["destroying"] == true
+            && soon.status == 200
+            && reported.status == 200
+            && first["running"] == false
+            && first["failures"] == 3
+            && first["phase"]["phase"] == "failed"
+            && replayed.status == 200
+            && again["failures"] == 3,
+        json!({ "held": held, "found": found, "first": first, "again": again }),
+    );
+    // (B) the same, its destroy failing: the alarm that waited for it takes
+    // the computer over itself, at once, and counts that strike
+    let (ready, _) = last_start_destroying(s, api, &owner, &id)?;
+    let stall = lever_with(api, &id, json!({ "op": "stall-takeover", "ms": 10_000 }))?;
+    let flaky = lever_with(api, &id, json!({ "op": "fail-takeover-destroys", "times": 1 }))?;
+    s.crash()?;
+    let fresh = s.start(false)?;
+    let api = &fresh;
+    let generation = saves_of(api, &id)["generation"].as_u64().unwrap_or(0);
+    let soon = lever_with(api, &id, json!({ "op": "alarm-in", "ms": 3_000 }))?;
+    let t0 = std::time::Instant::now();
+    let reported = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let mut last = Value::Null;
+    let cleaned = s.eventually(Duration::from_secs(40), || {
+        last = saves_of(api, &id);
+        last["phase"]["phase"] == "failed" && last["running"] == false
+    });
+    let took = t0.elapsed();
+    s.ok(
+        "its takeover's destroy failing, the alarm that came as it ran waits for it, then takes the computer over itself: the container gone and the start's last strike counted once, within seconds, not an alarm later",
+        ready && stall.status == 200 && flaky.status == 200 && soon.status == 200 && reported.status >= 500 && cleaned && last["failures"] == 3 && took < Duration::from_secs(40),
+        json!({ "reported": reported.body, "last": last, "tookS": took.as_secs() }),
+    );
+    // (C) the alarm the first to look: its takeover's destroy failing
+    // there keeps an alarm a minute on, which destroys the container and
+    // counts that strike, no request between (Codex on #1079: the alarm
+    // spent itself and nothing came again)
+    let (ready, _) = last_start_destroying(s, api, &owner, &id)?;
+    let flaky = lever_with(api, &id, json!({ "op": "fail-takeover-destroys", "times": 1 }))?;
+    let soon = lever_with(api, &id, json!({ "op": "alarm-in", "ms": 5_000 }))?;
+    s.crash()?;
+    let fresh_again = s.start(false)?;
+    let api = &fresh_again;
+    let t0 = std::time::Instant::now();
+    let mut last = Value::Null;
+    let cleaned = s.eventually(Duration::from_secs(240), || {
+        last = saves_of(api, &id);
+        last["phase"]["phase"] == "failed" && last["running"] == false
+    });
+    let took = t0.elapsed();
+    s.ok(
+        "its last strike, the alarm first to look after its isolate went: the takeover's destroy failing there keeps an alarm a minute on, which destroys the container and counts that strike, with no request between",
+        ready
+            && flaky.status == 200
+            && soon.status == 200
+            && cleaned
+            && last["failures"] == 3
+            && last["phase"]["why"].as_str().is_some_and(|w| w.contains("isolate"))
+            && took >= Duration::from_secs(45),
+        json!({ "last": last, "tookS": took.as_secs() }),
+    );
     // the platform crashes while it is awake: a new isolate takes the
     // computer over (lesson 6), and it answers what comes next, once; its
     // agent's routine, the platform's own data, is kept, and fires
@@ -2102,6 +2736,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     s.crash()?;
     let api = s.start(false)?;
+    // from here its computer's sidecar drops any query it would send public
+    // DNS: a run must not need it (#1017, where public DNS did not answer
+    // after this crash and every save of the boot failed)
+    let dropping = s.drop_public_dns()?;
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
     // its own turn's replies
@@ -2144,6 +2782,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its owner lets it sleep: it is awake only while something is open", off, view(&api));
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
+    let asked = s.public_dns_asked(&dropping)?;
+    s.ok(
+        "after the crash its computer asked public DNS nothing: the hosts the platform intercepts are answered at once, and its sleep's save went on with public DNS dropped",
+        !dropping.is_empty() && asked == 0 && r.body["phase"] == "asleep",
+        json!({ "sidecars": dropping.len(), "asked": asked }),
+    );
     made_while_its_seat_sync_fails(s, &api)?;
 
     // at zero credit agents stop, and no wake starts (decision 27): an

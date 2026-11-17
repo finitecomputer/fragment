@@ -15,6 +15,9 @@ the author-facing API.
 - `site/index.html` uses the browser library (`./__fragment.js`): `live`
   re-runs `list` whenever anything changes, `subscribe` follows
   `activity`, and `presence` shows who else has the page open.
+- Who did what: each activity line carries `by: call.principal`, and the
+  page shows that person by email from `__people` (a member's, to a
+  member). The app keeps no names of its own.
 
 From the CLI: `fragment call <name> add --input '{"text":"milk"}'`,
 `fragment call <name> list`, `fragment channel <name> activity --follow`.

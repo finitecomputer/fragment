@@ -8,7 +8,7 @@
 use std::sync::OnceLock;
 
 use fragment_proto::ledger::Plan;
-use fragment_proto::{valid_fragment_name, ErrorCode};
+use fragment_proto::{limits, valid_fragment_name, ErrorCode};
 use worker::Env;
 
 use crate::error::{CellError, CellResult};
@@ -46,6 +46,34 @@ pub struct StripeConfig {
     pub tax: bool,
 }
 
+/// The finite.computer move's settings (`FRAGMENT_MIGRATIONS_MOVER`,
+/// `FRAGMENT_MIGRATIONS_CUTOFF_MS`: plain values, read with no decoder).
+pub struct MigrationsConfig {
+    /// The mover's key, 64 hex (`mover`, an npub): its NIP-98 signature
+    /// alone reaches the mover's routes. The mover holds the key; this
+    /// deployment holds no secret for it.
+    pub mover: String,
+    /// Phase 2's cutoff, ms since the epoch (`cutoff_ms`): unanswered moves
+    /// are staged and retired from then on. None: no phase 2 yet.
+    pub cutoff_ms: Option<i64>,
+}
+
+/// The account's Workers Logs, which the operators' glance reads
+/// (`fragment_core::glance`): configured when its read-only key is bound
+/// (`secrets_store::OBSERVABILITY_READ`) and the account and this
+/// deployment's Worker are named.
+pub struct ObservabilityConfig {
+    /// `FRAGMENT_ACCOUNT_ID`, which a deploy that binds the key writes.
+    pub account_id: String,
+    /// `FRAGMENT_WORKER_NAME`, this deployment's Worker, which a deploy
+    /// that binds the key writes beside it: its lines alone are counted
+    /// (an account holds other deployments).
+    pub script: String,
+    /// `CLOUDFLARE_API_URL` (default https://api.cloudflare.com/client/v4;
+    /// dev and the e2e: the fake).
+    pub api: String,
+}
+
 pub struct Config {
     /// `FRAGMENT_CONNECTORS`: the connectors an owner may link, and their
     /// relay targets; absent, `connectors::Policy::default()` (docs/computers.md, "Connector policy").
@@ -77,12 +105,23 @@ pub struct Config {
     /// a `mailto:` address (`fragment_core::computer::support_url_ok`).
     /// Unset, the shell shows them what to tell whoever runs it.
     pub support_url: Option<String>,
+    /// `FRAGMENT_UPLOAD_MAX_BYTES` (the deploy config's `upload_max_bytes`;
+    /// default `limits::UPLOAD_MAX_BYTES_DEFAULT`, at most
+    /// `limits::BLOB_MAX_BYTES`): the zone's request limit, the most one
+    /// file a person sends may be. The list and a page's hello tell clients.
+    pub uploads: fragment_proto::UploadLimits,
     /// `FRAGMENT_POLL_INTERVAL_S`: a busy fragment's pass, and the poll backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
     /// addresses (dev and e2e fleets, which call local fakes). Never on a
     /// shared fleet.
     pub egress_local: bool,
+    /// `FRAGMENT_EGRESS_ALLOW` (the deploy config's `egress_allow`, comma
+    /// separated): the local hosts an operator opens to jobs, push
+    /// endpoints and subscriptions (a self-hosted org's intranet), never
+    /// loopback, link-local, localhost or the platform's own
+    /// (`fragment_core::egress::Allow`). Unset: none, public only.
+    pub egress_allow: fragment_core::egress::Allow,
     /// `FRAGMENT_BLOB_GRACE_S`: how long a blob no branch names is kept
     /// (default 7 days: a rollback within it still has its bytes).
     pub blob_grace_ms: i64,
@@ -110,6 +149,8 @@ pub struct Config {
     pub mail_url: Option<String>,
     workos: Option<WorkOsConfig>,
     stripe: Option<StripeConfig>,
+    /// The logs the glance reads; none: not configured.
+    pub observability: Option<ObservabilityConfig>,
     /// `FRAGMENT_PLATFORM_URL` (required): the platform's own origin, where
     /// sign-in and the platform session live (e.g. https://finite.chat).
     /// It is also the contact a push's VAPID token names (`sub`, RFC 8292):
@@ -124,6 +165,10 @@ pub struct Config {
     /// (`parse_list` reads each as 64 hex), that grant credit and set
     /// plans, seats and overdrafts.
     operators: Option<Result<Vec<String>, String>>,
+    /// `FRAGMENT_MIGRATIONS_*` (the deploy config's `migrations`): the
+    /// finite.computer move (docs/migrations.md). Without it, none of its
+    /// routes answer.
+    pub migrations: Option<MigrationsConfig>,
     /// `FRAGMENT_SIGNINS_PENDING_MAX`: sign-ins begun and not finished that
     /// the Registry keeps before it lets the oldest go (default
     /// `SIGNINS_PENDING_MAX_DEFAULT`).
@@ -276,6 +321,17 @@ fn configured_book(providers: &fragment_core::catalog::Catalog, models: &fragmen
 }
 
 impl Config {
+    /// What one message of `kind`'s may carry, the one choice of it: a
+    /// person's files pass the zone (`uploads`, which the deployment
+    /// names); an agent's go from its computer, which no zone meets, and
+    /// are at most a blob's. The upload route holds it, and the list says it.
+    pub fn uploads_for(&self, kind: fragment_proto::IdentityKind) -> fragment_proto::UploadLimits {
+        match kind {
+            fragment_proto::IdentityKind::Person => self.uploads,
+            fragment_proto::IdentityKind::Agent => fragment_proto::UploadLimits { upload_max_bytes: limits::BLOB_MAX_BYTES, ..self.uploads },
+        }
+    }
+
     /// The isolate's settings (`CONFIG`): built once, from `env`'s variables.
     pub fn from_env(env: &Env) -> &'static Config {
         let cfg = CONFIG.get_or_init(|| Config::build(env));
@@ -302,6 +358,13 @@ impl Config {
         assert!(fragment_core::frames::is_origin(&platform_url), "FRAGMENT_PLATFORM_URL (required) is an origin (scheme://host[:port], lower case, no path)");
         assert!(fragment_core::frames::is_origin(&format!("https://{host_suffix}")), "FRAGMENT_HOST_SUFFIX is a host name");
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
+        // its raw value, read whole by the core (`Allow::from_var`: absent or
+        // blank, none); the deploy checked it: one out of shape is a broken deploy
+        let egress_allow = {
+            let platform = url::Url::parse(&platform_url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            let raw = env.var("FRAGMENT_EGRESS_ALLOW").ok().map(|v| v.to_string());
+            fragment_core::egress::Allow::from_var(raw.as_deref(), &platform, &host_suffix).unwrap_or_else(|e| panic!("FRAGMENT_EGRESS_ALLOW: {e}"))
+        };
         let providers = providers(env);
         let models = fragment_core::models::Models::parse(var(env, "FRAGMENT_MODELS").as_deref(), &fragment_core::price::PriceBook::defaults(), egress_local)
             .unwrap_or_else(|e| panic!("FRAGMENT_MODELS: {e}"));
@@ -331,13 +394,28 @@ impl Config {
                 assert!(fragment_core::computer::support_url_ok(&u), "FRAGMENT_SUPPORT_URL is an https: page or a mailto: address, not {u:?}");
                 u
             }),
+            uploads: fragment_proto::UploadLimits {
+                upload_max_bytes: var(env, "FRAGMENT_UPLOAD_MAX_BYTES")
+                    .map(|v| v.parse::<u64>().ok().filter(|n| (1..=limits::BLOB_MAX_BYTES).contains(n)).unwrap_or_else(|| panic!("FRAGMENT_UPLOAD_MAX_BYTES is 1 to {} bytes, not {v:?}", limits::BLOB_MAX_BYTES)))
+                    .unwrap_or(limits::UPLOAD_MAX_BYTES_DEFAULT),
+                files_per_message: limits::FILES_PER_MESSAGE,
+            },
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
+            egress_allow,
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
             delivery_retry_s: pinned_retry_s.unwrap_or(10),
             delivery_retry_max_s: pinned_retry_s.unwrap_or(3600),
             workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
+            }),
+            observability: var(env, "FRAGMENT_ACCOUNT_ID")
+                .filter(|a| !a.is_empty() && crate::keys::bound(env, fragment_core::secrets_store::OBSERVABILITY_READ))
+                .zip(var(env, "FRAGMENT_WORKER_NAME").filter(|w| fragment_core::glance::valid_script(w)))
+                .map(|(account_id, script)| ObservabilityConfig {
+                account_id,
+                script,
+                api: var(env, "CLOUDFLARE_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.cloudflare.com/client/v4".into()),
             }),
             stripe: crate::keys::bound(env, fragment_core::secrets_store::STRIPE_KEY).then(|| StripeConfig {
                 api: var(env, "STRIPE_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.stripe.com".into()),
@@ -359,6 +437,11 @@ impl Config {
             }),
             mail_url: var(env, "FRAGMENT_MAIL_URL").map(|u| u.trim_end_matches('/').to_string()),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
+            // deploy checked both: a value that is not one is a broken deploy
+            migrations: var(env, "FRAGMENT_MIGRATIONS_MOVER").map(|m| MigrationsConfig {
+                mover: fragment_core::npub::parse(&m).unwrap_or_else(|| panic!("FRAGMENT_MIGRATIONS_MOVER is an npub, not {m:?}")),
+                cutoff_ms: var(env, "FRAGMENT_MIGRATIONS_CUTOFF_MS").map(|c| c.parse::<i64>().ok().filter(|c| *c > 0).unwrap_or_else(|| panic!("FRAGMENT_MIGRATIONS_CUTOFF_MS is ms since the epoch, not {c:?}"))),
+            }),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|n| *n >= 1)

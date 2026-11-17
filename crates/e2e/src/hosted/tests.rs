@@ -573,12 +573,13 @@ fn asked(seen: &Arc<Mutex<Vec<Seen>>>) -> (Vec<String>, Vec<String>, bool) {
 /// asked it to do.
 #[test]
 fn a_sweep_against_a_shared_preview() {
-    use sweep::{sweep_on, Kept, Scope};
+    use sweep::{sweep_on, Kept, Scope, Who};
     let (addr, seen) = recorder(fake_preview);
     let run = Run::signing_in_by_levers(SECRET.into(), 0);
     let api = api_at(addr, &run);
 
-    let ours = sweep_on(&api, &Scope::Run("c58b2a3f9e".into()), NOW_MS).unwrap();
+    let ours = sweep_on(&api, &Scope::Run("c58b2a3f9e".into()), Who::Everyone, NOW_MS);
+    assert!(ours.left.is_empty(), "{:?}", ours.left);
     let (deleted, slept, aged) = asked(&seen);
     assert_eq!(deleted, ["e2e-c58b2a3f9e-agent-chat--pa22", "e2e-c58b2a3f9e-todo--pa22", "e2e-c58b2a3f9e-x--pd22"], "the run's, and none of another run's (b is an editor of one: not theirs to delete)");
     assert_eq!(slept, ["ca"], "a's computer alone: d also owns another run's fragment, and b and c are not the run's");
@@ -600,7 +601,8 @@ fn a_sweep_against_a_shared_preview() {
         assert!(report.contains(part), "{part} in:\n{report}");
     }
 
-    let all = sweep_on(&api, &Scope::All { spared_for_ms: sweep::SPARED_FOR_MS }, NOW_MS).unwrap();
+    let all = sweep_on(&api, &Scope::All { spared_for_ms: sweep::SPARED_FOR_MS }, Who::Everyone, NOW_MS);
+    assert!(all.left.is_empty(), "{:?}", all.left);
     let (deleted, slept, aged) = asked(&seen);
     assert_eq!(deleted, ["e2e-0a0a0a0a0a-files--pc22", "e2e-c58b2a3f9e-agent-chat--pa22", "e2e-c58b2a3f9e-todo--pa22", "e2e-c58b2a3f9e-x--pd22", "e2e-todo-c5065a--pc22"], "every run's an hour old, and none's");
     assert_eq!(slept, ["ca", "cc"], "b's and d's own a young fragment: a run may be using their computers");
@@ -628,7 +630,7 @@ fn a_sweep_continues_after_a_persons_list_fails() {
     let run = Run::signing_in_by_levers(SECRET.into(), 0);
     let api = api_at(addr, &run);
     for scope in [sweep::Scope::Run("c58b2a3f9e".into()), sweep::Scope::All { spared_for_ms: sweep::SPARED_FOR_MS }] {
-        let error = sweep::sweep_on(&api, &scope, NOW_MS).unwrap_err().to_string();
+        let error = sweep::sweep_on(&api, &scope, sweep::Who::Everyone, NOW_MS).report();
         assert!(error.contains("listing a@e2e.test's fragments: 500"), "{error}");
         assert!(error.contains("internal error"), "{error}");
         let requests = seen.lock().unwrap();
@@ -640,3 +642,60 @@ fn a_sweep_continues_after_a_persons_list_fails() {
         assert!(!slept.iter().any(|n| n == "ca"));
     }
 }
+
+/// Goal (FIN-362): a run's sweep signs in the run's own people alone, as
+/// the run noted them, never the levers' list of every e2e person, and
+/// deletes the run's fragments among theirs. Method: run c58b2a3f9e's
+/// people (`a`, `d`) against the fake preview, counting its sign-ins.
+#[test]
+fn a_runs_sweep_signs_in_its_noted_people_alone() {
+    use sweep::{sweep_on, Scope, Who};
+    let (addr, seen) = recorder(fake_preview);
+    let run = Run::signing_in_by_levers(SECRET.into(), 0);
+    let api = api_at(addr, &run);
+    let people = ["a@e2e.test".to_string(), "d@e2e.test".to_string()];
+    let swept = sweep_on(&api, &Scope::Run("c58b2a3f9e".into()), Who::These(&people), NOW_MS);
+    let requests = seen.lock().unwrap().clone();
+    assert!(!requests.iter().any(|r| r.path == "/api/test/people"), "the levers' list of everyone is never asked");
+    assert_eq!(requests.iter().filter(|r| r.path == "/api/test/signin").count(), 2, "two people signed in, no more");
+    let (deleted, slept, _) = asked(&seen);
+    assert_eq!(deleted, ["e2e-c58b2a3f9e-agent-chat--pa22", "e2e-c58b2a3f9e-todo--pa22", "e2e-c58b2a3f9e-x--pd22"]);
+    assert_eq!(slept, ["ca"]);
+    assert_eq!((swept.people, swept.deleted, swept.left.len()), (2, 3, 0));
+}
+
+/// Goal (FIN-362): a person whose sign-in fails (a preview's 500) is
+/// passed and said, and the sweep goes on to the rest, its report naming
+/// what it left. Method: `b`'s sign-in answers 500.
+#[test]
+fn a_sweep_passes_a_person_whose_sign_in_fails() {
+    fn broken_signin(req: &Seen) -> (u16, String) {
+        if req.path == "/api/test/signin" && req.body.contains("\"b@e2e.test\"") {
+            return (500, json!({ "error": "host_failed", "message": "Error: internal error; reference = x" }).to_string());
+        }
+        fake_preview(req)
+    }
+    let (addr, seen) = recorder(broken_signin);
+    let run = Run::signing_in_by_levers(SECRET.into(), 0);
+    let api = api_at(addr, &run);
+    let swept = sweep::sweep_on(&api, &sweep::Scope::Run("c58b2a3f9e".into()), sweep::Who::Everyone, NOW_MS);
+    let (deleted, _, _) = asked(&seen);
+    assert_eq!(deleted, ["e2e-c58b2a3f9e-agent-chat--pa22", "e2e-c58b2a3f9e-todo--pa22", "e2e-c58b2a3f9e-x--pd22"], "the people after b still swept");
+    assert_eq!((swept.people, swept.left.len()), (4, 1));
+    assert!(swept.left[0].starts_with("signing b@e2e.test in") && swept.left[0].contains("500"), "{:?}", swept.left);
+    assert!(swept.report().contains("left 1 thing undone (sweep again)"), "{}", swept.report());
+}
+
+/// A run's people, noted and read back, one email a line; a run not noted
+/// here reads as none.
+#[test]
+fn a_runs_people_are_noted_and_read_back() {
+    let preview = Preview::local_http(ZONE, &format!("notes-{}", std::process::id()), 9);
+    let run = "c58b2a3f9e";
+    assert_eq!(sweep::run_people(&preview, run), None);
+    let people = ["a@e2e.test".to_string(), "cli-0123456789ab@e2e.test".to_string()];
+    sweep::note_run_people(&preview, run, &people).unwrap();
+    assert_eq!(sweep::run_people(&preview, run).as_deref(), Some(&people[..]));
+    std::fs::remove_file(sweep::run_people_file(&preview, run)).unwrap();
+}
+

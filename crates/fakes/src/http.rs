@@ -20,6 +20,8 @@ use std::time::Duration;
 pub struct Request {
     pub method: String,
     pub path: String,
+    /// Its path and query as they arrived, byte for byte.
+    pub target: String,
     pub query: HashMap<String, String>,
     /// The query's pairs in order, a repeated key's each time.
     pub pairs: Vec<(String, String)>,
@@ -41,7 +43,7 @@ impl Request {
             })
             .collect();
         let headers = headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.to_string())).collect();
-        Request { method: method.into(), path: decode(path), query: pairs.iter().cloned().collect(), pairs, headers, body: body.to_vec() }
+        Request { method: method.into(), path: decode(path), target: target.to_string(), query: pairs.iter().cloned().collect(), pairs, headers, body: body.to_vec() }
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {

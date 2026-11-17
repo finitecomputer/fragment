@@ -52,6 +52,7 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
+use crate::principal::calls::{Face, IndexChange, List};
 use crate::registry::calls::{ClaimInvite, InviteEmail};
 use crate::registry::invites::ForgetInvite;
 
@@ -76,7 +77,7 @@ pub(crate) const CLAIM_HEADER: &str = "x-fragment-invite-claim";
 /// effort: one not told keeps it out until its person's next yes there,
 /// said in the log.
 pub(crate) async fn agent_made(env: &Env, person: &str, agent: &str) {
-    let theirs: Vec<String> = match crate::listed(env, person).await {
+    let theirs: Vec<String> = match crate::principal::ask(env, person, &List::default()).await {
         Ok(list) => list.fragments.into_iter().filter(|f| matches!(f.role, Role::Viewer | Role::Editor)).map(|f| f.name).collect(),
         Err(e) => return console_error!("{}", json!({ "agent-made": agent, "list": person, "failed": e.message })),
     };
@@ -124,6 +125,7 @@ fn member_json(r: &Value) -> CellResult<Member> {
         added_at: r["added_at"].as_i64().unwrap_or(0),
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
         owner: r["owner"].as_str().map(str::to_string),
+        email: None,
     })
 }
 
@@ -180,15 +182,33 @@ impl FragmentCell {
     /// in the caller's turn, beside the membership write it mirrors. Their
     /// search cursor follows it (search.rs).
     pub(crate) fn index_change(&self, principal: &str, role: Option<Role>) -> CellResult<()> {
+        let stored = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
+        self.index_rows("SELECT ? AS principal, ? AS role", vec![principal.into(), stored])?;
+        self.search_follows(principal, role)
+    }
+
+    /// Records an index change for each (`principal`, `role`) row that
+    /// `rows` selects, all of them at one new version: one statement,
+    /// however many (a list orders the changes it takes of one fragment by
+    /// version, and each of these is newer than any sent it before).
+    fn index_rows(&self, rows: &str, binds: Vec<SqlStorageValue>) -> CellResult<()> {
         let version: i64 = self.meta(MetaKey::IndexVersion)?.and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
         self.set_meta(MetaKey::IndexVersion, &version.to_string())?;
-        let stored = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
+        let mut all = vec![SqlStorageValue::Integer(version), SqlStorageValue::Integer(js::now_ms())];
+        all.extend(binds);
         self.exec(
-            "INSERT INTO index_outbox (principal, role, version, attempts, next_at) VALUES (?, ?, ?, 0, ?)
-             ON CONFLICT (principal) DO UPDATE SET role = excluded.role, version = excluded.version, attempts = 0, next_at = excluded.next_at",
-            vec![principal.into(), stored, SqlStorageValue::Integer(version), SqlStorageValue::Integer(js::now_ms())],
+            &format!(
+                "INSERT INTO index_outbox (principal, role, version, attempts, next_at) SELECT principal, role, ?, 0, ? FROM ({rows}) WHERE true
+                 ON CONFLICT (principal) DO UPDATE SET role = excluded.role, version = excluded.version, attempts = 0, next_at = excluded.next_at"
+            ),
+            all,
         )?;
-        self.search_follows(principal, role)
+        // it goes after the answer (`after_answer`), never left for the
+        // alarm's next pass, which may be a poll away; a request that must
+        // see it taken before it answers flushes in its own turn as well
+        self.listed_moved.set(true);
+        self.later();
+        Ok(())
     }
 
     /// What its members' lists show of it, at each install of live: its
@@ -214,15 +234,17 @@ impl FragmentCell {
     /// they read moved: listed.rs). The others' rows carry nothing of it.
     pub(crate) fn reindex_readers(&self, read: Role) -> CellResult<()> {
         let owner = self.owner()?.name();
-        self.index_change(&owner, Some(Role::Owner))?;
-        // bounded by MEMBERS_MAX
-        for r in self.rows("SELECT principal, role FROM members", vec![])? {
-            let (Some(p), Some(role)) = (r["principal"].as_str(), r["role"].as_str().and_then(Role::parse)) else { continue };
-            if p != owner && role >= read {
-                self.index_change(p, Some(role))?;
-            }
-        }
-        Ok(())
+        // the roles at least `read`, as rows store them
+        let roles: Vec<&str> = [Role::Public, Role::Viewer, Role::Editor, Role::Owner].into_iter().filter(|r| *r >= read).map(Role::as_str).collect();
+        let roles = serde_json::to_string(&roles).expect("names serialize");
+        // its owner's row and each such member's (at most MEMBERS_MAX): one
+        // statement for their changes, one for their search cursors
+        self.index_rows(
+            "SELECT ? AS principal, ? AS role UNION ALL
+             SELECT principal, role FROM members WHERE principal != ? AND role IN (SELECT value FROM json_each(?))",
+            vec![owner.as_str().into(), Role::Owner.as_str().into(), owner.as_str().into(), roles.as_str().into()],
+        )?;
+        self.search_follow_rows("principal = ? OR role IN (SELECT value FROM json_each(?))", vec![owner.as_str().into(), roles.as_str().into()])
     }
 
     /// Who is in, or who may open it, changed: the owner's row in their
@@ -231,32 +253,15 @@ impl FragmentCell {
         self.index_change(&self.owner()?.name(), Some(Role::Owner))
     }
 
-    /// Sends one index change to `principal`'s list: whether it took it.
-    pub(crate) async fn send_index(&self, principal: &str, body: &Value) -> bool {
-        self.tell_index(principal, body).await.is_ok()
-    }
-
     /// Sends one index change to `principal`'s list, and tells apart why
     /// it was not taken (`fragment_core::ended::list_told`): the list's
     /// refusal, or a failure a later try may pass.
-    pub(crate) async fn tell_index(&self, principal: &str, body: &Value) -> Result<(), Failure> {
-        let sent = async {
-            let headers = Headers::new();
-            headers.set("content-type", "application/json")?;
-            let mut init = RequestInit::new();
-            init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
-            let req = Request::new_with_init("https://principal.internal/index", &init)?;
-            let mut resp = crate::routed::send(&self.env, "PRINCIPAL", principal, req).await?;
-            let status = resp.status_code();
-            // what a list says of a change it did not take (its error's message)
-            let detail = if status == 200 { String::new() } else { resp.text().await.unwrap_or_default() };
-            Ok::<(u16, String), CellError>((status, detail))
-        }
-        .await;
-        match sent {
-            Ok((status, detail)) => fragment_core::ended::list_told(Some(status), &detail),
+    pub(crate) async fn tell_index(&self, principal: &str, change: &IndexChange) -> Result<(), Failure> {
+        match crate::principal::ask(&self.env, principal, change).await {
+            Ok(_) => Ok(()),
             // a list of another release refused it unread (a deploy going out): a later try's
-            Err(e) => fragment_core::ended::list_told(None, &e.message),
+            Err(e) if e.release_refused.is_some() => fragment_core::ended::list_told(None, &e.message),
+            Err(e) => fragment_core::ended::list_told(Some(e.code.status()), &e.message),
         }
     }
 
@@ -304,39 +309,64 @@ impl FragmentCell {
                 return;
             }
         };
+        let incarnation = incarnation.parse::<i64>().unwrap_or(0);
         let mut batch = Vec::with_capacity(due.len());
         for row in &due {
             let principal = row["principal"].as_str().unwrap_or("").to_string();
             let version = row["version"].as_i64().unwrap_or(0);
-            let role = if stale.contains(&principal) { Value::Null } else { row["role"].clone() };
-            let mut body = json!({
-                "fragment": name,
-                "role": role,
-                "incarnation": incarnation.parse::<i64>().unwrap_or(0),
-                "version": version,
-            });
+            let attempts = row["attempts"].as_i64().unwrap_or(0);
+            let role = match row["role"].as_str().map(|r| Role::parse(r).ok_or(r)) {
+                None => None,
+                // an org's member offboarded since: none, which takes the
+                // row from their list
+                Some(Ok(_)) if stale.contains(&principal) => None,
+                Some(Ok(role)) => Some(role),
+                // a role this release does not know (a newer one's, read
+                // after a rollback) is never sent as none, which takes the
+                // row away: it waits, as a change its list refused does
+                Some(Err(r)) => {
+                    console_error!("{name}: {principal}'s change names a role this release does not know: {r}");
+                    batch.push((principal, version, attempts, None));
+                    continue;
+                }
+            };
+            let mut change = IndexChange { role, ..IndexChange::gone(name.clone(), incarnation, version) };
             // every row a role names: the channels searched, the
             // fragment's face and its agents, and the listed records of the
             // channels its role reads, as they are now
-            if let Some(role) = body["role"].as_str().and_then(Role::parse) {
-                body["searched"] = json!(searched);
-                body["listed"] = json!(fragment_core::listed::for_role(&listed, role));
-                if let Ok(Some(face)) = self.meta(MetaKey::Face) {
-                    body["face"] = serde_json::from_str(&face).unwrap_or(Value::Null);
-                    body["face"]["agents"] = json!(agents);
+            if let Some(role) = role {
+                change.searched = Some(searched.clone());
+                change.listed = fragment_core::listed::for_role(&listed, role);
+                // none stored yet (no template, one not blessed, a release
+                // read at its making that failed, nothing installed): the
+                // face a list reads a row without one as, an untitled app,
+                // so its agents are in every row from the first
+                match self.meta(MetaKey::Face) {
+                    Ok(stored) => {
+                        let mut shown = stored.and_then(|f| crate::json_text::<Face>(&f).ok()).unwrap_or_default();
+                        shown.agents = agents.clone();
+                        change.face = Some(shown);
+                    }
+                    Err(e) => console_error!("{name}: its face did not read ({:?}): {}", e.code, e.message),
+                }
+                // the owner's row: the sharing now, which no later change
+                // undoes (a later one sends a newer version, made after it)
+                if principal == owner {
+                    match self.sharing_counts() {
+                        Ok(sharing) => change.sharing = Some(sharing),
+                        Err(e) => console_error!("{name}: its sharing did not read ({:?}): {}", e.code, e.message),
+                    }
                 }
             }
-            // the owner's row: the sharing now, which no later change undoes
-            // (a later one sends a newer version, made after it)
-            if principal == owner && body["role"].is_string() {
-                match self.sharing_counts() {
-                    Ok(sharing) => body["sharing"] = json!(sharing),
-                    Err(e) => console_error!("{name}: its sharing did not read ({:?}): {}", e.code, e.message),
-                }
-            }
-            batch.push((principal, version, row["attempts"].as_i64().unwrap_or(0), body));
+            batch.push((principal, version, attempts, Some(change)));
         }
-        let delivered = join_all(batch.iter().map(|(principal, _, _, body)| self.send_index(principal, body))).await;
+        let told = batch.iter().map(|(principal, _, _, change)| async move {
+            match change {
+                Some(change) => self.tell_index(principal, change).await.is_ok(),
+                None => false,
+            }
+        });
+        let delivered = join_all(told).await;
         for ((principal, version, attempts, _), delivered) in batch.into_iter().zip(delivered) {
             if delivered {
                 let _ = self.exec(
@@ -433,15 +463,8 @@ impl FragmentCell {
     /// has; `Other` for a kind a newer release stored, read after a
     /// rollback).
     pub(crate) fn kind(&self) -> CellResult<FragmentKind> {
-        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
-        Ok(face.and_then(|f| serde_json::from_value(f["kind"].clone()).ok()).unwrap_or_default())
-    }
-
-    /// Whether its content files read from main first (`__file`, `__files`):
-    /// an agent's and a session archive's, whose writers write main and
-    /// never deploy.
-    pub(crate) fn main_first(&self) -> CellResult<bool> {
-        Ok(matches!(self.kind()?, FragmentKind::Agent | FragmentKind::Sessions))
+        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok());
+        Ok(face.map(|f| face_kind(&f)).unwrap_or_default())
     }
 
     /// A chat's own agent: its lead, the first agent added, which answers
@@ -494,13 +517,26 @@ impl FragmentCell {
         Ok(out)
     }
 
-    pub(crate) fn members(&self, caller: &Caller) -> CellResult<Response> {
+    /// The API's list (`fragment members list`): to the owner, and their
+    /// agent for them, each person by their email too, as the share sheet
+    /// shows them (decision 48). A page's (`__members`) and a job's name no
+    /// one: they ask `__people` (`job.people`), which decides by who asks.
+    pub(crate) async fn members(&self, caller: &Caller) -> CellResult<Response> {
         // an org's content admins administer who is in, member or not
         let admin = self.owner()?.org().is_some_and(|org| self.content_admin(caller, org).is_ok());
         if !admin {
             self.require(caller, false, Role::Viewer)?;
         }
-        json_response(&self.member_list()?)
+        let mut list = self.member_list()?;
+        if self.shares(caller) {
+            // bounded: at most MEMBERS_MAX, asked PROFILES_MAX at a time
+            let people = list.members.iter().filter(|m| m.kind != Some(IdentityKind::Agent)).map(|m| m.principal.clone()).collect();
+            let profiles = crate::share::profiles(&self.env, people).await;
+            for m in &mut list.members {
+                m.email = profiles.get(&m.principal).and_then(|p| p.email.clone());
+            }
+        }
+        json_response(&list)
     }
 
     /// Every member, the first added first (a chat's lead is its first
@@ -685,8 +721,38 @@ impl FragmentCell {
             let why = access::refuse_set_role(false, None, body.role).expect("only who administers it manages members");
             return Err(refusal(false, why));
         }
+        // what it waited on, for its client (`Server-Timing`)
+        let mut laps = crate::js::Laps::start();
         let target = self.named(who).await?;
-        json_response(&self.put_member(&actor, &target, body, false).await?)
+        laps.lap("identity");
+        let member = self.put_member(&actor, &target, body, false, &mut laps).await?;
+        Ok(laps.stamp(json_response(&member)?)?)
+    }
+
+    /// `who`, one of `owner`'s own agents, or why not (403): what a create
+    /// that names its agent asks before it makes anything (fragment.rs
+    /// `create`), as `put_member` would refuse anyone else's.
+    pub(crate) async fn own_agent(&self, who: &str, owner: &str) -> CellResult<Identity> {
+        let target = self.named(who).await?;
+        if target.kind != IdentityKind::Agent || target.owner.as_deref() != Some(owner) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a fragment's agent at its making is one of its maker's own: anyone else's joins with its owner, invited once it is made"));
+        }
+        Ok(target)
+    }
+
+    /// `target`, its owner's own agent (`own_agent`), made an editor as
+    /// the fragment is made, in the create's turn: written with its
+    /// owner's row and before any await, so no list row of it (the
+    /// request's flush, `after_answer`'s, the alarm's) names no agent. Its
+    /// rows and its computer's notice are sent as its owner's `PUT
+    /// members/{agent}` sends them (`write_member`), the notice once its
+    /// template is in (`fragment_core::seed::Stage::joins_wait`).
+    pub(crate) fn join_own_agent(&self, target: &Identity) -> CellResult<Member> {
+        // its maker: a person's fragment's owner, or an org's content admin
+        // making it (`own_agent` checked the agent is theirs)
+        let by = target.owner.clone().ok_or_else(|| CellError::host("an agent has its owner"))?;
+        let actor = Actor { admin: true, by, for_owner: None };
+        self.write_member(&actor, target, SetRole { role: Role::Editor }, false)
     }
 
     /// A test hook (`ops::test_fragment`'s `member`): `who` made a member,
@@ -699,7 +765,7 @@ impl FragmentCell {
             self.enrolled(org, &target, None).await?;
         }
         let actor = Actor { admin: true, by: self.owner()?.name(), for_owner: None };
-        self.put_member(&actor, &target, SetRole { role }, true).await
+        self.put_member(&actor, &target, SetRole { role }, true, &mut crate::js::Laps::start()).await
     }
 
     /// `target` made a member at `body`'s role, or their role changed, by
@@ -708,7 +774,7 @@ impl FragmentCell {
     /// be able to add someone to something and then it just shows up for
     /// them"): anyone else joins by their own yes to an invite, but for a
     /// test's `lever`.
-    async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool) -> CellResult<Member> {
+    async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool, laps: &mut crate::js::Laps) -> CellResult<Member> {
         // an org's: rows from before the person's place now are no grant
         // (a returning admin's own add comes in afresh)
         let person = match target.kind {
@@ -716,6 +782,19 @@ impl FragmentCell {
             IdentityKind::Person => target.id.clone(),
         };
         self.revoke_stale(&person).await?;
+        let member = self.write_member(actor, target, body, lever)?;
+        // the agent's list holds this fragment before its computer is told
+        self.flush_index().await;
+        laps.lap("list");
+        self.flush_joined().await;
+        laps.lap("joined");
+        Ok(member)
+    }
+
+    /// [`Self::put_member`]'s writes, in one turn with no await: the
+    /// member's row, its list changes, and an agent's notice queued. Their
+    /// sends are the caller's (`put_member`, or a create's own).
+    fn write_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool) -> CellResult<Member> {
         let current = self.member_role(&target.id)?;
         if let Some(why) = access::refuse_set_role(actor.admin, current, body.role) {
             return Err(refusal(true, why));
@@ -788,9 +867,6 @@ impl FragmentCell {
                 self.agents_join(&target.id, &agents, body.role)?;
             }
         }
-        // the agent's list holds this fragment before its computer is told
-        self.flush_index().await;
-        self.flush_joined().await;
         Ok(member)
     }
 
@@ -873,14 +949,14 @@ impl FragmentCell {
 
     /// Its title as its members' lists show it, if it has one.
     pub(crate) fn title(&self) -> CellResult<Option<String>> {
-        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
+        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok());
         Ok(face.and_then(|f| f["title"].as_str().map(str::to_string)).filter(|t| !t.is_empty()))
     }
 
     /// An agent fragment's role, as its face keeps it (`face`): none for
     /// any other fragment.
     pub(crate) fn agent_role(&self) -> CellResult<Option<String>> {
-        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
+        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok());
         Ok(face.and_then(|f| f["role"].as_str().map(str::to_string)))
     }
 
@@ -1226,11 +1302,15 @@ impl FragmentCell {
         let counts = counts.into_iter().next().expect("a SELECT without FROM answers one row");
         assert!(counts.guests <= counts.members, "guests are members");
         assert!(counts.invites <= limits::INVITES_MAX as u64, "a fragment holds at most INVITES_MAX invites");
-        Ok(Sharing { visibility, members: counts.members, guests: counts.guests, invites: Some(counts.invites) })
+        Ok(Sharing { visibility, members: counts.members, guests: counts.guests, invites: Some(counts.invites), reach: self.reaches()? })
     }
 
     pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
+        // members only narrows it; its link or public, not with reach (reach.rs)
+        if body.visibility != Visibility::Members {
+            self.share_while_private()?;
+        }
         let before = self.visibility()?;
         self.set_meta(MetaKey::Visibility, body.visibility.as_str())?;
         // opened again from members only, it gets a new share link: one
@@ -1293,22 +1373,40 @@ impl FragmentCell {
         if !fragment_proto::valid_secret_name(key) {
             return Err(CellError::invalid("a secret's name must match ^[A-Z][A-Z0-9_]{0,63}$"));
         }
-        let put: PutSecret = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts}}: {e}")))?;
+        let mut put: PutSecret = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts}} or {{fromVault, hosts}}: {e}")))?;
+        let hosts = secret_hosts(&put.hosts)?;
+        // a secret of the caller's own Vault, moved here (FIN-466): theirs
+        // alone to move, never an agent's. Its take claims it for this
+        // fragment's KEY (`fragment_core::vault::Claimed`), so what would
+        // refuse it here refuses it first
+        let moved = match put.from_vault.take() {
+            Some(_) if !put.value.is_empty() => return Err(CellError::invalid("a secret is its value or fromVault, not both")),
+            Some(name) => {
+                let person = caller.signed.as_ref().filter(|s| s.identity.kind == fragment_proto::IdentityKind::Person).map(|s| s.identity.id.clone());
+                let person = person.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only a person moves a secret of their vault, from their own session or key"))?;
+                self.reach_while_private()?;
+                self.secret_room(key)?;
+                let to = format!("{}/{key}", self.name()?);
+                let crate::vault::Taken(value, revision) = crate::vault::take(&self.env, &person, &name, &to).await?;
+                put.value = value;
+                Some((person, name, to, revision))
+            }
+            None => None,
+        };
         if put.value.is_empty() {
             return Err(CellError::invalid("a secret's value is empty"));
         }
         if put.value.len() > limits::SECRET_MAX_BYTES {
             return Err(CellError::too_large("a secret", put.value.len(), limits::SECRET_MAX_BYTES));
         }
-        let hosts = secret_hosts(&put.hosts)?;
         // sealed first (reading the host secret may yield): the checks and
         // the write below share one turn
         let sealed = crate::keys::seal(&self.env, &self.scope(), put.value.as_bytes()).await?;
         self.require(caller, false, Role::Editor)?;
-        let exists = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![key.into()])?.is_empty();
-        if !exists && self.count("SELECT COUNT(*) AS n FROM secrets")? >= limits::SECRETS_MAX as u64 {
-            return Err(CellError::invalid(format!("a fragment has at most {} secrets", limits::SECRETS_MAX)));
-        }
+        // a key is reach: none while its link opens it (reach.rs), decided
+        // in the write's own turn
+        self.reach_while_private()?;
+        let exists = self.secret_room(key)?;
         let by = self.caller_id(caller)?;
         self.exec(
             "INSERT INTO secrets (name, sealed, set_by, set_at) VALUES (?, ?, ?, ?)
@@ -1324,7 +1422,30 @@ impl FragmentCell {
         // its hosts are its editors' to know (`GET secrets`), never the
         // event log's, which every viewer reads
         self.event("secret.set", &format!("secret {key} set by {}", npub::display(by)), json!({ "name": key }));
+        // its owner's row says it has reach (`Sharing::reach`)
+        if !exists {
+            self.sharing_changed()?;
+        }
+        // kept here: gone from the Vault, so it has one home. Should that
+        // fail, it stays there too, claimed for this KEY: the same move
+        // again finishes it (only the value taken: one its person set
+        // since stays theirs there)
+        if let Some((person, name, to, revision)) = moved {
+            if let Err(e) = crate::vault::moved(&self.env, &person, &name, &to, &revision).await {
+                console_error!("{}", json!({ "secret": key, "moved": name, "vault": "kept", "error": e.message }));
+            }
+        }
         json_response(&json!({ "ok": true, "name": key, "hosts": hosts }))
+    }
+
+    /// Whether `key` is held already; a new one refused at
+    /// `SECRETS_MAX`.
+    fn secret_room(&self, key: &str) -> CellResult<bool> {
+        let exists = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![key.into()])?.is_empty();
+        if !exists && self.count("SELECT COUNT(*) AS n FROM secrets")? >= limits::SECRETS_MAX as u64 {
+            return Err(CellError::invalid(format!("a fragment has at most {} secrets", limits::SECRETS_MAX)));
+        }
+        Ok(exists)
     }
 
     pub(crate) fn list_secrets(&self, caller: &Caller) -> CellResult<Response> {
@@ -1350,8 +1471,19 @@ impl FragmentCell {
         self.exec("DELETE FROM secret_hosts WHERE name = ?", vec![key.into()])?;
         if removed {
             self.event("secret.removed", &format!("secret {key} removed"), json!({ "name": key }));
+            self.sharing_changed()?;
         }
         json_response(&json!({ "ok": true, "removed": removed }))
+    }
+
+    /// Every secret it holds let go, their names answered: a connector's,
+    /// as it is unmade (plane.rs), since what its owner set there (a bot's
+    /// token, a webhook's secret) is not the new code's to use.
+    pub(crate) fn drop_secrets(&self) -> CellResult<Vec<String>> {
+        let names: Vec<String> = self.rows("SELECT name FROM secrets ORDER BY name", vec![])?.iter().filter_map(|r| r["name"].as_str().map(str::to_string)).collect();
+        self.exec("DELETE FROM secrets", vec![])?;
+        self.exec("DELETE FROM secret_hosts", vec![])?;
+        Ok(names)
     }
 }
 
@@ -1372,7 +1504,7 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
             hosts.push(host);
         }
     }
-    hosts.sort();
+    hosts.sort_unstable();
     assert!(!hosts.is_empty() && hosts.len() <= limits::SECRET_HOSTS_MAX, "a secret's hosts are within their bounds");
     Ok(hosts)
 }
@@ -1394,4 +1526,11 @@ pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, 
         face["picture"] = json!(p);
     }
     face.to_string()
+}
+
+/// A kept face's kind (`face`), as serde reads a `FragmentKind`: one this
+/// release knows, `Other` for one a newer release kept (read after a
+/// rollback), an app's when it names none.
+pub(crate) fn face_kind(face: &Value) -> FragmentKind {
+    face["kind"].as_str().map_or(FragmentKind::default(), |k| FragmentKind::parse(k).unwrap_or(FragmentKind::Other))
 }

@@ -18,7 +18,9 @@
 //! sheet, not with a signed call (it holds no key), and not by scripting
 //! the window it opens on the sheet (only the platform's own page frames
 //! it, in a dialog). Every form needs the page's own token, bound to the
-//! session, and arms only after a moment.
+//! session, and arms only after a moment. Someone invited who opens the
+//! fragment is shown the invite as its sign-in begins, and accepts or
+//! declines it there (`at_signin`, FIN-502).
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -32,6 +34,8 @@ use super::templates::{email_of, person};
 use crate::api::{url_enc, Api, Call, Reply};
 use crate::browser::{Browser, Page};
 use crate::Suite;
+
+mod at_signin;
 
 /// Runs on a node restarted with the platform and the fragments on two domains
 /// (as fragment.club is), then restarts it as it was for the lanes after.
@@ -165,7 +169,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && r.text.contains(&owner_name)
             && r.text.contains("Your agent")
             && r.text.contains("name=\"email\"")
-            && r.text.contains("General access"),
+            && r.text.contains("aria-label=\"Who can open it\""),
         &r,
     );
     // whoever the owner lets into a chat can talk to their agent in it: the
@@ -263,12 +267,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let mailed = s.mail.sent_to(&guest_name);
     let link = api.site_url(&chat, "");
     s.ok(
-        "they are mailed, from the deployment's address: who invites them to what, on the platform the shell names, and the platform's own page to accept it on (never the fragment's address), which holds no secret",
+        "they are mailed, from the deployment's address: who invites them to what, on the platform the shell names, and the platform's own page to accept it on, the fragment's sign-in there (never the fragment's address), which holds no secret",
         mailed.len() == 1
             && mailed[0].from == json!({ "email": "mail@fragment.localhost", "name": "fragment" })
             && mailed[0].subject.starts_with(&format!("{owner_name} invited you to "))
             && mailed[0].text.contains(&format!(" on {}.\n", fragment_core::mail::PRODUCT))
-            && mailed[0].text.contains(&format!("Accept it: {platform}/\n"))
+            && mailed[0].text.contains(&format!("Accept it: {platform}/auth/fragment?name={chat}\n"))
             && mailed[0].text.contains(&format!("Sign in as {guest_name}, then accept or decline it"))
             && !mailed[0].text.contains(&link)
             && !mailed[0].text.contains("?view=")
@@ -340,8 +344,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let listed_theirs = api.signed(&guest, "GET", "/api/fragments", None)?;
     let in_list = listed_theirs.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == chat.as_str() && f["role"] == "editor"));
     s.ok(
-        "their yes makes them a member, at the role it said: the invite is spent, and it is in their list as it answers",
-        r.status == 200 && r.body == json!({ "fragment": chat, "role": "editor" }) && role_of(&guest_id)?.as_deref() == Some("editor") && invites_for(&guest_name)?.is_empty() && in_list,
+        "their yes makes them a member, at the role it said, and names its page to open (FIN-458): the invite is spent, and it is in their list as it answers",
+        r.status == 200 && r.body["fragment"] == chat.as_str() && r.body["role"] == "editor" && r.body["open"].as_str().is_some_and(|o| o.contains(chat.as_str())) && role_of(&guest_id)?.as_deref() == Some("editor") && invites_for(&guest_name)?.is_empty() && in_list,
         format!("{r} {listed_theirs}"),
     );
     let members_before = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?.body["members"].as_array().map_or(0, Vec::len);
@@ -807,21 +811,21 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.click(&home, share)?;
     }
     let inside = |chrome: &mut Browser| chrome.eval_in_frame(&home, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let shown = windowed && chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let shown = windowed && chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("People with access"));
     chrome.screenshot(&home, &s.scratch.join("share-dialog.png"))?;
     let done = shown && chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)").is_ok();
     let closed = done && chrome.until(&home, &format!("!document.getElementById('sheet').open && !document.querySelector('#sheet iframe') && !!document.querySelector({row:?})"), wait);
     s.ok(
-        "the shell opens an app's share sheet in a dialog (a frame on its own origin), and its Done closes it (the shell reads the list again)",
+        "the shell opens an app's share sheet in a dialog (a frame on its own origin), and its X closes it (the shell reads the list again)",
         shown && closed,
         format!("listed {listed} windowed {windowed} shown {shown} done {done}: {}", inside(&mut chrome)),
     );
 
     // ---- at a short window and a tall one: the dialog is as tall as the
     // sheet says, all of it in view when it fits and scrolling when it does
-    // not, and its Done, clicked where it is drawn, closes it
+    // not, and its X, clicked where it is drawn, closes it
     let (mut all, mut seen) = (true, vec![]);
-    for (height, fits) in [(700, false), (1440, true)] {
+    for (height, fits) in [(420, false), (1440, true)] {
         chrome.viewport(&home, 1280, height, false)?;
         // (two frames for the desktop to lay itself out at the new size)
         chrome.eval(&home, "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))")?;
@@ -850,10 +854,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
                     && (!fits || laid["dialog"].as_f64() == own)
             });
         chrome.screenshot(&home, &s.scratch.join(format!("share-dialog-{height}.png")))?;
-        // Done where it is drawn: the dialog scrolled to it, and the point
-        // the frame's place in the page plus the button's in the frame,
-        // the button what is there
-        chrome.eval(&home, "(() => { const d = document.getElementById('sheet'); d.scrollTop = d.scrollHeight; return true; })()")?;
+        // the X where it is drawn: the dialog scrolled to it (its top),
+        // and the point the frame's place in the page plus the button's in
+        // the frame, the button what is there
+        chrome.eval(&home, "(() => { const d = document.getElementById('sheet'); d.scrollTop = 0; return true; })()")?;
         let frame = chrome.eval(&home, "(() => { const r = document.querySelector('#sheet iframe')?.getBoundingClientRect(); return r ? [r.left, r.top] : []; })()")?;
         let done = chrome
             .eval_in_frame(&home, "/share/", "(() => { const r = document.querySelector('button[data-done]').getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return document.elementFromPoint(x, y)?.closest('button[data-done]') ? [x, y] : []; })()")
@@ -866,7 +870,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             chrome.click_at(&home, at)?;
         }
         let closed = at.is_some() && chrome.until(&home, "!document.getElementById('sheet').open && !document.querySelector('#sheet iframe')", wait);
-        seen.push(format!("{height}: sized {sized} {laid} Done at {at:?} closed {closed}"));
+        seen.push(format!("{height}: sized {sized} {laid} X at {at:?} closed {closed}"));
         all &= sized && fitted && closed;
         if !all {
             break;
@@ -874,7 +878,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     }
     chrome.viewport(&home, 1280, 800, false)?;
     s.ok(
-        "at a short window and a tall one the dialog is as tall as the sheet says, in view (scrolling only when the sheet does not fit), and its Done, clicked where it is drawn, closes it",
+        "at a short window and a tall one the dialog is as tall as the sheet says, in view (scrolling only when the sheet does not fit), and its X, clicked where it is drawn, closes it",
         all,
         seen.join("; "),
     );
@@ -894,10 +898,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         text,
     );
     chrome.click(&home, &format!("{access} button[data-action=sharing]"))?;
-    let opened = chrome.until(&home, &format!("!!document.querySelector({access:?})?.querySelector('.app-sharing-frame')?.style.height"), wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let opened = chrome.until(&home, &format!("!!document.querySelector({access:?})?.querySelector('.app-sharing-frame')?.style.height"), wait) && s.eventually(wait, || inside(&mut chrome).contains("People with access"));
     let _ = chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)");
     let closed = opened && chrome.until(&home, &format!("!document.querySelector({access:?})?.querySelector('.app-sharing-frame') && !!document.querySelector({access:?})"), wait);
-    s.ok("Sharing expands inline, and Done closes it back to the page", opened && closed, inside(&mut chrome));
+    s.ok("Sharing expands inline, and its X closes it back to the page", opened && closed, inside(&mut chrome));
     chrome.close(home)?;
 
     // the sheet as the owner sees it, at a popup's size and a phone's, light
@@ -907,7 +911,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     for (width, mobile, scheme, shot) in [(480, false, "light", "share-sheet.png"), (390, true, "dark", "share-sheet-phone.png")] {
         chrome.viewport(&shown, width, 900, mobile)?;
         chrome.color_scheme(&shown, scheme)?;
-        let ready = chrome.until(&shown, "document.readyState === 'complete' && !!document.querySelector('footer')", wait);
+        let ready = chrome.until(&shown, "document.readyState === 'complete' && !!document.querySelector('main.share .people')", wait);
         fits.push((width, ready && chrome.eval(&shown, "document.documentElement.scrollWidth <= innerWidth")? == json!(true)));
         chrome.screenshot(&shown, &s.scratch.join(shot))?;
     }
@@ -915,12 +919,17 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- a keyboard: arrow keys over its choices send nothing (a closed
     // select's did, on Linux and Windows: an ArrowDown on a member's role
-    // removed them, on General access made it public)
+    // removed them, on General access made it public): a member's role
+    // menu, closed and open, and the access switch
     chrome.viewport(&shown, 480, 900, false)?;
     chrome.reload(&shown)?;
-    let armed_now = chrome.until(&shown, "!!document.querySelector('footer') && ![...document.querySelectorAll('[data-arm]')].some(b => b.disabled)", wait);
+    let armed_now = chrome.until(&shown, "!!document.querySelector('main.share .people') && ![...document.querySelectorAll('[data-arm]')].some(b => b.disabled)", wait);
     let before = (api.status(&owner, &chat)?.body["visibility"].clone(), role_of(&member_id)?);
-    for focus in [format!("form:has(input[value={member_id:?}]) button[value=editor]"), "button[value=public]".to_string()] {
+    let menu = format!("details.menu:has(input[value={member_id:?}])");
+    for focus in [format!("{menu} summary"), format!("{menu} button[value=editor]"), "button[value=public]".to_string()] {
+        if focus.ends_with("[value=editor]") {
+            chrome.eval(&shown, &format!("(document.querySelector({menu:?}).open = true, true)"))?;
+        }
         chrome.eval(&shown, &format!("(document.querySelector({focus:?}).focus(), true)"))?;
         for key in ["ArrowDown", "ArrowDown", "ArrowUp", "ArrowDown"] {
             chrome.press(&shown, key, false)?;
@@ -929,7 +938,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(Duration::from_millis(500));
     let after = (api.status(&owner, &chat)?.body["visibility"].clone(), role_of(&member_id)?);
     s.ok("arrow keys over a member's role and over General access change nothing", armed_now && before == after && after.0 == "link", format!("{before:?} → {after:?}"));
-    // Remove asks a second click: the first only says what it does
+    // Remove, in the member's menu, asks a second click: the first only
+    // says what it does
+    chrome.eval(&shown, &format!("(document.querySelector({menu:?}).open = false, true)"))?;
+    chrome.click(&shown, &format!("{menu} summary"))?;
     let remove = format!("form:has(input[name=action][value=remove]):has(input[value={member_id:?}]) button");
     chrome.click(&shown, &remove)?;
     std::thread::sleep(Duration::from_millis(300));
@@ -942,28 +954,58 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "{member_name} invited again: {r}");
     chrome.close(shown)?;
 
-    // ---- the member's shell: the invite waits in their sidebar, with
-    // Accept and Decline (decision 63); their Accept opens it
+    // ---- the member's shell: the invite is told them as a notice, with
+    // Accept and Decline (decision 63; FIN-458); their Accept opens it, its
+    // answer naming its page
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &member_session)?;
     let theirs = chrome.open(&format!("{platform}/settings"))?;
     chrome.viewport(&theirs, 1280, 800, false)?;
-    let invite = format!("#invites .invite[data-invite={chat:?}]");
-    let waits = chrome.until(&theirs, &format!("{} && !document.getElementById('invites').hidden && !document.querySelector({row:?})", settled(&format!("{invite} .invite-accept"))), wait);
+    let invite = format!("#computer-notices:not([hidden]) .computer-notice[data-id=\"invite:{chat}\"]");
+    let accept = format!("[...(document.querySelector({invite:?})?.querySelectorAll('.notice-actions button') ?? [])].find((x) => x.textContent === 'Accept')");
+    let waits = chrome.until(&theirs, &format!("!!{accept} && !document.querySelector({row:?})"), wait);
     let said = chrome.eval(&theirs, &format!("document.querySelector({invite:?})?.innerText ?? ''"))?;
-    chrome.screenshot(&theirs, &s.scratch.join("share-invite-sidebar.png"))?;
+    chrome.screenshot(&theirs, &s.scratch.join("share-invite-notice.png"))?;
     s.ok(
-        "their shell shows the invite in the sidebar, above their chats: its title, who invited them and as what, with Accept and Decline; it is in no list yet",
+        "their shell tells them the invite, over their page: its title, who invited them and as what, with Accept and Decline; it is in no list yet",
         waits && said.as_str().is_some_and(|t| t.contains(&title) && t.contains(&format!("{owner_name} invited you to view it")) && t.contains("Accept") && t.contains("Decline")),
         &said,
     );
+    // ---- many at once: on a phone the band keeps to its share of the page
+    // and scrolls, the page below still there (FIN-458)
+    let many: Vec<String> = (0..4).map(|i| make(&s.name(&format!("many{i}")), "todo")).collect::<Result<_>>()?;
+    for name in &many {
+        let r = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": member_name, "role": "viewer" })))?;
+        anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "{member_name} invited to {name}: {r}");
+    }
+    chrome.viewport(&theirs, 390, 700, true)?;
+    let rows = "#computer-notices .computer-notice[data-id^='invite:']";
+    let all = chrome.until(&theirs, &format!("document.querySelectorAll({rows:?}).length === 5"), wait);
+    let band = chrome.eval(
+        &theirs,
+        "(() => { const b = document.getElementById('computer-notices').getBoundingClientRect(), el = document.getElementById('computer-notices'); \
+         return { height: b.height, below: innerHeight - b.bottom, page: innerHeight, scrolls: el.scrollHeight > el.clientHeight + 1 }; })()",
+    )?;
+    chrome.screenshot(&theirs, &s.scratch.join("share-invites-phone.png"))?;
+    let page = band["page"].as_f64().unwrap_or(0.0);
+    s.ok(
+        "five invites on a phone: the band takes at most 40% of the page and scrolls, the page below it still shown",
+        all && band["height"].as_f64().is_some_and(|h| h <= page * 0.4 + 1.0) && band["below"].as_f64().is_some_and(|b| b >= page * 0.4) && band["scrolls"] == json!(true),
+        &band,
+    );
+    for name in &many {
+        let r = api.signed(&member, "POST", &format!("/api/invites/{name}/decline"), Some(&json!({})))?;
+        anyhow::ensure!(r.status == 200, "{member_name} declines {name}: {r}");
+    }
+    chrome.viewport(&theirs, 1280, 800, false)?;
+    let waits = waits && chrome.until(&theirs, &format!("document.querySelectorAll({rows:?}).length === 1 && !!{accept}"), wait);
     if waits {
-        chrome.click(&theirs, &format!("{invite} .invite-accept"))?;
+        chrome.eval(&theirs, &format!("({accept}.click(), true)"))?;
     }
     // (their Accept opens its window on the desktop)
     let more = "#stack button[aria-label='More']";
     let listed = waits && chrome.until(&theirs, &format!("{} && {} && !document.querySelector({invite:?})", settled(&row), settled(more)), wait);
     s.ok(
-        "their Accept makes them a member, and opens it: it is in their dock, its window open, and the invite gone from the sidebar",
+        "their Accept makes them a member, and opens it: it is in their dock, its window open, and the invite told no more",
         listed && role_of(&member_id)?.as_deref() == Some("viewer") && invites_for(&member_name)?.is_empty(),
         chrome.eval(&theirs, "document.getElementById('sidebar').innerText")?,
     );
@@ -986,5 +1028,6 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         no_share && shown && text.contains("Leave") && text.contains("Only its owner changes who has access"),
         format!("listed {listed} windowed {windowed} offered {offered} shown {shown}: {text}"),
     );
-    Ok(())
+    drop(chrome);
+    at_signin::invite_asked_first(s, api, &owner)
 }

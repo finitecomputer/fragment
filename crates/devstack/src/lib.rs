@@ -1,8 +1,11 @@
 //! The local stack: one `wrangler dev` process serving the platform Worker
 //! (`cell/`), its variables rendered into its `.dev.vars` and its secrets
 //! seeded into wrangler's local Secrets Store, bound by name as a deploy
-//! binds them (store.rs). `xtask dev` runs it in the foreground; the e2e starts,
-//! crashes, and restarts it.
+//! binds them (store.rs); or one `celld dev` process (celld.rs;
+//! docs/self-host.md, seam 1), its secrets bound by name the same way and
+//! read by celld from the node's secrets backend: a file of their values
+//! (`Secrets::Vars`) or OpenBao (openbao.rs, `Secrets::OpenBao`). `xtask
+//! dev` runs it in the foreground; the e2e starts, crashes, and restarts it.
 
 use std::fs;
 use std::io::Write;
@@ -17,13 +20,17 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 
 pub mod built;
+pub mod celld;
 pub mod containers;
 mod framing;
 mod front;
 pub mod node;
 mod node_release;
+pub mod openbao;
+mod openbao_release;
 pub mod signals;
 pub mod store;
+mod tree;
 
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
@@ -106,6 +113,11 @@ pub fn read_config(project: &Path) -> Result<serde_json::Value> {
     serde_json::from_str(&strip_comments(&text)).with_context(|| format!("parse {}", path.display()))
 }
 
+/// The cell's shim, as a staged copy needs it: `entry.mjs` and each module
+/// it imports from beside it (a deploy runs it from the source tree, so
+/// only a staged copy can miss one: `the_staged_shim_holds_what_it_imports`).
+pub const SHIM_FILES: [&str; 2] = ["entry.mjs", "backup-reads.mjs"];
+
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
 /// `build/`, so a node run from it keeps its state and variables apart from
@@ -131,7 +143,9 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
     absolute_images(&mut config, &from)?;
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
-    fs::copy(from.join("entry.mjs"), dir.join("entry.mjs")).context("stage entry.mjs")?;
+    for shim in SHIM_FILES {
+        fs::copy(from.join(shim), dir.join(shim)).with_context(|| format!("stage {shim}"))?;
+    }
     let _ = fs::remove_dir_all(dir.join("build"));
     // no build writes among the files as they are copied
     let reading = built::reading(&from.join("build"))?;
@@ -177,11 +191,11 @@ pub fn local_config(project: &Path) -> PathBuf {
 
 /// The project's config as a local node runs it (`local_config`): less the
 /// remote-only bindings, its secrets bound by name (`secrets`, each a
-/// binding and its secret's name) in wrangler's local store, as a deploy
-/// binds them in the account's, `images` beside its own computer images,
-/// and every one built from a Dockerfile of its own
-/// (`containers::scope_images`), so that no other stack's teardown removes
-/// its computers.
+/// binding and its secret's name) in the local node's store (wrangler's,
+/// or celld's backend), as a deploy binds them in the account's, `images`
+/// beside its own computer images, and every one built from a Dockerfile
+/// of its own (`containers::scope_images`), so that no other stack's
+/// teardown removes its computers.
 fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     if !images.is_empty() {
@@ -203,13 +217,14 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(Str
     Ok(path)
 }
 
-/// Discards a project's local state (its Durable Objects, R2, Workflows,
-/// queues, and the local store's secrets): before its fleet is configured,
-/// which seeds the store again.
+/// Discards a project's local state on either runtime (its Durable
+/// Objects, R2, Workflows, queues, and the local store's secrets): before
+/// its fleet is configured, which seeds the store again.
 pub fn clear_state(project: &Path) -> Result<()> {
-    let state = state_dir(project);
-    if state.exists() {
-        fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+    for state in [state_dir(project), celld::state_dir(project)] {
+        if state.exists() {
+            fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+        }
     }
     Ok(())
 }
@@ -261,43 +276,26 @@ impl Tools {
     }
 }
 
-/// The lowest port `free_port` picks.
-const PICKED_PORTS_FROM: u16 = 20_000;
-/// Ports `free_port` tries before it gives up.
-const PICK_TRIES_MAX: u32 = 64;
-
-/// A free local port, for a process to bind a moment later (wrangler's
-/// node, its inspector, Chrome's DevTools), picked at random below the
-/// kernel's ephemeral range. The kernel numbers its own ports from that
-/// range alone: a connection's local end, any bind to port 0 (workerd's
-/// sockets inside wrangler), Docker's published ports. A port the kernel
-/// handed out for the asking (`bind(":0")`) was free only until then, and
-/// one of those took it before wrangler's bind (`bind(): Address already in
-/// use` at a node's boot, in CI runs 40148072254 and 40937119767); a node
-/// started again keeps its port, free while it is down. Below the range,
-/// only a process that names the port can take it.
-pub fn free_port() -> Result<u16> {
-    let ephemeral = ephemeral_ports_from()?;
-    anyhow::ensure!(ephemeral > PICKED_PORTS_FROM + 1024, "the kernel's ephemeral ports start at {ephemeral}, leaving none to pick below them from {PICKED_PORTS_FROM}");
-    for _ in 0..PICK_TRIES_MAX {
-        let r = u16::from_str_radix(&random_hex(2), 16).expect("four hex digits");
-        let port = PICKED_PORTS_FROM + r % (ephemeral - PICKED_PORTS_FROM);
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return Ok(port);
-        }
-    }
-    bail!("no free port in {PICK_TRIES_MAX} tries between {PICKED_PORTS_FROM} and {ephemeral}")
+/// Whether a boot's log says wrangler's build of the Worker failed:
+/// wrangler 4.145.0 (`logBuildFailure`) says "Build failed with N
+/// error(s):" and each of esbuild's errors after it, in one write. A dev
+/// server whose build failed stays up waiting for a file to change: it
+/// neither gets ready nor exits, so without this a start waited out
+/// READY_TIMEOUT (runs 41655792118 and 41655789661: an import of a file the
+/// node's copy of cell/ did not have, 900 s on each shard).
+fn build_failed(text: &str) -> bool {
+    text.match_indices("Build failed with ").any(|(at, said)| {
+        let count = &text[at + said.len()..];
+        let digits = count.len() - count.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        digits > 0 && count[digits..].starts_with(" error")
+    })
 }
 
-/// The first port of the kernel's ephemeral range: Linux's
-/// `ip_local_port_range` (32768 by default), macOS's 49152.
-fn ephemeral_ports_from() -> Result<u16> {
-    if cfg!(target_os = "macos") {
-        return Ok(49_152);
-    }
-    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").context("read the kernel's ephemeral port range")?;
-    let first = range.split_whitespace().next().context("an empty ip_local_port_range")?;
-    first.parse().with_context(|| format!("ip_local_port_range starts at {first:?}"))
+/// The port a boot's log says wrangler is ready on (`Ready on
+/// http://127.0.0.1:<port>`): its own pick, a boot's log saying it once.
+fn ready_port(text: &str) -> Option<u16> {
+    let after = text.split("Ready on http://127.0.0.1:").nth(1)?;
+    after[..after.find(|c: char| !c.is_ascii_digit())?].parse().ok().filter(|p| *p != 0)
 }
 
 /// Writes a project's `.dev.vars` (dotenv, one line per value, mode 600).
@@ -311,14 +309,32 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
+/// Where a local node's secrets are. Either way the local config binds
+/// each by name, as a deploy binds the account's, and the cell reads it as
+/// it reads the store's (cell/src/keys.rs: `await env.<BINDING>.get()`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Secrets {
+    /// wrangler's local Secrets Store in the node's state directory
+    /// (`wrangler dev`).
+    Store,
+    /// celld's secrets backend `vars`: the values in the node's secrets
+    /// file (`celld::secrets_file`), which only `celld dev` reads.
+    Vars,
+    /// celld's secrets backend `openbao` (openbao.rs): each secret seeded
+    /// under its store name, and the node given the path of a token that
+    /// reads them, and nothing else.
+    OpenBao(openbao::Target),
+}
+
 /// What a local deployment is configured with. The cell reads its
-/// settings as Worker variables, from `.dev.vars` (mode 600) under
-/// `wrangler dev`, and its keys from Secrets Store bindings
-/// (cell/src/keys.rs), which a local node reads from wrangler's local
-/// store in its state directory: `configure` seeds it with these values,
-/// under the names `store::Bound::conventional` gives them, and binds
-/// them as a deploy does. A dev or test deployment points code.storage at
-/// the fake in `crates/fakes`.
+/// settings as Worker variables, from `.dev.vars` (mode 600), and its keys
+/// from Secrets Store bindings (cell/src/keys.rs), which `configure` binds
+/// as a deploy does, under the names `store::Bound::conventional` gives
+/// them: under `wrangler dev` from wrangler's local store in its state
+/// directory, which `configure` seeds with these values; under `celld dev`
+/// from the node's secrets backend (`Secrets::Vars`, `Secrets::OpenBao`).
+/// A dev or test deployment points code.storage at the fake in
+/// `crates/fakes`.
 pub struct Fleet {
     pub host_secret: String,
     pub codestorage_org: String,
@@ -337,6 +353,9 @@ pub struct Fleet {
     pub job_retry_delay_s: u32,
     /// How long a blob no branch names is kept (`None`: the cell's 7 days).
     pub blob_grace_s: Option<u32>,
+    /// One file a person may send, at most (`FRAGMENT_UPLOAD_MAX_BYTES`;
+    /// `None`: the cell's default, a zone's).
+    pub upload_max_bytes: Option<u64>,
     /// Where the model route sends its calls, text and images
     /// (`FRAGMENT_AI_URL`: the Workers AI fake in dev and the e2e; `None`:
     /// the AI binding, through `ai_gateway`).
@@ -362,11 +381,18 @@ pub struct Fleet {
     pub workos: Option<WorkOsVars>,
     /// Seats sold: Stripe (the fake in `crates/fakes`; docs/billing.md).
     pub stripe: Option<StripeVars>,
+    /// The account's Workers Logs, which the operators' glance reads (the
+    /// fake in `crates/fakes`; `None`: the glance says they are not configured).
+    pub observability: Option<ObservabilityVars>,
     /// The platform's origin (sign-in, the platform session;
     /// `FRAGMENT_PLATFORM_URL`, which every fleet names).
     pub platform_url: String,
     /// Who may grant credit and set plans (`FRAGMENT_OPERATORS`).
     pub operators: Option<String>,
+    /// The finite.computer move (`FRAGMENT_MIGRATIONS_MOVER`,
+    /// `FRAGMENT_MIGRATIONS_CUTOFF_MS`: the mover's npub, and phase 2's
+    /// cutoff in ms): the e2e's `move` lane's.
+    pub migrations: Option<(String, String)>,
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
     /// `limits::SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: Option<u64>,
@@ -387,6 +413,17 @@ pub struct Fleet {
     /// `cargo xtask dev --real-agent`.
     pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
+    /// Whether computers reach the internet (`FRAGMENT_COMPUTER_INTERNET`,
+    /// `off` when not). Locally, workerd's networking sidecar answers a
+    /// container's DNS: with internet on, it asks public DNS first for
+    /// every name, the platform's intercepted hosts included
+    /// (`backups.sandbox.internal`, `api.fragment.internal`), and answers
+    /// them itself only once public DNS says there is no such name. Off,
+    /// it answers them at once, asking no one. The e2e's are off: its
+    /// computers reach only hosts the platform intercepts, and a run must not
+    /// depend on public DNS (#1017: every save of a boot failed when it did
+    /// not answer). `cargo xtask dev`'s are on, as a deployment's are.
+    pub computer_internet: bool,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
     /// the cell's thirty minutes). The e2e's is short, so its lane sees the
@@ -402,6 +439,12 @@ pub struct Fleet {
     pub operator_key_values: Vec<(String, String)>,
     pub connection_secret_values: Vec<(String, String)>,
     pub swap_upstream: Option<String>,
+    /// The connectors its people may link (`FRAGMENT_CONNECTORS`, the
+    /// policy's JSON; `None`: the cell's default). A self-hosted stack's
+    /// leaves Telegram out (`celld::connectors`).
+    pub connectors: Option<String>,
+    /// Where its secrets are (`Secrets`): the runtime's.
+    pub secrets: Secrets,
 }
 
 /// A Stripe account as the cell reads it.
@@ -415,6 +458,21 @@ pub struct StripeVars {
     /// Automatic tax on a Checkout (`FRAGMENT_STRIPE_TAX`).
     pub tax: bool,
 }
+
+/// The account's Workers Observability as the cell reads it: its read-only
+/// key (bound as a deploy binds `observability_read`'s), the account
+/// (`FRAGMENT_ACCOUNT_ID`), this deployment's Worker (`FRAGMENT_WORKER_NAME`),
+/// and where its API is (`CLOUDFLARE_API_URL`).
+pub struct ObservabilityVars {
+    pub key: String,
+    pub account_id: String,
+    pub script: String,
+    pub api_url: String,
+}
+
+/// The store name devstack binds the glance's key under, as
+/// deploy/example.jsonc names it.
+pub const OBSERVABILITY_READ_NAME: &str = "fragment-observability-read";
 
 /// The key of a slot of the model route on an OpenAI-compatible API
 /// (`fragment_core::models::SLOTS`): its secret's name in the store, bound
@@ -441,16 +499,12 @@ impl Fleet {
         let mut bound = store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &[]);
         bound.model_keys = self.model_keys.iter().map(|k| (k.slot.clone(), k.name.clone())).collect();
         bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
+        bound.observability_read = self.observability.as_ref().map(|_| OBSERVABILITY_READ_NAME.to_string());
         bound
     }
 
-    /// Renders the deployment for a node on `project`: its settings into
-    /// the project's `.dev.vars`, its secrets into wrangler's local store
-    /// in the project's state directory (`store::seed_local`, which skips
-    /// values it holds already), and their bindings into its local config
-    /// (`local_config`). Clear the state first (`clear_state`), not after.
-    pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
-        let bound = self.bound();
+    /// Each store secret's name, and its value, once each.
+    fn values<'a>(&'a self, bound: &'a store::Bound) -> Result<Vec<(&'a str, &'a str)>> {
         let mut values: Vec<(&str, &str)> = vec![(bound.host_secret.as_str(), self.host_secret.as_str()), (bound.codestorage_key.as_str(), self.codestorage_key_pem.as_str())];
         if let (Some((client, key)), Some(w)) = (&bound.workos, &self.workos) {
             values.push((client.as_str(), w.client_id.as_str()));
@@ -475,9 +529,42 @@ impl Fleet {
         for ((_, name), (_, value)) in bound.connection_secrets.iter().zip(&self.connection_secret_values) {
             values.push((name.as_str(), value.as_str()));
         }
+        if let (Some(name), Some(o)) = (&bound.observability_read, &self.observability) {
+            values.push((name.as_str(), o.key.as_str()));
+        }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
-        store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
+        Ok(values)
+    }
+
+    /// Renders the deployment for a node on `project`: its settings into
+    /// the project's `.dev.vars`, its secrets' bindings into its local
+    /// config (`local_config`), and the secrets where `secrets` says: into
+    /// wrangler's local store in the project's state directory
+    /// (`store::seed_local`, which skips values it holds already); into the
+    /// celld node's secrets file (`celld::secrets_file`, mode 600); or into
+    /// OpenBao (`openbao::Target::seed`, which writes only what changed),
+    /// the node's file naming it and the path of the token that reads them
+    /// (renewed, or made when it has lapsed). Clear the state first
+    /// (`clear_state`), not after.
+    pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
+        let bound = self.bound();
         write_local_config(project, &bound.cell(), &self.images)?;
+        match &self.secrets {
+            Secrets::Store => {
+                store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
+                // a celld stack's file of values, left from a run before, goes
+                let _ = fs::remove_file(celld::secrets_file(project));
+            }
+            Secrets::Vars => {
+                let values: serde_json::Map<String, serde_json::Value> = self.values(&bound)?.into_iter().map(|(name, value)| (name.to_string(), value.into())).collect();
+                celld::write_secrets_file(project, &serde_json::json!({ "backend": "vars", "values": values }))?;
+            }
+            Secrets::OpenBao(target) => {
+                target.seed(&self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed OpenBao: {e}"))?;
+                target.cell_token().map_err(|e| anyhow::anyhow!("the node's OpenBao token: {e}"))?;
+                celld::write_secrets_file(project, &target.node_config())?;
+            }
+        }
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         // the node's one release (`dev`) deployed as it is configured, as a
@@ -498,6 +585,10 @@ impl Fleet {
         let grace = self.blob_grace_s.map(|g| g.to_string());
         if let Some(g) = &grace {
             vars.push(("FRAGMENT_BLOB_GRACE_S", g.as_str()));
+        }
+        let uploads = self.upload_max_bytes.map(|n| n.to_string());
+        if let Some(n) = &uploads {
+            vars.push(("FRAGMENT_UPLOAD_MAX_BYTES", n.as_str()));
         }
         if let Some(u) = &self.mail_url {
             vars.push(("FRAGMENT_MAIL_URL", u.as_str()));
@@ -542,6 +633,15 @@ impl Fleet {
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));
         }
+        if let Some((mover, cutoff_ms)) = &self.migrations {
+            vars.push(("FRAGMENT_MIGRATIONS_MOVER", mover.as_str()));
+            vars.push(("FRAGMENT_MIGRATIONS_CUTOFF_MS", cutoff_ms.as_str()));
+        }
+        if let Some(o) = &self.observability {
+            vars.push(("FRAGMENT_ACCOUNT_ID", o.account_id.as_str()));
+            vars.push(("FRAGMENT_WORKER_NAME", o.script.as_str()));
+            vars.push(("CLOUDFLARE_API_URL", o.api_url.as_str()));
+        }
         let signins = self.signins_pending_max.map(|n| n.to_string());
         if let Some(n) = &signins {
             vars.push(("FRAGMENT_SIGNINS_PENDING_MAX", n.as_str()));
@@ -559,6 +659,9 @@ impl Fleet {
         if !self.computer_snapshots {
             vars.push(("FRAGMENT_COMPUTER_SNAPSHOTS", "off"));
         }
+        if !self.computer_internet {
+            vars.push(("FRAGMENT_COMPUTER_INTERNET", "off"));
+        }
         let unsaved = self.computer_unsaved_max_ms.map(|ms| ms.to_string());
         if let Some(ms) = &unsaved {
             vars.push(("FRAGMENT_COMPUTER_UNSAVED_MAX_MS", ms.as_str()));
@@ -568,6 +671,9 @@ impl Fleet {
         }
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
+        }
+        if let Some(c) = &self.connectors {
+            vars.push(("FRAGMENT_CONNECTORS", c.as_str()));
         }
         write_dev_vars(project, &vars)
     }
@@ -602,7 +708,12 @@ pub struct NodeOptions {
     /// local Secrets Store's among it. Its fleet is configured first
     /// (`Fleet::configure`; `clear_state` before that discards the state).
     pub project: PathBuf,
-    pub port: u16,
+    /// The node's port, bound by its maker (`hold_port`) and held as long as
+    /// it likes, the e2e's across the node's lives: each life's front door
+    /// listens on a clone, so the port is never let go between a pick and a
+    /// bind, nor while the node is down (a client dialing then waits for
+    /// the next life, as one dialing during a boot does).
+    pub listener: Arc<TcpListener>,
     /// Where each boot's log goes (`node-<port>-<boot>.log`): wrangler's
     /// own debug logs beside the Worker's output, always, as the front
     /// door reads the runtime's address there (front.rs).
@@ -612,6 +723,24 @@ pub struct NodeOptions {
     /// as it reaches xtask: in a group of its own, it outlived a Ctrl-C,
     /// holding its port.
     pub own_group: bool,
+}
+
+impl NodeOptions {
+    pub fn port(&self) -> u16 {
+        self.listener.local_addr().expect("a bound listener's address").port()
+    }
+}
+
+/// A port free on 127.0.0.1 now, for a process that binds it itself
+/// (OpenBao, celld's own listener): picked and let go just before it binds.
+pub fn free_port() -> Result<u16> {
+    Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
+}
+
+/// 127.0.0.1:`port` (0: one the kernel picks), bound for a node's
+/// `NodeOptions::listener`.
+pub fn hold_port(port: u16) -> Result<Arc<TcpListener>> {
+    Ok(Arc::new(TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("the node's port :{port} is taken"))?))
 }
 
 /// Boots of one port whose logs one directory keeps; a start past this
@@ -666,9 +795,35 @@ pub fn state_dir(project: &Path) -> PathBuf {
     project.join(".wrangler/state")
 }
 
+/// Each subject of `issuer` a project's node signs a person in by, and its
+/// email, as its Registry keeps them (`subjects`), read-only while no node
+/// runs: what a WorkOS fake made new must hand out exactly as they are
+/// (crates/fakes/src/workos.rs `adopt`). None for a node with no state.
+pub fn signed_in_subjects(project: &Path, issuer: &str) -> Result<Vec<(String, String)>> {
+    let dir = state_dir(project).join("v3/do/fragment-Registry");
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(&dir) else { return Ok(found) };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "sqlite") || path.file_stem().is_some_and(|s| s == "metadata") {
+            continue;
+        }
+        let db = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)
+            .with_context(|| format!("open {} read-only", path.display()))?;
+        let tables: i64 = db.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'subjects'", [], |r| r.get(0))?;
+        if tables == 0 {
+            continue;
+        }
+        let mut q = db.prepare("SELECT subject, email FROM subjects WHERE issuer = ?1 ORDER BY subject")?;
+        let rows = q.query_map([issuer], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        found.extend(rows.collect::<rusqlite::Result<Vec<_>>>().with_context(|| format!("read {}'s subjects", path.display()))?);
+    }
+    Ok(found)
+}
+
 /// The nodes this process started in process groups of their own and has
 /// not dropped, which a terminal's Ctrl-C does not reach (it signals the
-/// terminal's group), and whether the process is ending (`kill_nodes`).
+/// terminal's group), and whether the process is ending (`kill_started`).
 struct Live {
     ending: bool,
     groups: Vec<u32>,
@@ -680,27 +835,38 @@ const LIVE_NODES_MAX: usize = 8;
 
 static LIVE: Mutex<Live> = Mutex::new(Live { ending: false, groups: Vec::new() });
 
-/// SIGKILLs every node this process started in a group of its own and
-/// still runs, and refuses to start another: the process is ending (a
-/// signal; `signals::on_termination`), and a node started now would make
-/// containers after they were removed. The killed nodes' `Node`s are
-/// dropped with the process.
-pub fn kill_nodes() {
+/// SIGKILLs every process this process started and every one those
+/// started (tree.rs): its nodes, the Chromes they started detached, a
+/// lane's own Chrome, which no `Drop` closes on the way out; and refuses
+/// to start another node: the process is ending (a signal, which
+/// `signals::on_termination` handles with this first), and a node started
+/// now would make containers after they were removed. The killed nodes'
+/// `Node`s are dropped with the process.
+pub(crate) fn kill_started() {
     let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
     live.ending = true;
+    if let Err(e) = tree::kill(std::process::id()) {
+        eprintln!("could not kill the processes this run started: {e}");
+    }
+    // each still unreaped: a node strikes its group under this lock before
+    // it reaps its leader (`Node::reap`); its group's process that outlived
+    // a leader already exited (workerd may) is no longer below this one
     for group in live.groups.drain(..) {
-        let _ = Command::new("kill").args(["-KILL", "--", &format!("-{group}")]).stderr(Stdio::null()).status();
+        let _ = kill_group(group);
     }
 }
 
-/// One `wrangler dev` process, which runs workerd as its child: in a
-/// process group of its own (`NodeOptions::own_group`), so a crash kills
-/// both, or in the terminal's. Its port is its front door's (front.rs),
-/// which passes each connection to the runtime, past wrangler's own proxy
-/// (on a port of wrangler's, which no client is given).
+/// One node's process: `wrangler dev`, which runs workerd as its child, or
+/// `celld dev` (celld.rs), which supervises its own: in a process group of
+/// its own (`NodeOptions::own_group`), so a crash kills the whole node, or
+/// in the terminal's. Its port is its front door's (front.rs), which passes
+/// each connection to the runtime, past wrangler's own proxy (on a port of
+/// wrangler's, which no client is given), or to celld's port.
 pub struct Node {
     child: Child,
     own_group: bool,
+    /// What runs it, as errors name it (`wrangler dev`, `celld dev`).
+    what: &'static str,
     pub base: String,
     pub port: u16,
     /// This boot's log.
@@ -722,23 +888,77 @@ const RUNTIME_NAMED_WAIT: Duration = Duration::from_secs(30);
 /// (`node::VARS_CLEARED`). So wrangler never gets it.
 const WRANGLER_VARS_CLEARED: [&str; 1] = ["VSCODE_INSPECTOR_OPTIONS"];
 
+/// A process this one started and stops itself (OpenBao): a termination
+/// signal's `kill_started` reaches it as it reaches every process below
+/// this one (tree.rs), so it needs no list of its own.
+pub struct Started(Child);
+
+impl std::ops::Deref for Started {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Started {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+/// Spawns `cmd` (`Started`); refused once the process is ending, when
+/// nothing would stop it.
+pub fn spawn(cmd: &mut Command) -> std::io::Result<Started> {
+    // held across the spawn: `kill_started` either finds the child below
+    // this process or has already refused it
+    let live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    if live.ending {
+        return Err(std::io::Error::other("this process is ending (a signal): nothing more starts"));
+    }
+    Ok(Started(cmd.spawn()?))
+}
+
+/// Spawns a node's process (`cmd`: wrangler's or celld's), in a group of
+/// its own when `opts` says, its output heard line by line into the boot's
+/// log `out` and by the front door (`hear`).
+fn spawn_node(mut cmd: Command, opts: &NodeOptions, out: Arc<Mutex<fs::File>>, heard: Arc<front::Heard>) -> Result<Child> {
+    if opts.own_group {
+        cmd.process_group(0);
+    }
+    // held across the spawn: `kill_started` either finds this node's
+    // group or has already refused it
+    let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    anyhow::ensure!(!live.ending, "this process is ending (a signal): no node starts");
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null()).spawn().with_context(|| format!("start {}", cmd.get_program().to_string_lossy()))?;
+    hear(&mut child, out, heard)?;
+    if opts.own_group {
+        assert!(live.groups.len() < LIVE_NODES_MAX, "a process runs at most {LIVE_NODES_MAX} nodes at once");
+        live.groups.push(child.id());
+    }
+    Ok(child)
+}
+
 impl Node {
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
         let config = local_config(&opts.project);
         if !config.is_file() {
             bail!("{} is not there: configure the fleet first (Fleet::configure)", config.display());
         }
-        let (log, out) = boot_log(&opts.log_dir, opts.port)?;
+        let port = opts.port();
+        let (log, out) = boot_log(&opts.log_dir, port)?;
         // wrangler's lines and the front door's requests, one file
         let out = Arc::new(Mutex::new(out));
         // the node's port, held before wrangler starts (front.rs)
         let heard = Arc::new(front::Heard::default());
-        let front = front::Front::bind(opts.port, heard.clone(), out.clone())?;
-        let proxied = free_port()?;
+        let front = front::Front::serve(opts.listener.try_clone()?, heard.clone(), out.clone())?;
         let mut cmd = tools.wrangler()?;
         cmd.arg("dev").arg("-c").arg(&config);
-        cmd.args(["--ip", "127.0.0.1", "--port", &proxied.to_string()]);
-        cmd.args(["--inspector-port", &free_port()?.to_string()]);
+        // its own port (its proxy's, which nothing here dials: the front
+        // door goes to the runtime) and its inspector's, each of its own
+        // picking (`0`): one picked for it and let go before it bound could
+        // be another's by then (`bind(): Address already in use` at a node's
+        // boot, CI runs 40148072254 and 40937119767)
+        cmd.args(["--ip", "127.0.0.1", "--port", "0", "--inspector-port", "0"]);
         cmd.arg("--persist-to").arg(state_dir(&opts.project));
         // debug: the runtime's address is named there alone (front.rs)
         cmd.args(["--show-interactive-dev-session=false", "--log-level", "debug"]);
@@ -750,38 +970,28 @@ impl Node {
         for var in WRANGLER_VARS_CLEARED {
             cmd.env_remove(var);
         }
-        if opts.own_group {
-            cmd.process_group(0);
-        }
         let t0 = Instant::now();
-        let child = {
-            // held across the spawn: `kill_nodes` either finds this node's
-            // group or has already refused it
-            let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
-            anyhow::ensure!(!live.ending, "this process is ending (a signal): no node starts");
-            let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null()).spawn()?;
-            hear(&mut child, out, heard.clone())?;
-            if opts.own_group {
-                assert!(live.groups.len() < LIVE_NODES_MAX, "a process runs at most {LIVE_NODES_MAX} nodes at once");
-                live.groups.push(child.id());
-            }
-            child
-        };
-        let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false, _front: front };
-        loop {
+        let child = spawn_node(cmd, opts, out, heard.clone())?;
+        let mut node = Node { child, own_group: opts.own_group, what: "wrangler dev", base: format!("http://127.0.0.1:{port}"), port, log: log.clone(), reaped: false, _front: front };
+        let proxied = loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-            if text.contains(&format!("Ready on http://127.0.0.1:{proxied}")) {
-                break;
+            if let Some(proxied) = ready_port(&text) {
+                break proxied;
             }
-            if let Some(status) = node.child.try_wait()? {
-                node.reaped = true;
+            if exited_unreaped(node.child.id(), false)? {
+                let status = node.reap()?;
                 bail!("wrangler dev exited ({status}) before it was ready:\n{text}");
             }
+            // neither ready nor gone: it waits for a file to change, and
+            // no file of a started node's changes under it (`build_failed`)
+            if build_failed(&text) {
+                bail!("wrangler dev's build failed, so it never gets ready:\n{text}");
+            }
             if t0.elapsed() > READY_TIMEOUT {
-                bail!("wrangler dev on :{} was not ready after {READY_TIMEOUT:?}:\n{text}", opts.port);
+                bail!("wrangler dev on :{port} was not ready after {READY_TIMEOUT:?}:\n{text}");
             }
             std::thread::sleep(Duration::from_millis(50));
-        }
+        };
         // fails loudly: never the proxy's path instead
         let Some(runtime) = heard.named(RUNTIME_NAMED_WAIT) else {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
@@ -791,8 +1001,8 @@ impl Node {
         Ok((node, t0.elapsed()))
     }
 
-    /// Signals its group when it has one of its own, else wrangler alone
-    /// (which stops workerd).
+    /// Signals its group when it has one of its own, else its process
+    /// alone (wrangler stops workerd; celld its node).
     fn signal_group(&self, signal: &str) -> Result<()> {
         let target = if self.own_group { format!("-{}", self.child.id()) } else { self.child.id().to_string() };
         let status = Command::new("kill").args([signal, "--", &target]).status()?;
@@ -800,21 +1010,20 @@ impl Node {
         Ok(())
     }
 
-    /// SIGINT, as Ctrl-C stops it: wrangler shuts workerd down, and every
-    /// write already answered is on disk.
+    /// SIGINT, as Ctrl-C stops it (celld dev, too, stops on it): wrangler
+    /// shuts workerd down, and every write already answered is on disk.
     pub fn stop(mut self) -> Result<()> {
         self.signal_group("-INT")?;
         let t0 = Instant::now();
-        while self.child.try_wait()?.is_none() {
+        while !exited_unreaped(self.child.id(), false)? {
             if t0.elapsed() > STOP_TIMEOUT {
                 self.kill();
-                bail!("wrangler dev did not stop within {STOP_TIMEOUT:?}");
+                bail!("{} did not stop within {STOP_TIMEOUT:?}", self.what);
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        self.reaped = true;
         // workerd may outlive wrangler by a moment; the port must be free for the next node
-        self.kill_group();
+        self.reap()?;
         Ok(())
     }
 
@@ -824,48 +1033,228 @@ impl Node {
         Ok(())
     }
 
-    /// Waits for `wrangler dev` to exit (the foreground `xtask dev`).
+    /// Waits for the node's process to exit (the foreground `xtask dev`).
     pub fn wait(mut self) -> Result<std::process::ExitStatus> {
+        exited_unreaped(self.child.id(), true)?;
+        self.reap()
+    }
+
+    /// Reaps wrangler, which has exited and is not yet reaped (a zombie,
+    /// whose process group id stays this node's while it is one): first
+    /// its group's other processes SIGKILLed (workerd may outlive it), and
+    /// the group struck from `LIVE`, under its lock, so `kill_started` never
+    /// signals a group id the kernel is free to give another (#768).
+    fn reap(&mut self) -> Result<std::process::ExitStatus> {
+        assert!(!self.reaped, "a node is reaped once");
+        let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.own_group {
+            kill_group(self.child.id())?;
+            live.groups.retain(|g| *g != self.child.id());
+        }
+        // a zombie's: at once
         let status = self.child.wait()?;
         self.reaped = true;
-        self.kill_group();
         Ok(status)
     }
 
-    /// SIGKILL to its group, when it has one of its own (workerd may outlive
-    /// wrangler in it). Without one there is no group to reach, and a
-    /// reaped process's id is never signalled.
-    fn kill_group(&self) {
-        if self.own_group {
-            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
-        }
-    }
-
+    /// SIGKILL to wrangler, all it started (tree.rs: Chrome among them,
+    /// in no group of wrangler's) and its group, a crash's, then reaped as
+    /// `reap`.
     fn kill(&mut self) {
         if !self.reaped {
-            self.kill_group();
+            if self.own_group {
+                let _ = kill_group(self.child.id());
+            } else if exited_unreaped(self.child.id(), false).is_ok() {
+                let _ = tree::kill(self.child.id());
+            }
             let _ = self.child.kill();
-            let _ = self.child.wait();
-            self.reaped = true;
+            if exited_unreaped(self.child.id(), true).is_ok() {
+                let _ = self.reap();
+            }
+        }
+    }
+}
+
+/// SIGKILL to `leader`, every process below it (tree.rs: a Chrome
+/// miniflare started detached is in no group of its) and the process group
+/// it leads, only while `leader` is a child of this process not yet reaped
+/// (alive, or a zombie), so its pid and group id are still its own: a
+/// reaped one's may be another's by now, and is refused, unsignalled
+/// (`ECHILD`).
+fn kill_group(leader: u32) -> std::io::Result<()> {
+    exited_unreaped(leader, false)?;
+    // below it first: the group's SIGKILL would hand what it started to init
+    let below = tree::kill(leader);
+    let _ = Command::new("kill").args(["-KILL", "--", &format!("-{leader}")]).stderr(Stdio::null()).status();
+    below.map(|_| ())
+}
+
+/// Whether the child `pid` has exited, leaving it unreaped (`WNOWAIT`: a
+/// zombie, whose group id stays reserved); `block` waits for it.
+fn exited_unreaped(pid: u32, block: bool) -> std::io::Result<bool> {
+    let pid = libc::id_t::from(pid);
+    let flags = libc::WEXITED | libc::WNOWAIT | if block { 0 } else { libc::WNOHANG };
+    // bounded: a signal's interruption is tried again, and a child exits once
+    loop {
+        // SAFETY: waitid writes only `info`; WNOWAIT leaves the child for its `wait`
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        if unsafe { libc::waitid(libc::P_PID, pid, &mut info, flags) } == 0 {
+            // with WNOHANG and the child running, waitid leaves its pid 0
+            #[cfg(target_os = "linux")]
+            let exited = unsafe { info.si_pid() } != 0;
+            #[cfg(not(target_os = "linux"))]
+            let exited = info.si_pid != 0;
+            return Ok(exited);
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e);
         }
     }
 }
 
 impl Drop for Node {
-    /// An early error must not leave a node holding the port. A reaped
-    /// leader's group id is never signalled but by `stop` and `wait`, right
-    /// after it exits, while workerd may still hold the group.
+    /// An early error must not leave a node holding the port. A group id is
+    /// signalled only while its leader is unreaped (`reap`, `kill`).
     fn drop(&mut self) {
         self.kill();
-        if self.own_group {
-            LIVE.lock().unwrap_or_else(PoisonError::into_inner).groups.retain(|g| *g != self.child.id());
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// Goal: a staged cell (dev's, the e2e's) holds every module its shim
+    /// imports from beside it, as the source tree a deploy runs from does
+    /// (a module left out failed the e2e's build: "Could not resolve
+    /// ./backup-reads.mjs"), and nothing it does not. Method: entry.mjs's
+    /// relative imports, read, against `SHIM_FILES`.
+    #[test]
+    fn the_staged_shim_holds_what_it_imports() {
+        let entry = std::fs::read_to_string(super::cell_dir().join("entry.mjs")).expect("entry.mjs reads");
+        let mut beside: Vec<String> = entry
+            .lines()
+            .filter(|l| l.trim_start().starts_with("import ") || l.trim_start().starts_with("export ") && l.contains(" from "))
+            .filter_map(|l| l.split(" from \"./").nth(1))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|path| !path.starts_with("build/"))
+            .map(str::to_string)
+            .collect();
+        beside.insert(0, "entry.mjs".into());
+        assert_eq!(beside, super::SHIM_FILES, "SHIM_FILES is entry.mjs and what it imports from beside it");
+    }
+
+
+    /// A node's subjects, as its Registry keeps them: one issuer's alone,
+    /// its other SQLite (metadata) passed over; a node with no state has none.
+    #[test]
+    fn a_nodes_subjects_are_read_from_its_registry() {
+        let project = std::env::temp_dir().join(format!("devstack-subjects-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&project);
+        assert!(signed_in_subjects(&project, "workos:client").unwrap().is_empty(), "no state: no one");
+        let dir = state_dir(&project).join("v3/do/fragment-Registry");
+        fs::create_dir_all(&dir).unwrap();
+        let db = rusqlite::Connection::open(dir.join("0123abcd.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE subjects (issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT NOT NULL, signed_in_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject));
+             INSERT INTO subjects VALUES ('workos:client', 'user_00000000000000000000000004', 'npub1b', 0, 'second@example.test', 0);
+             INSERT INTO subjects VALUES ('workos:client', 'user_00000000000000000000000002', 'npub1a', 0, 'first@example.test', 0);
+             INSERT INTO subjects VALUES ('e2e', 'e2e:x', 'npub1c', 0, 'x@e2e.test', 0);",
+        )
+        .unwrap();
+        drop(db);
+        rusqlite::Connection::open(dir.join("metadata.sqlite")).unwrap().execute_batch("CREATE TABLE other (x);").unwrap();
+        let found = signed_in_subjects(&project, "workos:client").unwrap();
+        assert_eq!(found, [("user_00000000000000000000000002".to_string(), "first@example.test".to_string()), ("user_00000000000000000000000004".to_string(), "second@example.test".to_string())]);
+        fs::remove_dir_all(&project).unwrap();
+    }
     use super::*;
+
+    /// A node of `script` (`sh -c`) in a process group of its own, as
+    /// `start` makes wrangler's, listed live, its front on a free port; and
+    /// the pid the script prints first (a process of its group).
+    fn scripted_node(script: &str) -> (Node, u32) {
+        let mut child = Command::new("sh").args(["-c", script]).process_group(0).stdout(Stdio::piped()).stdin(Stdio::null()).spawn().unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut line).unwrap();
+        let member: u32 = line.trim().parse().unwrap();
+        LIVE.lock().unwrap().groups.push(child.id());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log = std::env::temp_dir().join(format!("devstack-node-{}.log", child.id()));
+        let file = Arc::new(Mutex::new(fs::File::create(&log).unwrap()));
+        let front = front::Front::serve(listener, Arc::new(front::Heard::default()), file).unwrap();
+        (Node { child, own_group: true, what: "a test node", base: format!("http://127.0.0.1:{port}"), port, log, reaped: false, _front: front }, member)
+    }
+
+    /// Whether `pid` runs (a zombie does not).
+    fn runs(pid: u32) -> bool {
+        let out = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+    }
+
+    fn gone(pid: u32) {
+        let t0 = Instant::now();
+        // bounded: five seconds for a SIGKILL to land
+        while runs(pid) {
+            assert!(t0.elapsed() < Duration::from_secs(5), "{pid} still runs");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Goal (FIN-457): what a node started in a session of its own, as
+    /// miniflare starts Chrome, and that one's children die with the node
+    /// when it is killed (crashed, or dropped on an error): its group's
+    /// SIGKILL alone left them running, handed to init. Linux's setsid(1)
+    /// does the detaching here, as @puppeteer/browsers does it there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_nodes_detached_descendants_die_with_it() {
+        let detaching = "setsid sh -c 'sleep 60 & echo $!; wait' & wait";
+        let (node, chrome) = scripted_node(detaching);
+        node.crash().unwrap();
+        gone(chrome);
+        let (node, chrome) = scripted_node(detaching);
+        drop(node);
+        gone(chrome);
+    }
+
+    /// Goal (#768): a node's process group is signalled only while its
+    /// leader is a child not yet reaped, so its group id is still the
+    /// node's: `stop` and `wait` wait for wrangler without reaping it,
+    /// SIGKILL its group (a process that outlives it, as workerd may),
+    /// strike the group from the live ones, and only then reap it. A
+    /// reaped leader's group is refused, unsignalled.
+    #[test]
+    fn a_nodes_group_is_signalled_only_while_its_leader_is_unreaped() {
+        // stop: its member ignores the SIGINT that ends its leader
+        let (node, member) = scripted_node("(trap '' INT; exec sleep 60) & echo $!; exec sleep 60");
+        let leader = node.child.id();
+        node.stop().unwrap();
+        gone(member);
+        assert!(!LIVE.lock().unwrap().groups.contains(&leader), "struck from the live groups");
+        // wait: its leader exits at once, its member still running
+        let (node, member) = scripted_node("sleep 60 & echo $!");
+        let leader = node.child.id();
+        assert!(node.wait().unwrap().success());
+        gone(member);
+        assert!(!LIVE.lock().unwrap().groups.contains(&leader));
+
+        // waiting without reaping: it stays a child to reap, its exit kept
+        let mut child = Command::new("sh").args(["-c", "exit 3"]).process_group(0).spawn().unwrap();
+        assert!(exited_unreaped(child.id(), true).unwrap());
+        assert!(exited_unreaped(child.id(), false).unwrap(), "asked again: still unreaped");
+        assert_eq!(child.wait().unwrap().code(), Some(3));
+        // reaped, its group id is no longer its: refused, unsignalled
+        assert!(exited_unreaped(child.id(), false).is_err());
+        assert!(kill_group(child.id()).is_err(), "a reaped leader's group is never signalled");
+        // running: not yet exited
+        let mut running = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
+        assert!(!exited_unreaped(running.id(), false).unwrap());
+        kill_group(running.id()).unwrap();
+        assert!(exited_unreaped(running.id(), true).unwrap());
+        running.wait().unwrap();
+    }
 
     /// A node started again on its port gets a log of its own, numbered
     /// after the last, and the earlier boot's log keeps what it holds.
@@ -902,16 +1291,26 @@ mod tests {
         assert_eq!(env("WRANGLER_SEND_METRICS"), Some(PathBuf::from("false")));
     }
 
-    /// A picked port is below the kernel's ephemeral range. It was free as
-    /// it was picked (`free_port` binds it to see); binding it again here
-    /// would test only that no other process took it since, which nothing
-    /// can promise on a shared machine (this test once failed so).
+    /// The port wrangler says it is ready on, once its line is whole; none
+    /// before it, from a line cut short, or for a port 0.
     #[test]
-    fn a_picked_port_is_below_the_ephemeral_range() {
-        let ephemeral = ephemeral_ports_from().expect("the ephemeral range");
-        for _ in 0..32 {
-            let port = free_port().expect("a free port");
-            assert!((PICKED_PORTS_FROM..ephemeral).contains(&port), "{port} is below {ephemeral}");
+    fn wrangler_is_ready_on_the_port_it_says() {
+        assert_eq!(ready_port("x\n[wrangler:info] Ready on http://127.0.0.1:35523\n[wrangler:info] GET / 200"), Some(35523));
+        for unready in ["", "Starting local server...", "Ready on http://127.0.0.1:355", "Ready on http://127.0.0.1:0\n", "Ready on http://localhost:35523\n"] {
+            assert_eq!(ready_port(unready), None, "{unready:?}");
+        }
+    }
+
+    /// A build that failed, as wrangler says it (run 41655792118's words,
+    /// its colors kept), for one error or several; not a start's lines, nor
+    /// the words without a count.
+    #[test]
+    fn a_failed_build_is_heard_from_wranglers_own_words() {
+        let ci = "\x1b[31m\u{2718} \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mBuild failed with 1 error:\x1b[0m\n\n  \x1b[31m\u{2718} \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mCould not resolve \"./backup-reads.mjs\"\x1b[0m\n";
+        assert!(build_failed(ci));
+        assert!(build_failed("x\nBuild failed with 2 errors:\n"));
+        for fine in ["", "[wrangler:info] Ready on http://127.0.0.1:35523\n", "Build failed with", "Build failed with errors", "Build failed with 1"] {
+            assert!(!build_failed(fine), "{fine:?}");
         }
     }
 

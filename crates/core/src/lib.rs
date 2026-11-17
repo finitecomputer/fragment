@@ -1,8 +1,17 @@
 //! The fragment cell's pure logic. Everything here is deterministic given
 //! its inputs (randomness and the clock come from the caller), so the cell
 //! runs it as wasm and the host tests it.
+//!
+//! It decodes JSON text as `serde_json::from_slice(text.as_bytes())`, not
+//! `from_str`: the same answer, through the bytes decoder each type has in
+//! the cell's Wasm, not a second, `&str` copy of it (cell/clippy.toml).
+//! Nor does it read a type again from a `serde_json::Value`
+//! (crates/core/clippy.toml), but in its tests.
+
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod access;
+pub mod across;
 pub mod address;
 pub mod backoff;
 pub mod blob;
@@ -27,9 +36,12 @@ pub mod search_index;
 pub mod facet;
 pub mod form;
 pub mod frames;
+pub mod gather;
+pub mod glance;
 pub mod glob;
 pub mod governance;
 pub mod icon;
+pub mod key_hour;
 pub mod ledger;
 pub mod levers;
 pub mod listed;
@@ -37,10 +49,12 @@ pub mod live;
 pub mod mail;
 pub mod manifest;
 pub mod migrate;
+pub mod migrations;
 pub mod media;
 pub mod models;
 pub mod multipart;
 pub mod names;
+pub mod notice;
 pub mod npub;
 pub mod own_signin;
 pub mod connection_accounts;
@@ -49,6 +63,7 @@ pub mod org;
 pub mod owner;
 pub mod price;
 pub mod ratelimit;
+pub mod retention;
 pub mod registry;
 pub mod relay;
 pub mod release;
@@ -57,8 +72,10 @@ pub mod schedule;
 pub mod schema;
 pub mod search;
 pub mod seal;
+pub mod seed;
 pub mod secrets;
 pub mod session;
+pub mod session_search;
 pub mod secrets_store;
 pub mod webpush;
 pub mod site;
@@ -68,3 +85,4 @@ pub mod wipe;
 pub mod swap;
 pub mod transcribe;
 pub mod tree;
+pub mod vault;

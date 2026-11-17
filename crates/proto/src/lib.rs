@@ -58,10 +58,13 @@ pub mod limits {
     /// An agent's role (its `fragment.json`'s `meta.role`: "chief of
     /// staff"), in characters: a tag beside its name, so a few words.
     pub const ROLE_MAX_CHARS: usize = 48;
-    /// CPU per call into author code.
+    /// CPU per call into author code: the runtime's guard against a
+    /// runaway call, each call's own (measured on a preview, 2026-11-01:
+    /// e2e `capability-cost`). An app's subrequests have no limit of the
+    /// platform's: the facet has no network, so they are its capability
+    /// calls alone (docs/technical-debt-ledger.md, "An app facet's
+    /// subrequests are the account's, for the facet's life").
     pub const APP_CPU_MS: u32 = 30_000;
-    /// Subrequests per call into author code.
-    pub const APP_SUBREQUESTS: u32 = 50;
     /// A NIP-98 event's `created_at` may differ from the cell's clock by this much.
     pub const AUTH_WINDOW_S: i64 = 60;
     /// Request bodies the router reads (to hash for NIP-98).
@@ -98,8 +101,23 @@ pub mod limits {
     /// Records a channel people may post to keeps (a `post` role in
     /// fragment.json; the oldest go first, whoever appended them): at the
     /// public call limits a public chat would otherwise grow ~38 MB a
-    /// minute, for good.
-    pub const POSTED_KEPT: i64 = 10_000;
+    /// minute, for good (FIN-415: about 150 MB a channel at a chat's
+    /// typical 1.5 KB a record).
+    pub const POSTED_KEPT: i64 = 100_000;
+    /// Records one call of the `records` test lever fills (cell
+    /// channels.rs `fill_records`): an e2e fixture's thousands in a few
+    /// calls, each within a request's body.
+    pub const RECORDS_FILL_MAX: usize = 1_000;
+    /// Bytes of record bodies such a channel keeps, whichever bound comes
+    /// first: a safety bound, not the policy (that is `POSTED_KEPT`).
+    /// `POSTED_KEPT` records of `RECORD_BODY_MAX_BYTES` would be 6.1 GiB a
+    /// channel, 12.2 GiB a chat, past a Durable Object's 10 GB of SQLite.
+    /// At most the bodies the old 10,000-record cap allowed (625 MiB): a
+    /// chat's two channels hold at most 1 GiB of bodies, far under the
+    /// object's limit with their rows' and indexes' overhead. (Its files,
+    /// blobs and transcript are not bounded by it: an export's
+    /// `FRAGMENT_MAX_BYTES` is no promise that every chat fits.)
+    pub const POSTED_BYTES_MAX: i64 = 512 * 1024 * 1024;
     /// `public`-role calls per minute by one principal that is not a member.
     pub const PUBLIC_CALLS_PER_MIN: u32 = 60;
     /// `public`-role calls per minute into one fragment by non-members.
@@ -111,6 +129,11 @@ pub mod limits {
     /// A page of a channel on the live socket also ends at about this many
     /// bytes of record frames (a record is at most `RECORD_BODY_MAX_BYTES`).
     pub const CHANNEL_PAGE_MAX_BYTES: usize = 1024 * 1024;
+    /// A page of a channel over HTTP also ends at this many bytes of record
+    /// bodies (at least one record a page): `CHANNEL_PAGE` records of
+    /// `RECORD_BODY_MAX_BYTES` would be 64 MiB. Its `more` says whether
+    /// records remain, so a page cut short is not read as the last.
+    pub const CHANNEL_HTTP_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
     /// Effects one mutation may have, of every kind together: the records
     /// it publishes, the files it writes, and its pushes.
     pub const EFFECTS_MAX: usize = 64;
@@ -173,6 +196,14 @@ pub mod limits {
     /// till then, so an agent's turn costs a few fan-outs to its members'
     /// lists, not one a record.
     pub const LISTED_MIN_GAP_MS: i64 = 3_000;
+    /// A channel's `newest` (`ChannelDecl::newest`): the kinds whose newest
+    /// record each poster's it keeps, at most (`valid_listed_kind`).
+    pub const NEWEST_KINDS_MAX: usize = 4;
+    /// The newest records a channel keeps, at most, across its kinds and
+    /// posters: past it, the one posted longest ago goes. So its read
+    /// (`ChannelNewest`) holds at most this many, each a record's bounded
+    /// body.
+    pub const NEWEST_KEPT_MAX: usize = 32;
     /// Fragments `GET /api/access` asks for their members and invites, at
     /// most: those someone else is in or invited to, the first listed
     /// first. Past it, a fragment's row has its counts alone (its share
@@ -191,6 +222,8 @@ pub mod limits {
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;
     /// Triggers per fragment.
     pub const TRIGGERS_MAX: usize = 32;
+    /// Paths a fragment.json names as kept for good (`immutable`).
+    pub const IMMUTABLE_MAX: usize = 16;
     /// How many hops a chain of triggered runs may take (a mutation's record
     /// triggering a run whose record triggers another …) before the next is
     /// blocked as a loop.
@@ -273,8 +306,18 @@ pub mod limits {
     /// A push's `who`, the tag a page subscribed with, in characters
     /// (Unicode scalar values: `chars()` here, `[...who]` in JavaScript).
     pub const PUSH_WHO_MAX_CHARS: usize = 64;
-    /// The largest blob an upload may carry (files of 1 MiB or more are blobs).
+    /// The largest blob an upload may carry (files of 1 MiB or more are
+    /// blobs): a computer's file's bound, as a computer's requests never
+    /// leave Cloudflare's network.
     pub const BLOB_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    /// One file a person sends (from a browser, a phone or a laptop), at
+    /// most, unless the deployment names its own (`upload_max_bytes`):
+    /// the request body Cloudflare takes on a Free or Pro zone, which each
+    /// such upload passes. Clients read the deployment's (`UploadLimits`).
+    pub const UPLOAD_MAX_BYTES_DEFAULT: u64 = 100_000_000;
+    const _: () = assert!(UPLOAD_MAX_BYTES_DEFAULT <= BLOB_MAX_BYTES);
+    /// Files one chat message carries, at most (docs/chat-records.md).
+    pub const FILES_PER_MESSAGE: u32 = 8;
     /// Finished runs are kept this long, and at most this many.
     pub const RUN_RETENTION_MS: i64 = 30 * 24 * 3600 * 1000;
     pub const RUNS_KEPT: i64 = 10_000;
@@ -283,10 +326,11 @@ pub mod limits {
     /// first 4 KiB (its record keeps all of it).
     pub const SEARCH_TEXT_MAX_BYTES: usize = 4 * 1024;
     /// Entries a person's list keeps for one fragment, its newest, and the
-    /// fragment's own log of what it sends: as many as a channel people
-    /// post to keeps records, so search finds every message a chat still
-    /// shows.
-    pub const SEARCH_ENTRIES_PER_FRAGMENT_MAX: i64 = POSTED_KEPT;
+    /// fragment's own log of what it sends: a tenth of what a chat keeps,
+    /// so one long chat leaves room in a person's list for nine others
+    /// (docs/technical-debt-ledger.md, "Search finds a chat's newest
+    /// messages only").
+    pub const SEARCH_ENTRIES_PER_FRAGMENT_MAX: i64 = 10_000;
     /// Entries a person's list keeps in all (ten full chats); past this
     /// the oldest go first, whichever fragment they came from.
     pub const SEARCH_ENTRIES_MAX: i64 = 100_000;
@@ -307,8 +351,17 @@ pub mod limits {
 // A person's list keeps every entry one fragment sends it, and room for
 // more than one fragment; one delivery is a small part of a fragment's.
 const _: () = assert!(limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX < limits::SEARCH_ENTRIES_MAX);
+const _: () = assert!(limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX <= limits::POSTED_KEPT);
+// A postable channel's byte bound holds many records whole, and a chat's two
+// channels at it stay no larger than at the old cap (10,000 of the largest).
+const _: () = assert!(limits::POSTED_BYTES_MAX >= 1000 * limits::RECORD_BODY_MAX_BYTES as i64);
+const _: () = assert!(limits::POSTED_BYTES_MAX <= 10_000 * limits::RECORD_BODY_MAX_BYTES as i64);
 const _: () = assert!((limits::SEARCH_BATCH_MAX as i64) < limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX);
 const _: () = assert!(limits::SEARCH_BATCH_MAX * limits::SEARCH_TEXT_MAX_BYTES < limits::BODY_MAX_BYTES);
+// A page over HTTP holds at least one record whole, and a socket's page
+// is the smaller.
+const _: () = assert!(limits::RECORD_BODY_MAX_BYTES < limits::CHANNEL_HTTP_PAGE_MAX_BYTES);
+const _: () = assert!(limits::CHANNEL_PAGE_MAX_BYTES < limits::CHANNEL_HTTP_PAGE_MAX_BYTES);
 // An editor's write through the API is an app's and more, in a body the
 // router reads.
 const _: () = assert!(limits::FILE_WRITE_MAX_BYTES < limits::API_FILES_WRITE_MAX_BYTES);
@@ -546,7 +599,13 @@ pub const VALID_KIND_JS: &str = r#"export function validKind(kind) {
 }"#;
 
 /// Every refusal the platform answers with, as `{"error": code, "message"}`.
+///
+/// Open (`x-fragment-open`, docs/wire): a code this reader does not know
+/// is read by its HTTP status (the CLI's `Resp::refusal`), so one is added
+/// without breaking a shipped client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(extend("x-fragment-open" = true)))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// 400: the request is malformed or breaks a rule.
@@ -633,6 +692,7 @@ impl ErrorCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ErrorBody {
     pub error: ErrorCode,
     pub message: String,
@@ -642,7 +702,15 @@ pub struct ErrorBody {
     /// a client that knows none ignores it, and one that does not know this
     /// one reads none (`reason_or_none`).
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "reason_or_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub reason: Option<Reason>,
+    /// How long to wait before asking again, in ms, where a refusal knows
+    /// (a 429 `rate_limited` of an embeddings model's rate limit: its
+    /// writer waits exactly this, then writes again). Add-only: absent
+    /// from every other refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub retry_after_ms: Option<u64>,
 }
 
 /// A reason this reader does not know is none: reasons are add-only, so a
@@ -712,10 +780,22 @@ pub enum Reason {
     OffersPerDay,
     /// The org's last paid seat: its subscription is canceled instead.
     LastPaidSeat,
+    /// It holds a secret or a door (it has reach), so for now it is not
+    /// given its link and not made public; people named by its owner may
+    /// still be added or invited (Paul, 2026-11-01 and 2026-11-11,
+    /// FIN-352; `Sharing::reach`).
+    PrivateWhileReaching,
+    /// Its link opens it (`link` or `public` visibility), so for now it
+    /// takes no secret and no door: it is made members only first (FIN-352;
+    /// `Sharing::beyond`).
+    UnshareFirst,
+    /// A shared key's calls are paused: its charges this last hour reached
+    /// the cap its person holds them to (FIN-448, `fragment_core::key_hour`).
+    KeyPaused,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 25] = [
+    pub const ALL: [Reason; 28] = [
         Reason::TrialUnknown,
         Reason::TrialEnded,
         Reason::TrialUsed,
@@ -741,6 +821,9 @@ impl Reason {
         Reason::TooManyOffers,
         Reason::OffersPerDay,
         Reason::LastPaidSeat,
+        Reason::PrivateWhileReaching,
+        Reason::UnshareFirst,
+        Reason::KeyPaused,
     ];
 
     /// Its name on the wire.
@@ -771,6 +854,9 @@ impl Reason {
             Reason::TooManyOffers => "too_many_offers",
             Reason::OffersPerDay => "offers_per_day",
             Reason::LastPaidSeat => "last_paid_seat",
+            Reason::PrivateWhileReaching => "private_while_reaching",
+            Reason::UnshareFirst => "unshare_first",
+            Reason::KeyPaused => "key_paused",
         }
     }
 
@@ -786,9 +872,28 @@ impl Serialize for Reason {
     }
 }
 
+/// Written by hand as its `Serialize` is: its names, open (a reader that
+/// does not know one reads none: `reason_or_none`).
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for Reason {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Reason".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.",
+            "type": "string",
+            "enum": Reason::ALL.map(Reason::as_str),
+            "x-fragment-open": true,
+        })
+    }
+}
+
 /// A member's role in a fragment. `Public` is the floor anyone who can see
 /// the fragment holds; the others are granted. Ordered weakest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Public,
@@ -821,7 +926,12 @@ impl Role {
 /// What a fragment is to the people who use it (`fragment.json`'s `kind`,
 /// decision 6): the shell lists each kind in its own place. An app unless
 /// it says otherwise.
+///
+/// Open (`x-fragment-open`, docs/wire): a kind this build does not know
+/// reads as `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(extend("x-fragment-open" = true)))]
 #[serde(rename_all = "snake_case")]
 pub enum FragmentKind {
     #[default]
@@ -882,6 +992,7 @@ pub fn valid_template_name(s: &str) -> bool {
 
 /// Who can see a fragment: everyone, holders of its share link, or members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Visibility {
     Public,
@@ -909,11 +1020,12 @@ impl Visibility {
 
     /// Who may open a fragment made from `template` with no visibility
     /// asked: a chat or an agent (its SOUL and memories) only its members
-    /// (Paul, 2026-10-13), as a session archive (a person's old chats);
-    /// anything else anyone with its share link (decision 48).
+    /// (Paul, 2026-10-13), as a session archive (a person's old chats) and
+    /// a connector (a chat of its owner's direct messages, holding its
+    /// keys: FIN-352); anything else anyone with its share link (decision 48).
     pub fn made_from(template: Option<&str>) -> Visibility {
         match template {
-            Some("chat" | "agent" | "sessions") => Visibility::Members,
+            Some("chat" | "agent" | "sessions" | "telegram") => Visibility::Members,
             _ => Visibility::Link,
         }
     }
@@ -947,6 +1059,13 @@ pub struct CreateFragment {
     /// `limits::TITLE_MAX_CHARS`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// One of its maker's own agents (its identity), an editor from the
+    /// first moment: in every list row of the fragment, and its computer
+    /// told it joined once its template is installed, as `PUT
+    /// /api/f/{name}/members/{agent}` does after. Anyone else's is refused,
+    /// as it is with a connector's template, and nothing is made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// The answer to a create.
@@ -959,25 +1078,36 @@ pub struct Created {
     pub visibility: Visibility,
     pub view_token: String,
     pub inbox_token: String,
+    /// Its code.storage repo: `""` while not made yet (a chat's, made
+    /// after the create answers: docs/api.md, Names).
     pub repo: String,
     pub canonical: String,
 }
 
+/// Where its refs point (`PINNED_REFS`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Pins {
+    /// The commit `main` points at; none before its first.
     pub main: Option<String>,
+    /// The commit installed as `live`; none before the first deploy.
     pub live: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Counts {
+    /// Files at main.
     pub files: u64,
+    /// Records of its `events` channel.
     pub events: u64,
+    /// Its members.
     pub members: u64,
 }
 
 /// The app code installed from the `live` pin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CodeStatus {
     /// The live commit the code was installed from; `None` without app code.
@@ -992,7 +1122,9 @@ pub struct CodeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Urls {
+    /// Its own origin, where its page is served.
     pub canonical: String,
     /// The platform's own origin, where people open its join links and
     /// send its inbox's webhooks: a client inside a computer reaches the
@@ -1003,6 +1135,7 @@ pub struct Urls {
 
 /// `GET /api/f/<name>/status` (viewer and up).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FragmentStatus {
     pub name: String,
@@ -1011,20 +1144,26 @@ pub struct FragmentStatus {
     #[serde(default)]
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub title: Option<String>,
     /// An agent fragment's role, as its face says it (`ListedFragment`'s
     /// `agent_role`): what its runtime tells it it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub agent_role: Option<String>,
     pub npub: String,
     /// Its owner as a name: a person's npub, or `org:<id>` (`owner_ref`
     /// says which; nothing parses this one for who may act or pay).
     pub owner: String,
+    /// Who owns it, typed: a person (`id`, their npub) or an org (`id`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub owner_ref: Option<OwnerRef>,
     /// The caller's role.
     pub role: Role,
     pub visibility: Visibility,
+    /// Its code.storage repo: `""` while not made yet (a chat's, made
+    /// after the create answers: docs/api.md, Names).
     pub repo: String,
     pub pins: Pins,
     pub counts: Counts,
@@ -1033,16 +1172,25 @@ pub struct FragmentStatus {
     /// sharing for them, but on a connector), as the share sheet shows it. A member does not
     /// share by link: they ask its owner.
     pub view_token: Option<String>,
+    /// It holds a secret or a door, so it has no share link and is not
+    /// public, and the people its owner adds can use its keys (FIN-352,
+    /// `Sharing::reach`): the share sheet says so. Add-only: left out when
+    /// false.
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub reach: bool,
     /// Editors and up see the inbox token.
     pub inbox_token: Option<String>,
     pub urls: Urls,
     /// Files this large or larger are stored as blobs, their pointers in
     /// git (absent from hosts without blobs: the TypeScript runtime).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub blob_min_bytes: Option<u64>,
     /// What the page reported as its last preview card's shot loaded it
     /// (docs/api.md, Cards); absent before the first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub page: Option<PageReport>,
 }
 
@@ -1050,6 +1198,7 @@ pub struct FragmentStatus {
 /// card, as a visitor without an account sees it: as it loaded and in
 /// the second after, with no interaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PageReport {
     /// The live commit the shot loaded.
     pub live: String,
@@ -1062,6 +1211,7 @@ pub struct PageReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PageError {
     pub kind: PageErrorKind,
     /// What the page or the browser said (cut to
@@ -1069,10 +1219,12 @@ pub struct PageError {
     pub text: String,
     /// The script or resource it names (`url`, or `url:line:column`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PageErrorKind {
     /// An uncaught exception or an unhandled rejection (a syntax error too).
@@ -1086,8 +1238,10 @@ pub enum PageErrorKind {
     Security,
 }
 
-/// A fragment the signer holds a role on.
+/// A fragment the signer holds a role on: a row of `GET /api/fragments`
+/// (and of a search's fragments), with the role they hold.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListedFragment {
     pub name: String,
     pub role: Role,
@@ -1096,77 +1250,93 @@ pub struct ListedFragment {
     #[serde(default)]
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub title: Option<String>,
     /// Its picture, as the address on the platform that serves it: an
     /// agent fragment's `avatar.png` at live (its agent's identity's
     /// `/api/identities/<npub>/picture?v=…`), any other's icon
     /// (`/api/f/<name>/icon?v=…`, docs/api.md, Icons).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub picture: Option<String>,
     /// An agent fragment's role (its live `fragment.json`'s `meta.role`,
     /// trimmed; none when it says nothing), as its last install said: the
     /// tag the shell shows beside its name. Never any other fragment's.
     #[serde(default, rename = "agentRole", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub agent_role: Option<String>,
     /// Its agent members, the first added (a chat's lead) first, at most
     /// `limits::LISTED_AGENTS_MAX`, as the fragment last said.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub agents: Vec<String>,
-    /// A chat's newest message, its first line, as the signer's search
-    /// holds it (none when it holds none: docs/api.md, Search).
+    /// A chat's newest message, its first line (at most
+    /// `limits::LISTED_PREVIEW_MAX_BYTES`), as the signer's search holds it
+    /// (none when it holds none: docs/api.md, Search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub preview: Option<String>,
     /// With `preview`: when its message was said (ms), so a list can put
     /// its chats newest first.
     #[serde(default, rename = "previewAt", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub preview_at: Option<i64>,
     /// A chat's messages the signer's search holds that came after the
     /// last they saw (`PUT /api/fragments/{name}/seen`), at most
     /// `limits::LISTED_UNREAD_MAX`; left out at 0.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = 0)))]
     pub unread: u32,
     /// Its owner's row only: who else is in it, as the fragment last said
     /// (`None` until it has).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub sharing: Option<Sharing>,
     /// The signer archived it: their own view, not the fragment's (the
     /// shell's sidebar leaves it out; search still finds it).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub archived: bool,
     /// On the signer's dock: their own choice, not the fragment's (`PUT
     /// /api/fragments/{name}/dock`), true until they take it off (the
     /// shell's dock shows apps and brains, less these and the archived).
     /// Left out while true, so a row from before the choice, or from an
     /// older platform, reads as on it.
-    #[serde(default = "on_the_dock", skip_serializing_if = "is_on_the_dock")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = true)))]
     pub dock: bool,
     /// The signer pinned it: their own view, not the fragment's (`PUT
     /// /api/fragments/{name}/pinned`; the shell's sidebar shows it first in
     /// its section). Left out while false, so a row from an older platform
     /// reads as not pinned.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub pinned: bool,
     /// An agent's list `for` someone: whether that someone owns it (beside
     /// the role the agent acts with there), as no name says any more.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub owned: bool,
     /// What its members are doing, as its channels that declare `listed`
     /// last said (each member's newest such record, the newest first, at
     /// most `limits::LISTED_POSTERS_MAX`): only those of channels this
     /// row's role may read; none when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub listed: Vec<ListedRecord>,
 }
 
 /// `PUT /api/fragments/{name}/archived`: the signer's own view of a
 /// fragment they hold a role on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetArchived {
     pub archived: bool,
 }
 
 /// Its answer: the fragment, and whether it is archived now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Archived {
     pub name: String,
     pub archived: bool,
@@ -1175,6 +1345,7 @@ pub struct Archived {
 /// `PUT /api/fragments/{name}/dock`: the signer's own choice of whether
 /// their dock shows a fragment they hold a role on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetDock {
     pub dock: bool,
 }
@@ -1182,12 +1353,14 @@ pub struct SetDock {
 /// `PUT /api/fragments/{name}/pinned`: the signer's own choice of whether
 /// a fragment they hold a role on is pinned in their sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetPinned {
     pub pinned: bool,
 }
 
 /// Its answer: the fragment, and whether it is pinned now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Pinned {
     pub name: String,
     pub pinned: bool,
@@ -1195,37 +1368,41 @@ pub struct Pinned {
 
 /// Its answer: the fragment, and whether it is on their dock now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Docked {
     pub name: String,
     pub dock: bool,
 }
 
-/// A row's `dock` when it names none: on it.
-fn on_the_dock() -> bool {
+/// A default of `true` (a row's `dock` that names none is on the dock).
+fn default_true() -> bool {
     true
 }
 
-/// A row on the dock leaves `dock` out.
-fn is_on_the_dock(dock: &bool) -> bool {
-    *dock
+/// A `true` is left out, as its default is `true` (`default_true`).
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// `PUT /api/fragments/{name}/seen`'s answer: the signer has seen the
 /// fragment's messages their search holds, so its row counts none unread.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Seen {
     pub name: String,
+    /// Always 0: none of its messages is unread now.
     pub unread: u32,
 }
 
-fn is_zero(n: &u32) -> bool {
-    *n == 0
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 /// `GET /api/search?q=` (any signer): the signer's fragments whose title
 /// or name match every word of the query, then the messages that do,
 /// newest first, from the fragments they hold a role on now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SearchAnswer {
     pub fragments: Vec<ListedFragment>,
     pub messages: Vec<MessageHit>,
@@ -1235,10 +1412,13 @@ pub struct SearchAnswer {
 /// a snippet of its text around the match (plain text, at most
 /// `limits::SEARCH_SNIPPET_MAX_BYTES`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MessageHit {
     pub fragment: String,
     pub channel: String,
+    /// The record's place in its channel.
     pub seq: i64,
+    /// When it was written (ms).
     pub at: i64,
     pub snippet: String,
 }
@@ -1248,12 +1428,21 @@ pub struct MessageHit {
 /// (neither the owner nor an agent of theirs), and how many invites wait
 /// on an email (`None` in a row sent before rows counted them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Sharing {
     pub visibility: Visibility,
     pub members: u64,
     pub guests: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub invites: Option<u64>,
+    /// It holds a secret or a door, so it has no share link and is not
+    /// public (FIN-352: `Reason::PrivateWhileReaching`,
+    /// `Reason::UnshareFirst`). Add-only: left out when false, and a row
+    /// from before it reads none.
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub reach: bool,
 }
 
 impl Sharing {
@@ -1261,6 +1450,13 @@ impl Sharing {
     /// invited (a row sent before invites were counted may have some).
     pub fn with_others(&self) -> bool {
         self.guests > 0 || self.invites.is_none_or(|n| n > 0)
+    }
+
+    /// Whether it is shared beyond the people named in it: its link opens
+    /// it, or it is public (FIN-352; Paul, 2026-11-11: people named, at any
+    /// role, are not beyond).
+    pub fn beyond(&self) -> bool {
+        self.visibility != Visibility::Members
     }
 }
 
@@ -1347,11 +1543,34 @@ pub struct AccessAgent {
 
 /// `GET /api/fragments` (any signer).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FragmentList {
     pub fragments: Vec<ListedFragment>,
+    /// What a message of the signer's may carry here, which every client
+    /// checks its files against before it sends them: a person's, the
+    /// deployment's bound; an agent's (`?for=` too), a blob's (add-only:
+    /// absent from an older platform, and from a list read inside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub limits: Option<UploadLimits>,
+}
+
+/// The one statement of what a person's message may carry, as the
+/// deployment sets it: on `GET /api/fragments` (the shell, the app) and
+/// a page's hello (`fragment.me()`). A file over `uploadMaxBytes`, or
+/// more files than `filesPerMessage`, is refused before it is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UploadLimits {
+    /// One file's bytes (`limits::UPLOAD_MAX_BYTES_DEFAULT` unless named).
+    pub upload_max_bytes: u64,
+    /// `limits::FILES_PER_MESSAGE`.
+    pub files_per_message: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
     /// The member's identity (an npub).
@@ -1362,14 +1581,23 @@ pub struct Member {
     pub added_at: i64,
     /// `person` or `agent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub kind: Option<IdentityKind>,
     /// An agent member's owner, who reads what it reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub owner: Option<String>,
+    /// A person member's email, as the share sheet shows it (decision
+    /// 48): in `GET members` to the owner and their agent for them, and in
+    /// no other list (add-only: absent from an older platform).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub email: Option<String>,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MemberList {
     pub members: Vec<Member>,
 }
@@ -1413,6 +1641,7 @@ pub const DEFAULT_TIER: Tier = Tier::Cheap;
 /// stays the fragment's and is not registered. An agent has a designated
 /// owner, a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityKind {
     Person,
@@ -1482,6 +1711,7 @@ pub struct OrgPlace {
 
 /// Who owns a fragment (decisions 66 to 71): a person or an org.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerRef {
     Person { id: String },
@@ -1649,11 +1879,15 @@ pub struct WaitingInvite {
 }
 
 /// The answer to `POST /api/invites/<fragment>/accept`: the role they
-/// hold there now (a stronger one they held already is kept).
+/// hold there now (a stronger one they held already is kept), and the
+/// fragment's page, which a client opens (FIN-458: an action's answer may
+/// name a page to open). Add-only: an answer from before it names none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InviteAccepted {
     pub fragment: String,
     pub role: Role,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<String>,
 }
 
 /// `GET /api/f/<name>/invites` (owner): the invites waiting.
@@ -1679,10 +1913,16 @@ pub struct Rotated {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PutSecret {
+    /// The value; empty with `fromVault`.
+    #[serde(default)]
     pub value: String,
     /// At least one, at most `SECRET_HOSTS_MAX`, each as a URL names it
     /// (`fragment_core::secrets::secret_host`).
     pub hosts: Vec<String>,
+    /// In place of `value`: a secret of the caller's own Vault (FIN-466),
+    /// moved here: kept here, gone from the Vault. A person's alone.
+    #[serde(default, rename = "fromVault", skip_serializing_if = "Option::is_none")]
+    pub from_vault: Option<String>,
 }
 
 /// A secret as `GET /api/f/<name>/secrets` (editor) shows it: its name and
@@ -1707,8 +1947,34 @@ pub struct SetVisibility {
     pub visibility: Visibility,
 }
 
-/// `GET /api/f/<name>/storage-token` (editor and up): a code.storage JWT
-/// scoped to this fragment's repo, `git:read` + `git:write`.
+/// The refs a fragment's git has that the platform follows (its pins).
+pub const PINNED_REFS: [&str; 2] = ["main", "live"];
+
+/// `POST /api/f/<name>/refresh`'s body: the ref its writer moved, which is
+/// all the platform reads again (a sync moved main, a rollback live).
+/// Without one (an older CLI's `{}`, or no body), both.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Refresh {
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub moved: Option<String>,
+}
+
+impl Refresh {
+    /// The refs a refresh with this body reads again. A body that names
+    /// no ref, or is not one (the route once read none), reads both; a ref
+    /// the platform does not pin is refused.
+    pub fn refs_of(body: &[u8]) -> Result<Vec<&'static str>, String> {
+        let asked: Refresh = serde_json::from_slice(body).unwrap_or_default();
+        match asked.moved.as_deref() {
+            None => Ok(PINNED_REFS.to_vec()),
+            Some(r) => PINNED_REFS.iter().find(|p| **p == r).map(|p| vec![*p]).ok_or_else(|| format!("ref is main or live, not {r:?}")),
+        }
+    }
+}
+
+/// `GET /api/f/<name>/storage-token` (an editor and up: `git:read` +
+/// `git:write`), or with `?access=read` (a member, viewer and up:
+/// `git:read` alone): a code.storage JWT scoped to this fragment's repo.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageToken {
@@ -1716,9 +1982,39 @@ pub struct StorageToken {
     pub repo: String,
     pub api: String,
     pub expires_at: i64,
+    /// Whether it writes (`git:write`). A host before `?access=read`
+    /// named none, and minted only writers' tokens.
+    #[serde(default = "StorageToken::writes")]
+    pub write: bool,
+}
+
+impl StorageToken {
+    fn writes() -> bool {
+        true
+    }
+}
+
+/// What a storage token is asked for: `?access=read` asks for one that
+/// only reads; none, for one that writes too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageAccess {
+    Write,
+    Read,
+}
+
+impl StorageAccess {
+    /// The query's `access`: none or `read`.
+    pub fn parse(access: Option<&str>) -> Result<StorageAccess, String> {
+        match access {
+            None => Ok(StorageAccess::Write),
+            Some("read") => Ok(StorageAccess::Read),
+            Some(other) => Err(format!("access is read, or left out for a token that writes too, not {other:?}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum OpKind {
     Query,
@@ -1743,21 +2039,25 @@ impl OpKind {
 
 /// An operation as `fragment.json` declares it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OpDecl {
     pub kind: OpKind,
     /// The weakest role that may call it.
     pub role: Role,
     /// Its input's JSON Schema (the supported subset); also its tool schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub input: Option<Value>,
     /// A mutation whose calls leave no ledger row (`"ephemeral": true`):
     /// no replay (the same id runs again) and no effects (docs/api.md, Apps).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub ephemeral: bool,
     /// What it does, in plain text, for a person or an agent choosing it
     /// (1 to `limits::OP_DESCRIPTION_MAX_CHARS` characters). None when the
     /// manifest gives none, and then absent from the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub description: Option<String>,
 }
 
@@ -1791,6 +2091,13 @@ pub struct ChannelDecl {
     /// kind means: it is the template's. `None`: nothing is listed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listed: Option<ListedDecl>,
+    /// Kinds of record it keeps each poster's newest of (`"newest":
+    /// [...]`), which one read answers (`GET …/channels/{c}/newest`): the
+    /// latest state each poster says, found however far back it was said
+    /// (a chat's agents' helpers working). A kind is a body's `kind`, as
+    /// for `listed`; nothing goes to its members' lists. Empty: none kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub newest: Vec<String>,
 }
 
 /// A channel's `listed`: the kinds of record whose newest, each member's,
@@ -1812,6 +2119,7 @@ pub struct ListedDecl {
 /// a member's newest record of a kind its channel lists, sent to the lists
 /// of the members whose role may read that channel, and to no one else's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListedRecord {
     pub channel: String,
     /// Who posted it: a member of the fragment.
@@ -1821,6 +2129,7 @@ pub struct ListedRecord {
     /// Its body's listed fields that are strings, each cut to
     /// `limits::LISTED_VALUE_MAX_CHARS` characters.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = {})))]
     pub fields: std::collections::BTreeMap<String, String>,
     /// When it was posted (ms); a poster who posts the same again moves it
     /// at most `limits::LISTED_FRESH_MS` behind.
@@ -1843,6 +2152,7 @@ pub fn valid_listed_field(field: &str) -> bool {
 /// `ops`, and posts to a channel its fragment.json declares postable) or by
 /// mutations' effects (app channels), never by a client's own hand.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChannelRecord {
     pub channel: String,
     pub seq: i64,
@@ -1860,6 +2170,7 @@ pub struct ChannelRecord {
 /// (`^[A-Za-z0-9._:-]{1,128}$`): the same id with the same body answers the
 /// record it appended and appends nothing; with another body it is 409.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PostRecord {
     pub id: String,
@@ -1873,14 +2184,17 @@ pub struct PostRecord {
 /// `draft` frame on `__live`); `text: null` stops it. The record its poster
 /// then writes with the same `turn` replaces it on a page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PutDraft {
     pub turn: String,
     /// At most `limits::RECORD_BODY_MAX_BYTES`.
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub text: Option<String>,
 }
 
 /// A post's answer: the record, and whether this id had posted it before.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Posted {
     pub record: ChannelRecord,
     pub replayed: bool,
@@ -1892,13 +2206,38 @@ pub const POST_KIND: &str = "message";
 /// `GET /api/f/<name>/channels/<channel>?after=` (the channel's reader):
 /// A page in ascending seq order. `next` is its last seq for a forward
 /// read, its first seq for a backwards read, or the input cursor if empty.
+/// `more`: whether the channel holds records past the page in the
+/// direction read (added 2026-11; absent from older releases' pages).
 // no PartialEq: a record's body is raw JSON text (compare the JSON instead)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChannelPage {
     pub channel: String,
     pub records: Vec<ChannelRecord>,
+    /// The next page's cursor: `after` it reading forward, `before` it
+    /// reading back.
     pub next: i64,
+    /// Whether records remain past the page in the direction read: a page
+    /// cut short by its bytes (`limits::CHANNEL_HTTP_PAGE_MAX_BYTES`) says
+    /// so here, so it is not read as the last.
+    #[serde(default)]
+    pub more: bool,
 }
+
+/// `GET /api/f/<name>/channels/<channel>/newest` (the channel's reader):
+/// each poster's newest record of each kind the channel keeps the newest
+/// of (`ChannelDecl::newest`), the newest first, at most
+/// `limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past
+/// its retention) is none; a channel that keeps no kind answers none.
+// no PartialEq: a record's body is raw JSON text (compare the JSON instead)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ChannelNewest {
+    pub channel: String,
+    pub records: Vec<ChannelRecord>,
+}
+
+const _: () = assert!(limits::NEWEST_KEPT_MAX * limits::RECORD_BODY_MAX_BYTES < limits::CHANNEL_HTTP_PAGE_MAX_BYTES, "a newest read fits one page's bytes");
 
 /// What a subscription's URL receives (`POST`, unsigned: the URL is the
 /// subscriber's capability): one new record of the channel it follows.
@@ -1937,16 +2276,27 @@ pub enum TriggerOn {
     Channel(String),
     /// A move of `main` that changes a path matching this pattern.
     Files(String),
+    /// Each install of new code: a deploy that moves `live`, or a blessed
+    /// template's changed release re-installed. Always `true` (the
+    /// manifest refuses any other value).
+    Installed(bool),
+    /// The fragment's object waking for someone: the first request of its
+    /// activation that a person or an agent made, never an alarm or the
+    /// platform's own. At most once per activation. Always `true`.
+    Woke(bool),
 }
 
 impl TriggerOn {
     /// What starts it, and on what: `("cron", schedule)`, `("channel",
-    /// channel)`, or `("files", pattern)`; the names are its wire keys.
+    /// channel)`, `("files", pattern)`, `("installed", "")` or `("woke",
+    /// "")`; the names are its wire keys.
     pub fn parts(&self) -> (&'static str, &str) {
         match self {
             TriggerOn::Cron(c) => ("cron", c),
             TriggerOn::Channel(c) => ("channel", c),
             TriggerOn::Files(f) => ("files", f),
+            TriggerOn::Installed(_) => ("installed", ""),
+            TriggerOn::Woke(_) => ("woke", ""),
         }
     }
 
@@ -1955,6 +2305,8 @@ impl TriggerOn {
             "cron" => Some(TriggerOn::Cron(target)),
             "channel" => Some(TriggerOn::Channel(target)),
             "files" => Some(TriggerOn::Files(target)),
+            "installed" => Some(TriggerOn::Installed(true)),
+            "woke" => Some(TriggerOn::Woke(true)),
             _ => None,
         }
     }
@@ -2003,8 +2355,13 @@ impl RunStatus {
 }
 
 /// How a run started: someone's call, another run's step, or a trigger.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// This release tolerates what the next writes: a `via` it does not know
+/// (a trigger kind a later release added, read after a rollback, or by an
+/// older CLI) is `Unknown`, shown as written and taken as a trigger's, so
+/// a new kind needs no forward-only step (FIN-328's needed one).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
 pub enum Via {
     Call,
     /// A step of another run called it (`trigger` names the parent run).
@@ -2012,30 +2369,44 @@ pub enum Via {
     Cron,
     Channel,
     Files,
+    Installed,
+    Woke,
+    Unknown(String),
 }
 
 impl Via {
-    pub fn as_str(self) -> &'static str {
+    const KNOWN: [Via; 7] = [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed, Via::Woke];
+
+    pub fn as_str(&self) -> &str {
         match self {
             Via::Call => "call",
             Via::Job => "job",
             Via::Cron => "cron",
             Via::Channel => "channel",
             Via::Files => "files",
+            Via::Installed => "installed",
+            Via::Woke => "woke",
+            Via::Unknown(s) => s,
         }
-    }
-
-    pub fn parse(s: &str) -> Option<Via> {
-        [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files].into_iter().find(|v| v.as_str() == s)
     }
 
     /// Started by a trigger: these runs act as the fragment, pause with
-    /// their operation, and count toward its hourly ceiling.
-    pub fn triggered(self) -> bool {
-        match self {
-            Via::Call | Via::Job => false,
-            Via::Cron | Via::Channel | Via::Files => true,
-        }
+    /// their operation, and count toward its hourly ceiling. One this
+    /// release does not know is a trigger's: calls and jobs are known.
+    pub fn triggered(&self) -> bool {
+        !matches!(self, Via::Call | Via::Job)
+    }
+}
+
+impl From<String> for Via {
+    fn from(s: String) -> Via {
+        Via::KNOWN.into_iter().find(|v| v.as_str() == s).unwrap_or(Via::Unknown(s))
+    }
+}
+
+impl From<Via> for String {
+    fn from(v: Via) -> String {
+        v.as_str().to_string()
     }
 }
 
@@ -2185,7 +2556,7 @@ fn write_canonical(v: &Value, out: &mut String) {
     match v {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
+            keys.sort_unstable();
             out.push('{');
             for (i, k) in keys.iter().enumerate() {
                 if i > 0 {
@@ -2215,13 +2586,48 @@ pub mod computer;
 pub mod export;
 pub mod ledger;
 pub mod live;
+pub mod migrations;
+pub mod notice;
 pub mod org;
+#[cfg(feature = "schema")]
+pub mod routes;
 pub mod search;
+pub mod vault;
 pub mod wipe;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a storage token says whether it writes, add-only. Method: a
+    /// host before `?access=read` names no `write` (it minted writers'
+    /// alone), a read token says false; `access` is read or left out.
+    #[test]
+    fn a_storage_token_says_whether_it_writes() {
+        let older: StorageToken = serde_json::from_str(r#"{"token":"t","repo":"r","api":"https://a","expiresAt":1}"#).unwrap();
+        assert!(older.write, "a host that names none minted a writer's");
+        let read: StorageToken = serde_json::from_str(r#"{"token":"t","repo":"r","api":"https://a","expiresAt":1,"write":false}"#).unwrap();
+        assert!(!read.write);
+        assert_eq!(serde_json::to_value(&read).unwrap()["write"], false);
+        assert_eq!(StorageAccess::parse(None), Ok(StorageAccess::Write));
+        assert_eq!(StorageAccess::parse(Some("read")), Ok(StorageAccess::Read));
+        assert!(StorageAccess::parse(Some("write")).is_err() && StorageAccess::parse(Some("")).is_err());
+    }
+
+    /// Goal: a refresh reads again the ref its writer names, and an older
+    /// writer's body (`{}`, none, or not JSON: the route read no body
+    /// before) both. Method: each body, and a ref the platform does not pin.
+    #[test]
+    fn a_refresh_reads_the_ref_it_names_or_both() {
+        assert_eq!(Refresh::refs_of(br#"{"ref":"main"}"#), Ok(vec!["main"]));
+        assert_eq!(Refresh::refs_of(br#"{"ref":"live"}"#), Ok(vec!["live"]));
+        for older in [&b"{}"[..], b"", b"not json", br#"{"other":1}"#] {
+            assert_eq!(Refresh::refs_of(older), Ok(vec!["main", "live"]), "{}", String::from_utf8_lossy(older));
+        }
+        assert!(Refresh::refs_of(br#"{"ref":"dev"}"#).is_err());
+        let sent = serde_json::to_value(Refresh { moved: Some("main".into()) }).unwrap();
+        assert_eq!(sent, serde_json::json!({ "ref": "main" }), "as a CLI sends it");
+    }
 
     /// Goal: the typed identity and sign-in reads the same JSON the
     /// registry and `GET /api/identities/me` carried before (T4: the wire
@@ -2347,6 +2753,12 @@ mod tests {
             assert_eq!(TriggerOn::from_parts(kind, target.to_string()), Some(on.clone()));
             assert_eq!(serde_json::to_value(&on).unwrap(), serde_json::json!({ kind: target }));
         }
+        let installed = TriggerOn::Installed(true);
+        assert_eq!(TriggerOn::from_parts("installed", String::new()), Some(installed.clone()));
+        assert_eq!(serde_json::to_value(&installed).unwrap(), serde_json::json!({ "installed": true }));
+        let woke = TriggerOn::Woke(true);
+        assert_eq!(TriggerOn::from_parts("woke", String::new()), Some(woke.clone()));
+        assert_eq!(serde_json::to_value(&woke).unwrap(), serde_json::json!({ "woke": true }));
         assert_eq!(TriggerOn::from_parts("webhook", "x".into()), None);
     }
 
@@ -2385,11 +2797,11 @@ mod tests {
     fn a_channel_without_post_reads_and_writes_as_before() {
         // code stored before posts (the code row's JSON columns) decodes
         let old: ChannelDecl = serde_json::from_str(r#"{"read":"viewer"}"#).unwrap();
-        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None });
+        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None, newest: vec![] });
         assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"read":"viewer"}"#);
-        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true, from: None, listed: None };
+        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true, from: None, listed: None, newest: vec![] };
         assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&postable).unwrap()).unwrap(), postable);
-        let agents = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: None };
+        let agents = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: None, newest: vec![] };
         assert_eq!(serde_json::to_string(&agents).unwrap(), r#"{"read":"viewer","post":"editor","from":"agent"}"#);
         assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&agents).unwrap()).unwrap(), agents, "its posters' kind reads back");
         assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a","body":1,"kind":"x"}"#).is_err(), "a post names only its id and body");
@@ -2401,7 +2813,7 @@ mod tests {
     #[test]
     fn a_listed_channel_reads_and_writes() {
         let listed = ListedDecl { kinds: vec!["turn.start".into(), "turn.asked".into()], fields: vec!["asks".into()] };
-        let work = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: Some(listed) };
+        let work = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: Some(listed), newest: vec![] };
         let text = serde_json::to_string(&work).unwrap();
         assert_eq!(text, r#"{"read":"viewer","post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.asked"],"fields":["asks"]}}"#);
         assert_eq!(serde_json::from_str::<ChannelDecl>(&text).unwrap(), work);
@@ -2472,11 +2884,16 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, owned: false, listed: vec![] }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, owned: false, listed: vec![] }], limits: None };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
-        let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
+        // the limits a person's client checks its files against, when the platform names them
+        let limited = FragmentList { fragments: vec![], limits: Some(UploadLimits { upload_max_bytes: limits::UPLOAD_MAX_BYTES_DEFAULT, files_per_message: limits::FILES_PER_MESSAGE }) };
+        assert_eq!(value(&limited), serde_json::json!({ "fragments": [], "limits": { "uploadMaxBytes": limits::UPLOAD_MAX_BYTES_DEFAULT, "filesPerMessage": 8 } }));
+        assert_eq!(serde_json::from_value::<FragmentList>(value(&limited)).unwrap(), limited);
+        let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2), reach: false };
         let listed = FragmentList {
             fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            limits: None,
         };
         assert_eq!(
             value(&listed),
@@ -2516,8 +2933,21 @@ mod tests {
         assert!(!Sharing { invites: Some(0), ..old }.with_others());
         assert!(Sharing { invites: Some(1), ..old }.with_others());
         assert!(Sharing { guests: 1, invites: Some(0), ..old }.with_others());
+        // FIN-352: beyond the people named in it is its link or public,
+        // never someone else in it or invited (2026-11-11); reach is sent
+        // only when true, and a row from before it reads none
+        let private = Sharing { visibility: Visibility::Members, members: 2, guests: 0, invites: Some(0), reach: true };
+        assert!(!private.beyond());
+        assert_eq!(value(&private), serde_json::json!({ "visibility": "members", "members": 2, "guests": 0, "invites": 0, "reach": true }));
+        for named in [Sharing { guests: 1, members: 3, ..private }, Sharing { invites: Some(1), ..private }, Sharing { invites: None, ..private }] {
+            assert!(!named.beyond(), "{named:?}");
+        }
+        for shared in [Sharing { visibility: Visibility::Link, ..private }, Sharing { visibility: Visibility::Public, ..private }] {
+            assert!(shared.beyond(), "{shared:?}");
+        }
+        assert!(!old.reach && value(&Sharing { reach: false, ..private }).get("reach").is_none());
         // a chat and an agent are made members only; the rest by link
-        assert_eq!([Some("chat"), Some("agent"), Some("sessions")].map(Visibility::made_from), [Visibility::Members; 3]);
+        assert_eq!([Some("chat"), Some("agent"), Some("sessions"), Some("telegram")].map(Visibility::made_from), [Visibility::Members; 4]);
         assert_eq!([None, Some("todo"), Some("brain"), Some("blank"), Some("skills")].map(Visibility::made_from), [Visibility::Link; 5]);
         // a share is the person's and their agents' (Paul, 2026-10-13): no
         // field says otherwise, and one that tries is refused
@@ -2537,8 +2967,11 @@ mod tests {
         assert_eq!(value(&invites), serde_json::json!({ "invites": [] }));
         let runs = RunList { runs: vec![], counts: [("held".to_string(), 2)].into(), paused: vec!["digest".into()] };
         assert_eq!(value(&runs), serde_json::json!({ "runs": [], "counts": { "held": 2 }, "paused": ["digest"] }));
-        let page = ChannelPage { channel: "chat".into(), records: vec![], next: 7 };
-        assert_eq!(value(&page), serde_json::json!({ "channel": "chat", "records": [], "next": 7 }));
+        let page = ChannelPage { channel: "chat".into(), records: vec![], next: 7, more: true };
+        assert_eq!(value(&page), serde_json::json!({ "channel": "chat", "records": [], "next": 7, "more": true }));
+        // an older release's page has no `more`: it reads as none said
+        let old: ChannelPage = serde_json::from_value(serde_json::json!({ "channel": "chat", "records": [], "next": 7 })).unwrap();
+        assert!(!old.more);
     }
 
     /// Goal: a list from a newer platform, one of whose fragments is of a
@@ -2586,15 +3019,29 @@ mod tests {
         assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "rotated": ["view"] }));
     }
 
+    /// Goal: a `via` a later release writes is read, listed and kept as
+    /// written (a rollback's object, an older CLI). Method: a run whose via
+    /// no release knows yet reads as `Unknown`, a trigger's, and writes
+    /// back unchanged.
+    #[test]
+    fn a_via_from_a_later_release_reads_as_written() {
+        let future = Via::from("webhook".to_string());
+        assert_eq!(future, Via::Unknown("webhook".into()));
+        assert!(future.triggered(), "a via this release does not know is a trigger's");
+        let wire = serde_json::json!({ "id": 7, "op": "tick", "via": "webhook", "principal": "npub1x", "status": "succeeded", "attempt": 1, "depth": 0, "createdAt": 1 });
+        let run: Run = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(run.via.as_str(), "webhook");
+        assert_eq!(serde_json::to_value(&run).unwrap(), wire, "and it lists as written");
+    }
+
     #[test]
     fn stored_states_read_back_as_they_serialize() {
-        for v in [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files] {
-            assert_eq!(Via::parse(v.as_str()), Some(v));
-            assert_eq!(serde_json::to_value(v).unwrap(), v.as_str());
+        for v in Via::KNOWN {
+            assert_eq!(Via::from(v.as_str().to_string()), v);
+            assert_eq!(serde_json::to_value(&v).unwrap(), v.as_str());
         }
-        assert_eq!(Via::parse("inbox"), None);
         assert!(!Via::Call.triggered() && !Via::Job.triggered());
-        assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered());
+        assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered() && Via::Installed.triggered() && Via::Woke.triggered());
         for t in [Tier::Cheap, Tier::Medium, Tier::High] {
             assert_eq!(Tier::parse(t.as_str()), Some(t));
             assert_eq!(serde_json::to_value(t).unwrap(), t.as_str());
@@ -2635,18 +3082,21 @@ mod tests {
             (TooManyOffers, "too_many_offers"),
             (OffersPerDay, "offers_per_day"),
             (LastPaidSeat, "last_paid_seat"),
+            (PrivateWhileReaching, "private_while_reaching"),
+            (UnshareFirst, "unshare_first"),
+            (KeyPaused, "key_paused"),
         ];
         assert_eq!(all.len(), Reason::ALL.len(), "every reason is named here");
         for (reason, wire) in all {
             assert!(Reason::ALL.contains(&reason));
             assert_eq!(serde_json::to_value(reason).unwrap(), wire);
             assert_eq!(Reason::parse(wire), Some(reason));
-            let body = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: Some(reason) };
+            let body = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: Some(reason), retry_after_ms: None };
             let text = serde_json::to_string(&body).unwrap();
             assert_eq!(text, format!(r#"{{"error":"already_exists","message":"m","reason":"{wire}"}}"#));
             assert_eq!(serde_json::from_str::<ErrorBody>(&text).unwrap(), body);
         }
-        let none = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: None };
+        let none = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: None, retry_after_ms: None };
         assert_eq!(serde_json::to_string(&none).unwrap(), r#"{"error":"already_exists","message":"m"}"#, "no reason, no field");
         let newer: ErrorBody = serde_json::from_str(r#"{"error":"already_exists","message":"m","reason":"one_from_later"}"#).unwrap();
         assert_eq!(newer, none, "a reason this reader does not know reads as none");
@@ -2654,7 +3104,7 @@ mod tests {
 
     #[test]
     fn error_codes_serialize_snake_case() {
-        let body = ErrorBody { error: ErrorCode::ConflictingBody, message: "x".into(), reason: None };
+        let body = ErrorBody { error: ErrorCode::ConflictingBody, message: "x".into(), reason: None, retry_after_ms: None };
         assert_eq!(serde_json::to_string(&body).unwrap(), r#"{"error":"conflicting_body","message":"x"}"#);
         assert_eq!(ErrorCode::ConflictingBody.status(), 409);
         assert_eq!(serde_json::to_value(ErrorCode::Deploying).unwrap(), "deploying");

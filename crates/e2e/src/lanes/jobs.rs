@@ -28,6 +28,26 @@ const INBOX_FILES: [(&str, &[u8]); 4] = [
     ("README.md", include_bytes!("../../../../templates/inbox/README.md")),
 ];
 
+/// Each of `values` as vendors write a value back (#814): each byte
+/// percent-encoded in lower-case hex, JSON-escaped, JSON-escaped within
+/// JSON, as HTML character references, and in base64.
+fn spellings(values: &[&str]) -> Vec<String> {
+    use base64::Engine;
+    let json = |v: &str| v.bytes().map(|b| format!("\\u{b:04x}")).collect::<String>();
+    values
+        .iter()
+        .flat_map(|v| {
+            [
+                v.bytes().map(|b| format!("%{b:02x}")).collect::<String>(),
+                json(v),
+                json(v).replace('\\', "\\\\"),
+                v.bytes().map(|b| format!("&#{b};")).collect::<String>(),
+                base64::engine::general_purpose::STANDARD.encode(v),
+            ]
+        })
+        .collect()
+}
+
 /// A request the upstream got.
 #[derive(Debug, Clone)]
 struct Hit {
@@ -67,6 +87,9 @@ impl Upstream {
                 p if p.starts_with("/keyed/") => Response::json(200, &json!({ "items": ["keyed"] })),
                 // an answer that echoes the URL it was asked at
                 p if p.starts_with("/echo/") => Response::json(302, &json!({ "asked": p })).with_header("location", p),
+                // one that writes the request's path and authorization back
+                // as vendors spell them (`spellings`), a line each
+                p if p.starts_with("/spell/") => Response::bytes(200, "text/plain", spellings(&[&p["/spell/".len()..], &header("authorization")]).join("\n").into_bytes()),
                 "/once" => Response::json(200, &json!({ "items": ["once"] })),
                 "/flaky" if flaky.fetch_add(1, Ordering::SeqCst) < 2 => Response::json(503, &json!({ "error": "busy" })),
                 "/flaky" => Response::json(200, &json!({ "items": ["gamma"] })),
@@ -99,12 +122,16 @@ pub(super) fn jobs_fragment(s: &Suite, api: &Api, owner: &Keys, base: &str, edit
     Ok((name, c))
 }
 
-/// Sets the fixture's `API_KEY` to `value`, for `hosts`.
+/// Sets the fixture's `API_KEY` to `value`, for `hosts`, on the fragment
+/// made private first: a key is held only where its owner and their own
+/// agents alone are (FIN-352, cell reach.rs).
 pub(super) fn set_secret(api: &Api, keys: &Keys, name: &str, value: &str, hosts: &[&str]) -> Result<Reply> {
+    let private = api.signed(keys, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(private.status == 200, "{name} made private for its key: {private}");
     api.signed(keys, "PUT", &format!("/api/f/{name}/secrets/API_KEY"), Some(&json!({ "value": value, "hosts": hosts })))
 }
 
-fn run(api: &Api, keys: &Keys, name: &str, id: i64) -> Result<Reply> {
+pub(crate) fn run(api: &Api, keys: &Keys, name: &str, id: i64) -> Result<Reply> {
     api.signed(keys, "GET", &format!("/api/f/{name}/runs/{id}"), None)
 }
 
@@ -120,7 +147,7 @@ pub(super) fn settle(api: &Api, keys: &Keys, name: &str, id: i64, want: &[&str],
     }
 }
 
-fn runs(api: &Api, keys: &Keys, name: &str, query: &str) -> Vec<Value> {
+pub(super) fn runs(api: &Api, keys: &Keys, name: &str, query: &str) -> Vec<Value> {
     api.signed(keys, "GET", &format!("/api/f/{name}/runs?limit=200{query}"), None)
         .ok()
         .and_then(|r| r.body["runs"].as_array().cloned())
@@ -128,7 +155,7 @@ fn runs(api: &Api, keys: &Keys, name: &str, query: &str) -> Vec<Value> {
 }
 
 /// The newest 500 events.
-fn events(api: &Api, keys: &Keys, name: &str) -> Vec<Value> {
+pub(super) fn events(api: &Api, keys: &Keys, name: &str) -> Vec<Value> {
     let last = api
         .signed(keys, "GET", &format!("/api/f/{name}/channels"), None)
         .ok()
@@ -198,9 +225,11 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let upstream = Upstream::start()?;
     let owner = api.person()?;
-    let viewer = api.person()?;
     let (name, _) = jobs_fragment(s, api, &owner, "jobs", |_| {})?;
-    api.share(&name, viewer.pubkey_hex(), "viewer")?;
+    // its viewer its owner's own agent: it holds a key (FIN-352)
+    let (viewer, viewer_id) = api.own_agent(&owner)?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{viewer_id}"), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "the jobs fragment's viewer: {r}");
     let r = set_secret(api, &owner, &name, SECRET, &["127.0.0.1"])?;
     anyhow::ensure!(r.status == 200, "secret setup: {r}");
     let long = Duration::from_secs(40);
@@ -255,6 +284,16 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         "an answer that echoes a URL's secret (a redirect's location) reaches the job naming it as the job wrote it",
         echoed["status"] == "succeeded" && echoed["output"]["location"] == "/echo/{{API_KEY}}/x" && !echoed.to_string().contains(SECRET) && upstream.hits(&format!("/echo/{SECRET}/x")).len() == 1,
         &echoed,
+    );
+    // a vendor that writes the secret back in spellings of its own (#814)
+    let r = api.op(&owner, &name, "spell", "spell-1", json!({ "url": upstream.url("/spell/{{API_KEY}}") }))?;
+    let spelled = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    let text = spelled["output"]["text"].as_str().unwrap_or("");
+    let forms = spellings(&[SECRET, &format!("Bearer {SECRET}")]);
+    s.ok(
+        "an answer that writes a secret back as a vendor spells it (percent-encoded in lower-case hex, JSON-escaped, within JSON, as HTML, in base64), the URL's and the header's alike, reaches the job naming it as its placeholder",
+        spelled["status"] == "succeeded" && text.lines().count() == forms.len() && text.lines().all(|l| l.contains("{{API_KEY}}")) && forms.iter().all(|f| !text.contains(f.as_str())) && !spelled.to_string().contains(SECRET),
+        &spelled,
     );
 
     // a step that fails for now is retried; one that keeps failing is the job's to catch
@@ -418,10 +457,13 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // the CLI
+    // the CLI as its owner: a fragment holding a key takes no one else in
+    // (FIN-352), so no other person's CLI
     let home = s.dir("jobs-cli");
-    s.login(api, &home);
-    let cli = s.cli_keys(&home).expect("the CLI logged in");
-    api.share(&name, cli.pubkey_hex(), "editor")?;
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": owner.secret_hex() }).to_string())?;
+    let cli = s.cli_keys(&home).expect("the CLI's key");
     let wrong_id = wrong["id"].as_i64().unwrap_or(0).to_string();
     let r = s.cli_json(api, &home, &["runs", &name, "--status", "held", "--json"])?;
     s.ok("fragment runs --status held lists the held runs", r["runs"].as_array().is_some_and(|a| a.len() == 1 && a[0]["op"] == "wrong"), &r);
@@ -480,6 +522,8 @@ fn inbox_secret(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     };
     let r = post(vec![("x-hook-secret", HOOK.into())])?;
     s.ok("an inbox whose secret is not set takes nothing", r.status == 403 && r.text.contains("x-hook-secret"), &r);
+    // its key held only while it is private (FIN-352)
+    anyhow::ensure!(api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?.status == 200, "made private");
     let r = api.signed(owner, "PUT", &format!("/api/f/{name}/secrets/HOOK"), Some(&json!({ "value": HOOK, "hosts": ["api.telegram.org"] })))?;
     anyhow::ensure!(r.status == 200, "the inbox's secret: {r}");
     let r = post(vec![("x-fragment-inbox-token", token.clone())])?;
@@ -627,6 +671,232 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// them; due (the `cron-now` lever), one fires once; paused it fires
 /// nothing, resumed it fires again; removed, it fires no more; and a
 /// fragment keeps at most 32.
+/// An installed trigger: each install of new code runs its operation once,
+/// as the fragment; asked again, nothing more; cut short by an outage, once
+/// after; a bad shape refused at deploy.
+fn installed_trigger(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
+    let owner = api.person()?;
+    let (name, c) = jobs_fragment(s, api, &owner, "installed", |m| m["triggers"] = json!([{ "installed": true, "run": "tick" }]))?;
+    let refresh = || api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})));
+    let installs = || runs(api, &owner, &name, "&op=tick").into_iter().filter(|r| r["via"] == "installed").collect::<Vec<_>>();
+    let status = api.status(&owner, &name)?;
+    let (own, code) = (status.body["npub"].clone(), status.body["code"].clone());
+    let first = installs().first().cloned().unwrap_or(Value::Null);
+    let done = settle(api, &owner, &name, first["id"].as_i64().unwrap_or(0), &["succeeded", "held", "blocked"], long);
+    let ticked = api.op(&owner, &name, "ticks", "q", json!({}))?;
+    s.ok(
+        "a deploy runs its installed trigger once, as the fragment, with the commit and code it installed",
+        installs().len() == 1
+            && done["status"] == "succeeded"
+            && done["principal"] == own
+            && done["depth"] == 0
+            && done["trigger"] == code["id"]
+            && ticked.body["result"] == json!([{ "ref": "live", "commit": code["sha"], "code": code["id"] }]),
+        format!("{done} {ticked}"),
+    );
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/triggers"), None)?;
+    s.ok("the triggers list names it", r.body["triggers"] == json!([{ "installed": true, "run": "tick", "paused": false }]), &r);
+    refresh()?;
+    s.deploy(&c);
+    s.commit(&c, &[("notes/only-main.md", Some(b"main moves, live does not"))]);
+    refresh()?;
+    s.ok("asked again, and a move of main alone, it starts nothing more", installs().len() == 1, json!(installs()));
+
+    // an install cut short (code.storage down after live moved) starts
+    // nothing; the next refresh installs it whole, and runs it once
+    s.fake.fail_file_reads(true);
+    s.commit(&c, &[("README.md", Some(b"v2"))]);
+    let during = s.deploy(&c);
+    let cut = (installs().len(), api.status(&owner, &name)?.body["code"]["sha"].clone());
+    s.fake.fail_file_reads(false);
+    refresh()?;
+    refresh()?;
+    let after = installs();
+    let newest = run(api, &owner, &name, after[0]["id"].as_i64().unwrap_or(0))?;
+    s.ok(
+        "an install cut short starts nothing; done once reads come back, it runs once",
+        cut == (1, code["sha"].clone()) && after.len() == 2 && newest.body["input"]["commit"] == during.as_str(),
+        format!("cut short: {cut:?}; after: {} {newest}", json!(after)),
+    );
+
+    // a bad shape is refused at deploy: the last good code stays, nothing runs
+    let mut bad: Value = serde_json::from_slice(JOBS_JSON)?;
+    bad["triggers"] = json!([{ "installed": false, "run": "tick" }]);
+    s.commit(&c, &[("fragment.json", Some(bad.to_string().as_bytes()))]);
+    s.deploy(&c);
+    let r = api.status(&owner, &name)?;
+    s.ok(
+        "an installed trigger that is not true is refused at deploy, the last good code kept, nothing run",
+        r.body["code"]["sha"] == during.as_str() && r.body["code"]["error"].as_str().is_some_and(|e| e.contains("installed must be true")) && installs().len() == 2,
+        &r,
+    );
+    Ok(())
+}
+
+/// A woke trigger (FIN-372): when someone comes back, its operation runs
+/// only if there is something to catch up: main moved since its last
+/// triggered run, or that run did not succeed. Nothing changed, a move its
+/// files trigger took, or the operation paused, a wake starts nothing; and
+/// a wake after one that ran starts none.
+fn woke_trigger(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
+    let owner = api.person()?;
+    let (name, c) = jobs_fragment(s, api, &owner, "woke", |m| {
+        m["triggers"] = json!([{ "woke": true, "run": "tick" }, { "files": "notes/**", "run": "tick" }])
+    })?;
+    let woke = || runs(api, &owner, &name, "&op=tick").into_iter().filter(|r| r["via"] == "woke").collect::<Vec<_>>();
+    let lever = |op: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": op })));
+    let refresh = || api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})));
+    // someone comes back (as if the object had just started, a request of
+    // the owner's) and a run comes: the nth woke run, ended. A request
+    // before may have been the wake: its run counts the same.
+    let woke_to = |s: &Suite, n: usize| -> bool {
+        let _ = lever("woke-reset");
+        let _ = api.status(&owner, &name);
+        s.eventually(long, || {
+            let w = woke();
+            w.len() == n && w.iter().all(|r| r["status"] != "queued" && r["status"] != "running")
+        })
+    };
+    // someone comes back and nothing is due: once the wake is decided (its
+    // chance spent: the lever says it had it), the woke runs are as they were
+    let quiet = |s: &Suite, n: usize| -> bool {
+        let _ = lever("woke-reset");
+        let _ = api.status(&owner, &name);
+        s.eventually(long, || lever("woke-reset").is_ok_and(|r| r.body["had"] == true)) && woke().len() == n
+    };
+
+    let first = woke_to(s, 1);
+    let own = api.status(&owner, &name)?.body["npub"].clone();
+    s.ok("the first wake runs its operation once, as the fragment", first && woke()[0]["status"] == "succeeded" && woke()[0]["principal"] == own, json!(woke()));
+    s.ok("a wake with nothing changed since starts nothing", quiet(s, 1), json!(woke()));
+
+    s.commit(&c, &[("other/moved.md", Some(b"main moved where no files trigger looks"))]);
+    refresh()?;
+    let moved = woke_to(s, 2);
+    s.ok("main moved with no run on it: a wake runs it once, and the next none", moved && quiet(s, 2), json!(woke()));
+
+    s.commit(&c, &[("notes/taken.md", Some(b"its files trigger runs it"))]);
+    refresh()?;
+    let taken = s.eventually(long, || runs(api, &owner, &name, "&op=tick").first().is_some_and(|r| r["via"] == "files" && r["status"] == "succeeded"));
+    s.ok("a move its files trigger ran for: a wake starts nothing", taken && quiet(s, 2), json!(runs(api, &owner, &name, "&op=tick")));
+
+    api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "tick", "paused": true })))?;
+    s.commit(&c, &[("notes/paused.md", Some(b"moved while paused"))]);
+    refresh()?;
+    let blocked = s.eventually(long, || runs(api, &owner, &name, "&op=tick").first().is_some_and(|r| r["via"] == "files" && r["status"] == "blocked"));
+    s.ok("paused, a wake starts nothing (its run would only be blocked)", blocked && quiet(s, 2), json!(runs(api, &owner, &name, "&op=tick")));
+    api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "tick", "paused": false })))?;
+    let caught = woke_to(s, 3) && woke()[0]["status"] == "succeeded";
+    s.ok("unpaused, the run that did not succeed is caught up by a wake, once", caught && quiet(s, 3), json!(woke()));
+
+    // a wake decides again once the ledger answers, with no wait before
+    // the run it starts: held there (a test lever, a latch), a files
+    // trigger's run for the move, or a pause, that comes meanwhile is seen
+    let hold = |name: &str, on: bool| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "hold-woke", "on": on })));
+    let held = |name: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "woke-held" }))).map(|r| r.body["held"] == true).unwrap_or(false);
+    let held_wake = |s: &Suite| -> bool {
+        let _ = hold(&name, true);
+        let _ = lever("woke-reset");
+        let _ = api.status(&owner, &name);
+        s.eventually(long, || held(&name))
+    };
+    let decided = |s: &Suite| -> bool {
+        let _ = hold(&name, false);
+        s.eventually(long, || !held(&name))
+    };
+    s.commit(&c, &[("other/held.md", Some(b"main moved where no files trigger looks"))]);
+    refresh()?;
+    let waiting = held_wake(s);
+    s.commit(&c, &[("notes/meanwhile.md", Some(b"its files trigger runs it while the wake waits"))]);
+    refresh()?;
+    let ran = s.eventually(long, || runs(api, &owner, &name, "&op=tick").first().is_some_and(|r| r["via"] == "files" && r["status"] == "succeeded"));
+    s.ok(
+        "a files trigger's run that comes while a wake waits for the ledger: the wake starts none",
+        waiting && ran && decided(s) && woke().len() == 3,
+        json!(runs(api, &owner, &name, "&op=tick")),
+    );
+    s.commit(&c, &[("other/held-again.md", Some(b"main moved again, no run on it"))]);
+    refresh()?;
+    let waiting = held_wake(s);
+    api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "tick", "paused": true })))?;
+    s.ok("a pause that comes while a wake waits for the ledger: the wake starts none (no blocked run)", waiting && decided(s) && woke().len() == 3, json!(woke()));
+    api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "tick", "paused": false })))?;
+    s.ok("and unpaused, the move is caught up by a wake, once", woke_to(s, 4) && quiet(s, 4), json!(woke()));
+
+    // a run still on it, however old: a newer one that ended (blocked, a
+    // files run while paused) does not make a wake due
+    let (active, ca) = jobs_fragment(s, api, &owner, "woke-active", |m| {
+        m["triggers"] = json!([{ "woke": true, "run": "nap" }, { "files": "notes/**", "run": "nap" }])
+    })?;
+    let lever2 = |op: &str, extra: Value| {
+        let mut body = json!({ "fragment": active, "op": op });
+        body.as_object_mut().expect("an object").extend(extra.as_object().cloned().unwrap_or_default());
+        api.unsigned("POST", "/api/test/fragment", Some(&body))
+    };
+    lever2("hold-advances", json!({ "on": true }))?;
+    let older = started(&api.op(&owner, &active, "nap", "older", json!({ "ms": 100 }))?);
+    let running = s.eventually(long, || lever2("advance-held", json!({})).is_ok_and(|r| r.body["run"] == older));
+    api.signed(&owner, "POST", &format!("/api/f/{active}/pause"), Some(&json!({ "op": "nap", "paused": true })))?;
+    s.commit(&ca, &[("notes/newer.md", Some(b"a files run, blocked while paused"))]);
+    api.signed(&owner, "POST", &format!("/api/f/{active}/refresh"), Some(&json!({})))?;
+    let newer = s.eventually(long, || runs(api, &owner, &active, "&op=nap").first().is_some_and(|r| r["via"] == "files" && r["status"] == "blocked"));
+    api.signed(&owner, "POST", &format!("/api/f/{active}/pause"), Some(&json!({ "op": "nap", "paused": false })))?;
+    // the wake, held were anything due: once it has had its chance, it never waited
+    let _ = hold(&active, true);
+    let _ = lever2("woke-reset", json!({}));
+    let _ = api.status(&owner, &active);
+    let had = s.eventually(long, || lever2("woke-reset", json!({})).is_ok_and(|r| r.body["had"] == true));
+    let never_held = !held(&active);
+    let _ = hold(&active, false);
+    let woke_active = runs(api, &owner, &active, "&op=nap").into_iter().filter(|r| r["via"] == "woke").count();
+    s.ok(
+        "an older run still running, a newer one ended blocked: a wake starts none",
+        running && newer && had && never_held && woke_active == 0,
+        json!(runs(api, &owner, &active, "&op=nap")),
+    );
+    lever2("hold-advances", json!({ "on": false }))?;
+    let _ = settle(api, &owner, &active, older, &["succeeded", "held"], long);
+    Ok(())
+}
+
+/// What a later release writes, this one reads and leaves alone: a
+/// trigger of a kind it does not know starts nothing and is listed nowhere
+/// (the cron beside it keeps its next time), and a run of a via it does not
+/// know is listed as written.
+fn future_rows(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let (name, c) = jobs_fragment(s, api, &owner, "future", |m| {
+        m["triggers"] = json!([{ "files": "notes/**", "run": "tick" }, { "cron": "0 0 1 1 *", "run": "tick" }])
+    })?;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "future-rows" })))?;
+    s.ok("(the test fleet stores a trigger and a run as a later release may)", r.status == 200 && r.body["triggers"] == 1, &r);
+    let future_run = r.body["run"].as_i64().unwrap_or(0);
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/triggers"), None)?;
+    let listed = r.body["triggers"].as_array().cloned().unwrap_or_default();
+    s.ok(
+        "the triggers list leaves out a kind it does not know; the cron beside it keeps its next time",
+        r.status == 200 && listed.len() == 1 && listed[0]["cron"] == "0 0 1 1 *" && listed[0]["nextAt"].is_i64(),
+        &r,
+    );
+    let moved = s.commit(&c, &[("notes/after.md", Some(b"a path the unknown trigger matched"))]);
+    let again = api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
+    let main = api.status(&owner, &name)?.body["pins"]["main"].clone();
+    let ticks = runs(api, &owner, &name, "&op=tick");
+    s.ok(
+        "a move of main is followed as ever, and the unknown trigger starts nothing",
+        again.status == 200 && main == moved.as_str() && ticks.iter().all(|r| r["via"] != "files"),
+        format!("{again}; main {main}; {}", json!(ticks)),
+    );
+    let listed = ticks.iter().find(|r| r["id"] == future_run).cloned().unwrap_or(Value::Null);
+    let one = run(api, &owner, &name, future_run)?;
+    s.ok(
+        "a run of a via it does not know is listed, and read, as written",
+        listed["via"] == "future" && listed["status"] == "succeeded" && one.status == 200 && one.body["via"] == "future",
+        format!("{listed} {one}"),
+    );
+    Ok(())
+}
+
 fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
     let (owner, editor, viewer, stranger) = (api.person()?, api.person()?, api.person()?, api.person()?);
     let (name, c) = jobs_fragment(s, api, &owner, "schedules", |m| {
@@ -1014,6 +1284,9 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     );
     s.ok("the event log says the inbox was full", events(api, &owner, &full).iter().any(|e| e["kind"] == "inbox.rejected"), "no inbox.rejected");
 
+    installed_trigger(s, api, long)?;
+    woke_trigger(s, api, long)?;
+    future_rows(s, api)?;
     scheduled_records(s, api, long)?;
 
     // cron, last: its fragment was deployed before the sections ahead of

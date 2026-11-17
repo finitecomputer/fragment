@@ -20,3 +20,10 @@ dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; }
 dt { opacity: .7; }
 code, .mono { font-family: ui-monospace, monospace; font-size: .9em; }
 .lapsed { color: #c33; }
+#tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: .6rem; margin: .75rem 0; }
+.tile { border: 1px solid #8884; border-radius: .5rem; padding: .6rem .75rem; }
+.tile .label { opacity: .7; font-size: .85rem; }
+.tile .big { font-size: 1.8rem; font-weight: 600; line-height: 1.2; }
+.tile .small { opacity: .8; font-size: .85rem; }
+section h2 { font-size: 1rem; margin: 1rem 0 .25rem; }
+.quiet { opacity: .6; font-size: .85rem; }

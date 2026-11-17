@@ -5,6 +5,7 @@
     "decide_twice": { "kind": "job" },
     "twice": { "kind": "job" },
     "draw": { "kind": "job" },
+    "film": { "kind": "job" },
     "ask": { "kind": "job", "role": "viewer" },
     "note": { "kind": "mutation" },
     "notes": { "kind": "query", "role": "viewer" }

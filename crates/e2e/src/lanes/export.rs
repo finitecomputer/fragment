@@ -141,7 +141,9 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let member = api.share(&app_name, &bob_id, "viewer")?;
     let invitee = format!("export-invitee-{}@example.com", &Keys::generate().pubkey_hex()[..8]);
     let invited = api.signed(&paul, "POST", &format!("/api/f/{app_name}/invites"), Some(&json!({ "email": invitee, "role": "editor" })))?;
-    let secret = api.signed(&paul, "PUT", &format!("/api/f/{app_name}/secrets/API_KEY"), Some(&json!({ "value": SECRET, "hosts": ["api.example.com"] })))?;
+    // a member, an invite and a key together: an app from before FIN-352
+    // (its key's lever; a key now waits until its app is private)
+    let secret = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "legacy-reach", "name": "API_KEY", "value": SECRET, "hosts": ["api.example.com"] })))?;
     let status = api.status(&paul, &app_name)?;
     let tokens = [status.body["viewToken"].as_str().unwrap_or("").to_string(), status.body["inboxToken"].as_str().unwrap_or("").to_string()];
     s.ok(
@@ -284,7 +286,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let files = entries_of(&archive).context("the archive is a tar")?;
     let root = fragment_core::export::ROOT;
     let frag = |name: &str, path: &str| format!("{root}/fragments/{name}/{path}");
-    s.ok("every entry is in its one folder, and its README is the platform's", files.keys().all(|k| k.starts_with(&format!("{root}/"))) && text_at(&files, &format!("{root}/README.md")) == fragment_core::export::README, files.keys().cloned().collect::<Vec<_>>().join(" "));
+    s.ok("every entry is in its one folder, and its README is the platform's", files.keys().all(|k| k.starts_with(&format!("{root}/"))) && text_at(&files, &format!("{root}/README.md")).as_bytes() == fragment_templates::EXPORT_README.bytes, files.keys().cloned().collect::<Vec<_>>().join(" "));
     let manifest = json_at(&files, &format!("{root}/manifest.json"));
     let names: Vec<&str> = manifest["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).collect();
     let shared_row = manifest["sharedWithMe"].as_array().into_iter().flatten().find(|f| f["name"] == bobs.as_str()).cloned().unwrap_or(Value::Null);
@@ -553,9 +555,26 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{failed} | {gone}"),
     );
     api.unsigned("POST", "/api/test/export", Some(&json!({ "identity": erin_id, "op": "cap", "steps": null })))?;
+    // within its limits, the next is made: scaled down by 2^16 (a
+    // fragment's part 256 KiB, the archive 1 MiB), its 200 KiB stands for
+    // 12.5 GiB, an imported agent's files (FIN-463), past the 2 GiB of
+    // before (32 KiB here)
+    let scale = |k: Option<u32>| api.unsigned("POST", "/api/test/export", Some(&json!({ "identity": erin_id, "op": "scale", "steps": k })));
+    anyhow::ensure!(scale(Some(1 << 16))?.status == 200, "the scale lever");
     let again = press(api, &erin)?;
     let made = built(s, api, &erin);
-    s.ok("within its limit, the next is made", again.body["id"] != r.body["id"] && made["state"] == "ready", &made);
+    s.ok("within its limits, the next is made: a fragment past the 2 GiB of before, as an imported agent's files are", again.body["id"] != r.body["id"] && made["state"] == "ready", &made);
+    // past a fragment's part, within the archive (scaled by 2^18: 64 KiB
+    // and 256 KiB), it fails saying whose
+    scale(Some(1 << 18))?;
+    let third = press(api, &erin)?;
+    let past = built(s, api, &erin);
+    s.ok(
+        "past one fragment's part it fails as it builds, naming the fragment (too_large)",
+        third.body["id"] != again.body["id"] && past["state"] == "failed" && past["error"]["code"] == "too_large" && past["error"]["message"].as_str().is_some_and(|m| m.starts_with(&format!("{fat} would pass")) && m.contains("the most one fragment's part")),
+        &past,
+    );
+    scale(None)?;
 
     // ---- the CLI: `fragment export` starts one, waits, and downloads it
     let home = s.dir("export-cli");
@@ -566,7 +585,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let saved = std::fs::read(&out).ok().and_then(|b| entries_of(&b).ok()).unwrap_or_default();
     s.ok(
         "fragment export starts one, waits for it, and downloads it: one tar, its README first",
-        r.as_ref().is_ok_and(|v| v["export"]["state"] == "ready" && v["out"] == path.as_str()) && saved.get(&format!("{root}/README.md")).is_some_and(|b| b == fragment_core::export::README.as_bytes()),
+        r.as_ref().is_ok_and(|v| v["export"]["state"] == "ready" && v["out"] == path.as_str()) && saved.get(&format!("{root}/README.md")).is_some_and(|b| b == fragment_templates::EXPORT_README.bytes),
         format!("{r:?}"),
     );
     Ok(())

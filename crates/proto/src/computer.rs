@@ -214,6 +214,11 @@ pub struct ProviderPrice {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderView {
     pub provider: String,
+    /// What people call it (`fragment_core::notice::provider_name`: xAI,
+    /// Google Places): the one source of every client's words for it.
+    /// Add-only: an answer from before it names none.
+    #[serde(default)]
+    pub name: String,
     pub kind: ProviderKind,
     pub state: ProviderState,
     pub hosts: Vec<String>,
@@ -243,6 +248,20 @@ pub struct ProviderView {
     /// is, or its row names no scopes (no `connection_oauth`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing: Option<Vec<String>>,
+    /// What a connection's account lets the person's agents do, as its
+    /// grant holds it (`connection_signin::access_of`): what they picked
+    /// as they connected it, or read only where they left every write
+    /// scope unticked. None when `granted` is, its row names no
+    /// `connection_oauth`, or it offers read and write alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<ConnectionAccess>,
+    /// The accesses a person may pick as they connect a connection, read
+    /// only first: both where its provider has a read-only scope, read and
+    /// write alone where it has none (then `access` is none: what its agents
+    /// may do is the account's own permissions at the provider). None for
+    /// another kind, or a connection with no `connection_oauth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accesses: Option<Vec<ConnectionAccess>>,
     /// The deployment's note on it (its catalog row's `note`), which
     /// settings shows under its name, connected or not: plain text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,6 +277,38 @@ pub struct ProviderView {
     /// beside `accounts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounts_max: Option<u8>,
+    /// What the person is charged for an operator key's calls, as the
+    /// ledger charges them (micro-dollars per `per` calls: its price in the
+    /// answering release's price book, with the book's margin, rounded up),
+    /// which settings shows, never `price`. None for another kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charged: Option<ProviderPrice>,
+}
+
+/// What a person lets their agents do with a connection's account, picked
+/// as they connect it: read only, or read and write. Its provider enforces
+/// it (the account is granted only the scopes asked for it), and settings
+/// shows it as the grant holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionAccess {
+    Read,
+    Write,
+}
+
+impl ConnectionAccess {
+    /// Its word on the wire and in a pending connect's row.
+    pub fn word(self) -> &'static str {
+        match self {
+            ConnectionAccess::Read => "read",
+            ConnectionAccess::Write => "write",
+        }
+    }
+
+    /// Read back from its word. None: no access this code knows.
+    pub fn of_word(word: &str) -> Option<ConnectionAccess> {
+        [ConnectionAccess::Read, ConnectionAccess::Write].into_iter().find(|a| a.word() == word)
+    }
 }
 
 /// One of a person's accounts at a connection that takes several: its
@@ -274,6 +325,8 @@ pub struct ConnectionAccount {
     pub granted: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<ConnectionAccess>,
     /// One they disconnected that Pipes holds still (its disconnect did not
     /// finish, or an import landed after it): not connected, used by no
     /// agent; settings offers to disconnect it again.
@@ -332,19 +385,23 @@ pub struct ComputerUses {
 /// `PUT /api/computers/{id}/agents/{fragment}/connections`: the providers
 /// an agent may use, all of them named at once, or `null` for every one
 /// its owner has (the default again). The field is named even when it is
-/// `null`: the route refuses a body without it.
+/// `null`: the route refuses a body without it (`Option::deserialize`, not
+/// an `Option`'s implied default).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConnections {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub connections: Option<Vec<String>>,
 }
 
 /// `PUT /api/computers/{id}/agents/{fragment}/accounts/{provider}`: which
 /// of its owner's accounts there the agent uses, by its id (one of theirs,
-/// as `GET /api/connections` lists it), or `null` for the default.
+/// as `GET /api/connections` lists it), or `null` for the default. The
+/// field is named even when it is `null`, as `AgentConnections`' is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentAccount {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub account: Option<String>,
 }
 
@@ -595,6 +652,25 @@ pub enum ComputerNotice {
     /// may put it off (`POST …/notices/later {version}`): told no more until
     /// a version other than that one is ready.
     Update { version: String },
+    /// Its disk is filling, as the platform last read it (`df` of its
+    /// container, after a start came up and after each save): `free` of its
+    /// `total` bytes are left, the image's own share counted used. A disk
+    /// that fills stops its agents from saving their work, so its owner is
+    /// told well before.
+    DiskFilling { total: u64, free: u64 },
+    /// A shared key its agents call is paused (FIN-448): its owner's calls
+    /// on `provider` were charged `spent_micros` this last hour, its cap
+    /// `cap_micros`, until `resumes_at` as the hour passes, or its owner
+    /// lifts the cap to `allow_micros` (none: the most already).
+    #[serde(rename_all = "camelCase")]
+    KeyPaused {
+        provider: String,
+        spent_micros: i64,
+        cap_micros: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_micros: Option<i64>,
+        resumes_at: i64,
+    },
 }
 
 /// `POST /api/computers/{id}/restart`: the start its owner restarts, as
@@ -612,6 +688,20 @@ pub struct RestartAsk {
 #[serde(deny_unknown_fields)]
 pub struct NoticeSeen {
     pub life: u64,
+}
+
+/// `POST /api/computers/{id}/key-caps/{provider}`: its owner's hourly cap on
+/// a shared key (FIN-448). `from`, the cap a pause's notice showed: lifted
+/// one step, worked out by the computer, while it is still that one (a
+/// stale page changes nothing). Else `micros`, that cap, or none for the
+/// default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyCapAsk {
+    #[serde(default)]
+    pub from: Option<i64>,
+    #[serde(default)]
+    pub micros: Option<i64>,
 }
 
 /// `POST /api/computers/{id}/notices/later`: its owner put off the update
@@ -658,6 +748,20 @@ pub fn valid_port_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent's connections and account are named even when `null`: a
+    /// body without the field is refused, never read as the default.
+    #[test]
+    fn a_null_is_named_and_a_missing_field_refused() {
+        let connections = |text: &str| serde_json::from_slice::<AgentConnections>(text.as_bytes()).map(|c| c.connections).map_err(|e| e.to_string());
+        assert_eq!(connections(r#"{"connections":null}"#), Ok(None));
+        assert_eq!(connections(r#"{"connections":["github"]}"#), Ok(Some(vec!["github".to_string()])));
+        assert!(connections("{}").unwrap_err().contains("missing field `connections`"));
+        let account = |text: &str| serde_json::from_slice::<AgentAccount>(text.as_bytes()).map(|a| a.account).map_err(|e| e.to_string());
+        assert_eq!(account(r#"{"account":null}"#), Ok(None));
+        assert_eq!(account(r#"{"account":"acct_1"}"#), Ok(Some("acct_1".to_string())));
+        assert!(account("{}").unwrap_err().contains("missing field `account`"));
+    }
 
     /// Valid: the port's root, or a path and query an image reads. Invalid:
     /// anything that is not a path on the port.

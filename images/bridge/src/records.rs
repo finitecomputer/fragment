@@ -63,6 +63,10 @@ pub struct Message {
     /// An ask's: the chat its asker's answer runs in (docs/chat-records.md,
     /// "An ask"). Honored only from another agent of this computer.
     pub return_to: Option<String>,
+    /// Where its attachments' blobs are: none, the chat it was said in; an
+    /// answer's, the chat its question was asked in. Never read from a
+    /// message: only an agent's own answer names another chat.
+    pub attachments_in: Option<String>,
 }
 
 /// A command for an agent's runtime (`{kind: "command"}`), from a person:
@@ -118,8 +122,11 @@ pub enum Task {
     /// The answer to a question the agent asked another (`answer`): a turn
     /// in `chat`, told `text` by that agent (`by`, its `name`), `hop`
     /// hand-offs deep; `refused`: the question was never taken, and the
-    /// turn never runs.
-    Answer { chat: String, text: String, by: String, name: String, hop: u32, refused: bool },
+    /// turn never runs. `files`: what the asked agent sent with its answer,
+    /// blobs of the chat it was asked in (`asked`), which the asker reads
+    /// as itself; none from an answer that names no chat, or any it cannot
+    /// read whole.
+    Answer { chat: String, text: String, by: String, name: String, hop: u32, refused: bool, files: Vec<AttachmentRef>, asked: Option<String> },
     Other,
 }
 
@@ -274,7 +281,7 @@ fn message(o: &Map<String, Value>) -> Said {
         Some(Value::String(c)) if fragment_name_ok(c) => Some(c.clone()),
         Some(_) => return Said::Other,
     };
-    Said::Message(Message { text, to, attachments, turn, hop, reply_to, return_to })
+    Said::Message(Message { text, to, attachments, turn, hop, reply_to, return_to, attachments_in: None })
 }
 
 /// Whether `s` is a fragment's name in full, in shape: lowercase letters,
@@ -388,8 +395,18 @@ pub fn task(body: &Value) -> Task {
                 Some(_) => None,
             };
             let by = text_field(o, "by").filter(|b| is_identity(b) && b.len() <= 128);
+            // its files, all of them read or none: an answer is kept whatever
+            // they say, as its question's only delivery
+            let asked = o.get("asked").and_then(|a| a.get("fragment")).and_then(Value::as_str).filter(|f| fragment_name_ok(f)).map(str::to_string);
+            let files = match (o.get("files"), &asked) {
+                (Some(Value::Array(items)), Some(_)) if items.len() <= limits::ATTACHMENTS_MAX => {
+                    let parsed: Vec<AttachmentRef> = items.iter().filter_map(attachment).collect();
+                    if parsed.len() == items.len() { parsed } else { Vec::new() }
+                }
+                _ => Vec::new(),
+            };
             match (text_field(o, "chat"), text_field(o, "text"), by, text_field(o, "name"), hop, refused) {
-                (Some(chat), Some(text), Some(by), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, by, name, hop, refused },
+                (Some(chat), Some(text), Some(by), Some(name), Some(hop), Some(refused)) if fragment_name_ok(&chat) && !name.trim().is_empty() && name.len() <= limits::ANSWER_NAME_MAX_BYTES => Task::Answer { chat, text, by, name, hop, refused, files, asked },
                 _ => Task::Other,
             }
         }
@@ -705,6 +722,51 @@ pub fn turn_notice(turn: &str, category: NoticeCategory, text: &str) -> Value {
     json!({ "kind": "turn.notice", "turn": turn, "category": category.as_str(), "text": cut(text, limits::NOTICE_TEXT_MAX_CHARS) })
 }
 
+/// A helper's id in its chat's set: the first 24 hex digits of SHA-256 of
+/// its runtime's id for it (Hermes' child session id, which runs long and
+/// is said nowhere else).
+pub fn child_id(runtime_id: &str) -> String {
+    hex(&Sha256::digest(runtime_id.as_bytes()))[..24].to_string()
+}
+
+/// A helper's task, as its set says it: one line, cut.
+pub fn child_goal(goal: &str) -> String {
+    cut(&goal.split_whitespace().collect::<Vec<_>>().join(" "), limits::CHILD_GOAL_MAX_CHARS)
+}
+
+/// A helpers set's post id: `hs:<life>:<n>`, this bridge life's (never
+/// saved, so never another life's) and the `n`th set it posted, from 1:
+/// no two sets share one, whatever the clock does (`Engine::post_helpers`).
+pub fn helpers_id(life: &str, n: u64) -> String {
+    assert!(valid_life(life) && n >= 1, "a life is 32 lowercase hex, and sets number from 1: {life}");
+    format!("hs:{life}:{n}")
+}
+
+/// One helper in a chat's set: the turn that started it, its id, its task,
+/// and when the bridge saw it start (ms).
+pub struct HelperSaid<'a> {
+    pub parent: &'a str,
+    pub child: &'a str,
+    pub goal: &'a str,
+    pub since: u64,
+}
+
+/// The helpers an agent has working in a chat, all of them, as its bridge
+/// holds them now (docs/chat-records.md, `turn.helpers`): posted at each
+/// start and end, and again before `until` while any run. A reader shows
+/// a poster's newest set until `until`; an empty one shows none.
+///
+/// It names no `turn`: every reader from before it passes over a `work`
+/// record with no `turn` (chat.js `onWork`, the iOS app's `Timeline.learn`
+/// and `WorkingActivity`), so none takes it for a turn's going on (Codex
+/// and Alex on #1086: a helper's record read as its turn's hid the turn's
+/// question in words).
+pub fn turn_helpers(helpers: &[HelperSaid<'_>], until: u64) -> Value {
+    assert!(helpers.len() <= limits::HELPERS_PER_CHAT_MAX, "a chat's set is bounded");
+    let helpers: Vec<Value> = helpers.iter().map(|h| json!({ "child": h.child, "parent": h.parent, "goal": child_goal(h.goal), "since": h.since })).collect();
+    json!({ "kind": "turn.helpers", "helpers": helpers, "until": until })
+}
+
 fn cut_or_empty(text: &str, max: usize) -> String {
     if text.trim().is_empty() {
         String::new()
@@ -723,6 +785,12 @@ pub struct PromptOption {
     /// Answered in words (a clarify's "Other"): its answer carries them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub words: bool,
+    /// Answered on the agent's computer, never in a record (`words` too):
+    /// what its person gives that computer alone, a sign-in's code (the
+    /// chat's page hands it to the shell, which hands it to the computer's
+    /// `/answer` page: docs/bridge.md, "An answer for the computer").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub computer: bool,
 }
 
 pub fn turn_prompt(turn: &str, prompt: &str, text: &str, options: &[PromptOption], asks: &str, expires_at: u64) -> Value {
@@ -908,7 +976,7 @@ mod tests {
     /// message to its agent; its id is the same for the same message.
     #[test]
     fn a_relayed_message_reads_strictly() {
-        let juniper = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+        let juniper = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
         let body = relayed_message("hi from my phone", &juniper, VIA_SIMPLEX, &[]);
         assert_eq!(body, json!({ "text": "hi from my phone", "to": ["npub1juniper"], "relayed": { "via": "simplex", "for": "npub1paul", "agent": "juniper--k3x9" } }));
         assert_eq!(relayed(&body), Some(Relayed { for_: "npub1paul".into(), via: VIA_SIMPLEX.into(), agent: "juniper--k3x9".into() }));
@@ -1049,10 +1117,31 @@ mod tests {
         assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c--k3x9" })), Task::Routine { text: "water".into(), chat: "c--k3x9".into() });
         assert_eq!(task(&json!({ "kind": "joined", "fragment": "c--k3x9" })), Task::Joined { fragment: Some("c--k3x9".into()) });
         let answer = json!({ "kind": "answer", "chat": "home--k3x9", "text": "t", "by": "npub1rowan", "name": "Rowan", "hop": 2 });
-        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), by: "npub1rowan".into(), name: "Rowan".into(), hop: 2, refused: false });
+        assert_eq!(task(&answer), Task::Answer { chat: "home--k3x9".into(), text: "t".into(), by: "npub1rowan".into(), name: "Rowan".into(), hop: 2, refused: false, files: vec![], asked: None });
         let mut refused = answer.clone();
         refused["refused"] = json!(true);
         assert!(matches!(task(&refused), Task::Answer { refused: true, .. }));
+
+        // #721: the files the asked agent sent, blobs of the chat it was
+        // asked in; any one unread, or more than a message carries, and
+        // none are (the answer is kept: its question's only delivery)
+        let file = |name: &str| json!({ "sha256": "a".repeat(64), "size": 3, "type": "text/plain", "name": name });
+        let mut with = answer.clone();
+        with["asked"] = json!({ "fragment": "talk--k3x9", "seq": 4 });
+        with["files"] = json!([file("drawing.txt")]);
+        let read = AttachmentRef { sha256: "a".repeat(64), size: 3, media_type: "text/plain".into(), name: "drawing.txt".into() };
+        assert!(matches!(task(&with), Task::Answer { ref files, ref asked, .. } if *files == vec![read.clone()] && asked.as_deref() == Some("talk--k3x9")), "{:?}", task(&with));
+        let mut bad = with.clone();
+        bad["files"] = json!([file("drawing.txt"), { "sha256": "zz", "size": 1, "type": "a", "name": "b" }]);
+        let mut many = with.clone();
+        many["files"] = json!((0..=limits::ATTACHMENTS_MAX).map(|i| file(&format!("f{i}"))).collect::<Vec<_>>());
+        let mut nowhere = with.clone();
+        nowhere["asked"] = json!({ "fragment": "Not A Chat" });
+        let mut unasked = with.clone();
+        unasked.as_object_mut().unwrap().remove("asked");
+        for (why, b) in [("an unread file", bad), ("past the bound", many), ("no chat to read them from", nowhere), ("no asked chat", unasked)] {
+            assert!(matches!(task(&b), Task::Answer { ref files, .. } if files.is_empty()), "{why}: {:?}", task(&b));
+        }
         // a name at its bound, written as the writer cuts one (51 emoji, 67
         // CJK characters: a title of 120 characters is more), is read
         for long in ["🌱".repeat(120), "森".repeat(120)] {
@@ -1136,13 +1225,34 @@ mod tests {
         assert_eq!(turn_notice("t", NoticeCategory::Memory, " Memory updated "), json!({ "kind": "turn.notice", "turn": "t", "category": "memory", "text": "Memory updated" }));
         assert_eq!(turn_notice("t", NoticeCategory::Warning, &"x".repeat(400))["text"].as_str().map(|t| t.chars().count()), Some(limits::NOTICE_TEXT_MAX_CHARS));
         assert_eq!([NoticeCategory::Info, NoticeCategory::Warning, NoticeCategory::Memory].map(NoticeCategory::as_str), ["info", "warning", "memory"]);
+        let h = child_id("20261107_014500_ab12cd");
+        assert!(h.len() == 24 && h.bytes().all(|b| b.is_ascii_hexdigit()), "{h}");
+        let set = [
+            HelperSaid { parent: "t1", child: &h, goal: " Find three\nvenues  near Lisbon ", since: 1_790_000_000_000 },
+            HelperSaid { parent: "t2", child: "c2", goal: &"g".repeat(400), since: 1_790_000_000_001 },
+        ];
+        let body = turn_helpers(&set, 1_790_000_900_000);
+        assert_eq!(body["helpers"][0], json!({ "child": h, "parent": "t1", "goal": "Find three venues near Lisbon", "since": 1_790_000_000_000u64 }), "one line");
+        assert_eq!(body["helpers"][1]["goal"].as_str().map(|g| g.chars().count()), Some(limits::CHILD_GOAL_MAX_CHARS));
+        assert_eq!((body["kind"].clone(), body["until"].clone()), (json!("turn.helpers"), json!(1_790_000_900_000u64)));
+        assert_eq!(turn_helpers(&[], 5), json!({ "kind": "turn.helpers", "helpers": [], "until": 5 }), "none working");
+        // no reader from before helpers takes one for its turn's: it names no `turn`
+        assert!(body.get("turn").is_none());
+        let life = "0123456789abcdef0123456789abcdef";
+        assert!(valid_post_id(&helpers_id(life, u64::MAX)) && helpers_id(life, 7) == format!("hs:{life}:7"));
+        // the bound's whole set fits a record, each goal at its worst
+        let worst: Vec<String> = (0..limits::HELPERS_PER_CHAT_MAX).map(|i| format!("{i:024}")).collect();
+        let goal = "\u{1}".repeat(limits::CHILD_GOAL_MAX_CHARS);
+        let parent = "t".repeat(128);
+        let full: Vec<HelperSaid<'_>> = worst.iter().map(|c| HelperSaid { parent: &parent, child: c, goal: &goal, since: u64::MAX }).collect();
+        assert!(turn_helpers(&full, u64::MAX).to_string().len() < 64 * 1024);
         let every = [Category::Shell, Category::Web, Category::Read, Category::Write, Category::Browser, Category::Image, Category::Delegate, Category::Memory, Category::Other];
         assert_eq!(every.map(Category::as_str), ["shell", "web", "read", "write", "browser", "image", "delegate", "memory", "other"], "docs/chat-records.md's nine");
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("once", "npub1p", None))), json!({ "kind": "turn.prompt.closed", "turn": "t", "prompt": "p", "outcome": "answered", "option": "once", "by": "npub1p" }));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("other", "npub1p", Some("purple"))))["text"], "purple");
-        let other = PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true };
-        let once = PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false };
+        let other = PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true, computer: false };
+        let once = PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false, computer: false };
         assert_eq!(turn_prompt("t", "p", "Which?", &[once, other], "npub1p", 9)["options"], json!([{ "id": "once", "label": "Allow once" }, { "id": "other", "label": "Other", "words": true }]));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Expired, None)["outcome"], "expired");
         assert_eq!(reply("hi", "t", &[], 0, false), json!({ "text": "hi", "turn": "t" }));

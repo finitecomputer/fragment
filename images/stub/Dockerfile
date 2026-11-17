@@ -21,7 +21,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     find bridge -type f -exec touch {} + \
  && cargo build --release --locked -p fragment-bridge \
- && cp target/release/fragment-bridge /fragment-bridge
+ && cp target/release/fragment-bridge /fragment-bridge \
+ && cp target/release/fake-claude /fake-claude
 
 # The fragment CLI (cli/), static, its agents ask each other with. Its
 # dependencies first, built from the manifests and the lock alone (each of
@@ -46,9 +47,10 @@ COPY crates/templates/Cargo.toml crates/templates/Cargo.toml
 COPY crates/devstack/Cargo.toml crates/devstack/Cargo.toml
 COPY crates/e2e/Cargo.toml crates/e2e/Cargo.toml
 COPY crates/fakes/Cargo.toml crates/fakes/Cargo.toml
+COPY crates/identity-door/Cargo.toml crates/identity-door/Cargo.toml
 COPY xtask/Cargo.toml xtask/Cargo.toml
 RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
-    for m in crates/core crates/nip98 crates/proto crates/templates crates/devstack crates/e2e crates/fakes xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
+    for m in crates/core crates/nip98 crates/proto crates/templates crates/devstack crates/e2e crates/fakes crates/identity-door xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
  && mkdir -p cli/src && echo 'fn main() {}' > cli/src/main.rs && echo 'fn main() {}' > crates/templates/build.rs \
  && cargo build --release --locked -p fragment-cli
 COPY cli cli
@@ -57,10 +59,12 @@ COPY crates/nip98 crates/nip98
 COPY crates/proto crates/proto
 COPY crates/templates crates/templates
 COPY templates/blank templates/blank
+COPY templates/board templates/board
 COPY templates/calories templates/calories
 COPY templates/doc templates/doc
 COPY templates/inbox templates/inbox
 COPY templates/notes templates/notes
+COPY templates/slides templates/slides
 COPY templates/todo templates/todo
 RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
     find cli crates templates -type f -exec touch {} + \
@@ -75,6 +79,28 @@ COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/
 COPY --from=build /fragment-bridge /usr/local/bin/fragment-bridge
 COPY --from=cli /out/fragment /usr/local/bin/fragment
 COPY images/stub/screen /opt/fragment/screen
+# A Claude agent's Claude Code, as the platform's lanes see one: not
+# installed until its person presses Install on its turn's card, which runs
+# this stand-in for Anthropic's installer (BRIDGE_CLAUDE_INSTALLER). It
+# lays out the bridge's test double of Claude Code (fake-claude, here
+# answering `echo: <its words>`) as Anthropic's installer lays out the
+# real one: a version in the data dir, a launcher linking to it. It starts
+# signed out, and signs in from its turn's card with fake-claude's code.
+COPY --from=build /fake-claude /opt/fragment/claude/claude
+COPY <<'EOF' /opt/fragment/claude/fake-claude.json
+{"mode":"echo","signed_out":true}
+EOF
+COPY --chmod=755 <<'EOF' /opt/fragment/bin/install-claude
+#!/bin/sh
+# The stub image's stand-in for Anthropic's installer (images/stub/Dockerfile).
+set -e
+v="$XDG_DATA_HOME/claude/versions/2.1.316"
+mkdir -p "$(dirname "$v")" "$HOME/.local/bin"
+cp /opt/fragment/claude/claude "$v"
+cp /opt/fragment/claude/fake-claude.json "$(dirname "$v")/fake-claude.json"
+ln -sf "$v" "$HOME/.local/bin/claude"
+echo "Claude Code successfully installed!"
+EOF
 # which build this is, served beside the screen (the platform's upgrade and
 # rollback lane reads it through the computer's port)
 ARG STUB_VERSION=1
@@ -88,7 +114,10 @@ ENV BRIDGE_RUNTIME=script \
     BRIDGE_MEDIA_DIR=/tmp/bridge-media \
     BRIDGE_SCRIPT_SCRATCH=/tmp/bridge-script \
     BRIDGE_SCREEN_LISTEN=0.0.0.0:6080 \
-    BRIDGE_SCREEN_DIR=/opt/fragment/screen
+    BRIDGE_SCREEN_DIR=/opt/fragment/screen \
+    BRIDGE_CLAUDE_BIN=/data/claude-home/.local/bin/claude \
+    BRIDGE_CLAUDE_HOME=/data/claude-home \
+    BRIDGE_CLAUDE_INSTALLER=/opt/fragment/bin/install-claude
 # no /data: the platform's restore makes it, and a directory from an image
 # layer cannot be swapped for a restored one (EXDEV under overlayfs)
 RUN mkdir -p /run/computer

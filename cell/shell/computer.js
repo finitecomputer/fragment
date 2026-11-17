@@ -1,6 +1,42 @@
+import { icon } from "./icons.js";
+import { active, createRestartFollow, FAILED, READ_FAILED } from "./restart-follow.js";
 export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
+// Settings' State: its phase, but a restart's save is Saving, not Going to
+// sleep (Paul on #1053), while a restart this page asked for is followed
+// (`restarting`: restart-follow.js's `active`, never a failure kept on
+// screen); any other sleep, or one asked elsewhere, is going to sleep
+export function stateSaid(c, restarting) {
+  return c.phase === "sleeping" && restarting ? "Saving" : PHASE[c.phase] ?? c.phase;
+}
 
-export function createComputer({ api, el, seg, named, section, line, actionLine, computer, agents, computerFailed, support, setupPending, made, computerIs, reopenSettings, openScreen, reads, load }) {
+// A notice's countdown (`until`, FIN-458) in words at `now`: the server's
+// words, then how long until its time, in whole minutes up; the last
+// minute, under a minute.
+export function untilSaid(u, now) {
+  const left = u.at - now;
+  if (left <= 60_000) return `${u.said} in under a minute.`;
+  const minutes = Math.ceil(left / 60_000);
+  if (minutes <= 60) return `${u.said} in ${minutes} min.`;
+  const h = Math.floor(minutes / 60);
+  return `${u.said} in ${h} h${minutes % 60 ? ` ${minutes % 60} min` : ""}.`;
+}
+
+// A platform path's image (a notice's `image`) on `img`: read as the shell
+// reads the API, with its header (the session's cookie alone is no caller
+// for `/api/…`), and shown from its bytes; one that won't load goes.
+export function platformImage(img, path) {
+  img.dataset.src = path;
+  if (!globalThis.location || typeof fetch !== "function") return;
+  fetch(path, { headers: { "x-fragment-shell": "1" }, credentials: "same-origin" })
+    .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+    .then((b) => {
+      img.onload = () => URL.revokeObjectURL(img.src);
+      img.src = URL.createObjectURL(b);
+    })
+    .catch(() => img.remove?.());
+}
+
+export function createComputer({ api, el, seg, named, section, line, actionLine, computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, openPage, timers = globalThis, now = () => Date.now() }) {
   // ---- the computer: awake while the person is here, and its updates ----
   let woke = 0;
   // asking for a wake as the person arrives or focuses a chat hides the
@@ -26,111 +62,366 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then(computerIs).catch(() => {});
   }
   document.addEventListener("visibilitychange", prewake);
-  // ---- what the person should know of their computer (docs/computers.md,
-  // "What its owner is told"): the view's notices, the most pressing first,
-  // each in plain words with the one way back to working. Its computer tells
-  // this page's list socket when they change, so they show while there is
-  // still time. Times are the person's own clock. ----
-  const clock = (ms) => {
-    const d = new Date(ms);
-    const today = d.toDateString() === new Date().toDateString();
-    const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
-  };
-  // why a computer won't start, in plain words (the platform's own words
-  // stay beside them, for whoever helps)
-  function wontStart(why) {
-    if (/not ready within/.test(why)) return "It didn't finish starting within a few minutes.";
-    if (/kept stopping/.test(why)) return "It kept stopping as soon as it started.";
-    if (/check/.test(why)) return "Its saved files didn't pass their check.";
-    if (/restore|archive|backup/i.test(why)) return "Its save couldn't be restored.";
-    return "It couldn't start.";
+  // ---- what the person is told (FIN-458, `GET /api/notices`): each
+  // notice in the server's own words, the most pressing first, drawn the
+  // same way whatever its kind, with its actions. Each owner tells this
+  // page's list socket when its notices change, and the page reads them
+  // again (shell.js `load`). Beside them, the page's own rows: a deploy, a
+  // read that failed, a restart under way. ----
+  // A restart the person asked for in this page (a notice's Restart, or
+  // Settings'), followed until the computer says it is done
+  // (restart-follow.js: its states and their ways out), shown where its
+  // notice was as the phase the computer reports; past `SLOW_MS` a line
+  // says a big one takes minutes. Hidden, the page reads nothing.
+  const SLOW_MS = 30_000;
+  const follow = createRestartFollow({
+    read: () => (computer() ? api("GET", `/api/computers/${seg(computer().computer)}`) : Promise.reject(new Error("no computer"))),
+    ask: (asked) => api("POST", `/api/computers/${seg(computer().computer)}/restart`, { generation: asked }),
+    view: () => computer(),
+    // a view unchanged draws only the restart's line (its slow line comes)
+    take: (v) => (v?.computer && JSON.stringify(v) !== JSON.stringify(computer()) ? computerIs(v) : renderComputer()),
+    changed: () => renderComputer(),
+    hidden: () => document.hidden,
+  });
+  const followVisibility = () => follow.visibility();
+  document.addEventListener("visibilitychange", followVisibility);
+  // whether the last drawing showed a restart: one gone since is done
+  let drewRestart = false;
+  // what the restart is doing, as the computer last said
+  function restartStep(c, op) {
+    if (c?.phase === "sleeping") return "Saving…";
+    if (c?.phase === "starting") return "Starting…";
+    // a start of the restart's that failed, tried again after a pause
+    if (c?.phase === "asleep" && c.generation > op.asked) return "Starting again…";
+    return "Restarting…";
   }
-  // a restart the person asked for in this page, and of which start: a
-  // computer that still won't start after one says where to get help
-  let restarted = 0;
+  // A notice's action that restarts the computer is its restart, followed
+  // (its progress is the page's own row, not a notice's): the one route
+  // the band knows, never a kind.
+  const restarts = (a) => !!computer() && a.post === `/api/computers/${seg(computer().computer)}/restart`;
+  // Settings' Computer as last built: its State's words, and its Restart's
+  // buttons, painted again as the computer changes (`paintSettings`); its
+  // buttons only when the restart's step changed, so a Restart now asked
+  // stays until pressed or cancelled.
+  const shown = { section: null, state: null, asks: null, said: null, painted: null };
+  // a button with its icon before its words; `words`, the span its words
+  // are in (a named one: renderNames rewrites only its text)
+  const iconed = (name, words, cls = "quiet") => {
+    const b = el("button", `${cls} with-icon`);
+    b.type = "button";
+    b.append(icon(name), typeof words === "string" ? el("span", null, words) : words);
+    return b;
+  };
+  // the notices whose last action failed, by id: why (`said`: the server's
+  // own words for its refusal, Paul 2026-11-09, else the page's for a call
+  // that never reached it), whether the server refused it, and the notice's
+  // title and level. Said under its words until it is acted on again; a
+  // refusal outlives its notice (an invite taken back meanwhile), a line of
+  // its own until dismissed (`refusalRow`); a call that never reached the
+  // server goes with its notice, the read saying what is true now
+  const failed = new Map();
+  // the notices with an action under way, by id: every action of each is
+  // off until that action's read is done, whatever draws it meanwhile, and
+  // asks nothing (an invite's Accept and Decline are one answer)
+  const pending = new Set();
+  // While a notice must be answered (`drawAsked`), the page's own keys take
+  // nothing (its shortcuts open the launcher, toggle the desktop): a key in
+  // the cover acts on it and stops there; any other is taken here first.
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      const cover = document.getElementById("must-answer");
+      if (!cover?.open || cover.contains(e.target)) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    },
+    true,
+  );
+  // A dialog the page opens while a notice must be answered (a frame's ask
+  // to add an agent, an answer's continuation) waits under the cover: the
+  // cover is shown again over it, the top of the page's top layer, so it
+  // keeps the keys, and the other is the page's once the cover goes.
+  const raised = new MutationObserver((changes) => {
+    const cover = document.getElementById("must-answer");
+    if (cover?.open && changes.some((c) => c.target !== cover && c.target.open)) {
+      cover.close();
+      reshow(cover);
+      focusChosen(cover, false);
+    }
+  });
+  raised.observe(document, { subtree: true, attributes: true, attributeFilter: ["open"] });
+  // The answer that has the cover's focus, by what it does (`dataset.answer`;
+  // the page's own buttons by their `action`), as the person moves it: kept
+  // through a redraw of the same notice, a rename of it, while it is off,
+  // and over a dialog opened meanwhile. The cover never gives an answer the
+  // focus the person didn't: shown, and when theirs is gone, the focus is
+  // the cover's own, where Enter answers nothing.
+  let chosen = null;
+  const keyOf = (b) => b.dataset.action ?? b.dataset.answer ?? null;
+  document.getElementById("must-answer")?.addEventListener("focusin", (e) => (chosen = keyOf(e.target)));
+  // The cover shown (again), the person's answer kept: `showModal` focuses
+  // its first button, which `focusin` would take for their choice.
+  function reshow(cover) {
+    const kept = chosen;
+    cover.showModal();
+    chosen = kept;
+  }
+  function focusChosen(cover, fresh) {
+    const kept = chosen && [...cover.querySelectorAll("button, a")].find((b) => keyOf(b) === chosen);
+    if (kept) {
+      if (!kept.disabled) kept.focus();
+    } else if (fresh || chosen || !cover.contains(document.activeElement)) {
+      chosen = null;
+      cover.focus();
+    }
+  }
+  // the countdowns as last drawn, each its line and its time (`countdown`)
+  let counting = [];
+  let tick = null;
+  // A notice, as the server said it: its title, its words, its countdown,
+  // the platform's own words small, and its actions, the first the main one.
   function noticeRow(n) {
-    const row = el("div", "computer-notice");
+    const row = el("div", n.level === "warn" ? "computer-notice warn" : "computer-notice");
     row.dataset.kind = n.kind;
+    row.dataset.id = n.id;
     const copy = el("div", "notice-copy");
     const actions = el("div", "notice-actions");
-    const say = (title, text, detail) => {
-      copy.append(el("strong", null, title), el("p", null, text));
-      if (detail) copy.append(el("p", "notice-detail", detail));
+    copy.append(el("strong", null, n.title));
+    if (n.text) copy.append(el("p", null, n.text));
+    if (n.until) {
+      const line = el("p", null, untilSaid(n.until, now()));
+      counting.push({ u: n.until, line });
+      copy.append(line);
+    }
+    if (failed.has(n.id)) copy.append(el("p", null, failed.get(n.id).said));
+    if (n.detail) copy.append(el("p", "notice-detail", n.detail));
+    (n.actions ?? []).forEach((a, i) => actions.append(actionOf(n, a, i === 0)));
+    // its picture (an agent's), a platform path; one that won't load goes
+    if (n.image) {
+      const pic = el("img", "notice-image");
+      pic.alt = "";
+      platformImage(pic, n.image);
+      row.append(pic);
+    }
+    row.append(copy, actions);
+    return row;
+  }
+  function actionOf(n, a, main) {
+    if (a.open) {
+      const link = el("a", main ? "primary" : null, a.label);
+      link.href = a.open;
+      // a page of the platform's own opens here (`/move`), any other apart
+      const here = globalThis.location?.origin;
+      if (!here || new URL(a.open, here).origin !== here) {
+        link.target = "_blank";
+        link.rel = "noopener";
+      }
+      link.dataset.answer = `open ${a.open}`;
+      return link;
+    }
+    const b = el("button", main ? "primary" : null, a.label);
+    b.type = "button";
+    // what it does, whatever its label says (the cover keeps the focus by it)
+    b.dataset.answer = `post ${a.post} ${JSON.stringify(a.body ?? {})}`;
+    b.disabled = pending.has(n.id);
+    b.onclick = () => act(n, a);
+    return b;
+  }
+  // A refusal whose notice the read after it no longer has: the notice's
+  // title and the server's words, until dismissed (OK asks nothing).
+  function refusalRow(id, f) {
+    const row = el("div", f.level === "warn" ? "computer-notice warn" : "computer-notice");
+    row.dataset.kind = "refused";
+    row.dataset.id = id;
+    const copy = el("div", "notice-copy");
+    const actions = el("div", "notice-actions");
+    copy.append(el("strong", null, f.title), el("p", null, f.said));
+    const ok = el("button", "primary", "OK");
+    ok.type = "button";
+    ok.onclick = () => {
+      failed.delete(id);
+      renderComputer();
     };
-    const restart = (label) => {
+    actions.append(ok);
+    row.append(copy, actions);
+    return row;
+  }
+  // An action: its route posted with its body, then the notices read again,
+  // one more read in the page's sequence (`load`: the newest wins), which
+  // decides what shows whatever the post answered. Its notice's actions are
+  // off meanwhile (`pending`). Failed, the notice says why (`failed`), its
+  // buttons back to tap again. Its answer may name a page to open (Paul,
+  // 2026-11-09: an invite's app, a checkout), opened once that read has it.
+  async function act(n, a) {
+    // the start the server named, so a stale row's press restarts nothing newer
+    if (restarts(a)) return restartComputer(a.body?.generation);
+    if (pending.has(n.id)) return;
+    pending.add(n.id);
+    failed.delete(n.id);
+    renderComputer();
+    let answer = null;
+    try {
+      answer = await api("POST", a.post, a.body ?? {});
+    } catch (e) {
+      const refused = !!e?.status;
+      failed.set(n.id, { said: refused ? e.message : "Couldn't do that. Try again.", refused, title: n.title, level: n.level });
+    }
+    // as a change told this page: only the cards whose rows it touched read again
+    await load(true).catch(() => {});
+    pending.delete(n.id);
+    // drawn again whatever the read came to (failed: as the last read said)
+    renderComputer();
+    if (typeof answer?.open === "string") openPage(answer.open);
+  }
+  // The countdowns, live: each line said again as its minute changes (in
+  // place: a button under the person's finger stays), and the band drawn
+  // again as the first ends, so an idle page drops a notice whose time
+  // passed. One timer at a time.
+  function countdown() {
+    if (tick !== null) timers.clearTimeout(tick);
+    tick = null;
+    const t = now();
+    if (counting.some((c) => c.u.at <= t)) return renderComputer();
+    for (const c of counting) c.line.textContent = untilSaid(c.u, t);
+    const next = counting.map((c) => {
+      const left = c.u.at - t;
+      return left > 60_000 ? left - (Math.ceil(left / 60_000) - 1) * 60_000 : left;
+    });
+    if (next.length) tick = timers.setTimeout(countdown, Math.min(...next));
+  }
+  // the page's own rows: a deploy, a read that failed, a restart under way
+  function pageRow(kind) {
+    const row = el("div", "computer-notice");
+    row.dataset.kind = kind;
+    const copy = el("div", "notice-copy");
+    const actions = el("div", "notice-actions");
+    const button = (label, action, onclick) => {
       const b = el("button", "primary", label);
       b.type = "button";
-      b.dataset.action = "restart";
-      b.onclick = () => restartComputer(b);
+      b.dataset.action = action;
+      b.onclick = onclick;
       actions.append(b);
     };
-    if (n.kind === "wont_wake") {
-      row.classList.add("warn");
-      const again = restarted && computer()?.generation > restarted;
-      say(
-        again ? "Your computer still won't start" : "Your computer won't start",
-        `${wontStart(n.why)} Your agents can't answer until it does.${again ? " If restarting again doesn't help, get help and give them the details below." : ""}`,
-        `${computer()?.computer ?? ""}: ${n.why}`,
-      );
-      restart(again ? "Try again" : "Restart");
-      if (again && support()) {
-        const help = el("a", null, "Get help");
-        help.href = support();
-        help.target = "_blank";
-        help.rel = "noopener";
-        actions.append(help);
+    if (kind === "restart") {
+      const op = follow.op();
+      if (op.state === FAILED) {
+        row.classList.add("warn");
+        copy.append(el("strong", null, "Your computer didn't restart"), el("p", null, op.error));
+        button("Try again", "restart", () => restartComputer());
+      } else if (op.state === READ_FAILED) {
+        // a read that failed: no news of the restart, which may go on
+        copy.append(el("strong", null, "Couldn't check on the restart"), el("p", "notice-detail", op.error));
+        button("Check again", "restart-read", () => follow.readAgain());
+      } else {
+        const step = restartStep(computer(), op);
+        copy.append(el("strong", null, "Restarting your computer"));
+        if (Date.now() - op.at >= SLOW_MS) copy.append(el("p", null, step === "Saving…" ? "A big save can take a few minutes." : "A big restore can take a few minutes."));
+        const status = el("span", "restart-status", step);
+        status.setAttribute("role", "status");
+        actions.append(status);
       }
-    } else if (n.kind === "unsaved") {
-      row.classList.add("warn");
-      const then = n.save ? "starts again from that save" : "starts again with nothing kept";
-      const stop = n.stopsAt ? ` If it still can't by ${clock(n.stopsAt)}, it stops and ${then}.` : "";
-      say("Your computer can't save right now", `It hasn't saved since ${clock(n.since)}, so what its agents did after that isn't kept yet. It keeps trying.${stop} Restarting tries to save first.`, n.why);
-      restart("Restart now");
-    } else if (n.kind === "went_back") {
-      // told only when something was done on it after that save (a stop
-      // that lost nothing tells nothing), so it says what went, calmly
-      const since = n.save && n.savedAt ? clock(n.savedAt) : null;
-      const back = n.pending
-        ? (since ? `When it starts again, changes on it since ${since} won't be there.` : "Nothing on it was saved yet, so it will start fresh.")
-        : (since ? `Changes on it since ${since} weren't kept.` : "Nothing on it was saved yet, so it started fresh.");
-      say(n.pending ? "Your computer stopped" : "Your computer restarted", `${back} Your chats are all here.`);
-      const ok = el("button", null, "OK");
-      ok.type = "button";
-      ok.dataset.action = "seen";
-      ok.onclick = () => sawNotice(n.life, ok);
-      actions.append(ok);
-    } else if (n.kind === "update") {
-      // told only between turns, never restarted behind their back; an
-      // always-on computer never sleeps, so never updates by itself
-      const itself = computer()?.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps.";
-      say("An update is ready for your computer", `Restart to get it — about a minute; your chats and work are kept.${itself}`);
-      restart("Restart");
-      const later = el("button", null, "Later");
-      later.type = "button";
-      later.dataset.action = "later";
-      later.onclick = () => updateLater(n.version, later);
-      actions.append(later);
-    } else if (n.kind === "deploying") {
+    } else if (kind === "deploying") {
       copy.append(el("strong", null, "Updating — back in a moment"));
-    } else if (n.kind === "refresh") {
-      copy.append(el("strong", null, computerFailed() ? "Couldn't refresh your computer" : "Couldn't refresh your apps"));
+    } else {
+      copy.append(el("strong", null, computerFailed() || reads().noticesFailed ? "Couldn't refresh your computer" : "Couldn't refresh your apps"));
       const again = el("button", "primary", "Try again");
       again.type = "button";
       again.dataset.action = "refresh";
       again.onclick = () => readAgain(again);
       actions.append(again);
-    } else return null;
+    }
     row.append(copy, actions);
     return row;
   }
-  // a read of it that failed (a blip, a 5xx) says so first, over what the
-  // last read said, with Try again; a confirmed deploy waits by itself
+  // a read that failed (a blip, a 5xx) says so first, over what the last
+  // read said, with Try again; a confirmed deploy waits by itself
   function renderComputer() {
+    // a view taken from elsewhere (the list's read) may say it is done
+    follow.check();
+    const restart = !!follow.op();
+    if (drewRestart && !restart) redrawSection();
+    drewRestart = restart;
     const box = document.getElementById("computer-notices");
-    const rows = [...(reads().updating ? [{ kind: "deploying" }] : computerFailed() || reads().listFailed ? [{ kind: "refresh" }] : []), ...(computer()?.notices ?? [])].map(noticeRow).filter(Boolean);
+    const t = now();
+    const all = notices() ?? [];
+
+    // a notice a restart answers waits while it runs; one whose time passed is gone
+    const told = all.filter((n) => !(n.until && n.until.at <= t) && !(restart && (n.actions ?? []).some(restarts)));
+    // a failure whose notice is not drawn (the read has it no more, or its
+    // time passed): a refusal stays, a line of its own; a call that never
+    // reached the server goes with it
+    const gone = [...failed].filter(([id]) => !told.some((n) => n.id === id));
+    for (const [id, f] of gone) if (!f.refused) failed.delete(id);
+    counting = [];
+    // a read that failed, its notices' too: what the last said stays, under its line
+    const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed || reads().noticesFailed ? ["refresh"] : [];
+    const refusals = gone.filter(([, f]) => f.refused).map(([id, f]) => refusalRow(id, f));
+    const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.filter((n) => !n.mustAnswer).map(noticeRow), ...refusals];
     box.replaceChildren(...rows);
     box.hidden = !rows.length;
+    drawAsked(told.find((n) => n.mustAnswer && !answeredHere(n)), own);
+    countdown();
+    paintSettings();
+  }
+  // On the platform's page one of its answers opens (the move's `/move`),
+  // a notice that must be answered is answered there: its cover stands
+  // aside while that page shows, and is back on any other.
+  function answeredHere(n) {
+    const here = globalThis.location;
+    if (!here) return false;
+    return (n.actions ?? []).some((a) => {
+      if (!a.open) return false;
+      const to = new URL(a.open, here.href);
+      return to.origin === here.origin && to.pathname === here.pathname;
+    });
+  }
+  // One that must be answered (`mustAnswer`) shows alone, over everything,
+  // a guest's welcome too (`#must-answer`, a modal dialog: the page behind
+  // takes nothing), drawn as its row is, until the read after an answer of
+  // it has it no more: the first in the list first (its owner's oldest).
+  // Escape, or a browser that shuts it anyway, leaves it as it was. The
+  // page's own rows (`own`: a read that failed, with Try again; a deploy)
+  // are drawn over it too, as the band behind it can't be reached.
+  function drawAsked(n, own) {
+    const cover = document.getElementById("must-answer");
+    if (!cover) return;
+    if (!n) {
+      delete cover.dataset.id;
+      chosen = null;
+      cover.replaceChildren();
+      if (cover.open) cover.close();
+      return;
+    }
+    const fresh = cover.dataset.id !== n.id;
+    if (fresh) chosen = null;
+    cover.dataset.id = n.id;
+    // shown, the cover's own focus (its first answer's otherwise)
+    cover.tabIndex = -1;
+    cover.autofocus = true;
+    cover.oncancel = (e) => e.preventDefault();
+    cover.onkeydown = (e) => e.stopPropagation();
+    cover.onclose = () => {
+      if (cover.dataset.id && !cover.open) {
+        reshow(cover);
+        focusChosen(cover, false);
+      }
+    };
+    cover.setAttribute("aria-label", n.title);
+    cover.replaceChildren(...own.map(pageRow), noticeRow(n));
+    if (!cover.open) reshow(cover);
+    focusChosen(cover, fresh);
+  }
+  // The restart, done: awake on a newer start, or a newer start that won't
+  // (its notice then says so, with Try again). Settings' Computer, shown,
+  // is drawn again in place (its version, the latest), under its heading,
+  // which settings' links name: nothing else read again, nothing moved.
+  function redrawSection() {
+    const old = shown.section;
+    const c = computer();
+    if (!old?.isConnected || !c) return;
+    const fresh = computerSection(c);
+    old.replaceChildren(old.querySelector(":scope > h2"), ...[...fresh.children].slice(1));
+    shown.section = old;
   }
   // Try again: the list and the computer read again (`load`, which goes on
   // with what the failure put off). The list's read failing too, the line
@@ -143,49 +434,12 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     button.disabled = false;
   }
   // Restart: the computer saves if it can, then starts fresh from its newest
-  // good save. It names the start the person saw, so pressed twice (or in two
-  // tabs) it restarts once. What went wrong is said beside the button.
-  async function restartComputer(button) {
-    const c = computer();
-    if (!c) return;
-    const buttons = [...document.querySelectorAll("[data-action=restart]")];
-    for (const b of buttons) b.disabled = true;
-    const label = button.textContent;
-    button.textContent = "Restarting…";
-    try {
-      restarted = c.generation || 0;
-      computerIs(await api("POST", `/api/computers/${seg(c.computer)}/restart`, { generation: c.generation || 0 }));
-      await reopenSettings();
-    } catch (e) {
-      button.textContent = label;
-      const said = button.parentElement.querySelector(".form-error") ?? el("p", "form-error");
-      said.textContent = `It did not restart: ${e.message}`;
-      button.parentElement.append(said);
-    } finally {
-      for (const b of buttons) b.disabled = false;
-    }
-  }
-  // The person read what a start went back to: told no more, anywhere.
-  async function sawNotice(life, button) {
-    const c = computer();
-    if (!c) return;
-    button.disabled = true;
-    try {
-      computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/seen`, { life }));
-    } catch {
-      computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
-    }
-  }
-  // Later: this update is told no more, anywhere, until another is ready.
-  async function updateLater(version, button) {
-    const c = computer();
-    if (!c) return;
-    button.disabled = true;
-    try {
-      computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/later`, { version }));
-    } catch {
-      computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
-    }
+  // good save. It names the start the person saw (`asked`: a notice's own,
+  // else the view's), so pressed twice (or in two tabs, or on a stale row)
+  // it restarts once. Its progress shows where its notice was (`follow`),
+  // and so does its ask's failure, with Try again.
+  function restartComputer(asked) {
+    follow.press(asked);
   }
 
   function computerSection(c) {
@@ -196,7 +450,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       "Computer",
       ...(c
         ? [
-            line("State", PHASE[c.phase] ?? c.phase),
+            stateLine(c),
             line("Version", c.version ?? c.latest ?? c.image),
             ...(behind
               ? [line("Latest version", c.latest), el("p", "muted", `Restart to get the latest version.${c.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps."}`)]
@@ -206,38 +460,101 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
         : // never read: a failed read is not "none" (shown again once one answers: `load`)
           [el("p", "muted", computerFailed() ? "Couldn't load your computer." : "Your computer starts with your first agent.")]),
     );
-    // each agent's own desktop
+    // a row of Computer: its label, a short line under it, and its buttons
+    // on the right
+    const row = (key, sub, ...buttons) => {
+      const line = el("div", "settings-line settings-line-with-action");
+      const info = el("div", "settings-info");
+      info.append(el("span", "settings-key", key), el("span", "settings-value settings-sub", sub));
+      const control = el("div", "settings-control");
+      control.append(...buttons);
+      line.append(info, control);
+      return line;
+    };
+    // each agent's own desktop, where its runtime offers one (`markOffer`:
+    // agent-runtimes.js), and the line gone with the last
     const screens = [];
     for (const a of c ? agents().values() : []) {
-      const screen = named(el("button", "quiet"), a.fragment, (t) => `Open ${t}'s screen`);
-      screen.type = "button";
+      const screen = iconed("screen", named(el("span"), a.fragment, (t) => `Open ${t}'s screen`));
       screen.dataset.screenFor = a.fragment;
       screen.onclick = () => openScreen(a.fragment);
-      screens.push(screen);
+      screens.push(markOffer(screen, a.fragment, "screen"));
     }
-    if (screens.length) computer.append(actionLine("Screens", ...screens));
+    if (screens.length) {
+      const shown = row("Screens", "Watch your agent work on its own desktop, and take over.", ...screens);
+      shown.dataset.offers = "";
+      shown.hidden = screens.every((s) => s.hidden);
+      computer.append(shown);
+    }
     // the way back to working when something is wrong with it: asked once
     // more before it cuts what its agents are doing
     if (c) {
-      computer.append(el("p", "muted", "Restarting saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops."));
-      const row = el("span", "settings-actions");
-      const go = el("button", "quiet", "Restart computer");
-      go.type = "button";
-      go.dataset.action = "restart-ask";
-      go.onclick = () => {
-        const sure = el("button", "quiet", "Restart now");
-        sure.type = "button";
-        sure.dataset.action = "restart";
-        sure.onclick = () => restartComputer(sure);
-        const cancel = el("button", "quiet", "Cancel");
-        cancel.type = "button";
-        cancel.onclick = () => row.replaceChildren(go);
-        row.replaceChildren(sure, cancel);
-      };
-      row.append(go);
-      computer.append(actionLine("Restart", row));
+      const asks = el("span", "settings-actions");
+      const restartRow = row("Restart", "Saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops.", asks);
+      // why its ask failed, under its words (never beside its button, which
+      // would squeeze them)
+      const said = el("p", "form-error");
+      restartRow.querySelector(".settings-info").append(said);
+      Object.assign(shown, { asks, said });
+      paintAsks(asks);
+      computer.append(restartRow);
     }
+    shown.section = computer;
     return computer;
   }
-  return { computerOf, prewake, renderComputer, restartComputer, computerSection, dispose: () => document.removeEventListener("visibilitychange", prewake) };
+  function stateLine(c) {
+    const l = line("State", stateSaid(c, active(follow.op())));
+    shown.state = l.querySelector(".settings-value");
+    return l;
+  }
+  function paintSettings() {
+    const c = computer();
+    if (shown.state?.isConnected && c) shown.state.textContent = stateSaid(c, active(follow.op()));
+    if (shown.asks?.isConnected && restartSaid() !== shown.painted) paintAsks(shown.asks);
+  }
+  // what settings' Restart says now: nothing but its button, the restart's
+  // step, or why its ask failed
+  function restartSaid() {
+    const op = follow.op();
+    return !op ? "" : op.state === FAILED || op.state === READ_FAILED ? `${op.state}: ${op.error}` : restartStep(computer(), op);
+  }
+  function paintAsks(asks) {
+    const step = restartSaid();
+    const op = follow.op();
+    shown.painted = step;
+    shown.said.textContent = op?.state === FAILED ? `It didn't restart: ${op.error}` : op?.state === READ_FAILED ? `Couldn't check on the restart: ${op.error}` : "";
+    shown.said.hidden = !shown.said.textContent;
+    if (op?.state === READ_FAILED) {
+      const check = iconed("reload", "Check again");
+      check.dataset.action = "restart-read";
+      check.onclick = () => follow.readAgain();
+      asks.replaceChildren(check);
+      return;
+    }
+    if (op && op.state !== FAILED) {
+      const status = el("span", "restart-status", step);
+      status.setAttribute("role", "status");
+      asks.replaceChildren(status);
+      return;
+    }
+    const go = iconed("reload", op ? "Try again" : "Restart computer");
+    go.dataset.action = "restart-ask";
+    go.onclick = () => {
+      const sure = iconed("reload", "Restart now");
+      sure.dataset.action = "restart";
+      sure.onclick = () => restartComputer();
+      const cancel = el("button", "quiet", "Cancel");
+      cancel.type = "button";
+      cancel.onclick = () => asks.replaceChildren(go);
+      asks.replaceChildren(cancel, sure);
+    };
+    asks.replaceChildren(go);
+  }
+  return { computerOf, prewake, renderComputer, restartComputer, computerSection, dispose: () => {
+    document.removeEventListener("visibilitychange", prewake);
+    document.removeEventListener("visibilitychange", followVisibility);
+    if (tick !== null) timers.clearTimeout(tick);
+    raised.disconnect();
+    follow.dispose();
+  } };
 }

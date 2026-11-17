@@ -19,6 +19,13 @@
 //! the prompt (`image_bytes`), with no usage: Workers AI prices an image by
 //! its tiles and steps, which the cell counts itself.
 //!
+//! The video model (`VIDEO_MODEL`, HappyHorse 1.0, a third party's in
+//! Cloudflare's catalog) answers as the binding does, `{state: "Completed",
+//! result: {video: <url>}}`, its video served from this fake at that URL
+//! (`GET /video/<n>.mp4`), made from the prompt and the seconds asked
+//! (`video_bytes`), with no usage: the catalog bills its seconds, which the
+//! cell counts itself.
+//!
 //! BGE-M3 (fragment_core::embed's model unnamed) answers its text
 //! embeddings as the binding does, `{shape, data, pooling}` with no usage,
 //! each vector the fake's own (`embedding`: words hashed, unit length);
@@ -27,7 +34,7 @@
 //!
 //! An icon (fragment_core::icon) is made of three calls here:
 //! - its subject, GLM-5.3 Flash asked with the icon's own system message
-//!   (`icon::subject_input`): named as its maker's hint asked, else
+//!   (`icon::subject_input`, with a hint or without): named as its maker's hint asked, else
 //!   `ICON_SUBJECT` (`icon_subject`), unstreamed with its usage;
 //! - its drawings, FLUX.2 [klein] 4B (`ICON_MODEL`), `{prompt, width,
 //!   height, seed}` as JSON (the cell sends the binding a form): `{"image":
@@ -138,6 +145,8 @@ use crate::http::{Handler, Request, Response, Server};
 
 /// The image model's catalog id (fragment_core::media::IMAGE_MODEL).
 pub use fragment_core::media::IMAGE_MODEL;
+/// The video model's (fragment_core::media::VIDEO_MODEL).
+pub use fragment_core::media::VIDEO_MODEL;
 /// The transcription model's (fragment_core::transcribe::TRANSCRIBE_MODEL).
 pub use fragment_core::transcribe::TRANSCRIBE_MODEL;
 /// The decision models (the Clef family): a typed-decision vendor
@@ -334,6 +343,10 @@ struct State {
     /// Paced answers whose reader dropped the connection while it was held
     /// past their `[DONE]`.
     hung_up: Arc<AtomicU64>,
+    /// While true, a paced answer holds after its first event
+    /// (`hold_streams`): a stream the caller has begun reading, its end
+    /// not yet sent.
+    streams_held: Arc<(Mutex<bool>, std::sync::Condvar)>,
     /// The usage the next answers report, in order; then the default.
     usage: VecDeque<Used>,
     /// Raw System One answers queued by tests, including malformed ones.
@@ -354,6 +367,10 @@ struct State {
     /// A model's own key, in place of `key` (`accept_key_for`): another
     /// API's, on the same face.
     model_keys: Vec<(String, String)>,
+    /// Where this fake serves, for the URLs its videos are at.
+    base: String,
+    /// The videos made, each at `/video/<its index>.mp4`.
+    videos: Vec<Vec<u8>>,
 }
 
 /// Workers AI's answer when it cannot reach a model (as the binding passed
@@ -779,6 +796,54 @@ fn transcription_answer(input: &Value, log_id: &str) -> Response {
     Response::json(200, &answer).with_header("cf-aig-log-id", log_id)
 }
 
+/// The bytes a video prompt makes, `seconds` long: an MP4 (its `ftyp`, its
+/// media data, then its `moov` with a movie header of that length, as a
+/// muxer that writes it last does). One naming "small" is 2 KiB (kept in
+/// git), any other past 1 MiB (a blob); one naming "png" is a PNG instead,
+/// which the platform refuses.
+pub fn video_bytes(prompt: &str, seconds: u32) -> Vec<u8> {
+    if prompt.contains("png") {
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        out.extend(prompt.bytes().cycle().take(2048));
+        return out;
+    }
+    let boxed = |kind: &[u8; 4], body: &[u8]| [&((body.len() + 8) as u32).to_be_bytes()[..], kind, body].concat();
+    let mut mvhd = vec![0, 0, 0, 0];
+    mvhd.extend([0; 8]);
+    mvhd.extend(1000u32.to_be_bytes());
+    mvhd.extend((seconds * 1000).to_be_bytes());
+    mvhd.extend([0; 80]);
+    let pad = if prompt.contains("small") { 2048 } else { 1024 * 1024 + 4096 };
+    let media: Vec<u8> = prompt.bytes().cycle().take(pad).collect();
+    [boxed(b"ftyp", b"isom\0\0\0\0isomiso2mp41"), boxed(b"mdat", &media), boxed(b"moov", &boxed(b"mvhd", &mvhd))].concat()
+}
+
+/// The video model's answer to `input`, as the binding answers a catalog
+/// model raw, held to its catalog's input schema: a prompt naming "fails"
+/// ends `Failed`, with no video; one naming "gone" is at a URL that answers
+/// 404.
+fn video_answer(s: &mut State, input: &Value, log_id: &str) -> Response {
+    let Some(prompt) = input["prompt"].as_str().filter(|p| (1..=2500).contains(&p.chars().count())) else { return problem(400, "prompt is a string of 1 to 2500 characters") };
+    let Some(seconds) = input["duration"].as_u64().filter(|d| (3..=15).contains(d)) else { return problem(400, "duration is an integer from 3 to 15") };
+    if !matches!(input["resolution"].as_str(), None | Some("720P" | "1080P")) || !matches!(input["ratio"].as_str(), None | Some("16:9" | "9:16" | "1:1" | "4:3" | "3:4")) {
+        return problem(400, "resolution is 720P or 1080P; ratio is 16:9, 9:16, 1:1, 4:3 or 3:4");
+    }
+    if prompt.contains("fails") {
+        return Response::json(200, &json!({ "state": "Failed", "result": {}, "gatewayMetadata": { "keySource": "Unified" } })).with_header("cf-aig-log-id", log_id);
+    }
+    s.videos.push(if prompt.contains("gone") { Vec::new() } else { video_bytes(prompt, seconds as u32) });
+    let url = format!("{}/video/{}.mp4", s.base, s.videos.len() - 1);
+    Response::json(200, &json!({ "state": "Completed", "result": { "video": url }, "gatewayMetadata": { "keySource": "Unified" } })).with_header("cf-aig-log-id", log_id)
+}
+
+/// A video this fake made, at its URL (an emptied one is gone: 404).
+fn video_served(s: &State, path: &str) -> Response {
+    match path.strip_suffix(".mp4").and_then(|n| n.parse::<usize>().ok()).and_then(|n| s.videos.get(n)) {
+        Some(bytes) if !bytes.is_empty() => Response::bytes(200, "video/mp4", bytes.clone()),
+        _ => problem(404, "no such video"),
+    }
+}
+
 /// The image model's answer to `input`, as the binding answers it raw.
 fn image_answer(input: &Value, log_id: &str) -> Response {
     let Some(prompt) = input["prompt"].as_str() else { return problem(400, "Type mismatch of '/prompt', 'undefined' not in 'string'") };
@@ -786,14 +851,14 @@ fn image_answer(input: &Value, log_id: &str) -> Response {
     Response::json(200, &json!({ "image": image })).with_header("cf-aig-log-id", log_id)
 }
 
-/// The subject named when `body` asks an icon's (its system message
-/// `icon::subject_input`'s): the hint its maker asked for (the user
-/// message's "Its maker asks for: …"), else `ICON_SUBJECT`. `None` for any
-/// other chat.
+/// The subject named when `body` asks an icon's (its system message one
+/// of `icon::subject_input`'s, with a hint or without): the hint its maker
+/// asked for (the user message's "Its maker asks for: …"), else
+/// `ICON_SUBJECT`. `None` for any other chat.
 pub fn icon_subject(body: &Value) -> Option<String> {
-    let asked = fragment_core::icon::subject_input("", None, None);
     let messages = body["messages"].as_array()?;
-    if messages.first() != Some(&asked["messages"][0]) {
+    let system = messages.first()?;
+    if ![None, Some("x")].iter().any(|hint| fragment_core::icon::subject_input("", None, *hint)["messages"][0] == *system) {
         return None;
     }
     let said = messages.iter().rev().find(|m| m["role"] == "user").map(|m| text_of(&m["content"])).unwrap_or_default();
@@ -965,6 +1030,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     if req.path == EMBEDDINGS_PATH {
         return openai_embeddings(s, req);
     }
+    if let Some(video) = req.path.strip_prefix("/video/").filter(|_| req.method == "GET") {
+        return video_served(s, video);
+    }
     let Some(model) = req.path.strip_prefix("/run/").map(crate::http::decode) else { return problem(404, "no such route") };
     if req.method != "POST" {
         return problem(405, "the binding runs a model with a POST");
@@ -984,6 +1052,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     let log_id = format!("01FAKE{:020}", s.answers);
     if model == IMAGE_MODEL {
         return image_answer(&body, &log_id);
+    }
+    if model == VIDEO_MODEL {
+        return video_answer(s, &body, &log_id);
     }
     if model == ICON_MODEL {
         return icon_answer(&body, &log_id);
@@ -1112,7 +1183,7 @@ fn chat_answer(s: &mut State, face: Face, model: &str, body: &Value) -> Response
         let thinking = pace.map_or(0, |p| p.thinking);
         let events = stream(face, model, &reply, &mut s.tool_calls, usage_of(used, body, written), budget, broken, pieces, thinking);
         return match pace {
-            Some(pace) => paced(events, pace, Arc::clone(&s.hung_up)),
+            Some(pace) => paced(events, pace, Arc::clone(&s.hung_up), Arc::clone(&s.streams_held)),
             None => Response::bytes(200, "text/event-stream", events.into_bytes()),
         };
     }
@@ -1146,12 +1217,21 @@ fn chat_answer(s: &mut State, face: Face, model: &str, body: &Value) -> Response
 /// A streamed answer written as `pace` says: chunked, an event at a time,
 /// `every_ms` apart, then its connection held `hold_ms` past its `[DONE]`
 /// with nothing more sent, as the gateway held one; a reader that drops it
-/// meanwhile is counted in `hung_up`.
-fn paced(events: String, pace: Pace, hung_up: Arc<AtomicU64>) -> Response {
+/// meanwhile is counted in `hung_up`. Held (`hold_streams`), it waits
+/// after its first event until released.
+fn paced(events: String, pace: Pace, hung_up: Arc<AtomicU64>, held: Arc<(Mutex<bool>, std::sync::Condvar)>) -> Response {
     let events: Vec<String> = events.split_inclusive("\n\n").map(str::to_string).collect();
     let write = move |mut s: std::net::TcpStream| {
         let chunk = |e: &str| format!("{:x}\r\n{e}\r\n", e.len());
         for (i, e) in events.iter().enumerate() {
+            if i == 1 {
+                let (lock, released) = &*held;
+                let mut holding = lock.lock().expect("streams hold");
+                // bounded by `release_streams`, which a test always calls
+                while *holding {
+                    holding = released.wait(holding).expect("streams hold");
+                }
+            }
             if i > 0 {
                 std::thread::sleep(Duration::from_millis(pace.every_ms));
             }
@@ -1226,6 +1306,7 @@ impl WorkersAi {
             response
         });
         let server = Server::start(port, handler)?;
+        state.lock().expect("workers ai state").base = server.url.clone();
         Ok(WorkersAi { url: server.url.clone(), state, held, _server: server })
     }
 
@@ -1268,6 +1349,18 @@ impl WorkersAi {
     /// How the next streamed answers are written, in order (`Pace`).
     pub fn pace_next(&self, paces: &[Pace]) {
         self.state().paces.extend(paces.iter().copied());
+    }
+
+    /// Paced answers hold after their first event, from now until
+    /// `release_streams`: a stream begun and not yet ended.
+    pub fn hold_streams(&self) {
+        *self.state().streams_held.0.lock().expect("streams hold") = true;
+    }
+
+    pub fn release_streams(&self) {
+        let held = Arc::clone(&self.state().streams_held);
+        *held.0.lock().expect("streams hold") = false;
+        held.1.notify_all();
     }
 
     /// Paced answers whose reader dropped the connection while it was held
@@ -1351,6 +1444,36 @@ impl WorkersAi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: the video model answers as the binding answers a catalog model,
+    /// its video at a URL this fake serves, an MP4 of the seconds asked, and
+    /// its input held to the catalog's schema. Method: a video made and
+    /// read back, one that fails, one gone, one out of bounds.
+    #[test]
+    fn a_video_is_made_and_served() {
+        let mut s = State { base: "http://127.0.0.1:1".into(), ..State::default() };
+        let run = |s: &mut State, input: Value| answer(s, &Request::new("POST", &format!("/run/{VIDEO_MODEL}"), &[], input.to_string().as_bytes()));
+        let made: Value = serde_json::from_slice(&run(&mut s, json!({ "prompt": "waves", "duration": 6, "resolution": "720P", "ratio": "16:9", "watermark": false })).body).unwrap();
+        assert_eq!((made["state"].clone(), made["result"]["video"].clone()), (json!("Completed"), json!("http://127.0.0.1:1/video/0.mp4")));
+        assert_eq!(fragment_core::media::video_url(made.to_string().as_bytes()).as_deref(), Ok("http://127.0.0.1:1/video/0.mp4"));
+        let served = answer(&mut s, &Request::new("GET", "/video/0.mp4", &[], b""));
+        assert_eq!(served.status, 200);
+        assert_eq!(served.body, video_bytes("waves", 6));
+        assert!(served.body.len() > fragment_core::blob::BLOB_MIN_BYTES, "a blob's size");
+        assert_eq!(fragment_core::media::mp4_duration_ms(&served.body), Some(6_000));
+        assert_eq!(fragment_core::media::mp4_duration_ms(&video_bytes("a small one", 3)), Some(3_000));
+        assert!(video_bytes("a small one", 3).len() < fragment_core::blob::BLOB_MIN_BYTES);
+        assert_eq!(fragment_core::media::mp4_duration_ms(&video_bytes("a png", 5)), None);
+        let failed: Value = serde_json::from_slice(&run(&mut s, json!({ "prompt": "it fails", "duration": 5 })).body).unwrap();
+        assert_eq!(fragment_core::media::video_url(failed.to_string().as_bytes()), Err(fragment_core::media::AnswerFault::NoVideo));
+        let gone: Value = serde_json::from_slice(&run(&mut s, json!({ "prompt": "gone", "duration": 5 })).body).unwrap();
+        let path = gone["result"]["video"].as_str().unwrap().strip_prefix("http://127.0.0.1:1").unwrap().to_string();
+        assert_eq!(answer(&mut s, &Request::new("GET", &path, &[], b"")).status, 404);
+        for bad in [json!({ "prompt": "p", "duration": 2 }), json!({ "prompt": "", "duration": 5 }), json!({ "prompt": "p", "duration": 5, "resolution": "768p" })] {
+            assert_eq!(run(&mut s, bad.clone()).status, 400, "{bad}");
+        }
+        assert_eq!(s.calls.iter().filter(|c| c.model == VIDEO_MODEL).count(), 6, "each call recorded; a video's read is none");
+    }
 
     /// Goal: a stream reads as S4 recorded it: deltas of usage on its
     /// chunks, then the whole call's on a line of Workers AI's own. Method:

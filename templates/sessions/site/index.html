@@ -4,6 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Session Archive</title>
+  <!-- its first paint is the room's own colour, light or dark, before any
+       stylesheet comes (the fonts' is another site's): never white while
+       it loads in the shell's middle column (chat.css's --bg-chat) -->
+  <style>html{background:#181818;color-scheme:dark}@media (prefers-color-scheme:light){html{background:#ebe9e5;color-scheme:light}}</style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
@@ -13,6 +17,12 @@
   <link rel="stylesheet" href="./sessions.css">
 </head>
 <body class="fragment-chat">
+  <!-- said only if its script never came (a tab of the last release asks
+       for a bundle this one lacks: crates/templates/bundle.rs), with a
+       reload of this same page, in its own frame: chat.css shows it after
+       a delay, and sessions.js takes it away as it starts. No script of
+       its own: it could fail to come as well. -->
+  <p class="still-loading" id="still-loading">Still loading… <a href="">Reload</a></p>
   <div class="scroll" id="scroll"><div class="column" id="page"><p class="muted">Loading…</p></div></div>
   <script type="module" src="./sessions.js"></script>
 </body>

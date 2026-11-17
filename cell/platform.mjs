@@ -15,7 +15,10 @@
 // mutation commits, and `call.files.write(path, content)` /
 // `call.files.remove(path)` change files on `main` then (one commit).
 // `this.files.read / readBytes / list / stat` read files at `main` from
-// anything async (queries, fetch, jobs).
+// anything async (queries, fetch, jobs). `this.searchIndex.upsert / delete
+// / query / status` write and ask the fragment's own search index
+// (docs/api.md, "A fragment's search") as the fragment itself, its owner
+// paying; camel case, so no operation (`a-z`, `0-9`, `_`) can shadow it.
 //
 // A job's method gets (input, job) and runs as a Workflow: each `await
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
@@ -344,8 +347,9 @@ class Job {
   }
 
   // Text through the platform's model route (a tier: cheap unless named),
-  // and images on Workers AI (FLUX.1 [schnell]); the owner's ledger pays
-  // for each (docs/ledger.md):
+  // images on Workers AI (FLUX.1 [schnell]) and videos from Cloudflare's
+  // model catalog (HappyHorse 1.0); the owner's ledger pays for each
+  // (docs/ledger.md):
   //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort?, tools?, tool_choice?, draft?: { channel, turn } })
   //     → { text, message: { role, content, tool_calls? }, finish_reason, model, tier, usage, timing }
   //     (its arguments at most AI_TEXT_MAX_BYTES of JSON; with a draft, its
@@ -354,7 +358,8 @@ class Job {
   //     predicates and scores on the Clef family (clef-flash unless named), about text, JSON and
   //     media: the fragment's blobs ({ sha256, type }, as fragment.blob(file) answers) or small inline ({ data })
   //   ai.image({ prompt, path, steps? })  → { path, size, sha256, mediaType }: a JPEG on main
-  //   ai.video(…) is refused, saying why: videos are off until they run on Cloudflare
+  //   ai.video({ prompt, path, duration?, resolution?, aspect_ratio? })
+  //     → { path, size, sha256, mediaType, lengthMs }: an MP4 on main (refused where the tiers are private)
   get ai() {
     const step = (kind, args) => this.#step(kind, args);
     const clean = (o) => JSON.parse(JSON.stringify(o ?? {}));
@@ -366,7 +371,7 @@ class Job {
       },
       decide: (opts) => step("ai.decide", clean(opts)),
       image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
-      video: (opts = {}) => step("ai.video", clean(opts)),
+      video: (opts = {}) => (checkPath(opts.path), step("ai.video", clean(opts))),
     };
   }
 
@@ -472,6 +477,25 @@ export class App extends AuthorApp {
       },
       list: (prefix = "") => cap.list(prefix),
       stat: (path) => cap.stat(path),
+    };
+  }
+
+  // The fragment's own search index through the SEARCH capability: a
+  // refusal throws here, in the app's isolate, with the platform's `code`,
+  // `status`, `cleared` and `fence` (the capability answers it as a plain
+  // `{error}`: an Error crossing Workers RPC keeps no field of its own).
+  get searchIndex() {
+    const cap = this.env.SEARCH;
+    const answered = async (pending) => {
+      const { answer, error } = await pending;
+      if (error) throw Object.assign(new Error(error.message), error);
+      return answer;
+    };
+    return {
+      upsert: (source) => answered(cap.upsert(source)),
+      delete: (source) => answered(cap.delete(source)),
+      query: (question) => answered(cap.query(question)),
+      status: () => answered(cap.status()),
     };
   }
 

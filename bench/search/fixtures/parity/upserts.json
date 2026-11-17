@@ -1,0 +1,96 @@
+[
+ {
+  "source": "garden/links.md",
+  "title": "Notes on frost",
+  "fields": {
+   "wiki": "garden"
+  },
+  "sections": [
+   {
+    "id": "s0",
+    "text": "Before planting, read the launch guide and frost dates.\nA bare one: frost dates.",
+    "context": []
+   },
+   {
+    "id": "s1",
+    "text": "Sow beans once the last frost has passed.",
+    "context": [],
+    "heading": "Planting after frost dates"
+   },
+   {
+    "id": "s2",
+    "text": "A spade and a rake.",
+    "context": [],
+    "heading": "Tools in the shed"
+   }
+  ]
+ },
+ {
+  "source": "garden/long.md",
+  "title": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+  "fields": {
+   "wiki": "garden"
+  },
+  "sections": [
+   {
+    "id": "s0",
+    "text": "Under a long heading.",
+    "context": [],
+    "heading": "ññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññ"
+   },
+   {
+    "id": "s1",
+    "text": "Under a heading cut at an emoji.",
+    "context": [
+     "ññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññ"
+    ],
+    "heading": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   {
+    "id": "s5",
+    "text": "Under a long ancestor.",
+    "context": [
+     "Top",
+     "Middle",
+     "üüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüü"
+    ],
+    "heading": "Deep"
+   }
+  ]
+ },
+ {
+  "source": "garden/plain.md",
+  "title": "Plain page",
+  "fields": {
+   "wiki": "garden"
+  },
+  "sections": [
+   {
+    "id": "s0",
+    "text": "No links here, only words.",
+    "context": [],
+    "heading": "Plain page"
+   },
+   {
+    "id": "s1",
+    "text": "More words.",
+    "context": [
+     "Plain page"
+    ],
+    "heading": "Second"
+   }
+  ]
+ },
+ {
+  "source": "root.md",
+  "title": "root",
+  "fields": {},
+  "sections": [
+   {
+    "id": "s0",
+    "text": "Text at the root, before any heading, with a link.",
+    "context": []
+   }
+  ]
+ }
+]

@@ -14,11 +14,12 @@
 
 use std::collections::BTreeMap;
 
-use fragment_core::tree::{self, Indexed, TreeDiff};
+use fragment_core::codestorage::TreeEntry;
+use fragment_core::tree::{self, Indexed};
 use fragment_core::{face, manifest, npub, site};
 use fragment_proto::{
     limits, valid_listed_field, valid_listed_kind, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, FragmentKind, IdentityKind, ListedDecl, OpDecl, OpKind, Role,
-    TriggerDecl, TriggerOn,
+    StorageAccess, TriggerDecl, TriggerOn,
 };
 use fragment_templates::{blessed, File};
 use serde::Deserialize;
@@ -28,8 +29,14 @@ use worker::*;
 
 use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
-use crate::fragment::{json_response, missing, Caller, Facts, FragmentCell, MetaKey};
+use crate::fragment::{json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
+use fragment_core::gather::Gathered;
+
+/// A test fleet's `hold-install` (ops.rs) holds a pending install at most
+/// this many polls of `TEST_HOLD_INSTALL_POLL_MS` (a minute).
+const TEST_HOLD_INSTALL_POLLS: u32 = 3_000;
+const TEST_HOLD_INSTALL_POLL_MS: u64 = 20;
 
 /// Platform code that runs in the facet around the author's App class.
 pub const PLATFORM_JS: &str = include_str!("../platform.mjs");
@@ -42,7 +49,7 @@ pub const QUIET_PASS_MS: i64 = 24 * 3600 * 1000;
 /// fails to follow: a token lives 15 minutes, so this is generous for
 /// whoever pushes with it, and outlasts a code.storage outage of hours.
 const MAY_LAG_MS: i64 = 24 * 3600 * 1000;
-pub const REFS: [&str; 2] = ["main", "live"];
+pub const REFS: [&str; 2] = fragment_proto::PINNED_REFS;
 
 pub struct PinMove {
     pub changed: bool,
@@ -121,6 +128,12 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
                 vec![channel.as_str().into(), names(&listed.kinds).into(), names(&listed.fields).into()],
             )?;
         }
+        // the kinds it keeps each poster's newest of, and a table of its own
+        if !d.newest.is_empty() {
+            assert!(d.newest.len() <= limits::NEWEST_KINDS_MAX, "a checked manifest keeps a bounded number of kinds");
+            let kinds = serde_json::to_string(&d.newest).expect("names serialize");
+            sql.exec("INSERT INTO code_channel_newest (channel, kinds) VALUES (?, ?)", vec![channel.as_str().into(), kinds.into()])?;
+        }
     }
     for (i, t) in code.triggers.iter().enumerate() {
         let (kind, target) = t.on.parts();
@@ -128,6 +141,12 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
         let from = t.from.map_or(SqlStorageValue::Null, |k| k.as_str().into());
         sql.exec("INSERT INTO code_triggers (idx, kind, target, run, from_kind) VALUES (?, ?, ?, ?, ?)", vec![idx, kind.into(), target.into(), t.run.as_str().into(), from])?;
     }
+    // what is kept of a kind no channel keeps now goes (one kept again
+    // starts from its next record): bounded, `NEWEST_KEPT_MAX` a channel
+    sql.exec(
+        "DELETE FROM newest WHERE NOT EXISTS (SELECT 1 FROM code_channel_newest c, json_each(c.kinds) k WHERE c.channel = newest.channel AND k.value = newest.kind)",
+        None,
+    )?;
     let count = |table: &str| -> Result<usize> {
         let rows: Vec<Value> = sql.exec(&format!("SELECT COUNT(*) AS n FROM {table}"), None)?.to_array()?;
         Ok(rows.first().and_then(|r| r["n"].as_u64()).expect("COUNT answers a row") as usize)
@@ -137,12 +156,13 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
     assert_eq!(count("code_channels")?, code.channels.len(), "every channel is stored");
     assert_eq!(count("code_channel_from")?, code.channels.values().filter(|d| d.from.is_some()).count(), "every channel's posters' kind is stored");
     assert_eq!(count("code_channel_listed")?, code.channels.values().filter(|d| d.listed.is_some()).count(), "every channel's listed is stored");
+    assert_eq!(count("code_channel_newest")?, code.channels.values().filter(|d| !d.newest.is_empty()).count(), "every channel's newest is stored");
     assert_eq!(count("code_triggers")?, code.triggers.len(), "every trigger is stored");
     Ok(())
 }
 
 fn clear_installed(sql: &SqlStorage) -> Result<()> {
-    for table in ["code_ops", "code_op_descriptions", "code_channels", "code_channel_from", "code_channel_listed", "code_triggers"] {
+    for table in ["code_ops", "code_op_descriptions", "code_channels", "code_channel_from", "code_channel_listed", "code_channel_newest", "code_triggers"] {
         sql.exec(&format!("DELETE FROM {table}"), None)?;
     }
     Ok(())
@@ -173,7 +193,7 @@ fn op_decl(row: OpRow) -> CellResult<(String, OpDecl)> {
     let kind = OpKind::parse(&row.kind).ok_or_else(|| stored(&format!("operation {}", row.op), format!("kind {:?}", row.kind)))?;
     let role = Role::parse(&row.role).ok_or_else(|| stored(&format!("operation {}", row.op), format!("role {:?}", row.role)))?;
     let input = match row.input {
-        Some(text) => Some(serde_json::from_str(&text).map_err(|e| stored(&format!("operation {}", row.op), e))?),
+        Some(text) => Some(crate::json_text(&text).map_err(|e| stored(&format!("operation {}", row.op), e))?),
         None => None,
     };
     Ok((row.op, OpDecl { kind, role, input, ephemeral: row.ephemeral != 0, description: row.description }))
@@ -190,12 +210,15 @@ struct ChannelRow {
     /// From `code_channel_listed`, joined (`CHANNELS`): JSON arrays of names.
     listed_kinds: Option<String>,
     listed_fields: Option<String>,
+    /// From `code_channel_newest`, joined (`CHANNELS`): a JSON array of kinds.
+    newest_kinds: Option<String>,
 }
 
 /// The installed channels' rows, each with its posters' kind and what its
 /// members' lists show of it (tables of their own: crates/core/migrations/fragment).
-const CHANNELS: &str = "SELECT c.channel, c.read, c.post, c.signed_in, f.from_kind, l.kinds AS listed_kinds, l.fields AS listed_fields
-  FROM code_channels c LEFT JOIN code_channel_from f ON f.channel = c.channel LEFT JOIN code_channel_listed l ON l.channel = c.channel";
+const CHANNELS: &str = "SELECT c.channel, c.read, c.post, c.signed_in, f.from_kind, l.kinds AS listed_kinds, l.fields AS listed_fields, n.kinds AS newest_kinds
+  FROM code_channels c LEFT JOIN code_channel_from f ON f.channel = c.channel LEFT JOIN code_channel_listed l ON l.channel = c.channel
+  LEFT JOIN code_channel_newest n ON n.channel = c.channel";
 
 fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
     let role = |key: &str, text: &str| Role::parse(text).ok_or_else(|| stored(&format!("channel {}", row.channel), format!("{key} {text:?}")));
@@ -208,7 +231,7 @@ fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
     let listed = match (row.listed_kinds.as_deref(), row.listed_fields.as_deref()) {
         (None, None) => None,
         (Some(kinds), Some(fields)) => {
-            let names = |text: &str| serde_json::from_str::<Vec<String>>(text).map_err(|e| stored(&format!("channel {}", row.channel), format!("listed: {e}")));
+            let names = |text: &str| crate::json_text::<Vec<String>>(text).map_err(|e| stored(&format!("channel {}", row.channel), format!("listed: {e}")));
             let listed = ListedDecl { kinds: names(kinds)?, fields: names(fields)? };
             // written from a checked manifest: anything else is corruption
             let valid = !listed.kinds.is_empty()
@@ -223,7 +246,18 @@ fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
         }
         _ => return Err(stored(&format!("channel {}", row.channel), "listed holds kinds without fields, or fields without kinds")),
     };
-    Ok((row.channel, ChannelDecl { read, post, signed_in: row.signed_in != 0, from, listed }))
+    let newest = match row.newest_kinds.as_deref() {
+        None => vec![],
+        Some(text) => {
+            let kinds = crate::json_text::<Vec<String>>(text).map_err(|e| stored(&format!("channel {}", row.channel), format!("newest: {e}")))?;
+            // written from a checked manifest: anything else is corruption
+            if kinds.is_empty() || kinds.len() > limits::NEWEST_KINDS_MAX || !kinds.iter().all(|k| valid_listed_kind(k)) {
+                return Err(stored(&format!("channel {}", row.channel), "its newest kinds"));
+            }
+            kinds
+        }
+    };
+    Ok((row.channel, ChannelDecl { read, post, signed_in: row.signed_in != 0, from, listed, newest }))
 }
 
 #[derive(Deserialize)]
@@ -235,9 +269,81 @@ struct TriggerRow {
     from_kind: Option<String>,
 }
 
+/// A pin's move, every read done (`refresh_pin`): what its publish writes.
+struct Moved {
+    which: String,
+    to: String,
+    /// The tree's changes (`tree::diff`): paths gone, and files added or changed.
+    removed: Vec<String>,
+    upserts: Vec<TreeEntry>,
+    /// Each changed path's pointer at `to`, or none (`read_pointers`).
+    pointers: Vec<(String, Option<fragment_core::blob::Pointer>)>,
+    /// The listing's files, which the index holds once written.
+    files: usize,
+}
+
+impl Moved {
+    /// Publishes the move: its pointer rows, its tree rows and the pin, in
+    /// the caller's one transaction (`js::transaction_sync`), awaiting
+    /// nothing. The tree's rows are its changes alone, so a one-file commit
+    /// writes one row whatever the tree's size. The index then holds one
+    /// row per file of the listing, or the listing named a path twice: then
+    /// it is refused, all of it rolled back, and the next refresh diffs
+    /// again from what was there.
+    fn publish(&self, sql: &SqlStorage) -> CellResult<()> {
+        let which = self.which.as_str();
+        for (path, pointer) in &self.pointers {
+            sql.exec("DELETE FROM pointers WHERE ref = ? AND path = ?", vec![which.into(), path.as_str().into()])?;
+            if let Some(p) = pointer {
+                sql.exec("INSERT INTO pointers (ref, path, sha, size) VALUES (?, ?, ?, ?)", vec![which.into(), path.as_str().into(), p.sha256.as_str().into(), SqlStorageValue::Integer(p.size as i64)])?;
+            }
+        }
+        for batch in self.removed.chunks(TREE_BATCH) {
+            let marks = vec!["?"; batch.len()].join(", ");
+            let mut binds: Vec<SqlStorageValue> = Vec::with_capacity(batch.len() + 1);
+            binds.push(which.into());
+            binds.extend(batch.iter().map(|p| SqlStorageValue::from(p.as_str())));
+            sql.exec(&format!("DELETE FROM tree WHERE ref = ? AND path IN ({marks})"), binds)?;
+        }
+        for batch in self.upserts.chunks(TREE_BATCH) {
+            let tuples = vec!["(?, ?, ?, ?, ?)"; batch.len()].join(", ");
+            let mut binds: Vec<SqlStorageValue> = Vec::with_capacity(batch.len() * 5);
+            for e in batch {
+                binds.extend([which.into(), e.path.as_str().into(), SqlStorageValue::Integer(e.size as i64), e.mode.as_str().into(), e.last_commit_sha.as_str().into()]);
+            }
+            sql.exec(
+                &format!(
+                    "INSERT INTO tree (ref, path, size, mode, last_commit) VALUES {tuples}
+                     ON CONFLICT (ref, path) DO UPDATE SET size = excluded.size, mode = excluded.mode, last_commit = excluded.last_commit"
+                ),
+                binds,
+            )?;
+        }
+        let held = sql.exec("SELECT COUNT(*) AS n FROM tree WHERE ref = ?", vec![which.into()])?.to_array::<Value>()?.first().and_then(|r| r["n"].as_u64()).expect("COUNT answers a row");
+        if held != self.files as u64 {
+            return Err(CellError::host(format!("{which}'s index would hold {held} files after the move, not the listing's {} (a path listed twice?)", self.files)));
+        }
+        sql.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![MetaKey::pin(which).key().into(), self.to.as_str().into()])?;
+        Ok(())
+    }
+}
+
 impl FragmentCell {
     pub(crate) fn cs(&self) -> CellResult<Cs<'_>> {
         Ok(Cs::new(self.cfg.codestorage(), &self.env))
+    }
+
+    /// Its repo, for a writer of it (a commit, a deploy, a storage token's
+    /// push): while its template is still to land (`Stage::waits_template`),
+    /// the same seed the create and the alarm run (one at a time:
+    /// `seeding`) lands it first, its repo, commit, deploy and install, so a
+    /// write lands on top of its template, never under it. A seed that
+    /// cannot land fails the writer as code.storage failed it.
+    pub(crate) async fn repo_ready(&self) -> CellResult<String> {
+        if self.stage()?.waits_template() {
+            self.seed().await?;
+        }
+        self.must(MetaKey::Repo)
     }
 
     pub(crate) fn pin(&self, which: &str) -> CellResult<Option<String>> {
@@ -256,15 +362,25 @@ impl FragmentCell {
     /// (main) or the code (live) follow. Callers hold `self.plane`.
     async fn refresh_pin(&self, which: &str) -> CellResult<PinMove> {
         let [repo, from] = self.metas([MetaKey::Repo, MetaKey::pin(which)])?;
-        let repo = repo.ok_or_else(|| missing(MetaKey::Repo))?;
+        // no repo yet (its template seeds after its create's answer,
+        // publish.rs `seeds_later`): no branch, so nothing pinned moved
+        let Some(repo) = repo else {
+            assert!(from.is_none(), "a pin is a commit of a repo made");
+            return Ok(PinMove { changed: false, to: None, paths: vec![], removed: vec![] });
+        };
         let cs = self.cs()?;
         let Some(to) = cs.branch_head(&repo, which).await? else {
             if from.is_none() {
                 return Ok(PinMove { changed: false, to: None, paths: vec![], removed: vec![] });
             }
-            self.exec("DELETE FROM tree WHERE ref = ?", vec![which.into()])?;
-            self.exec("DELETE FROM pointers WHERE ref = ?", vec![which.into()])?;
-            self.del_meta(MetaKey::pin(which))?;
+            let (sql, which_owned, pin) = (self.sql(), which.to_string(), MetaKey::pin(which).key());
+            // all or none, as a move is published
+            js::transaction_sync(&self.raw, move || {
+                sql.exec("DELETE FROM tree WHERE ref = ?", vec![which_owned.as_str().into()])?;
+                sql.exec("DELETE FROM pointers WHERE ref = ?", vec![which_owned.as_str().into()])?;
+                sql.exec("DELETE FROM meta WHERE key = ?", vec![pin.into()])?;
+                Ok(())
+            })?;
             self.event("git.refresh", &format!("{which}: the branch is gone; pin cleared"), json!({ "ref": which, "from": from }));
             return Ok(PinMove { changed: true, to: None, paths: vec![], removed: vec![] });
         };
@@ -273,13 +389,25 @@ impl FragmentCell {
         }
         let entries = cs.tree(&repo, &to).await?;
         let prior: BTreeMap<String, Indexed> =
-            self.tree_rows(which)?.into_iter().map(|r| (r.path, Indexed { size: r.size, mode: r.mode, last_commit: r.last_commit })).collect();
+            self.tree_rows(which)?.into_iter().map(|r| (r.path, Indexed { size: r.size, mode: r.mode, last_commit: r.last_commit })).gathered();
         let diff = tree::diff(&prior, &entries);
         let paths = diff.paths();
         let sizes: std::collections::HashMap<&str, u64> = entries.iter().map(|e| (e.path.as_str(), e.size)).collect();
-        self.track_pointers(which, &to, &paths, &sizes).await?;
-        self.write_tree(which, &diff, entries.len())?;
-        self.set_meta(MetaKey::pin(which), &to)?;
+        // every read first: the move is then published in one synchronous
+        // transaction, its pointer rows, tree rows and pin together, so no
+        // reader sees one without the others and no crash keeps half of it
+        // (FIN-407)
+        let pointers = self.read_pointers(&to, &paths, &sizes).await?;
+        let moved = Moved {
+            which: which.to_string(),
+            to: to.clone(),
+            removed: diff.removed.iter().map(|p| p.to_string()).collect(),
+            upserts: diff.upserts.iter().map(|e| (*e).clone()).collect(),
+            pointers,
+            files: entries.len(),
+        };
+        let sql = self.sql();
+        js::transaction_sync(&self.raw, move || moved.publish(&sql))?;
         self.event(
             "git.refresh",
             &format!("{which}: {} → {} ({} files, {} changed)", short(from.as_deref()), short(Some(&to)), entries.len(), paths.len()),
@@ -289,40 +417,7 @@ impl FragmentCell {
         Ok(PinMove { changed: true, to: Some(to), paths, removed })
     }
 
-    /// Writes a pin move's changes to its index (`tree::diff`): deletes
-    /// the paths gone and upserts the ones added or changed, so a one-file
-    /// commit writes one row whatever the tree's size. The index then
-    /// holds one row per file of the listing, `files`, or the listing
-    /// named a path twice: then the pin does not move, and the next
-    /// refresh diffs again from what was written.
-    fn write_tree(&self, which: &str, diff: &TreeDiff<'_>, files: usize) -> CellResult<()> {
-        for batch in diff.removed.chunks(TREE_BATCH) {
-            let marks = vec!["?"; batch.len()].join(", ");
-            let mut binds: Vec<SqlStorageValue> = Vec::with_capacity(batch.len() + 1);
-            binds.push(which.into());
-            binds.extend(batch.iter().map(|p| SqlStorageValue::from(*p)));
-            self.exec(&format!("DELETE FROM tree WHERE ref = ? AND path IN ({marks})"), binds)?;
-        }
-        for batch in diff.upserts.chunks(TREE_BATCH) {
-            let tuples = vec!["(?, ?, ?, ?, ?)"; batch.len()].join(", ");
-            let mut binds: Vec<SqlStorageValue> = Vec::with_capacity(batch.len() * 5);
-            for e in batch {
-                binds.extend([which.into(), e.path.as_str().into(), SqlStorageValue::Integer(e.size as i64), e.mode.as_str().into(), e.last_commit_sha.as_str().into()]);
-            }
-            self.exec(
-                &format!(
-                    "INSERT INTO tree (ref, path, size, mode, last_commit) VALUES {tuples}
-                     ON CONFLICT (ref, path) DO UPDATE SET size = excluded.size, mode = excluded.mode, last_commit = excluded.last_commit"
-                ),
-                binds,
-            )?;
-        }
-        let held = self.rows("SELECT COUNT(*) AS n FROM tree WHERE ref = ?", vec![which.into()])?.first().and_then(|r| r["n"].as_u64()).expect("COUNT answers a row");
-        if held != files as u64 {
-            return Err(CellError::host(format!("{which}'s index holds {held} files after the move, not the listing's {files} (a path listed twice?)")));
-        }
-        Ok(())
-    }
+
 
     /// What follows a pin: the manifest from main, the code from live.
     /// Each records the commit it was read from, so a read that failed
@@ -389,17 +484,21 @@ impl FragmentCell {
     /// that changes it is a fresh worker, as a new commit is. Its own repo
     /// carries no code: a live commit with any is refused, saying to fork.
     async fn install_code(&self, live: Option<&str>) -> CellResult<()> {
-        let repo = self.must(MetaKey::Repo)?;
         let Some(sha) = live else {
             self.exec("DELETE FROM code", vec![])?;
-            clear_installed(&self.sql())?;
+            // none installed, through the one path every install takes (so
+            // what was kept of a kind goes too: `newest`)
+            store_installed(&self.sql(), &Installed { operations: &BTreeMap::new(), channels: &BTreeMap::new(), triggers: &[] })?;
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
+            self.del_meta(MetaKey::FilesLive)?;
+            self.del_meta(MetaKey::ImmutableLive)?;
             self.del_meta(MetaKey::Blessed)?;
             self.del_meta(MetaKey::CodeError)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
             return Ok(());
         };
+        let repo = self.must(MetaKey::Repo)?;
         let cs = self.cs()?;
         let manifest = match self.tree_row("live", "fragment.json")? {
             None => manifest::Manifest::default(),
@@ -411,6 +510,45 @@ impl FragmentCell {
                 }
             }
         };
+        self.install(manifest, Some((&cs, repo.as_str())), sha).await
+    }
+
+    /// A fragment whose template seeds after its create's answer
+    /// (publish.rs `seeds_later`) runs that template from the release
+    /// until its first commit lands: installed as live's will be, from the
+    /// same `fragment.json` its seed commits (`blessed_manifest_bytes`),
+    /// with no commit (`""`, as the code's sha and the status's repo say).
+    /// The seed's own install, from live, replaces it.
+    ///
+    /// Callers hold `self.plane`, as every install's do: an end of its life
+    /// waits for it, and a seed's install from live (under the same lock)
+    /// comes wholly before or after it. One that came before stands: this
+    /// installs nothing over live.
+    pub(crate) async fn install_pending(&self) -> CellResult<()> {
+        let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(()) };
+        if self.pin("live")?.is_some() {
+            return Ok(());
+        }
+        let title = self.meta(MetaKey::TemplateTitle)?;
+        let bytes = crate::publish::blessed_manifest_bytes(&which, title.as_deref());
+        let manifest = manifest::parse(&bytes).map_err(|e| CellError::host(format!("the {which} template's own fragment.json: {e}")))?;
+        assert_eq!(manifest.template.as_deref(), Some(which.as_str()), "a pending template's manifest names it");
+        // test fleets: `hold-install` holds it here, its manifest read and
+        // its release's reads and writes still to come (bounded)
+        for _ in 0..TEST_HOLD_INSTALL_POLLS {
+            if !(self.cfg.test_hooks && self.test_hold_install.get().0) {
+                break;
+            }
+            self.test_hold_install.set((true, true));
+            worker::Delay::from(std::time::Duration::from_millis(TEST_HOLD_INSTALL_POLL_MS)).await;
+        }
+        self.test_hold_install.set((self.test_hold_install.get().0, false));
+        self.install(manifest, None, "").await
+    }
+
+    /// Installs `manifest`'s app, read at `sha` of `repo` (`None`: a
+    /// blessed template before its repo, `install_pending`).
+    async fn install(&self, manifest: manifest::Manifest, repo: Option<(&Cs<'_>, &str)>, sha: &str) -> CellResult<()> {
         // a blessed template's fragment runs the release's manifest, with its own face
         let blessed = manifest.template.clone();
         let manifest = match &blessed {
@@ -445,23 +583,51 @@ impl FragmentCell {
         let (source, modules, loader_id) = match code {
             None => (None, BTreeMap::new(), String::new()),
             Some(Code::Release(c)) => (Some(c.source), c.modules, c.id),
-            Some(Code::Live) => match self.read_live_code(&cs, &repo, sha).await? {
-                Ok((source, modules, id)) => (Some(source), modules, id),
-                Err(why) => return self.code_refused(sha, &why),
-            },
+            Some(Code::Live) => {
+                let (cs, repo) = repo.expect("code of its own is a commit's: a pending install is a blessed template's");
+                match self.read_live_code(cs, repo, sha).await? {
+                    Ok((source, modules, id)) => (Some(source), modules, id),
+                    Err(why) => return self.code_refused(sha, &why),
+                }
+            }
         };
         // an agent's picture, checked as a write of it is (docs/api.md, "An
         // agent's name and picture"): a live commit with one that is not is refused
-        let picture = match manifest.kind() {
-            FragmentKind::Agent => match self.read_picture(&cs, &repo, sha).await? {
+        // (none before its first commit: a pending install's)
+        let picture = match (manifest.kind(), repo) {
+            (FragmentKind::Agent, Some((cs, repo))) => match self.read_picture(cs, repo, sha).await? {
                 Ok(p) => p,
                 Err(why) => return self.code_refused(sha, &why),
             },
             _ => None,
         };
+        // Installed triggers start their runs in the step that installs, so
+        // the owner's standing (which blocks them past the overdraft) is
+        // read before it, and only when there are any.
+        let read_only = match manifest.triggers.iter().any(|t| matches!(t.on, TriggerOn::Installed(_))) {
+            true => self.read_only().await?,
+            false => None,
+        };
+        // From here to the end nothing awaits, so what this install writes,
+        // the runs it starts, and the pin it follows (`follow`; a blessed
+        // one's release) commit as one: an install cut short leaves none of
+        // them and is done again whole, its runs started once.
         match &manifest.meta {
             Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta(MetaKey::MetaLive)?,
+        }
+        match &manifest.files {
+            Some(files) => self.set_meta(MetaKey::FilesLive, &serde_json::to_string(files).expect("files serialize"))?,
+            None => self.del_meta(MetaKey::FilesLive)?,
+        }
+        // with the commit they describe: served only beside its tree
+        // (site.rs `declared_immutable`)
+        match manifest.immutable.is_empty() {
+            false => {
+                let declared = fragment_core::site::Declared { commit: sha.to_string(), paths: manifest.immutable.clone() };
+                self.set_meta(MetaKey::ImmutableLive, &serde_json::to_string(&declared).expect("paths serialize"))?
+            }
+            true => self.del_meta(MetaKey::ImmutableLive)?,
         }
         match &blessed {
             Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template whose manifest was read is blessed")))?,
@@ -485,12 +651,16 @@ impl FragmentCell {
             None => self.del_meta(MetaKey::InboxSecret)?,
         }
         // a connector that installs other code (a fork, another template, none)
-        // is no door from then on, nor its owner's alone to edit (doors.rs)
+        // is no door from then on, nor its owner's alone to edit (doors.rs),
+        // and keeps none of its secrets (Paul, 2026-10-31): what its owner set
+        // while it was theirs alone (its bot's token, its webhook's secret) is
+        // not the new code's, nor its editors', to send
         if let Some(t) = self.meta(MetaKey::DoorTemplate)? {
             if fragment_core::door::blessed_template(&loader_id) != Some(t.as_str()) {
                 self.del_meta(MetaKey::DoorTemplate)?;
                 self.unbind_door("its code is no longer its connector's")?;
-                self.event("door.unmade", &format!("ran code that is not the {t} connector's: never a door again"), json!({ "template": t, "code": loader_id }));
+                let secrets = self.drop_secrets()?;
+                self.event("door.unmade", &format!("ran code that is not the {t} connector's: never a door again, its secrets removed ({})", secrets.len()), json!({ "template": t, "code": loader_id, "secrets": secrets }));
             }
         }
         let Some(source) = source else {
@@ -540,7 +710,7 @@ impl FragmentCell {
             ),
             json!({ "sha": sha, "code": loader_id, "operations": manifest.operations.keys().collect::<Vec<_>>() }),
         );
-        Ok(())
+        self.fire_installed(&manifest.triggers, sha, &loader_id, read_only)
     }
 
     /// The live commit's `app.mjs` and `applib/` modules, and their
@@ -606,6 +776,9 @@ impl FragmentCell {
     }
 
     fn code_refused(&self, sha: &str, why: &str) -> CellResult<()> {
+        // live's tree is the refused commit's: the last install's kept paths
+        // describe another (its commit's, which the serving path compares too)
+        self.del_meta(MetaKey::ImmutableLive)?;
         self.set_meta(MetaKey::CodeError, &format!("live {}: {why}", short(Some(sha))))?;
         self.event("code.refused", &format!("live {} not installed: {why}", short(Some(sha))), json!({ "sha": sha }));
         Ok(())
@@ -635,8 +808,12 @@ impl FragmentCell {
             if !self.blessed_stale()? {
                 return Ok(());
             }
-            let live = self.meta(MetaKey::PinLive)?;
-            self.install_code(live.as_deref()).await?;
+            match self.meta(MetaKey::PinLive)? {
+                Some(live) => self.install_code(Some(&live)).await?,
+                // before its first deploy (publish.rs `seeds_later`): its template from the release again
+                None if self.stage()?.waits_template() => self.install_pending().await?,
+                None => self.install_code(None).await?,
+            }
             self.search_fence()?;
             self.listed_fence()?;
         }
@@ -646,7 +823,8 @@ impl FragmentCell {
 
     /// Refreshes pins; a move of main notifies the change feed and starts
     /// the runs its file triggers name. A move of live wants its preview
-    /// card, shot later from the alarm (card.rs).
+    /// card, shot later from the alarm (card.rs), and so does main's first
+    /// move after live's shot (its content changed under the card).
     pub(crate) async fn interpret(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let out = self.interpret_locked(refs).await?;
         // the file triggers' runs, and the alarm for newly installed schedules
@@ -655,6 +833,12 @@ impl FragmentCell {
             // a move of live wants its preview card, which the alarm shoots (card.rs)
             if let (true, "live", Some(live)) = (moved.changed, which.as_str(), moved.to.as_deref()) {
                 if let Err(e) = self.card_wanted(live) {
+                    self.event("card.want-failed", &e.message, json!({ "code": e.code }));
+                }
+            }
+            // main moved under live's card: its first change since the shot is shot (card.rs)
+            if moved.changed && which == "main" {
+                if let Err(e) = self.card_content_moved() {
                     self.event("card.want-failed", &e.message, json!({ "code": e.code }));
                 }
             }
@@ -695,7 +879,12 @@ impl FragmentCell {
     /// check that fails is not recorded, so the next request asks again.
     /// `facts` follows what moved.
     pub(crate) async fn ensure_pins(&self, facts: &mut Facts) -> CellResult<()> {
-        if facts.pins_checked {
+        // its template still to land: only its seed moves its pins (every
+        // writer waits for it: `repo_ready`), so nothing is asked of
+        // code.storage, whose outage then leaves a chat serving its
+        // template from the release (`install_pending`), repo made or not;
+        // asked once the seed has landed
+        if facts.pins_checked || self.stage()?.waits_template() {
             return Ok(());
         }
         let missing: Vec<&str> = REFS.into_iter().filter(|w| facts.pin(w).is_none()).collect();
@@ -721,7 +910,15 @@ impl FragmentCell {
     /// move was followed when it was made or refreshed, so a quiet pass
     /// asks code.storage nothing.
     pub(crate) async fn poll(&self) {
-        if let Err(e) = self.interpret(&REFS).await {
+        let polled = match self.stage() {
+            // its template still to land: only its seed moves its pins
+            // (`ensure_pins`), and a branch there now is a deleted life's,
+            // its repo kept (fragment_core::seed)
+            Ok(stage) if stage.waits_template() => return,
+            Ok(_) => self.interpret(&REFS).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = polled {
             self.event("git.poll-failed", &e.message, json!({ "code": e.code }));
         }
     }
@@ -734,18 +931,8 @@ impl FragmentCell {
     /// A fragment nothing touches (a chat, from its second day) is woken
     /// once a day, and asks code.storage nothing.
     pub(crate) fn busy(&self) -> CellResult<bool> {
-        #[derive(Deserialize)]
-        struct Busy {
-            pending: i64,
-            running: i64,
-        }
-        let rows: Vec<Busy> = self.typed(
-            "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?) AS pending,
-               EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running",
-            vec![MetaKey::TemplatePending.key().into()],
-        )?;
-        let b = rows.into_iter().next().expect("a SELECT without FROM answers one row");
-        Ok(self.pins_may_lag()? || b.pending != 0 || b.running != 0)
+        let running = self.count("SELECT EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS n")? != 0;
+        Ok(self.pins_may_lag()? || self.stage()?.waits_template() || running)
     }
 
     /// Whether the pins may lag the repo: in the last day a storage token
@@ -763,9 +950,15 @@ impl FragmentCell {
         self.schedule().await
     }
 
-    pub(crate) async fn refresh(&self, caller: &Caller) -> CellResult<Response> {
+    /// `POST /api/refresh`: `refs` read again (the one its writer moved,
+    /// or both), their moves taken before it answers. Its template still to
+    /// land, that lands first, as for any writer (`repo_ready`): till then
+    /// nothing this life wrote is there, and a branch there is a deleted
+    /// life's, its repo kept, which pinned would be served as this one's.
+    pub(crate) async fn refresh(&self, caller: &Caller, refs: &[&str]) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
-        let moved = self.interpret(&REFS).await?;
+        self.repo_ready().await?;
+        let moved = self.interpret(refs).await?;
         let refs: serde_json::Map<String, Value> = moved
             .into_iter()
             .map(|(which, m)| {
@@ -775,37 +968,59 @@ impl FragmentCell {
                 };
                 (which, v)
             })
-            .collect();
+            .gathered();
         json_response(&json!({ "ok": true, "refs": refs }))
     }
 
-    pub(crate) async fn storage_token(&self, caller: &Caller) -> CellResult<Response> {
-        self.require(caller, false, Role::Editor)?;
-        // a token writes the repo for its 15 minutes whatever happens to its
-        // holder: an org's fragment, whose people an offboarding removes at
-        // once, hands out none
+    /// `GET /api/storage-token`: a token that writes the repo (an editor
+    /// and up), or with `?access=read` one that only reads it (viewer and
+    /// up). Either reads the repo's whole history, not only main's files,
+    /// so it is decided by membership (`access::repo_role`): a visibility
+    /// floor, a share link, or an agent of theirs that is in lends none.
+    pub(crate) async fn storage_token(&self, caller: &Caller, asked: StorageAccess) -> CellResult<Response> {
+        let write = asked == StorageAccess::Write;
+        let needs = if write { Role::Editor } else { Role::Viewer };
+        // whoever may not have the role at all is refused as anywhere (401,
+        // 403); a share link counts for nothing here, and a public
+        // fragment's floor is below a viewer's
+        self.require(caller, false, needs)?;
+        // a token reads (or writes) the repo for its 15 minutes whatever
+        // happens to its holder: an org's fragment, whose people an
+        // offboarding removes at once, hands out none, to read or to write
         if self.owner()?.org().is_some() {
             return Err(CellError::new(ErrorCode::Forbidden, "an org's fragment hands out no storage token: an offboarding could not take one back"));
         }
-        // its token writes the repo: a deploy's first step
-        self.writable().await?;
+        // the rest read as a viewer through an agent of theirs that is a member
+        if !fragment_core::access::repo_role(self.standing(caller, false)?).is_some_and(|r| r >= needs) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a storage token reads the repo's whole history, so it is its members' alone: reading it through your agent's membership lends none"));
+        }
+        if write {
+            // its token writes the repo: a deploy's first step
+            self.writable().await?;
+        }
 
         let who = self.caller_id(caller)?;
-        let repo = self.must(MetaKey::Repo)?;
-        let token = self.cs()?.storage_token(&repo, who).await?;
+        // its template still to land: its seed lands it first (`repo_ready`),
+        // so the token's holder reads and pushes on top of it
+        let repo = self.repo_ready().await?;
+        let token = self.cs()?.storage_token(&repo, who, write).await?;
+        let scopes = if write { "git:read+git:write" } else { "git:read" };
         self.event(
             "storage-token.minted",
-            &format!("{} → repo {repo}, git:read+git:write, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),
-            json!({ "actor": npub::display(who), "key": caller.key().map(npub::display), "repo": repo, "expiresAt": token.expires_at }),
+            &format!("{} → repo {repo}, {scopes}, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),
+            json!({ "actor": npub::display(who), "key": caller.key().map(npub::display), "repo": repo, "expiresAt": token.expires_at, "write": write }),
         );
-        self.may_lag().await?;
+        if write {
+            // its holder may push when they like, and not refresh after
+            self.may_lag().await?;
+        }
         json_response(&token)
     }
 
     pub(crate) fn manifest(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         match self.meta(MetaKey::ManifestMain)? {
-            Some(text) => json_response(&serde_json::from_str::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?),
+            Some(text) => json_response(&crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?),
             None => Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")),
         }
     }
@@ -816,7 +1031,7 @@ impl FragmentCell {
         self.ensure_pins(&mut facts).await?;
         let blobs = self.pointers_at("main")?;
         let rows = self.tree_rows("main")?;
-        let release = self.release_data(&rows.iter().map(|r| r.path.as_str()).collect())?;
+        let release = self.release_data(&rows.iter().map(|r| r.path.as_str()).gathered())?;
         let mut files: Vec<Value> = rows
             .into_iter()
             .map(|r| {
@@ -832,7 +1047,8 @@ impl FragmentCell {
             .collect();
         // a blessed template's data, beneath the fragment's own files (decision 40)
         files.extend(release.iter().map(|d| json!({ "path": d.path, "size": d.size, "mode": "100644", "lastCommitSha": blessed::data_version(d), "machinery": false, "release": true })));
-        files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        // each path once (`release_data` leaves out the fragment's own), so no order of equals to keep
+        files.sort_unstable_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         json_response(&json!({ "ref": facts.pin_main, "files": files }))
     }
 
@@ -853,6 +1069,14 @@ impl FragmentCell {
         let Some(installed) = self.meta(MetaKey::Blessed)? else { return Ok(None) };
         let template = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
         Ok(blessed::data_file(template, path))
+    }
+
+    /// The icon of the blessed template live runs (blessed.rs `icon`), when
+    /// it carries one: the fragment's own, until it has one of its own.
+    pub(crate) fn release_icon(&self) -> CellResult<Option<&'static File>> {
+        let Some(installed) = self.meta(MetaKey::Blessed)? else { return Ok(None) };
+        let template = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
+        Ok(blessed::icon(template))
     }
 
     /// A release's data file as a file route answers one, its bytes
@@ -884,7 +1108,8 @@ impl FragmentCell {
     /// Streams a file's bytes from git at a pin.
     pub(crate) async fn stream_git(&self, facts: &Facts, which: &str, path: &str) -> CellResult<Response> {
         let pin = facts.pin(which).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no {which} pin yet")))?;
-        let upstream = self.cs()?.stream(&facts.repo, pin, path).await?;
+        let repo = facts.repo.as_deref().expect("a pin is a commit of a repo made");
+        let upstream = self.cs()?.stream(repo, pin, path).await?;
         let headers = Headers::new();
         headers.set("content-type", site::mime_for_path(path))?;
         headers.set("x-fragment-ref", pin)?;
@@ -916,7 +1141,7 @@ impl FragmentCell {
 
     /// The installed operations (from the live commit); none without code.
     pub(crate) fn operations(&self) -> CellResult<BTreeMap<String, OpDecl>> {
-        self.typed::<OpRow>(&format!("{OPS} ORDER BY o.op"), vec![])?.into_iter().map(op_decl).collect()
+        self.typed::<OpRow>(&format!("{OPS} ORDER BY o.op"), vec![])?.into_iter().map(op_decl).try_gathered()
     }
 
     /// The declared operation, or why there is none: no code, or no such
@@ -948,7 +1173,17 @@ impl FragmentCell {
 
     /// The app channels the live code declares.
     pub(crate) fn declared_channels(&self) -> CellResult<BTreeMap<String, ChannelDecl>> {
-        self.typed::<ChannelRow>(&format!("{CHANNELS} ORDER BY c.channel"), vec![])?.into_iter().map(channel_decl).collect()
+        self.typed::<ChannelRow>(&format!("{CHANNELS} ORDER BY c.channel"), vec![])?.into_iter().map(channel_decl).try_gathered()
+    }
+
+    /// The names of the app channels the live code declares, and nothing
+    /// else of them (what a call's meta tells the app).
+    pub(crate) fn declared_channel_names(&self) -> CellResult<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Name {
+            channel: String,
+        }
+        Ok(self.typed::<Name>("SELECT channel FROM code_channels ORDER BY channel", vec![])?.into_iter().map(|n| n.channel).collect())
     }
 
     /// An app channel the live code declares (who reads it, who may post
@@ -958,8 +1193,7 @@ impl FragmentCell {
         Ok(rows.into_iter().next().map(channel_decl).transpose()?.map(|(_, d)| d))
     }
 
-    /// The installed triggers, in their manifest's order (a cron trigger's
-    /// schedule is keyed by that index).
+    /// The installed triggers this release knows, in their manifest's order.
     pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
         let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run, from_kind FROM code_triggers ORDER BY idx", vec![])?;
         let mut out = Vec::with_capacity(rows.len());
@@ -967,7 +1201,14 @@ impl FragmentCell {
             if row.idx != i64::try_from(i).expect("triggers are few") {
                 return Err(stored(&format!("trigger {i}"), format!("it is stored at index {}", row.idx)));
             }
-            let on = TriggerOn::from_parts(&row.kind, row.target).ok_or_else(|| stored(&format!("trigger {i}"), format!("kind {:?}", row.kind)))?;
+            // This release tolerates what the next writes: a kind it does
+            // not know (a later release's, read after a rollback) starts
+            // nothing and is listed nowhere, so a new kind needs no
+            // forward-only step (FIN-328's needed one).
+            let Some(on) = TriggerOn::from_parts(&row.kind, row.target) else {
+                console_warn!("{}", json!({ "event": "trigger.unknown", "idx": row.idx, "kind": row.kind, "run": row.run }));
+                continue;
+            };
             let from = match row.from_kind.as_deref() {
                 None => None,
                 Some(k) => Some(IdentityKind::parse(k).ok_or_else(|| stored(&format!("trigger {i}"), format!("from {k:?}")))?),
@@ -1000,5 +1241,6 @@ impl FragmentCell {
 }
 
 fn short(sha: Option<&str>) -> String {
-    sha.map(|s| s.chars().take(12).collect()).unwrap_or_else(|| "(none)".into())
+    // (`""`: a template's install before its first commit, `install_pending`)
+    sha.filter(|s| !s.is_empty()).map(|s| s.chars().take(12).collect()).unwrap_or_else(|| "(none)".into())
 }

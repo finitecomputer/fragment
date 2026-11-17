@@ -182,7 +182,8 @@ pub(crate) fn view(sql: SqlStorage, class: &'static Class) -> CellResult<Value> 
 /// `migrations` section). They answer on a fragment that refuses its
 /// schema too, and make the objects the runner must tell apart:
 ///
-/// - `schema`: its steps (`view`), and the columns of `members` and `runs`;
+/// - `schema`: its steps (`view`), its id (an operator's wake names it by
+///   it), and the columns of `members` and `runs`;
 /// - `schema-rerun`: its migration run again, as a start runs it;
 /// - `schema-unversion`: an object from before versions (no `_schema`,
 ///   and only step 1's objects: the tables and indexes later steps made
@@ -204,6 +205,7 @@ pub(crate) fn fragment_lever(raw: &JsValue, sql: SqlStorage, id: &str, op: &str,
     match (op, shape) {
         ("schema", None) => {
             let mut view = view(sql.clone(), class)?;
+            view["id"] = json!(id);
             view["members"] = json!(columns(&sql, "members")?);
             view["runs"] = json!(columns(&sql, "runs")?);
             Ok(view)

@@ -3,6 +3,7 @@
 // the platform's `ErrorBody` and a success into its fragment_proto type.
 use crate::auth::Identity;
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use fragment_proto::{ErrorBody, ErrorCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -244,13 +245,14 @@ pub struct AgentMode {
 /// The header that names the agent a request acts as.
 pub const AGENT_HEADER: &str = "x-fragment-agent";
 
-/// Whether the platform honors `for` on `path`: a fragment's routes
-/// (`/api/f/…`, and its own at `/f/…`), the fragment list, and the invites
-/// waiting (`/api/invites…`, an agent's for its owner); it refuses it on
-/// every other route (cell/src/lib.rs `signer`).
-pub fn honors_for(path: &str) -> bool {
+/// Whether the platform honors `for` on `method path`: a fragment's routes
+/// (`/api/f/…`, and its own at `/f/…`), the fragment list, the invites
+/// waiting (`/api/invites…`, an agent's for its owner), and a search
+/// across fragments (`POST /api/search`; never the launcher's `GET`); it
+/// refuses it on every other route (cell/src/lib.rs `signer`).
+pub fn honors_for(method: &str, path: &str) -> bool {
     let p = path.split('?').next().unwrap_or(path);
-    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/")
+    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/") || (method == "POST" && p == "/api/search")
 }
 
 impl From<Identity> for Signer {
@@ -260,11 +262,11 @@ impl From<Identity> for Signer {
 }
 
 impl Signer {
-    /// The path as sent: an agent acting for someone names them in `for`
-    /// on the routes that honor it.
-    pub fn path(&self, path: &str) -> String {
+    /// The path as sent with `method`: an agent acting for someone names
+    /// them in `for` on the routes that honor it.
+    pub fn path(&self, method: &str, path: &str) -> String {
         match self {
-            Signer::Agent(AgentMode { acting_for: Some(who), .. }) if honors_for(path) => {
+            Signer::Agent(AgentMode { acting_for: Some(who), .. }) if honors_for(method, path) => {
                 let sep = if path.contains('?') { '&' } else { '?' };
                 format!("{path}{sep}for={}", encode_q(who))
             }
@@ -395,14 +397,14 @@ impl Client {
         }
     }
 
-    /// The URL a request to `path` goes to (with `for`, as an agent acting
-    /// for someone on a route that honors it).
-    pub fn url(&self, path: &str) -> String {
-        format!("{}{}", self.host, self.signer.path(path))
+    /// The URL a `method` request to `path` goes to (with `for`, as an
+    /// agent acting for someone on a route that honors it).
+    pub fn url(&self, method: &str, path: &str) -> String {
+        format!("{}{}", self.host, self.signer.path(method, path))
     }
 
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
-        let body = body.unwrap_or_default();
+        let body = Bytes::from(body.unwrap_or_default());
         let timeout = timeout_for(body.len() as u64);
         self.send(method, path, body, Replay::of(method), Signed::Body, timeout, None)
     }
@@ -411,9 +413,9 @@ impl Client {
     /// allows (`send_retrying`); `content_type` names the body's type, when
     /// it has one.
     #[allow(clippy::too_many_arguments)]
-    fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
+    fn send(&self, method: &str, path: &str, body: Bytes, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
         let path = &self.resolved(path)?;
-        let url = self.url(path);
+        let url = self.url(method, path);
         let verb: reqwest::Method = method.parse()?;
         let what = format!("{method} {path}");
         let build = || {
@@ -422,7 +424,7 @@ impl Client {
             if let Some(t) = content_type {
                 req = req.header("content-type", t);
             }
-            if body.is_empty() { req } else { req.body(body.clone()) }
+            if body.is_empty() { req } else { req.body(attempt_body(&body)) }
         };
         let (host, coded) = (&self.host, |code, msg| Err(anyhow::Error::new(CodedError { code, msg })));
         match send_retrying(build, replay, self.verbose.then_some(what.as_str())) {
@@ -449,14 +451,14 @@ impl Client {
     /// A bounded slow operation, such as icon generation. It retains the
     /// normal non-idempotent POST retry policy.
     pub fn post_json_with_timeout(&self, path: &str, v: &impl serde::Serialize, timeout: Duration) -> Result<Resp> {
-        self.send("POST", path, serde_json::to_vec(v)?, Replay::ConnectOnly, Signed::Body, timeout, None)
+        self.send("POST", path, Bytes::from(serde_json::to_vec(v)?), Replay::ConnectOnly, Signed::Body, timeout, None)
     }
     /// A POST whose body carries its idempotency id (an operation call):
     /// retried like a read (`Replay::ById`).
     pub fn post_json_by_id(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {
         let body = serde_json::to_vec(v)?;
         let timeout = timeout_for(body.len() as u64);
-        self.send("POST", path, body, Replay::ById, Signed::Body, timeout, None)
+        self.send("POST", path, Bytes::from(body), Replay::ById, Signed::Body, timeout, None)
     }
     pub fn put_json(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {
         self.request("PUT", path, Some(serde_json::to_vec(v)?))
@@ -469,26 +471,27 @@ impl Client {
     /// `content_type` is what a page reading it gets (`__blob`).
     pub fn put_blob(&self, path: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<Resp> {
         let timeout = timeout_for(bytes.len() as u64);
-        self.send("PUT", path, bytes, Replay::Safe, Signed::Url, timeout, content_type)
+        self.send("PUT", path, Bytes::from(bytes), Replay::Safe, Signed::Url, timeout, content_type)
     }
     /// A GET whose answer is known to be about `bytes` long (a blob), given
     /// the time that takes.
     pub fn get_sized(&self, path: &str, bytes: u64) -> Result<Resp> {
-        self.send("GET", path, Vec::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
+        self.send("GET", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
     }
     /// A signed GET whose answer goes to `to` as it arrives (an export's
-    /// archive, which may be gigabytes), never held whole: its bytes. A
-    /// refusal is read whole, as any other's is.
-    pub fn download(&self, path: &str, to: &std::path::Path) -> Result<u64> {
-        let url = self.url(path);
+    /// archive, which may be tens of gigabytes), never held whole, given
+    /// the time its `bytes` take: its bytes. A refusal is read whole, as
+    /// any other's is.
+    pub fn download(&self, path: &str, to: &std::path::Path, bytes: u64) -> Result<u64> {
+        let url = self.url("GET", path);
         let (header, value) = self.signer.header("GET", &url, &[]);
         if self.verbose {
             eprintln!("GET {path}");
         }
-        let mut resp = self.http.get(&url).header(header, value).timeout(Duration::from_secs(6 * 3600)).send().with_context(|| format!("GET {path}"))?;
+        let mut resp = self.http.get(&url).header(header, value).timeout(timeout_for(bytes)).send().with_context(|| format!("GET {path}"))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let body = resp.bytes().map(|b| b.to_vec()).unwrap_or_default();
+            let body = resp.bytes().map(owned).unwrap_or_default();
             return Err(anyhow::Error::new(Resp { status, body }.refusal()));
         }
         let mut file = std::fs::File::create(to).with_context(|| format!("writing {}", to.display()))?;
@@ -549,6 +552,21 @@ pub fn resolve_label(label: &str, listed: &[fragment_proto::ListedFragment]) -> 
     }
 }
 
+/// The body one attempt of a request sends: the buffer kept for its
+/// retries itself, shared (a reference, not a copy). A blob's PUT (up to
+/// `BLOB_MAX_BYTES`) once held two whole copies, the kept one and the
+/// attempt's.
+pub fn attempt_body(kept: &Bytes) -> Bytes {
+    kept.clone()
+}
+
+/// An answer's bytes as the `Vec` a `Resp` holds: the buffer reqwest read
+/// them into, taken in place when the answer holds it alone (a body read
+/// whole does), not copied out beside it as a blob's GET once was.
+pub fn owned(answer: Bytes) -> Vec<u8> {
+    Vec::from(answer)
+}
+
 pub fn send_retrying(build: impl Fn() -> reqwest::blocking::RequestBuilder, replay: Replay, log: Option<&str>) -> std::result::Result<(u16, Vec<u8>), Failed> {
     let (mut last, mut reached) = (None, false);
     for attempt in 0..REQUEST_ATTEMPTS {
@@ -561,7 +579,7 @@ pub fn send_retrying(build: impl Fn() -> reqwest::blocking::RequestBuilder, repl
         let answer = build().send().and_then(|resp| {
             crate::notice::heard(resp.url().host_str(), resp.headers().get("x-fragment-cli").and_then(|v| v.to_str().ok()));
             let status = resp.status().as_u16();
-            resp.bytes().map(|b| (status, b.to_vec()))
+            resp.bytes().map(|b| (status, owned(b)))
         });
         let ms = t0.elapsed().as_millis();
         match answer {
@@ -600,6 +618,38 @@ pub fn encode_q(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a transfer's bytes are one buffer, not two (Codex on
+    /// 69037874: four 256 MiB blobs moving at once held 2 GiB). Method:
+    /// the buffers themselves, by address. An attempt sends the body kept
+    /// for its retries, shared; an answer read whole by this reqwest (a
+    /// 4 MiB one from a local socket, in many chunks) becomes the `Vec` a
+    /// `Resp` holds in place. Each fails with a copy (`clone` of a `Vec`,
+    /// `to_vec`: checked).
+    #[test]
+    fn a_transfer_holds_its_bytes_once() {
+        let kept = Bytes::from(vec![7u8; 1 << 20]);
+        assert_eq!(attempt_body(&kept).as_ptr(), kept.as_ptr(), "an attempt's body is the kept buffer");
+
+        use std::io::{Read, Write};
+        const LEN: usize = 4 << 20;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut asked = [0u8; 1024];
+            let _ = conn.read(&mut asked).unwrap();
+            write!(conn, "HTTP/1.1 200 OK\r\ncontent-length: {LEN}\r\nconnection: close\r\n\r\n").unwrap();
+            for _ in 0..LEN / (64 << 10) {
+                conn.write_all(&[9u8; 64 << 10]).unwrap();
+            }
+        });
+        let answer = reqwest::blocking::get(&url).unwrap().bytes().unwrap();
+        let at = answer.as_ptr();
+        let body = owned(answer);
+        assert_eq!((body.as_ptr(), body.len()), (at, LEN), "an answer's Vec is the buffer reqwest read it into");
+        served.join().unwrap();
+    }
 
     use fragment_fakes::http::{Response as FakeResponse, Server};
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -699,7 +749,7 @@ mod tests {
         assert_eq!(timeout_for(0), REQUEST_TIMEOUT_BASE);
         assert_eq!(timeout_for(UPLOAD_BYTES_PER_S_MIN * 90), REQUEST_TIMEOUT_BASE + Duration::from_secs(90));
         // the largest blob gets hours, not 30 seconds
-        assert!(timeout_for(256 * 1024 * 1024) > Duration::from_secs(2 * 3600));
+        assert!(timeout_for(fragment_proto::limits::BLOB_MAX_BYTES) > Duration::from_secs(2 * 3600));
     }
 
     /// One percent-encoder for the query values and path segments the CLI
@@ -743,7 +793,7 @@ mod tests {
             (ErrorCode::Deploying, "unavailable"),
         ];
         for (error, cli) in table {
-            let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into(), reason: None }).unwrap();
+            let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into(), reason: None, retry_after_ms: None }).unwrap();
             let refusal = Resp { status: error.status(), body }.refusal();
             assert_eq!(refusal.code.as_str(), cli, "{error:?}");
             assert_eq!(refusal.msg, format!("http {}: name taken, already exists", error.status()));
@@ -795,22 +845,27 @@ mod tests {
         agent.post_json_by_id("/api/f/garden.paul/ops/add", &serde_json::json!({ "id": "x", "input": {} })).unwrap();
         agent.get("/api/f/garden.paul/channels/chat?after=3").unwrap();
         agent.get("/api/ledger").unwrap();
+        // a search across fragments names `for`; the launcher's search never
+        agent.post_json("/api/search", &serde_json::json!({ "q": "x", "in": ["garden--k3x9"] })).unwrap();
+        agent.get("/api/search?q=x").unwrap();
         let key = Client::new(&server.url, crate::auth::fixed(7));
         key.get("/api/fragments").unwrap();
+        key.post_json("/api/search", &serde_json::json!({ "q": "x", "in": ["garden--k3x9"] })).unwrap();
         let seen = seen.lock().unwrap();
         let for_of = |pairs: &Vec<(String, String)>| pairs.iter().find(|(k, _)| k == "for").map(|(_, v)| v.clone());
-        for (i, (method, path, pairs, auth, named)) in seen.iter().take(5).enumerate() {
+        for (i, (method, path, pairs, auth, named)) in seen.iter().take(7).enumerate() {
             assert_eq!(named.as_deref(), Some("juniper.paul"), "request {i} ({method} {path}) names its agent");
             assert!(auth.is_none(), "request {i} carries no signature of its own: {auth:?}");
-            let expected = matches!(path.as_str(), "/api/fragments" | "/api/f/garden.paul/ops/add" | "/api/f/garden.paul/channels/chat").then(|| "id:paul".to_string());
-            assert_eq!(for_of(pairs), expected, "{method} {path}");
+            let honored = matches!(path.as_str(), "/api/fragments" | "/api/f/garden.paul/ops/add" | "/api/f/garden.paul/channels/chat") || (method == "POST" && path == "/api/search");
+            assert_eq!(for_of(pairs), honored.then(|| "id:paul".to_string()), "{method} {path}");
         }
         assert_eq!(seen[3].2.iter().find(|(k, _)| k == "after").map(|(_, v)| v.as_str()), Some("3"), "a query of its own is kept beside `for`");
-        let (_, _, pairs, auth, named) = &seen[5];
-        assert!(auth.as_deref().is_some_and(|a| a.starts_with("Nostr ")) && named.is_none() && for_of(pairs).is_none(), "a key signs, and names no agent");
+        for (method, path, pairs, auth, named) in &seen[7..] {
+            assert!(auth.as_deref().is_some_and(|a| a.starts_with("Nostr ")) && named.is_none() && for_of(pairs).is_none(), "a key signs, and names no agent: {method} {path}");
+        }
         // an agent acting for no one names no one
         let alone = Signer::Agent(AgentMode { agent: "juniper.paul".into(), acting_for: None });
-        assert_eq!(alone.path("/api/fragments"), "/api/fragments");
+        assert_eq!(alone.path("GET", "/api/fragments"), "/api/fragments");
         assert!(agent.key().is_err() && key.key().is_ok(), "an agent holds no key");
         assert_eq!(agent.writer_id(), agent.writer_id());
         assert_eq!(agent.writer_id().len(), 8);
@@ -820,11 +875,14 @@ mod tests {
     #[test]
     fn for_is_named_on_a_fragments_routes_the_list_and_the_invites_only() {
         for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1", "/api/invites", "/api/invites/x--k3x9/accept"] {
-            assert!(honors_for(yes), "{yes}");
+            assert!(honors_for("GET", yes), "{yes}");
         }
         for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx", "/api/invitesx"] {
-            assert!(!honors_for(no), "{no}");
+            assert!(!honors_for("GET", no), "{no}");
         }
+        // a search across fragments takes it; the launcher's search never
+        assert!(honors_for("POST", "/api/search"));
+        assert!(!honors_for("GET", "/api/search?q=a") && !honors_for("POST", "/api/searchx"));
     }
 
     /// Every code has its own name, and GUIDE.md lists each one.

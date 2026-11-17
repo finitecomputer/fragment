@@ -431,6 +431,9 @@ async fn the_hermes_image() {
     // the activity plugin holds for its children however its socket is opened again
     let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/opt/hermes/.venv/bin/python", "-c", include_str!("activity_reconnect.py")]);
     assert_eq!(code, 0, "a reopened activity socket holds while children run: {said}");
+    // and says each child of a person's turn as it starts and ends
+    let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/opt/hermes/.venv/bin/python", "-c", include_str!("activity_children.py")]);
+    assert_eq!(code, 0, "each child's start and end are said beside its work: {said}");
     fake.until(30_000, "the local skill fork and its helper committed to the agent fragment", |w| {
         let files = &w.fragments["juniper--k3x9"].files;
         files.get("skills/research/model-council-finite/SKILL.md").is_some_and(|b| String::from_utf8_lossy(b).contains("# My Revised Council"))
@@ -877,6 +880,42 @@ async fn chat_attachments_have_tool_usable_paths_with_native_images() {
     assert!(!text.contains("[New message]"), "the file note creates no empty new-message section: {text}");
 }
 
+/// Goal (FIN-405): a 64 MiB file, past Hermes' own 25 MiB, reaches real
+/// Hermes by its path alone. The bridge streams it to disk (its peak memory
+/// stays well under the file's size), Hermes is handed no media to read
+/// whole, and the agent's terminal reads the original bytes at the path.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_large_attachment_reaches_hermes_by_its_path() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 120_000, "the bridge follows the chat", |w| w.live_sockets() >= 2).await;
+    let size = 64 * 1024 * 1024;
+    let bytes = bytes::Bytes::from(support::big(size));
+    let sha = fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("video/mp4".into(), bytes.clone())));
+    let path = format!("/tmp/bridge-media/{sha}");
+    let before = model.calls.lock().unwrap().len();
+    let said = fake.say(&chat, &person("paul"), json!({ "text": format!("run: sha256sum {path}"), "attachments": [{ "name": "film.mp4", "type": "video/mp4", "size": size, "sha256": sha }] }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    within(&fake, &chat, &c, 180_000, "the large file's turn ends", |w| w.bodies(&chat, "work", "turn.end").iter().any(|r| r["turn"] == turn)).await;
+    fake.with(|w| {
+        let said: Vec<String> = w.bodies(&chat, "chat", "reply").iter().filter(|r| r["turn"] == turn).filter_map(|r| r["text"].as_str().map(str::to_string)).collect();
+        assert!(said.iter().any(|t| t.contains(&format!("{sha}  {path}"))), "the agent's terminal read the original at its path: {said:?}");
+    });
+    let calls = model.calls.lock().unwrap()[before..].to_vec();
+    let inbound = calls.iter().find_map(|call| call.body["messages"].as_array()?.iter().find(|m| m["role"] == "user" && content_text(m).contains("run: sha256sum")).cloned()).expect("the turn reached the model");
+    assert!(content_text(&inbound).contains(&format!("[paul sent a file: 'film.mp4' (video/mp4). It is on your computer at: {path}]")), "{inbound}");
+    assert!(inbound["content"].as_array().is_none_or(|parts| parts.iter().all(|p| p["type"] == "text")), "nothing but words reach the model: {inbound}");
+    let peak = c.exec_out(&["sh", "-c", "grep VmHWM /proc/$(pgrep -o -x fragment-bridge)/status"]);
+    let kib: u64 = peak.split_whitespace().nth(1).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("the bridge's peak memory: {peak:?}"));
+    eprintln!("the bridge's peak memory: {kib} KiB, for a {} KiB file", size / 1024);
+    assert!(kib * 1024 < size as u64 / 2, "streamed, never whole in memory: {kib} KiB");
+}
+
 async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, Container) {
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
@@ -900,6 +939,102 @@ async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, 
     let t = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", first["seq"].as_u64().unwrap());
     fake.until(180_000, "Hermes' first reply", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
     (fake, model, chat, c)
+}
+
+/// Goal (FIN-258): an agent whose `agent.json` names another runtime
+/// (Claude) gets no Hermes profile and no desktop, and the bridge's ready
+/// file names it at once: its turns go to the runtime it names, Claude
+/// Code, which its person has not installed here, so they end saying how. Valid: an agent switched
+/// to Claude while the computer runs loses its screen at once, its profile
+/// retired at the next start, as an unassigned agent's is; switched back,
+/// its profile is written again and it answers as Hermes. Restart: the
+/// Claude agent is still profile-less after it, and a Hermes agent whose
+/// runtime the start fails to read at first keeps its profile, its session
+/// in it (Alex on #887): the start reads it again before it retires any.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_agent_of_another_runtime_gets_no_hermes_profile() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let ready = |c: &Container| c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]);
+    let screens = |c: &Container| c.exec_out(&["cat", "/var/lib/fragment-run/screens.json"]);
+    let profile = |c: &Container, label: &str| c.exec(&["test", "-d", &format!("/data/hermes/profiles/{label}--k3x9")]);
+    // how often juniper's runtime was read as `runtime`: the boot and the
+    // bridge each say so when it changes (driver.rs, `with_runtimes`)
+    let read_as = |c: &Container, runtime: &str| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "agent.runtime" && e["agent"] == "juniper--k3x9" && e["runtime"] == runtime).count();
+
+    // rowan, a Claude agent, assigned while it runs, in its chat already
+    // (ready as soon as its runtime is read, no profile to wait for, so its
+    // chats are found before a chat made after it would be)
+    let workshop = fake.chat("workshop", &["rowan"]);
+    fake.add_agent_with("rowan", r#"{"tier":"cheap","runtime":"claude"}"#);
+    let t = Instant::now();
+    while !ready(&c).contains("rowan--k3x9") {
+        assert!(t.elapsed() < Duration::from_secs(30), "the ready file never named rowan: {}", ready(&c));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(!profile(&c, "rowan") && !screens(&c).contains("rowan--k3x9"), "no profile, no desktop: {}", screens(&c));
+    let asked = fake.say(&workshop, &person("paul"), json!({ "text": "hello rowan" }));
+    let tr = fragment_bridge::records::turn_id("rowan--k3x9", &workshop, "chat", asked["seq"].as_u64().unwrap());
+    // its runtime's turn asks its person to install Claude Code (#901);
+    // declined, it ends, so nothing waits on it below
+    fake.until(90_000, "rowan's install card", |w| w.bodies(&workshop, "work", "turn.prompt").iter().any(|p| p["turn"] == tr && p["prompt"] == "install")).await;
+    fake.with(|w| {
+        let card = w.bodies(&workshop, "work", "turn.prompt").into_iter().find(|p| p["turn"] == tr).unwrap();
+        assert_eq!(card["text"], json!(fragment_bridge::runtime::claude::INSTALL_ASK), "its runtime's turn, asking to install it: {card}");
+    });
+    fake.say(&workshop, &person("paul"), json!({ "kind": "prompt_response", "prompt": "install", "option": "not-now", "agent": "npub1rowan", "turn": tr }));
+    fake.until(90_000, "rowan's turn to end", |w| w.bodies(&workshop, "work", "turn.end").iter().any(|e| e["turn"] == tr && e["outcome"] == "idle")).await;
+
+    // maple, of Hermes', and oak, unassigned before the restart
+    fake.add_agent("maple");
+    fake.add_agent("oak");
+    let t = Instant::now();
+    while !(profile(&c, "maple") && profile(&c, "oak") && ready(&c).contains("maple--k3x9")) {
+        assert!(t.elapsed() < Duration::from_secs(60), "maple's and oak's profiles: {}", ready(&c));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo kept > /data/hermes/profiles/maple--k3x9/fragment-test-marker"]));
+
+    // juniper switched to Claude: its screen goes at once, its profile at the next start
+    fake.with(|w| w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap","runtime":"claude"}"#)));
+    let t = Instant::now();
+    while screens(&c).contains("juniper--k3x9") {
+        assert!(t.elapsed() < Duration::from_secs(40), "juniper's screen stayed: {}", screens(&c));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(ready(&c).contains("juniper--k3x9") && profile(&c, "juniper"), "still run, its profile kept until the next start");
+    fake.remove_agent("oak");
+    // the restart, its start's first read of every agent.json failed
+    let unread_before = c.logs().matches("\"boot.runtimes_unread\"").count();
+    c.sigterm();
+    fake.with(|w| w.fail_agent_json = 3);
+    c.start();
+    let t = Instant::now();
+    while !(ready(&c).contains("juniper--k3x9") && ready(&c).contains("rowan--k3x9") && ready(&c).contains("maple--k3x9")) {
+        assert!(t.elapsed() < Duration::from_secs(120), "the ready file after the restart: {}", ready(&c));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(c.exec(&["grep", "-q", "kept", "/data/hermes/profiles/maple--k3x9/fragment-test-marker"]), "maple's profile kept whole, its runtime read again");
+    assert!(!c.exec(&["sh", "-c", "ls -d /data/hermes-retired/maple--k3x9-*"]), "maple's never retired");
+    assert!(!profile(&c, "juniper") && !profile(&c, "rowan"), "juniper's profile retired, rowan still has none");
+    assert!(c.exec(&["sh", "-c", "ls -d /data/hermes-retired/juniper--k3x9-*"]), "moved aside, never deleted");
+    assert!(!profile(&c, "oak") && c.exec(&["sh", "-c", "ls -d /data/hermes-retired/oak--k3x9-*"]), "oak, unassigned, retired");
+    assert!(c.logs().matches("\"boot.runtimes_unread\"").count() > unread_before, "the start's first reads failed, and were read again");
+
+    // back to Hermes: its profile again, and once the bridge has read it so
+    // too (within its minute), it answers as Hermes
+    let before = read_as(&c, "hermes");
+    assert_eq!(before, 2, "the boot and the bridge read it as Hermes' once, in the first life");
+    fake.with(|w| w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap"}"#)));
+    let t = Instant::now();
+    while !(profile(&c, "juniper") && screens(&c).contains("juniper--k3x9") && read_as(&c, "hermes") == before + 2) {
+        assert!(t.elapsed() < Duration::from_secs(90), "juniper never came back to Hermes: {} {}", screens(&c), read_as(&c, "hermes"));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let back = fake.say(&chat, &person("paul"), json!({ "text": "hello again" }));
+    let tb = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", back["seq"].as_u64().unwrap());
+    fake.until(180_000, "juniper's reply as Hermes", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == tb)).await;
+    assert!(!profile(&c, "rowan"), "rowan never had one");
 }
 
 /// Decision 65's image gate: a real Hermes background delegate finishes
@@ -1005,6 +1140,19 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     assert!(fake.with(|w| !w.bodies(&chat, "work", "turn.step").iter().any(|s| s["args"].as_str().is_some_and(|a| a.contains("delegate-started")))), "no child's call is a step");
     assert_eq!(delivered.len(), 1, "the background result arrives in the chat once");
     assert_ne!(delivered[0]["turn"], parent, "its completion has a turn of its own");
+    // the helper as the chat's bar reads it (FIN-432): its chat's set names
+    // it as it starts (under the parent's turn, its task in one line), and
+    // a later set names none once it finished, after the parent's own end
+    within(&fake, &chat, &c, 10_000, "the helper's set, then none", |w| w.bodies(&chat, "work", "turn.helpers").last().is_some_and(|b| b["helpers"] == json!([]))).await;
+    let work = fake.with(|w| w.records(&chat, "work"));
+    let sets: Vec<&serde_json::Value> = work.iter().map(|r| &r["body"]).filter(|b| b["kind"] == "turn.helpers").collect();
+    let named: Vec<&serde_json::Value> = sets.iter().flat_map(|b| b["helpers"].as_array().unwrap().iter()).collect();
+    assert!(!named.is_empty() && named.iter().all(|h| h["child"] == named[0]["child"] && h["parent"] == parent), "one helper, under its parent's turn: {sets:?}");
+    let goal = named[0]["goal"].as_str().unwrap_or_default();
+    assert!(goal.starts_with("run: touch /data/work/juniper--k3x9/delegate-started; sleep 12;") && goal.ends_with('…') && goal.chars().count() == fragment_bridge::limits::CHILD_GOAL_MAX_CHARS, "{sets:?}");
+    assert!(sets.iter().all(|b| b.get("turn").is_none() && b["until"].as_u64().is_some()), "{sets:?}");
+    let at = |pred: &dyn Fn(&serde_json::Value) -> bool| work.iter().position(|r| pred(&r["body"])).expect("recorded");
+    assert!(at(&|b| b["kind"] == "turn.end" && b["turn"] == parent) < at(&|b| b["kind"] == "turn.helpers" && b["helpers"] == json!([])), "it ends after its parent");
     assert!(held, "the computer stays awake throughout the background delegate");
     if let Some(tier) = tier {
         let deep = if tier == "cheap" { ROUTE_FALLBACK_ID } else { "deepseek/deepseek-v4.1-flash" };
@@ -1038,6 +1186,46 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     tokio::time::sleep(Duration::from_secs(3)).await;
     let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["text"].as_str().is_some_and(|s| s.contains("checked the delegated result: fragment-delegate-complete"))).count());
     assert_eq!(replies, 1, "no duplicate arrives after the completion settles");
+}
+
+/// Goal (Alex on #1086): a `group` Hermes runs as one completion unit.
+/// Two background tasks of one group, independent completions on: both
+/// helpers start under the parent's turn; the fast one, finished, stays in
+/// its chat's set while its sibling runs, as Hermes stops a group's
+/// children only once it joins (no supported hook says one child of a
+/// group finished: docs/bridge.md); then the set names none, after the
+/// parent's end, and the group reports.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_groups_helpers_end_together() {
+    let (fake, _model, chat, c) = hermes_running_with_modes(None).await;
+    let parent = asked(&fake, &chat, &c, "delegate the grouped work", |w, t| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    let newest = |w: &support::fake::World| w.bodies(&chat, "work", "turn.helpers").last().map(|b| b["helpers"].as_array().unwrap().len());
+    within(&fake, &chat, &c, 60_000, "both helpers started", |w| newest(w) == Some(2)).await;
+    let t0 = Instant::now();
+    while !c.exec(&["test", "-f", "/data/work/juniper--k3x9/group-fast-done"]) {
+        assert!(t0.elapsed() < Duration::from_secs(90), "the fast task ran; {}", told(&fake, &chat, &c));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // the fast one done, its sibling still running: both still in the set
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let early = fake.with(|w| newest(w));
+    assert!(!c.exec(&["test", "-f", "/data/work/juniper--k3x9/group-slow-done"]), "the slow task still runs");
+    assert_eq!(early, Some(2), "a group's helpers end together");
+    within(&fake, &chat, &c, 120_000, "both helpers ended", |w| newest(w) == Some(0)).await;
+    let work = fake.with(|w| w.records(&chat, "work"));
+    let bodies: Vec<&serde_json::Value> = work.iter().map(|r| &r["body"]).collect();
+    let sets: Vec<&&serde_json::Value> = bodies.iter().filter(|b| b["kind"] == "turn.helpers").collect();
+    let mut named: Vec<&str> = sets.iter().flat_map(|b| b["helpers"].as_array().unwrap().iter()).map(|h| h["child"].as_str().unwrap_or("")).collect();
+    named.sort();
+    named.dedup();
+    assert_eq!(named.len(), 2, "{sets:?}");
+    assert!(sets.iter().flat_map(|b| b["helpers"].as_array().unwrap().iter()).all(|h| h["parent"] == parent), "{sets:?}");
+    let parent_end = bodies.iter().position(|b| b["kind"] == "turn.end" && b["turn"] == parent).expect("its end");
+    let none = bodies.iter().position(|b| b["kind"] == "turn.helpers" && b["helpers"] == json!([])).expect("none working");
+    assert!(none > parent_end, "they end after their parent");
+    within(&fake, &chat, &c, 60_000, "the group's one report", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("the group reported")))).await;
+    within(&fake, &chat, &c, 10_000, "the hold to end", |w| w.keepalive_open == 0).await;
 }
 
 /// A deployment is platform preflight, not provider silence: real Hermes
@@ -1386,7 +1574,11 @@ async fn held_nothing_under_data_changes() {
     }
     eprintln!("hermes: /data quiet {} ms after its first reply", quiet.elapsed().as_millis());
     let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
-    assert!(left_out.iter().any(|l| l == "/hermes/profiles/juniper--k3x9/state.db") && left_out.iter().all(|l| l.starts_with("/hermes/") && l.contains(".db")), "it names exactly the databases it copied: {left_out:?}");
+    // the databases it copied, and the caches a save leaves out: folders,
+    // never a file of a person's (held.rs, `caches`)
+    let (databases, caches): (Vec<&String>, Vec<&String>) = left_out.iter().partition(|l| l.contains(".db"));
+    assert!(databases.iter().any(|l| *l == "/hermes/profiles/juniper--k3x9/state.db") && databases.iter().all(|l| l.starts_with("/hermes/")), "it names exactly the databases it copied: {left_out:?}");
+    assert!(caches.iter().any(|l| *l == "/hermes/.cache/pip/") && caches.iter().all(|l| l.ends_with('/')), "the rest it names are cache folders: {caches:?}");
     assert!(c.exec(&["test", "-f", "/data/held-copies/manifest.json"]), "its copies are made before it answers");
     let before = files(&c, &left_out);
     let held = Instant::now();
@@ -1876,6 +2068,118 @@ print(json.dumps({"holder": l.holder, "viewer_id": l.viewer_id, "epoch": l.epoch
 /// Whether `profile`'s desktop is up: its launcher's published environment.
 fn desktop_up(c: &Container, profile: &str) -> bool {
     c.exec(&["test", "-e", &format!("/data/hermes/profiles/{profile}/bot-desktop/env")])
+}
+
+/// The environment of `profile`'s desktop session (its panel's, which opens
+/// its terminals and links), read as hermes: a process's environment is its
+/// own user's to read.
+async fn desktop_session(c: &Container, profile: &str) -> serde_json::Value {
+    const SESSION_ENV: &str = r#"import json, os, sys
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[0].decode(errors="replace")
+        env = dict(e.split("=", 1) for e in open(f"/proc/{pid}/environ", "rb").read().decode(errors="replace").split("\0") if "=" in e)
+    except Exception:
+        continue
+    if cmd.endswith("xfce4-panel") and env.get("HERMES_BD_PROFILE") == sys.argv[1]:
+        print(json.dumps(env))
+        break
+"#;
+    let t = Instant::now();
+    // bounded: 90 s for the desktop to start
+    loop {
+        let out = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", SESSION_ENV, profile]);
+        if let Ok(env) = serde_json::from_str::<serde_json::Value>(out.trim()) {
+            return env;
+        }
+        assert!(t.elapsed() < Duration::from_secs(90), "no panel on {profile}'s desktop: {out}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// `cmd` run by `sh` as hermes in a desktop session's environment, as a
+/// terminal there runs it: its exit code and what it printed.
+fn in_session(c: &Container, session: &serde_json::Value, cmd: &str) -> (i32, String) {
+    const RUN: &str = r#"import json, subprocess, sys
+env = json.loads(sys.argv[1])
+sys.exit(subprocess.run([env.get("SHELL", "/bin/sh"), "-c", sys.argv[2]], env=env, cwd=env["HOME"]).returncode)
+"#;
+    c.exec_code(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", RUN, &session.to_string(), cmd])
+}
+
+/// The pages open in the browser holding `user_data_dir` (by its real path:
+/// a profile names its jar through a link), its tabs' URLs read over its
+/// DevTools port, and its process: none if none holds it.
+fn browser_pages(c: &Container, user_data_dir: &str) -> Option<(u32, Vec<String>)> {
+    const PAGES: &str = r#"import json, os, sys, urllib.request
+import psutil
+jar = os.path.realpath(sys.argv[1])
+for p in psutil.process_iter(["pid", "cmdline"]):
+    argv = p.info["cmdline"] or []
+    held = next((a.split("=", 1)[1] for a in argv if a.startswith("--user-data-dir=")), None)
+    if held and os.path.realpath(held) == jar and not any(a.startswith("--type=") for a in argv):
+        port = next((a.split("=", 1)[1] for a in argv if a.startswith("--remote-debugging-port=")), None)
+        if port:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            pages = json.load(opener.open(f"http://127.0.0.1:{port}/json/list", timeout=5))
+            print(json.dumps({"pid": p.info["pid"], "urls": [t["url"] for t in pages if t.get("type") == "page"]}))
+            break
+"#;
+    let out = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", PAGES, user_data_dir]);
+    let v: serde_json::Value = serde_json::from_str(out.trim()).ok()?;
+    Some((v["pid"].as_u64()? as u32, v["urls"].as_array()?.iter().filter_map(|u| u.as_str().map(str::to_string)).collect()))
+}
+
+/// The process of the browser holding `jar` once it shows `url`.
+async fn showing(c: &Container, profile: &str, jar: &str, url: &str) -> u32 {
+    let t = Instant::now();
+    // bounded: 60 s for the browser to start and show it
+    loop {
+        if let Some((pid, urls)) = browser_pages(c, jar) {
+            if urls.iter().any(|u| u == url) {
+                return pid;
+            }
+        }
+        assert!(t.elapsed() < Duration::from_secs(60), "{url} never showed in its browser: {:?}; windows {}; browsers' jars:\n{}", browser_pages(c, jar), desk(c, profile)["windows"], c.exec_out(&["sh", "-c", "ps -eo args | grep -o -- '--user-data-dir=[^ ]*' | sort | uniq -c"]));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Goal (FIN-351): a link opened on an agent's desktop (a terminal's
+/// `claude auth login` sign-in, xdg-open) opens in that agent's own
+/// Chromium, started for it, and no window asks its person which browser
+/// to use. Replay: a second link goes to the same browser. Invalid: opened
+/// outside a desktop, it fails saying so, starting nothing.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_link_opened_on_the_desktop_opens_in_its_own_browser() {
+    let (_fake, _model, _chat, c) = hermes_running().await;
+    let profile = "juniper--k3x9";
+    let jar = "/data/work/juniper--k3x9/browser-profile";
+    let (code, said) = c.exec_code(&["/opt/fragment/bin/hermes-boot", "screen-start", profile]);
+    assert_eq!(code, 0, "the desktop starts: {said}");
+    let session = desktop_session(&c, profile).await;
+    assert!(browser_pages(&c, jar).is_none(), "no browser before a link");
+
+    let opened = |c: &Container, url: &str| {
+        let (code, said) = in_session(c, &session, &format!("xdg-open '{url}'"));
+        assert_eq!(code, 0, "xdg-open {url}: {said}");
+    };
+    let first = "http://127.0.0.1:9/fragment-link-one";
+    opened(&c, first);
+    let pid = showing(&c, profile, jar, first).await;
+    let windows = desk(&c, profile)["windows"].to_string();
+    assert!(!windows.contains("Choose Preferred Application") && !windows.contains("Preferred"), "no one asked which browser: {windows}");
+
+    // replay: a second link, the same browser
+    let second = "http://127.0.0.1:9/fragment-link-two";
+    opened(&c, second);
+    assert_eq!(showing(&c, profile, jar, second).await, pid, "the same browser");
+    eprintln!("desktop link: both links in juniper's own browser (pid {pid}): {:?}; windows {windows}", browser_pages(&c, jar).map(|(_, u)| u));
+
+    // invalid: outside the desktop, no browser to open it in
+    let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "/opt/fragment/bin/desktop-browser", "http://127.0.0.1:9/nowhere"]);
+    assert!(code != 0 && said.contains("desktop is not running"), "{code}: {said}");
 }
 
 /// Goal: two agents on one computer, two desktops (Hermes gives each
@@ -3980,6 +4284,191 @@ async fn an_old_bot_chat_is_rebuilt_without_bot_mode() {
     assert!(!c.exec(&["test", "-L", "/data/hermes/profiles/juniper--k3x9/hooks/fragment-bot-chat"]), "the older image's Bot Mode hook link is gone");
 }
 
+/// `turn`'s `n`th sign-in card in `chat` (claude.rs, `SIGN_IN_CARD`), once
+/// it asks it.
+async fn signing_in(fake: &Fake, chat: &str, c: &Container, turn: &str, n: usize) -> serde_json::Value {
+    let id = format!("{}-{n}", fragment_bridge::runtime::claude::SIGN_IN_CARD);
+    let card = |w: &support::fake::World| w.bodies(chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == turn && p["prompt"] == id.as_str());
+    within(fake, chat, c, 180_000, "the sign-in card", |w| card(w).is_some()).await;
+    fake.with(|w| card(w).expect("found"))
+}
+
+/// `code` on rowan's sign-in `card`, posted to its computer's `/answer` as
+/// the shell's unseen frame posts it: what it said, then its status.
+fn sign_in_code(c: &Container, card: &serde_json::Value, code: &str) -> String {
+    let body = json!({ "turn": card["turn"], "prompt": card["prompt"], "option": "code", "value": code }).to_string();
+    c.exec_out(&["curl", "-s", "-w", " %{http_code}", "-H", "content-type: application/json", "-d", &body, "http://127.0.0.1:6080/answer?agent=rowan--k3x9"])
+}
+
+/// A Stop of `turn`, waiting on its sign-in card, and its end, stopped.
+async fn stop_signing_in(fake: &Fake, chat: &str, c: &Container, turn: &str) {
+    fake.say(chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
+    let end = |w: &support::fake::World| w.bodies(chat, "work", "turn.end").into_iter().find(|e| e["turn"] == turn);
+    within(fake, chat, c, 60_000, "the stopped sign-in's end", |w| end(w).is_some()).await;
+    assert_eq!(fake.with(|w| end(w).expect("ended")["outcome"].clone()), "stopped");
+    // `[a]` so the pattern never matches this shell's own command line
+    let left = c.exec_out(&["sh", "-c", "pgrep -fa '[a]uth login' || true"]);
+    assert_eq!(left.trim(), "", "its login ends with it");
+}
+
+/// The error `turn`'s end in `chat` says, once it ends.
+async fn ended_saying(fake: &Fake, chat: &str, c: &Container, turn: &str, what: &str) -> String {
+    let end = |w: &support::fake::World| w.bodies(chat, "work", "turn.end").into_iter().find(|e| e["turn"] == turn);
+    within(fake, chat, c, 180_000, what, |w| end(w).is_some()).await;
+    fake.with(|w| end(w).expect("ended")["error"].as_str().unwrap_or_default().to_string())
+}
+
+/// Goal (FIN-258; Paul on FIN-233: "The install will survive restarts
+/// right?"): Claude Code, installed by its person with Anthropic's own
+/// installer in a terminal of an agent's desktop, lands in /data and
+/// outlasts a restart and an image update, the same on disk each time, and
+/// an agent naming `claude` runs it: before the install its turn asks to
+/// install it, after it (no one signed in) its turn asks its person to sign
+/// in (FIN-353), on a card linking Anthropic's sign-in as the real `claude
+/// auth login` says it, which calls a code that is not one invalid.
+/// Method: the real installer (the network; skipped without
+/// `FRAGMENT_DOCKER_REAL_CLAUDE=1`, so CI never downloads it), run as
+/// hermes in the environment of juniper's desktop's panel, which opens its
+/// terminals, in the shell a terminal there starts (its user's, not a
+/// login shell, so the desktop's PATH holds); the update is this image's /data saved and restored into
+/// another image (this one and a layer), as a deploy's wake from a save is.
+/// No model is called: nothing signs in (no real code is ever used).
+#[tokio::test]
+#[ignore = "needs Docker and the network: FRAGMENT_DOCKER_REAL_CLAUDE=1 cargo test -p fragment-bridge --test docker -- --ignored --exact a_persons_claude_code_outlasts_restarts_and_updates"]
+async fn a_persons_claude_code_outlasts_restarts_and_updates() {
+    if std::env::var("FRAGMENT_DOCKER_REAL_CLAUDE").is_err() {
+        eprintln!("skip: FRAGMENT_DOCKER_REAL_CLAUDE=1 runs Anthropic's installer, from the network");
+        return;
+    }
+    const SESSION_ENV: &str = r#"import json, os, sys
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[0].decode(errors="replace")
+        env = dict(e.split("=", 1) for e in open(f"/proc/{pid}/environ", "rb").read().decode(errors="replace").split("\0") if "=" in e)
+    except Exception:
+        continue
+    if cmd.endswith("xfce4-panel") and env.get("HERMES_BD_PROFILE") == sys.argv[1]:
+        print(json.dumps(env))
+        break
+"#;
+    const IN_SESSION: &str = r#"import json, os, subprocess, sys
+env = json.loads(sys.argv[1])
+sys.exit(subprocess.run([env.get("SHELL", "/bin/sh"), "-c", sys.argv[2]], env=env, cwd=env["HOME"]).returncode)
+"#;
+    let (fake, model, _chat, c) = hermes_running().await;
+    let workshop = fake.chat("workshop", &["rowan"]);
+    fake.add_agent_with("rowan", r#"{"tier":"cheap","runtime":"claude"}"#);
+    let ask_rowan = |text: &str| -> String {
+        let said = fake.say(&workshop, &person("paul"), json!({ "text": text }));
+        fragment_bridge::records::turn_id("rowan--k3x9", &workshop, "chat", said["seq"].as_u64().unwrap())
+    };
+
+    // before the install: rowan's turn asks to install it (#901); its
+    // person installs it from the desktop instead, so declines here
+    let before = ask_rowan("hello before");
+    let asked = |w: &support::fake::World| w.bodies(&workshop, "work", "turn.prompt").into_iter().find(|p| p["turn"] == before.as_str() && p["prompt"] == "install");
+    within(&fake, &workshop, &c, 180_000, "rowan's install card", |w| asked(w).is_some()).await;
+    assert_eq!(fake.with(|w| asked(w).expect("found")["text"].clone()), json!(fragment_bridge::runtime::claude::INSTALL_ASK));
+    fake.say(&workshop, &person("paul"), json!({ "kind": "prompt_response", "prompt": "install", "option": "not-now", "agent": "npub1rowan", "turn": before }));
+    assert_eq!(ended_saying(&fake, &workshop, &c, &before, "rowan's declined turn").await, "", "declined, it ends idle");
+
+    // juniper's desktop, and its terminals' environment: home is Hermes'
+    let (code, started) = c.exec_code(&["/opt/fragment/bin/hermes-boot", "screen-start", "juniper--k3x9"]);
+    assert_eq!(code, 0, "the desktop starts: {started}");
+    let t = Instant::now();
+    let session = loop {
+        // as hermes: a process's environment is its own user's to read
+        let out = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", SESSION_ENV, "juniper--k3x9"]);
+        if let Ok(env) = serde_json::from_str::<serde_json::Value>(out.trim()) {
+            break env;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(180),
+            "no panel on juniper's desktop: {out}\nscreen-start said: {started}\nthe panel's environment:\n{}\nprocesses:\n{}\nits launcher:\n{}",
+            c.exec_out(&["/command/s6-setuidgid", "hermes", "sh", "-c", "for p in $(pgrep -x xfce4-panel); do tr '\\0' '\\n' < /proc/$p/environ | grep -E '^(HOME|HERMES_BD_PROFILE|PATH)='; done"]),
+            c.exec_out(&["ps", "-eo", "pid,user,args"]),
+            c.exec_out(&["sh", "-c", "tail -40 /data/hermes/profiles/juniper--k3x9/bot-desktop/launcher.log"])
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("claude install: the desktop's HOME {} and PATH {}", session["HOME"], session["PATH"]);
+    assert_eq!(session["HOME"], "/data/hermes", "the desktop's home is Hermes', in /data");
+    assert_eq!(session["XDG_DATA_HOME"], "/data/hermes/.local/share", "its data in that home, not its profile");
+    let in_session = |cmd: &str| c.exec_code(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", IN_SESSION, &session.to_string(), cmd]);
+
+    // the install, as its person types it there
+    let t = Instant::now();
+    let (code, out) = in_session("curl -fsSL https://claude.ai/install.sh | bash");
+    eprintln!("claude install: {} s\n{out}", t.elapsed().as_secs());
+    assert_eq!(code, 0, "the installer: {out}");
+    let (code, found) = in_session("command -v claude && claude --version");
+    assert_eq!(code, 0, "{found}");
+    assert!(found.starts_with("/data/hermes/.local/bin/claude\n"), "on the desktop's PATH, in /data: {found}");
+    let version = found.lines().nth(1).unwrap_or_default().to_string();
+    let on_disk = |c: &Container| c.exec_out(&["sh", "-c", "readlink -f /data/hermes/.local/bin/claude && ls /data/hermes/.local/share/claude/versions && stat -c '%U' /data/hermes/.local/bin/claude"]);
+    let installed = on_disk(&c);
+    eprintln!("claude install: {version}; on disk:\n{installed}");
+    assert!(installed.contains("/data/hermes/.local/share/claude/versions/") && installed.trim_end().ends_with("hermes"), "Anthropic's layout, the person's (hermes'): {installed}");
+    // an agent's Claude settings become these flags (`claude.model`,
+    // `claude.effort`): the installed Claude Code takes both, unwarned
+    // (signed out, it calls no model)
+    let (_, took) = in_session("claude -p --model haiku --effort low hi </dev/null 2>&1");
+    assert!(took.contains("Not logged in") && !took.contains("Warning") && !took.contains("unknown option"), "the installed Claude Code takes --model and --effort: {took}");
+
+    // the agent runs it: no one signed in, its turn asks its person to sign
+    // in; a code that is not one is called invalid and asked again
+    let after = ask_rowan("hello after the install");
+    let card = signing_in(&fake, &workshop, &c, &after, 1).await;
+    eprintln!("claude install: rowan's sign-in card: {}", card["text"]);
+    assert!(card["text"].as_str().is_some_and(|t| t.contains("[Open the sign-in](https://")), "a link to Anthropic's sign-in: {card}");
+    let said = sign_in_code(&c, &card, "not-a-real-code");
+    assert!(said.ends_with(" 200"), "taken: {said}");
+    let again = signing_in(&fake, &workshop, &c, &after, 2).await;
+    assert!(again["text"].as_str().is_some_and(|t| t.starts_with("That code didn't work.")), "Claude Code's login called it invalid: {again}");
+    stop_signing_in(&fake, &workshop, &c, &after).await;
+
+    // a restart
+    c.restart();
+    fake.until(180_000, "the bridge back after the restart", |w| w.live_sockets() >= 3).await;
+    assert_eq!(on_disk(&c), installed, "the same install after the restart");
+    let restarted = ask_rowan("hello after the restart");
+    signing_in(&fake, &workshop, &c, &restarted, 1).await;
+    stop_signing_in(&fake, &workshop, &c, &restarted).await;
+
+    // an image update: /data saved, and restored into another image
+    let next = format!("{}-next", hermes_tag());
+    let mut build = Command::new(docker()).args(["build", "-t", &next, "-"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().expect("docker runs");
+    {
+        use std::io::Write;
+        build.stdin.take().expect("its stdin").write_all(format!("FROM {}\nRUN echo next > /opt/fragment/next-image\n", hermes_tag()).as_bytes()).expect("its Dockerfile");
+    }
+    let built = build.wait_with_output().expect("docker build");
+    assert!(built.status.success(), "the next image: {}", String::from_utf8_lossy(&built.stderr));
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold"));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("claude-install-update");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("data.tar");
+    let bytes = save_data(&c, &left_out, &save);
+    eprintln!("claude install: the save is {} MB", bytes / 1_000_000);
+    c.sigterm();
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let c = Container::run(&next, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
+    let tar = std::fs::File::open(&save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    assert_eq!(code, 0, "the save checks: {checked}");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    assert!(c.exec(&["test", "-e", "/opt/fragment/next-image"]), "the next image");
+    fake.until(180_000, "the next image's bridge", |w| w.live_sockets() >= 3).await;
+    assert_eq!(on_disk(&c), installed, "the same install after the update");
+    let updated = ask_rowan("hello after the update");
+    signing_in(&fake, &workshop, &c, &updated, 1).await;
+    stop_signing_in(&fake, &workshop, &c, &updated).await;
+}
+
 /// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an
 /// agent whose owner connected a provider that serves models, and picked
 /// one of them for it in settings (its `agent.json`'s `model`), runs its
@@ -4416,4 +4905,299 @@ async fn a_step_says_how_its_call_ended() {
     within(&fake, &chat, &c, 60_000, "the stopped turn's end", |w| ended(w, &turn)).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     check("sleep 3", &steps(&turn), "failed", "Exit code: 130");
+}
+
+/// Builds wheels of a package each (`<name>`, its `OK` being `<name>-ok`)
+/// in `/tmp/wheels`, with the image's Python: an install's input that
+/// needs no index.
+const TEST_WHEELS: &str = r#"import base64, hashlib, os, sys, zipfile
+os.makedirs('/tmp/wheels', exist_ok=True)
+for name in sys.argv[1:]:
+    info = f'{name}-1.0.dist-info'
+    files = {f'{name}/__init__.py': f'OK = "{name}-ok"\n', f'{info}/METADATA': f'Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n', f'{info}/WHEEL': 'Wheel-Version: 1.0\nGenerator: fragment-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n'}
+    digest = lambda text: base64.urlsafe_b64encode(hashlib.sha256(text.encode()).digest()).rstrip(b'=').decode()
+    files[f'{info}/RECORD'] = ''.join(f'{p},sha256={digest(t)},{len(t.encode())}\n' for p, t in files.items()) + f'{info}/RECORD,,\n'
+    with zipfile.ZipFile(f'/tmp/wheels/{name}-1.0-py3-none-any.whl', 'w') as z:
+        for p, t in files.items():
+            z.writestr(p, t)
+"#;
+
+/// The boot's `python.env` events so far, in order.
+fn python_envs(c: &Container) -> Vec<serde_json::Value> {
+    c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "python.env" || e["event"] == "python.failed").collect()
+}
+
+/// Waits (bounded) until the boot has said `n` things of its Python
+/// environment; the last.
+async fn python_env_said(c: &Container, n: usize) -> serde_json::Value {
+    let t = Instant::now();
+    loop {
+        let said = python_envs(c);
+        if said.len() >= n {
+            return said[n - 1].clone();
+        }
+        assert!(t.elapsed() < Duration::from_secs(60), "the boot said nothing of its Python environment: {said:?}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Goal (Paul's prod agent, 2026-11-02: no `pip`, `uv` only inside Hermes'
+/// tool store, the image's Python read-only): an agent's terminal has `uv`
+/// and the computer's Python environment, so `pip install` and `uv pip
+/// install` work, and what they install is kept across a restart and a
+/// sleep (a save restored into a fresh container, as every wake and image
+/// update starts) (docs/computers.md, "Python in our Hermes image").
+/// Valid: both installs import in the terminal, beside the image's own
+/// document libraries, by `python` and `python3`. Restart and wake: they
+/// still import, the boot keeping the environment, and so after an image
+/// update whose Python is the same minor release at another path (Codex on
+/// #989), the old path kept or gone, and one bound to that old path
+/// rebound to the stable name. Invalid: one made for another Python is set aside, its packages
+/// listed for `pip install -r`, and a new one with pip made. Replay: the
+/// start after keeps that one.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn the_computers_python_keeps_what_its_agents_install() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let made = python_env_said(&c, 1).await;
+    assert_eq!(made["event"], "python.env", "{made}");
+    assert_eq!(made["plan"], "Make", "a first start makes it: {made}");
+    // its Python by the name every image links it at, which uv keeps
+    let (link, cfg) = (c.exec_out(&["readlink", "/data/work/python/bin/python"]), c.exec_out(&["cat", "/data/work/python/pyvenv.cfg"]));
+    eprintln!("python env: bin/python -> {}pyvenv.cfg:\n{cfg}", link);
+    assert_eq!(link.trim(), "/usr/local/bin/python3");
+    assert!(cfg.lines().any(|l| l == "home = /usr/local/bin"), "{cfg}");
+    let wheels = c.exec_code(&["/command/s6-setuidgid", "hermes", "/usr/local/bin/python3", "-c", TEST_WHEELS, "by_pip", "by_uv"]);
+    assert_eq!(wheels.0, 0, "the test's wheels: {}", wheels.1);
+
+    // what each prints is computed, never in the command: a failing
+    // command's traceback quotes its source
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && which python python3 pip uv && echo \"venv=$VIRTUAL_ENV\" && pip install --no-index /tmp/wheels/by_pip-1.0-py3-none-any.whl && uv pip install --offline /tmp/wheels/by_uv-1.0-py3-none-any.whl && python -c 'import by_pip, by_uv; print(by_pip.OK, by_uv.OK)' && python -c 'import reportlab, pypdf, pdfplumber, pypdfium2, pymupdf; print(\"pdf\", 6 * 7)' && python3 -c 'import docx, pptx, openpyxl; print(\"office\", 6 * 7)'").await;
+    for seen in ["/data/work/python/bin/python\\n", "/data/work/python/bin/python3\\n", "/data/work/python/bin/pip", "/usr/local/bin/uv", "venv=/data/work/python\\n", "by_pip-ok by_uv-ok", "pdf 42", "office 42"] {
+        assert!(said.contains(seen), "{seen:?} in what the terminal said: {said}");
+    }
+    let imported = "run: cd /tmp && python -c 'import by_pip, by_uv; print(by_pip.__file__, by_uv.OK)'";
+
+    // restart: the boot keeps it, and what was installed imports
+    c.restart();
+    assert_eq!(python_env_said(&c, 2).await["plan"], "Keep");
+    let said = tool_said(&fake, &chat, &c, imported).await;
+    assert!(said.contains("/data/work/python/lib/python3.14/site-packages/by_pip/__init__.py by_uv-ok"), "after a restart: {said}");
+
+    // a sleep: held, saved, stopped; a fresh container wakes from the save
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; {}", told(&fake, &chat, &c)));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("python-env");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("asleep.tar");
+    save_data(&c, &left_out, &save);
+    c.sigterm();
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(&save).unwrap()).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    assert_eq!(code, 0, "the save checks: {checked}");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    assert_eq!(python_env_said(&c, 1).await["plan"], "Keep", "a wake keeps it");
+    let said = tool_said(&fake, &chat, &c, imported).await;
+    assert!(said.contains("by_uv-ok"), "after a sleep: {said}");
+
+    // an image update whose Python is the same minor release at another
+    // path (upstream's store names each release by its own): the
+    // environment runs the Python the image links, and keeps what it holds
+    let linked = c.exec_out(&["readlink", "/usr/local/bin/python3"]);
+    let old = linked.trim().strip_suffix("/bin/python3").unwrap_or_else(|| panic!("the image links its Python: {linked:?}")).to_string();
+    let next = format!("{old}-next");
+    assert!(c.exec(&["cp", "-a", &old, &next]) && c.exec(&["ln", "-sfn", &format!("{next}/bin/python3"), "/usr/local/bin/python3"]));
+    c.restart();
+    assert_eq!(python_env_said(&c, 2).await["plan"], "Keep", "a Python of the same minor release at another path keeps it");
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && python -c 'import sys, by_uv; print(\"base\", sys.base_prefix, by_uv.OK)'").await;
+    // the path's end: what the terminal says masks a run of digits in it
+    assert!(said.contains("-next by_uv-ok") && said.contains("base /opt/hermes/tools/python-"), "it runs the newly linked Python ({next}), its packages kept: {said}");
+
+    // one bound to the store's own path (as another uv may bind it), and
+    // that path gone, as an update of the same minor release leaves it:
+    // the start rebinds it to the stable name, and keeps it
+    let real = c.exec_out(&["readlink", "-f", &format!("{old}/bin/python3")]);
+    assert!(c.exec(&["sh", "-c", &format!("ln -sfn '{}' /data/work/python/bin/python && sed -i 's|^home = .*|home = {old}/bin|' /data/work/python/pyvenv.cfg", real.trim())]));
+    assert!(c.exec(&["mv", &old, &format!("{old}.gone")]));
+    c.restart();
+    assert_eq!(python_env_said(&c, 3).await["plan"], "Keep", "rebound, then kept");
+    assert!(c.logs().contains("\"event\":\"python.rebound\""), "it said it rebound");
+    assert_eq!(c.exec_out(&["readlink", "/data/work/python/bin/python"]).trim(), "/usr/local/bin/python3");
+    assert!(c.exec_out(&["cat", "/data/work/python/pyvenv.cfg"]).lines().any(|l| l == "home = /usr/local/bin"));
+    let ran = c.exec_out(&["/command/s6-setuidgid", "hermes", "/data/work/python/bin/python", "-c", "import sys, by_uv; print(sys.base_prefix, by_uv.OK)"]);
+    assert_eq!(ran.trim(), format!("{next} by_uv-ok"), "the old path gone, it runs the linked Python, packages kept");
+    assert!(c.exec(&["mv", &format!("{old}.gone"), &old]));
+
+    // one made for another Python: set aside, listed, and made again
+    assert!(c.exec(&["sed", "-i", "s/^version_info = .*/version_info = 3.13.5/", "/data/work/python/pyvenv.cfg"]));
+    assert!(c.exec(&["mv", "/data/work/python/lib/python3.14", "/data/work/python/lib/python3.13"]));
+    c.restart();
+    let remade = python_env_said(&c, 4).await;
+    assert_eq!((remade["plan"].as_str(), remade["set_aside"].as_str()), (Some("SetAside(Some(\"3.13\"))"), Some("/data/work/python.3.13")), "{remade}");
+    assert_eq!(c.exec_out(&["cat", "/data/work/python.3.13/requirements.txt"]), "by_pip==1.0\nby_uv==1.0\n");
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && pip --version && python -c 'import by_pip' || echo by_pip-gone").await;
+    assert!(said.contains("/data/work/python/lib/python3.14/site-packages/pip") && said.contains("by_pip-gone"), "a new one, with pip and without the old packages: {said}");
+    c.restart();
+    assert_eq!(python_env_said(&c, 5).await["plan"], "Keep", "the start after keeps the new one");
+    assert_eq!(c.exec_out(&["ls", "/data/work"]).lines().filter(|l| l.starts_with("python")).collect::<Vec<_>>(), ["python", "python.3.13"], "set aside once");
+}
+
+/// An agent's own Playwright, Python's: a screenshot and a PDF of a page,
+/// with a plain `chromium.launch()`.
+const PLAYWRIGHT_PY: &str = r#"from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    b = p.chromium.launch()
+    page = b.new_page()
+    page.set_content("<h1>hello from python</h1>")
+    page.screenshot(path="/tmp/pw/py.png")
+    page.pdf(path="/tmp/pw/py.pdf")
+    print("python-chromium", b.version)
+    # a page's video, through the FFmpeg Playwright finds
+    context = b.new_context(record_video_dir="/tmp/pw/video")
+    context.new_page().set_content("<h1>a video</h1>")
+    context.close()
+    import pathlib
+    print("videos", sum(1 for v in pathlib.Path("/tmp/pw/video").glob("*.webm") if v.stat().st_size > 0))
+    b.close()
+"#;
+
+/// The same, Node's.
+const PLAYWRIGHT_JS: &str = r#"const { chromium } = require('playwright');
+chromium.launch().then(async b => {
+  const page = await b.newPage();
+  await page.setContent('<h1>hello from node</h1>');
+  await page.screenshot({ path: '/tmp/pw/js.png' });
+  await page.pdf({ path: '/tmp/pw/js.pdf' });
+  console.log('node-chromium', b.version());
+  await b.close();
+}).catch(e => { console.error(e); process.exit(1); });
+"#;
+
+/// Goal (Paul, 2026-11-02): an agent's own Python and Node code run
+/// Playwright with a plain `chromium.launch()` on the system Chromium, the
+/// desktop's (Chrome for Testing fails Cloudflare's bot check where it
+/// passes), with no browser downloaded; and unzip, zip, jq and sqlite3
+/// run. Method: through the agent's terminal, a Python script (in the
+/// computer's Python environment) and a Node script each take a screenshot
+/// and print a PDF, saying their browser's version, which is the system
+/// Chromium's; each tool does its work; and no browser was downloaded.
+/// Invalid: `playwright install`, by either runtime as the agent's user,
+/// answers at once, never waiting on its lock in a directory of root's.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn playwright_runs_the_system_chromium_and_the_small_tools_run() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    python_env_said(&c, 1).await;
+    let system = c.exec_out(&["/usr/bin/chromium", "--version"]);
+    let version = system.split_whitespace().nth(1).unwrap_or_else(|| panic!("the system Chromium's version: {system:?}")).to_string();
+    for (path, text) in [("/tmp/pw/pw.py", PLAYWRIGHT_PY), ("/tmp/pw/pw.js", PLAYWRIGHT_JS)] {
+        let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "sh", "-c", "mkdir -p /tmp/pw && printf '%s' \"$1\" > \"$2\"", "sh", text, path]);
+        assert_eq!(code, 0, "{path}: {said}");
+    }
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && python pw.py && node pw.js && python -c 'import sys; [print(f, open(f, \"rb\").read(5)) for f in sys.argv[1:]]' py.png py.pdf js.png js.pdf").await;
+    for seen in [format!("python-chromium {version}"), format!("node-chromium {version}"), "videos 1".into(), r"py.png b'\\x89PNG\\r'".into(), "py.pdf b'%PDF-'".into(), r"js.png b'\\x89PNG\\r'".into(), "js.pdf b'%PDF-'".into()] {
+        assert!(said.contains(&seen), "{seen:?} in what the terminal said: {said}");
+    }
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && zip -q t.zip pw.py && unzip -l t.zip | grep -c pw.py && echo '{\"n\": 42}' | jq .n && sqlite3 :memory: 'select 6 * 7' && playwright --version").await;
+    let lines: Vec<&str> = said.split("\\n").map(str::trim).collect();
+    let pinned = include_str!("../../hermes/playwright-requirements.txt").lines().find_map(|l| l.strip_prefix("playwright==")).and_then(|v| v.split_whitespace().next()).expect("the lock pins playwright");
+    let release = format!("Version {pinned}");
+    for seen in ["1", "42", release.as_str()] {
+        assert!(lines.iter().any(|l| l.contains(seen)), "{seen:?} in what the terminal said: {said}");
+    }
+    assert!(said.contains("\"exit_code\": 0"), "each ran: {said}");
+    // `playwright install`, as the agent's user, answers at once (Codex on
+    // #991: Playwright's own waits ten minutes on a lock in a directory of
+    // root's): Chromium, or no browser named, is installed already; another
+    // is root's
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp && s=$(date +%s) && timeout 60 playwright install && timeout 60 playwright install chromium && timeout 60 python -m playwright install --with-deps chromium && { timeout 60 playwright install firefox; echo \"firefox=$?\"; } && echo \"took=$(( $(date +%s) - s ))\"").await;
+    assert_eq!(said.matches("Playwright's Chromium is installed already").count(), 3, "each install of Chromium says so: {said}");
+    assert!(said.contains("firefox=1") && said.contains("firefox can only be installed as root here (sudo playwright install firefox)"), "another browser is root's: {said}");
+    let took: u64 = said.split("took=").nth(1).and_then(|r| r.split(|ch: char| !ch.is_ascii_digit()).next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("how long: {said}"));
+    assert!(took < 10, "at once, not after Playwright's lock: {took} s");
+    // what it suggests (Codex on #991): `sudo playwright install chromium`
+    // fetches nothing, and a browser `sudo` installs goes where the agent's
+    // own launch looks (sudo keeps PLAYWRIGHT_BROWSERS_PATH): its dry run's
+    // place is the one the agent's Playwright resolves
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && sudo playwright install chromium && echo \"sudo-chromium=$?\" && at=$(sudo playwright install --dry-run firefox | sed -n 's|^ *Install location: *\\(.*/firefox-[0-9]*\\)$|\\1|p') && [ -n \"$at\" ] && mine=$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.firefox.executable_path); p.stop()') && case \"$mine\" in \"$at\"/*) echo \"firefox-where-$((6 * 7))\" ;; *) echo \"sudo $at, the agent $mine\" ;; esac").await;
+    assert!(said.contains("sudo-chromium=0") && !said.contains("MiB") && !said.contains("downloaded to"), "sudo installs no Chromium, nor its FFmpeg: {said}");
+    assert!(!said.contains("Removing unused browser"), "nor collects Hermes' tools: {said}");
+    // an install location was read (empty, `"$at"/*` is `/*`, which any
+    // absolute path matches: Codex on #991)
+    assert!(said.contains("firefox-where-42"), "a browser sudo installs is where the agent looks: {said}");
+    // `uninstall`, which collects regardless, is refused in Hermes' store
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && { sudo playwright uninstall --all; echo \"uninstall=$?\"; } && { timeout 60 playwright uninstall; echo \"mine=$?\"; }").await;
+    assert!(said.contains("uninstall=1") && said.contains("mine=1") && said.contains("would remove Hermes' own tools"), "{said}");
+    let store = c.exec_out(&["ls", "/opt/hermes/tools"]);
+    assert!(store.lines().any(|l| l == "chromium-1208") && store.lines().any(|l| l.starts_with("ffmpeg-9")), "Hermes' Chrome for Testing and FFmpeg are kept: {store}");
+    let browsers = c.exec_out(&["sh", "-c", "ls /opt/hermes/tools | grep chromium"]);
+    assert_eq!(browsers.lines().count(), 3, "Chrome for Testing's, and Playwright's two names for the system Chromium; none downloaded: {browsers}");
+}
+
+/// Goal: a deck builds in an agent's own terminal on the Hermes image as
+/// the slides skill says (templates/skills/skills/creative/slides-finite),
+/// with the environment Hermes gives that terminal (its `HOME` and its
+/// `TMPDIR`, both its work under `/data/work`), and its build is the one the
+/// e2e serves. Method: juniper's terminal (the scripted model's `run:`), in
+/// a deck folder in its work whose `site/` is the e2e's prebuilt starter
+/// deck (crates/e2e/fixtures/slides-site): `node scripts/build.mjs --check`
+/// installs the locked toolchain (`npm ci`, through the image's npm and its
+/// 14-day release cooldown) where the skill says it is kept,
+/// `~/.local/share/open-slide/<lock hash>` (Paul: kept on purpose, so the
+/// next build needs no install), links it, builds the deck aside, and finds
+/// `site/` that build byte for byte; npm's download cache is gone, and
+/// nothing of the install is in `TMPDIR`; then a build, of another deck in
+/// the work, installs nothing and writes its page. Invalid: a fixture its
+/// inputs no longer make, a toolchain in `TMPDIR` or not where the skill
+/// says, a cache left behind, a lock the cooldown refuses, a second
+/// install. It needs npm's registry, so it runs by name only, never in the
+/// queue's Docker lane: skipped without `FRAGMENT_DOCKER_SLIDES=1`.
+#[tokio::test]
+#[ignore = "needs Docker and npm's registry: FRAGMENT_DOCKER_SLIDES=1 cargo test -p fragment-bridge --test docker -- --ignored --exact a_slides_deck_builds_in_an_agents_terminal"]
+async fn a_slides_deck_builds_in_an_agents_terminal() {
+    if std::env::var("FRAGMENT_DOCKER_SLIDES").is_err() {
+        eprintln!("skip: FRAGMENT_DOCKER_SLIDES=1 installs open-slide from npm's registry");
+        return;
+    }
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("slides", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    // two decks in its work, as `fragment new` puts them there, the first's
+    // site the e2e's prebuilt deck
+    let work = "/data/work/juniper--k3x9";
+    for (from, to) in [("templates/slides", "/tmp/deck-src"), ("crates/e2e/fixtures/slides-site", "/tmp/site-src")] {
+        let cp = Command::new(docker()).args(["cp", &format!("{}/.", repo_dir().join(from).display()), &format!("{}:{to}", c.id)]).output().expect("docker runs");
+        assert!(cp.status.success(), "docker cp {from}: {}", String::from_utf8_lossy(&cp.stderr));
+    }
+    let setup = format!("cp -r /tmp/deck-src {work}/deck && rm -rf {work}/deck/site && cp -r /tmp/site-src {work}/deck/site && cp -r /tmp/deck-src {work}/second && chown -R hermes {work}/deck {work}/second");
+    let (code, out) = c.exec_code(&["sh", "-c", &setup]);
+    assert_eq!(code, 0, "the decks in its work: {out}");
+    let checked = tool_said(&fake, &chat, &c, &format!("run: echo tmpdir=$TMPDIR home=$HOME; cd {work}/deck && node scripts/build.mjs --check > check.log 2>&1; echo exit=$?")).await;
+    let log = c.exec_out(&["cat", &format!("{work}/deck/check.log")]);
+    let (tmpdir, home) = (said(&checked, "tmpdir"), said(&checked, "home"));
+    let real = |p: &str| c.exec_out(&["realpath", "-e", p]).trim().to_string();
+    assert_eq!((real(&tmpdir), real(&home)), (format!("{work}/tmp"), format!("{work}/home")), "the terminal's own TMPDIR and HOME, as Hermes gives them: {checked}");
+    assert!(said(&checked, "exit") == "0" && log.contains("byte for byte"), "the e2e's prebuilt deck is the template's build, made again in the terminal: {checked} {log}");
+    assert!(log.contains("installing open-slide"), "the first build installs: {log}");
+    let kept = format!("{work}/home/.local/share/open-slide");
+    let link = real(&format!("{work}/deck/node_modules"));
+    assert!(link.starts_with(&format!("{kept}/")) && link.ends_with("/node_modules"), "the toolchain is kept where the skill says, {kept}: {link}");
+    assert_eq!(c.exec_out(&["ls", "-A", &kept]).split_whitespace().count(), 1, "one version kept, no staging left");
+    let caches = c.exec_out(&["sh", "-c", &format!("find {kept} {work}/tmp -name .npm-cache -o -name _cacache | head")]);
+    assert!(caches.trim().is_empty(), "npm's download cache is gone: {caches}");
+    let in_tmp = c.exec_out(&["sh", "-c", &format!("du -sm {work}/tmp | cut -f1")]).trim().parse::<u64>().unwrap_or(u64::MAX);
+    assert!(in_tmp < 10, "nothing of the install is in TMPDIR: {in_tmp} MB");
+    let kept_mb = c.exec_out(&["sh", "-c", &format!("du -sm {kept} | cut -f1")]);
+    let built = tool_said(&fake, &chat, &c, &format!("run: cd {work}/second && node scripts/build.mjs > build.log 2>&1; echo exit=$?")).await;
+    let log = c.exec_out(&["cat", &format!("{work}/second/build.log")]);
+    let page = c.exec_out(&["cat", &format!("{work}/second/site/index.html")]);
+    assert!(said(&built, "exit") == "0" && !log.contains("installing") && page.contains("/slides-live.js"), "another deck builds with the kept toolchain, installing nothing: {built} {log}");
+    eprintln!("slides: kept toolchain {} MB, TMPDIR {in_tmp} MB", kept_mb.trim());
 }

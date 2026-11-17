@@ -6,7 +6,14 @@
 // Empty stays quiet. Words ask the person's search (`GET /api/search`:
 // their chats and apps by title and label, then messages, newest first,
 // archived ones included): a chat found opens in the middle column, an app
-// in the desktop, a message its chat. Enter sends those exact words, and
+// in the desktop, a message its chat. They also ask what the person knows
+// (FIN-238, decision 6: the launcher searches across brains), their brains'
+// and Session Archive's own indexes as one (`POST /api/search`, as
+// `fragment search --all` asks), and its best few show under Knowledge,
+// each a page: a brain's opens at that page, the archive's conversation in
+// its reader. It is its own question, asked once typing rests a little
+// longer: its answer is drawn as it comes and never holds up the rest, and
+// one that fails says so there alone. Enter sends those exact words, and
 // the files dropped or pasted beside them, as the first message of a new
 // chat with the agent the sidebar's New chat names (`newChatAgent`: the
 // open chat's, else their main agent), or the one picked on its row, one
@@ -25,10 +32,10 @@
 // launcher's next opening.
 
 import { icon } from "./icons.js";
+import { KIND } from "./frame-messages.js";
+import { speakers } from "./session-text.js";
+import { refusal } from "./limits.js";
 
-// At most 8 files, 25 MiB each, as the chat's page takes them.
-const FILES_MAX = 8;
-const FILE_MAX_BYTES = 25 * 1024 * 1024;
 // A connection dropped on a file's upload is tried again, as `fragment.blob` does.
 const UPLOAD_TRIES = 3;
 // The input grows with a long prompt to this, then scrolls; one line at rest.
@@ -36,6 +43,59 @@ const INPUT_MAX_PX = 200;
 // The search API's hint: eight words, 256 bytes at most.
 const HINT_WORDS = 8;
 const HINT_MAX_BYTES = 256;
+// The knowledge question: the fragments asked at most (proto's
+// `search::IN_MAX`), its words' bytes at most (`search::QUERY_MAX_BYTES`;
+// both held to theirs by xtask/src/guards.rs), the pages shown, and how long
+// typing rests before it is asked (each question is embedded, paid as the
+// person).
+const KNOWLEDGE_IN_MAX = 32;
+const KNOWLEDGE_Q_MAX_BYTES = 1024;
+const KNOWLEDGE_SHOWN = 5;
+// the hits asked for, so five pages fill once a page's other matches are
+// folded into its best (`knownOf`)
+const KNOWLEDGE_ASKED = 20;
+// the fragments not indexed yet named at most, the rest counted
+const UNINDEXED_NAMED = 3;
+const KNOWLEDGE_WAIT_MS = 400;
+
+// What the knowledge question asks: the person's brains and Session Archive
+// (not ones they archived), as `fragment search --all` asks them, in their
+// list's order, KNOWLEDGE_IN_MAX at most.
+export const knowledgeIn = (fragments) => fragments.filter((f) => (f.kind === "brain" || f.kind === "sessions") && !f.archived).map((f) => f.name).slice(0, KNOWLEDGE_IN_MAX);
+// What a knowledge answer says (`POST /api/search`'s `FoundAcross`): its
+// hits, a page's (a fragment's source: a brain's page, an imported
+// conversation) best alone, the first the merge ranked, with how many more
+// of its sections matched (`more`), `shown` of them; the fragments it could
+// not search, which Knowledge names (Alex on #885): one whose `state` is
+// `failed` (its index did not answer, or refused), though the answer itself
+// came; and those with no index yet (`no_index`: a brain before its pages
+// are indexed), named too, quietly. One searched and holding nothing says
+// nothing; one denied or missing has left the person's list since it was read.
+export function knownOf(answer, shown = KNOWLEDGE_SHOWN) {
+  const pages = new Map();
+  for (const hit of answer?.results ?? []) {
+    const page = JSON.stringify([hit.fragment, hit.source]);
+    if (pages.has(page)) pages.get(page).more++;
+    else pages.set(page, { ...hit, more: 0 });
+  }
+  const states = answer?.fragments ?? [];
+  return {
+    hits: [...pages.values()].slice(0, shown),
+    unsearched: states.filter((f) => f.state === "failed").map((f) => ({ name: f.name, message: f.message ?? "" })),
+    unindexed: states.filter((f) => f.state === "no_index").map((f) => f.name),
+  };
+}
+// Where a knowledge hit opens: a Session Archive's conversation in the
+// middle column, read-only (`/?s=<key>`, session-archive.js; its list when
+// the source is no conversation of it); any other fragment's page (a
+// brain's) in the desktop, at that page (its viewer's hash route).
+export function knownAt(hit, kind) {
+  if (kind === "sessions") {
+    const key = hit.source.match(/^sessions\/(.+)\.json$/)?.[1];
+    return { chat: key ? `/?s=${encodeURIComponent(key)}` : "/" };
+  }
+  return { app: `/#/${encodeURIComponent(hit.source)}` };
+}
 
 /**
  * Makes the launcher, its dialog `#search-dialog` (index.html), and opens it
@@ -44,7 +104,9 @@ const HINT_MAX_BYTES = 256;
  * `state`, `byName`, `isChat`, `titleOf`, `chatTitle`, `mark`,
  * `iconOf`, `primaryAgent`, `newChatAgent`, `agentsOwnChat`, `UNTITLED`, `openChat`,
  * `openApp`, `chatFrame`, `composeIn`, `newChat`, `leaveSidebar`,
- * `closeMenu`, `notice`, `prewake`, `originOf`), and three it reads late:
+ * `closeMenu`, `notice`, `prewake`, `originOf`, `dropFrame`: a chat's frame
+ * let go with its stand-in), `offers` (what an agent's runtime offers:
+ * agent-runtimes.js), and three it reads late:
  * `views()` (how many views the middle column has been given: `openChat`
  * and `openSettings` count them), `busy(name)` (whether a chat's page holds
  * what no storage keeps: files chosen, a voice memo) and `setupChat()` (the
@@ -57,12 +119,25 @@ const HINT_MAX_BYTES = 256;
  */
 export function createLauncher(shell) {
   const { $, el, api, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED } = shell;
-  const { openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake, originOf } = shell;
+  const { openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake, originOf, offers } = shell;
   const input = $("workspace-search");
   const dialog = $("search-dialog");
 
   let asked = 0;
   let typing = null;
+  // The last answers to the words typed: the person's search (`found`), and
+  // their knowledge's (`known`: null, nothing to ask; `{pending}`, asked or
+  // about to be; `{hits, unsearched}` (`knownOf`); `{failed}`, the question
+  // refused whole), each drawn as it comes, the second
+  // in a box of its own (`knownBox`) so its answer leaves the rows above it,
+  // and the one focused, as they are.
+  let found = { fragments: [], messages: [] };
+  let known = null;
+  let knowing = null;
+  let knowAsked = 0;
+  const knownBox = el("div", "search-known");
+  // what `renderFound` drew: its rows, and the first chat a launch waits on
+  let drawn = { count: 0, waiting: null };
   let searchIdentity = null;
   // The agent the person picked for this launch, over `newChatAgent`'s.
   let launchPick = null;
@@ -81,12 +156,52 @@ export function createLauncher(shell) {
   // Attachments), each uploaded to the chat once it is made.
   let launchFiles = []; // { file, url }: url, an image's preview
 
+  // Where a hit opens: a chat, or its page; an agent whose runtime offers no
+  // page (a Claude agent: agent-runtimes.js) its own chat, and none when it
+  // has none, so it is not listed.
+  function opensTo(name) {
+    if (isChat(name)) return { chat: name };
+    if (byName(name)?.kind !== "agent" || offers(name, "profile")) return { app: name };
+    const own = agentsOwnChat(name)?.name;
+    return own ? { chat: own } : null;
+  }
   function openFound(name) {
+    const to = opensTo(name);
     closeSearch();
-    if (isChat(name)) openChat(name); else openApp(name);
+    if (to?.chat) openChat(to.chat);
+    else if (to) openApp(to.app);
     leaveSidebar();
   }
+  // A knowledge hit's page: a brain's in the desktop at that page (its
+  // viewer's hash route), a Session Archive conversation in the middle
+  // column, read-only (`/?s=<key>`, session-archive.js).
+  function openKnown(hit) {
+    closeSearch();
+    const at = knownAt(hit, byName(hit.fragment)?.kind);
+    if (at.chat) openChat(hit.fragment, true, at.chat);
+    else openApp(hit.fragment, at.app);
+    leaveSidebar();
+  }
+  function knownRow(hit) {
+    const row = el("button", "row search-result search-known");
+    row.type = "button";
+    row.dataset.fragment = hit.fragment;
+    row.dataset.source = hit.source;
+    const text = el("span", "agent-copy");
+    text.append(el("span", "label", hit.heading && hit.heading !== hit.title ? `${hit.title} › ${hit.heading}` : hit.title || hit.source));
+    // an imported conversation's words said for a person: You, and its agent by name
+    const sessions = byName(hit.fragment)?.kind === "sessions";
+    const key = sessions ? hit.source.match(/^sessions\/(.+)\.json$/)?.[1] : null;
+    const snippet = key ? speakers(hit.snippet, shell.sessionAgent?.(key)) : hit.snippet;
+    if (snippet) text.append(el("span", "agent-preview", snippet));
+    // its other sections that matched, folded into this one (`knownOf`)
+    if (hit.more) text.append(el("span", "search-known-more", `+${hit.more} more ${sessions ? "in this chat" : "on this page"}`));
+    row.append(iconOf(hit.fragment), text, el("span", "meta", titleOf(hit.fragment)));
+    row.onclick = () => openKnown(hit);
+    return row;
+  }
   function foundRow(name, preview, extra) {
+    if (!opensTo(name)) return null;
     const f = byName(name);
     const row = el("button", "row search-result");
     row.type = "button";
@@ -104,7 +219,8 @@ export function createLauncher(shell) {
     const d = new Date(at);
     return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   };
-  function renderFound(fragments, messages) {
+  function renderFound() {
+    const { fragments, messages } = found;
     const results = $("search-results");
     results.replaceChildren();
     const q = input.value.trim();
@@ -126,15 +242,16 @@ export function createLauncher(shell) {
     }
     const groups = [
       ["Chats", fragments.filter((f) => f.kind === "chat").map((f) => foundRow(f.name, f.preview ?? ""))],
-      // the desktop's apps, as the dock lists them (`apps`)
-      ["Apps", fragments.filter((f) => f.kind === "app" || f.kind === "brain").map((f) => foundRow(f.name, ""))],
+      // the desktop's apps and brains, as the Apps and Brains pages list them
+      ["Apps", fragments.filter((f) => f.kind === "app").map((f) => foundRow(f.name, ""))],
+      ["Brains", fragments.filter((f) => f.kind === "brain").map((f) => foundRow(f.name, ""))],
       // a message in a fragment the list has not shown yet is left out until it has
       ["Messages", messages.filter((m) => byName(m.fragment)).map((m) => {
         const row = foundRow(m.fragment, m.snippet, el("span", "meta", when(m.at)));
-        row.classList.add("search-message");
-        row.dataset.seq = String(m.seq);
+        row?.classList.add("search-message");
+        if (row) row.dataset.seq = String(m.seq);
         return row;
-      })],
+      }).filter(Boolean)],
     ];
     let count = 0;
     for (const [heading, rows] of groups) {
@@ -142,7 +259,30 @@ export function createLauncher(shell) {
       count += rows.length;
       results.append(el("h3", null, heading), ...rows);
     }
-    $("search-status").textContent = [launchError, count || canLaunch() || waiting ? "" : "Nothing found."].filter(Boolean).join(" ");
+    drawn = { count, waiting };
+    renderKnown();
+  }
+  // What they know, below the rest, once it has answered: its hits, and
+  // what was not searched (the question refused, or a fragment of it that
+  // failed), said there alone. "Nothing found." only once both have
+  // answered, all of it searched, and neither found anything.
+  function renderKnown() {
+    const results = $("search-results");
+    const hits = (known?.hits ?? []).filter((h) => byName(h.fragment));
+    const unsearched = known?.unsearched ?? [];
+    const failed = known?.failed ? `Not searched: ${known.failed}` : unsearched.length ? `Not searched: ${unsearched.map((u) => titleOf(u.name)).join(", ")}` : "";
+    const note = failed && el("p", "search-known-failed", failed);
+    if (note && unsearched.length) note.title = unsearched.map((u) => `${titleOf(u.name)}: ${u.message}`).join("\n");
+    // what holds no index yet (a brain before its pages are), named quietly
+    const unindexed = (known?.unindexed ?? []).map(titleOf);
+    const waits = unindexed.length > 0 && el("p", "search-known-failed", `Not indexed yet: ${unindexed.slice(0, UNINDEXED_NAMED).join(", ")}${unindexed.length > UNINDEXED_NAMED ? ` and ${unindexed.length - UNINDEXED_NAMED} more` : ""}`);
+    const notes = [note, waits].filter(Boolean);
+    const rows = hits.length || notes.length ? [el("h3", null, "Knowledge"), ...hits.map(knownRow), ...notes] : [];
+    knownBox.replaceChildren(...rows);
+    if (rows.length && input.value.trim()) results.append(knownBox);
+    else knownBox.remove();
+    const none = !drawn.count && !hits.length && !failed && !known?.pending && !canLaunch() && !drawn.waiting;
+    $("search-status").textContent = [launchError, input.value.trim() && none ? "Nothing found." : ""].filter(Boolean).join(" ");
     fitSearch();
   }
 
@@ -189,15 +329,17 @@ export function createLauncher(shell) {
   const canSend = () => canLaunch() || !!firstChat();
   const sendable = () => canSend() && (!!input.value.trim() || (launchFiles.length > 0 && canLaunch()));
 
+  // What a message carries, at most, as the chat's page takes it: the
+  // platform's own word as its list last said it (`state.limits`;
+  // limits.js), checked again as the files are sent.
   function addFiles(files) {
     launchError = "";
+    const limits = state.limits;
     for (const file of files) {
-      if (launchFiles.length >= FILES_MAX) {
-        launchError = `A message carries at most ${FILES_MAX} files.`;
-        break;
-      }
-      if (file.size > FILE_MAX_BYTES) {
-        launchError = `${file.name || "A file"} is over 25 MB.`;
+      const why = refusal(limits, [file], launchFiles.length);
+      if (why) {
+        launchError = why;
+        if (launchFiles.length >= limits.filesPerMessage) break;
         continue;
       }
       launchFiles.push({ file, url: file.type.startsWith("image/") ? URL.createObjectURL(file) : null });
@@ -270,21 +412,48 @@ export function createLauncher(shell) {
   async function search() {
     const q = input.value.trim();
     const mine = ++asked;
-    if (!q) return renderFound([], []);
+    if (!q) {
+      found = { fragments: [], messages: [] };
+      return renderFound();
+    }
     try {
       // A prompt can be longer than the search API's words and bytes. Only
       // the search hint is bounded; the complete prompt is sent to the chat.
       const hint = [...q.split(/\s+/).slice(0, HINT_WORDS).join(" ")];
       while (new TextEncoder().encode(hint.join("")).length > HINT_MAX_BYTES) hint.pop();
-      const found = await api("GET", `/api/search?q=${encodeURIComponent(hint.join(""))}`);
+      const answer = await api("GET", `/api/search?q=${encodeURIComponent(hint.join(""))}`);
       // a slower answer to an older query never replaces a newer one's
-      if (mine === asked) renderFound(found.fragments ?? [], found.messages ?? []);
+      if (mine === asked) {
+        found = { fragments: answer.fragments ?? [], messages: answer.messages ?? [] };
+        renderFound();
+      }
     } catch (e) {
       if (mine === asked) {
         $("search-status").textContent = e.message;
         fitSearch();
       }
     }
+  }
+  // What the person knows (`knowledgeIn`); none, nothing asked.
+  async function searchKnowledge() {
+    const mine = ++knowAsked;
+    const names = knowledgeIn(state.fragments);
+    const words = [...input.value.trim()];
+    while (new TextEncoder().encode(words.join("")).length > KNOWLEDGE_Q_MAX_BYTES) words.pop();
+    if (!names.length || !words.join("").trim()) {
+      known = null;
+      return renderKnown();
+    }
+    let answer;
+    try {
+      answer = knownOf(await api("POST", "/api/search", { q: words.join("").trim(), in: names, limit: KNOWLEDGE_ASKED }));
+    } catch (e) {
+      answer = { failed: e.message };
+    }
+    // a slower answer to older words never replaces newer ones'
+    if (mine !== knowAsked) return;
+    known = answer;
+    renderKnown();
   }
   // `text`: what a suggestion asks, in place of the last unsent one
   function openSearch(trigger, text = null) {
@@ -341,6 +510,15 @@ export function createLauncher(shell) {
       leaveSidebar();
       return;
     }
+    // its files against the platform's word now (its list, read again since
+    // they were taken: a deploy may have changed it): refused, they and the
+    // words stay, saying why
+    const why = refusal(state.limits, files);
+    if (why) {
+      launchError = why;
+      $("search-status").textContent = launchError;
+      return;
+    }
     launching = true;
     ++asked;
     clearTimeout(typing);
@@ -360,8 +538,8 @@ export function createLauncher(shell) {
     // no storage keeps (`busy`).
     const unload = (name) => {
       if (shell.busy(name)) return;
-      state.frames.get(name)?.remove();
-      state.frames.delete(name);
+      // the frame and its stand-in (frame-standin.js), with no chat of it left
+      shell.dropFrame(name);
     };
     let name = null;
     try {
@@ -379,7 +557,7 @@ export function createLauncher(shell) {
         leaveSidebar();
         view = shell.views();
       }
-      // bounded: at most FILES_MAX, uploaded together
+      // bounded: at most the platform's filesPerMessage (checked above), uploaded together
       const attachments = await Promise.all(files.map((f) => upload(name, f)));
       await api("POST", `/api/f/${seg(name)}/channels/chat`, { id: pendingLaunch.id, body: { text, ...(attachments.length ? { attachments } : {}) } });
       pendingLaunch = null;
@@ -429,8 +607,15 @@ export function createLauncher(shell) {
     $("search-status").textContent = launchError;
     fitSearch();
     $("search-send").disabled = !sendable();
-    renderFound([], []);
-    if (input.value.trim()) typing = setTimeout(search, 150);
+    ++knowAsked;
+    clearTimeout(knowing);
+    found = { fragments: [], messages: [] };
+    known = input.value.trim() && knowledgeIn(state.fragments).length ? { pending: true } : null;
+    renderFound();
+    if (input.value.trim()) {
+      typing = setTimeout(search, 150);
+      knowing = setTimeout(searchKnowledge, KNOWLEDGE_WAIT_MS);
+    }
   }
 
   for (const id of ["sidebar-new-chat", "new-chat"]) {
@@ -449,7 +634,7 @@ export function createLauncher(shell) {
   });
   // Keyboard events inside the chat iframe cannot bubble to the desktop.
   addEventListener("message", async event => {
-    if (event.data?.fragment !== "open-launcher" || $("layout").hidden) return;
+    if (event.data?.fragment !== KIND.openLauncher || $("layout").hidden) return;
     const frame = [...document.querySelectorAll("iframe[data-fragment]")].find(f => f.contentWindow === event.source);
     const name = frame?.dataset.fragment;
     if (!name || !byName(name) || document.activeElement !== frame) return;

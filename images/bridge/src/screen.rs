@@ -346,6 +346,8 @@ struct Shared {
     /// An agent's SimpleX link (`/simplex/…`, simplex/http.rs): 404 on an
     /// image that names no core.
     simplex: crate::simplex::http::Simplex,
+    /// Where an answer for the computer goes (`/answer`, answer.rs).
+    answers: Option<crate::answer::Answers>,
 }
 
 impl Shared {
@@ -378,12 +380,12 @@ impl Shared {
     }
 }
 
-pub async fn serve(cfg: ScreenConfig, agents: Agents, simplex: crate::simplex::http::Simplex, stop: watch::Receiver<bool>) -> Result<(), String> {
+pub async fn serve(cfg: ScreenConfig, agents: Agents, simplex: crate::simplex::http::Simplex, answers: Option<crate::answer::Answers>, stop: watch::Receiver<bool>) -> Result<(), String> {
     let listener = cfg.listener.try_clone().and_then(|l| l.set_nonblocking(true).and_then(|()| tokio::net::TcpListener::from_std(l))).map_err(|e| format!("screen listen: {e}"))?;
     let listen = listener.local_addr().map_err(|e| format!("screen listen: {e}"))?;
     crate::ev!("screen.listening", { "listen": listen.to_string(), "screensFile": cfg.screens_file.as_ref().map(|p| p.display().to_string()) });
     let screens_file = cfg.screens_file.clone().map(|p| Mutex::new(Screens::new(p)));
-    let shared = Arc::new(Shared { cfg, agents, screens_file, by_agent: Mutex::new(HashMap::new()), simplex });
+    let shared = Arc::new(Shared { cfg, agents, screens_file, by_agent: Mutex::new(HashMap::new()), simplex, answers });
     tokio::spawn(tick(shared.clone(), stop.clone()));
     let handler = move |req: Request<Incoming>, _peer: SocketAddr| {
         let shared = shared.clone();
@@ -453,6 +455,10 @@ async fn handle(mut req: Request<Incoming>, shared: Arc<Shared>) -> Response<Bod
     let path = req.uri().path().to_string();
     if crate::simplex::http::ours(&path) {
         return crate::simplex::http::handle(req, &shared.simplex).await;
+    }
+    if crate::answer::ours(&path) {
+        let runs = if req.method() == hyper::Method::POST { running(&shared.agents).await.unwrap_or_default() } else { Vec::new() };
+        return crate::answer::handle(req, shared.answers.as_ref(), |agent| runs.iter().any(|a| a.fragment == agent)).await;
     }
     match path.as_str() {
         "/websockify" | "/control" => {

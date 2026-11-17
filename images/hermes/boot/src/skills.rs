@@ -82,7 +82,7 @@ pub const EXTERNAL_DIRS: [&str; 2] = [MANAGED_DIR, PLATFORM_VIEW];
 const COMPUTER_PAGE: &str = include_str!("computer.md");
 /// The platform skill's description, which Hermes lists in every turn's
 /// prompt (its skills index): what makes an agent load it.
-const PLATFORM_DESCRIPTION: &str = "You are an agent on a Fragment computer: what that is, and the `fragment` CLI in your terminal, which acts as you. Load it before you list, read, make, change, deploy or share your owner's fragments (apps, sites, brains, chats), when asked what you can do here, to ask another of your owner's agents (`fragment ask`), for anything later or recurring (`fragment schedule`), and for your owner's connections (Google: GOOGLE_OAUTH_ACCESS_TOKEN) or your desktop.";
+const PLATFORM_DESCRIPTION: &str = "You are an agent on a Fragment computer: what that is, and the `fragment` CLI in your terminal, which acts as you. Load it before you list, read, make, change, deploy or share your owner's fragments (apps, sites, brains, chats), when asked what you can do here, to ask another of your owner's agents (`fragment ask`), for anything later or recurring (`fragment schedule`), to search past conversations and brains (`fragment search`), and for your owner's connections (Google: GOOGLE_OAUTH_ACCESS_TOKEN) or your desktop.";
 /// The platform skill is a page or two, not a manual. 20 KiB since
 /// 2026-10-22: the computer's page's "Files your owner sends you" took it
 /// past 16 KiB, which it had all but reached.
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn the_reader_is_an_agent_of_the_computers_owner() {
-        let a = |f: &str, o: &str| Agent { fragment: f.into(), identity: format!("npub1{f}"), name: f.into(), owner: o.into(), credentials: vec![], key: None, runtime: None };
+        let a = |f: &str, o: &str| Agent { fragment: f.into(), identity: format!("npub1{f}"), name: f.into(), owner: o.into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
         let agents = [a("x.skyler", "npub1skyler"), a("juniper--k3x9", "npub1paul")];
         assert_eq!(reader(&agents, "npub1paul").map(|r| r.fragment.as_str()), Some("juniper--k3x9"));
         assert!(reader(&agents[..1], "npub1paul").is_none());
@@ -564,7 +564,7 @@ mod tests {
         let down = Arc::new(Mutex::new(false));
         let (addr, _stop) = fake::start(files.clone(), down.clone(), Arc::new(Mutex::new(true))).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
-        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
         let root = std::env::temp_dir().join(format!("hermes-boot-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (dir, manifest) = (root.join("managed"), root.join("sync/managed.json"));
@@ -711,6 +711,19 @@ mod tests {
     /// as a skill (one frontmatter, a one-line description it lists, nothing
     /// its guard flags or its preprocessing would run). Invalid: a CLI skill
     /// with no frontmatter, or another name, is refused.
+    /// Goal (Paul's prod agent, 2026-11-02: `session_search` found nothing of
+    /// a conversation from before its computer, which the Session Archive
+    /// held): every agent is told what Hermes' `session_search` sees, and
+    /// how to search the rest, in the page and in the description that gets
+    /// it loaded.
+    #[test]
+    fn an_agent_is_told_where_past_conversations_are() {
+        for said in ["`session_search` sees only this computer's other chats since it started", "never the one you are in", "chats imported from elsewhere", "fragment search --all \"<words>\"", "`--in <fragment>`"] {
+            assert!(COMPUTER_PAGE.contains(said), "computer.md says {said}");
+        }
+        assert!(PLATFORM_DESCRIPTION.contains("to search past conversations and brains (`fragment search`)"));
+    }
+
     #[test]
     fn the_platform_skill_is_the_clis_after_the_computers_page() {
         let cli = &cli_skill();
@@ -723,7 +736,7 @@ mod tests {
         assert!(body.contains(cli_body), "the CLI's skill, whole");
         let page = body.find("# Your computer").unwrap();
         assert!(page < body.find("# fragment").unwrap(), "the computer's page first");
-        for said in ["FRAGMENT_AS_AGENT", "skip its Install and Pair", "apps-finite", "brain-finite", "GOOGLE_OAUTH_ACCESS_TOKEN", "google-workspace-finite", "\"Its screen\"", "take over", "human_has_control", "another agent's desktop", "fragment create", "fragment write", "fragment deploy", "fragment call", "fragment list", "fragment schedule add --routine", "`hermes cron`", "every 15 minutes", "a cron trigger and a job", "A routine may end with exactly `[SILENT]` when there is nothing to tell"] {
+        for said in ["FRAGMENT_AS_AGENT", "skip its Install and Pair", "apps-finite", "brain-finite", "GOOGLE_OAUTH_ACCESS_TOKEN", "google-workspace-finite", "\"Its screen\"", "take over", "human_has_control", "another agent's desktop", "fragment create", "fragment write", "fragment deploy", "fragment call", "fragment list", "fragment schedule add --routine", "`hermes cron`", "every 15 minutes", "a cron trigger and a job", "A routine may end with exactly `[SILENT]` when there is nothing to tell", "fragment quote", "ask once, in one\nsentence"] {
             assert!(body.contains(said), "it says {said:?}");
         }
         // Paul, 2026-10-20: an agent asked to check something hourly found no
@@ -784,7 +797,7 @@ mod tests {
         let listed = Arc::new(Mutex::new(false));
         let (addr, _stop) = fake::start(files.clone(), Arc::new(Mutex::new(false)), listed.clone()).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
-        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
         let root = std::env::temp_dir().join(format!("hermes-boot-platform-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (own, manifest) = (root.join("profile/skills"), root.join("sync/managed.json"));

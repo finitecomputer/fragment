@@ -52,7 +52,7 @@ pub fn keys(s: &mut Suite, api: &Api) -> Result<()> {
     let c = s.create(api, &owner, &peek)?;
     ship(s, &c, PEEK_APP, PEEK_JSON);
     let r = api.op(&owner, &peek, "peek", "p", json!({}))?;
-    s.ok("an app's env holds only its capabilities", r.status == 200 && r.body["result"]["env"] == json!(["FILES"]), &r);
+    s.ok("an app's env holds only its capabilities", r.status == 200 && r.body["result"]["env"] == json!(["FILES", "SEARCH"]), &r);
     let texts: Vec<String> = r.body["result"]["texts"].as_array().map(|t| t.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     if s.hosted() {
         s.skip("no string an app can reach holds a deployment secret", "a preview's secrets are its own, never the run's to compare (its env's names are checked above)");

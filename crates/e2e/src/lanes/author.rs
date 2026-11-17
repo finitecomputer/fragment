@@ -329,6 +329,9 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a page hears its own change", own == json!({ "type": "presence", "id": n_hello["id"], "principal": n_hello["principal"], "data": { "name": "new" } }), &own);
     n.close();
     s.ok("a visitor's socket without a cookie gets one, as a call does", set.iter().any(|c| c.starts_with("fragment_anon=") && c.contains("HttpOnly")), format!("{set:?}"));
+    let timing = Socket::accepted_timing(api, &name, "__live", None)?;
+    let parts = crate::api::timing_parts(&timing);
+    s.ok("a socket's accept says what it waited on (Server-Timing): who it is, and the accept", ["identity", "accept"].iter().all(|p| parts.iter().any(|w| w == p)), &timing);
     // b heard the new page's presence arrive and leave: past those two
     for _ in 0..2 {
         b.until("presence", 5)?;
@@ -410,7 +413,52 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
         tail == (total - 2..=total + 2).collect::<Vec<_>>() && sub["more"] == false && sub["next"] == total + 2,
         format!("{tail:?} {sub}"),
     );
+    http_pages(s, api, &owner, &paged, total + 2)?;
     live_queries(s, api, &owner)
+}
+
+/// The same backlog over HTTP (`GET …/channels/{c}`): a page ends at
+/// `CHANNEL_PAGE` records or about `CHANNEL_HTTP_PAGE_MAX_BYTES` of
+/// bodies, and its `more` says whether records remain, so a page cut
+/// short by its bytes is not the last. Read forward and back, every
+/// record once.
+fn http_pages(s: &mut Suite, api: &Api, owner: &Keys, name: &str, total: i64) -> Result<()> {
+    let page = |q: &str| api.signed(owner, "GET", &format!("/api/f/{name}/channels/room?{q}&limit={}", limits::CHANNEL_PAGE), None);
+    let first = page("after=0")?;
+    let n = first.body["records"].as_array().map_or(0, Vec::len);
+    s.ok("an HTTP page ends at CHANNEL_PAGE records, with more to read", first.status == 200 && n == limits::CHANNEL_PAGE && first.body["more"] == true, format!("{} {n} more {}", first.status, first.body["more"]));
+    for back in [false, true] {
+        let mut cursor = if back { total + 1 } else { 0 };
+        let (mut seqs, mut sizes, mut more, mut cut) = (vec![], vec![], true, false);
+        // bounded: every page holds at least one record
+        for _ in 0..total {
+            if !more {
+                break;
+            }
+            let r = page(&if back { format!("before={cursor}") } else { format!("after={cursor}") })?;
+            anyhow::ensure!(r.status == 200, "page: {r}");
+            let records = r.body["records"].as_array().cloned().unwrap_or_default();
+            let bytes: usize = records.iter().map(|r| r["body"].to_string().len()).sum();
+            more = r.body["more"] == true;
+            cut |= more && records.len() < limits::CHANNEL_PAGE;
+            sizes.push(bytes);
+            let got: Vec<i64> = records.iter().filter_map(|r| r["seq"].as_i64()).collect();
+            cursor = r.body["next"].as_i64().unwrap_or(cursor);
+            if back {
+                seqs.splice(0..0, got);
+            } else {
+                seqs.extend(got);
+            }
+        }
+        let want: Vec<i64> = (1..=total).collect();
+        let gap = seqs.iter().zip(&want).position(|(a, b)| a != b);
+        s.ok(
+            &format!("read {}, HTTP pages cut by their bytes say more, and together hold every record once", if back { "back" } else { "forward" }),
+            seqs == want && !more && cut && sizes.iter().all(|b| *b <= limits::CHANNEL_HTTP_PAGE_MAX_BYTES),
+            format!("{} pages of {sizes:?} bytes, {} records, first difference at {gap:?}", sizes.len(), seqs.len()),
+        );
+    }
+    Ok(())
 }
 
 /// Queries over the live socket: run as the socket's principal and role,
@@ -570,20 +618,47 @@ fn live_queries(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         }
     };
     s.ok("a socket whose key was revoked is closed at its next frame once asked again (4001)", closed.contains("4001"), &closed);
-    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "forget-live" })))?;
-    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-live", "ms": limits::LIVE_IDENTITY_MS })))?;
-    o.send(&json!({ "type": "ping" }))?;
-    let closed = loop {
-        match o.next() {
-            Ok(_) => continue,
-            Err(e) => break e.to_string(),
+
+    // The object wakes (a test lever forgets what its activation held). A
+    // key is public and kept in its socket's attachment, so a key's socket
+    // is asked about again with it: the owner's goes on, and a key revoked
+    // while the object slept still closes its own. A cookie's token is
+    // never stored: a page's socket signed in by cookie is closed to
+    // reconnect, never trusted as it was (4001).
+    let closed_by = |sock: &mut Socket| loop {
+        if let Err(e) = sock.next() {
+            break e.to_string();
         }
     };
+    let spare = Keys::generate();
+    let r = api.signed(&signer, "POST", add, Some(&json!({ "proof": api.proof(&spare, "POST", add, &signer) })))?;
+    let mut k = Socket::open(api, &name, "__live", Some(&spare), None)?;
+    let k_hello = k.until("hello", 5)?;
+    let site = format!("fragment_site={}", super::signin::site_cookie(api, &api.sign_in(&Api::email_of(owner))?, &name)?);
+    let mut c = Socket::on_host(api, &name, "__live", None, Some(&site), Some(&api.site_origin(&name)))?;
+    let c_hello = c.until("hello", 5)?;
     s.ok(
-        "one the object holds no credential for (it woke) is closed to reconnect, never trusted as it was (4001)",
-        r.status == 200 && closed.contains("4001"),
-        &closed,
+        "(another key of a person's, and the owner's page by its site cookie, open sockets as them)",
+        r.status == 200 && k_hello["principal"] == api.identity(&signer)?.as_str() && c_hello["principal"] == o_hello["principal"],
+        format!("{k_hello} {c_hello}"),
     );
+    let forgot = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "forget-live" })))?;
+    let revoked = api.signed(&signer, "DELETE", &format!("/api/identities/me/keys/{}", fragment_core::npub::encode(spare.pubkey_hex())), None)?;
+    let aged = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-live", "ms": limits::LIVE_IDENTITY_MS })))?;
+    s.ok(
+        "(the test fleet forgets the sockets, as waking does; that key is revoked; the checks are aged)",
+        forgot.status == 200 && revoked.status == 200 && aged.status == 200,
+        format!("{forgot} {revoked} {aged}"),
+    );
+    o.send(&json!({ "type": "ping" }))?;
+    let still = o.until("pong", 5).map_err(|e| e.to_string());
+    s.ok("a key's socket asked again after the object woke goes on: its key is in its attachment", still.as_ref().is_ok_and(|p| p["type"] == "pong"), format!("{still:?}"));
+    k.send(&json!({ "type": "ping" }))?;
+    let closed = closed_by(&mut k);
+    s.ok("a key revoked while the object slept closes its socket at its next frame once asked again (4001)", closed.contains("4001"), &closed);
+    c.send(&json!({ "type": "ping" }))?;
+    let closed = closed_by(&mut c);
+    s.ok("a socket signed in by cookie, its object woken since, is closed to reconnect, never trusted as it was (4001)", closed.contains("4001"), &closed);
 
     // a socket's role is fixed while it is open: a member whose role
     // changes has theirs reopened (4001, which the library reconnects
@@ -625,9 +700,10 @@ fn fill_past_a_page(api: &Api, keys: &Keys, name: &str, bytes: bool) -> Result<i
         anyhow::ensure!(r.status == 200, "bulk: {r}");
         total += limits::EFFECTS_MAX as i64;
     }
-    // records of 60 KiB, past the byte budget of one page
+    // records of 60 KiB, past the byte budget of one page (an HTTP page's,
+    // the larger)
     let size = 60 * 1024;
-    for i in 0..if bytes { limits::CHANNEL_PAGE_MAX_BYTES / size + 3 } else { 0 } {
+    for i in 0..if bytes { limits::CHANNEL_HTTP_PAGE_MAX_BYTES / size + 3 } else { 0 } {
         let r = api.op(keys, name, "bulk", &format!("big-{i}"), json!({ "n": 1, "size": size }))?;
         anyhow::ensure!(r.status == 200, "bulk: {r}");
         total += 1;
@@ -681,8 +757,12 @@ fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Re
         titles.push(json!({ "wanted": title, "main": manifest.body["meta"]["title"], "live": status.body["title"] }));
     }
     s.ok("CLI rename A to B to A and an immediate repeat each change main and the live display name", titles.iter().all(|r| r["wanted"] == r["main"] && r["wanted"] == r["live"]), json!(titles));
-    let receipt = s.cli_json(api, home, &["preview", &name, "--json"])?;
-    s.ok("CLI preview asks for a screenshot and returns its completion receipt", receipt["since"].is_i64() && receipt["live"].is_string(), &receipt);
+    if s.shoots_cards() {
+        let receipt = s.cli_json(api, home, &["preview", &name, "--json"])?;
+        s.ok("CLI preview asks for a screenshot and returns its completion receipt", receipt["since"].is_i64() && receipt["live"].is_string(), &receipt);
+    } else {
+        s.skip_card("CLI preview asks for a screenshot and returns its completion receipt");
+    }
     let label = name.split_once("--").expect("the name has a suffix").0;
     let claimed = s.cli_json(api, home, &["address", &name, label, "--json"])?;
     let read = s.cli_json(api, home, &["address", &name, "--json"])?;
@@ -834,27 +914,60 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         Ok(String::from_utf8_lossy(&out.stdout).lines().map(|l| serde_json::from_str(l).unwrap_or_else(|_| json!({ "not JSON-RPC": l }))).collect())
     };
     let tools = |list: &Value| list["result"]["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
-    let read = mcp(false, &[("count", json!({})), ("measure", json!({})), ("say", json!({ "text": "from mcp" }))])?;
+    let quote = json!({ "items": [{ "model": "cheap", "input": 1_000, "output": 100, "calls": 4 }] });
+    let read = mcp(false, &[("count", json!({})), ("measure", json!({})), ("say", json!({ "text": "from mcp" })), ("fragment-quote", quote)])?;
     let wrote = mcp(true, &[("say", json!({ "text": "from mcp" }))])?;
     let said = api.signed(&keys, "GET", &format!("/api/f/{name}/channels/room"), None)?;
     s.ok(
-        "fragment mcp serves the described queries over stdio, signed with the CLI's key: a call answers, a refused one is the tool's error with the platform's code, and a write without --write is refused",
-        read.len() == 5
+        "fragment mcp serves the described queries over stdio, a reader's search and a quote, signed with the CLI's key: a call answers, a refused one is the tool's error with the platform's code, and a write without --write is refused",
+        read.len() == 6
             && read[0]["result"]["serverInfo"]["title"] == name.as_str()
-            && tools(&read[1]) == ["count", "measure"]
+            && tools(&read[1]) == ["count", "measure", "fragment-search", "fragment-quote"]
             && read[2]["result"]["structuredContent"]["n"].is_u64()
             && read[3]["result"]["isError"] == true
             && read[3]["result"]["structuredContent"]["error"]["code"] == "invalid_request"
             && read[3]["result"]["structuredContent"]["error"]["message"].as_str().is_some_and(|m| m.contains("/text: is required"))
-            && read[4]["error"]["message"].as_str().is_some_and(|m| m.contains("--write")),
+            && read[4]["error"]["message"].as_str().is_some_and(|m| m.contains("--write"))
+            && read[5]["result"]["structuredContent"]["items"][0]["calls"] == 4
+            && read[5]["result"]["structuredContent"]["totalMicros"].as_i64().is_some_and(|t| t > 0 && Some(t) == read[5]["result"]["structuredContent"]["items"][0]["chargeMicros"].as_i64())
+            && read[5]["result"]["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("about $")),
         json!(read),
     );
     s.ok(
         "with --write it serves the described mutation too, and a call of it runs once",
-        tools(&wrote[1]) == ["count", "measure", "say"]
+        tools(&wrote[1]) == ["count", "measure", "say", "fragment-search", "fragment-quote"]
             && wrote[2]["result"]["structuredContent"]["id"].is_u64()
             && said.body["records"].as_array().is_some_and(|r| r.iter().filter(|r| r["body"]["text"] == "from mcp").count() == 1),
         json!({ "mcp": wrote, "room": said.body }),
+    );
+    // a quote of the book's parts (FIN-443 and FIN-445), through the CLI:
+    // each priced as the ledger charges its row, a part counted by its
+    // units, none said, said so; the lines a person reads printed here
+    let asked = ["fal:image", "1x", "1048576px", "xai", "1", "xai:image", "2x", "google-places:photo", "firecrawl:credit", "5credits", "elevenlabs:speech", "200chars", "fal:image"];
+    let said = s.cli(api, &home, &[&["quote"][..], &asked].concat());
+    let lines = String::from_utf8_lossy(&said.stdout).into_owned();
+    println!("      (fragment quote {}:\n{})", asked.join(" "), lines.lines().map(|l| format!("        {l}")).collect::<Vec<_>>().join("\n"));
+    let quoted = s.cli_json(api, &home, &[&["quote"][..], &asked, &["--json"]].concat())?;
+    let charge = |key: &str, units: u64| {
+        let (micros, per) = fragment_core::price::default_key_price(key).expect("the book prices each part");
+        let book = fragment_core::price::PriceBook { keys: vec![fragment_core::price::KeyPrice { key: key.into(), micros, per }], ..fragment_core::price::PriceBook::defaults() };
+        book.price(&fragment_core::price::Usage::Key { key: key.into(), units }).expect("a part's row is priced").charge
+    };
+    let expect = [("fal:image", 1_048_576, 1), ("xai", 1, 1), ("xai:image", 1, 2), ("google-places:photo", 1, 1), ("firecrawl:credit", 5, 1), ("elevenlabs:speech", 200, 1)];
+    let items = quoted["items"].as_array().cloned().unwrap_or_default();
+    let priced = expect.iter().zip(&items).all(|((key, units, calls), q)| q["pricedAs"] == *key && q["calls"] == *calls && q["eachMicros"].as_i64() == Some(charge(key, *units)) && q["chargeMicros"].as_i64() == Some(charge(key, *units) * *calls));
+    let total: i64 = expect.iter().map(|(key, units, calls)| charge(key, *units) * calls).sum();
+    s.ok(
+        "fragment quote prices each of the book's parts as the ledger charges its row: fal's image by its pixels, xAI's X search and its image a call, a Places photo, Firecrawl's credits, speech by its characters; a part counted by its units, none said, is said so",
+        said.status.success()
+            && items.len() == 7
+            && priced
+            && items[6] == json!({ "pricedAs": "fal:image", "calls": 1, "unknown": "no_units" })
+            && quoted["totalMicros"].as_i64() == Some(total)
+            && lines.starts_with(&format!("about {} for what is priced; you ", fragment_core::price::dollars(total)))
+            && lines.contains("  fal:image: say each call's units")
+            && lines.lines().next().is_some_and(|l| l.ends_with(" left this month") && l.rsplit_once('.').is_some_and(|(_, cents)| cents.len() == 2 + " left this month".len())),
+        json!({ "said": lines, "quoted": quoted }),
     );
     let r = s.cli_json(api, &home, &["channel", &name, "--json"])?;
     s.ok("fragment channel lists the channels", r["channels"].as_array().is_some_and(|a| a.iter().any(|c| c["name"] == "room")), &r);
@@ -965,6 +1078,13 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         again == Some(1) && v["error"]["code"] == "invalid_request" && v["error"]["message"].as_str().is_some_and(|m| m.contains("fragment members role")) && changed["role"] == "editor",
         json!([v, changed]),
     );
+    let listed = s.cli(api, &home, &["members", "list", &name]);
+    let text = String::from_utf8_lossy(&listed.stdout).to_string();
+    s.ok(
+        "fragment members list shows its owner each person by email too, as the share sheet does (decision 48)",
+        listed.status.success() && text.lines().any(|l| l.starts_with("editor\t") && l.ends_with(&format!("\t{bea_email}"))),
+        &text,
+    );
     // the invites waiting for the CLI's person's yes: listed, accepted by
     // label, declined by name (decision 63)
     let me_email = s.cli_keys(&home).map(|k| crate::cli_email(&fragment_core::npub::encode(k.pubkey_hex()))).transpose()?.unwrap_or_default();
@@ -1063,6 +1183,42 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
             && past["error"]["code"] == "invalid_usage"
             && past["error"]["message"].as_str().is_some_and(|m| m.contains(&format!("at most {} KiB", limits::API_FILES_WRITE_MAX_BYTES / 1024))),
         json!({ "wrote": wrote, "read": read.status, "bytes": read.bytes.len(), "past": past }),
+    );
+    // `fragment write --dir`: several files in one commit, whole or not at
+    // all, as a parent brain publishes its synthesis beside its revision
+    // record. Over another writer's commit to one of them it lands both
+    // (the files route commits onto main as it finds it); one path that is
+    // not a repo path, or one file missing, sends nothing.
+    let staged = s.scratch.join("write-batch");
+    std::fs::create_dir_all(staged.join("out/wiki"))?;
+    std::fs::create_dir_all(staged.join("out/datasets"))?;
+    std::fs::write(staged.join("out/wiki/launch.md"), "synthesis v2\n")?;
+    std::fs::write(staged.join("out/datasets/incorporated.json"), "{\"child\":{\"revision\":\"v2\"}}\n")?;
+    let theirs = api.signed(&keys, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "files": [{ "path": "out/wiki/launch.md", "text": "another writer's\n" }] })))?;
+    let staged_s = staged.to_str().ok_or_else(|| anyhow::anyhow!("a utf-8 path"))?;
+    let batch = s.cli_json(api, &home, &["write", &name, "out/wiki/launch.md", "out/datasets/incorporated.json", "--dir", staged_s, "--json"]).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+    let listed = api.signed(&keys, "GET", &format!("/api/f/{name}/files"), None)?;
+    let commit_of = |path: &str| listed.body["files"].as_array().and_then(|l| l.iter().find(|f| f["path"] == path)).map(|f| f["lastCommitSha"].clone()).unwrap_or_default();
+    let text_of = |path: &str| api.signed(&keys, "GET", &format!("/api/f/{name}/file?path={path}"), None).map(|r| r.text).unwrap_or_default();
+    s.ok(
+        "fragment write --dir commits several files as one, over another writer's commit to one of them",
+        theirs.status == 200
+            && batch["commit"].is_string()
+            && batch["paths"] == json!(["out/wiki/launch.md", "out/datasets/incorporated.json"])
+            && commit_of("out/wiki/launch.md") == batch["commit"]
+            && commit_of("out/datasets/incorporated.json") == batch["commit"]
+            && text_of("out/wiki/launch.md") == "synthesis v2\n"
+            && text_of("out/datasets/incorporated.json") == "{\"child\":{\"revision\":\"v2\"}}\n",
+        json!({ "theirs": theirs.status, "batch": batch, "files": listed.body["files"] }),
+    );
+    std::fs::write(staged.join("out/wiki/launch.md"), "synthesis v3\n")?;
+    let (bad_exit, bad) = refused(s, &["write", &name, "out/wiki/launch.md", "../outside.md", "--dir", staged_s, "--json"]);
+    let (missing_exit, missing) = refused(s, &["write", &name, "out/wiki/launch.md", "out/wiki/none.md", "--dir", staged_s, "--json"]);
+    let (one_exit, one) = refused(s, &["write", &name, "out/wiki/launch.md", "out/datasets/incorporated.json", "--text", "x", "--json"]);
+    s.ok(
+        "a write with a path outside the repo or a missing file sends nothing (exit 2, 1), and --text writes one file alone (exit 2)",
+        bad_exit == Some(2) && bad["error"]["code"] == "invalid_usage" && missing_exit == Some(1) && one_exit == Some(2) && text_of("out/wiki/launch.md") == "synthesis v2\n",
+        json!({ "bad": bad, "missing": missing, "one": one }),
     );
     Ok(())
 }
@@ -1201,7 +1357,156 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      its page made {calls} HTTP calls to the query");
     s.ok("and asked the query over HTTP once, before its socket opened: every re-run went over the socket", calls == 1, format!("{calls} HTTP calls to list"));
     deploying_call(s, api, &mut chrome)?;
+    click_aims(s, &mut chrome, &v, &api.base)?;
     super::posts::browser(s, api, &mut chrome)
+}
+
+/// The harness's `click` (browser.rs `CLICK_GUARD`) reaches the element it
+/// aims at, or nothing of its page. A listener the page put on its window
+/// before the click hears only the press that reaches it. Valid: a still
+/// button, pressed once; a disabled button, pressed and never clicked, as a
+/// hand's; a link that takes the page to another document. Invalid: one
+/// the page moves under the mouse between the aim and the press (two
+/// buttons swap places as the pointer comes, as a list drawn again moves
+/// its rows): the press on the other is stopped before the page hears it,
+/// and the next aim presses the button where it is now, once; the same
+/// aimed once (`click_strict`), an error and nothing pressed; one covered
+/// for good, by an element or a frame, an error naming its cover, which
+/// hears nothing; one hidden, an error saying it has no box; a press that fails to dispatch, which leaves no guard
+/// armed to take a later one; a frame drawn over the point between the aim
+/// and the press (the guard's limit: the frame takes that press), a miss
+/// said, never a success; and a document armed, left into the back/forward
+/// cache and come back to, which holds no aim.
+fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate::browser::Page, base: &str) -> Result<()> {
+    chrome.eval(
+        page,
+        "(() => { window.__heard = []; const heard = (what) => window.__heard.push(what); const box = document.createElement('div'); box.id = 'aims'; \
+         Object.assign(box.style, { position: 'fixed', inset: '0', zIndex: '2147483647', background: 'white' }); document.body.append(box); \
+         const put = (tag, id, left, top) => { const e = document.createElement(tag); e.id = id; if (tag !== 'iframe') e.textContent = id; \
+           Object.assign(e.style, { position: 'absolute', left: `${left}px`, top: `${top}px`, width: '200px', height: '40px', margin: '0', padding: '0', border: '0', boxSizing: 'border-box' }); \
+           box.append(e); if (tag === 'iframe') e.contentWindow.addEventListener('pointerdown', (ev) => { if (ev.isTrusted) heard(`frame ${id}`); }, true); \
+           else for (const k of ['pointerdown', 'click']) e.addEventListener(k, () => heard(`${k} ${id}`)); return e; }; \
+         const swap = (a, b) => { if (box.dataset.swap !== 'armed') return; box.dataset.swap = 'done'; [a.style.top, b.style.top, a.style.left, b.style.left] = [b.style.top, a.style.top, b.style.left, a.style.left]; }; \
+         put('button', 'still', 20, 20); const moving = put('button', 'moving', 20, 80), other = put('button', 'other', 20, 140); \
+         moving.addEventListener('pointermove', () => swap(moving, other)); \
+         put('button', 'covered', 20, 200); put('div', 'cover', 20, 200); put('button', 'off', 20, 260).disabled = true; put('button', 'gone', 20, 380).hidden = true; \
+         const away = put('a', 'away', 20, 320); away.href = `${location.pathname}?clicked`; \
+         put('button', 'framed', 300, 20); put('iframe', 'frame-cover', 300, 20); \
+         const late = put('button', 'framed-late', 300, 80), lateFrame = put('iframe', 'frame-late', 540, 80); \
+         late.addEventListener('pointermove', () => { if (box.dataset.swap !== 'armed') return; box.dataset.swap = 'done'; lateFrame.style.left = '300px'; }); \
+         addEventListener('pointerdown', (ev) => { if (ev.isTrusted) heard(`window ${ev.target.id}`); }, true); return true; })()",
+    )?;
+    let heard = |chrome: &mut crate::browser::Browser| -> Result<Value> { chrome.eval(page, "(() => { const h = window.__heard; window.__heard = []; return h; })()") };
+    let arm = |chrome: &mut crate::browser::Browser| chrome.eval(page, "(document.getElementById('aims').dataset.swap = 'armed', true)");
+    let err = |r: &Result<()>| r.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+
+    chrome.click(page, "#still")?;
+    let still = heard(chrome)?;
+    s.ok("a click aimed at a still button presses it, once", still == json!(["window still", "pointerdown still", "click still"]), &still);
+
+    arm(chrome)?;
+    chrome.click(page, "#moving")?;
+    let moved = heard(chrome)?;
+    let swapped = chrome.eval(page, "document.getElementById('aims').dataset.swap")?;
+    s.ok(
+        "one moved under the mouse between its aim and its press: neither the other button nor the page's own window listener hears that press, and the next aim presses it where it is, once",
+        swapped == "done" && moved == json!(["window moving", "pointerdown moving", "click moving"]),
+        json!({ "swapped": swapped, "heard": moved }),
+    );
+
+    arm(chrome)?;
+    let strict = chrome.click_strict(page, "#moving");
+    let none = heard(chrome)?;
+    s.ok(
+        "the same aimed once (click_strict): an error naming what it would have pressed, and nothing pressed",
+        err(&strict).contains("<button#other>") && none == json!([]),
+        json!({ "click": err(&strict), "heard": none }),
+    );
+
+    let failed = chrome.click_aimed(page, "#moving", 1, |_, _, _| anyhow::bail!("a press that failed to dispatch"));
+    let armed = chrome.eval(page, "window.__clickGuard.armed()")?;
+    let at = chrome.eval(page, "(() => { const r = document.getElementById('still').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")?;
+    chrome.click_at(page, (at[0].as_f64().unwrap_or(0.0), at[1].as_f64().unwrap_or(0.0)))?;
+    let after = heard(chrome)?;
+    s.ok(
+        "a press that fails to dispatch is the click's error, and leaves no guard armed: a later press elsewhere is the page's",
+        err(&failed).contains("a press that failed to dispatch") && armed == false && after == json!(["window still", "pointerdown still", "click still"]),
+        json!({ "click": err(&failed), "armed": armed, "heard": after }),
+    );
+
+    let covered = chrome.click(page, "#covered");
+    let under = heard(chrome)?;
+    s.ok(
+        "one covered for good: the click is an error naming its cover, which heard nothing",
+        err(&covered).contains("<div#cover>") && under == json!([]),
+        json!({ "click": err(&covered), "heard": under }),
+    );
+
+    let gone = chrome.click(page, "#gone");
+    let unheard = heard(chrome)?;
+    s.ok(
+        "one hidden (no box): the click is an error saying so, and nothing is pressed",
+        err(&gone).contains("it with no box") && unheard == json!([]),
+        json!({ "click": err(&gone), "heard": unheard }),
+    );
+
+    let framed = chrome.click(page, "#framed");
+    let under = heard(chrome)?;
+    s.ok(
+        "one covered by a frame: the click is an error naming the frame, which heard nothing",
+        err(&framed).contains("<iframe#frame-cover>") && under == json!([]),
+        json!({ "click": err(&framed), "heard": under }),
+    );
+
+    arm(chrome)?;
+    let late = chrome.click(page, "#framed-late");
+    let took = heard(chrome)?;
+    s.ok(
+        "a frame drawn over the point between the aim and the press takes that press (the guard's limit), which the click says is a miss, never a success: the button heard nothing, and the next aims find the frame over it",
+        err(&late).contains("pressed nothing on this page") && err(&late).contains("<iframe#frame-late>") && took == json!(["frame frame-late"]),
+        json!({ "click": err(&late), "heard": took }),
+    );
+
+    let off = chrome.click(page, "#off");
+    let pressed = heard(chrome)?;
+    s.ok(
+        "a disabled button: pressed as a hand presses it, and never clicked",
+        off.is_ok() && !pressed.as_array().into_iter().flatten().any(|h| h == "click off"),
+        json!({ "click": err(&off), "heard": pressed }),
+    );
+
+    let path = chrome.eval(page, "location.pathname")?;
+    chrome.click(page, "#away")?;
+    let landed = chrome.until(page, "location.search === '?clicked' && document.readyState === 'complete' && !document.getElementById('aims')", Duration::from_secs(15));
+    s.ok("a link that takes the page to another document: the click is done, the page there", landed, json!({ "from": path }));
+
+    // armed, then left for another document and come back to from the
+    // back/forward cache (a page of the platform's with no script and no
+    // socket, so it may be cached): the outgoing document dropped its aim
+    // (`pagehide`). Left once loaded: one left still parsing is not cached,
+    // and one left with its fonts and background still coming is cached,
+    // then finishes that load once restored, its first `pageshow` (not
+    // persisted) after the restore's (FIN-460, run 42675327752). The
+    // browser says how it came back (`back`), and the document that came is
+    // the one marked before it left. Left by the harness's navigation,
+    // answered once the new document is there: a click on the page's own
+    // link could race its web font (`font-display: swap`), whose late swap
+    // moves the link, between a press and its release too, and that click
+    // goes to the paragraph (run 42438054022); `#away` above is the link click
+    let legal = chrome.open(&format!("{base}/about"))?;
+    let loaded = chrome.until(&legal, "document.readyState === 'complete'", Duration::from_secs(15));
+    let armed = chrome.eval(&legal, "(window.__left = true, window.__clickGuard.arm('body', 1), window.__clickGuard.armed())")?;
+    chrome.navigate(&legal, &format!("{base}/terms"))?;
+    let left = chrome.eval(&legal, "location.pathname === '/terms'")? == true;
+    let came = chrome.back(&legal)?;
+    let back = chrome.eval(&legal, "({ at: location.pathname, marked: window.__left === true, armed: window.__clickGuard.armed() })")?;
+    s.ok(
+        "a document armed, left, and come back to from the back/forward cache holds no aim",
+        loaded && armed == true && left && came == crate::browser::Came::Restored && back == json!({ "at": "/about", "marked": true, "armed": false }),
+        json!({ "loaded": loaded, "armed": armed, "left": left, "came": came.to_string(), "back": back }),
+    );
+    chrome.close(legal)?;
+    Ok(())
 }
 
 /// An app's call while a deploy goes out: the fragment's ask for its

@@ -70,6 +70,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.create_with(&owner, json!({ "name": blank, "template": "blank" }))?;
     let blank_cookie = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
     template_pages(s, api, &todo, &todo_cookie, &blank, &blank_cookie)?;
+    telegram_page(s, api, &owner, &owner_session)?;
     for (k, role) in [(&editor, "editor"), (&viewer, "viewer")] {
         let r = api.share(&blank, &npub_of(k), role)?;
         anyhow::ensure!(r.status == 200, "adding a {role}: {r}");
@@ -187,6 +188,57 @@ fn template_pages(s: &mut Suite, api: &Api, todo: &str, todo_cookie: &str, blank
     Ok(())
 }
 
+/// The Telegram connector's pages (Paul, 2026-11-07: its setup flow in
+/// Settings, its chat just a chat). Its page is the chat template's own,
+/// linked, and starts as a chat, no setup in it. Its setup page, here in a
+/// tab of its own (where Settings' frame can't sign in: Safari's cookie
+/// rule), marks it what it is, a word each (Paul, 2026-10-31: experimental,
+/// and less secure, as Telegram's servers read its messages), asks for the
+/// bot's token, and leads back to Settings. Settings' dialog and the steps
+/// past the token are the computers lane's (`telegram_checks`), where an
+/// agent is.
+fn telegram_page(s: &mut Suite, api: &Api, owner: &Keys, session: &str) -> Result<()> {
+    let Some(mut b) = s.browser()? else {
+        s.ok("Chrome is installed for the Telegram connector's pages (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let wait = std::time::Duration::from_secs(15);
+    let name = s.named(api, owner, "ttelegram")?;
+    let r = api.create_with(owner, json!({ "name": name, "template": "telegram" }))?;
+    anyhow::ensure!(r.status == 200, "a Telegram connector: {r}");
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = b.open(&api.site_url(&name, "__signin?return=/"))?;
+    // it starts, every module it imports served (Alex's review: the chat's
+    // `control.js`): the chat's page live and its composer open to its
+    // owner, the still-loading line gone, and no setup in it
+    let started = b.until(&page, "document.getElementById('say')?.dataset.ready === '1' && !document.getElementById('text').disabled && !document.getElementById('still-loading') && document.getElementById('helpers')?.hidden === true", wait);
+    let seen = b.eval(&page, "({ setup: !!document.querySelector('.telegram, .setup, .setup-tag, input[type=password]') })")?;
+    let chat = fragment_templates::blessed::site_file("chat", "site/index.html").map(|f| f.sha256);
+    let telegram = fragment_templates::blessed::site_file("telegram", "site/index.html").map(|f| f.sha256);
+    s.ok(
+        "the Telegram connector's page is the chat's own page, and starts as a chat (its helpers' bar there, hidden while none work), no setup in it",
+        started && seen == json!({ "setup": false }) && chat.is_some() && chat == telegram,
+        json!({ "seen": seen, "chat": chat, "telegram": telegram }),
+    );
+    b.close(page)?;
+
+    // its setup page, in a tab of its own
+    let page = b.open(&api.site_url(&name, "__signin?return=/setup.html"))?;
+    let asks = b.until(&page, "document.querySelectorAll('#setup .setup-tag').length === 2 && !!document.querySelector('#setup input[type=password]') && [...document.querySelectorAll('#setup button')].some((x) => x.textContent === 'Connect')", wait);
+    let seen = b.eval(
+        &page,
+        "({ h1: document.querySelector('#setup h1')?.textContent, tags: [...document.querySelectorAll('#setup .setup-tag')].map((t) => [t.textContent, t.title]), framed: document.documentElement.hasAttribute('data-framed'), line: document.querySelector('#setup > p')?.textContent, back: document.querySelector('#setup a.quiet')?.getAttribute('href') ?? null })",
+    )?;
+    s.ok(
+        "its setup page, in a tab of its own, marks it experimental and less secure (Telegram's servers read it), a word each, asks for the bot's token, and leads back to Settings",
+        asks && seen
+            == json!({ "h1": "Telegram", "tags": [["Experimental", ""], ["Less secure", "Telegram's servers can read these messages"]], "framed": false, "line": "Make a bot with @BotFather, then paste its token.", "back": format!("{}/settings", api.base) }),
+        &seen,
+    );
+    b.close(page)?;
+    Ok(())
+}
+
 /// Author CSS keeps control even when declared before the platform link;
 /// the page's explicit theme wins over the system, and native controls
 /// and hidden content keep their behavior.
@@ -278,9 +330,9 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     );
     let skill_names: Vec<&str> = want.iter().filter_map(|(p, _)| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).collect();
     s.ok(
-        "the managed set contains sixteen skills, including design-finite, gws-docs and gws-slides",
-        skill_names.len() == 16
-            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "gws-docs", "gws-slides"].iter().all(|n| skill_names.contains(n)),
+        "the managed set contains eighteen skills, including design-finite, slides-finite, gws-docs, gws-slides and import-agent-home",
+        skill_names.len() == 18
+            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "slides-finite", "gws-docs", "gws-slides", "import-agent-home"].iter().all(|n| skill_names.contains(n)),
         format!("{skill_names:?}"),
     );
     let apps = "skills/software-development/apps-finite/SKILL.md";

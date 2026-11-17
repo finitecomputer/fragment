@@ -82,6 +82,26 @@ pub const NOTICE_TEXT_MAX_CHARS: usize = 300;
 /// one longest unused goes.
 pub const NOTICE_CHATS_MAX: usize = AGENTS_MAX * 64;
 
+/// Helpers running in one chat (one agent's there) that its set names, at
+/// most (`turn.helpers`); the rest go unrecorded, and their work still
+/// holds the computer.
+pub const HELPERS_PER_CHAT_MAX: usize = 32;
+/// Helpers the bridge's state keeps, at most: every agent's chats at once.
+pub const CHILDREN_OPEN_MAX: usize = AGENTS_MAX * HELPERS_PER_CHAT_MAX;
+/// A helper's task, at most: one line, cut as a step's arguments are.
+pub const CHILD_GOAL_MAX_CHARS: usize = STEP_ARGS_MAX_CHARS;
+/// How long a chat's helpers set holds (`turn.helpers`' `until`): a reader
+/// shows it until then. While any helper runs it is posted again
+/// `HELPERS_RENEW_BEFORE_MS` before it lapses, so a computer that crashed
+/// and sleeps shows none at most this long after its last set, and a set
+/// whose post was lost misleads no longer than this.
+pub const HELPERS_LEASE_MS: u64 = 15 * 60 * 1000;
+pub const HELPERS_RENEW_BEFORE_MS: u64 = 5 * 60 * 1000;
+const _: () = assert!(HELPERS_RENEW_BEFORE_MS < HELPERS_LEASE_MS, "a set is renewed before it lapses");
+// a whole set, each helper's goal at its bound (a char escaped as \uXXXX at
+// most), its turn and child ids and start, fits one record's body
+const _: () = assert!(HELPERS_PER_CHAT_MAX * (CHILD_GOAL_MAX_CHARS * 6 + 300) < 64 * 1024, "a chat's set is one record");
+
 /// Prompts one turn asks, at most.
 pub const PROMPTS_PER_TURN_MAX: usize = 16;
 
@@ -112,11 +132,37 @@ pub const QUEUED_EVENTS_MAX: usize = 1024;
 /// A failed turn's error, at most.
 pub const ERROR_MAX_CHARS: usize = 300;
 
-/// Attachments one message or reply carries, at most.
+/// Attachments one message or reply carries, at most: the platform's
+/// (`fragment_proto::limits::FILES_PER_MESSAGE`; a copy, held to it by
+/// xtask/src/guards.rs until the bridge depends on proto).
 pub const ATTACHMENTS_MAX: usize = 8;
-/// One attachment's bytes, at most: Hermes' own media cap (its
-/// `MEDIA_MAX_BYTES`), well under the platform's 256 MiB blob cap.
-pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// One attachment's bytes, at most: the platform's blob cap
+/// (`fragment_proto::limits::BLOB_MAX_BYTES`; a copy, held to it the same
+/// way), not a person's upload's bound, which a computer's never meets.
+/// Each streams to disk (transfer.rs), never whole in memory.
+pub const ATTACHMENT_MAX_BYTES: u64 = 256 * 1024 * 1024;
+/// A file Hermes takes as media, at most: its own cap (its
+/// `MEDIA_MAX_BYTES`), which it reads whole into memory. A message's file
+/// past it is named to Hermes by its path alone, never hosted for it at
+/// `/relay/media` (relay/mod.rs, `start`); a file Hermes sends by URL is
+/// fetched, whole, within it (relay/fetch.rs).
+pub const HERMES_MEDIA_MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// A file's transfer (a blob's download or upload, Hermes' upload to
+/// `/relay/media`) that moves no byte this long is cut: a slow transfer
+/// that moves runs as long as it takes, a stuck one never holds its lane.
+pub const TRANSFER_STALL_MS: u64 = 15_000;
+/// Requests one blob's download makes, at most: each after the first
+/// resumes where the last was cut (`Range`), signed afresh by the egress
+/// (NIP-98's `created_at` is checked as a request starts).
+pub const DOWNLOAD_TRIES_MAX: u32 = 8;
+/// Each scratch folder's bytes (the message files downloaded for a
+/// runtime; Hermes' uploads and fetches), at most: one message's most files
+/// whole. Past it, the files used least lately go (scratch.rs): a computer
+/// has a 20 GB disk, which has filled before.
+pub const SCRATCH_MAX_BYTES: u64 = ATTACHMENTS_MAX as u64 * ATTACHMENT_MAX_BYTES;
+/// Files in one scratch folder, at most, the same way (each pass that
+/// makes room reads the folder whole).
+pub const SCRATCH_FILES_MAX: usize = 1024;
 
 /// A prompt waits this long for its answer unless the runtime says
 /// otherwise. An hour: the person may be away from the chat. A card
@@ -132,6 +178,17 @@ pub const PROMPT_TTL_MS_DEFAULT: u64 = 60 * 60 * 1000;
 /// is told its card's turn's request at more length (note.rs, `late`): the
 /// answer is to it.
 pub const NOTE_MAX_BYTES: usize = 4096;
+
+/// A message handed to its agent at least this long after it was said is
+/// told its age (note.rs, `age`; Paul, 2026-10-31, FIN-236): five times a
+/// pre-wake's hold (`fragment_core::computer::PREWAKE_MS`, the platform's
+/// own allowance for a wake), past what an ordinary hand-off takes (a
+/// claim, a cold wake and its restore, a message behind a typical turn),
+/// so the line marks a message that waited through an outage, a long
+/// restart or a backlog, and is not noise the agent learns to skip.
+pub const MESSAGE_AGE_TOLD_MS: u64 = 5 * 60_000;
+/// That line, at most (its longest, a continuation's in days, is under 150).
+pub const AGE_NOTE_MAX_BYTES: usize = 256;
 pub const NOTE_ASKED_MAX_CHARS: usize = 300;
 pub const NOTE_LATE_ASKED_MAX_CHARS: usize = 1500;
 pub const NOTE_TOOL_MAX_CHARS: usize = 40;
@@ -336,3 +393,5 @@ const _: () = assert!(2 * (ANSWER_TEXT_MAX_BYTES + ANSWER_ASKED_MAX_BYTES + ANSW
 const _: () = assert!(AGENT_TURNS_PER_CHAT_MAX > HOPS_MAX as usize, "the budget is a backstop, past one chain of hand-offs");
 const _: () = assert!(AGENT_TURNS_WINDOW_MS > 0 && ENDED_HOPS_MS > 0);
 const _: () = assert!(MEDIA_FETCH_MS < 30_000, "Hermes waits 30 s for an op's answer, a fetched file's included");
+const _: () = assert!(HERMES_MEDIA_MAX_BYTES < ATTACHMENT_MAX_BYTES && ATTACHMENT_MAX_BYTES <= SCRATCH_MAX_BYTES, "a file past Hermes' cap still fits, and so does the largest file in scratch");
+const _: () = assert!(DOWNLOAD_TRIES_MAX >= 2, "a cut download resumes");

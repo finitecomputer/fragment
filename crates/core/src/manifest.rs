@@ -20,6 +20,28 @@ pub struct Meta {
     pub image: Option<String>,
 }
 
+/// `files` (FIN-372): the platform's files view (`__files`) as the
+/// fragment's own page, and what it opens first and says of it. A
+/// template's layer over the one view, declared, so the view knows no
+/// template.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct FilesDecl {
+    /// Its page (`/`) is the files view.
+    #[serde(default)]
+    pub page: bool,
+    /// The file it opens first, over the view's own choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
+    /// A query of its own the view asks for a status line: its answer's
+    /// `line` (text) and `busy` (whether work is under way).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// It opens on its graph of links (pages and the links between them)
+    /// when no file is named, over `home` and the view's own choice.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub graph: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Manifest {
     pub operations: BTreeMap<String, OpDecl>,
@@ -36,6 +58,13 @@ pub struct Manifest {
     /// How its inbox knows a delivery (`inbox`): by a header that holds one
     /// of its secrets, not by its inbox token.
     pub inbox: Option<InboxDecl>,
+    /// Its page as the platform's files view, and that view's layer (`files`).
+    pub files: Option<FilesDecl>,
+    /// The site's paths kept for good (`immutable`: file trigger patterns,
+    /// under `site/`): a bundler's output folder (`assets/**`), whose names
+    /// change with their bytes. Nothing else of a site is (site.rs
+    /// `declared_immutable`).
+    pub immutable: Vec<String>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
@@ -112,6 +141,8 @@ pub fn on_template(own: &Manifest, blessed: &Manifest) -> Result<Manifest, Strin
         ("channels", !own.channels.is_empty()),
         ("triggers", !own.triggers.is_empty()),
         ("inbox", own.inbox.is_some()),
+        ("files", own.files.is_some()),
+        ("immutable", !own.immutable.is_empty()),
     ]
     .into_iter()
     .filter_map(|(k, set)| set.then_some(k))
@@ -227,8 +258,8 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
 /// weaker than `read` is refused.
 fn channel(name: &str, v: &Value) -> Result<ChannelDecl, String> {
     let obj = v.as_object().ok_or_else(|| format!("channels.{name} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "read" | "post" | "signedIn" | "from" | "listed")) {
-        return Err(format!("channels.{name} has an unknown key {k:?} (read, post, signedIn, from, listed)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "read" | "post" | "signedIn" | "from" | "listed" | "newest")) {
+        return Err(format!("channels.{name} has an unknown key {k:?} (read, post, signedIn, from, listed, newest)"));
     }
     let role = |key: &str| -> Result<Option<Role>, String> {
         obj.get(key)
@@ -257,7 +288,45 @@ fn channel(name: &str, v: &Value) -> Result<ChannelDecl, String> {
         Some(_) => return Err(format!("channels.{name}.from must be a string")),
     };
     let listed = obj.get("listed").map(|l| listed(name, l)).transpose()?;
-    Ok(ChannelDecl { read, post, signed_in, from, listed })
+    let newest = match obj.get("newest") {
+        None => vec![],
+        Some(v) => {
+            let kinds = names(&format!("channels.{name}.newest"), Some(v), limits::NEWEST_KINDS_MAX, valid_listed_kind, KIND_SHAPE)?;
+            if kinds.is_empty() {
+                return Err(format!("channels.{name}.newest names the kinds of record it keeps each poster's newest of: at least one"));
+            }
+            kinds
+        }
+    };
+    Ok(ChannelDecl { read, post, signed_in, from, listed, newest })
+}
+
+const KIND_SHAPE: &str = "kind (^[A-Za-z0-9._-]{1,64}$)";
+
+/// A list of names at `at` (absent: none): at most `max`, each `valid`,
+/// none twice.
+fn names(at: &str, v: Option<&Value>, max: usize, valid: fn(&str) -> bool, shape: &str) -> Result<Vec<String>, String> {
+    let list = match v {
+        None => return Ok(vec![]),
+        Some(Value::Array(list)) => list,
+        Some(_) => return Err(format!("{at} must be an array of names")),
+    };
+    if list.len() > max {
+        return Err(format!("{at} names {}: at most {max}", list.len()));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(list.len());
+    for item in list {
+        let Some(text) = item.as_str() else { return Err(format!("{at} must be an array of names")) };
+        if !valid(text) {
+            return Err(format!("{at} has {text:?}, which is no {shape}"));
+        }
+        if out.iter().any(|o| o == text) {
+            return Err(format!("{at} names {text:?} twice"));
+        }
+        out.push(text.to_string());
+    }
+    assert!(out.len() <= max, "names are within their bound");
+    Ok(out)
 }
 
 /// A channel's `listed`: `{"kinds": [...], "fields": [...]}`, its kinds 1
@@ -270,30 +339,8 @@ fn listed(name: &str, v: &Value) -> Result<ListedDecl, String> {
     if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "kinds" | "fields")) {
         return Err(format!("{at} has an unknown key {k:?} (kinds, fields)"));
     }
-    let names = |key: &str, max: usize, valid: fn(&str) -> bool, shape: &str| -> Result<Vec<String>, String> {
-        let list = match obj.get(key) {
-            None => return Ok(vec![]),
-            Some(Value::Array(list)) => list,
-            Some(_) => return Err(format!("{at}.{key} must be an array of names")),
-        };
-        if list.len() > max {
-            return Err(format!("{at}.{key} names {}: at most {max}", list.len()));
-        }
-        let mut out: Vec<String> = Vec::with_capacity(list.len());
-        for item in list {
-            let Some(text) = item.as_str() else { return Err(format!("{at}.{key} must be an array of names")) };
-            if !valid(text) {
-                return Err(format!("{at}.{key} has {text:?}, which is no {shape}"));
-            }
-            if out.iter().any(|o| o == text) {
-                return Err(format!("{at}.{key} names {text:?} twice"));
-            }
-            out.push(text.to_string());
-        }
-        assert!(out.len() <= max, "a listed's names are within their bound");
-        Ok(out)
-    };
-    let kinds = names("kinds", limits::LISTED_KINDS_MAX, valid_listed_kind, "kind (^[A-Za-z0-9._-]{1,64}$)")?;
+    let names = |key: &str, max: usize, valid: fn(&str) -> bool, shape: &str| names(&format!("{at}.{key}"), obj.get(key), max, valid, shape);
+    let kinds = names("kinds", limits::LISTED_KINDS_MAX, valid_listed_kind, KIND_SHAPE)?;
     if kinds.is_empty() {
         return Err(format!("{at}.kinds names the kinds of record its members' lists show: at least one"));
     }
@@ -301,34 +348,43 @@ fn listed(name: &str, v: &Value) -> Result<ListedDecl, String> {
     Ok(ListedDecl { kinds, fields })
 }
 
-/// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`,
-/// a channel's with an optional `"from": "person" | "agent"` (only records
-/// a member of that kind posted start runs).
+/// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`
+/// or `{"installed" | "woke": true, "run": op}`, a channel's with an optional
+/// `"from": "person" | "agent"` (only records a member of that kind posted
+/// start runs).
 fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
     let at = format!("triggers[{i}]");
     let obj = v.as_object().ok_or_else(|| format!("{at} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "run" | "from")) {
-        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, run, from)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "woke" | "run" | "from")) {
+        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, woke, run, from)"));
     }
     let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{at}.{k} must be a string"))).transpose();
-    let on = match (text("cron")?, text("channel")?, text("files")?) {
-        (Some(c), None, None) => {
+    let flag = |k: &str| match obj.get(k) {
+        None => Ok(false),
+        Some(Value::Bool(true)) => Ok(true),
+        Some(_) => Err(format!("{at}.{k} must be true")),
+    };
+    let (installed, woke) = (flag("installed")?, flag("woke")?);
+    let on = match (text("cron")?, text("channel")?, text("files")?, installed, woke) {
+        (None, None, None, true, false) => TriggerOn::Installed(true),
+        (None, None, None, false, true) => TriggerOn::Woke(true),
+        (Some(c), None, None, false, false) => {
             crate::cron::Cron::parse(&c).map_err(|e| format!("{at}.cron: {e}"))?;
             TriggerOn::Cron(c)
         }
-        (None, Some(c), None) => {
+        (None, Some(c), None, false, false) => {
             if c != "inbox" && !m.channels.contains_key(&c) {
                 return Err(format!("{at}.channel must be inbox or a channel this fragment.json declares, not {c:?}"));
             }
             TriggerOn::Channel(c)
         }
-        (None, None, Some(f)) => {
+        (None, None, Some(f), false, false) => {
             if !crate::glob::valid(&f) {
                 return Err(format!("{at}.files must be a relative path pattern (* ** ?), not {f:?}"));
             }
             TriggerOn::Files(f)
         }
-        _ => return Err(format!("{at} needs exactly one of cron, channel, files")),
+        _ => return Err(format!("{at} needs exactly one of cron, channel, files, installed, woke")),
     };
     let run = text("run")?.ok_or_else(|| format!("{at} needs run: the operation it starts"))?;
     let decl = m.operations.get(&run).ok_or_else(|| format!("{at}.run names no declared operation: {run:?}"))?;
@@ -345,6 +401,39 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
         Some(k) => Some(IdentityKind::parse(&k).ok_or_else(|| format!("{at}.from is person or agent, not {k:?}"))?),
     };
     Ok(TriggerDecl { on, run, from })
+}
+
+/// `files: {page?, home?, status?, graph?}` (`FilesDecl`): `page` and
+/// `graph` true or false; `home` a content path (not the fragment's
+/// machinery, nor its site); `status` a query it declares, since the view
+/// asks it on every visit.
+fn files(v: &Value, m: &Manifest) -> Result<FilesDecl, String> {
+    let obj = v.as_object().ok_or("files must be an object: {\"page\": true, \"home\": …, \"status\": …, \"graph\": true}")?;
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "page" | "home" | "status" | "graph")) {
+        return Err(format!("files has an unknown key {k:?} (page, home, status, graph)"));
+    }
+    let flag = |key: &str| match obj.get(key) {
+        None => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(format!("files.{key} must be true or false")),
+    };
+    let page = flag("page")?;
+    let graph = flag("graph")?;
+    let home = match obj.get("home") {
+        None => None,
+        Some(Value::String(p)) if fragment_proto::valid_repo_path(p) && !crate::site::is_machinery(p) && !p.starts_with("site/") => Some(p.clone()),
+        Some(_) => return Err("files.home must be a content path: not fragment.json, app.mjs, applib/ or site/".into()),
+    };
+    let status = match obj.get("status") {
+        None => None,
+        Some(Value::String(op)) => match m.operations.get(op) {
+            Some(d) if d.kind == OpKind::Query => Some(op.clone()),
+            Some(_) => return Err(format!("files.status: {op} is not a query; the view asks it on every visit, so it must change nothing")),
+            None => return Err(format!("files.status names no declared operation: {op:?}")),
+        },
+        Some(_) => return Err("files.status must name a query".into()),
+    };
+    Ok(FilesDecl { page, home, status, graph })
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
@@ -426,7 +515,38 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         None | Some(Value::Null) => {}
         Some(v) => m.inbox = Some(inbox(v)?),
     }
+    match obj.get("files") {
+        None | Some(Value::Null) => {}
+        Some(v) => m.files = Some(files(v, &m)?),
+    }
+    match obj.get("immutable") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(list)) => {
+            if list.len() > limits::IMMUTABLE_MAX {
+                return Err(format!("immutable names at most {} paths", limits::IMMUTABLE_MAX));
+            }
+            for p in list {
+                let p = p.as_str().ok_or("immutable lists paths under site/, as strings")?;
+                m.immutable.push(immutable_path(p)?.to_string());
+            }
+        }
+        Some(_) => return Err("immutable must be an array of paths under site/ (\"assets/**\")".into()),
+    }
     Ok(m)
+}
+
+/// One of `immutable`'s paths: a pattern as a file trigger's is (`*`,
+/// `**`, `?`, a trailing `/`), under `site/`, its first folder or file
+/// named outright (`assets/**`, `fonts/inter.woff2`). A pattern that could
+/// take the whole site (`**`, `*.js`) is refused: a file kept for good by
+/// mistake keeps its old bytes in browsers for a year.
+fn immutable_path(p: &str) -> Result<&str, String> {
+    let first = p.split('/').next().unwrap_or("");
+    let named = !first.is_empty() && !first.contains(['*', '?']) && first != "." && first != "..";
+    if !crate::glob::valid(p) || !named || p.split('/').any(|s| s == "..") || p.starts_with("site/") {
+        return Err(format!("immutable paths are under site/, each naming its first folder or file (\"assets/**\"), not {p:?}"));
+    }
+    Ok(p)
 }
 
 #[cfg(test)]
@@ -618,13 +738,95 @@ mod tests {
         }
     }
 
+    /// Goal: an operation may run once after each install of new code (a
+    /// brain re-reading what changed). Method: `"installed": true`, valid
+    /// and stored as it serializes; any other value, or beside another
+    /// kind, refused at deploy.
+    #[test]
+    fn an_installed_trigger_is_true_and_alone() {
+        let m = parse(br#"{"operations":{"n":{"kind":"mutation"}},"triggers":[{"installed":true,"run":"n"}]}"#).unwrap();
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Installed(true), run: "n".into(), from: None });
+        let wire = serde_json::to_value(&m.triggers[0]).unwrap();
+        assert_eq!(wire, serde_json::json!({ "installed": true, "run": "n" }));
+        assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");
+        for (bad, says) in [
+            (&br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":false,"run":"n"}]}"#[..], "installed must be true"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":"yes","run":"n"}]}"#, "installed must be true"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":true,"cron":"* * * * *","run":"n"}]}"#, "exactly one of"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":true,"from":"agent","run":"n"}]}"#, "from is a channel trigger's"),
+            (br#"{"operations":{"n":{"kind":"query"}},"triggers":[{"installed":true,"run":"n"}]}"#, "is a query"),
+            (br#"{"operations":{"n":{"kind":"job","role":"owner"}},"triggers":[{"installed":true,"run":"n"}]}"#, "a trigger acts as an editor"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":true}]}"#, "needs run"),
+        ] {
+            let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(e.contains(says), "{e}");
+        }
+    }
+
+    /// Goal: a brain catches up when someone comes back to it (FIN-372),
+    /// declared as installed is: `"woke": true`, valid alone, running a
+    /// mutation or a job an editor may.
+    #[test]
+    fn a_woke_trigger_is_true_and_alone() {
+        let m = parse(br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":true,"run":"n"}]}"#).unwrap();
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Woke(true), run: "n".into(), from: None });
+        let wire = serde_json::to_value(&m.triggers[0]).unwrap();
+        assert_eq!(wire, serde_json::json!({ "woke": true, "run": "n" }));
+        assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");
+        for (bad, says) in [
+            (&br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":false,"run":"n"}]}"#[..], "woke must be true"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":true,"installed":true,"run":"n"}]}"#, "exactly one of"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":true,"files":"a/**","run":"n"}]}"#, "exactly one of"),
+            (br#"{"operations":{"n":{"kind":"query"}},"triggers":[{"woke":true,"run":"n"}]}"#, "is a query"),
+            (br#"{"operations":{"n":{"kind":"job","role":"owner"}},"triggers":[{"woke":true,"run":"n"}]}"#, "a trigger acts as an editor"),
+        ] {
+            let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(e.contains(says), "{e}");
+        }
+    }
+
+    /// Goal: a template makes the files view its page, and says what it
+    /// opens first and its status line, without the view knowing it
+    /// (FIN-372); a fragment on a blessed template takes its template's.
+    #[test]
+    fn files_make_the_files_view_a_page() {
+        let m = parse(br#"{"operations":{"st":{"kind":"query"}},"files":{"page":true,"home":"wiki/index.md","status":"st"}}"#).unwrap();
+        assert_eq!(m.files, Some(FilesDecl { page: true, home: Some("wiki/index.md".into()), status: Some("st".into()), graph: false }));
+        assert_eq!(serde_json::to_value(m.files.as_ref().unwrap()).unwrap(), serde_json::json!({ "page": true, "home": "wiki/index.md", "status": "st" }));
+        let g = parse(br#"{"files":{"page":true,"graph":true}}"#).unwrap();
+        assert_eq!(g.files, Some(FilesDecl { page: true, graph: true, ..FilesDecl::default() }), "it opens on its graph");
+        assert_eq!(serde_json::to_value(g.files.as_ref().unwrap()).unwrap(), serde_json::json!({ "page": true, "graph": true }));
+        assert!(!serde_json::from_value::<FilesDecl>(serde_json::json!({ "page": true })).unwrap().graph, "a stored decl from before reads as no graph");
+        assert_eq!(parse(br#"{"files":{}}"#).unwrap().files, Some(FilesDecl::default()), "page is false unless said");
+        assert_eq!(parse(b"{}").unwrap().files, None);
+        for (bad, says) in [
+            (&br#"{"files":true}"#[..], "files must be an object"),
+            (br#"{"files":{"page":"yes"}}"#, "files.page must be true or false"),
+            (br#"{"files":{"graph":1}}"#, "files.graph must be true or false"),
+            (br#"{"files":{"search":true}}"#, "unknown key \"search\""),
+            (br#"{"files":{"home":"app.mjs"}}"#, "files.home must be a content path"),
+            (br#"{"files":{"home":"site/index.html"}}"#, "files.home must be a content path"),
+            (br#"{"files":{"home":"../x.md"}}"#, "files.home must be a content path"),
+            (br#"{"files":{"status":"nope"}}"#, "names no declared operation"),
+            (br#"{"operations":{"j":{"kind":"job"}},"files":{"status":"j"}}"#, "is not a query"),
+        ] {
+            let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(e.contains(says), "{e}");
+        }
+        let blessed = parse(br#"{"kind":"brain","operations":{"st":{"kind":"query"}},"files":{"page":true,"status":"st"}}"#).unwrap();
+        let own = parse(br#"{"template":"brain","meta":{"title":"Garden"}}"#).unwrap();
+        assert_eq!(on_template(&own, &blessed).unwrap().files, blessed.files, "the template's");
+        let mine = parse(br#"{"template":"brain","files":{"page":false}}"#).unwrap();
+        assert!(on_template(&mine, &blessed).unwrap_err().contains("not files"), "its own is the template's to say");
+    }
+
     #[test]
     fn postable_channels() {
         let m = parse(br#"{"channels":{"chat":{"read":"public","post":"public"},"notes":{"post":"editor"},"desk":{"read":"editor","post":"owner"}}}"#).unwrap();
-        assert_eq!(m.channels["chat"], ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: false, from: None, listed: None }, "a post role as loose as read");
-        assert_eq!(m.channels["notes"], ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: None, listed: None }, "read defaults to viewer beside a post role");
+        assert_eq!(m.channels["chat"], ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: false, from: None, listed: None, newest: vec![] }, "a post role as loose as read");
+        assert_eq!(m.channels["notes"], ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: None, listed: None, newest: vec![] }, "read defaults to viewer beside a post role");
         let control = parse(br#"{"channels":{"control":{"post":"viewer","signedIn":true}}}"#).unwrap().channels["control"].clone();
-        assert_eq!(control, ChannelDecl { read: Role::Viewer, post: Some(Role::Viewer), signed_in: true, from: None, listed: None }, "a post role for signed-in posters only");
+        assert_eq!(control, ChannelDecl { read: Role::Viewer, post: Some(Role::Viewer), signed_in: true, from: None, listed: None, newest: vec![] }, "a post role for signed-in posters only");
         assert_eq!(m.channels["desk"].post, Some(Role::Owner), "a post role tighter than read");
         for (bad, says) in [
             (&br#"{"channels":{"chat":{"read":"viewer","post":"public"}}}"#[..], "channels.chat.post (public) is looser than its read (viewer)"),
@@ -643,7 +845,7 @@ mod tests {
     #[test]
     fn a_channel_may_name_its_posters_kind() {
         let m = parse(br#"{"channels":{"work":{"read":"viewer","post":"editor","from":"agent"},"asks":{"post":"viewer","from":"person"},"chat":{"post":"viewer"}}}"#).unwrap();
-        assert_eq!(m.channels["work"], ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: None }, "its agent members post");
+        assert_eq!(m.channels["work"], ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: None, newest: vec![] }, "its agent members post");
         assert_eq!(m.channels["asks"].from, Some(IdentityKind::Person), "its person members post");
         assert_eq!(m.channels["chat"].from, None, "no from: whoever holds the post role");
         let wire = serde_json::to_value(&m.channels["work"]).unwrap();
@@ -657,7 +859,7 @@ mod tests {
             (br#"{"channels":{"work":{"post":"editor","from":["agent"]}}}"#, "channels.work.from must be a string"),
             (br#"{"channels":{"work":{"from":"agent"}}}"#, "channels.work.from is about who may post: give it a post role"),
             (br#"{"channels":{"work":{"read":"editor","from":"person"}}}"#, "channels.work.from is about who may post"),
-            (br#"{"channels":{"work":{"post":"editor","form":"agent"}}}"#, "unknown key \"form\" (read, post, signedIn, from, listed)"),
+            (br#"{"channels":{"work":{"post":"editor","form":"agent"}}}"#, "unknown key \"form\" (read, post, signedIn, from, listed, newest)"),
         ] {
             let why = parse(bad).expect_err(&String::from_utf8_lossy(bad));
             assert!(why.contains(says), "{why}");
@@ -707,6 +909,33 @@ mod tests {
         }
     }
 
+    /// A channel may keep each poster's newest record of some kinds
+    /// (`newest`): valid declarations read back whole, and say nothing when
+    /// there are none; every other shape, a kind that is none, a repeat, or
+    /// one past the bound is refused at deploy, saying which.
+    #[test]
+    fn a_channel_may_keep_its_posters_newest() {
+        let m = parse(br#"{"channels":{"work":{"post":"editor","from":"agent","newest":["turn.helpers"]},"wall":{}}}"#).unwrap();
+        assert_eq!(m.channels["work"].newest, vec!["turn.helpers".to_string()]);
+        assert!(m.channels["wall"].newest.is_empty(), "none declared: none kept");
+        assert_eq!(serde_json::to_value(&m.channels["work"]).unwrap()["newest"], serde_json::json!(["turn.helpers"]));
+        assert!(serde_json::to_value(&m.channels["wall"]).unwrap().get("newest").is_none(), "none kept: none written");
+        let most = format!(r#"{{"channels":{{"c":{{"newest":{}}}}}}}"#, serde_json::json!((0..limits::NEWEST_KINDS_MAX).map(|i| format!("k{i}")).collect::<Vec<_>>()));
+        assert_eq!(parse(most.as_bytes()).unwrap().channels["c"].newest.len(), limits::NEWEST_KINDS_MAX, "as many kinds as the bound allows");
+        let over = format!(r#"{{"channels":{{"c":{{"newest":{}}}}}}}"#, serde_json::json!((0..=limits::NEWEST_KINDS_MAX).map(|i| format!("k{i}")).collect::<Vec<_>>()));
+        for (bad, says) in [
+            (&br#"{"channels":{"c":{"newest":[]}}}"#[..], "channels.c.newest names the kinds of record it keeps each poster's newest of: at least one"),
+            (br#"{"channels":{"c":{"newest":"turn.helpers"}}}"#, "channels.c.newest must be an array of names"),
+            (br#"{"channels":{"c":{"newest":[1]}}}"#, "channels.c.newest must be an array of names"),
+            (br#"{"channels":{"c":{"newest":["turn helpers"]}}}"#, "channels.c.newest has \"turn helpers\", which is no kind"),
+            (br#"{"channels":{"c":{"newest":["a","a"]}}}"#, "channels.c.newest names \"a\" twice"),
+            (over.as_bytes(), "channels.c.newest names 5: at most 4"),
+        ] {
+            let why = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(why.contains(says), "{why}");
+        }
+    }
+
     #[test]
     fn refusals() {
         for bad in [
@@ -736,5 +965,28 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
+    }
+
+    /// Goal (FIN-391): a site names what is kept for good, its bundler's
+    /// output folder, and nothing can take the whole site. Valid: folders
+    /// and files named outright. Invalid: a pattern from the root (`**`,
+    /// `*.js`), a path out of `site/` or naming it, not a list of strings,
+    /// past `IMMUTABLE_MAX`, and on a blessed template (its site is the
+    /// release's).
+    #[test]
+    fn immutable_names_a_sites_long_lived_paths() {
+        let m = parse(br#"{"immutable":["assets/**","fonts/inter.woff2","_app/immutable/"]}"#).unwrap();
+        assert_eq!(m.immutable, ["assets/**", "fonts/inter.woff2", "_app/immutable/"]);
+        assert!(parse(br#"{"immutable":[]}"#).unwrap().immutable.is_empty() && parse(b"{}").unwrap().immutable.is_empty());
+        for bad in [r#""assets/**""#, r#"["**"]"#, r#"["*.js"]"#, r#"["?ssets/**"]"#, r#"["/assets/**"]"#, r#"["../assets/**"]"#, r#"["assets/../x"]"#, r#"["site/assets/**"]"#, r#"[""]"#, r#"[3]"#, r#"["assets//x"]"#] {
+            let why = parse(format!(r#"{{"immutable":{bad}}}"#).as_bytes()).unwrap_err();
+            assert!(why.starts_with("immutable"), "{bad}: {why}");
+        }
+        let most: Vec<String> = (0..=limits::IMMUTABLE_MAX).map(|i| format!("\"a{i}/**\"")).collect();
+        assert!(parse(format!(r#"{{"immutable":[{}]}}"#, most[1..].join(",")).as_bytes()).is_ok(), "IMMUTABLE_MAX paths");
+        assert!(parse(format!(r#"{{"immutable":[{}]}}"#, most.join(",")).as_bytes()).unwrap_err().contains("at most"));
+        let blessed = parse(br#"{"kind":"chat","meta":{"title":"Chat"}}"#).unwrap();
+        let own = parse(br#"{"template":"chat","immutable":["assets/**"]}"#).unwrap();
+        assert!(on_template(&own, &blessed).unwrap_err().contains("immutable"));
     }
 }

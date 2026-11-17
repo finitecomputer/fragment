@@ -25,7 +25,7 @@ include!("blessed_names.rs");
 /// doors"): a fragment made from one is its owner's alone to edit, and may
 /// be bound as their agent's door of its name while it runs no other code
 /// (cell/src/doors.rs).
-pub const CONNECTORS: &[&str] = &[];
+pub const CONNECTORS: &[&str] = &["telegram"];
 
 /// The blessed templates that stay a person's own (decisions 66 to 71): an
 /// org owns apps and brains, never an agent, a chat or skills. The cell
@@ -43,6 +43,7 @@ pub fn template(name: &str) -> Option<&'static Template> {
         "brain" => Some(&crate::BRAIN),
         "skills" => Some(&crate::SKILLS),
         "sessions" => Some(&crate::SESSIONS),
+        "telegram" => Some(&crate::TELEGRAM),
         _ => None,
     }
 }
@@ -54,13 +55,23 @@ pub const DATA_FILES_MAX: usize = 1_000;
 pub const DATA_MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub const DATA_FILE_MAX_BYTES: u64 = 256 * 1024;
 
+/// A blessed template's icon, when it carries one (docs/api.md, Icons):
+/// the icon of each fragment on it that has none of its own, served from
+/// the release, so no fragment holds a copy (decision 40).
+pub const ICON: &str = "icon.png";
+
 /// Whether `path` of a blessed template is its data: what every fragment on
 /// it lists and reads from the release (`GET …/files`, `…/file`, `__files`,
 /// `__file`), beneath its own files at the same path. Everything but its
-/// manifest, its README, its code and its site, which the release serves
-/// otherwise (decision 40: no copies to drift).
+/// manifest, its README, its icon, its code and its site, which the release
+/// serves otherwise (decision 40: no copies to drift).
 pub fn is_data(path: &str) -> bool {
-    path != "fragment.json" && path != "README.md" && !is_code(path) && !path.starts_with("site/")
+    path != "fragment.json" && path != "README.md" && path != ICON && !is_code(path) && !path.starts_with("site/")
+}
+
+/// A blessed template's icon (`ICON`), when it carries one.
+pub fn icon(name: &str) -> Option<&'static File> {
+    template(name)?.file(ICON)
 }
 
 /// A data file's version, `release:<24 hex>` from its bytes' hash: its
@@ -193,11 +204,8 @@ mod tests {
     use super::*;
     use crate::tests::bytes_of;
 
-    fn text(t: &Template, path: &str) -> String {
-        String::from_utf8(bytes_of(t, t.file(path).unwrap_or_else(|| panic!("{} has {path}", t.name)))).expect("UTF-8")
-    }
-
-    /// Every blessed template parses, names its kind, has a page, and its
+    /// Every blessed template parses, names its kind, has a page (its own,
+    /// or the files view its manifest makes its page), and its
     /// code, when it carries some, is within an app's limits and runs the
     /// operations its manifest declares (a chat's push, from its trigger).
     #[test]
@@ -209,7 +217,7 @@ mod tests {
             let persons = matches!(m.kind(), fragment_proto::FragmentKind::Agent | fragment_proto::FragmentKind::Chat | fragment_proto::FragmentKind::Skills);
             assert_eq!(PERSONS_OWN.contains(&name), persons, "{name}: a person's own exactly when its kind is an agent's, a chat's or skills'");
             assert!(m.template.is_none(), "{name} names no template itself");
-            assert!(site_file(name, "site/index.html").is_some(), "{name} has a page");
+            assert!(site_file(name, "site/index.html").is_some() || m.files.as_ref().is_some_and(|f| f.page), "{name} has a page");
             assert_eq!(release(name), Some(t.release), "its release is the build's hash of its files");
             match code_files(name).unwrap_or_else(|e| panic!("{name}: {}", e.message())) {
                 Some(files) => {
@@ -246,29 +254,23 @@ mod tests {
         assert_eq!(crate::shell("agent.png").map(|f| f.sha256), Some(agent.sha256), "the shell's too");
     }
 
-    /// Goal: a brain (decision 30) is the notes viewer and the brain's own
-    /// code, all of it the template's. Method: its page loads the viewer and
-    /// its search; the viewer's files are the notes template's very bytes
-    /// (one asset, through the symlink build.rs follows), plain source that
-    /// renders with the platform's renderer and carries no bundle; its code carries
-    /// its sections and its guide, which is one template literal; its file
-    /// trigger keeps the index.
+    /// Goal: a brain (decision 30) is the platform's files view with the
+    /// brain's own code, all of it the template's (FIN-372). Method: it
+    /// carries no page of its own; its manifest makes the files view its
+    /// page, with its status line, and its triggers keep the index as main
+    /// moves, as a release installs, and as someone comes back; its data
+    /// are its guide and front page; its code carries its sections and its
+    /// guide, which is one template literal.
     #[test]
-    fn a_brain_is_the_notes_viewer_and_its_own_search() {
+    fn a_brain_is_the_files_view_and_its_own_code() {
         let brain = template("brain").unwrap();
-        let page = text(brain, "site/index.html");
-        assert!(page.contains("assets/viewer.js") && page.contains("brain.js"), "its page is the viewer and its search");
-        let viewer = crate::NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")).map(|f| f.path).collect::<Vec<_>>();
-        assert_eq!(viewer, ["site/assets/viewer.css", "site/assets/viewer.js"], "the viewer is two files of source, no bundle");
-        let source = text(&crate::NOTES, "site/assets/viewer.js");
-        assert!(source.contains("from \"../__markdown.js\""), "it renders with the platform's renderer");
-        for f in crate::NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")) {
-            let mine = site_file("brain", f.path).unwrap_or_else(|| panic!("the brain serves the viewer's {}", f.path));
-            assert_eq!(mine.sha256, f.sha256, "{} is one asset", f.path);
-        }
+        assert!(brain.files.iter().all(|f| !f.path.starts_with("site/")), "no page of its own");
+        assert_eq!(data("brain").iter().map(|f| f.path).collect::<Vec<_>>(), ["AGENTS.md", "index.md"], "its guide and its front page");
         let m = manifest("brain", &bytes_of(brain, manifest_file("brain").unwrap())).unwrap();
         assert_eq!(m.kind(), fragment_proto::FragmentKind::Brain);
-        assert!(m.triggers.iter().any(|t| t.run == "changed"), "a file trigger keeps its index");
+        assert_eq!(m.files, Some(fragment_core::manifest::FilesDecl { page: true, home: None, status: Some("index_status".into()), graph: true }), "its page is the files view");
+        let on: Vec<&str> = m.triggers.iter().filter(|t| t.run == "changed").map(|t| t.on.parts().0).collect();
+        assert_eq!(on, ["files", "installed", "woke"], "its index kept as main moves, a release installs, and someone comes back");
         let files = code_files("brain").unwrap().expect("a brain carries code");
         let c = code("brain", files.into_iter().map(|f| (f, bytes_of(brain, f))).collect()).unwrap();
         assert!(c.modules.contains_key("applib/sections.mjs") && c.modules.contains_key("applib/guide.mjs"), "{:?}", c.modules.keys());
@@ -277,6 +279,23 @@ mod tests {
         let body = text.strip_suffix("`;\n").expect("one template literal, to the end");
         assert!(!body.contains('`') && !body.contains("${"), "the guide holds no backtick or substitution");
         assert!(body.contains("raw/") && body.contains("fragment call <brain> search"), "it says how to ingest and search");
+    }
+
+    /// Goal: a brain has an icon with no one making one (docs/api.md,
+    /// Icons). Method: the brain's template carries one, an icon as a
+    /// making keeps it (a `SIZE` PNG within `ICON_MAX_BYTES`, kept whole
+    /// by a `PUT`), and it is no data; a template without one has none.
+    #[test]
+    fn a_brain_carries_an_icon() {
+        use fragment_core::icon;
+        let brain = template("brain").unwrap();
+        let f = self::icon("brain").expect("the brain's icon");
+        let bytes = bytes_of(brain, f);
+        assert!(bytes.len() <= icon::ICON_MAX_BYTES, "{} bytes", bytes.len());
+        let (w, h, _) = icon::alpha_of(&bytes).expect("a PNG with alpha");
+        assert_eq!((w, h), (icon::SIZE, icon::SIZE));
+        assert!(data("brain").iter().all(|d| d.path != ICON), "no data");
+        assert!(self::icon("chat").is_none() && self::icon("todo").is_none());
     }
 
     /// Goal: what counts as code is what a fragment on a template may not
@@ -292,10 +311,12 @@ mod tests {
         }
     }
 
-    /// Every hosted door's template is a blessed one, named.
+    /// Every hosted door's template is a blessed one, named, and made
+    /// members-only (it holds its owner's keys: FIN-352).
     #[test]
     fn every_connector_is_blessed() {
         assert!(CONNECTORS.iter().all(|c| BLESSED.contains(c) && template(c).is_some()), "{CONNECTORS:?}");
+        assert!(CONNECTORS.iter().all(|c| fragment_proto::Visibility::made_from(Some(c)) == fragment_proto::Visibility::Members), "{CONNECTORS:?}");
     }
 
     /// The named statics are the templates under templates/ of those names,
@@ -320,7 +341,7 @@ mod tests {
         for p in ["skills/research/arxiv-finite/SKILL.md", "skills/x/scripts/a.py", "LICENSE", "docs/README.md", "x/app.mjs"] {
             assert!(is_data(p), "{p}");
         }
-        for p in ["fragment.json", "README.md", "app.mjs", "applib/a.mjs", "site/index.html", "site/skills/x.md"] {
+        for p in ["fragment.json", "README.md", "icon.png", "app.mjs", "applib/a.mjs", "site/index.html", "site/skills/x.md"] {
             assert!(!is_data(p), "{p}");
         }
         assert!(data("agent").is_empty() && data("chat").is_empty(), "the agent and chat templates carry no data");
@@ -372,7 +393,7 @@ mod tests {
                 assert!(names.insert(name.to_string()), "{name} twice");
             }
         }
-        for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite"] {
+        for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "slides-finite"] {
             assert!(names.contains(rewritten), "{rewritten}");
         }
         for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite", "ml-paper-writing-finite", "powerpoint-finite"] {
@@ -380,8 +401,70 @@ mod tests {
         }
         assert!(names.contains("gws-docs"), "the upstream Docs guide complements connected Google");
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
-        assert_eq!(names.len(), 16, "Fragment contracts, the six retained integrations, design-finite and the Docs and Slides guides");
+        assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
+        assert_eq!(names.len(), 18, "Fragment contracts, the six retained integrations, design-finite, the Docs and Slides guides, and import-agent-home");
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
+    }
+
+    /// A command of the import skill's (FIN-401): the agent's terminal starts
+    /// each command in its work folder, so a `cd` never carries over, and a
+    /// `--dir .` or a `cp … .` after one pushed the work folder itself (its
+    /// browser profile, the export) into a brain. Every folder a command
+    /// names is named whole (`"$…`, `$…`, `~/…`, `/…`), and none runs `cd`.
+    fn the_folders_it_names_are_whole(file: &str, text: &str) -> Vec<String> {
+        let whole = |arg: &str| ["\"$", "\"${", "$", "~/", "/", "\"/", "\"~"].iter().any(|p| arg.starts_with(p));
+        let mut bad = Vec::new();
+        let mut code = false;
+        for (n, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("```") {
+                code = !code;
+                continue;
+            }
+            if !code {
+                continue;
+            }
+            // each command of the line, `&&`, `||`, `;` and `|` apart
+            for cmd in line.split("&&").flat_map(|c| c.split("||")).flat_map(|c| c.split(';')).flat_map(|c| c.split('|')) {
+                let words: Vec<&str> = cmd.split_whitespace().collect();
+                let args = |from: usize| words[from..].iter().copied().filter(|w| !w.starts_with('-') || *w == "-").collect::<Vec<_>>();
+                let say = |why: &str| format!("{file}:{}: {why}: {}", n + 1, line.trim());
+                match words.first().copied() {
+                    Some("cd") => bad.push(say("a `cd` carries over to no later command")),
+                    Some("rm") | Some("mkdir") => {
+                        if let Some(a) = args(1).into_iter().find(|a| !whole(a)) {
+                            bad.push(say(&format!("{a} is no whole path")));
+                        }
+                    }
+                    Some("cp") => {
+                        if let Some(a) = args(1).last().filter(|a| !whole(a)) {
+                            bad.push(say(&format!("its target {a} is no whole path")));
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(at) = words.iter().position(|w| *w == "--dir") {
+                    if words.get(at + 1).is_none_or(|a| !whole(a)) {
+                        bad.push(say("its --dir is no whole path"));
+                    }
+                }
+            }
+        }
+        bad
+    }
+
+    /// Goal: the import skill, and its profiles, name every folder whole in
+    /// every command, and run no `cd` (FIN-401). Invalid: what led a
+    /// move's brain to hold its computer's work folder.
+    #[test]
+    fn the_import_skill_names_every_folder_whole() {
+        let files: Vec<_> = data("skills").into_iter().filter(|f| f.path.starts_with("skills/productivity/import-agent-home/") && f.path.ends_with(".md")).collect();
+        assert!(!files.is_empty());
+        let skills = template("skills").unwrap();
+        let bad: Vec<String> = files.iter().flat_map(|f| the_folders_it_names_are_whole(f.path, std::str::from_utf8(&bytes_of(skills, f)).unwrap())).collect();
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+        // what FIN-401's guide ran is refused
+        let guide = "```sh\nmkdir -p ~/w && cd ~/w\nfragment sync b --dir .\ncp -R ~/x/. .\nrm -rf site && mkdir site\nfragment deploy b --dir \"$W\"\n```\n";
+        assert_eq!(the_folders_it_names_are_whole("guide.md", guide).len(), 5, "{:?}", the_folders_it_names_are_whole("guide.md", guide));
     }
 
     #[test]

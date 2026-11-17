@@ -199,6 +199,11 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
             ("site/index.html", Some(b"<!doctype html><html><head></head><body>front</body></html>")),
             ("site/docs/index.html", Some(b"<p>docs</p>")),
             ("site/app.3f9a1c2e.js", Some(b"console.log(1)")),
+            // Vite's and esbuild's names for their output, and a look-alike
+            ("site/assets/index-Ikq0sZO3.js", Some(b"console.log(2)")),
+            ("site/assets/index-S4M26L7U.js", Some(b"console.log(3)")),
+            ("site/assets/about.html", Some(b"<p>about</p>")),
+            ("site/my-component.js", Some(b"console.log(4)")),
             ("site/style.css", Some(b"body{color:red}")),
             ("notes/a.md", Some(b"alpha")),
             ("site/logo.svg", Some(SCRIPTED_SVG)),
@@ -206,7 +211,8 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
             ("notes/x.svg", Some(SCRIPTED_SVG)),
             ("notes/x.html", Some(b"<!doctype html><script>document.title = 'ran'</script>")),
             ("workflows/w.mjs", Some(b"code")),
-            ("fragment.json", Some(br#"{"meta":{"title":"Site <Test>","description":"d"}}"#)),
+            // its bundler's output folder kept for good (FIN-391), nothing else
+            ("fragment.json", Some(br#"{"meta":{"title":"Site <Test>","description":"d"},"immutable":["assets/**"]}"#)),
         ],
     );
     let live = s.deploy(&c);
@@ -262,11 +268,15 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a signed stranger without the link is 403", r.status == 403, &r);
 
     // its preview card: shot as a link holder sees the page, for its members
-    let card = card_showing(s, api, &owner, &name, &live);
-    s.ok("a deploy makes the fragment's preview card: a 1280×800 JPEG of its page, tagged by its bytes", card.as_ref().is_some_and(is_card), card_detail(&card));
-    let etag = card.as_ref().map(|r| r.header("etag")).unwrap_or_default();
-    let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/card"), None)?;
-    s.ok("a viewer gets the card", is_card(&r) && r.header("etag") == etag, card_detail(&Some(r)));
+    if s.shoots_cards() {
+        let card = card_showing(s, api, &owner, &name, &live);
+        s.ok("a deploy makes the fragment's preview card: a 1280×800 JPEG of its page, tagged by its bytes", card.as_ref().is_some_and(is_card), card_detail(&card));
+        let etag = card.as_ref().map(|r| r.header("etag")).unwrap_or_default();
+        let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/card"), None)?;
+        s.ok("a viewer gets the card", is_card(&r) && r.header("etag") == etag, card_detail(&Some(r)));
+    } else {
+        s.skip_card("a deploy makes the fragment's preview card, which a viewer gets");
+    }
     let r = api.signed(&stranger, "GET", &format!("/api/f/{name}/card"), None)?;
     let anon = api.unsigned("GET", &format!("/api/f/{name}/card"), None)?;
     s.ok("a stranger does not (403), nor anyone unsigned (401)", r.status == 403 && anon.status == 401 && r.bytes.len() < 1000, format!("{r} | {anon}"));
@@ -276,8 +286,18 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("meta becomes Open Graph tags", r.text.contains(r#"og:title" content="Site &lt;Test&gt;""#) && r.text.contains("__preview.svg"), &r);
     let r = api.page(&name, "__preview.svg", Some(&cookie))?;
     s.ok("the preview image is served", r.status == 200 && r.header("content-type") == "image/svg+xml", &r);
-    let r = api.page(&name, "app.3f9a1c2e.js", Some(&cookie))?;
-    s.ok("hashed assets are immutable (privately, here)", r.header("cache-control") == "private, max-age=31536000, immutable", r.header("cache-control"));
+    // kept for good: what its fragment.json names (`immutable`), never a
+    // page there; a name alone, however hashed it looks, is revalidated
+    let caching = |path: &str| api.page(&name, path, Some(&cookie)).map(|r| (r.status, r.header("cache-control")));
+    let pinned = |(status, cache): &(u16, String)| *status == 200 && cache == "private, max-age=31536000, immutable";
+    let revalidated = |(status, cache): &(u16, String)| *status == 200 && cache == "private, no-cache";
+    let (vite, esbuild, page_there) = (caching("assets/index-Ikq0sZO3.js")?, caching("assets/index-S4M26L7U.js")?, caching("assets/about.html")?);
+    let (hex, plain) = (caching("app.3f9a1c2e.js")?, caching("my-component.js")?);
+    s.ok(
+        "the files its fragment.json names immutable (assets/**) are kept for good, privately here; a page there, and a hashed-looking name elsewhere, are revalidated",
+        pinned(&vite) && pinned(&esbuild) && revalidated(&page_there) && revalidated(&hex) && revalidated(&plain),
+        json!({ "vite": vite, "esbuild": esbuild, "page": page_there, "hex": hex, "plain": plain }),
+    );
     let r = api.page(&name, "nope.html", Some(&cookie))?;
     s.ok("a missing page is 404", r.status == 404, &r);
     let r = api.call(Call { method: "HEAD", url: api.site_url(&name, ""), cookie: Some(cookie.clone()), ..Call::default() })?;
@@ -396,6 +416,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
             && r.body["files"].as_array().is_some_and(|a| a.iter().any(|f| f["path"] == "notes/a.md" && f["size"] == 5)),
         &r,
     );
+    versioned_files(s, api, &c, &name, &cookie, &view)?;
     for asset in ["__files.js", "__files.css"] {
         let r = api.page(&name, asset, Some(&cookie))?;
         s.ok(&format!("{asset} is served, tagged with its build-time hash"), r.status == 200 && r.header("etag").len() == 18 && !r.text.is_empty(), &r);
@@ -453,6 +474,77 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
 /// A pretty address really serves the same app at its own origin. The
 /// registry arbitrates claims, and an ended app never hands that origin
 /// to a replacement with the same generated name.
+/// FIN-340: a file's version. `__files` names each file's (`commit`, the
+/// commit that last changed it), and `__file?path=&v=<commit>` answers it
+/// kept for good, tagged by the commit (304 to a browser that has it).
+/// Invalid: a `v` that names no commit is refused. Replay: rewritten, the
+/// old URL goes on to the new version's (302, never other bytes at one
+/// URL); written again with the same bytes, the version is the same; gone,
+/// none. In Chrome, a page fetching a version twice fetches it once, as it
+/// does not the file's unversioned URL.
+fn versioned_files(s: &mut Suite, api: &Api, c: &Value, name: &str, cookie: &str, view: &str) -> Result<()> {
+    let listed = || -> Result<Reply> { api.call(Call { method: "GET", url: api.site_url(name, "__files"), cookie: Some(cookie.to_string()), extra: vec![("accept", "application/json".into())], ..Call::default() }) };
+    let version = |r: &Reply, path: &str| r.body["files"].as_array().and_then(|a| a.iter().find(|f| f["path"] == path)).and_then(|f| f["commit"].as_str()).unwrap_or_default().to_string();
+    let at = |v: &str| format!("__file?path=data%2Fnew.json&v={v}");
+    let first = version(&listed()?, "data/new.json");
+    let r = api.page(name, &at(&first), Some(cookie))?;
+    s.ok(
+        "__files names each file's version, and __file at that version answers it, kept for good, tagged by its commit",
+        fragment_core::site::valid_version(&first) && r.status == 200 && r.text == "{}" && r.header("cache-control") == "private, max-age=31536000, immutable" && r.header("etag") == format!("\"{first}\""),
+        &r,
+    );
+    let again = api.call(Call { method: "GET", url: api.site_url(name, &at(&first)), cookie: Some(cookie.to_string()), extra: vec![("if-none-match", format!("\"{first}\""))], ..Call::default() })?;
+    s.ok("a browser that has it is told so (304)", again.status == 304 && again.header("cache-control") == "private, max-age=31536000, immutable", &again);
+    let bad: Vec<(String, u16)> = [first[..39].to_string(), first.to_uppercase(), "../notes/a.md".into(), String::new()]
+        .iter()
+        .map(|v| api.page(name, &format!("__file?path=data%2Fnew.json&v={v}"), Some(cookie)).map(|r| (v.clone(), r.status)))
+        .collect::<Result<_>>()?;
+    s.ok("a version that names no commit is refused", bad.iter().all(|(_, status)| *status == 400), json!(bad));
+
+    // rewritten: the old URL goes on to the new version
+    s.commit(c, &[("data/new.json", Some(b"{\"n\":2}"))]);
+    let second = version(&listed()?, "data/new.json");
+    let moved = api.page(name, &at(&first), Some(cookie))?;
+    let now = api.page(name, &at(&second), Some(cookie))?;
+    s.ok(
+        "rewritten, its old version's URL goes on to the new one's, uncached, and that answers the new bytes, kept for good",
+        second != first && moved.status == 302 && moved.header("location") == at(&second) && moved.header("cache-control") == "no-store" && now.status == 200 && now.text == "{\"n\":2}" && now.header("cache-control") == "private, max-age=31536000, immutable",
+        json!({ "first": first, "second": second, "moved": moved.to_string(), "now": now.to_string() }),
+    );
+    // through the platform's own write, which commits nothing for bytes main holds
+    let wrote = s.as_owner(c, "files", &json!({ "files": [{ "path": "data/new.json", "text": "{\"n\":2}" }] }));
+    let same = version(&listed()?, "data/new.json");
+    s.ok("written again with the same bytes, its version is the same", same == second, json!({ "before": second, "after": same, "wrote": wrote }));
+
+    // in Chrome: a version is fetched once, the unversioned URL each time
+    match s.browser()? {
+        Some(mut b) => {
+            b.set_cookie(&api.site_url(name, ""), "fragview", view)?;
+            let page = b.open(&api.site_url(name, ""))?;
+            let opened = b.until(&page, "document.body?.textContent === 'front'", std::time::Duration::from_secs(15));
+            anyhow::ensure!(opened, "the site's page did not open: {}", b.eval(&page, "location.href")?);
+            let fetched_twice = |b: &mut crate::browser::Lease, url: &str| b.eval(&page, &format!("(async () => {{ const u = new URL({url:?}, location).href; for (const _ of [1, 2]) await (await fetch(u)).text(); return performance.getEntriesByName(u).map((e) => e.transferSize); }})()"));
+            let pinned = fetched_twice(&mut b, &at(&second))?;
+            let latest = fetched_twice(&mut b, "__file?path=data%2Fnew.json")?;
+            let sizes = |v: &Value| v.as_array().map(|a| a.iter().filter_map(Value::as_u64).collect::<Vec<_>>()).unwrap_or_default();
+            let (pinned, latest) = (sizes(&pinned), sizes(&latest));
+            s.ok(
+                "a page fetching a file's version twice fetches it once (the second from its cache), and its unversioned URL each time",
+                pinned.len() == 2 && pinned[0] > 0 && pinned[1] == 0 && latest.len() == 2 && latest.iter().all(|n| *n > 0),
+                json!({ "versioned": pinned, "unversioned": latest }),
+            );
+            b.close(page)?;
+        }
+        None => s.skip("a page fetching a file's version twice fetches it once", "no Chrome here"),
+    }
+
+    // gone: no version answers
+    s.commit(c, &[("data/new.json", None)]);
+    let r = api.page(name, &at(&second), Some(cookie))?;
+    s.ok("gone, its version is not found", r.status == 404, &r);
+    Ok(())
+}
+
 fn public_addresses(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let viewer = api.person()?;
@@ -525,6 +617,32 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         json!({ "card": r.status, "cards": cards(api, &name), "events": event_kinds(api, owner, &name) }),
     );
 
+    if !s.shoots_cards() {
+        s.skip_card("a shot's own checks: members only while it loads, tried again, given up, an editor's asks and uploads, content after a shot, and a page's errors heard");
+        return Ok(());
+    }
+
+    // gone members only while its shot loads (FIN-359): the shot lands on
+    // the platform's sign-in, which is no card of it; its next look skips it
+    let name = s.named(api, owner, "site-private-shot")?;
+    let c = s.create(api, owner, &name)?;
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "members-while-shot", "times": 1 })))?;
+    s.commit(&c, &[("site/index.html", Some(page))]);
+    s.deploy(&c);
+    let skipped = s.eventually(CARD_WAIT, || event_kinds(api, owner, &name).iter().any(|k| k == "card.skipped"));
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/card"), None)?;
+    if r.status == 200 {
+        // what it kept instead, for the record
+        let _ = std::fs::write(s.dir("cards").join("members-while-shot.jpg"), &r.bytes);
+    }
+    let made = event_kinds(api, owner, &name).iter().any(|k| k == "card.made");
+    let visibility = api.signed(owner, "GET", &format!("/api/f/{name}/status"), None)?.body["visibility"].clone();
+    s.ok(
+        "a fragment gone members only while its shot loads keeps no card of the sign-in its shot landed on: none made, 404, and its next look skips it",
+        skipped && !made && r.status == 404 && visibility == "members",
+        json!({ "card": r.status, "made": made, "visibility": visibility, "cards": cards(api, &name), "events": event_kinds(api, owner, &name) }),
+    );
+
     // a shot that fails is tried again, with a wait between, and the card comes
     let name = s.named(api, owner, "site-retry")?;
     let c = s.create(api, owner, &name)?;
@@ -558,7 +676,44 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let site = api.page(&name, &format!("?view={view}"), None)?;
     s.ok("and the fragment serves its page all the same", site.status == 200 && site.text.contains("a card"), &site);
     card_asks(s, api, owner, &members)?;
+    content_after_shot(s, api, owner, page)?;
     page_errors(s, api, owner, page)
+}
+
+/// Goal: an app whose files change after its live's shot (main moves, live
+/// stays: a brain's pages arriving after its empty first shot) is shot
+/// once more, of the same live, and a busy app's next change shoots
+/// nothing until its next deploy (FIN-368). Replay: the same change twice.
+fn content_after_shot(s: &mut Suite, api: &Api, owner: &Keys, page: &[u8]) -> Result<()> {
+    let name = s.named(api, owner, "site-content")?;
+    let c = s.create(api, owner, &name)?;
+    s.commit(&c, &[("site/index.html", Some(page))]);
+    let live = s.deploy(&c);
+    let first = card_showing(s, api, owner, &name, &live);
+    let first_at = cards(api, &name)["cards"]["card"]["at_ms"].clone();
+    s.commit(&c, &[("notes/first.md", Some(b"# its first note"))]);
+    let wanted = cards(api, &name)["cards"]["content_shot"] == live.as_str();
+    let mut kept = Value::Null;
+    let again = s.eventually(CARD_WAIT, || {
+        kept = cards(api, &name);
+        kept["cards"]["card"]["at_ms"] != first_at && kept["cards"]["card"]["live"] == live.as_str() && kept["cards"]["wanted"].is_null()
+    });
+    s.ok(
+        "its files changed after its live's shot: its first change wants the same live shot once more, and that shot is its card",
+        first.as_ref().is_some_and(is_card) && wanted && again,
+        json!({ "first": card_detail(&first), "cards": kept }),
+    );
+    // a busy app: its next changes shoot nothing until its next deploy
+    let shot_at = kept["cards"]["card"]["at_ms"].clone();
+    s.commit(&c, &[("notes/second.md", Some(b"# its second note"))]);
+    s.commit(&c, &[("notes/third.md", Some(b"# its third note"))]);
+    let after = cards(api, &name);
+    s.ok(
+        "its later changes shoot nothing until its next deploy",
+        after["cards"]["wanted"].is_null() && after["cards"]["card"]["at_ms"] == shot_at && after["cards"]["content_shot"] == live.as_str(),
+        &after,
+    );
+    Ok(())
 }
 
 /// A JPEG header of `w` × `h` (SOI, SOF0, EOI): what `card::check_image`

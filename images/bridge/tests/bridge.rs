@@ -254,10 +254,11 @@ async fn a_reply_is_not_held_behind_its_drafts_interval() {
 }
 
 /// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
-/// chat): a tool call is a step on `work`; the words the agent said before
-/// it are a reply of their own, posted before the step and marked
-/// `interim` (its turn worked on after them), never the step's; the turn's
-/// answer is a reply after it.
+/// chat): a tool call is a step on `work`, said first as asked for
+/// (`turn.call`, before it runs); the words the agent said before it are a
+/// reply of their own, posted before the step and marked `interim` (its
+/// turn worked on after them), never the step's; the turn's answer is a
+/// reply after it.
 #[tokio::test]
 async fn tool_steps() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -275,7 +276,9 @@ async fn tool_steps() {
         assert!(steps[0].get("text").is_none(), "the words are no part of the step: {}", steps[0]);
         assert_eq!((&steps[0]["category"], &steps[0]["args"]), (&json!("web"), &json!("use a tool")), "what it does, and its preview");
         let ids: Vec<String> = w.records(&chat, "work").iter().map(|r| r["body"]["kind"].as_str().unwrap_or("").to_string()).collect();
-        assert_eq!(ids, vec!["turn.start", "commands", "turn.step", "turn.end"]);
+        assert_eq!(ids, vec!["turn.start", "commands", "turn.call", "turn.step", "turn.end"], "its call said before it ran, then its end");
+        let call = w.bodies(&chat, "work", "turn.call").remove(0);
+        assert_eq!((&call["tool"], &call["args"], &call["category"], &call["tool_call_id"]), (&json!("search"), &json!("use a tool"), &json!("web"), &json!("call-search")), "{call}");
         let replies: Vec<Value> = w.records(&chat, "chat").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
         let bodies: Vec<Value> = replies.iter().map(|r| r["body"].clone()).collect();
         assert_eq!(bodies, vec![json!({ "text": "Let me look.", "turn": turn, "interim": true }), json!({ "text": "echo: [paul] use a tool", "turn": turn })], "its words, then its answer");
@@ -435,6 +438,42 @@ fn a_photo(fake: &Fake, chat: &str, dir: &std::path::Path) -> (Value, std::path:
     (json!({ "sha256": sha, "size": bytes.len(), "type": "image/png", "name": "basil.png" }), at, told)
 }
 
+/// Goal (FIN-405): a running turn's files are never let go for another's
+/// room. In a scratch of 100 bytes, a turn waiting on its asker holds its
+/// 60-byte file: another chat's 60-byte file finds no room and is told as
+/// unread, never taking the first's; once that turn ends, its file goes
+/// for the next.
+#[tokio::test]
+async fn a_running_turns_files_are_never_let_go_for_room() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let (a, b) = (fake.chat("one", &["juniper"]), fake.chat("two", &["juniper"]));
+    let dir = support::dir("scratch-turns");
+    let file = |chat: &str, fill: u8, name: &str| {
+        let bytes = bytes::Bytes::from(vec![fill; 60]);
+        let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+        fake.with(|w| w.fragments.get_mut(chat).unwrap().blobs.insert(sha.clone(), ("text/plain".into(), bytes.clone())));
+        (json!({ "sha256": sha, "size": 60, "type": "text/plain", "name": name }), dir.join("media").join(&sha))
+    };
+    let ((fa, at_a), (fb, at_b)) = (file(&a, 1, "a.txt"), file(&b, 2, "b.txt"));
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.media_max_bytes = 100;
+    let bridge = support::start(cfg, support::script());
+    following(&fake, 3).await;
+    let asking = turn_of("juniper", &a, seq(&fake.say(&a, &person("paul"), json!({ "text": "keep this, ask-me", "attachments": [fa] }))));
+    fake.until(WAIT, "the first turn asks, holding its file", |w| replies(w, &a).iter().any(|r| r["turn"] == asking.as_str() && r["text"] == "What should I call it?")).await;
+    let other = turn_of("juniper", &b, seq(&fake.say(&b, &person("paul"), json!({ "text": "and this", "attachments": [fb.clone()] }))));
+    fake.until(WAIT, "the other chat's reply", |w| replies(w, &b).iter().any(|r| r["turn"] == other.as_str())).await;
+    fake.with(|w| assert_eq!(replies(w, &b).iter().find(|r| r["turn"] == other.as_str()).unwrap()["text"], "echo: [paul] and this", "its file had no room: told as unread, none named"));
+    assert!(at_a.exists() && !at_b.exists(), "the running turn's file stayed");
+    fake.say(&a, &person("paul"), json!({ "text": "Basil" }));
+    fake.until(WAIT, "the first turn's end", |w| w.bodies(&a, "work", "turn.end").iter().any(|e| e["turn"] == asking.as_str())).await;
+    let again = turn_of("juniper", &b, seq(&fake.say(&b, &person("paul"), json!({ "text": "now this", "attachments": [fb] }))));
+    fake.until(WAIT, "the other chat's next reply", |w| replies(w, &b).iter().any(|r| r["turn"] == again.as_str())).await;
+    fake.with(|w| assert_eq!(replies(w, &b).iter().find(|r| r["turn"] == again.as_str()).unwrap()["text"], "echo: [paul] now this [got 1: b.txt]"));
+    assert!(!at_a.exists() && at_b.exists(), "the ended turn's file went for it");
+    bridge.stop().await;
+}
+
 /// Goal: a question in words is answered with files too (photos sent as
 /// the answer), with words or none: the asker's message is its answer,
 /// mid-turn, its files downloaded to the computer as a turn's are and
@@ -539,6 +578,9 @@ async fn a_question_cut_by_a_crash_is_lost_and_its_answer_is_a_turn() {
         let asked = fake.say(&chat, &person("paul"), json!({ "text": "name my plant, ask-me" }));
         let turn = turn_of("juniper", &chat, seq(&asked));
         fake.until(WAIT, "the question", |w| replies(w, &chat).iter().any(|r| r["text"] == "What should I call it?")).await;
+        // asking on the journal too (`turn.asked`, posted after the
+        // question), where a life rolled back to before it reads it
+        fake.until(WAIT, "its question on work", |w| !w.bodies(&chat, "work", "turn.asked").is_empty()).await;
         bridge.kill().await;
         fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
         match wakes {
@@ -549,32 +591,22 @@ async fn a_question_cut_by_a_crash_is_lost_and_its_answer_is_a_turn() {
 
         let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
         fake.until(WAIT, "the cut turn's end", |w| !ends_of(w, &chat, &turn).is_empty()).await;
-        // phase 4: the state the crash left knows the turn waited on its
-        // person (their answer is its next turn): not continued; an older
-        // state, or none, cannot know it asked: continued once, first
-        let cont = records::continuation_id(&turn);
-        let continued = wakes != "during";
-        if continued {
-            fake.until(WAIT, "its continuation's end", |w| !ends_of(w, &chat, &cont).is_empty()).await;
-        }
+        // phase 4: a turn that waited on its person is not continued (their
+        // answer is its next turn), whatever the next life wakes with: the
+        // state the crash left says it asked, and the journal says so of
+        // one another life ran (its claim answered 409: `note::waited`)
         let answer = said_and_ended(&fake, &chat, "Fernando").await;
-        let want = if continued { vec![turn.clone(), cont.clone(), answer.clone()] } else { vec![turn.clone(), answer.clone()] };
-        assert_eq!(runs.all(), want, "{wakes}: the asking turn ran once, and the answer is a turn of its own");
+        assert_eq!(runs.all(), vec![turn.clone(), answer.clone()], "{wakes}: the asking turn ran once, and the answer is a turn of its own");
         fake.with(|w| {
             assert_eq!(ends_of(w, &chat, &turn), vec![json!({ "kind": "turn.end", "turn": turn, "outcome": "error", "error": "lost when the computer restarted" })], "{wakes}: one end, as lost");
+            assert!(ends_of(w, &chat, &records::continuation_id(&turn)).is_empty(), "{wakes}: never continued");
             let r = replies(w, &chat);
-            assert_eq!(r.len(), if continued { 3 } else { 2 }, "{wakes}: the question, its continuation's, then the answer's own reply: {r:?}");
+            assert_eq!(r.len(), 2, "{wakes}: the question, then the answer's own reply: {r:?}");
             assert_eq!(r[0], json!({ "text": "What should I call it?", "turn": turn }), "{wakes}");
-            // the first turn after the cut one is told of it (P5): its
-            // continuation, else the answer's
-            let told = &r[1];
-            let text = told["text"].as_str().unwrap_or("");
-            let said = if continued { "echo: [your computer] I restarted" } else { "echo: [paul] Fernando" };
-            assert_eq!(told["turn"], json!(if continued { &cont } else { &answer }), "{wakes}");
-            assert!(text.starts_with(said) && text.contains("(told: Your previous turn in this chat was cut short") && text.contains("It was answering: “name my plant, ask-me”") && text.contains("It had replied: “What should I call it?”"), "{wakes}: {text}");
-            if continued {
-                assert_eq!(r[2], json!({ "text": "echo: [paul] Fernando", "turn": answer }), "{wakes}: told once");
-            }
+            // the first turn after the cut one is told of it (P5): the answer's
+            let text = r[1]["text"].as_str().unwrap_or("");
+            assert_eq!(r[1]["turn"], json!(&answer), "{wakes}");
+            assert!(text.starts_with("echo: [paul] Fernando") && text.contains("(told: Your previous turn in this chat was cut short") && text.contains("It was answering: “name my plant, ask-me”") && text.contains("It had replied: “What should I call it?”"), "{wakes}: {text}");
             assert_eq!(ends_of(w, &chat, &answer), vec![json!({ "kind": "turn.end", "turn": answer, "outcome": "idle" })], "{wakes}");
         });
         bridge.stop().await;
@@ -1156,6 +1188,58 @@ async fn a_routine_with_no_chat_runs_at_home() {
     });
 }
 
+/// Goal (FIN-463, FIN-488; Paul's order of 2026-11-10): a move's
+/// routine reaches the agent only once its stage's SimpleX files are set
+/// aside, so the import it starts cannot end the stage first. Here the
+/// agent says `done` the instant its turn is claimed (the fake refuses the
+/// stage's reads from then on), and the platform answers each read late:
+/// the files are kept whole all the same, and the routine still runs.
+#[tokio::test]
+async fn a_moves_routine_waits_for_its_simplex_to_be_set_aside() {
+    use fragment_bridge::simplex::{run, stage};
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let own = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let dir = support::dir("move-routine-simplex");
+    // the stage, as the mover writes it (Python's zipfile: deflated, zip64)
+    let src = dir.join("stage-src");
+    std::fs::create_dir_all(&src).expect("a folder");
+    let mut chat = b"SQLite format 3\0".to_vec();
+    let mut x: u64 = 0x5eed;
+    chat.extend((0..6_000_000).map(|_| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x as u8
+    }));
+    let agent_db = [b"SQLite format 3\0".as_slice(), &[7u8; 50_000]].concat();
+    for (name, bytes) in [("chat", &chat[..]), ("agent", &agent_db[..]), ("owner", br#"{"contact":3}"#.as_slice()), ("notes", b"# notes".as_slice())] {
+        std::fs::write(src.join(name), bytes).expect("written");
+    }
+    let zip = dir.join("stage.zip");
+    let script = "import sys, zipfile\nwith zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:\n    for a in sys.argv[2:]:\n        s, n = a.split('=', 1)\n        with open(s, 'rb') as f, z.open(n, 'w', force_zip64=True) as w:\n            w.write(f.read())\n";
+    let entries = [("notes", "workspace/notes.md"), ("chat", stage::CHAT), ("agent", stage::AGENT), ("owner", stage::OWNER)].map(|(f, n)| format!("{}={n}", src.join(f).display()));
+    assert!(std::process::Command::new("python3").arg("-I").arg("-c").arg(script).arg(&zip).args(&entries).status().expect("python3 runs").success());
+    let zip = bytes::Bytes::from(std::fs::read(&zip).expect("its zip"));
+    fake.with(|w| {
+        w.stages.insert("old1.p1.1".into(), ("juniper--k3x9".into(), zip));
+        w.stage_read_ms = 150;
+        w.done_on_claim = Some("old1.p1.1".into());
+    });
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.simplex = Some(run::Config { bin: dir.join("no-core"), dir: dir.join("simplex"), smp: None, xftp: None });
+    let bridge = support::start(cfg, support::script());
+    following(&fake, 2).await;
+    let words = "Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage old1.p1.1.";
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", json!({ "kind": "routine", "text": words })));
+    fake.until(WAIT * 2, "the routine run", |w| !replies(w, &own).is_empty()).await;
+    bridge.stop().await;
+    assert!(fake.with(|w| !w.stages.contains_key("old1.p1.1")), "the agent said done as its turn was claimed");
+    let at = dir.join("simplex").join("juniper--k3x9");
+    assert_eq!(stage::ready(&at), Some(stage::Staged { stage: "old1.p1.1".into(), owner: 3 }), "set aside before the routine reached it");
+    assert_eq!(std::fs::read(at.join("staged/sx_chat.db")).expect("kept"), chat, "whole");
+    assert_eq!(std::fs::read(at.join("staged/sx_agent.db")).expect("kept"), agent_db);
+}
+
 /// Goal (Alex's review of #620): a routine whose home is its SimpleX chat,
 /// named by its link and not made yet (its making refused for now, or a
 /// restart between its naming and its making), waits for it: it is neither
@@ -1216,7 +1300,7 @@ async fn a_routine_waits_for_its_simplex_chat() {
     // its chat made by its name (its poster's `ensure_chat`; no core runs here to start one): the routine runs there
     let bridge = support::start(config(), support::script());
     let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
-    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
     run::ensure_chat(&api, &juniper, &simplex).await.expect("made");
     fake.until(WAIT, "the routine in its SimpleX chat", |w| said(w, &simplex).len() == 1).await;
     bridge.stop().await;
@@ -1248,7 +1332,7 @@ async fn its_simplex_chat_is_made_once_by_its_name() {
     fake.add_member(&theirs, "npub1skyler", "owner");
     let left = fake.chat_named("juniper-simplex--s5t6", &[]);
     let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
-    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
     let chat = "juniper-simplex--w9x2";
     ensure_chat(&api, &juniper, chat).await.expect("made");
     fake.with(|w| {
@@ -1780,6 +1864,47 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
         bridge.stop().await;
     }
     assert!(told.windows(2).all(|p| p[0] == p[1]), "the journal's note of the cut, whatever state woke: {told:#?}");
+}
+
+/// Goal (FIN-236; Alex on #853): a late message's age goes first in what
+/// its turn is told, before what was cut, never in its place (a turn's
+/// own note means a card's, which takes the cut note's place). A cut
+/// turn's continuation is told the age of what it answered, then what was
+/// cut; a message after a cut turn that waited on its card (so was not
+/// continued) is told its own age, then what was cut.
+#[tokio::test]
+async fn a_late_messages_age_comes_before_what_was_cut() {
+    for continued in [true, false] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        let chat = fake.chat("talk", &["juniper"]);
+        let dir = support::dir(&format!("aged-{continued}"));
+        let cfg = support::config(&fake.url(), &dir, support::settings());
+        let pace = Duration::from_millis(100);
+        let hours = |h: u64| Duration::from_secs(h * 3_600);
+        let bridge = support::start_killable(cfg.clone(), support::script_paced(pace));
+        following(&fake, 2).await;
+        let cut_text = if continued { "a slow tool please" } else { "something risky" };
+        let said = fake.say_aged(&chat, &person("paul"), json!({ "text": cut_text }), hours(2));
+        let cut = turn_of("juniper", &chat, seq(&said));
+        fake.until(WAIT, "the cut turn under way", |w| if continued { w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == cut.as_str()) && w.drafts.iter().any(|d| d.2 == cut) } else { w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["turn"] == cut.as_str()) }).await;
+        bridge.kill().await;
+        fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+        let bridge = support::start_killable(cfg, support::script_paced(pace));
+        let told = if continued {
+            records::continuation_id(&cut)
+        } else {
+            let next = fake.say_aged(&chat, &person("paul"), json!({ "text": "good morning" }), hours(3));
+            turn_of("juniper", &chat, seq(&next))
+        };
+        fake.until(WAIT, "the told turn's end", |w| !ends_of(w, &chat, &told).is_empty()).await;
+        let note = fake.with(|w| replies(w, &chat).into_iter().find(|r| r["turn"] == told.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default());
+        let note = note.split_once("\n\n(told: ").map(|(_, n)| n.trim_end_matches(')').to_string()).unwrap_or_else(|| panic!("{continued}: told something: {note:?}"));
+        let age = if continued { "What that turn was answering was sent about 2 hours ago." } else { "This message was sent about 3 hours ago, and is only reaching you now." };
+        let (first, rest) = note.split_once("\n\n").unwrap_or_else(|| panic!("{continued}: its age, then what was cut: {note}"));
+        assert_eq!(first, format!("{age} If it may no longer be wanted, check before acting on it."), "{continued}: {note}");
+        assert!(rest.starts_with("Your previous turn in this chat was cut short") && rest.contains(&format!("It was answering: “{cut_text}”")), "{continued}: what was cut, after its age: {note}");
+        bridge.stop().await;
+    }
 }
 
 /// Goal : a turn whose run ended, but whose end a crash kept from the

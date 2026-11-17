@@ -296,7 +296,8 @@ impl InvoiceItem {
 /// subscription's prorations are a few a seat change).
 pub const PENDING_ITEMS_MAX: usize = 1_000;
 
-/// An event: its object is read by its type.
+/// An event: its object is read by its type, from its own text (`RawValue`:
+/// the event's read skips it, and the type's reads it once).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Event {
     pub id: String,
@@ -308,7 +309,7 @@ pub struct Event {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EventData {
-    pub object: serde_json::Value,
+    pub object: Box<serde_json::value::RawValue>,
 }
 
 /// A subscription as the registry keeps it: fragment's has one item, on

@@ -1,8 +1,9 @@
 //! The shell (docs/cloudflare-v1.md, decisions 6–12): the platform's one
-//! page, at `/`, `/settings`, `/apps` and `/welcome`, Finite's about page, privacy
-//! policy and terms at `/about`, `/privacy` and `/terms`, and its files at
-//! `/__shell/<file>`, the release's (cell/shell/), read from its Static
-//! Assets (assets.rs). It holds no key: its script calls the API with
+//! page, at `/`, `/settings`, `/apps`, `/brains`, `/history` and `/welcome`, Finite's
+//! about page, privacy policy and terms at `/about`, `/privacy` and
+//! `/terms`, and its files at `/__shell/<file>`, the release's
+//! (cell/shell/), read from its Static Assets (assets.rs). It holds no
+//! key: its script calls the API with
 //! the person's platform session (lib.rs `shell_session`) and frames their
 //! fragments, each signed in on its own origin by the platform's frame mint.
 //!
@@ -71,8 +72,11 @@ pub async fn fragment_sheet_asset(req: &Request, env: &Env) -> CellResult<Respon
     asset(req, env, "sheet.css").await?.ok_or_else(|| CellError::host("the shell publishes sheet.css"))
 }
 
+/// Whether the request's `If-None-Match` names `tag`, by the weak
+/// comparison it uses (RFC 9110 13.1.2): Cloudflare weakens the tag of an
+/// answer it compresses (`W/"s-…"`), and the browser sends it back so.
 fn not_modified(req: &Request, tag: &str) -> Result<bool> {
-    Ok(req.headers().get("if-none-match")?.is_some_and(|v| v.split(',').any(|t| t.trim() == tag)))
+    Ok(req.headers().get("if-none-match")?.is_some_and(|v| fragment_core::site::not_modified(&v, tag)))
 }
 
 /// One of the shell's pages, its file in the release.
@@ -89,17 +93,20 @@ fn frame_src(cfg: &Config, url: &Url) -> String {
     format!("'self' {platform} {scheme}://*.{}{port}", cfg.host_suffix)
 }
 
-/// `GET /`, `GET /settings`, `GET /apps` and `GET /welcome`: the shell's page, for
-/// anyone (signed out, it asks them to sign in; the shell opens the view
-/// its path names), naming the release that answers it and when it was
-/// deployed (`fragment_templates::shell_page`): its script reloads at a
-/// safe moment once a later answer names another, and Settings ends with
-/// both (docs/api.md, The shell). A few KiB, read whole to fill it.
+/// `GET /`, `GET /settings`, `GET /apps`, `GET /brains`, `GET /history`, `GET /welcome` and `GET /move`:
+/// the shell's page, for anyone (signed out, it asks them to sign in; the
+/// shell opens the view its path names), naming the release that answers
+/// it and when it was deployed (`fragment_templates::shell_page`): its
+/// script reloads at a safe moment once a later answer names another, and
+/// Settings ends with both (docs/api.md, The shell). A few KiB, read whole
+/// to fill it.
 pub async fn page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     // its bytes are checked against their hash as they are read: UTF-8, as the release's index.html is
     let bytes = crate::assets::read(env, page_file("index.html")).await?;
     let text = std::str::from_utf8(&bytes).map_err(|_| CellError::host("the release's shell page is not UTF-8"))?;
-    let filled = fragment_templates::shell_page(text, &crate::levers::answered_release(cfg, req), cfg.deployed_at);
+    // its fragments' origin, `{name}` in it (fragment_templates::ORIGIN_BLANK)
+    let origin = cfg.origin(url, fragment_templates::ORIGIN_NAME);
+    let filled = fragment_templates::shell_page(text, &crate::levers::answered_release(cfg, req), cfg.deployed_at, &origin);
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
@@ -165,7 +172,8 @@ pub async fn legal_page(req: &Request, env: &Env, name: &str) -> CellResult<Resp
 }
 
 /// `GET /__shell/<file>`: one of the files it publishes
-/// (`fragment_templates::shell_published`), or `None`. Asked for by its
+/// (`fragment_templates::shell_published`), or `None`. Named by its hash
+/// (its page's build's, crates/templates/bundle.rs) or asked for by its
 /// version (`?v=`, `versioned`), it is kept for good; by its name alone, or
 /// by a version this release does not hold (a page of the last one's), it
 /// is revalidated each time.
@@ -174,7 +182,7 @@ pub async fn asset(req: &Request, env: &Env, name: &str) -> CellResult<Option<Re
     let h = Headers::new();
     h.set("content-type", mime)?;
     h.set("x-content-type-options", "nosniff")?;
-    let pinned = req.url()?.query_pairs().any(|(k, v)| k == "v" && v == version(f));
+    let pinned = fragment_core::site::hashed(name) || req.url()?.query_pairs().any(|(k, v)| k == "v" && v == version(f));
     Ok(Some(revalidated(req, env, f, h, if pinned { PINNED } else { "no-cache" }).await?))
 }
 

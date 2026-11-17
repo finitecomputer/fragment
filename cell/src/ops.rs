@@ -162,7 +162,7 @@ fn read_installed_code(sql: &SqlStorage, id: &str) -> Result<AppCode, String> {
         return Err(format!("the loader asked for {id}, which is not the installed code any more"));
     }
     assert!(row.cpu_ms > 0 && row.cpu_ms <= limits::APP_CPU_MS, "stored cpu_ms is within the limit");
-    let modules: BTreeMap<String, String> = serde_json::from_str(&row.modules).map_err(|e| format!("the stored applib modules: {e}"))?;
+    let modules: BTreeMap<String, String> = crate::json_text(&row.modules).map_err(|e| format!("the stored applib modules: {e}"))?;
     Ok(AppCode {
         fragment: row.name.ok_or("a created fragment has no name")?,
         platform: PLATFORM_JS,
@@ -170,7 +170,6 @@ fn read_installed_code(sql: &SqlStorage, id: &str) -> Result<AppCode, String> {
         source: row.source,
         modules,
         cpu_ms: row.cpu_ms,
-        subrequests: limits::APP_SUBREQUESTS,
     })
 }
 
@@ -193,6 +192,27 @@ impl FragmentCell {
         // key, which is the same for every version of it): one dynamic worker a day
         self.note_dynamic_worker(&format!("{loader_id}:{}", platform().id));
         self.app.facet(&self.raw, &self.app_facet()?)
+    }
+
+    /// Test fleets only: one capability call, counted against the
+    /// `facet-calls` lever's budget for the facet's current start and
+    /// refused past it in the runtime's words (`facet::at_limit`), as
+    /// Cloudflare refuses a facet's subrequests past its life's limit.
+    pub(crate) fn facet_calls_lever(&self) -> CellResult<()> {
+        if !self.cfg.test_hooks {
+            return Ok(());
+        }
+        let Some(limit) = self.meta(MetaKey::TestFacetCalls)?.and_then(|n| n.parse::<u64>().ok()) else {
+            return Ok(());
+        };
+        let start = self.app.starts();
+        let (at, made) = self.facet_calls.get();
+        let made = if at == start { made + 1 } else { 1 };
+        self.facet_calls.set((start, made));
+        if made > limit {
+            return Err(CellError::host(format!("Too many subrequests by single Worker invocation (a test lever: {limit} capability calls a facet start)")));
+        }
+        Ok(())
     }
 
     /// The installed app code's identity (its stored loader id), when live has an app.
@@ -301,7 +321,7 @@ impl FragmentCell {
                     "principal": npub::display(inv.asker.unwrap_or(inv.principal)),
                     "agent": agent,
                     "role": inv.role,
-                    "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                    "channels": self.declared_channel_names()?,
                 });
                 self.mutate(&facet, &inv, &input_sha, &input_text, meta).await
             }
@@ -431,6 +451,16 @@ impl FragmentCell {
             // a life's search index, an ended life's too (searchable.rs)
             return self.search_index_lever(body).await;
         }
+        if body["op"] == "hold-install" {
+            // a pending install (plane.rs `install_pending`) waits while on,
+            // its release's reads and writes to come: set before a create,
+            // on an object with no life yet; `waiting`, whether one waits now
+            if let Some(on) = body["on"].as_bool() {
+                self.test_hold_install.set((on, self.test_hold_install.get().1));
+            }
+            let (on, waiting) = self.test_hold_install.get();
+            return Ok(json!({ "on": on, "waiting": waiting }));
+        }
         self.name()?;
         let ms = || body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"));
         Ok(match body["op"].as_str() {
@@ -448,7 +478,8 @@ impl FragmentCell {
             Some("alarm") => {
                 let alarm_at = self.state.storage().get_alarm().await?;
                 let poll_at = self.meta(MetaKey::PollAt)?.and_then(|at| at.parse::<i64>().ok());
-                json!({ "alarmAt": alarm_at, "pollAt": poll_at, "now": js::now_ms() })
+                // `soonMs`: no alarm is armed sooner than this after now
+                json!({ "alarmAt": alarm_at, "pollAt": poll_at, "now": js::now_ms(), "soonMs": crate::fragment::ALARM_SOON_MS })
             }
             Some("age-outside") => {
                 let ms = ms()?;
@@ -465,15 +496,18 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "aged": ms, "invites": aged })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards" | "fail-search-index")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "lose-video-answers" | "fail-cards" | "members-while-shot" | "fail-search-index" | "fail-signin-visibility")) => {
                 let key = match lever {
                     "fail-cards" => MetaKey::TestFailCards,
+                    "members-while-shot" => MetaKey::TestMembersWhileShot,
                     "fail-search-index" => MetaKey::TestFailSearchIndex,
+                    "fail-signin-visibility" => MetaKey::TestFailSigninVisibility,
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
                     "fail-triggers" => MetaKey::TestFailTriggers,
                     "fail-meter-acks" => MetaKey::TestFailMeterAcks,
                     "fail-after-paid" => MetaKey::TestFailAfterPaid,
+                    "lose-video-answers" => MetaKey::TestLoseVideoAnswers,
                     _ => MetaKey::TestDropEffects,
                 };
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid(format!("{lever} names how many times")))?;
@@ -533,6 +567,18 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("advance-held") => json!({ "run": self.meta(MetaKey::TestAdvanceHeld)?.and_then(|r| r.parse::<i64>().ok()) }),
+            Some("hold-woke") => {
+                // while on, a wake with something due waits before it reads
+                // the ledger (jobs.rs `held_woke`), at most 20 s
+                if body["on"] == true {
+                    self.del_meta(MetaKey::TestWokeHeld)?;
+                    self.set_meta(MetaKey::TestHoldWoke, "1")?;
+                } else {
+                    self.del_meta(MetaKey::TestHoldWoke)?;
+                }
+                json!({ "ok": true })
+            }
+            Some("woke-held") => json!({ "held": self.meta(MetaKey::TestWokeHeld)?.is_some() }),
             Some("age-live") => {
                 let ms = body["ms"].as_i64().filter(|ms| *ms > 0).ok_or_else(|| CellError::invalid("ms: a positive number"))?;
                 json!({ "aged": self.live_age(ms)? })
@@ -559,12 +605,103 @@ impl FragmentCell {
                 self.trim_writes_before(js::now_ms() + ms - crate::files::WRITES_KEPT_MS)?;
                 json!({ "aged": ms })
             }
+            Some("future-rows") => {
+                // a trigger and a run as a later release may write them, a
+                // kind and a via this one does not know: trigger 0 becomes
+                // one, and a finished run is one
+                let triggers = self.rows("UPDATE code_triggers SET kind = 'future' WHERE idx = 0 RETURNING idx", vec![])?.len();
+                let now = SqlStorageValue::Integer(js::now_ms());
+                let run = self.rows(
+                    "INSERT INTO runs (op, via, principal, role, depth, input, status, attempt, created_at, finished_at)
+                     VALUES ('tick', 'future', ?, 'editor', 0, '{}', 'succeeded', 1, ?, ?) RETURNING id",
+                    vec![self.own_key()?.into(), now.clone(), now],
+                )?;
+                json!({ "triggers": triggers, "run": run.first().and_then(|r| r["id"].as_i64()) })
+            }
+            Some("facet-calls") => {
+                // each start of the app facet may make this many capability
+                // calls, refused past it in the runtime's words, as
+                // Cloudflare spends a facet's subrequests for its life
+                // (`facet_calls_lever`); no number, no limit
+                match body["calls"].as_u64() {
+                    Some(n) => self.set_meta(MetaKey::TestFacetCalls, &n.to_string())?,
+                    None => self.del_meta(MetaKey::TestFacetCalls)?,
+                }
+                json!({ "calls": body["calls"] })
+            }
+            Some("posted-kept") => {
+                // a channel people may post to keeps fewer records, trimmed
+                // at its next append (channels.rs `posted_kept`); no number,
+                // `limits::POSTED_KEPT`
+                match body["n"].as_i64() {
+                    Some(n) if (1..=limits::POSTED_KEPT).contains(&n) => self.set_meta(MetaKey::TestPostedKept, &n.to_string())?,
+                    Some(_) => return Err(CellError::invalid(format!("n is 1 to {}", limits::POSTED_KEPT))),
+                    None => self.del_meta(MetaKey::TestPostedKept)?,
+                }
+                json!({ "kept": self.posted_kept()? })
+            }
+            Some("posted-bytes") => {
+                // a channel people may post to keeps fewer bytes, trimmed at
+                // its next append (channels.rs `make_room`); no number,
+                // `limits::POSTED_BYTES_MAX`
+                match body["n"].as_i64() {
+                    Some(n) if (1..=limits::POSTED_BYTES_MAX).contains(&n) => self.set_meta(MetaKey::TestPostedBytes, &n.to_string())?,
+                    Some(_) => return Err(CellError::invalid(format!("n is 1 to {}", limits::POSTED_BYTES_MAX))),
+                    None => self.del_meta(MetaKey::TestPostedBytes)?,
+                }
+                json!({ "bytes": self.posted_bytes_max()? })
+            }
+            Some("blessed-stale") => {
+                // as if the platform had deployed a newer release of its
+                // blessed template since: its next request installs that
+                // release again (plane.rs `blessed_current`)
+                let installed = self.meta(MetaKey::Blessed)?;
+                if let Some(installed) = &installed {
+                    let t = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
+                    self.set_meta(MetaKey::Blessed, &format!("{t}@older"))?;
+                }
+                json!({ "stale": installed.is_some() })
+            }
+            Some("woke-reset") => {
+                // as if its object had just started again: the next request
+                // a person or an agent makes has its woke trigger's chance
+                // (jobs.rs `woke_chance`)
+                json!({ "had": self.woke.replace(false) })
+            }
             Some("legacy-member-kind") => {
                 // a member row from before `members.kind` (2026-09-24): its
                 // kind NULL, as such rows were left
                 let principal = body["principal"].as_str().ok_or_else(|| CellError::invalid("legacy-member-kind names a member's principal"))?;
                 let n = self.rows("UPDATE members SET kind = NULL WHERE principal = ? RETURNING principal", vec![principal.into()])?.len();
                 json!({ "members": n })
+            }
+            Some("legacy-reach") => {
+                // a key set before FIN-352 (2026-11-01), while it was shared
+                // beyond its owner and their agents, as such fragments were
+                // left (reach.rs): sealed and stored as `PUT secrets` did
+                // then, past the rule as an older release wrote it
+                let name = body["name"].as_str().unwrap_or("LEGACY_KEY");
+                if !fragment_proto::valid_secret_name(name) {
+                    return Err(CellError::invalid("legacy-reach names a secret"));
+                }
+                let sealed = crate::keys::seal(&self.env, &self.scope(), body["value"].as_str().unwrap_or("legacy").as_bytes()).await?;
+                self.exec(
+                    "INSERT INTO secrets (name, sealed, set_by, set_at) VALUES (?, ?, 'legacy', ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed",
+                    vec![name.into(), sealed.into(), SqlStorageValue::Integer(js::now_ms())],
+                )?;
+                for host in body["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    self.exec("INSERT OR IGNORE INTO secret_hosts (name, host) VALUES (?, ?)", vec![name.into(), host.into()])?;
+                }
+                // its owner's row never told (that release sent no `reach`)
+                self.del_meta(MetaKey::ReachTold)?;
+                json!({ "reach": self.reaches()? })
+            }
+            Some("records") => {
+                // posts filled in as a member made them (channels.rs `fill_records`)
+                let channel = body["channel"].as_str().ok_or_else(|| CellError::invalid("records names a channel"))?;
+                let principal = body["principal"].as_str().ok_or_else(|| CellError::invalid("records names its poster's principal"))?;
+                let posts = body["records"].as_array().ok_or_else(|| CellError::invalid("records is a list of {id, body}"))?;
+                json!({ "seq": self.fill_records(channel, principal, posts).await? })
             }
             Some("members") => {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
@@ -611,8 +748,21 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "pollAt": now })
             }
+            Some("hold-rows") => {
+                // while on, the alarm sends no list row (`on_alarm`): a row
+                // a list shows was sent by a request's own flush or its
+                // answer's (`after_answer`); off, the alarm is armed for
+                // what waited
+                if body["on"] == true {
+                    self.set_meta(MetaKey::TestHoldRows, "1")?;
+                } else {
+                    self.del_meta(MetaKey::TestHoldRows)?;
+                    self.schedule().await?;
+                }
+                json!({ "ok": true })
+            }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, or ended")),
+ hold-advances, advance-held, hold-woke, woke-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, hold-rows, or ended")),
         })
     }
 }

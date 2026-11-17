@@ -61,7 +61,7 @@ a guest only edits what is shared with them.
 ## Build, deploy, share
 
 ```
-fragment init my-app --template todo --title "My app"   # a folder my-app/, created and live: prints its links
+fragment init my-app --template todo --title "My app"   # a folder, live, prints its links; templates: blank|board|calories|doc|inbox|notes|slides|todo
 fragment deploy my-app --dir my-app              # after an edit: sync the folder, then put it live
 fragment status my-app                           # its links, its live commit, why its code was refused, its page's errors
 fragment events my-app --tail 30                 # what happened there: believe it over your memory
@@ -69,10 +69,11 @@ fragment call my-app add --input '{"text":"hi"}' # one of its operations
 fragment visibility my-app link                  # public | link (anyone with the share link) | members
 fragment members add my-app bea@example.com --role editor   # by email; viewer | editor
 fragment list                                    # your person's fragments
-fragment create <label> --template todo          # one with no folder: blank|todo|inbox|calories|doc
+fragment create <label> --template todo          # no folder: blank|todo|inbox|calories|doc
 fragment write <name> site/index.html --from index.html     # one text file to main
 fragment deploy <name>                           # main goes live: the site and the app
 fragment mcp <name> [--write]                    # its described operations as an MCP server's tools
+fragment search "what was decided" --in a,b     # fragments' indexes, by words and meaning, as one (a reader's)
 fragment agent <agent> --name Frank --picture frank.jpg   # an agent's name and picture (an agent: its own, no <agent>)
 ```
 
@@ -81,7 +82,7 @@ Give every app a useful name (`--title` at creation, or `fragment rename
 (background terminal task after revealing the app), `fragment preview
 <app>`, and `fragment address <app> <label>` (only when requested;
 permanent, changes no permissions). Never delay a working link for an
-icon. See `fragment guide` for details.
+icon.
 
 A fragment is named `<label>--<suffix>` (`todo--k3x9`: the platform adds
 the suffix); a bare label names the one of your person's with it.
@@ -113,14 +114,16 @@ shadows.
   query reads, a mutation changes the app's SQLite (all or nothing, once
   per id), a job runs durable steps. Each has a `role` (who may call it)
   and an `input` JSON Schema. Give every operation you write a
-  `description`: what it does and what it answers, in plain text
+  `description`: what it does and what it answers
   (`"description": "Add a todo with this text. Answers its {id}."`).
-  People and agents read it in `fragment status` to know what to call,
-  and a described operation is a tool (below).
+  It shows in `fragment status` and makes the operation a tool (below).
 - **Pages** import `./__fragment.js`: `fragment.call`, `fragment.live` (a
   query that re-runs after every change), `fragment.subscribe` (a
   channel's records, live, and with `onDraft` its drafts as they
   stream), presence, web push.
+- **Who did it**: store `call.principal`; a page shows members by email
+  from `./__people?id=…` (to members), the viewer's own by
+  `fragment.me({ email: true })`. Keep no table of names.
 - **Channels**: records a mutation publishes and pages follow live;
   `inbox` takes webhooks, `events` is the log.
 - **Triggers**: a cron, a record on a channel, a change to files.
@@ -130,14 +133,13 @@ shadows.
   which the fragment's owner pays for: `job.ai.text` (text on the
   platform's model tiers, `cheap` or `medium`; with OpenAI's `tools` the
   model asks for calls your job runs, a tool loop with no computer, and
-  with `draft: {channel, turn}` its words stream to the pages following
-  that channel until the record you publish under the turn replaces
-  them), `job.ai.decide` and `job.ai.image` (a JPEG into the fragment's
-  files).
+  with `draft: {channel, turn}` its words stream to that channel's
+  pages until your record under the turn replaces them),
+  `job.ai.decide` and `job.ai.image` (a JPEG into the fragment's files).
   - `job.ai.decide`: typed answers (one of named options, a yes-or-no
     probability, a score on ordered levels) about text, JSON, or a
     photo, voice note or video someone uploaded (`fragment.blob(file)`'s
-    `{sha256, type}`), with no prose to parse: to sort, route and gate.
+    `{sha256, type}`): to sort, route and gate.
     `model`: `clef-flash` (the default), `clef`, or `clef-omni` (audio
     and video). An agent asks the same from its computer, `POST
     $FRAGMENT_MODEL/v1/decide`.
@@ -154,5 +156,14 @@ claude mcp add groceries -- fragment mcp groceries --write    # and change thing
 codex mcp add groceries -- fragment mcp groceries             # Codex
 ```
 
-`fragment list` shows what your person has. An operation without a
-`description` is no tool: describe the ones a model should use.
+An operation without a `description` is no tool: describe the ones a
+model should use. A reader has one tool more, `fragment-search`.
+
+## Before you spend
+
+Before a job likely to cost more than about $1 (speech, images, many
+searches or model calls), or anything repeated or looping, quote it
+(`fragment quote elevenlabs:speech 40000chars`) and ask once, in one
+sentence: "That's about $4.80; you have $95 left this month. Go ahead?"
+Not for small one-off calls. Refused for credit or budget? `fragment
+quote` reads what is left: don't assume.

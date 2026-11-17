@@ -437,6 +437,6 @@ appoints control who may use them.
 4. **`fragment deploy` reported success when refused:** fixed.
 5. **An image is served by its path's extension, not its bytes:**
    `job.ai.image` takes only `.jpg` or `.jpeg`.
-6. **Small job-written files have no cacheable URL** (`__file` is
-   `no-store`): open.
+6. **Small job-written files had no cacheable URL:** a file's version
+   (`__file?path=&v=<commit>`) is `immutable` (FIN-340).
 7. **`fragment create` printed secrets:** fixed (`--show-tokens`).

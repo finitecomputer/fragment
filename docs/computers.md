@@ -57,12 +57,47 @@ an image may rely on this:
 - **A restart** (its owner's) is a sleep that saves if it can and stops
   whether or not it did, then a fresh start: from the image and the
   newest good save, never the snapshot, which could carry what broke it
-  outside `/data`.
+  outside `/data`. That start is owed, made by its alarm (asleep or
+  won't wake, the start alone), so the restart answers `starting` on
+  every path, and its owner's page follows it to awake.
 - **A crash** (the container stopped on its own) starts it again while
   something wants it; a guest that died holding its keepalive is started
   again however long its turn ran, and its next life ends what was cut.
+- **A failed start** (it failed, never reported ready, or its container
+  stopped before it was ready) is tried again after a growing pause. It
+  is one strike however its failure is heard: a start that fails
+  destroys its container, and that container's end is not a crash too.
+  The lifecycle keeps that it is destroying (`Phase::Starting`'s
+  `destroying`, stored before the destroy), so an isolate that comes up
+  after it knows it as well; one that finds the start's own report gone
+  with the isolate before it destroys that container (whatever runs: its
+  host owns no start yet; an event coming meanwhile waits for it) and
+  counts the start failed, once, or, the
+  container still running, tells nothing and tries again at the next
+  event, an alarm it keeps a minute on at the latest (on its last strike
+  nothing else may come).
+- **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
+  share `RESTORE_MS`), never one that follows a restore's progress: a
+  restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,
+  2026-11-02), so its nine minutes and 25 seconds hold about 22 GB, more
+  than a computer's 20 GB disk. Any restore that fits the disk fits the
+  deadline; one that does not fit is set aside, not waited for.
+- **A start owed after its container goes** (a sleep's end with a wake
+  or a restart asked, a crash while wanted, a start that fell back past a
+  bad save) is due at once, told as `starting`: the request that saw it go
+  (a restart's aside) makes it, and each
+  one after it as a start falls back (`STARTS_OWED_MAX` at most), or, in
+  an alarm, the alarm it asks for, never the rest of the alarm that ran
+  the sleep (see Bounds). Its owner's sleep before it is made lets it go,
+  unless the computer is always on.
 - **Won't wake**: after `STARTS_FAILED_MAX` failed starts in a row it
   starts no container until its owner asks.
+- **Trying again**: "won't wake" is never for good, since what failed may
+  pass (a storage error, a disk a release made room on). A wake that is
+  not its owner's (a record, a page's presence, a join, a port tab)
+  `WONT_WAKE_RETRY_MS` (30 minutes) after it gave up tries one start, and
+  a failure gives up again at once: at most one paid start that often,
+  and only while something wants it.
 
 ## Durability
 
@@ -103,12 +138,17 @@ has none of it.
   call. Never twice, never a continuation's, and never one its asker
   stopped or one that waited on its person (docs/bridge.md, "A cut turn
   is continued once").
+- **A late message is told its age** (Paul, 2026-10-31). An agent
+  handed a message late (a backlog after an outage, a restart or a
+  sleep) is told how old it is, and judges whether it is still wanted;
+  nothing is cut off (docs/bridge.md, "A late message is told its age").
 - **P6, a card outlives its turn.** A sleep or a restart may cut a turn
   under its card. The card stays answerable until it expires; a late
   answer starts one fresh turn, claimed by the answer, with the card's
   turn as its note, and the old turn never resumes (docs/bridge.md, "A
-  card outlives its turn (P6)"). Not yet proved by a hosted run's real
-  sleep and wake: the Docker lane's sleep is a save and a restore.
+  card outlives its turn (P6)"). Proved on real Hermes by the `hermes`
+  lane: a turn cut under its card by a sleep and a wake, then its late
+  answer. Not yet by a hosted run's real sleep and wake.
 
 **A+ now, toward E** (Paul, 2026-10-05). A save asked of the guest covers
 only the writers it knows of, and some state must never go back in time
@@ -142,8 +182,6 @@ Not built either:
   linked account holds the protocol's state, so it never rewinds.
   Deferred (Paul, 2026-10-05: "too much of a lift for now"); SimpleX runs
   on an always-on computer meanwhile (decision 32).
-- **A backlog's age**: chat messages have no age limit after a long
-  outage (routines have an hour). Undecided.
 
 ## What its owner is told
 
@@ -157,6 +195,14 @@ with no clock, so every reader is told the same, and when they change the
 DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
 
 - `wont_wake`: its starts kept failing.
+- `disk_filling`: its disk, read (`df`) in each start that restores a
+  save or a snapshot, before its guest is let go (a step of the start,
+  within its deadline), and after each awake save, is used past
+  `DISK_TOLD_USED_PCT` (80%) with at most
+  `DISK_TOLD_FREE_MAX` (5 GB) free: the room left, told until a read finds
+  clearly more (at most `DISK_CLEAR_USED_PCT`, 70%, used, or at least
+  `DISK_CLEAR_FREE_MIN`, 6 GB, free), so a disk at the edge never shows
+  and clears it in turn. Each read logs a `disk` line of its own.
 - `unsaved`: this life's saves are failing (a sleep's at once, awake ones
   from the second in a row): since when its work is in no save, and when
   the bound stops it.
@@ -165,15 +211,38 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   done on the lost life after that save (Paul, 2026-10-23).
 - `update`: it is awake, with no keepalive open, on another version than
   its next start runs, until its owner puts that version off.
+- `key_paused`: a shared key's charges this last hour reached its owner's
+  cap on it (`fragment_core::key_hour`; FIN-448), so the swap refuses its
+  calls (429 `rate_limited`, reason `key_paused`, with `retry_after_ms`)
+  until `resumesAt`, which the notice counts down to. Worked out on read from
+  the computer's `key_hour`, and told as a charge reaches the cap. Its
+  button lifts the cap a step (`allowMicros`, `key_hour::next_lift`),
+  worked out by the computer from the cap it holds, so a stale page
+  changes nothing; at the most it says so.
 
 The platform posts none of them in a chat: a chat's records are its
-people's and agents' (docs/chat-records.md). The shell shows them over
-every chat and Settings.
+people's and agents' (docs/chat-records.md). Its owner reads them in words
+with the rest of what they are told (`GET /api/notices`, docs/api.md,
+Notices): the computer says each one itself (`fragment_core::computer::said`),
+with its actions' routes (Restart, OK `…/notices/seen`, Later
+`…/notices/later`, Allow `…/key-caps/{provider}`, Get help), and the shell
+draws them over every chat and Settings with no code of its own for any.
 
 - **One way back: Restart** (`POST /api/computers/{id}/restart`): the
   sleep and fresh start above. It names the start its owner saw, so
   pressed twice it restarts once, and the ledger is asked first, as for a
-  wake.
+  wake. While it runs, the shell shows its phase where the button was
+  (saving, then starting; Settings' State says Saving, not Going to sleep,
+  while a restart asked in that page saves: one asked elsewhere, by
+  another tab, the CLI or the app, still reads Going to sleep there), read
+  every two seconds while the page is shown
+  (`cell/shell/restart-follow.js`), and a line that a big save or restore
+  can take a few minutes once it has run 30 seconds; awake on its new
+  start (or, pressed while a start was under way, which the restart
+  adopts, on that start, read after its answer), the notice goes. A read that fails says so, with Check again,
+  never that the restart failed; an ask that fails is decided by the next
+  read that works (none while the page is hidden or waits for Check
+  again): no restart under way says it didn't restart, with Try again.
 - **An update is told, never forced** (Paul, 2026-10-09). A deploy that
   changes an image pushes it under the same name: asleep, a computer takes
   it at its next wake; awake, it runs the image it started on until it
@@ -187,8 +256,8 @@ every chat and Settings.
 - **The agent** is told what a cut or a rollback lost, in its next turn
   in each chat (docs/bridge.md, "The turn after a cut one is told" and
   "What a rollback forgot").
-- **Getting help**: a deployment may name `support_url`, which the shell
-  links once a restart has failed too.
+- **Getting help**: a deployment may name `support_url`, which a
+  `wont_wake` notice offers beside Restart.
 
 ## Preview and production
 
@@ -204,10 +273,8 @@ preview proved, promoted by Paul.
   name goes.
 - **Preview follows master.** Each green master push deploys, as
   `hermes`, the image its checkout's inputs make, reused by its input key
-  when it was built before (`xtask/src/image/preview.rs`). The merge
-  queue builds it first (`preview-image.yml`, under queue tags, never
-  deploying and never a required check); master's job alone writes an
-  input tag.
+  when it was built before (`xtask/src/image/preview.rs`), else built
+  beside the push's e2e by master's job, the only writer of an input tag.
 - **What changes a version.** Only the image's inputs (Paul, 2026-10-14:
   a change to the cell or the shell needs no image rollout); a host test
   holds that list to the Dockerfile.
@@ -236,7 +303,7 @@ preview proved, promoted by Paul.
    logs and spend.
 3. Run the hosted lanes on preview, then `--sweep`: `cargo xtask e2e
    --hosted --config <preview config> --branch preview --only
-   computers,agent-restart,agent-smoke,agent-ask,bot-mode
+   computers,agent-restart,agent-smoke,agent-ask
    --max-paid-calls 190`.
 4. Prove the upgrade from production's image: name production's digest
    in the preview config as an image of its own (`production`, in the
@@ -313,7 +380,9 @@ from a snapshot.
 - **What the save leaves out.** `held` may name, one per line, what the
   save of `/data` leaves out: gitignore patterns relative to `/data`, the
   files the guest copied under the hold to names the save keeps, so a hot
-  copy of one is never what a wake restores. Bounds and the patterns'
+  copy of one is never what a wake restores, and caches a tool fetches
+  again. Those under `/work/` its work's own save leaves out, relative to
+  it (`fragment_core::computer::work_left_out`). Bounds and the patterns'
   alphabet are `fragment_core::computer::left_out`'s. An empty answer
   leaves nothing out; one the DO refuses saves the guest whole.
 - **A hold not answered.** Until it answers, a guest may say why in
@@ -331,7 +400,8 @@ from a snapshot.
   scratch), and the rest of `/data` is the guest's own state (ours:
   Hermes' home and the bridge's state). Each is a `DirectoryBackup`
   record of its own, restored together, `/data` first; the work's record
-  leaves nothing out. The DO makes `/data/work` with its hold, so it
+  leaves out only the caches the guest named in it. The DO makes
+  `/data/work` with its hold, so it
   always exists to save.
 - With `RESTORE_PENDING=1`, the image waits for `/run/computer/restored`
   before it reads `/data`. Without it, `/data` is ready at start (a
@@ -345,13 +415,18 @@ from a snapshot.
 
 ### Saves and what a wake restores
 
-- A computer keeps its newest three saves (`SAVES_KEPT`), each taken
+- A computer keeps its newest three saves (`SAVES_KEPT`), and the one its
+  running life came up from until a start comes up from a newer one (a
+  save a start proved, the last a start falls back to), each taken
   under the hold; its view lists them (`saves`), newest first, each
   saying whether its guest answered (`held`).
 - **A wake restores the current save**, the newest not found unusable. A
   start whose save will never restore (its archive gone or altered)
   marks it unusable and starts again at once from the one before, with no
-  strike against the computer.
+  strike against the computer. A read of its archive that storage failed
+  (R2 answered an error) is asked again a few times within the restore
+  (`cell/backup-reads.mjs`), since the SDK's shim would fail the whole
+  start on one.
 - **The snapshot is only a cache** of one save on one image (`{id, image,
   save}`): a wake uses it only when `save` is the current save and
   `image` the pinned image's reference, and one that fails or comes up
@@ -368,8 +443,18 @@ from a snapshot.
 Every step the DO takes in a container ends within a bound, and one past
 it fails (the Sandbox SDK times out nothing): the consts beside
 `SLEEP_STEPS_MS` in cell/src/computer.rs, each within the lifecycle's
-deadline for its phase, checked as the cell compiles. So an owner's sleep
-answers within 11 minutes.
+deadline for its phase, checked as the cell compiles. A save's steps run
+in the Durable Object alarm whose events asked for them, which Cloudflare
+ends at 15 minutes: a sleep's hold, save and stop fit one alarm, and its
+backups get what the rest leaves (`BACKUPS_MS`, 11 minutes 10 seconds).
+That is the most any save can have, so it is fixed, not one that follows
+a save's progress. Saves over 1 GB moved 9 to 156 MB/s on production
+(2026-10-27 to 11-03), so a full disk's save (about 10.8 GB) fits all but
+the slowest 6% of tries, each tried again. A start takes an alarm of its
+own: the one start an alarm makes (a retry's, or one owed after a sleep),
+its disk's read among its steps, with the alarm's other events, fits
+15 minutes (`RESTORE_MS` leaves them their 65 seconds). So an owner's
+sleep answers within 14 minutes.
 
 ### The fragment API
 
@@ -379,7 +464,11 @@ answers within 11 minutes.
   through it names the code.storage the guest can reach.
 - `x-fragment-agent: <agent fragment>` says which agent a request acts
   as. The intercept refuses an agent not assigned to this computer, then
-  signs the request (NIP-98) as that agent.
+  signs the request (NIP-98) as that agent. It reads a body whole to
+  sign its hash, at most 32 MiB, but a blob's upload (`PUT
+  /api/f/{name}/blobs/{sha256}`): that streams through with its declared
+  length and no payload hash, as from the internet (the signature binds
+  the URL, which names the hash), at most `BLOB_MAX_BYTES`.
 - Without the header only the computer's own routes answer:
   - `GET /api/computer`: its own view, proto's `ComputerView` without
     `notices` and with what only the guest is given: each agent's
@@ -437,7 +526,8 @@ The deployment's `connectors` (`FRAGMENT_CONNECTORS`;
 and the exact endpoints a computer's relay carries for each: `[{id,
 relayTargets: [{host, port}]}]`, each an exact public DNS name on a
 nonzero port. Absent, the cell's default: `simplex`, with `relay::HOSTS`
-on 443. `[]` is the kill switch: no door is linked, redeemed or checked,
+on 443, and `telegram` (a hosted connector, templates/telegram: no
+relay). `[]` is the kill switch: no door is linked, redeemed or checked,
 and no relay opens; an owner may still unlink. A computer's relay offer
 and admission read the same policy, for the connectors its agents are
 allowed; the relay's bounds stay the computer's.
@@ -531,7 +621,8 @@ provider's own hosts.
   deploy/example.jsonc has the platform's. Connecting one is
   docs/api.md's, Connections; its consent is browser-bound
   (docs/pipes-browser-binding.md), and a connection holds only the scopes
-  its person allowed.
+  its person allowed: read only or read and write, as they picked, and
+  of those what they left ticked.
 - **A placeholder** is `fcx_<provider>_<tag>` for a connection and
   `fck_<provider>_<tag>` for a key, its tag a MAC of (computer, agent
   fragment, provider) under a key only the platform holds (`swap`). It
@@ -552,6 +643,15 @@ provider's own hosts.
   when its owner's gate refuses (402, 403). A body goes as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
+- **An account's own host.** A connection whose accounts each live at a
+  host of their own (a Salesforce org at its My Domain) names the suffix
+  they are under and the Pipes metadata field naming each account's
+  (`account_host`). The intercept also catches the suffix's glob
+  (`*.my.salesforce.com`); a request to a host under it is swapped only
+  when Pipes' credential for the account names that very host
+  (`AccountHost::of_metadata`), since anyone may own a host under the
+  suffix. Another account's host is refused (403), naming the account's
+  own; an account whose metadata names none is refused too.
 - **Who may use what.** An agent may use every provider its owner has
   (decision 44); its owner may narrow it to a list, a specialization
   rather than a wall. Where a connection takes several accounts, each
@@ -559,6 +659,14 @@ provider's own hosts.
   placeholder is the same.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
+- **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
+  each secret bound to an agent, with a host, is one of its credentials,
+  kind `own`, named by the secret, with no variable. Its hosts join the
+  catalog's in the egress's intercepts (the computer arms them again as
+  its guest reads its view). The intercept asks the Vault for it per
+  request, plans it beside the catalog's rows, and names each value it
+  filled in the answer (`{{name}}`); a Nostr key's is a signature the
+  Vault makes. A Vault's calls are not counted in `uses`.
 
 ### An agent's own model
 
@@ -617,8 +725,19 @@ agent; their account pays.
 
 What our Hermes image guarantees beyond the contract:
 
-- **One profile per agent**, named as its agent fragment, holding its
-  `SOUL.md`, `memories/` and `skills/`, synced both ways with it.
+- **One profile per agent of Hermes'**, named as its agent fragment,
+  holding its `SOUL.md`, `memories/` and `skills/`, synced both ways with
+  it through the files route, never a storage token: the agent edits its
+  own fragment, so a viewer's read-only sync is not this one's. A fragment
+  shared with the agent's owner it syncs with the `fragment` CLI, as its
+  owner would, at the lower of their roles (cli/GUIDE.md, Sync in depth). An agent whose `agent.json` names another runtime (Claude) has no
+  profile, desktop, route or sync: the boot reads `runtime` as the bridge
+  does (`with_runtimes`), and the ready file names it at once, for the
+  bridge to run on its runtime. A start reads every agent's before it
+  writes or retires a profile, asking again until each answers, so a
+  failed read never retires a Hermes agent's profile. One switched to another runtime while
+  the computer runs loses its desktop within 10 s, its profile retired at
+  the next start; switched back, its profile is written again.
 - **Its `agent.json`**, read at boot and every 10 s while awake (a change
   is the next turn's, nothing restarted): `tier` (`cheap` unless it says
   `medium`; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23),
@@ -641,12 +760,18 @@ What our Hermes image guarantees beyond the contract:
   of its own, copies every SQLite database outside the work with SQLite's
   online backup, and names exactly those as left out; a database it
   cannot copy (made after the copy, or held locked) is saved hot. Its
-  `computer-check` puts the copies back and checks each.
+  `computer-check` puts the copies back and checks each. It also names
+  the caches a save leaves out (`held::caches`: package managers'
+  downloads under Hermes' home and each agent's, a browser profile's
+  caches, never a person's own folder) and Claude Code's versions but the
+  one it runs, as many as fit beside its copies.
 - **What changes under the hold.** Hermes' gateway still writes on its
   own timers while held, each file replaced whole or appended, so a save
   holds a whole version of it; nothing else under `/data` changes (the
   Docker lane's `held_nothing_under_data_changes`). Its model-catalog
-  refresh is off, and Node's compile cache is outside `/data`.
+  refresh is off, and Node's compile cache is outside `/data`. A Claude
+  agent's idle `claude` is stopped before the hold is answered
+  (docs/bridge.md, "The Claude runtime").
 - **A turn a restart cut** is closed in its Hermes session before the
   gateway starts, so the next message is a turn of its own (P5).
 - **Its agents change while it runs**, nothing restarted: one assigned
@@ -658,7 +783,9 @@ What our Hermes image guarantees beyond the contract:
   which Hermes' tools obey until Give back. Its agents run as one user
   (decision 44), so only the lease and the platform skill keep an agent
   off another's desktop. The desktop and the browser tools share one
-  regular Chromium and one saved profile per agent.
+  regular Chromium and one saved profile per agent. A link opened on the
+  desktop (a terminal's sign-in, `xdg-open`) opens there too: it is the
+  desktop's default web browser, so no dialog asks which (FIN-351).
 
 ### Approvals in our Hermes image
 
@@ -736,8 +863,104 @@ passwordless `sudo`: the computer is one person's, with no secret in it,
 and their agents are not fenced from each other (decisions 13, 43, 44).
 An install outside `/data` lasts until the next start from the image (a
 crash, an update, a restart; a snapshot's wake keeps it). Nothing is
-installed under `/data` at run time. The bridge runs as root and keeps
-SimpleX's state from the agent's user, though not from its sudo.
+installed under `/data` at run time but what its agents install into its
+Python environment (next) and the person's own Claude Code (below). The
+bridge runs as root and keeps SimpleX's state from the agent's user,
+though not from its sudo.
+
+### Python in our Hermes image
+
+Paul, 2026-11-02 (his agent found no `pip`, `uv` only in Hermes' tool
+store, and the image's Python read-only): `pip install` and `uv pip
+install` work, and what they install is kept.
+
+- **One environment for the computer**, `/data/work/python`, its agents'
+  (they run as one user, decision 44), saved with their work. Every login
+  shell, as each command of Hermes' terminal runs in, has it active
+  (`/etc/profile.d/fragment-python.sh`: its `bin` first on `PATH`, and
+  `VIRTUAL_ENV`), so `python`, `pip` and `uv pip` are its. `uv` and `uvx`
+  are Hermes' own, on every `PATH`.
+- **Made by the boot**, off its path and offline: uv makes it on the
+  image's Python (`/usr/local/bin/python3`, the name upstream links it
+  at), and its pip is the wheel that Python bundles
+  (`boot/src/python.rs`).
+- **Kept** across a restart and a sleep, and across an image update whose
+  Python is the same minor release: it runs whichever Python the image
+  links (`bin/python` is a link to `/usr/local/bin/python3`, as is its
+  `home`), wherever the image's store keeps it. One made for another
+  Python (or unreadable) is set aside whole (`/data/work/python.3.14`),
+  with `requirements.txt` listing what it held for `pip install -r`, and a
+  new one is made; the agent's page says so.
+- **The image's own packages**, in `/opt/fragment/python` (the document
+  skills' libraries and Playwright; never Hermes' store, whose Python its
+  PM records a digest of), are named in it by a `.pth` the boot writes at
+  each start, after its own, so an agent's install of one wins. Hermes'
+  venv names them by the same `.pth`.
+
+### Playwright and small tools in our Hermes image
+
+Paul, 2026-11-02: an agent's own code drives a browser with Playwright,
+on the system Chromium, which passes Cloudflare's bot check where Chrome
+for Testing fails.
+
+- **One release for Python and Node**, pinned in
+  `images/hermes/playwright-requirements.txt`: Python's in the image's own
+  packages (above), its driver on the image's Node
+  (`PLAYWRIGHT_NODEJS_PATH`; the wheel's own is dropped), Node's global
+  (`require('playwright')` through the login shell's `NODE_PATH`), and the
+  `playwright` CLI. A plain
+  `chromium.launch()` runs `/opt/fragment/bin/chromium`, the desktop's:
+  the image puts it in `PLAYWRIGHT_BROWSERS_PATH` under the names that
+  release looks for, marked installed, beside the image's FFmpeg under
+  its name (a page's video), so `sudo playwright install chromium`
+  downloads nothing. sudo keeps `PLAYWRIGHT_BROWSERS_PATH`, so a browser
+  `sudo playwright install` adds is where an agent's own launch looks,
+  and `PLAYWRIGHT_SKIP_BROWSER_GC`: that directory is Hermes' tool store,
+  and Playwright's install would collect Hermes' own Chrome for Testing
+  and FFmpeg from it (`uninstall`, which always collects, is refused
+  there). As
+  the agent's user, `playwright install` (either runtime's) answers at
+  once (`playwright-node`, the Node both run Playwright's CLI on):
+  Chromium, or no browser named, is installed already; another browser is
+  root's to install. Playwright's own would wait ten minutes on its lock
+  in that directory, root's.
+  Another release an agent installs looks for its own names, and finds
+  none.
+- **`unzip`, `zip`, `jq` and `sqlite3`**, Debian's. `sqlite3` runs with
+  Debian's SQLite library, not the newer one upstream puts first.
+- The image still carries Hermes' Chrome for Testing
+  (docs/technical-debt-ledger.md, "The Hermes image carries two
+  Chromiums").
+
+### Claude Code in our Hermes image
+
+Paul, FIN-233 (2026-10-31): an agent whose `agent.json` names `claude`
+runs on Claude Code, which the person installs on their computer
+themselves, as on a VPS of theirs. The image ships none, and no flag
+gates it.
+
+- **Installed and signed in from the chat**: a Claude agent's turn on a
+  computer with none asks its person to install it, and Install runs
+  Anthropic's own installer as below; signed out, its turn's card links
+  Anthropic's sign-in for their own browser and takes the code it shows,
+  on the computer alone (docs/bridge.md, "The Claude runtime").
+- **Or installed in a terminal of an agent's desktop** with Anthropic's own
+  installer, then signed in there with `claude auth login` (its URL
+  opened in their browser, its code pasted back). The desktop's home is
+  Hermes' (`/data/hermes`), so the install lands in `/data`
+  (`.local/bin/claude`, its versions in `.local/share/claude`), already on
+  the image's `PATH`, and the sign-in in `/data/hermes/.claude`. Both
+  outlast a restart, a sleep and an image update, as all of `/data` does.
+- **The agent runs that same Claude Code** (`BRIDGE_CLAUDE_BIN`,
+  `BRIDGE_CLAUDE_HOME`: docs/bridge.md), as Hermes' user, with the
+  person's sign-in, settings and auto memory, each agent in its own work
+  directory.
+- **Its updates are Anthropic's**: Claude Code updates itself in the
+  background, keeping the two newest versions, so a save carries one or
+  two (about 270 MB each).
+- **A Claude agent has no Hermes profile or desktop** (above, "One
+  profile per agent of Hermes'"): its person installs and signs in from
+  its chat.
 
 ## Billing
 

@@ -4,10 +4,10 @@ import { PHASE } from "./computer.js";
 
 export function createOnboarding({ api, ui, account, fragments, computer, navigation, reads, load, skillsFragment, rosterChanged }) {
   const { $, el, notice } = ui;
-  const { person, isGuest, setGuest, hasInvites } = account;
+  const { person, isGuest, setGuest, told } = account;
   const { allFragments, chats, own, labelOf, titleOf, primaryAgent, agentsOwnChat, freeLabel, slug, seg } = fragments;
   const { computerView, computerFailed, agents, computerOf, computerIs } = computer;
-  const { start, openChat, atHome, hasFrame, welcomePath: WELCOME } = navigation;
+  const { start, openChat, atHome, hasFrame, page, welcomePath: WELCOME } = navigation;
   // A new agent's name, when its maker names none (Paul, 2026-10-03): the
   // beige boxes of an alternate 1990s, never a real one's.
   const NAMES = ["XBT-2000", "Starfire 40K", "Turbo Quasar 486", "Novatron DX", "Hyperion 9000", "Cobalt Prism 66", "Megastation LX", "Orbitron 3D", "Datastar Pro", "Pulsar 360", "Zephyr XL", "Titan MX", "Vortex 7", "Nimbus 4K", "Galaxion SE", "Powerframe 99"];
@@ -197,9 +197,9 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     const trial = q.get("trial");
     const foot = el("div", "welcome-foot");
     foot.append(noSeatSaid(), switchForm(trial ? `${WELCOME}?trial=${encodeURIComponent(trial)}` : WELCOME, "text"));
-    // someone shared something with them first, or invited them: it is still
-    // theirs to open, or to answer
-    if (allFragments().length || hasInvites()) {
+    // someone shared something with them first, or they are told something
+    // (an invite): it is still theirs to open, or to answer
+    if (allFragments().length || told()) {
       const home = el("a", "text", "Not now");
       home.href = "/";
       foot.append(home);
@@ -390,13 +390,27 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // Try again in its chat, is the one to finish first. An agent of theirs
   // of this name on no computer and with no chat of its own (an Add cut
   // short before its chat, or one made elsewhere) is the one made on.
-  function addAgent({ name, role }) {
-    if (setup) return Promise.reject(new Error("Another agent is being made: finish it in its chat first."));
+  // A making that failed before its chat, asked from a page, is Add's to say
+  // (it rejects): nothing is drawn over the page, and Add again goes on with
+  // what was made.
+  // `quiet` (the move's page): its chat is made but not opened, the page
+  // staying as it is; answered with what was made (`{chat, id, computer}`).
+  // `from`: the old finite.computer agent it is made for, kept in its
+  // agent.json (`from`), so the page finds it again (move-page.js `madeFor`).
+  // `agent`: the one made for it before, which the page found so: gone on
+  // with by its own label (its chat too, one made whose answer was lost),
+  // under the name it has, never another made.
+  async function addAgent({ name, role, runtime = "hermes", quiet = false, from = null, agent = null }) {
+    if (setup) throw new Error("Another agent is being made: finish it in its chat first.");
     const placed = new Set([...agents().values()].map((a) => a.fragment));
-    const left = allFragments().find((f) => f.kind === "agent" && own(f) && titleOf(f.name) === name && !placed.has(f.name) && !agentsOwnChat(f.name));
-    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, job: addedJob, added: true, agent: left?.name ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
-    return creatingAgent();
+    const left = agent ?? allFragments().find((f) => f.kind === "agent" && own(f) && titleOf(f.name) === name && !placed.has(f.name) && !agentsOwnChat(f.name))?.name;
+    setup = { label: left ? labelOf(left) : freeLabel(slug(name)), title: agent ? titleOf(agent) : name, role: role || null, runtime, job: addedJob, added: true, quiet, from, agent: left ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+    lastMade = null;
+    const unsaid = await creatingAgent();
+    if (unsaid) throw new Error(unsaid);
+    return lastMade;
   }
+  let lastMade = null;
   // The first run's agent, named as an earlier try named it, if one did.
   async function defaultAgent() {
     await load();
@@ -423,7 +437,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       (await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title: FIRST_CHAT })).name;
     setupChanged({ chat: chatName });
     await load();
-    if (!hasFrame(chatName)) openChat(chatName);
+    if (!setup.quiet && !hasFrame(chatName)) openChat(chatName);
 
     // These can run together once the chat is on screen. The computer is
     // assigned before it wakes, with the agent's configuration deployed.
@@ -457,7 +471,11 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     const written = await api("GET", `/api/f/${seg(agent)}/file?path=agent.json`).then(() => true, (e) => { if (e.status === 404) return false; throw e; });
     if (!written) {
       const owner = person().email || "your person";
-      const files = [{ path: "SOUL.md", text: job(owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER }, null, 2) + "\n" }];
+      // what it runs on, as the bridge reads it (docs/bridge.md): Claude
+      // Code named, Hermes (none named) with its tier
+      const runs = setup.runtime === "claude" ? { runtime: "claude" } : { tier: DEFAULT_AGENT_TIER };
+      if (setup.from) runs.from = setup.from;
+      const files = [{ path: "SOUL.md", text: job(owner) }, { path: "agent.json", text: JSON.stringify(runs, null, 2) + "\n" }];
       // its role, beside its name in its fragment.json (`meta.role`)
       if (setup.role) {
         const manifest = await api("GET", `/api/f/${seg(agent)}/manifest`);
@@ -483,17 +501,30 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     return c?.phase === "awake" && (subs.subscriptions ?? []).some((x) => x.wake && x.principal === id && x.channel === "chat");
   }
   // `seat` (`{session?}`): a seat comes first (`seatFirst`), then the agent.
+  // At home, the middle column says what is being made until its chat is;
+  // a page open (Settings' Add, a reload there going on with one) stays as
+  // it is until the chat is made and opens, nothing said over it (Paul,
+  // 11-01: "Making your agent…" over Settings). Answers a failure before
+  // its chat that nothing said (a page was open: the asker's to say), its
+  // making let go so an Add goes on with what was made.
   function creatingAgent(seat = null) {
     if (seat) return seatFirst(seat);
     if (setupRun) return setupRun;
-    history.replaceState(null, "", "/");
     showLayout();
-    // until its chat is made, the middle column says what is being made
-    if (!setup?.chat || !hasFrame(setup.chat)) notice("Making your agent…");
+    if (!page()) {
+      history.replaceState(null, "", "/");
+      if (!setup?.chat || !hasFrame(setup.chat)) notice("Making your agent…");
+    }
     setupRun = (async () => {
       const made = await defaultAgent();
+      lastMade = made;
+      // a quiet making (the move's page) is done once made, its computer
+      // assigned and it in its chat: what it is made for wakes it (its
+      // move's routine), and a wake its computer's view refused a moment
+      // ago (a guest's, comped since) is no answer about it
+      const quiet = !!setup?.quiet;
       const t0 = Date.now();
-      for (;;) {
+      for (; !quiet; ) {
         let ready = false;
         try {
           ready = await agentReady(made);
@@ -510,12 +541,17 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       await load();
     })().catch((err) => {
       if (setup) setupChanged({ error: err.message || "It did not answer." });
-      if (!setup?.chat || !hasFrame(setup.chat)) {
-        const retry = el("button", "primary", "Try again");
-        retry.type = "button";
-        retry.onclick = () => creatingAgent();
-        notice("Your agent could not start", err.message, retry);
+      // its chat says it (its steps)
+      if (setup?.chat && hasFrame(setup.chat)) return null;
+      if (page()) {
+        setup = null;
+        return err.message || "It did not answer.";
       }
+      const retry = el("button", "primary", "Try again");
+      retry.type = "button";
+      retry.onclick = () => creatingAgent();
+      notice("Your agent could not start", err.message, retry);
+      return null;
     }).finally(() => { setupRun = null; });
     return setupRun;
   }

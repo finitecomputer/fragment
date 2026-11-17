@@ -33,6 +33,7 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{as_themselves, decide, decode_segment, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 use crate::routed::Credential;
+use fragment_core::gather::Gathered;
 
 /// Marks a site request's refusal (401, 403) as the platform's, never an
 /// app's answer: the router answers a browser's navigation to one as a
@@ -102,7 +103,7 @@ async fn browser_asset(req: &Request, env: &Env, file: &File, content_type: &str
 /// member's `__watch` closes when they leave), or a push subscription. Its
 /// caller is resolved first.
 fn answers_someone(path: &str) -> bool {
-    path.starts_with("__op/") || path.starts_with("__secrets/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__watch" | "__live" | "__door")
+    path.starts_with("__op/") || path.starts_with("__secrets/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__watch" | "__live" | "__door" | "__search")
 }
 
 /// A browser's navigation to a page: a GET or HEAD that its Fetch
@@ -196,6 +197,8 @@ impl FragmentCell {
         let anon = site::cookie(&cookies, ANON_COOKIE).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(anon_principal);
         // who a socket connected as is asked again later (live.rs)
         let credential = if path == "__live" { caller.unresolved.clone() } else { None };
+        // what a socket's accept waited on, for its client (`Server-Timing`)
+        let mut laps = js::Laps::start();
         let resolved;
         let caller = if answers_someone(&path) {
             resolved = self.identified(caller, name).await?;
@@ -203,6 +206,7 @@ impl FragmentCell {
         } else {
             caller
         };
+        laps.lap("identity");
         let resp = if let Some(op) = path.strip_prefix("__op/") {
             if req.method() != Method::Post {
                 return Err(CellError::invalid("call an operation with POST"));
@@ -224,6 +228,15 @@ impl FragmentCell {
             };
             let result = self.call_op(caller, &facts, &principal, link, op, body).await?;
             json_response(&result)?
+        } else if path == "__search" {
+            // its own index, asked from its page as the asker, who pays for
+            // the question's embedding (searchable.rs): viewers and up
+            if req.method() != Method::Post || !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
+                return Err(CellError::invalid("ask with POST, the question as application/json"));
+            }
+            let body = crate::read_body(&mut req, SEARCH_BODY_MAX_BYTES).await?;
+            let q = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            self.search_page(caller, link, q).await?
         } else if let Some(op) = path.strip_prefix("__push-").filter(|op| matches!(*op, "key" | "sub" | "unsub")) {
             // web push: anyone who can see the fragment (push.rs)
             self.admit(&facts, caller, link, Role::Public)?;
@@ -280,13 +293,22 @@ impl FragmentCell {
             if req.method() != Method::Get {
                 return Err(CellError::invalid("read a channel with GET"));
             }
+            // `__channel/<c>`: a page; `__channel/<c>/newest`: its posters' newest
+            let (channel, newest) = match channel.strip_suffix("/newest") {
+                Some(c) => (c, true),
+                None => (channel, false),
+            };
             if !fragment_proto::valid_channel_name(channel) {
                 return Err(CellError::invalid("invalid channel name"));
             }
             let read = self.channel_read_role(channel)?;
             self.reader(&mut facts, caller, link, read).await?;
-            let (after, before, limit) = crate::channels::page_query(&url)?;
-            json_response(&self.channel_page(channel, after, before, limit)?)?
+            if newest {
+                json_response(&self.channel_newest(channel)?)?
+            } else {
+                let (after, before, limit) = crate::channels::page_query(&url)?;
+                json_response(&self.channel_page(channel, after, before, limit)?)?
+            }
         } else if path == "__members" {
             // who is in it, for a page (a chat's agents, its lead the first
             // added): viewers and up, as the API's list
@@ -341,7 +363,8 @@ impl FragmentCell {
                     // a page following this fragment may soon post to a computer's
                     // channel (an agent's own socket wakes no computer it runs on)
                     self.prewake(&principal);
-                    resp
+                    laps.lap("accept");
+                    laps.stamp(resp)?
                 }
                 Err(e) if page && crate::auth::is_refusal(e.code) => crate::live::refused_page(&e.message)?,
                 Err(e) => return Err(e),
@@ -356,6 +379,55 @@ impl FragmentCell {
         // whichever of its branches answered (live, main, the release's data, a HEAD)
         let resp = if path == "__file" { content_file(resp)? } else { resp };
         with_cookies(resp, &set)
+    }
+
+    /// `__file?path=<p>&v=<commit>` (FIN-340): the file at `main` or `live`
+    /// whose last change is that commit, kept for good (`pinned_cache`, its
+    /// `ETag` the commit, 304 to a browser that has it); a file whose
+    /// version is another, a 302 to that one's URL (`no-store`): a URL
+    /// answers its bytes or sends the browser on, never other bytes. None
+    /// when neither pin has the file (its blessed template's data, or
+    /// nothing, as without a version).
+    async fn versioned_file(&self, req: &Request, facts: &Facts, p: &str, v: &str, public: bool, head: bool) -> CellResult<Option<Response>> {
+        // the pins an unversioned `__file` reads, in its order
+        let mut current = None;
+        for &which in self.content_pins()? {
+            match self.tree_row(which, p)? {
+                Some(row) if row.last_commit == v => {
+                    // a blob's bytes come by the pointer table, not by the
+                    // commit `v` names: revalidated, never kept (`kept_bytes`)
+                    let cache = if kept_bytes(row.size) { site::pinned_cache(public) } else { "no-cache" };
+                    let etag = site::file_etag(v);
+                    if let Some(resp) = not_modified(req, &etag, cache)? {
+                        return Ok(Some(resp));
+                    }
+                    let mut resp = if head {
+                        let size = match crate::blobs::maybe_pointer(row.size) {
+                            true => self.pointer(which, p)?.map_or(row.size, |(_, size)| size),
+                            false => row.size,
+                        };
+                        let h = Headers::new();
+                        h.set("content-type", site::mime_for_path(p))?;
+                        h.set("content-length", &size.to_string())?;
+                        Response::empty()?.with_headers(h)
+                    } else {
+                        self.stream_file(facts, which, &row, req.headers().get("range")?.as_deref()).await?
+                    };
+                    resp.headers_mut().set("cache-control", cache)?;
+                    resp.headers_mut().set("etag", &etag)?;
+                    return Ok(Some(resp));
+                }
+                Some(row) => current = current.or(Some(row.last_commit)),
+                None => {}
+            }
+        }
+        let Some(now) = current else { return Ok(None) };
+        let mut to = url::form_urlencoded::Serializer::new(String::new());
+        to.append_pair("path", p).append_pair("v", &now);
+        let h = Headers::new();
+        h.set("location", &format!("__file?{}", to.finish()))?;
+        h.set("cache-control", "no-store")?;
+        Ok(Some(Response::empty()?.with_status(302).with_headers(h)))
     }
 
     /// The author's `fetch` for a path that is not a site file: it sees the
@@ -440,7 +512,15 @@ impl FragmentCell {
         self.ensure_pins(facts).await?;
         let facts = &*facts;
         let name = facts.name.as_str();
-        let live = facts.pin_live.as_deref().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{name} has no live commit yet: deploy first")))?;
+        // before its first deploy, a template that seeds after its create's
+        // answer runs from the release (plane.rs `install_pending`): its
+        // site is the release's, no commit of its own (`""`), whether or
+        // not its repo is made yet
+        let live = match facts.pin_live.as_deref() {
+            Some(live) => live,
+            None if self.stage()?.runs_release() => "",
+            None => return Err(CellError::new(ErrorCode::NotFound, format!("{name} has no live commit yet: deploy first"))),
+        };
         let public = facts.visibility == Visibility::Public;
         let headers = |ct: &str, cache: &str| -> CellResult<Headers> {
             let h = Headers::new();
@@ -456,45 +536,74 @@ impl FragmentCell {
             }
             "__files" => {
                 if !req.headers().get("accept")?.is_some_and(|a| a.contains("application/json")) {
-                    return Ok(Response::ok(files_page(name))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
+                    return Ok(Response::ok(files_page(name, &self.title_now(name)?))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
                 }
-                // a path on both is the one `__file` reads (live's; an agent's
-                // or a session archive's, main's)
+                // a path on both is the one `__file` reads (`content_pins`),
+                // with its version (`commit`: `__file?path=&v=`, FIN-340)
                 let mut sizes = std::collections::BTreeMap::new();
-                let last_wins = if self.main_first()? { ["live", "main"] } else { ["main", "live"] };
-                for which in last_wins {
+                for &which in self.content_pins()?.iter().rev() {
                     let blobs = self.pointer_sizes(which)?;
                     for r in self.tree_rows(which)?.into_iter().filter(|r| !site::is_machinery(&r.path)) {
                         let size = blobs.get(&r.path).copied().unwrap_or(r.size);
-                        sizes.insert(r.path, size);
+                        sizes.insert(r.path, (size, Some(r.last_commit)));
                     }
                 }
-                // beneath them, its blessed template's data (decision 40)
-                let release: Vec<(String, u64)> = {
-                    let own: std::collections::BTreeSet<&str> = sizes.keys().map(String::as_str).collect();
-                    self.release_data(&own)?.into_iter().map(|d| (d.path.to_string(), d.size)).collect()
+                // beneath them, its blessed template's data (decision 40), no version of its own
+                let release: Vec<(String, (u64, Option<String>))> = {
+                    let own: std::collections::BTreeSet<&str> = sizes.keys().map(String::as_str).gathered();
+                    self.release_data(&own)?.into_iter().map(|d| (d.path.to_string(), (d.size, None))).collect()
                 };
                 sizes.extend(release);
-                let files: Vec<Value> = sizes.into_iter().map(|(path, size)| json!({ "path": path, "size": size })).collect();
-                return json_response(&json!({ "type": "files", "count": files.len(), "files": files }));
+                let files: Vec<Value> = sizes
+                    .into_iter()
+                    .map(|(path, (size, commit))| match commit {
+                        Some(commit) => json!({ "path": path, "size": size, "commit": commit }),
+                        None => json!({ "path": path, "size": size }),
+                    })
+                    .collect();
+                let mut answer = json!({ "type": "files", "count": files.len(), "files": files, "title": self.title_now(name)? });
+                // the files view's layer (FIN-372): its search, and what its manifest says
+                if self.search_indexed()? {
+                    answer["searchable"] = json!(true);
+                }
+                if let Some(f) = self.files_live()? {
+                    if let Some(home) = f.home {
+                        answer["home"] = json!(home);
+                    }
+                    if let Some(status) = f.status {
+                        answer["status"] = json!(status);
+                    }
+                    if f.graph {
+                        answer["graph"] = json!(true);
+                    }
+                }
+                return json_response(&answer);
             }
             "__file" => {
                 let p = url.query_pairs().find(|(k, _)| k == "path").map(|(_, v)| v.into_owned()).unwrap_or_default();
                 if !valid_repo_path(&p) || site::is_machinery(&p) {
                     return Err(CellError::invalid("path must be a content path (not the fragment's own machinery)"));
                 }
-                // Data an app writes lands on main; a path not yet on live
-                // reads from there. An agent's files (its job, its settings,
-                // its memories) are main's first: its computer's sync writes
-                // them there and never deploys (images/hermes/boot/src/
-                // sync.rs), so live keeps the job of its last deploy. So are a
-                // session archive's: its imports write main and never deploy
-                // (templates/sessions/README.md).
-                let first = if self.main_first()? { ["main", "live"] } else { ["live", "main"] };
-                let found = match self.tree_row(first[0], &p)? {
-                    Some(row) => Some((first[0], row)),
-                    None => self.tree_row(first[1], &p)?.map(|row| (first[1], row)),
-                };
+                // a version (FIN-340): the commit that last changed the file
+                // names its bytes, so its URL is kept for good; an older one
+                // goes on to the current (never other bytes at one URL)
+                let v = url.query_pairs().find(|(k, _)| k == "v").map(|(_, v)| v.into_owned());
+                if let Some(v) = &v {
+                    if !site::valid_version(v) {
+                        return Err(CellError::invalid("v is a file's version: the commit that last changed it (files.stat's `commit`), 40 or 64 lowercase hex characters"));
+                    }
+                    if let Some(resp) = self.versioned_file(req, facts, &p, v, public, head).await? {
+                        return Ok(resp);
+                    }
+                }
+                // the first of its content pins that has it (`content_pins`)
+                let mut found = None;
+                for &which in self.content_pins()? {
+                    if let Some(row) = self.tree_row(which, &p)? {
+                        found = Some((which, row));
+                        break;
+                    }
+                }
                 let (which, row) = match found {
                     Some(f) => f,
                     // beneath both, its blessed template's data (decision 40)
@@ -515,6 +624,17 @@ impl FragmentCell {
         }
         if !path.is_empty() && !valid_repo_path(path.trim_end_matches('/')) {
             return Err(CellError::new(ErrorCode::NotFound, "no such page"));
+        }
+        // a fragment whose page is the files view (its manifest's
+        // `files.page`, FIN-372), with its Open Graph tags as a page's
+        if path.is_empty() && self.files_live()?.is_some_and(|f| f.page) {
+            let mut page = files_page(name, &self.title_now(name)?);
+            if let Some(meta) = self.meta(MetaKey::MetaLive)? {
+                let meta: fragment_core::manifest::Meta = crate::json_text(&meta).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?;
+                page = site::inject_og(&page, name, &meta, &format!("{}__preview.svg", self.cfg.canonical(&caller.url, name)));
+            }
+            let h = headers("text/html; charset=utf-8", "no-store")?;
+            return Ok(if head { Response::empty()?.with_headers(h) } else { Response::from_html(page)?.with_headers(h) });
         }
         // a blessed template's fragment: its site is the platform release's (decision 40)
         if let Some(installed) = self.meta(MetaKey::Blessed)? {
@@ -552,14 +672,17 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?}")));
         };
         let mime = site::mime_for_path(&row.path);
-        let cache = site::cache_control(&row.path, public);
+        // no await between the row's read and this: the same tree's paths.
+        // Never a file that may be a blob's pointer: its bytes are read by
+        // the pointer table, not by this tree (`kept_bytes`)
+        let cache = site::cache_control(kept_bytes(row.size) && self.declared_immutable(&row.path)?, public);
         // a file of a pointer's size may be one: its bytes are a blob's
         let pointer = if crate::blobs::maybe_pointer(row.size) { self.pointer("live", &row.path)? } else { None };
         // Only a page gets Open Graph tags, so only a page reads `meta`.
         let page = pointer.is_none() && mime.starts_with("text/html") && row.size <= OG_MAX_BYTES;
         let stored = if page { self.meta(MetaKey::MetaLive)? } else { None };
         let og: Option<fragment_core::manifest::Meta> = match stored {
-            Some(text) => Some(serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
+            Some(text) => Some(crate::json_text(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
             None => None,
         };
         // Revalidation is answered here, before code.storage is asked for
@@ -588,7 +711,8 @@ impl FragmentCell {
             return with_etag(self.stream_blob(&sha, mime, range.as_deref()).await?);
         }
         if let Some(meta) = og {
-            if let Some(bytes) = self.cs()?.read(&facts.repo, live, &row.path, OG_MAX_BYTES as usize).await? {
+            let repo = facts.repo.as_deref().expect("a live row is a commit of a repo made");
+            if let Some(bytes) = self.cs()?.read(repo, live, &row.path, OG_MAX_BYTES as usize).await? {
                 let html = String::from_utf8_lossy(&bytes);
                 let image = format!("{}__preview.svg", self.cfg.canonical(&caller.url, name));
                 let page = site::inject_og(&html, name, &meta, &image);
@@ -599,6 +723,18 @@ impl FragmentCell {
     }
 }
 
+/// Whether a file whose tree row is `size` bytes may be kept for good: its
+/// bytes the tree's own, never a blob's (a file of `BLOB_MIN_BYTES` or
+/// more, its git file a pointer). A pointer's bytes are read from the
+/// pointer table: any file the size of a pointer is revalidated (FIN-391),
+/// a rule made while a refresh rewrote that table path by path before it
+/// moved the tree and its pin. It is now published with them, all or none
+/// (plane.rs `Moved::publish`, FIN-407); whether such a file may be kept
+/// for good again is a change of its own.
+fn kept_bytes(size: u64) -> bool {
+    !crate::blobs::maybe_pointer(size)
+}
+
 impl FragmentCell {
     /// A file of a blessed template's site, from the release: a page gets
     /// the fragment's own Open Graph tags, as a site's page does. A 304 and
@@ -606,10 +742,11 @@ impl FragmentCell {
     async fn blessed_page(&self, req: &Request, caller: &Caller, facts: &Facts, file: &'static File, release: &str, public: bool) -> CellResult<Response> {
         let path = file.path;
         let mime = site::mime_for_path(path);
-        let cache = site::cache_control(path, public);
+        // the release's own files: kept for good by the platform's hash alone
+        let cache = site::cache_control(site::hashed(path), public);
         let page = mime.starts_with("text/html");
         let og: Option<fragment_core::manifest::Meta> = match page.then(|| self.meta(MetaKey::MetaLive)).transpose()?.flatten() {
-            Some(text) => Some(serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
+            Some(text) => Some(crate::json_text(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
             None => None,
         };
         let live = facts.pin_live.as_deref().unwrap_or("");
@@ -639,22 +776,84 @@ impl FragmentCell {
     }
 }
 
-/// `__files`: the files viewer's page (`files.mjs`), which lists the
-/// fragment's content files by asking `__files` for JSON.
-fn files_page(name: &str) -> String {
+/// A question to `__search`, at most: its words and filters.
+const SEARCH_BODY_MAX_BYTES: usize = 16 * 1024;
+
+/// `__files`, and the page of a fragment whose page it is: the files
+/// view (`files.mjs`), which lists the fragment's content files by asking
+/// `__files` for JSON, titled `title`.
+fn files_page(name: &str, title: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{n}: files</title>
+<title>{t}</title>
 <link rel="stylesheet" href="./__files.css">
 </head>
-<body data-fragment="{n}">
+<body data-fragment="{n}" data-title="{t}">
 <script type="module" src="./__files.js"></script>
 </body>
 </html>"#,
-        n = site::html_escape(name)
+        n = site::html_escape(name),
+        t = site::html_escape(title)
     )
+}
+
+impl FragmentCell {
+    /// The pins its content files are read from (`__file`, `__files`, a
+    /// version's read too), the first that has a path winning. Data an
+    /// app writes lands on main, so a path not yet on live reads from
+    /// there: live, then main. An agent's files (its job, its settings, its
+    /// memories) are main's first: its computer's sync writes them there
+    /// and never deploys (images/hermes/boot/src/sync.rs), so live keeps
+    /// the job of its last deploy; so are a session archive's, whose
+    /// imports write main and never deploy (templates/sessions/README.md).
+    /// A fragment whose page is the files view (`files.page`: a brain, a
+    /// notes vault) reads main alone, as its search and its sync do: a page
+    /// edited or deleted there and not deployed is as main says, never
+    /// live's older bytes, and nothing main deleted is listed (FIN-372).
+    fn content_pins(&self) -> CellResult<&'static [&'static str]> {
+        if self.files_live()?.is_some_and(|f| f.page) {
+            return Ok(&["main"]);
+        }
+        Ok(match self.kind()? {
+            fragment_proto::FragmentKind::Agent | fragment_proto::FragmentKind::Sessions => &["main", "live"],
+            _ => &["live", "main"],
+        })
+    }
+
+    /// Whether live's manifest keeps the site file at `path` (`site/…`) for
+    /// good (`immutable`, site.rs `declared_immutable`): the paths stored
+    /// for the commit live is at now, read with it in one statement, and
+    /// asked with no await since the file's tree row was read, so of the
+    /// very tree that row is of. Read only for a file that is no page, as a
+    /// page never is.
+    fn declared_immutable(&self, path: &str) -> CellResult<bool> {
+        let Some(rest) = path.strip_prefix("site/") else { return Ok(false) };
+        if site::mime_for_path(rest).starts_with("text/html") {
+            return Ok(false);
+        }
+        let [declared, live] = self.metas([MetaKey::ImmutableLive, MetaKey::PinLive])?;
+        Ok(site::declared_immutable(declared.as_deref(), live.as_deref().unwrap_or(""), rest))
+    }
+
+    /// What live's manifest says of the files view (`files`), if anything.
+    fn files_live(&self) -> CellResult<Option<fragment_core::manifest::FilesDecl>> {
+        self.meta(MetaKey::FilesLive)?
+            .map(|text| crate::json_text(&text).map_err(|e| CellError::host(format!("the stored files do not decode: {e}"))))
+            .transpose()
+    }
+
+    /// Its title now: as its manifest at main names it (a rename lands
+    /// there first), else as live's does, else its name.
+    fn title_now(&self, name: &str) -> CellResult<String> {
+        let [main, live] = self.metas([MetaKey::ManifestMain, MetaKey::MetaLive])?;
+        let at = |text: Option<String>, meta: fn(&Value) -> &Value| -> Option<String> {
+            let v: Value = crate::json_text(&text?).ok()?;
+            meta(&v)["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
+        };
+        Ok(at(main, |v| &v["meta"]).or_else(|| at(live, |v| v)).unwrap_or_else(|| name.to_string()))
+    }
 }

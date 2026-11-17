@@ -45,11 +45,17 @@ const META_TRIAL: &str = "fragment_trial";
 struct Checkout {
     url: String,
     session: String,
+    /// The page to open, `url` again (FIN-458: an action's answer names
+    /// the page to open, as a notice's Buy credit does; docs/api.md).
+    open: String,
 }
 
 #[derive(Serialize)]
 struct Portal {
     url: String,
+    /// The page to open, `url` again (FIN-458: a notice's Payment and
+    /// invoices opens it; docs/api.md).
+    open: String,
 }
 
 fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
@@ -159,7 +165,7 @@ async fn session_of(env: &Env, cfg: &Config, stripe_cfg: &StripeConfig, plan: &C
     let attempt = hex::encode(js::random_bytes::<8>());
     let session: CheckoutSession = stripe.post("/v1/checkout/sessions", &form, &format!("fragment-checkout-{}-{attempt}", plan.org)).await?;
     let url = session.url.ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "Stripe made a Checkout with no URL"))?;
-    Ok(Checkout { url, session: session.id })
+    Ok(Checkout { open: url.clone(), url, session: session.id })
 }
 
 /// `POST /api/billing/packs {member?}`: a Checkout for a $25 credit pack
@@ -196,7 +202,7 @@ async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>) -> CellRe
     let attempt = hex::encode(js::random_bytes::<8>());
     let session: CheckoutSession = stripe.post("/v1/checkout/sessions", &form, &format!("fragment-pack-{}-{attempt}", plan.org)).await?;
     let url = session.url.ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "Stripe made a Checkout with no URL"))?;
-    Ok(Checkout { url, session: session.id })
+    Ok(Checkout { open: url.clone(), url, session: session.id })
 }
 
 /// A paid pack's credit on its person's ledger, once by its Checkout; or
@@ -310,7 +316,7 @@ async fn portal(env: &Env, cfg: &Config, by: By) -> CellResult<Portal> {
         url: String,
     }
     let s: Session = stripe.post("/v1/billing_portal/sessions", &form, &format!("fragment-portal-{}", hex::encode(js::random_bytes::<8>()))).await?;
-    Ok(Portal { url: s.url })
+    Ok(Portal { open: s.url.clone(), url: s.url })
 }
 
 /// `/api/billing/…`: a person's.
@@ -357,7 +363,7 @@ pub(crate) async fn webhook(mut req: Request, env: &Env, cfg: &Config) -> CellRe
     let deployment = cfg.stripe_deployment();
     let handled = match event.kind.as_str() {
         "checkout.session.completed" => {
-            let session: CheckoutSession = serde_json::from_value(event.data.object).map_err(|e| CellError::invalid(format!("a session: {e}")))?;
+            let session: CheckoutSession = serde_json::from_slice(event.data.object.get().as_bytes()).map_err(|e| CellError::invalid(format!("a session: {e}")))?;
             match core_stripe::ours(&session.metadata, deployment) {
                 true => {
                     let stripe = crate::stripe::client(env, cfg).await?;
@@ -373,7 +379,7 @@ pub(crate) async fn webhook(mut req: Request, env: &Env, cfg: &Config) -> CellRe
                 #[serde(default)]
                 metadata: std::collections::BTreeMap<String, String>,
             }
-            let named: Named = serde_json::from_value(event.data.object).map_err(|e| CellError::invalid(format!("a subscription: {e}")))?;
+            let named: Named = serde_json::from_slice(event.data.object.get().as_bytes()).map_err(|e| CellError::invalid(format!("a subscription: {e}")))?;
             match (core_stripe::ours(&named.metadata, deployment), named.metadata.get(META_ORG)) {
                 (true, Some(org)) => {
                     let stripe = crate::stripe::client(env, cfg).await?;

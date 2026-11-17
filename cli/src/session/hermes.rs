@@ -50,7 +50,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use fragment_core::session::{self, Kind, Message, Session, ToolCall, ARGUMENTS_MAX_CHARS, REASONING_MAX_CHARS, SESSION_MAX_BYTES, TOOL_TEXT_MAX_CHARS};
@@ -454,13 +454,48 @@ pub fn read(path: &Path, spool: &mut Spool, own: Option<&Path>) -> Result<()> {
 /// show each twice. Its Hermes root is `home` (`$HERMES_HOME`), or the
 /// folder holding its `profiles/` when `home` is one of them.
 fn refuse_own(db: &Path, home: &Path) -> Result<()> {
-    let root = match home.parent() {
-        Some(p) if p.file_name().is_some_and(|n| n == "profiles") => p.parent().map(Path::to_path_buf).unwrap_or(home.to_path_buf()),
-        _ => home.to_path_buf(),
-    };
+    let root = hermes_root(home);
     if let (Ok(db), Ok(root)) = (db.canonicalize(), root.canonicalize()) {
         if db.starts_with(&root) {
             bail!(super::usage(format!("{} is one of this computer's own Hermes databases: its conversations are your chats here already. Import another agent's (its state.db, or its export)", db.display())));
+        }
+    }
+    Ok(())
+}
+
+/// A platform computer's Hermes root: `home` (`$HERMES_HOME`), or the
+/// folder holding its `profiles/` when `home` is one of them.
+fn hermes_root(home: &Path) -> PathBuf {
+    match home.parent() {
+        Some(p) if p.file_name().is_some_and(|n| n == "profiles") => p.parent().map(Path::to_path_buf).unwrap_or(home.to_path_buf()),
+        _ => home.to_path_buf(),
+    }
+}
+
+/// Every conversation id a database's `sessions` holds, or `None` when it
+/// holds none to read.
+fn session_ids(db: &Path) -> Option<HashSet<String>> {
+    let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()?;
+    let mut q = c.prepare("SELECT id FROM sessions").ok()?;
+    let ids = q.query_map([], |r| r.get::<_, String>(0)).ok()?.filter_map(|r| r.ok()).collect();
+    Some(ids)
+}
+
+/// A database copied out of a home (a zip of one) that holds a
+/// conversation one of this computer's own Hermes databases holds is that
+/// agent's own, wherever it was copied: refused, as `refuse_own` refuses
+/// one in place. Its place can't say (a zip in the agent's home is as
+/// likely another agent's, brought here), so its conversations do.
+pub fn refuse_shared(db: &Path, home: &Path) -> Result<()> {
+    let root = hermes_root(home);
+    let mut own = vec![root.join("state.db")];
+    if let Ok(profiles) = std::fs::read_dir(root.join("profiles")) {
+        own.extend(profiles.flatten().map(|e| e.path().join("state.db")));
+    }
+    let Some(theirs) = session_ids(db) else { return Ok(()) };
+    for mine in own.iter().filter(|p| p.is_file()).filter_map(|p| session_ids(p)) {
+        if !mine.is_disjoint(&theirs) {
+            bail!(super::usage("this home's Hermes database holds this computer's own conversations: they are your chats here already. Import another agent's".to_string()));
         }
     }
     Ok(())
@@ -813,7 +848,8 @@ pub(crate) mod tests {
     }
 
     fn read_sql(sql: &str) -> (Spool, Vec<Session>) {
-        let path = super::super::tempdir().join("state.db");
+        let dir = super::super::tempdir();
+        let path = dir.join("state.db");
         database(&path, sql);
         read_path(&path)
     }
@@ -862,7 +898,8 @@ pub(crate) mod tests {
     /// continuation of one conversation; a second conversation beside it.
     #[test]
     fn a_conversation_that_cannot_be_read_whole_is_refused_whole() {
-        let path = super::super::tempdir().join("state.db");
+        let dir = super::super::tempdir();
+        let path = dir.join("state.db");
         let db = Connection::open(&path).unwrap();
         db.execute_batch(&SCHEMA.replace("CREATE TABLE messages ", "CREATE TABLE stored ")).unwrap();
         db.execute_batch(
@@ -950,7 +987,7 @@ and peas?',210,1,'hidden');
             "the tail copied into s2 is shown once, where it was first said"
         );
         assert_eq!(c.ended_at.as_deref(), session::iso(400.0).as_deref(), "it ends when it was last said");
-        assert_eq!(by_id(&all, "stale").map(|s| s.kind), Some(Kind::Subagent), "a continuation Hermes passed over is kept, as a side task");
+        assert_eq!(by_id(&all, "stale").map(|s| s.kind.clone()), Some(Kind::Subagent), "a continuation Hermes passed over is kept, as a side task");
     }
 
     /// Goal: what a session is follows Hermes' markers. Valid: a branch and
@@ -977,7 +1014,7 @@ and peas?',210,1,'hidden');
             INSERT INTO sessions VALUES ('orphan_tool','tool',NULL,NULL,NULL,NULL,NULL,213,223,NULL,NULL,NULL,NULL);
             "#,
         );
-        let kind_of = |id: &str| by_id(&all, id).map(|s| (s.kind, s.parts.clone()));
+        let kind_of = |id: &str| by_id(&all, id).map(|s| (s.kind.clone(), s.parts.clone()));
         assert_eq!(kind_of("root"), Some((Kind::Chat, vec!["root".into(), "cont".into()])));
         assert_eq!(kind_of("branch").map(|k| k.0), Some(Kind::Chat));
         assert_eq!(kind_of("reset"), Some((Kind::Chat, vec!["reset".into(), "reset2".into()])), "a reset that compressed goes on in its continuation, though it carries the marker");
@@ -1037,7 +1074,8 @@ and peas?',210,1,'hidden');
         assert_eq!(spool.refused.len(), 1);
         assert_eq!(spool.refused[0].id, "big");
 
-        let path = super::super::tempdir().join("state.db");
+        let dir = super::super::tempdir();
+        let path = dir.join("state.db");
         database(&path, &format!("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i <= {SESSIONS_READ_MAX}) INSERT INTO sessions (id, source, started_at) SELECT 's' || i, 'cli', i FROM n;"));
         let e = read(&path, &mut Spool::new(BTreeSet::new()).unwrap(), None).unwrap_err();
         assert!(format!("{e:#}").contains("past the 200000 an import reads"), "{e:#}");
@@ -1075,7 +1113,8 @@ and peas?',210,1,'hidden');
     /// Goal: a read changes nothing: the database is opened read-only.
     #[test]
     fn a_read_writes_nothing() {
-        let path = super::super::tempdir().join("state.db");
+        let dir = super::super::tempdir();
+        let path = dir.join("state.db");
         database(&path, "INSERT INTO sessions VALUES ('a','cli',NULL,NULL,NULL,NULL,NULL,1,NULL,NULL,NULL,NULL,NULL);");
         let before = std::fs::read(&path).unwrap();
         read_path(&path);
@@ -1093,7 +1132,8 @@ and peas?',210,1,'hidden');
         let (mine, sibling) = (root.join("profiles/juniper"), root.join("profiles/maple"));
         std::fs::create_dir_all(&mine).unwrap();
         std::fs::create_dir_all(&sibling).unwrap();
-        let elsewhere = super::super::tempdir().join("state.db");
+        let away = super::super::tempdir();
+        let elsewhere = away.join("state.db");
         for db in [root.join("state.db"), sibling.join("state.db"), mine.join("state.db"), elsewhere.clone()] {
             database(&db, "");
         }
@@ -1216,12 +1256,13 @@ for table in ("sessions", "messages"):
     /// delegate, and one whose parent a prune let go.
     #[test]
     fn what_hermes_wrote_reads_as_hermes_shows_it() {
-        let path = super::super::tempdir().join("state.db");
+        let dir = super::super::tempdir();
+        let path = dir.join("state.db");
         // its other tables (a prompt's hash) left out: their keys are not this test's
         Connection::open(&path).unwrap().execute_batch(&format!("PRAGMA foreign_keys = OFF;\n{FIXTURE}")).unwrap();
         let (spool, all) = read_path(&path);
         assert!(spool.refused.is_empty(), "{:?}", spool.refused.iter().map(|r| &r.why).collect::<Vec<_>>());
-        let kinds: Vec<(&str, Kind, usize)> = all.iter().map(|s| (s.id.as_str(), s.kind, s.parts.len())).collect();
+        let kinds: Vec<(&str, Kind, usize)> = all.iter().map(|s| (s.id.as_str(), s.kind.clone(), s.parts.len())).collect();
         assert_eq!(
             kinds,
             [

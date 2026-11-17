@@ -113,6 +113,52 @@ it, and each book a ledger priced with is kept once as a command,
 informational. The fee is AI Gateway's on credits, so it applies to
 `tokens` and `neurons` only.
 
+- **A video's seconds** (crate::media's video model, a third party's in
+  Cloudflare's catalog, paid by Unified Billing): `tokens` of a row per
+  resolution (`alibaba/hh1-t2v@720P`, `@1080P`), its output one
+  millisecond of video, priced per million at the catalog's price a
+  second ($0.14, $0.28), with the fee. Charged when the model answers
+  with its video, at the seconds asked, as the catalog bills them. No
+  usage kind of its own: every release's ledger prices tokens, and one
+  without the row charges the video nothing (decision 62).
+
+- **An operator key's call** is one `key` unit at its catalog row's
+  price, else the book's (`DEFAULT_KEYS`), an estimate of a typical call
+  where its vendor bills something else. A part of a key's calls the
+  book prices apart (`KEY_PARTS`) is metered in its vendor's own unit
+  from the request: ElevenLabs' text to speech (`/v1/text-to-speech/…`)
+  is `elevenlabs:speech`, a unit a character of its JSON body's `text`,
+  at most 40,000 (a request's limit), at $0.08 per 1,000 (FIN-443); its
+  music and every other call on the key is one call, a minute of music.
+  On fal's key (FIN-445), only FLUX.2 Klein 9B's synchronous run (`POST
+  fal.run/fal-ai/flux-2/klein/9b`) is charged, as `fal:image`, a unit a
+  pixel its JSON body asks for (`num_images` of its `image_size`,
+  Klein's default when absent), at most 16 megapixels, at $0.006 per
+  1,048,576; every other call (a queued generation, its polls and
+  result, an edit, another model, an upload) is none of the key's,
+  charged nothing. On xAI's key, a call whose `tools` name `x_search` is
+  one call of the key (an X search, as before), and an image call naming
+  a grok-imagine-image model and made in its answer (not `deferred`) one
+  `xai:image` ($0.02); any other call (a chat, whose tokens are not
+  read, a deferred image, a video, a model list) none. On Google Places'
+  key, a place's photo is one `google-places:photo`, at its own list; a
+  search or a place's details (whose tier is its field mask's), an
+  autocomplete (free in a session that ends in a Details call) and any
+  other call none. On Firecrawl's key, a scrape and a map are their
+  credits as `firecrawl:credit` ($0.005 each); a search (its results not
+  counted), a crawl, a batch scrape, an extract and a status poll none.
+  On Browser Use's key, a new session's or task's start is one call of
+  the key (five minutes); a task on a session it has (`sessionId`), its
+  status, its stop and any other call none. On X's key, a search is one
+  call of the key, ten posts, as before; a lookup (its resources not
+  counted) and any other call none. Only a call so classified is
+  charged, and only on a 2xx: a part's call, or any call on a key priced
+  by its parts, that its vendor refused or redirected, or whose units
+  are not read (no JSON, no `text` or no size, a body past
+  `KEY_PART_BODY_MAX_BYTES`), is charged nothing, and a release whose
+  book has no part's price refuses its rows as unpriced, charging
+  nothing.
+
 - **OpenRouter's price** (decision 61; a decision for Paul): a slot on
   OpenRouter is priced at the ceiling it routes under
   (`body.provider.max_price`), every input token at its prompt price,
@@ -134,22 +180,57 @@ A model call that fell back is charged once, at the fallback's usage and
 prices. Usage a release's book cannot price is charged nothing and
 logged `ledger.unpriced` (#509).
 
+## A quote
+
+`POST /api/ledger/quote` (FIN-448; docs/api.md, Ledger) prices a planned
+job before it starts, so an agent can say what it will cost and what is
+left (Paul, 2026-11-08: "it will probably cost about $3 and you have $40
+left this month, okay to proceed?"), and reads the balance rather than
+guessing after a refusal. Each item is a row's usage times its calls,
+charged by `ledger::row_charge`, the function a ledger's own rows are
+charged by, with the book the answering release charges with: so it
+prices every key and part the book has (`KEY_PARTS`), the always-on
+seat's awake time at nothing, and a name the book does not price is
+unknown, never guessed. Its payer is the one a charge resolves to (an
+agent's owner). It is as accurate as the units it is given: a part's
+(speech's characters) must be said, a model's tokens are an estimate,
+and a call that falls back is quoted on its own model. It holds and
+keeps nothing: the job is still charged after, never held (decision 62).
+
 ## The gate
 
 Before a spend starts, its payer's ledger is asked `may_spend` (an
 agent's turn, an AI step, a wake, a write, a create), and when someone
 else spends in a fragment, its owner's ledger is asked `fragment_open`
-(its cap). Both go through one cached question, `ledger::may`: each
-isolate keeps each answer, a refusal too, for `STANDING_CACHE_MS`, and
-asks a ledger with no fresh answer once, for at most `GATE_WAIT_MS`.
-Only the ledger's own refusal stops a spend. A ledger that does not
-answer, or answers otherwise, lets the spend start
-(`ledger.gate-unknown`) and is asked again next time. So a payer out of
-credit may overspend by what starts within the minute, and one who
+(its cap), at the same time; if both refuse, the payer's refusal is
+the one said. Both go through one cached question: each isolate keeps
+each answer, a refusal too, for `STANDING_CACHE_MS`. Only the ledger's
+own refusal stops a spend. A ledger that does not answer, or answers
+otherwise, lets the spend start (`ledger.gate-unknown`) and is asked
+again next time.
+
+**A model call waits on no ledger** (Paul, 2026-11-01: "prioritize user
+experience over nickel-and-diming"; `ledger::may_beside`). A fresh
+answer answers it at once, a refusal refusing it before its vendor call.
+With none, it starts at once and the ledger is asked beside it, the
+answer kept for the next call. Only a question last heard refused,
+longer ago than the window, is asked first, for at most `GATE_WAIT_MS`
+(the payer may have topped up). An ask beside a call holds nothing of
+the call's: a call started runs to its end, a stream to its `[DONE]`,
+and is charged as any call is. So a payer out of credit, or past a
+fragment's cap, may make one call more in each isolate that has not
+heard them (paid by the platform, charged to their ledger), and the
+next is refused. A refusal said from the cache says the refusal's
+standard words.
+
+**Every other spend asks first** (`ledger::may`): a ledger with no
+fresh answer is asked once, for at most `GATE_WAIT_MS`. So a payer out
+of credit may overspend by what starts within the minute, and one who
 topped up waits up to a minute.
 
-- A model call, and an operator key's call through the swap, asks
-  `agent_turn` of the agent's owner.
+- A model call (an agent's chat, vision, decision, transcription and
+  embeddings, and a search's embeddings) asks `agent_turn` of its payer,
+  beside it; an operator key's call through the swap asks it first.
 - A job's AI step asks `ai_step` of the fragment's owner, capped when
   the run's principal is neither the owner nor an agent of theirs.
 - A fragment's write asks `write` of its owner (402 past the overdraft).

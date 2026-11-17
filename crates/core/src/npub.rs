@@ -46,6 +46,19 @@ pub fn parse(s: &str) -> Option<String> {
     (bytes.len() == 32).then(|| hex::encode(bytes))
 }
 
+/// A Nostr secret key as an `nsec` (NIP-19) or 64 hex → 64 lowercase hex.
+pub fn secret_hex(s: &str) -> Option<String> {
+    if is_hex_key(s) {
+        return Some(s.to_string());
+    }
+    let (hrp, data, variant) = bech32::decode(s).ok()?;
+    if hrp != "nsec" || variant != Variant::Bech32 {
+        return None;
+    }
+    let bytes = Vec::<u8>::from_base32(&data).ok()?;
+    (bytes.len() == 32).then(|| hex::encode(bytes))
+}
+
 /// A list as configuration names people (npubs or 64 hex, separated by
 /// commas or whitespace) → each as 64 lowercase hex: a key, or the key an
 /// identity was made with. The first entry that is neither is the error.

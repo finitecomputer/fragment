@@ -20,18 +20,26 @@ The page is `site/`: `index.html`,
 `chat.js` (the chat, its voice memos, `/` commands, Reply, Steer
 and "Notify me"), `control.js` (whose a turn is to stop, command and
 answer: its asker's, or for a routine's or an answer's, its agent's
-owner's), `markdown.js`
+owner's), `pages.js` (whether a channel page read is the last),
+`limits.js` (what one message carries, by the platform's latest word,
+which the shell's launcher links to), `speakers.js` (whose words a
+message is, a relay's as its members say),
+`markdown.js`
 (agents' text as DOM, never as markup: the platform's renderer,
 `./__markdown.js`, with the chat's choices), `media.js` (a message's
 attachments: images, audio and video shown inline, every one opened or
 downloaded), `response-actions.js` (copy, share and their feedback),
 `icons.js` (Lucide's shapes, each icon built through the DOM;
-`LUCIDE-LICENSE.txt`), `tooltips.js`,
-`chat.css`, `agent.png` (the agents' avatar) and `agent-color.js` (an
+`LUCIDE-LICENSE.txt`), `tooltips.js`, `frame-messages.js` (its messages
+with the shell that frames it, and the shell's: one definition, which
+the shell links to), `chat.css`, `agent.png` (the agents' avatar) and `agent-color.js` (an
 agent's colour, by its identity), each the agent template's own,
 linked. Every URL in it is
 relative, so it works on a fragment's own host, under `/f/<name>/`, and
-served from the platform's release.
+served from the platform's release. The release serves the page built
+(crates/templates/bundle.rs): its scripts as one bundle and its
+stylesheet, each named by its hash and kept for good, with the bundle's
+source map beside it.
 
 To talk with an agent here, add it as an editor (the platform tells its
 computer, which follows the chat at once), or @mention it in the page,

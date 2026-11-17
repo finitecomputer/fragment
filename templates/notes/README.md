@@ -1,23 +1,10 @@
 # notes
 
-A folder of markdown as a live site, on fragment's file model: the notes
-are files in git, and the viewer follows them.
+A folder of markdown, live. Each file here is a note: markdown with
+`[[wikilinks]]`, code, and pictures. Pick one from the list.
 
-- Everything outside `site/`, `app.mjs`, and `fragment.json` is a note:
-  markdown with `[[wikilinks]]`, code with highlighting, images inline.
-  Files of 1 MiB or more are stored as blobs (pointers in git); the site
-  serves their bytes.
-- Edit by syncing the folder: `fragment sync <name> --dir . --watch`
-  keeps it live both ways. Notes do not need a deploy: the viewer reads
-  them at `main`. Only a change to `site/` or `app.mjs` needs `fragment
-  deploy`.
-- `fragment.json` declares a file trigger, `{"files": "**", "run":
-  "changed"}`: each move of `main` runs `changed`, and every open page
-  re-runs its `last_change` query and refreshes the tree, and the open
-  note when it changed or a note or picture it names came or went.
-- `app.mjs` answers `api/tree` and `api/file` from `this.files`, the
-  app's read access to its files at `main`.
+Edit them by syncing the folder:
 
-The viewer (`site/assets/viewer.js`, plain source) renders markdown with
-the platform's renderer (`./__markdown.js`): DOM only, so HTML in a note
-shows as the text it is, and links go only to notes here or the web.
+    fragment sync <name> --dir . --watch
+
+What you save shows on every open page. Notes need no deploy.

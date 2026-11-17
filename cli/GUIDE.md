@@ -65,10 +65,11 @@ does what that needs when the computer sets:
   own; the computer's egress signs it as that agent, which then holds
   exactly its grants.
 - `FRAGMENT_FOR=<npub>`, optional: the person the agent acts for (its
-  owner), named as `for` on a fragment's routes and the fragment list,
-  the routes that honor it. The agent then holds that person's role,
-  never above it (and never above an editor): `fragment list` lists their
-  fragments, and what `fragment create` makes is theirs, the agent its
+  owner), named as `for` on a fragment's routes, the fragment list and
+  `fragment search`, the routes that honor it. The agent then holds that
+  person's role, never above it (and never above an editor): `fragment
+  list` lists their fragments, `fragment search` searches only what they
+  may read, and what `fragment create` makes is theirs, the agent its
   editor.
 - The host is `--host`, else `FRAGMENT_HOST`, else the computer's
   `FRAGMENT_API` (`http://api.fragment.internal`), never the config's or
@@ -98,10 +99,11 @@ platform refuses (403) sharing acting for anyone else, on a fragment
 your owner only edits or views, or while your owner holds you below
 them, and never lets an agent delete a fragment or set its cap. Links meant for people (a share link, a webhook URL) name the
 platform's public origin, which a fragment's status reports
-(`urls.platform`), not the computer's internal host. `fragment write`
-(one text file to main, through the platform) and `fragment deploy`
-without `--dir` (the platform moves live) need nothing but the API, so
-they are an agent's way to build and publish. `fragment sync` and
+(`urls.platform`), not the computer's internal host. `fragment read`
+(one file at main) and `fragment write` (files to main, several in one
+commit with `--dir`), through the platform, and `fragment deploy` without
+`--dir` (the platform moves live), need nothing but the API, so they are
+an agent's way to read, build and publish. `fragment sync` and
 `deploy --dir` still talk to code.storage directly, with the
 short-lived, repo-scoped token the platform mints for the agent.
 
@@ -206,7 +208,7 @@ its jobs, an agent's owner for its turns (Your ledger, below).
 fragment login --host {{platform}}        # once per machine: type its code at the host's /cli, signed in
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
-fragment init my-inbox --template inbox   # or: todo | notes | calories | doc | blank
+fragment init my-inbox --template inbox   # or another template, below
 ```
 
 `fragment new <dir> --template T` scaffolds a folder without creating
@@ -219,13 +221,20 @@ lists their templates:
 - `calories`: a food log you tell what you ate; a text step logs it.
 - `doc`: a page of writing its readers leave notes on, paragraph by
   paragraph, in the margin (Notes on a page, below).
+- `board`: an agent's designs side by side on one live canvas: pages at
+  desktop, tablet and phone widths, and screenshots; a frame you change
+  redraws on every open board. Its README.md, "Making frames (for
+  agents)", says how to make one.
+- `slides`: a deck made with open-slide (each page a React component),
+  presented live: everyone watching follows. Its README.md says how to
+  build it (Node 20.19 or later, and npm) before you deploy.
 - `blank`: one page, to build on.
 
 `fragment create <name> --template T` makes one on the platform with no
 folder, from the platform's own templates: one of `blank`, `todo`,
-`inbox`, `calories`, `doc` is copied in as its first commit (`notes` is
-`new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
-`skills`, `sessions`, runs the platform's current release and is named in its
+`inbox`, `calories`, `doc` is copied in as its first commit (`board`,
+`notes`, `slides` are `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
+`skills`, `sessions`, `telegram`, runs the platform's current release and is named in its
 `fragment.json`. Either way `--title` gives it its own title, its
 `fragment.json`'s `meta.title`, over the template's. Any other is
 refused, naming them.
@@ -253,9 +262,15 @@ Making one for someone, go in this order:
 fragment.json      # operations, channels, triggers, meta
 app.mjs            # class App: one method per operation (at most 1 MiB)
 applib/            # modules app.mjs imports (at most 64 modules, 4 MiB with app.mjs)
-site/              # static files, served from live
+site/              # static files, served from live; revalidated on each load
 everything else    # files: notes, data, media; synced and versioned
 ```
+
+A bundler's output (Vite's `dist/`, published as `site/`) names its files
+by their bytes, in `site/assets/`: say so in `fragment.json`,
+`"immutable": ["assets/**"]`, and browsers keep them instead of asking
+again on every load. Name only such a folder: a file kept by mistake
+keeps its old bytes in browsers for a year.
 
 Code runs from `live`: a deploy changes what runs. Files the app reads
 come from `main`: a synced note is visible without a deploy.
@@ -295,7 +310,7 @@ from their label instead of a template placeholder such as "Blank".
 fragment rename meal-planner "Meals this week"     # changes meta.title, deploys; address stays put
 fragment icon generate meal-planner --hint "a cooking pot"   # generates and sets the best candidate
 fragment icon set meal-planner pot.png             # or upload an image
-fragment icon remove meal-planner                  # restore the default glyph
+fragment icon remove meal-planner                  # restore the default (a brain's icon, or the glyph)
 fragment preview meal-planner                     # request a new screenshot, returns immediately
 fragment address meal-planner                     # read its optional public address
 fragment address meal-planner family-meals        # claim one, first come first served
@@ -306,6 +321,8 @@ run it as a background terminal task after revealing the working app;
 never hold up creation, deployment or the first link for it. It uses the
 app's title, description and optional hint, then sets the best candidate.
 If none passes the checks, it reports failure and keeps the current icon.
+Its output's `subject` is what was drawn: read it before telling the person
+what the icon shows.
 Generation and upload require editor access and bill the app's owner.
 
 Preview refresh queues the browser capture; check `fragment status` for
@@ -326,11 +343,12 @@ working copy: sync again to bring the new name into it before editing it.
 
 The repo is the truth; your folder is a working copy. Sync talks to
 code.storage directly with a short-lived, repo-scoped token the host
-mints (editors and up): one per command; a watcher keeps one for at most
-a minute, and mints again after that, before it expires, or when
-code.storage refuses it (the host checks the role when it mints, so an
-editor removed from the fragment stops syncing within a minute). No
-local `.git` is made.
+mints: one that writes for editors and up, one that only reads for any
+member (a pull asks for that one, whoever you are). It mints one per
+command; a watcher keeps one for at most a minute, and mints again after
+that, before it expires, or when code.storage refuses it (the host
+checks the role when it mints, so an editor removed from the fragment
+stops syncing within a minute). No local `.git` is made.
 
 ```
 fragment sync my-thing --dir .              # one mirror pass (default)
@@ -351,27 +369,50 @@ fragment verify my-thing --dir .            # full-content audit
   always holds real files.
 - **Conflicts**: when both sides changed a file to different bytes,
   yours stays and the remote copy lands beside it as
-  `<path>.conflict-<time>-<writer>` (exit 3). Both stay in git history.
-  Both sides changed to the same bytes is no conflict.
+  `<path>.conflict-<time>-<writer>` (exit 3); an editor's next pass sends
+  yours. Both stay in git history. A copy never replaces a file: another
+  within the same second is `<time>-2`. Both sides changed to the same
+  bytes is no conflict.
 - **Mass-deletion guard**: a pass that would delete more than
   max(3, 30%) of known files, or all of them, is refused (exit 4) until
   `--apply-mass-delete`.
+- **Folders refused**: sync and `deploy --dir` refuse `/`, `/tmp`, your
+  home folder or one above it, and a folder with a browser profile
+  (`Default/Cookies`, `Local State`, `org.chromium.Chromium.*`) in it or
+  one level down. Point `--dir` at the folder you mean, by its full path.
 - **Deletions converge**; a locally modified copy wins over a remote
   delete.
+- **Viewers** sync read-only, and so does an agent acting for one (it
+  holds the lower of their role and its own). A mirror pulls and sends
+  nothing: what it would have sent stays in your folder, listed as not
+  sent (exit 5), and a file you deleted is pulled back. A file of yours
+  is never pulled over: each time the fragment's copy changes, or where
+  it has one your folder never synced, theirs lands beside yours as a
+  conflict copy; a remote deletion leaves yours. `--mode push` and
+  `deploy --dir` are an editor's. A token reads the repo's whole
+  history, so every member, a viewer too, can read anything ever
+  committed, including what was removed before they were added. A share
+  link and a public fragment's visitors get none: they read what is
+  served.
 - **What syncs**: everything but dot files and folders (`.fragment/`,
   `.git/`, `.obsidian/`, `.DS_Store`), the top-level `node_modules/` (one
   deeper down, as under `site/`, is served and syncs), editor droppings
   (`~` backups, `~$` locks, `.swp`), and sync's own `.conflict-` copies.
   One rule for both directions: such a file in the repo is never pulled,
   and never deleted for being absent from your folder. In a git repo,
-  `.gitignore`d files never upload.
+  `.gitignore`d files never upload, and one is never pulled over: where
+  the fragment has a file of that path, yours stays and theirs lands
+  beside it as a conflict copy (exit 3). A synced file you then ignore
+  (or replace with what is not a file) is no longer synced, listed once:
+  it stays as it is, and the fragment's copy is not deleted. Only a file
+  that is gone is a deletion.
 - **Watching** (`--watch`): a save is one pass, and so is a burst of
   saves; the change feed's echo of your own commit, and the folder's
   echo of a pull, cost nothing. After 60 s of quiet a sweep compares the
   folder with its journal and main with the last head it saw (one
   request), and passes only when either moved or the change feed is
   down.
-- **Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped.
+- **Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped, 5 changes not sent (you may only read it).
 
 ## The app
 
@@ -486,9 +527,16 @@ export class App extends DurableObject {
   path, steps})`. Text runs on a tier, `model: "cheap"` (the default) or
   `"medium"`; an image is a JPEG (FLUX.1 [schnell], 1 to 8 `steps`, 4 by
   default) written to `path` on `main`, which ends in `.jpg` or `.jpeg`.
-  You pay for them, from your ledger (below). `job.ai.video` is off until
-  videos run on Cloudflare. GLM can spend a small `max_tokens` thinking:
-  `reasoning_effort` is `low` unless you ask for `high`. A text step
+  `job.ai.video({prompt, path, duration, resolution, aspect_ratio})` makes
+  an MP4 (HappyHorse 1.0: 3 to 15 seconds, 5 by default; `720p` or
+  `1080p`) written to `path`, which ends in `.mp4`. You pay for them,
+  from your ledger (below): an image about a tenth of a cent, a video
+  $0.14 a second at 720p and $0.28 at 1080p, plus the platform's fee and
+  margin. Before you build a fragment that makes images or videos, tell
+  the person what each costs and that its owner pays for every one
+  anyone makes in it. GLM
+  can spend a small `max_tokens` thinking: `reasoning_effort` is `low`
+  unless you ask for `high`. A text step
   answers `{text, message, finish_reason, model, tier, usage, timing}`
   (`timing`: `{first_ms, ms, model, calls, tries}`). It takes OpenAI's
   `tools` (at most 64, each `{type: "function", function: {name,
@@ -618,6 +666,17 @@ it gets none of it.
 
 Visitors without a key call as an anonymous principal (a cookie), so
 `public` operations work on a public fragment with no login.
+
+**Who did it.** Store `call.principal` with what someone did, and show
+them by email when the page draws: `fetch("./__people?id=" + id)` →
+`{profiles: {[id]: {kind, email?, name?, picture}}}` (at most 64 ids a
+time; `job.people(ids)` in a job). People show as their email to the
+fragment's members (they were invited by it), an agent by its name, and
+an anonymous visitor or link holder as no one. `await fragment.me()`
+says who this page is: `{id, principal, role}`; `fragment.me({ email:
+true })` adds `email` for a signed-in member (one more ask). Keep no table of names in your app: nobody can pick
+someone else's, and none goes stale. A mutation's `call` carries no
+name or email (it is the app's own transaction); ask when you draw.
 `await fragment.push.register(who)` (from a click) subscribes the
 browser to web push; `call.push(who, payload)` or `job.push(...)` reaches
 every browser registered with that `who` (`*` for all).
@@ -722,6 +781,34 @@ fragment channel my-thing                                      # list channels
 fragment channel my-thing activity --follow                     # the backlog a page at a time, then new records, as JSON lines
 ```
 
+## Searching fragments
+
+Fragments with a search index (docs/api.md, "A fragment's search": an
+app's sources, such as your Session Archive's conversations) are searched
+by their words and their meaning, several as one, by anyone who may read
+each:
+
+```
+fragment search "what did we decide about the ferry" --in my-sessions         # one fragment
+fragment search "launch readiness" --in executive,research,delivery         # a parent brain and its sources, as one
+fragment search "launch" --all                                               # your brains and Session Archive (32 at most, by name)
+fragment search ferry --in my-sessions --mode lexical --limit 5              # words alone; hybrid (default), semantic
+fragment search ferry --in my-sessions --field kind=chat --after 2026-10-01
+fragment search ferry --in my-sessions --json    # {results: [{fragment, rank, source, section, …, snippet}], fragments: [{name, state}], semantic}
+```
+
+- Each result is a section of one of their sources (a conversation's
+  turn, a page's part), best first across all the fragments, named by
+  its fragment, with its source, section, title and heading, and a
+  snippet of its best part.
+- Each fragment is asked as you, exactly as if you asked it alone: one
+  you may not read is `denied`, one with no index `no_index`, and is
+  said after the results (`fragments` in `--json`). Nothing is copied
+  between them.
+- Your question is embedded once on the platform's model, paid by you;
+  with `--mode lexical`, or on a deployment that embeds nothing, it is
+  searched by its words alone (`semantic: off`).
+
 ## Your operations as tools (MCP)
 
 `fragment mcp <name>` is an MCP server over stdio: another agent (Claude
@@ -758,6 +845,17 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
   call that got no answer says `unavailable`, or `outcome_unknown` when
   it may have run: `fragment call <name> <op> --id <id>` finds out, and
   never runs it twice.
+- A reader has one tool more, `fragment-search` (a name no operation can
+  have): fragments' indexes searched as one, this fragment's unless its
+  `in` names others. Its arguments are `fragment search`'s question,
+  `{q, in?, limit?, mode?, fields?, after?, before?}`, and its result is
+  `fragment search --json`'s.
+- Everyone has `fragment-quote`: what a planned job would cost the
+  caller's payer, and what they have left (Your ledger). Its arguments
+  are `POST /api/ledger/quote`'s, `{items}`, each `{key, units?,
+  calls?}`, `{model, input?, cachedInput?, cacheWrite?, output?,
+  calls?}` or `{usage, calls?}`; its result is `fragment quote --json`'s,
+  after the line a person reads.
 - One server serves one fragment: add one for each. Claude desktop
   takes one in its config's `mcpServers`: `{"my-thing": {"command":
   "/Users/<you>/.local/bin/fragment", "args": ["mcp", "my-thing"]}}` (a
@@ -768,7 +866,7 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
 
 ```
 fragment visibility my-thing [public|link|members]
-fragment members list my-thing
+fragment members list my-thing                            # each person by email too, to the owner (and their agent)
 fragment members add my-thing bea@example.com --role editor   # a person, by email
 fragment members add my-thing <npub> --role viewer            # one of your own agents (or any key of one)
 fragment members role my-thing bea@example.com editor         # someone in already: their role
@@ -801,9 +899,9 @@ invites, visibility, and tokens.
 You pay for what is yours: your fragments' hosting (requests, storage, a
 code version's day) and their AI (`job.ai`), whoever started the run, and
 your agents' model calls, whoever asked them. A seat includes credit
-each month; operators grant more. A paid step reserves its worst case
-first, and one your ledger cannot cover is held, saying why: replay it
-after a top-up or next month.
+each month; operators grant more. A paid step is charged once it
+answers; one started when your ledger is out of credit is held, saying
+why: replay it after a top-up or next month.
 
 - At zero, agents and AI stop; your fragments keep serving and taking
   writes.
@@ -815,10 +913,33 @@ after a top-up or next month.
   edit the fragments shared with them, whose owners pay.
 - Each fragment has a monthly cap, $5 unless you set one: past it, AI
   steps and agent turns there stop for everyone but you.
+- Each of the platform's shared keys (ElevenLabs, xAI, …) pauses once your
+  agents' calls on it spend $5 in an hour (429 `rate_limited`, reason
+  `key_paused`); nothing else does. Its calls resume as the hour passes,
+  or at once when you allow more: the notice in your agent's chat has a
+  button, or `fragment ledger key-cap`. Only you can, never your agents.
+
+Before a job that spends (speech, images, searches, many model calls),
+quote it: `fragment quote` prices a plan with the same book your ledger
+charges with, and says what you have left this month (an agent's quote
+is its owner's). It spends nothing. Its items follow one another, each a
+name and its amounts: an operator key (`perplexity`, `xai`), a part of
+a key's calls priced apart (`elevenlabs:speech` by its text's
+characters, `fal:image` by its pixels, `xai:image` one a call) or a
+model (`cheap`, `medium`, an id); `<n>` or `<n>x` its calls, `<n>in`,
+`<n>cached`, `<n>write` and `<n>out` a model's tokens a call, `<n>` with
+a unit (`60000chars`, `1048576px`) a key's units a call. A name the
+book does not price here is said so, never guessed. Refused for credit
+or a budget? `fragment quote` alone reads what is left.
 
 ```
+fragment quote elevenlabs:speech 60000chars   # "about $7.20; you have $95.40 left this month"
+fragment quote fal:image 40x 1048576px xai 10x   # several items, each one's price too
+fragment quote cheap 2000in 500out 40x        # 40 turns on the cheap tier
+fragment quote                                # what you have left, alone
 fragment ledger                    # your credit, your plan, what is stopped, this month's spend by fragment
 fragment cap my-thing 10           # my-thing's cap: $10 a month (or `default`)
+fragment ledger key-cap elevenlabs 20   # a shared key's cap on your computer: $20 an hour (or `default`)
 fragment runs my-thing             # each run shows what it cost
 fragment ledger grant ann 20 --why "a top-up"   # operators only
 fragment operator people --q ann@                 # operators: people, orgs, comps,
@@ -867,10 +988,13 @@ from Hermes' own `state.db` (or the Hermes home holding it), read-only:
 fragment session import ~/finite-import/export              # the old Finite's export, unpacked
 fragment session import ~/.hermes                           # a Hermes home, or its state.db
 fragment session import ~/.hermes --kind chat               # only chats (also: cron, subagent)
+fragment session import stage.zip --layout ./layouts/x.json  # an agent's home, zipped: its Hermes home where its layout says
 ```
 
 A `state.db` copied from elsewhere needs its `state.db-wal` beside it, or
-its newest messages are not in it. On an agent's computer here, its own
+its newest messages are not in it. A zip of an agent's home (`fragment
+home`) is read in place: its database, and its WAL, are copied out to a
+temporary folder for the read and deleted after. On an agent's computer here, its own
 Hermes databases are refused: their conversations are your chats here
 already.
 
@@ -880,7 +1004,10 @@ from Hermes' database) replaces the older; an older copy never does. It says wha
 already had, and what it left out and why: at most 18,000 conversations
 and 1 GiB an archive (an import past either adds nothing), 8 MiB a
 conversation. A tool's output and an agent's reasoning are cut to 2,000
-characters; what was said, never. An agent runs it for its owner (into
+characters; what was said, never. Each import also writes the archive's
+search, a section a turn of each conversation, and puts it right when it
+has fallen behind (on a host without search yet, it says so and skips
+it). An agent runs it for its owner (into
 their archive, never one of its own), and so reads it: `fragment sync
 <archive> --dir ~/archive --mode pull`, then your own tools over
 `~/archive/sessions/`. A conversation's file (format
@@ -890,6 +1017,40 @@ tool, tool_calls, reasoning, summary, attachments}`; `kind` is `chat`,
 `cron` (a scheduled job's run) or `subagent` (a side task); times are UTC.
 A file a message held is under `~/archive/media/`, named in its
 `attachments`.
+
+## Bringing an agent's home
+
+`fragment home` reads an agent's home from wherever it ran: its folder,
+or a zip of it, read in place and never changed. A layout says where
+that home keeps things: `hermes` (a bare Hermes home, the default), or a
+layout file a platform's import skill carries.
+
+```
+fragment home survey ~/old-home --json                         # what an import would bring, and what stays
+fragment home survey stage.zip --layout ./layouts/x.json       # a zip, read through a platform's layout
+fragment home extract stage.zip agent/SOUL.md skills/ --to ~/import   # files and folders, copied out as they are
+fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9   # its own files, into a fragment of files
+fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9 --plan   # only what it would bring
+```
+
+The survey lists the chats' database (`fragment session import` brings
+them), the SOUL, memories and a few public settings, each skill with
+where it came from (its own come over; a platform's are replaced by
+this one's, and an edit to one is kept), each scheduled job as a
+routine in UTC (weekdays by name), and its files: what an import brings
+(photos, video, audio and documents first, newest first, then the rest,
+up to 10 GiB) and what stays behind, and why. A file that may hold a
+password or key (`.env`, `auth.json`, a private key) is left out unread,
+and named: nothing an import makes holds it. A zip naming a file by a
+path that is not plain (`..`, `a/./b`) is refused whole. `extract`
+copies into a folder apart from the home, never through a link.
+
+`fragment home files` brings the home's own files (its layout's work
+folder) into a fragment you edit, under `files/`, each file of 1 MiB or
+more as a blob, and writes `left-behind.md` beside them: every file or
+folder left out, its size, and why. A fragment with no `fragment.json`
+gets one whose page is the files view (`fragment deploy` shows it).
+Running it again sends only what is missing.
 
 ## Agents
 
@@ -987,6 +1148,13 @@ variable of its name, else stdin, never the command line. A secret set
 before secrets named hosts fills nowhere until it is set again with
 `--to`. Never write secret values into files.
 
+A fragment holding a secret (or a door) has no share link and is not
+public for now: make it members only first (`fragment visibility
+my-thing members`), and while it holds one it gets no link and is not
+made public (403 `private_while_reaching`; a secret on one its link
+opens is 403 `unshare_first`). People you add by name, at any role, are
+fine, and they can use its keys.
+
 ## Rules of the road
 
 1. **The event log is truth.** Read `fragment events` before and after
@@ -1003,9 +1171,13 @@ before secrets named hosts fills nowhere until it is set again with
 fragment login [--force] [--no-wait] [--no-browser]
 fragment whoami                          fragment call <name> <op> [--input JSON|@file|-] [--id ID]
 fragment keys [list|rotate|revoke <npub>]
-fragment ledger [grant <who> <usd> --why W [--id ID]]
+fragment ledger [grant <who> <usd> --why W [--id ID] | key-cap <key> <usd>|default]
+fragment quote [<name> <amount>…]        # what a job would cost, and what is left
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
-fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
+fragment session import <path> [--kind K] [--layout L]   # an agent's past conversations, into your Session Archive
+fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
+fragment home extract <source> <path>... --to <dir> [--layout L]
+fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>
@@ -1031,14 +1203,19 @@ fragment invites                         # the invites waiting for your yes
 fragment invites accept|decline <name>   # an agent: its owner's, acting for them
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret list|rm ...
-fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, else stdin
+fragment secret set <name> <KEY> --to HOST [--to HOST] [--from-vault SECRET]   # the value from $KEY, else stdin; or moved from your Vault
+fragment vault set <secret> --agent A [--to HOST] [--header H [--format F] | --query Q | --basic user|password | --sign nip98] [--keep-value]   # a person's own (an agent 403): the value from a hidden prompt, else stdin; --keep-value keeps the one held
+fragment vault list                      fragment vault rm <secret>
 fragment deploy <name> [--dir D] [--note N]
+fragment read <name> <path>              # one file at main, as a viewer may
 fragment write <name> <path> --text T | --from FILE|- [--message M]
+fragment write <name> <path>... --dir D [--message M]   # several files from D, one commit: all land or none
 fragment blob put <name> <file>          # prints its sha256: its pages read it at __blob/<sha256>
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S] | --return-to CHAT] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
+fragment search "<query>" --in <name>[,<name>…] | --all  [--limit N] [--mode hybrid|lexical|semantic] [--field K=V]… [--after T] [--before T]
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --routine TEXT [--chat C]   # an agent's routine, on its tasks; no --chat: its owner's home
@@ -1046,6 +1223,7 @@ fragment schedule list [<name>]          fragment schedule pause|resume|rm [<nam
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]
+fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many open by link or public (counts only)
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
 fragment operator orgs [--after A] [--key-file F]
@@ -1053,10 +1231,17 @@ fragment operator comp <email> [--kind seat|always-on] [--org O] [--key-file F]
 fragment operator uncomp <seat> [--key-file F]
 fragment operator trials [--name N [--days D] [--capacity C] | --send <id> --to <email>] [--key-file F]
 fragment operator health [--key-file F]
+fragment operator wake <class> <ids-file> [--key-file F]   # start objects by Cloudflare's ids, schemas made current
 fragment operator log [--before N] [--key-file F]
 fragment operator credit <org> <usd> --why W --id REF [--key-file F]
 fragment operator budget <org> <usd> [--id I] [--key-file F]
 fragment operator payer <org> <email|npub> [--id I] [--key-file F]
+fragment operator moves [--withdrawn] [--key-file F]   # the finite.computer move; --withdrawn: the will-not-move list, each with its why
+fragment operator withdraw <old> --why W [--key-file F]   # keep an old agent out of the move (ahead of the roster too)
+fragment operator include <old> [--key-file F]   # take a withdrawal back
+fragment operator retry <old> [--key-file F]   # a held move tried again where it was held: a new attempt at its stage, or its retirement or (phase 2) import again
+fragment operator restart-old <old> [--key-file F]   # the old agent started again, the move offered again (phase 1, before its retirement)
+fragment operator retire <old> [--key-file F]   # a held move's old agent retired as migrated: the move done
 ```
 
 `fragment operator …` is the deployment's operators' alone: each signs

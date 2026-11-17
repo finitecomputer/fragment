@@ -100,27 +100,27 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             json_answer(&ask_registry(env, &calls::TestHook::E2ePeople(hook)).await?)
         }
         (Method::Post, ["ledger"]) => {
-            /// `{identity, …}`: a lever on that person's ledger (ledger.rs `TestHook`).
-            #[derive(Deserialize)]
-            struct TestLedger {
-                identity: String,
-                #[serde(flatten)]
-                hook: ledger::TestHook,
-            }
-            let t: TestLedger = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            // `{identity, op, …}`: a lever on that person's ledger (ledger.rs `TestHook`)
+            let mut fields: ledger::TestHookFields = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let identity = fields.identity.take().ok_or_else(|| CellError::invalid("body: missing field `identity`"))?;
+            let hook = ledger::TestHook::try_from(fields).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             // a person's, or an org's (`org:<id>`) where levers reach everyone
-            let org = fragment_core::ledger::org::Payer::parse(&t.identity).is_some_and(|p| matches!(p, fragment_core::ledger::org::Payer::Org(_)));
-            if !npub::is_identity(&t.identity) && !(org && !cfg.levers_scoped) {
+            let org = fragment_core::ledger::org::Payer::parse(&identity).is_some_and(|p| matches!(p, fragment_core::ledger::org::Payer::Org(_)));
+            if !npub::is_identity(&identity) && !(org && !cfg.levers_scoped) {
                 return Err(CellError::invalid("name an identity (or, unscoped, an org's ledger: org:<id>)"));
             }
-            if cfg.levers_scoped && !is_e2e(env, &t.identity).await? {
+            if cfg.levers_scoped && !is_e2e(env, &identity).await? {
                 return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the ledger levers reach e2e people alone"));
             }
-            if matches!(t.hook, ledger::TestHook::ForgetGate) {
+            if matches!(hook, ledger::TestHook::GateHeard) {
+                // the router's gate, where model calls ask
+                return json_answer(&ledger::gate_heard(&identity));
+            }
+            if matches!(hook, ledger::TestHook::ForgetGate) {
                 // the router's isolate's gate; the ledger forgets its own
                 ledger::forget_gate();
             }
-            json_answer(&ledger::ask(env, &t.identity, &t.hook).await?)
+            json_answer(&ledger::ask(env, &identity, &hook).await?)
         }
         (Method::Post, ["list"]) => {
             /// `{identity, op}`: a lever on that identity's list (principal.rs `test_lever`).
@@ -142,11 +142,11 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                     return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the list levers reach e2e people's lists (and their agents') alone"));
                 }
             }
-            json_answer(&routed::ask_object(env, "PRINCIPAL", &t.identity, &format!("test/{}", t.op), &serde_json::json!({})).await?)
+            crate::principal::pass(env, &t.identity, &crate::principal::calls::ListLever { op: t.op }).await
         }
         (Method::Post, ["export"]) => {
             /// `{identity, op, steps?}`: a lever on that person's export (export.rs `export_lever`).
-            #[derive(Deserialize, serde::Serialize)]
+            #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestExport {
                 identity: String,
@@ -161,9 +161,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             if cfg.levers_scoped && !is_e2e(env, &t.identity).await? {
                 return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the export levers reach e2e people's exports alone"));
             }
-            let lever = serde_json::json!({ "op": t.op, "steps": t.steps });
-            let req = routed::internal_request("test/export", &lever.to_string())?;
-            crate::routed::send(env, "PRINCIPAL", &t.identity, req).await
+            crate::principal::pass(env, &t.identity, &crate::principal::calls::ExportLever { op: t.op, steps: t.steps }).await
         }
         (Method::Post, [hook @ ("keys" | "fragment")]) => {
             /// The fragment a lever's body names (the rest is the fragment's to read).
@@ -181,10 +179,13 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             crate::routed::send(env, "FRAGMENT", &target.fragment, inner).await
         }
         (Method::Post, ["computer"]) => {
-            /// `{computer, op, times?, on?, ms?, freeze?}`: a lever on that
-            /// computer (computer.rs, `lever`): `times` is `fail-saves`',
-            /// `on` is `always-on`'s, `ms` is `hang-backups`' and
-            /// `alive-check`'s, `freeze` is `alive-check`'s.
+            /// `{computer, op, times?, on?, ms?, freeze?, offsetMs?,
+            /// generation?}`: a lever on that computer (computer.rs, `lever`):
+            /// `times` is `fail-saves`', `fail-starts`' and
+            /// `fail-takeover-destroys`', `on` is `always-on`'s, `ms` is
+            /// `hang-backups`', `alive-check`'s, `slow-tell`'s,
+            /// `stall-failing-start`'s and `alarm-in`'s, `freeze` is `alive-check`'s,
+            /// `offsetMs` is `clock`'s, `generation` is `exit`'s.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {
@@ -198,6 +199,10 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 ms: Option<u32>,
                 #[serde(default)]
                 freeze: Option<bool>,
+                #[serde(default, rename = "offsetMs")]
+                offset_ms: Option<i64>,
+                #[serde(default)]
+                generation: Option<u64>,
             }
             let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if !valid_computer_id(&t.computer) {
@@ -210,7 +215,13 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                     return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the computer levers reach e2e people's computers alone"));
                 }
             }
-            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze })).await?)
+            if t.op == "exit" {
+                // the runtime's own report that start `generation`'s
+                // container exited (`computer/exited`), sent as it sends it
+                let generation = t.generation.ok_or_else(|| CellError::invalid("exit names its generation"))?;
+                return json_answer(&crate::computer::ask(env, &t.computer, "computer/exited", &serde_json::json!({ "generation": generation })).await?);
+            }
+            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "offsetMs": t.offset_ms })).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
         (Method::Post, ["registry"]) if cfg.levers_scoped => Err(no_route("/api/test/registry")),
@@ -222,6 +233,9 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             }
             json_answer(&ask_registry(env, &hook).await?)
         }
+        // the move's object is the whole deployment's, as the registry is
+        (Method::Post, ["migrations"]) if cfg.levers_scoped => Err(no_route("/api/test/migrations")),
+        (Method::Post, ["migrations"]) => crate::migrations::lever(env, cfg, &body).await,
         // a preview's mail goes out for real: only the fake's is a test's
         (Method::Post, ["mail"]) if cfg.levers_scoped => Err(no_route("/api/test/mail")),
         (Method::Post, ["mail"]) => {
@@ -257,8 +271,7 @@ async fn sign_in(env: &Env, asked: SignIn) -> CellResult<SignedIn> {
     if lent > levers::E2E_PAID_CALLS_MAX {
         return Err(CellError::invalid(format!("an e2e person makes at most {} paid calls", levers::E2E_PAID_CALLS_MAX)));
     }
-    let answer = ask_registry(env, &calls::TestHook::E2eSignIn(calls::E2eSignIn { email: asked.email, paid_calls: lent })).await?;
-    let signed: calls::E2eSignedIn = serde_json::from_value(answer).map_err(|e| CellError::host(format!("the registry's e2e sign-in: {e}")))?;
+    let signed: calls::E2eSignedIn = crate::ask_registry_as(env, &calls::TestHook::E2eSignIn(calls::E2eSignIn { email: asked.email, paid_calls: lent })).await?;
     assert!(npub::is_identity(&signed.identity), "the registry answers an identity");
     ledger::ask(env, &signed.identity, &SetPlan { id: E2E_SEAT_ID.into(), plan: Plan::Seat }).await?;
     let cap = ledger::ask(env, &signed.identity, &ledger::TestHook::PaidCalls { max: asked.paid_calls }).await?;

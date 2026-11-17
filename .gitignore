@@ -3,6 +3,8 @@ target/
 .DS_Store
 node_modules/
 cell/.celld/
+# the celld node's secrets file, and the one written before it is moved in
+.celld.secrets.json*
 cell/.dev.vars
 cell/build/
 cell/build.lock
@@ -10,5 +12,6 @@ cell/client/
 cell/target/
 .wrangler/
 cell/wrangler.local.jsonc
+cell/wrangler.celld.jsonc
 # CI's deploy checks out finitecomputer/fragment-deploy, the configs, here
 /deploy-config/

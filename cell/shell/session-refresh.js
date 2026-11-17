@@ -1,3 +1,5 @@
+import { KIND } from "./frame-messages.js";
+
 export function createSessionRefresh({ held, getFrames, personId, viewerKeys, validFragment, openApp, originOf, endAlerts, dropAlerts }) {
   // ---- a new release: the page reloads itself at a safe moment ----
   // A page outlives a deploy: a home screen's app or a tab left open runs the
@@ -14,7 +16,7 @@ export function createSessionRefresh({ held, getFrames, personId, viewerKeys, va
   // so they survive this reload as any other; so the shell reloads only
   // when no chat's page says it is busy with what no storage keeps (files
   // chosen, a voice memo, a message on its way or one that failed, a quote
-  // chosen: `{fragment: "busy", busy}`,
+  // chosen: `{fragment: KIND.busy, busy}`,
   // told as it changes), and none of this page's own dialogs, menu, fields
   // typed in, prompts on their way or writes still going hold it. Nothing
   // is asked at the moment of the reload, so nothing can change between an
@@ -161,7 +163,7 @@ export function createSessionRefresh({ held, getFrames, personId, viewerKeys, va
 
   // Signing out, or in with another account, ends the tab's person: what was
   // kept for them goes first, its windows here, each chat page's draft
-  // (`{fragment: "forget-draft"}`, answered `draft-forgotten`, waited for at
+  // (`{fragment: KIND.forgetDraft}`, answered `draft-forgotten`, waited for at
   // most FORGET_WAIT_MS) and their chats' alerts (`dropAlerts`, as long),
   // then the form goes. A draft of theirs a page not open here keeps is
   // never shown to anyone else (its page gives a draft back only to its own
@@ -181,7 +183,7 @@ export function createSessionRefresh({ held, getFrames, personId, viewerKeys, va
       const left = new Set(frames.map((f) => f.contentWindow));
       const timer = setTimeout(() => finish(), FORGET_WAIT_MS);
       const forgotten = (event) => {
-        if (event.data?.fragment === "draft-forgotten" && left.delete(event.source) && !left.size) finish();
+        if (event.data?.fragment === KIND.draftForgotten && left.delete(event.source) && !left.size) finish();
       };
       const finish = () => {
         clearTimeout(timer);
@@ -189,7 +191,7 @@ export function createSessionRefresh({ held, getFrames, personId, viewerKeys, va
         done();
       };
       addEventListener("message", forgotten);
-      for (const f of frames) originOf(f.dataset.fragment).then((origin) => f.contentWindow?.postMessage({ fragment: "forget-draft" }, origin), () => {});
+      for (const f of frames) originOf(f.dataset.fragment).then((origin) => f.contentWindow?.postMessage({ fragment: KIND.forgetDraft }, origin), () => {});
     });
   }
 

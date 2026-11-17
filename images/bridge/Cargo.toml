@@ -28,6 +28,10 @@ hmac.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+# a stage's zip, read by ranges (simplex/stage.rs): its deflated entries and
+# their CRCs, the standard crates (flate2 on its pure-Rust miniz_oxide)
+crc32fast = "1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # BIP-340 for its doors (simplex/door.rs): the platform's curve and crate, at its pin
 k256.workspace = true
 # SIGTERM to a SimpleX core (simplex/run.rs): already in the lock, through tokio

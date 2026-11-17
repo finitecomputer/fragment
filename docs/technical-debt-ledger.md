@@ -5,6 +5,148 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## No mail without Email Sending
+
+- **Shortcut:** the platform's mail (invites, a key added, an org's seat,
+  an export ready, a trial code) goes through Cloudflare Email Sending's
+  binding (`EMAIL`, `cell/src/mail.rs`), or in dev and the e2e to the
+  mail fake (`FRAGMENT_MAIL_URL`). A self-hosted node has no mailer: celld
+  binds `EMAIL` with workerd's class and every send rejects
+  (`E_NO_MAILER`, "this node has no mailer"), which the cell takes as any
+  failed send (`upstream_failed`). An invite to someone new is refused and
+  not kept; a key's or an export's mail is logged as failed; an org's
+  `mailed` and a trial's send say it was not sent. Paul, 2026-10-22: not
+  solved in this pass.
+- **Risk:** on a self-hosted box, people new to it cannot be invited by
+  mail, and nothing mailed reaches anyone. Whether a box with no mailer
+  should still make invites is a product rule, its own PR.
+- **Delete when:** celld relays mail for its node (SMTP, or a company's
+  relay, behind the same binding: its `SendEmail`'s seam), or that product
+  rule lands.
+
+## A self-hosted box signs in through WorkOS's surface
+
+- **Shortcut:** on a self-hosted box the cell signs people in through the
+  identity door (`crates/identity-door`; docs/self-host.md, seam 4), which
+  answers WorkOS AuthKit's endpoints so the cell needs no code of its
+  own. The cell still speaks WorkOS's words there: its sign-in page says
+  "WorkOS said `access_denied`: …" for a refusal of the door's or the
+  provider's, and "Use another account" cannot ask the provider for
+  another person (the door cannot tell a switch from a sign-in, and keeps
+  no session to end), so the provider's own session decides who signs in.
+- **Risk:** a self-hosted person sees the word WorkOS on a refusal page,
+  and on a provider that holds sessions (Keycloak, Entra; not tsidp, where
+  the device names its one person) cannot switch accounts without signing
+  out there.
+- **Delete when:** a product change words the cell's sign-in by its
+  provider and tells the provider a switch (Core 1.0's `prompt=login`),
+  proven on preview as the self-host rule asks of a cell change.
+
+## A computer's lifecycle writes its old flags too
+
+- **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle
+  phase into the phases that own it (`fragment_core::computer::Phase`:
+  `Asleep`'s `retry`, `Sleeping`'s `owner`, `restarting` and
+  `owes_start`, `Failed`'s `since_ms`). The previous release reads only
+  the old fields (`wake_after_sleep`, `retry_at_ms`, `failed_ms`,
+  `owner_sleep`, `restarting`), so every stored lifecycle still carries
+  them too, written from the phase (`Legacy`), and `Lifecycle::read` fills
+  a phase stored by that release from them. Each step asserts the two
+  agree.
+- **Risk:** none while they agree. A rollback reads the same computer;
+  only `Starting`'s `destroying` is new to it, so a rolled-back release
+  counts a failing start's own destroy as a crash again (one more strike,
+  as before #1004's note in memory, which it still has).
+- **Delete when:** writing them, once no deployment can roll back to a
+  release before this one (production runs a release after it): step two
+  stops writing them (`Legacy::of`, the per-step assertion). Reading them
+  (`Legacy::fill`) goes too once every stored lifecycle has been written
+  by this release or a later one: a computer that has not woken since
+  keeps the old fields until its next event, so that last cut waits for
+  a sweep that touches every computer, or for no computer being older.
+
+## A chat wiped while its seed runs can keep its template's repo
+
+- **Shortcut:** a chat's create answers before its repo is made
+  (`publish::seeds_later`); its seed makes the repo right after. A life
+  that ends while that seed waits on code.storage records no repo for its
+  wipe (none was made when it ended), and the seed, seeing the life gone,
+  stops and keeps what it made, as a delete keeps a repo
+  (`publish.rs` `seed`). A wipe in that second leaves the repo holding
+  the chat's first `fragment.json` (its template and title), or nothing.
+- **Risk:** one chat's title outlives its owner's wipe at code.storage,
+  when the wipe lands within about a second of that chat's making.
+- **Delete when:** a wipe deletes its person's repos by their name
+  (`codestorage::repo_name`, the owner's digest), not only those its
+  fragments' lives recorded.
+
+## The bridge copies the platform's file bounds; the app, an older platform's
+
+- **Shortcut:** a file's bounds are proto's `limits`, which the platform
+  serves its clients (`UploadLimits`: `GET /api/fragments`, a page's
+  hello). Two copies remain. The bridge's `ATTACHMENT_MAX_BYTES` and
+  `ATTACHMENTS_MAX` (images/ cannot depend on proto yet) are held to
+  proto by xtask/src/guards.rs. The app's `UploadLimits.olderPlatform`
+  (ios/Sources/ChatMedia.swift) is what a platform that serves no
+  `limits` took, 25 MiB and 8 files, for a build that meets one.
+- **Risk:** none past a red check for the bridge's. The app against an
+  older platform refuses a file past 25 MiB that the platform might take.
+- **Delete when:** the bridge depends on proto (FIN-379, PR 4); and
+  production serves `limits` (the first production deploy after FIN-405's
+  PR 3), when the app reads an absent `limits` as no bound of its own.
+
+## A computer's disk is 20 GB, priced as 12
+
+- **Shortcut:** every computer starts with Containers' most disk, 20 GB
+  (`price::DISK_MB`), since a computer whose `/data` filled the 12 GB its
+  price assumed could never be restored again (2026-11-03). The price book
+  still counts 12 GB (`price::DEFAULT_INSTANCES`): the 8 GB more,
+  $0.002016 an awake hour, is the platform's.
+- **Risk:** about 3% of a computer's awake price goes uncharged.
+- **Delete when:** Paul reprices the default instance with its 20 GB (a
+  new `DEFAULT_INSTANCES` row and `DEFAULT_BOOK_VERSION`).
+
+## A fragment with reach has no link and is not public
+
+- **Shortcut:** Paul, 2026-11-01 (FIN-352): "as an extra safety right now
+  we should disallow sharing for apps that have reach". Narrowed
+  2026-11-11 to link and public alone: "restricted will be used for brain
+  sharing and brains really need those connections for workflows." A
+  fragment holding a secret or a door is never opened by its link or
+  public (`cell/src/reach.rs`), both ways: its link or public is refused
+  (`Reason::PrivateWhileReaching`), and reach on one its link opens
+  (`Reason::UnshareFirst`). People its owner names, at any role, are in as
+  ever, and can use its keys; the share sheet says so once. Fragments
+  opened by their link before the rule keep serving, counted by
+  `fragment operator reach`.
+- **Risk:** a person cannot give an app that holds a key a share link or
+  make it public; an agent building one with a key makes it members only
+  first.
+- **Delete when:** temporary: lift after the FIN-354 audit. Then drop
+  reach.rs's two refusals and their call sites, the share sheet's lock,
+  the two reasons (kept on the wire as add-only names), the census route
+  and command, and the `legacy-reach` lever.
+
+## An app facet's subrequests are the account's, for the facet's life
+
+- **Shortcut:** Cloudflare counts a Durable Object facet's subrequests
+  across its calls for as long as it runs, not per call (measured on a
+  preview, 2026-11-01, e2e `capability-cost`: two calls of 30 on one
+  facet made 30, then 20, under a limit of 50). So the platform sets no
+  `subRequests` on the app facet (`cell/src/js.rs`, `worker_code`), and
+  leaves the account's. A call that fails at a runtime limit on the facet
+  stops it (`Facet::failed`, `fragment_core::facet::at_limit`), so the next
+  call starts it fresh. CPU stays each call's guard (`APP_CPU_MS`, measured
+  per call the same day).
+- **Risk:** no per-call bound on an app's capability calls. The facet has
+  no network, so they are the platform's own calls, each bounded by its
+  route. A facet that makes the account's limit in one life fails one call,
+  and then starts again.
+- **Delete when:** Cloudflare scopes a facet's subrequests to each call,
+  or gives a facet call limits of its own (as `getEntrypoint` does for a
+  Dynamic Worker). Then set a per-call budget again, beside `APP_CPU_MS`,
+  and turn `capability-cost`'s across-calls check into its refusal.
+
 ## Every call still carries its release's deploy time
 
 - **Shortcut:** an object of a release before #826 read
@@ -101,6 +243,21 @@ unfinished design, not debt.
   adapter and replacements go together once
   `a_regular_browser_is_shared_by_the_desktop_and_tools` and
   `two_agents_two_desktops` pass against it.
+
+## The Hermes image carries two Chromiums
+
+- **Shortcut:** Hermes v0.21.7's browser tools bring Chrome for Testing
+  r1208 (`/opt/hermes/tools/chromium-1208`, 364 MB) beside the system
+  Chromium (`/usr/bin/chromium`, 376 MB), which the desktop, Hermes'
+  browser (desktop_browser.py) and an agent's own Playwright run
+  (images/hermes/Dockerfile). r1208 fails Cloudflare's bot check where
+  the system Chromium passes (Paul's prod agent, 2026-10-28).
+- **Risk:** 364 MB of every image, and a browser an agent could still
+  reach by its path.
+- **Delete when:** the image moves to Hermes v0.22, which drops the
+  browser tools (FIN-305): then the image removes r1208, and the
+  build's Playwright check (both runtimes print a page with the system
+  Chromium) still passes.
 
 ## Each agent's Hermes profile config is rewritten at every boot
 
@@ -205,8 +362,35 @@ unfinished design, not debt.
 ## An operator key is metered per call, not per what its vendor counts
 
 - **Shortcut:** the swap charges one `key` unit a call at an estimate
-  (`fragment_core::price::DEFAULT_KEYS`, sources beside it).
-- **Risk:** calls charged above or below what they cost.
+  (`fragment_core::price::DEFAULT_KEYS`, sources beside it), except a
+  part of a key's calls priced by what its request says
+  (`price::KEY_PARTS`: ElevenLabs' speech by its text's characters, at
+  the multilingual models' $0.08 per 1,000 whatever the model, so Flash
+  and Turbo's $0.04 calls are charged twice their list; fal's
+  synchronous Klein runs by the pixels they ask for; xAI's X searches as
+  20 posts and a call's tokens, its synchronous images as one
+  grok-imagine-image ($0.02) a call; Google Places' photos at their own
+  list; Firecrawl's scrapes and maps by their credits; a Browser Use
+  session's start as five minutes; X's searches as ten posts).
+- **Risk:** calls charged above or below what they cost: every other
+  ElevenLabs call (sound effects, dialogue, a music plan, a voice list)
+  is charged a minute of music; a queued fal generation (Hermes'
+  `image_generate`), an edit and every other fal model are charged
+  nothing until a queued job is settled from its result's answer, once
+  per request id; a Grok chat (its tokens not read), a deferred image, a
+  video and server-side tools other than X Search are charged nothing, a
+  grok-imagine-image-2.0 image or several images a call under their
+  cost, and an X search that fetches fewer than 20 posts over it; Google
+  Places' searches and details (their tier their field mask's, which the
+  meter does not read) and autocompletes (free in a session that ends in
+  a Details call) are charged nothing; a Firecrawl search (its returned
+  results not counted), crawl, batch scrape, extract, agent or browser
+  session is charged nothing, as are a scrape's PDF pages and other
+  add-ons; a Browser Use session is charged five minutes at its start,
+  whatever it ran, and a task its session alone, not its model's tokens;
+  X's lookups (their returned resources not counted) are charged
+  nothing, and a search that returns fewer than ten posts is charged
+  ten.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.
@@ -357,14 +541,20 @@ unfinished design, not debt.
   it writes (refused for good, so it replays after a top-up), with an
   e2e check; the platform's own records stay.
 
-## Video steps are off
+## A video's lost answer is made again only by a replay
 
-- **Shortcut:** `job.ai.video` is refused
-  (`fragment_core::media::Refusal::VideoOff`): Workers AI has no video.
-- **Risk:** a fragment that made videos (meatproxy) cannot.
-- **Delete when:** a video model runs on Cloudflare, metered from its
-  usage, with an e2e check that a video is drawn, stored and charged; or
-  Paul drops videos, and `job.ai.video` goes with this entry.
+- **Shortcut:** `job.ai.video` is one call of the AI binding
+  (cell/src/ai.rs `step_video`), which answers when the video is made;
+  the model catalog names no request to poll. Its try outlasts a making
+  (15 minutes, cell/entry.mjs), and it is asked at most once an attempt
+  (`making`): a try that never heard its answer (the object restarted
+  mid-call, the try broke, the making took longer) fails for good, saying
+  to replay.
+- **Risk:** a video whose answer was lost may still be made, and billed
+  by the catalog, charged to no one; a replay makes it again. The person
+  pays for one.
+- **Delete when:** the catalog answers a request id a step can poll (one
+  step starts it, the next ones poll, as the celld era's did).
 
 ## An icon's drawings skip the AI Gateway
 
@@ -383,14 +573,23 @@ unfinished design, not debt.
 - **Delete when:** the release's build rebuilds a change to one of its
   files in seconds, and dev builds the release's again.
 
-## The cell's Wasm budget was raised for launch
+## The cell's Wasm budget raised to 7.5 MB
 
-- **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) went from
-  6.0 MB to 6.5 MB so launch week's features could land.
-- **Risk:** slower starts, less memory, an easier next raise.
-- **Delete when:** the cell is back under 6.0 MB (first candidate: the
-  export's archive builder in a Worker of its own) and the budget is
-  set back to 6.0 MB.
+- **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) is 7.5 MB
+  (Paul, 2026-11-10). It went 6.0 → 6.5 MB for launch week (10-14),
+  6.6 MB for the restart fixes (11-03), and 7.5 MB for the
+  finite.computer move (FIN-463: its Migrations object, about 143 KB)
+  and the Vault (FIN-466, about 98 KB). The untangle pass (M6, M7) had
+  just brought the cell back to 6.31 MB.
+- **Risk:** slower isolate starts and less memory for every object, and
+  an easier next raise. Every fragment's isolate carries machinery it
+  never uses.
+- **Delete when:** the cell is split into Workers of their own, so a
+  fragment carries only its own machinery (Paul, 11-10: "eventually we
+  should refactor so these are multiple workers not a monolith… why
+  should every fragment need all this machinery"), and the move's code
+  is removed (FIN-463's debt entry). First candidates: the Migrations
+  object, the export's archive builder, the Computer DO's routes.
 
 ## Local nodes keep their computers apart through wrangler's and workerd's internals
 
@@ -418,6 +617,24 @@ unfinished design, not debt.
   the node runs Miniflare itself with no proxy between: then front.rs,
   the debug level and `Node::start`'s readers go. The devstack's
   `front_door` and `debug_terminal` tests check a wrangler move.
+
+## The e2e's computers have no internet
+
+- **Shortcut:** with the internet on, local workerd's networking sidecar
+  (`cloudflare/proxy-everything`) resolves even the hosts the platform
+  intercepts through public DNS first, so a run's saves failed while
+  public DNS did not answer (#1017). The e2e's fleet starts computers
+  with it off (`FRAGMENT_COMPUTER_INTERNET=off`, crates/devstack's
+  `Fleet::computer_internet`), and the sidecar answers them at once.
+  The computers lane checks it by dropping a sidecar's queries to public
+  DNS (`containers::drop_public_dns`, which leans on the sidecar's mark
+  for them).
+- **Risk:** a run's computers do not run as a deployment's do, with the
+  internet on: something a computer needs from the internet fails only
+  on a preview.
+- **Delete when:** the sidecar answers an intercepted name without
+  asking public DNS (a draft upstream issue awaits Paul); then the fleet
+  var, `computer_internet` and the lane's drop go.
 
 ## The dev proxy may answer an early refusal with its own 500
 
@@ -473,6 +690,53 @@ unfinished design, not debt.
   claims and the `role IS NULL` clauses go, and `invite_claims` with
   them (a step that drops it).
 
+## The finite.computer move (FIN-463)
+
+- **Shortcut:** fragment carries, for the move of finite.computer's
+  agents (docs/migrations.md): a `Migrations` Durable Object (one, with
+  its schema steps), its routes (`/api/migrations/*`, on the wire, and
+  `/api/admin/migrations`), `fragment_proto::migrations` and
+  `fragment_core::migrations`, the `STAGE` R2 bucket and its lifecycle
+  rules in `xtask deploy`, the stage's reads (one zip by ranges; no
+  mount), the mover's npub in the config (`migrations.mover`; it signs
+  with its own key, so fragment holds no secret for it), the secrets
+  hand-off (F11: the Vault entries it made are their person's, and stay;
+  the Vault's `receipts` table is the move's),
+  the e2e lane `move` and the fake mover;
+  and, from its other PRs, the page `/move`, the welcome's slot, the
+  notices owner, the sign-in call (`signin.rs`), `Source::Stage` and
+  `fragment stage` in the CLI, the `finite-computer` layout and profile
+  of the `import-agent-home` skill, and the vault's `nostr_nsec`
+  purpose. finite-mono carries `finite-mover`, `finite-mover-host`,
+  their keys, its database role, Core's `moved` column and two CLI
+  subcommands.
+- **Risk:** Wasm while it lives; one more global object asked by
+  `GET /api/notices` (with F4); the mover's key can upload a stage for
+  an old agent it was told to stage, into a consenting person's new
+  agent. It holds no bucket credential and reads no stage.
+- **Delete when:** every roster agent is `moved`, `withdrawn` or
+  `expired`, phase 2's 90 days have passed, and no move is `held`. Then,
+  in order:
+  1. Turn the mover off; remove `migrations` from the config.
+  2. Delete the class with a `deleted_classes` tag (xtask learns to
+     retire a class's steps from `schema.lock`).
+  3. Retire its wire facts in `wire.retired`.
+  4. Remove `/move`, the welcome's slot, the notices owner and the
+     sign-in call.
+  5. Remove `Source::Stage`, `fragment stage`, and the `finite-computer`
+     layout and profile.
+  6. Remove `finite-chat-archive/1` once phase 0 ends.
+  7. Remove the vault's `nostr_nsec` purpose and what it holds, and the
+     Vault's `receipts` table (a step that drops it) with `vault/handoff`.
+  8. Delete the `STAGE` bucket (Paul).
+  9. Remove the SPECIAL-CASE-INVENTORY row and this entry.
+  10. In finite-mono: the mover, the host reader, the database role and
+      the ssh account.
+
+  What stays: `fragment home`, the `import-agent-home` skill and its
+  `hermes` layout, must-answer notices, the comp's `until`, the vault,
+  and the wire's bytes answer.
+
 ## The registry is one Durable Object for the fleet
 
 - **Shortcut:** every signed request resolves its key or session live in
@@ -488,11 +752,13 @@ unfinished design, not debt.
 
 - **Shortcut:** `fragment_core::migrate::adopt` takes an object from
   before 2026-10-19 whose tables are step 1's (`Class::variants`); any
-  other refuses every call (`schema_refused`).
+  other refuses every call (`schema_refused`). An operator's wake
+  (`POST /api/admin/objects/{class}/wake`) starts one no call has.
 - **Risk:** such objects stay refused; a Registry refuses everything.
-- **Delete when:** the deployments made before 2026-10-19 (the e2e
-  preview, p5, preview.finite.build) are reset or retired, or those
-  objects deleted (Paul's call).
+- **Delete when:** every object of the deployments made before
+  2026-10-19 (preview.finite.build, finite.chat) has been woken by
+  `fragment operator wake`, each answering ready; `adopt` and the wake
+  route then go together.
 
 ## An app facet's operation ledger has no schema version
 
@@ -556,10 +822,28 @@ unfinished design, not debt.
 ## A channel's retention is not declarable
 
 - **Shortcut:** an app channel keeps every record, a postable one its
-  newest `limits::POSTED_KEPT` (cell/src/channels.rs `append`).
-- **Risk:** app channels grow without bound; long chats lose their start.
+  newest `limits::POSTED_KEPT` (100,000) or `limits::POSTED_BYTES_MAX`
+  (512 MiB of bodies), whichever comes first (cell/src/channels.rs
+  `make_room`; FIN-415). A chat keeps that much on each of `chat` and
+  `work`.
+- **Risk:** app channels grow without bound; a chat past either bound on
+  a channel loses its start (a tool-heavy turn writes 20 to 60 `work`
+  records, so old turns lose their steps first; records near 64 KiB reach
+  the byte bound at about 8,000).
 - **Delete when:** `fragment.json` can declare a channel's retention
   (count or age) under a platform ceiling, enforced and tested.
+
+## Search finds a chat's newest messages only
+
+- **Shortcut:** a fragment's search log and each person's list keep its
+  newest `limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX` (10,000) messages,
+  a tenth of what a chat keeps (cell/src/search.rs, principal.rs). A
+  person's list holds `limits::SEARCH_ENTRIES_MAX` (100,000) in all, so
+  one chat as long as it may be would push every other out.
+- **Risk:** a message a long chat still shows is not found by search.
+- **Delete when:** a person's search reads each fragment's own index
+  (no copy bounded by the person's total), or Paul states the limit as
+  policy.
 
 ## A draft past its pace has no e2e
 
@@ -589,9 +873,10 @@ unfinished design, not debt.
 
 ## A blob upload is one request, and the CLI holds whole files
 
-- **Shortcut:** a blob is one request of at most 256 MiB
-  (cell/src/blobs.rs), and the CLI reads files whole; Cloudflare refuses
-  bodies over 100 MB on Free and Pro zones.
+- **Shortcut:** a blob is one request of at most 256 MiB from a
+  computer, and of at most the deployment's `upload_max_bytes` (its
+  zone's limit: 100 MB on Free and Pro) from a person (cell/src/lib.rs
+  `blob_length`), and the CLI reads files whole.
 - **Risk:** large files fail whole, or cannot upload at all.
 - **Delete when:** uploads go in resumable parts (R2 multipart under the
   zone's limit, tested with a 150 MB file) or by signed URL, and the CLI

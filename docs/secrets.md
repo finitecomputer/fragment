@@ -9,15 +9,17 @@ its home; everything that uses it reads it from there.
 
 | Secret | Home | Set and rotated by |
 |---|---|---|
-| The deployment's own: the host secret, the code.storage org key, WorkOS's client id and API key, Stripe's restricted key and webhook secret, each model slot's key on an OpenAI-compatible API, each operator key, each connection's OAuth client secret | the account's Cloudflare Secrets Store, bound to the platform Worker by name (below) | Paul, or the coordinating session, with `cargo xtask secret`; deleting one is Paul's alone |
-| A fragment's secret (an app's API key, a webhook signing key) | the fragment's Durable Object, sealed | its editors (docs/api.md), who may set and list secrets but never read one; a connector's, its owner alone (`cell/src/doors.rs`) |
+| The deployment's own: the host secret, the code.storage org key, WorkOS's client id and API key, Stripe's restricted key and webhook secret, a read-only Workers Observability key (the operators' glance reads the account's Workers Logs with it: an account API token with Workers Observability Read and nothing else), each model slot's key on an OpenAI-compatible API, each operator key, each connection's OAuth client secret | the account's Cloudflare Secrets Store, bound to the platform Worker by name (below) | Paul, or the coordinating session, with `cargo xtask secret`; deleting one is Paul's alone |
+| A fragment's secret (an app's API key, a webhook signing key) | the fragment's Durable Object, sealed | its editors (docs/api.md), who may set and list secrets but never read one; a connector's, its owner alone (`cell/src/doors.rs`), and removed when it installs other code (a fork: Paul, 2026-10-31) |
 | A person's own key for an `own` provider | their computer's Durable Object, sealed | the person; one with a sign-in is exchanged by the platform and sealed at once, never pasted; revoking it is the person's, at the provider |
+| A person's secret for their agents (a token, a bot's, a Nostr key) | their Vault, a Durable Object of theirs, sealed (below) | the person alone, never an agent: `PUT /api/vault/{secret}` (docs/api.md, "A person's Vault"); or the platform's own code for them (`vault::put`: FIN-463's hand-off) |
 | A sign-in under way (its PKCE verifier) | sealed in the computer (an own key's) or the registry (a connection's), until used or ten minutes pass | no one |
 | A fragment's nostr key (an agent's too) and its push key | made and sealed in the fragment's Durable Object, opened only to sign | no one |
 | A person's connections (Google, …) | WorkOS Pipes, which holds and refreshes them; a computer's swap asks it for a short-lived token on each call (decision 22) | the person (docs/pipes-browser-binding.md) |
 | Browser sessions | the registry, as SHA-256 hashes; the tokens only in HttpOnly cookies | no one |
 | The DNS token, a preview's test secret, the Stripe key xtask uses | files on the deploying machine, named by path in the config (Files, below) | Paul |
 | An operator key (a wipe's) | a file on the operator's machine (below) | its operator |
+| A self-hosted box's identity door: its own secret (it seals the door's state at the provider and derives each sign-in's PKCE verifier and nonce) and its client secret at the OpenID Connect provider | files on the box, owner-only (the door refuses one others may read), named by its config (docs/self-host.md, seam 4); the platform's client secret at the door stays in the node's secrets backend as `WORKOS_KEY`, and the door's config holds only its SHA-256 | the box's operator |
 
 A computer's guest holds only placeholders (docs/computers.md). A
 placeholder's tag is an HMAC of (computer, agent, provider) under a key
@@ -35,6 +37,9 @@ only from that computer's egress, toward that provider.
   is in use within a minute, with no deploy. A binding whose secret the
   store lacks is an error; nothing falls back to a Worker secret or
   variable.
+  A self-hosted runtime (celld) binds them the same way and reads each
+  from its node's secrets backend, OpenBao (docs/self-host.md, seam 12):
+  the cell is the same on both.
 - **App code holds no key.** It runs in a loader isolate whose env the
   platform builds (`js::app_env`), so it names no deployment secret. A
   job's `job.fetch` names a fragment secret as `{{NAME}}` in a header or
@@ -42,17 +47,82 @@ only from that computer's egress, toward that provider.
   leaves, over https and only toward a host the secret names
   (`fragment_core::secrets::may_fill`). A value filled into a URL that
   would change its scheme, host, port, path segments or query parameters
-  is not sent, and a failure's message and the answer name it as its
-  placeholder again (`fill_url`, `redact`). Its hosts are set only with
+  is not sent (`fill_url`). A failure's message and the answer name every
+  value the fetch filled, a header's or the URL's, as its placeholder
+  again, in each form a vendor writes one back in, character by
+  character: as it is, its UTF-8 percent-encoded (either hex case, once or
+  twice), JSON-escaped (`\u` past ASCII and surrogate pairs, a control
+  character's short escape such as `\n`, also within JSON), as HTML character references; and in base64 for a value of 12
+  bytes or more, itself in any of those forms (`redact`; #814). A value that comes back compressed, hashed or
+  cut in pieces by the vendor is past what matching text can name. Its hosts are set only with
   its value, so an editor who cannot read a value cannot send it anywhere
   its setter did not mean. An editor sets one through the API (`fragment
   secret set`) or from the fragment's own page (`PUT __secrets/{KEY}`,
   the same contract over its session), so a connector's page takes a
   pasted token, and makes a webhook's secret in the browser, without
   either passing through app code or a model.
+- **No deployment traces its fetches**: a Workers trace records each
+  fetch's URL and query, which may carry a secret filled at the egress,
+  so `cargo xtask deploy` pins `observability.traces` off beside its logs
+  (#814).
 - **Agents hold no key.** Model calls go through the platform's model
   route, which adds a deployment key toward that API alone; operator keys
   and connections are swapped in at the computer's egress.
+
+## A person's Vault
+
+FIN-466: a person keeps secrets on the platform, and their agents use
+them without holding them. One `Vault` Durable Object a person, named by
+their identity (cell/src/vault.rs), holds each by its name: its value
+sealed for that object, the hosts it may go to, where it goes on a
+request, and the agents that may use it (Paul, 2026-11-09: per agent).
+
+- **A value goes in and never comes out.** No answer, list, log, event or
+  wipe report names one; the person who set it cannot read it back.
+- **Only its person says where a value goes** (`fragment_core::vault::check`):
+  its hosts, place and agents, with its value or, set again with none,
+  keeping the one held. A kept value keeps its kind: a Nostr key stays a
+  signer and a token a fill, so a new secret, or one going between the
+  two, needs a value. So a key handed off parked is pointed at its host
+  with no one carrying it by hand. No hosts: parked, it fills nothing.
+- **Only its person writes it**, from their session or their own key;
+  their agents are refused every route. The CLI's `fragment vault
+  set|list|rm` reads a value from a hidden prompt, or stdin, never argv or
+  the environment, and never prints one; `set … --keep-value` reads none.
+- **An agent uses one through its computer's swap**, as an own key: its
+  view lists each secret bound to it with a host, as `fck_<name>_<tag>`
+  toward its hosts, and the computer's egress catches those hosts (armed
+  again as the view is read). For a request carrying one, the computer
+  asks the Vault (`vault/fill`), which answers only for an agent the
+  secret names, toward one of its hosts; the swap plans the request with
+  that secret's row beside the catalog (`Catalog::with`). A request to
+  those hosts carrying no placeholder goes on as it came, its own
+  `Authorization` (a git remote's basic auth) untouched.
+- **A Nostr key signs, never leaves** (`place: {"sign": "nip98"}`): the
+  Vault answers a fresh NIP-98 event over the request as it goes (its
+  https URL, method and body's SHA-256) in `Authorization: Nostr …`, and
+  such a request carries no other placeholder.
+- **Echoes are hidden**: an answer to a request a Vault filled is read
+  whole (not an event stream, at most 8 MiB) and each value it echoes
+  named `{{name}}`, as a job's fetch names its own.
+- **A wipe empties it** with their ledger, and keeps the row that says so.
+- **An old finite.computer agent's keys come in once** (FIN-463 F11;
+  docs/migrations.md, "The secrets hand-off"): on its person's Yes, the
+  move puts each into their Vault, bound to the new agent
+  (`vault/handoff`), and keeps a receipt in the same turn, so a retry
+  never puts back one they removed or moved since. A hand-off never
+  takes the name of another agent's secret.
+- **A secret moves out once, whole**: its person may move one into a
+  fragment they edit as that fragment's secret (`fromVault` on `PUT
+  /api/f/{name}/secrets/{KEY}`; `fragment secret set … --from-vault`), as
+  a Telegram bot's token moves into its connector. The Vault claims the
+  value for that one destination as the move reads it; the fragment keeps
+  it, then the Vault removes it, for its claimant alone. So it has one
+  home and is never lost between: a move into anywhere else is refused
+  (409) while the claim stands, and the same move again finishes one cut
+  short. A claim has no clock; setting the secret again with a value, or
+  removing it, ends it (`fragment_core::vault::Claimed`); set again with
+  no value, the value claimed is the one held, and its claim stands. A Nostr key never moves.
 
 ## The Secrets Store
 
@@ -94,10 +164,7 @@ finitecomputer/fragment-deploy, whose configs hold names and paths,
 never a value), `CLOUDFLARE_ACCOUNT_ID` (a secret so that logs mask it)
 and the preview's `PREVIEW_TEST_SECRET`; production's also holds
 `PREVIEW_REGISTRY_TOKEN` and `PREVIEW_ACCOUNT_ID` for copying an image
-from the preview's registry. The merge queue's image build has an
-environment of its own, `preview-image`, open only to master's queue
-(`gh-readonly-queue/master/*`), whose token has the preview account's
-Containers permission alone. Paul sets them. Registry credentials the
+from the preview's registry. Paul sets them. Registry credentials the
 image jobs mint are never printed.
 
 ## The test secret

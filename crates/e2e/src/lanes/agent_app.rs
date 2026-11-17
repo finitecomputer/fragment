@@ -126,7 +126,7 @@ pub fn agent_app(s: &mut Suite, api: &Api) -> Result<()> {
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
     let label = s.name("juniper");
-    let (agent, identity) = super::agent_ask::agent(api, &keys, &id, &label, "Juniper", &format!("You are Juniper, {email}'s agent. Help with whatever they ask.\n"))?;
+    let (agent, identity) = super::agent_ask::agent(api, &keys, &id, &label, "Juniper", &format!("You are Juniper, {email}'s agent. Help with whatever they ask.\n"), "medium")?;
     let chat = api.create_with(&keys, json!({ "label": format!("{label}-chat"), "template": "chat", "title": "Juniper" }))?;
     let chat_name = chat.body["name"].as_str().unwrap_or("").to_string();
     let joined = api.signed(&keys, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;

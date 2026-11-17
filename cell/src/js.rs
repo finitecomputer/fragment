@@ -48,8 +48,8 @@ async fn settle(v: JsValue) -> Result<JsValue, JsValue> {
     JsFuture::from(Promise::resolve(&v)).await
 }
 
-pub(crate) fn to_js(v: &serde_json::Value) -> JsValue {
-    js_sys::JSON::parse(&v.to_string()).expect("serde_json output is valid JSON")
+pub(crate) fn to_js(v: &impl serde::Serialize) -> JsValue {
+    js_sys::JSON::parse(&serde_json::to_string(v).expect("a value serializes")).expect("serde_json output is valid JSON")
 }
 
 pub(crate) fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
@@ -57,7 +57,7 @@ pub(crate) fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
         return Ok(serde_json::Value::Null);
     }
     let text = js_sys::JSON::stringify(v).map_err(|e| format!("not JSON: {}", js_message(&e)))?;
-    serde_json::from_str(&String::from(text)).map_err(|e| format!("not JSON: {e}"))
+    crate::json_text(&String::from(text)).map_err(|e| format!("not JSON: {e}"))
 }
 
 /// `obj.method(...args)`, settled (a value, a promise, or an RPC
@@ -80,7 +80,7 @@ pub(crate) fn property(obj: &JsValue, key: &str) -> CellResult<JsValue> {
 /// ambient network and bounded CPU. Read from the code row only when the
 /// loader asks for it (`AppLoader`).
 pub struct AppCode {
-    /// The fragment its `FILES` capability is bound to.
+    /// The fragment its `FILES` and `SEARCH` capabilities are bound to.
     pub fragment: String,
     pub platform: &'static str,
     pub limits: &'static str,
@@ -88,29 +88,34 @@ pub struct AppCode {
     /// `applib/…` path → source.
     pub modules: std::collections::BTreeMap<String, String>,
     pub cpu_ms: u32,
-    pub subrequests: u32,
 }
 
 /// The `app` facet of a Durable Object: author code in its own SQLite.
 pub struct Facet {
     stub: JsValue,
+    /// The facet table and this facet's name: a call that meets one of
+    /// the runtime's limits on the facet stops it (`Facet::failed`).
+    facets: JsValue,
+    name: String,
 }
 
 /// The app facet's name, before its life's `@<incarnation>`: each life of
 /// a fragment's name has its own (`Fragment::app_facet`).
 pub const APP_FACET: &str = "app";
 
-/// The capabilities an app's env holds: `FILES`, bound to `fragment`
-/// (`ctx.exports.Files({ props })`, the class in entry.mjs).
+/// The capabilities an app's env holds: `FILES` and `SEARCH`, each bound
+/// to `fragment` (`ctx.exports.Files({ props })`, the classes in entry.mjs).
 fn app_env(ctx: &JsValue, fragment: &str) -> CellResult<Object> {
     let props = Object::new();
     set(&props, "fragment", fragment);
     let options = Object::new();
     set(&options, "props", props);
     let exports = get(ctx, "exports")?;
-    let files = call(&exports, "Files", &[options.into()]).map_err(|e| CellError::host(format!("ctx.exports.Files: {}", js_message(&e))))?;
     let env = Object::new();
-    set(&env, "FILES", files);
+    for (name, class) in [("FILES", "Files"), ("SEARCH", "Search")] {
+        let cap = call(&exports, class, &[options.clone().into()]).map_err(|e| CellError::host(format!("ctx.exports.{class}: {}", js_message(&e))))?;
+        set(&env, name, cap);
+    }
     Ok(env)
 }
 
@@ -126,9 +131,12 @@ fn worker_code(ctx: &JsValue, code: &AppCode) -> CellResult<Object> {
         set(&module, "js", source.as_str());
         set(&modules, path, module);
     }
+    // CPU is each call's (the runaway guard); subrequests are left the
+    // account's: Cloudflare counts a facet's across its calls for its life
+    // (docs/technical-debt-ledger.md), and a facet without network makes
+    // none but its capability calls
     let limits = Object::new();
     set(&limits, "cpuMs", code.cpu_ms);
-    set(&limits, "subRequests", code.subrequests);
     let worker_code = Object::new();
     set(&worker_code, "compatibilityDate", "2026-01-01");
     set(&worker_code, "mainModule", "platform.js");
@@ -162,6 +170,9 @@ pub struct AppLoader {
     /// How many times this activation built worker code for the loader (a
     /// test hook reads it: `/test/fragment code-builds`).
     builds: std::rc::Rc<std::cell::Cell<u32>>,
+    /// How many times this activation started the facet (a test lever
+    /// counts its capability calls by start: `facet-calls`).
+    starts: std::rc::Rc<std::cell::Cell<u32>>,
 }
 
 impl AppLoader {
@@ -183,7 +194,10 @@ impl AppLoader {
             Ok(worker_code(&ctx_for_code, &app).map_err(|e| thrown(&e.message))?.into())
         });
         let env = env.clone();
+        let starts = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let started = starts.clone();
         let start: Callback = Closure::new(move || -> Result<JsValue, JsValue> {
+            started.set(started.get() + 1);
             let id = id().map_err(|why| thrown(&why))?;
             // the loader calls its callback with no arguments: bound, it
             // is told which id it builds (a fresh bound function a call,
@@ -196,11 +210,15 @@ impl AppLoader {
             set(&options, "class", class);
             Ok(options.into())
         });
-        AppLoader { start, builds }
+        AppLoader { start, builds, starts }
     }
 
     pub fn builds(&self) -> u32 {
         self.builds.get()
+    }
+
+    pub fn starts(&self) -> u32 {
+        self.starts.get()
     }
 
     /// The running app facet `name`, or a new one started from the
@@ -208,7 +226,7 @@ impl AppLoader {
     pub fn facet(&self, ctx: &JsValue, name: &str) -> CellResult<Facet> {
         let facets = get(ctx, "facets")?;
         let stub = call(&facets, "get", &[name.into(), self.start.as_ref().clone()]).map_err(|e| CellError::host(format!("facets.get: {}", js_message(&e))))?;
-        Ok(Facet { stub })
+        Ok(Facet { stub, facets, name: name.to_string() })
     }
 }
 
@@ -235,11 +253,29 @@ fn facet_error(message: String) -> CellError {
 }
 
 impl Facet {
+    /// Stops the facet when `message` is a runtime limit on it (its
+    /// subrequests, which last its life, or a call's CPU), so the next call
+    /// starts it fresh, its whole budget again: a call's failure thrown
+    /// (`failed`), or one the platform code caught and answered (a job's).
+    pub fn stop_at_limit(&self, message: &str) {
+        if facet::at_limit(message) {
+            if let Err(e) = call(&self.facets, "abort", &[self.name.as_str().into(), js_sys::Error::new(message).into()]) {
+                worker::console_error!("{}", serde_json::json!({ "event": "app.facet-unstopped", "error": js_message(&e) }));
+            }
+        }
+    }
+
+    /// A call's failure, its facet stopped at a runtime limit.
+    fn failed(&self, message: String) -> CellError {
+        self.stop_at_limit(&message);
+        facet_error(message)
+    }
+
     /// Forwards a request to the facet's `fetch` (the author's custom routes).
     pub async fn fetch(&self, req: worker::Request) -> CellResult<worker::Response> {
         let raw = JsValue::from(req.inner());
-        let pending = call(&self.stub, "fetch", &[raw]).map_err(|e| facet_error(js_message(&e)))?;
-        let out = settle(pending).await.map_err(|e| facet_error(js_message(&e)))?;
+        let pending = call(&self.stub, "fetch", &[raw]).map_err(|e| self.failed(js_message(&e)))?;
+        let out = settle(pending).await.map_err(|e| self.failed(js_message(&e)))?;
         let resp: worker_sys::web_sys::Response =
             out.dyn_into().map_err(|_| CellError::new(ErrorCode::AppFailed, "the app's fetch did not return a Response"))?;
         // The app's response has immutable headers; the platform adds its
@@ -261,8 +297,8 @@ impl Facet {
     }
 
     async fn invoke(&self, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
-        let pending = call(&self.stub, method, args).map_err(|e| facet_error(js_message(&e)))?;
-        settle(pending).await.map_err(|e| facet_error(js_message(&e)))
+        let pending = call(&self.stub, method, args).map_err(|e| self.failed(js_message(&e)))?;
+        settle(pending).await.map_err(|e| self.failed(js_message(&e)))
     }
 
     /// A platform method's answer, the JSON text it made (platform.mjs):
@@ -361,8 +397,13 @@ pub async fn jobs_status(env: &JsValue, id: &str) -> Result<Option<serde_json::V
 }
 
 /// The fleet's blob store (`BLOBS`, an R2 binding over the fleet bucket).
+/// The platform's bucket of blobs, pictures, exports and saves; the
+/// functions that take a bucket's binding name take this, or the move's
+/// `STAGE` (migrations.rs).
+pub const BLOBS: &str = "BLOBS";
+
 fn blobs(env: &Env) -> CellResult<Bucket> {
-    Ok(env.bucket("BLOBS")?)
+    Ok(env.bucket(BLOBS)?)
 }
 
 async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue> {
@@ -370,16 +411,26 @@ async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue
     settle(pending).await.map_err(|e| CellError::host(format!("{what}: {}", js_message(&e))))
 }
 
-/// Streams `body` into the blob store at `key` while hashing it
-/// (`crypto.DigestStream`): answers (bytes stored, SHA-256 hex).
-pub async fn blob_put(env: &Env, key: &str, body: ReadableStream) -> CellResult<(u64, String)> {
-    let (stored, hashed) = tee(&body)?;
+/// Streams `body`, `size` bytes as its upload declared, into the blob
+/// store at `key`, each chunk hashed (`crypto.DigestStream`) before it is
+/// handed on: in series, so a sender faster than the store fills nothing
+/// (a `tee`'s branch would hold all the store had not read yet). A body of
+/// another length fails the store. Answers its SHA-256 hex.
+pub async fn blob_put(env: &Env, key: &str, body: ReadableStream, size: u64) -> CellResult<String> {
+    use futures_util::TryStreamExt;
     let digest = DigestStream::new(DigestStreamAlgorithm::Sha256);
-    let bucket = blobs(env)?;
-    let (put, piped) = futures_util::future::join(bucket.put(key, stored).execute(), JsFuture::from(hashed.pipe_to(digest.raw()))).await;
-    let object = put.map_err(|e| CellError::host(format!("storing the blob: {e}")))?;
-    piped.map_err(|e| CellError::host(format!("hashing the blob: {}", js_message(&e))))?;
-    Ok((object.map_or(0, |o| o.size()), hex::encode(digest.digest().await?.to_vec())))
+    let writer = digest.raw().get_writer().map_err(|e| CellError::host(format!("hashing the blob: {}", js_message(&e))))?;
+    let hashing = writer.clone();
+    let hashed = worker::ByteStream::from(body).and_then(move |chunk| {
+        let hashing = hashing.clone();
+        async move {
+            JsFuture::from(hashing.write_with_chunk(&js_sys::Uint8Array::from(chunk.as_slice()))).await.map_err(|e| worker::Error::RustError(format!("hashing the blob: {}", js_message(&e))))?;
+            Ok(chunk)
+        }
+    });
+    blobs(env)?.put(key, worker::FixedLengthStream::wrap(hashed, size)).execute().await.map_err(|e| CellError::host(format!("storing the blob: {e}")))?;
+    JsFuture::from(writer.close()).await.map_err(|e| CellError::host(format!("hashing the blob: {}", js_message(&e))))?;
+    Ok(hex::encode(digest.digest().await?.to_vec()))
 }
 
 /// Reads a request's body to its end, keeping nothing, when nothing read
@@ -415,6 +466,16 @@ pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Valu
     Ok(())
 }
 
+/// A queue message's body, the JSON value a cell sent (`queue_send`), as
+/// its JSON text: for serde_json to read as the routes read theirs, so its
+/// types have that one decoder in the Wasm and not a second,
+/// serde_wasm_bindgen one (`worker::Message::try_from`): the meter queue's
+/// `MeterRow` alone was a 44 KB visitor.
+pub(crate) fn queue_text(raw: &worker::RawMessage) -> Result<String, String> {
+    let text = js_sys::JSON::stringify(&raw.body()).map_err(|e| format!("not JSON: {}", js_message(&e)))?;
+    Ok(String::from(text))
+}
+
 /// A request to the Browser Rendering binding (`BROWSER`, wrangler.jsonc
 /// `browser`), through its `fetch`: the routes `@cloudflare/puppeteer`
 /// speaks to it, a WebSocket upgrade among them (card.rs).
@@ -425,9 +486,18 @@ pub async fn browser_fetch(env: &JsValue, req: worker::Request) -> CellResult<wo
     Ok(worker::Response::from(resp))
 }
 
-/// Stores bytes at `key`.
-pub async fn blob_put_bytes(env: &Env, key: &str, bytes: &[u8]) -> CellResult<()> {
-    blobs(env)?.put(key, bytes.to_vec()).execute().await?;
+/// Stores bytes at `key` in `bucket` (a binding's name).
+pub async fn blob_put_bytes(env: &Env, bucket: &str, key: &str, bytes: &[u8]) -> CellResult<()> {
+    env.bucket(bucket)?.put(key, bytes.to_vec()).execute().await?;
+    Ok(())
+}
+
+/// Sets the Durable Object's alarm at `at_ms`, not waiting for it: its
+/// storage's writes are ordered and its output gate holds the answer until
+/// they are durable.
+pub fn set_alarm(state: &JsValue, at_ms: i64) -> CellResult<()> {
+    let storage = get(state, "storage")?;
+    call(&storage, "setAlarm", &[JsValue::from_f64(at_ms as f64)]).map_err(|e| CellError::host(format!("setAlarm: {}", js_message(&e))))?;
     Ok(())
 }
 
@@ -446,14 +516,14 @@ pub struct BlobBody {
 
 /// The request's own `Range` header goes to R2 as it came, which reads it
 /// (workers-rs's `get` takes only a parsed range).
-pub async fn blob_get(env: &Env, key: &str, range: Option<&str>) -> CellResult<Option<BlobBody>> {
+pub async fn blob_get(env: &Env, bucket: &str, key: &str, range: Option<&str>) -> CellResult<Option<BlobBody>> {
     let options = Object::new();
     if let Some(r) = range {
         let headers = worker_sys::web_sys::Headers::new().map_err(|e| CellError::host(js_message(&e)))?;
         headers.set("range", r).map_err(|e| CellError::host(js_message(&e)))?;
         set(&options, "range", JsValue::from(headers));
     }
-    let object = await_js(call(blobs(env)?.as_ref(), "get", &[key.into(), options.into()]), "get").await?;
+    let object = await_js(call(env.bucket(bucket)?.as_ref(), "get", &[key.into(), options.into()]), "get").await?;
     if object.is_null() || object.is_undefined() {
         return Ok(None);
     }
@@ -480,27 +550,29 @@ pub async fn blob_range(env: &Env, key: &str, offset: u64, length: u64) -> CellR
     Ok(Some(body.bytes().await?))
 }
 
-/// Starts a multipart upload at `key`, typed `content_type`: its id.
-pub async fn upload_start(env: &Env, key: &str, content_type: &str) -> CellResult<String> {
+/// Starts a multipart upload at `key` in `bucket` (a binding's name),
+/// typed `content_type`: its id.
+pub async fn upload_start(env: &Env, bucket: &str, key: &str, content_type: &str) -> CellResult<String> {
     let metadata = worker::HttpMetadata { content_type: Some(content_type.to_string()), ..Default::default() };
-    let upload = blobs(env)?.create_multipart_upload(key).http_metadata(metadata).execute().await?;
+    let upload = env.bucket(bucket)?.create_multipart_upload(key).http_metadata(metadata).execute().await?;
     Ok(upload.upload_id().await)
 }
 
 /// Uploads part `part` (from 1) of the upload `upload` at `key`: its etag.
-/// The same part again replaces it.
-pub async fn upload_part(env: &Env, key: &str, upload: &str, part: u16, bytes: Vec<u8>) -> CellResult<String> {
+/// The same part again replaces it. `body` is its bytes, or a request's
+/// own stream of the length it declared, which R2 reads unbuffered.
+pub async fn upload_part(env: &Env, bucket: &str, key: &str, upload: &str, part: u16, body: impl Into<worker::Data>) -> CellResult<String> {
     assert!(part >= 1, "parts count from 1");
-    let uploaded = blobs(env)?.resume_multipart_upload(key, upload)?.upload_part(part, bytes).await?;
+    let uploaded = env.bucket(bucket)?.resume_multipart_upload(key, upload)?.upload_part(part, body).await?;
     Ok(uploaded.etag())
 }
 
 /// Completes the upload with `parts` (number, etag), in order: the
 /// object's size. workers-rs takes only the parts its own calls answered,
 /// so the list goes as R2's binding takes it.
-pub async fn upload_complete(env: &Env, key: &str, upload: &str, parts: &[(u16, String)]) -> CellResult<u64> {
+pub async fn upload_complete(env: &Env, bucket: &str, key: &str, upload: &str, parts: &[(u16, String)]) -> CellResult<u64> {
     assert!(!parts.is_empty() && parts.windows(2).all(|w| w[0].0 < w[1].0), "a completion names its parts once each, in order");
-    let bucket = blobs(env)?;
+    let bucket = env.bucket(bucket)?;
     let pending = await_js(call(bucket.as_ref(), "resumeMultipartUpload", &[key.into(), upload.into()]), "resumeMultipartUpload").await?;
     let list = Array::new();
     for (n, etag) in parts {
@@ -515,37 +587,39 @@ pub async fn upload_complete(env: &Env, key: &str, upload: &str, parts: &[(u16, 
 
 /// Aborts the upload: its parts go. One already gone (completed, aborted,
 /// or expired) is no failure.
-pub async fn upload_abort(env: &Env, key: &str, upload: &str) -> CellResult<()> {
-    match blobs(env)?.resume_multipart_upload(key, upload)?.abort().await {
+pub async fn upload_abort(env: &Env, bucket: &str, key: &str, upload: &str) -> CellResult<()> {
+    match env.bucket(bucket)?.resume_multipart_upload(key, upload)?.abort().await {
         Ok(()) => Ok(()),
         Err(e) if e.to_string().contains("NoSuchUpload") || e.to_string().contains("10024") => Ok(()),
         Err(e) => Err(e.into()),
     }
 }
 
-pub async fn blob_delete(env: &Env, keys: &[String]) -> CellResult<()> {
-    Ok(blobs(env)?.delete_multiple(keys.to_vec()).await?)
+pub async fn blob_delete(env: &Env, bucket: &str, keys: &[String]) -> CellResult<()> {
+    Ok(env.bucket(bucket)?.delete_multiple(keys.to_vec()).await?)
 }
 
-/// The first page of keys under `prefix`, and whether there are more.
-pub async fn blob_list(env: &Env, prefix: &str) -> CellResult<(Vec<String>, bool)> {
-    let listed = blobs(env)?.list().prefix(prefix).execute().await?;
+/// The first page of keys under `prefix` in `bucket` (a binding's name),
+/// and whether there are more.
+pub async fn blob_list(env: &Env, bucket: &str, prefix: &str) -> CellResult<(Vec<String>, bool)> {
+    let listed = env.bucket(bucket)?.list().prefix(prefix).execute().await?;
     Ok((listed.objects().iter().map(|o| o.key()).collect(), listed.truncated()))
 }
 
-/// Deletes what BLOBS holds under `prefix`, at most `pages` pages (R2's
-/// list, up to 1000 keys each) a call: how many it deleted, and whether
-/// any are left (the caller's to call again). A deleted fragment's blobs
-/// (ended.rs) and a wiped computer's saves (computer.rs) go so.
-pub async fn blob_delete_under(env: &Env, prefix: &str, pages: usize) -> CellResult<(u64, bool)> {
+/// Deletes what `bucket` (a binding's name) holds under `prefix`, at most
+/// `pages` pages (R2's list, up to 1000 keys each) a call: how many it
+/// deleted, and whether any are left (the caller's to call again). A
+/// deleted fragment's blobs (ended.rs), a wiped computer's saves
+/// (computer.rs) and a move's stages done with (migrations.rs) go so.
+pub async fn blob_delete_under(env: &Env, bucket: &str, prefix: &str, pages: usize) -> CellResult<(u64, bool)> {
     assert!(prefix.ends_with('/') && pages > 0, "a prefix of its own, a bounded number of pages");
     let mut deleted = 0u64;
     for _ in 0..pages {
         // each page listed is deleted, so the next list starts afresh
-        let (keys, more) = blob_list(env, prefix).await?;
+        let (keys, more) = blob_list(env, bucket, prefix).await?;
         assert!(keys.iter().all(|k| k.starts_with(prefix)), "a listing under a prefix answers keys under it");
         if !keys.is_empty() {
-            blob_delete(env, &keys).await?;
+            blob_delete(env, bucket, &keys).await?;
             deleted += keys.len() as u64;
         }
         if !more {
@@ -674,14 +748,6 @@ pub async fn email_send(env: &JsValue, message: &serde_json::Value) -> Result<St
     }
 }
 
-/// A stream as two that read the same bytes (`ReadableStream.tee`): one
-/// may be read while the other is dropped.
-pub fn tee(stream: &ReadableStream) -> CellResult<(ReadableStream, ReadableStream)> {
-    let pair = stream.tee();
-    let branch = |i: u32| pair.get(i).dyn_into::<ReadableStream>().map_err(|_| CellError::host("tee answered no stream"));
-    Ok((branch(0)?, branch(1)?))
-}
-
 pub fn now_ms() -> i64 {
     js_sys::Date::now() as i64
 }
@@ -713,6 +779,26 @@ impl Laps {
     pub fn took(&mut self, step: &'static str, ms: i64) {
         let waited = ms.max(0) + self.waits.get(step).and_then(serde_json::Value::as_i64).unwrap_or(0);
         self.waits.insert(step.to_string(), waited.into());
+    }
+
+    /// Its steps' waits as a `Server-Timing` value, `step;dur=<ms>` each:
+    /// names and durations only. None for no steps.
+    pub fn server_timing(&self) -> Option<String> {
+        let steps: Vec<String> = self.waits.iter().map(|(step, ms)| format!("{step};dur={ms}")).collect();
+        (!steps.is_empty()).then(|| steps.join(", "))
+    }
+
+    /// `resp` with these waits' `Server-Timing` first, before any it holds
+    /// already (a forwarded object's own), so one answer carries both.
+    pub fn stamp(&self, resp: worker::Response) -> worker::Result<worker::Response> {
+        let Some(mine) = self.server_timing() else { return Ok(resp) };
+        let h = resp.headers().clone();
+        let value = match h.get("server-timing")? {
+            Some(theirs) if !theirs.is_empty() => format!("{mine}, {theirs}"),
+            _ => mine,
+        };
+        h.set("server-timing", &value)?;
+        Ok(resp.with_headers(h))
     }
 
     /// One line (lesson 14): `fields`, then `event`, `at` (when the work

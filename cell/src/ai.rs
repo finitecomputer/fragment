@@ -11,8 +11,14 @@
 //! through the deployment's gateway), priced in neurons by its tiles and
 //! steps (fragment_core::media). A generated image is a file written to
 //! `main` (a blob when 1 MiB or more), so it syncs to folders like anything
-//! else. Video steps are refused until they run on Cloudflare (the debt
-//! ledger).
+//! else. A video is HappyHorse 1.0 from Cloudflare's model catalog, on the
+//! same transport (a third party's, which the gateway pays for by Unified
+//! Billing): its answer names the video's URL, which the step reads and
+//! writes to `main` as an image is, on any deployment, Private's too (its
+//! zero data retention; Paul, 2026-10-31: as its images are). Its call
+//! waits while the model makes it (there is no request to poll), and is
+//! asked at most once an attempt (`making`): a try that never heard its
+//! answer fails for good, and only a replay asks again.
 //!
 //! Who pays (docs/cloudflare-v1.md, decision 26): every paid step bills the
 //! fragment's owner, on their ledger, capped when the run's principal is
@@ -39,7 +45,7 @@ use fragment_core::decide;
 use fragment_core::media;
 use fragment_core::models::{self as bounds, Answer, Bounded, Stream};
 use fragment_core::price::Usage;
-use fragment_core::steps::{AiText, Step};
+use fragment_core::steps::{AiText, AiVideo, Step};
 use fragment_core::{blob, npub};
 use fragment_proto::limits;
 use futures_util::StreamExt;
@@ -47,8 +53,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
-use crate::error::CellError;
-use crate::files::FileWrite;
+use crate::error::{CellError, CellResult};
+use crate::files::{FileWrite, Wrote};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::jobs::{permanent, RunRow, StepFail};
 use crate::ledger::{self, LedgerError, MaySpend};
@@ -148,7 +154,7 @@ impl FragmentCell {
         let rows: Vec<KeptRow> = self.typed("SELECT result, settled FROM paid WHERE key = ?", vec![key.into()]).map_err(retry)?;
         let Some(row) = rows.into_iter().next() else { return Ok(None) };
         let corrupt = |e: serde_json::Error| retry(CellError::host(format!("a kept step result: {e}")));
-        let result = serde_json::from_str(&row.result).map_err(corrupt)?;
+        let result = crate::json_text(&row.result).map_err(corrupt)?;
         Ok(Some(Kept { result, settled: row.settled != 0 }))
     }
 
@@ -238,8 +244,15 @@ impl FragmentCell {
         let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
         let message = format!("{} run {}: generated {path}", run.op, run.id);
         let writes = [FileWrite { path: target, bytes: Some(content) }];
-        self.commit(&key, &writes, &Default::default(), &message, &run.principal, run.depth).await.map_err(retry)?;
-        Ok(json!({ "path": path, "size": size, "sha256": sha }))
+        let tip = match self.commit(&key, &writes, &Default::default(), &message, &run.principal, run.depth).await.map_err(retry)? {
+            Wrote::Commit(tip) => tip,
+            Wrote::Conflict(why) => return Err(permanent(why)),
+        };
+        // its version, for `__file?path=&v=` (FIN-340): the commit that last
+        // changed it, which is `tip` unless its bytes were already there
+        let repo = self.must(MetaKey::Repo).map_err(retry)?;
+        let commit = self.cs().map_err(retry)?.head(&repo, &tip, path).await.map_err(retry)?.map_or(tip, |h| h.last_commit_sha);
+        Ok(json!({ "path": path, "size": size, "sha256": sha, "commit": commit }))
     }
 
     /// A kept image's bytes, from the blob store where it was put before
@@ -291,9 +304,118 @@ impl FragmentCell {
                 out["mediaType"] = kept["mediaType"].clone();
                 Ok(out)
             }
-            // nothing is charged: no call is made
-            Step::AiVideo {} => Err(permanent(media::Refusal::VideoOff.message())),
+            Step::AiVideo(video) => self.step_video(run, index, video).await,
             other => unreachable!("only AI steps are performed here, not {}", other.kind()),
+        }
+    }
+
+    /// `job.ai.video`: checked (a deployment whose tiers are private makes
+    /// none), gated, called, and kept with its charge as soon as the model
+    /// answers with its video's URL: its seconds at its resolution, as the
+    /// catalog bills it. Then the video is read from that URL and written
+    /// as an image is. A step tried again after its call answered reads
+    /// the URL it kept and never makes the video again, nor charges it
+    /// again; an answer that is no completed video is charged nothing,
+    /// said aloud.
+    async fn step_video(&self, run: &RunRow, index: u32, video: &AiVideo) -> Result<Value, StepFail> {
+        let call = media::video_call(video).map_err(|why| permanent(why.message()))?;
+        let cfg = crate::config::Config::from_env(&self.env);
+        let p = self.paying(run, index)?;
+        let url = match self.kept(&p.key)? {
+            Some(kept) => {
+                self.reused(&p, &kept);
+                kept.result["url"].as_str().ok_or_else(|| retry(CellError::host("a kept video names its URL")))?.to_string()
+            }
+            None => {
+                // asked at most once an attempt: a try that finds its own
+                // attempt's call unanswered never heard the answer (a
+                // restart, a broken try), which may still be made and billed
+                if media::lost(self.making(&p.key)?, run.attempt) {
+                    self.event("ai.video-lost", &format!("{}: its answer never came back; charged nothing", p.reference), json!({ "ref": p.reference }));
+                    console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": p.reference, "why": "the video's answer never came back, and the catalog may have billed it: charged nothing" }));
+                    return Err(permanent("this step's video was asked for and its answer never came back: replay the run to make it again"));
+                }
+                self.gate(&p).await?;
+                self.asking(&p, run).map_err(retry)?;
+                let answered = crate::models::run(&self.env, media::VIDEO_MODEL, &call.input, &p.owner, p.agent.as_deref()).await;
+                // test fleets: the answer lost before this try hears it, as a restart's is
+                self.test_countdown(MetaKey::TestLoseVideoAnswers, "the video's answer was lost").map_err(retry)?;
+                // no answer: it may still be making the video, so the row stays
+                let (status, bytes, log_id) = answered.map_err(retry)?;
+                // answered (a refusal, a 503 too): a try may ask again
+                self.answered(&p.key, run.attempt).map_err(retry)?;
+                if status != 200 {
+                    return Err(model_failure(status, &bytes));
+                }
+                let url = match media::video_url(&bytes) {
+                    Ok(url) => url,
+                    Err(fault) => {
+                        // it answered with no video: what it made is unknown, charged nothing, said aloud
+                        self.event("ai.video-refused", &format!("{}: {}; charged nothing", p.reference, fault.message()), json!({ "ref": p.reference, "logId": log_id }));
+                        console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": p.reference, "logId": log_id, "why": "the video's answer was no completed video: charged nothing" }));
+                        return Err(permanent(fault.message()));
+                    }
+                };
+                let kept = json!({ "url": url, "seconds": call.seconds, "resolution": call.resolution.input() });
+                self.keep(&p, &kept, Some(call.usage()), log_id.as_deref()).await?;
+                // test fleets: a failure after the paid call (bug 2's), which the retry survives
+                self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
+                url
+            }
+        };
+        let made = media::video_of(self.read_video(&url, cfg.ai_url.is_some()).await?).map_err(|fault| permanent(fault.message()))?;
+        let length_ms = made.length_ms;
+        let mut out = self.store_media(run, index, &video.path, made.bytes).await?;
+        out["mediaType"] = json!(media::VIDEO_MEDIA_TYPE);
+        out["lengthMs"] = json!(length_ms);
+        Ok(out)
+    }
+
+    /// The attempt whose call for this step's video waits on its model,
+    /// if one does (`making`).
+    fn making(&self, key: &str) -> Result<Option<u32>, StepFail> {
+        #[derive(Deserialize)]
+        struct Making {
+            attempt: u32,
+        }
+        let rows: Vec<Making> = self.typed(media::MAKING, vec![key.into()]).map_err(retry)?;
+        Ok(rows.into_iter().next().map(|m| m.attempt))
+    }
+
+    /// This attempt asks the model for the step's video: a replay's takes
+    /// the row from the attempt before.
+    fn asking(&self, p: &Paying, run: &RunRow) -> CellResult<()> {
+        self.exec(
+            media::ASKING,
+            vec![p.key.as_str().into(), SqlStorageValue::Integer(run.id), SqlStorageValue::Integer(run.attempt.into()), SqlStorageValue::Integer(crate::js::now_ms())],
+        )
+    }
+
+    /// The model answered `attempt`'s call for the step's video: its row
+    /// goes, and a newer attempt's stays (`media::ANSWERED`).
+    fn answered(&self, key: &str, attempt: u32) -> CellResult<()> {
+        self.exec(media::ANSWERED, vec![key.into(), SqlStorageValue::Integer(attempt.into())])
+    }
+
+    /// The video at the URL the model answered, at most
+    /// `media::VIDEO_MAX_BYTES` (read no further): https alone, or http to
+    /// the dev stack's and the e2e's fake (`plain`). Gone (404, 410) is for
+    /// good; a refusal that passes (429, 5xx) or a read that breaks is the
+    /// step's to try again.
+    async fn read_video(&self, url: &str, plain: bool) -> Result<Vec<u8>, StepFail> {
+        if !(url.starts_with("https://") || (plain && url.starts_with("http://"))) {
+            return Err(permanent(media::AnswerFault::NoVideo.message()));
+        }
+        let mut resp = Fetch::Url(Url::parse(url).map_err(|_| permanent(media::AnswerFault::NoVideo.message()))?).send().await.map_err(|e| StepFail::Retry(format!("the video's URL did not answer: {e}")))?;
+        match resp.status_code() {
+            200 => {}
+            404 | 410 => return Err(permanent("the video this step made is gone from its URL (it is kept for a while): replay the run to make it again")),
+            status @ (429 | 500..=599) => return Err(StepFail::Retry(format!("the video's URL answered {status}"))),
+            status => return Err(permanent(format!("the video's URL answered {status}"))),
+        }
+        match crate::cs::read_answer(&mut resp, media::VIDEO_MAX_BYTES).await.map_err(retry)? {
+            (_, true) => Err(permanent(media::AnswerFault::VideoTooLarge.message())),
+            (bytes, false) => Ok(bytes),
         }
     }
 
@@ -356,7 +478,7 @@ impl FragmentCell {
     /// or `None` when it is gone.
     async fn blob(&self, sha: &str) -> Result<Option<crate::js::BlobBody>, StepFail> {
         let key = self.blob_key(sha).map_err(retry)?;
-        crate::js::blob_get(&self.env, &key, None).await.map_err(retry)
+        crate::js::blob_get(&self.env, crate::js::BLOBS, &key, None).await.map_err(retry)
     }
 
     /// `job.ai.text`: the model route's call, streamed (`read_text`), kept

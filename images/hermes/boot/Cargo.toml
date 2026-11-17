@@ -25,5 +25,6 @@ sha2.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+ignore.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true

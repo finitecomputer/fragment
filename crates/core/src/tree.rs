@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::codestorage::TreeEntry;
+use crate::gather::Gathered;
 
 /// A file as the index holds it: what a change is judged by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +46,7 @@ pub fn diff<'a>(prior: &'a BTreeMap<String, Indexed>, listing: &'a [TreeEntry]) 
             None => true,
         })
         .collect();
-    let listed: BTreeSet<&str> = listing.iter().map(|e| e.path.as_str()).collect();
+    let listed: BTreeSet<&str> = listing.iter().map(|e| e.path.as_str()).gathered();
     let removed: Vec<&str> = prior.keys().map(String::as_str).filter(|p| !listed.contains(p)).collect();
     assert!(upserts.len() <= listing.len(), "an upsert is a listed file");
     assert!(removed.len() <= prior.len(), "a removal is a held file");

@@ -1,6 +1,6 @@
 //! `fake-claude`: Claude Code's stream-json wire, recorded from the real
 //! `claude` and replayed, for the bridge's tests of its `claude` runtime
-//! (tests/claude.rs). Test-only: no image carries it.
+//! (tests/claude.rs), and the stub image's Claude Code.
 //!
 //! It reads what to do from `fake-claude.json` beside its own executable
 //! (each test copies it into a directory of its own, so tests in parallel
@@ -23,6 +23,19 @@
 //!   session is as Claude Code keeps one: `--session-id` of one whose
 //!   transcript is there, and `--resume` of one that is not, fail as the
 //!   real one does, and its first message makes its transcript.
+//!
+//! - `{"mode": "echo"}`: answers each message `echo: <its words>` (the stub
+//!   image's Claude Code, images/stub/Dockerfile).
+//!
+//! In record or replay mode each line it is given is appended to
+//! `heard.jsonl` beside it, as it came: what a test reads of what Claude
+//! Code was told. Every process, in any mode, first appends its arguments
+//! there (`{"args": [...]}`).
+//!
+//! `claude auth status` and `claude auth login` are as the real ones with
+//! no display: signed in, unless its config says `"signed_out": true` and
+//! no sign-in took `SIGN_IN_CODE` yet. Its config may slow them
+//! (`login_url_after_ms`, `login_exchange_ms`, `status_signed_in_ms`).
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -30,15 +43,146 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 fn main() {
-    let exe = std::env::current_exe().expect("its own path");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // as the real one says it, which an install reads (FIN-258)
+    if args == ["--version"] {
+        println!("2.1.316 (Claude Code)");
+        return;
+    }
+    // through its launcher's link, as an install lays it out (macOS's
+    // current_exe names the link itself)
+    let exe = std::env::current_exe().and_then(std::fs::canonicalize).expect("its own path");
     let dir = exe.parent().expect("a directory").to_path_buf();
     let cfg: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("fake-claude.json")).expect("fake-claude.json beside it")).expect("JSON");
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // signing in, as the real one does with no display (FIN-353): signed
+    // out only when its config says so (`signed_out`), until a sign-in
+    if args.first().map(String::as_str) == Some("auth") {
+        let creds = PathBuf::from(std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_else(|_| ".claude".into())).join(".credentials.json");
+        let signed_in = cfg["signed_out"] != true || creds.is_file();
+        match args.get(1).map(String::as_str) {
+            Some("status") => {
+                if signed_in {
+                    pause(&cfg, "status_signed_in_ms");
+                }
+                println!("{}", serde_json::json!({ "loggedIn": signed_in, "authMethod": if signed_in { "claude.ai" } else { "none" } }));
+                std::process::exit(if signed_in { 0 } else { 1 });
+            }
+            Some("login") => auth_login(&cfg, &creds),
+            other => panic!("fake-claude: no auth {other:?}"),
+        }
+    }
+    // what each process was started with, for a test to read (`{"args"}`)
+    heard(&serde_json::json!({ "args": args }).to_string());
     match cfg["mode"].as_str() {
         Some("record") => record(&args, Path::new(cfg["real"].as_str().expect("real")), Path::new(cfg["out"].as_str().expect("out"))),
         Some("replay") => replay(&args, Path::new(cfg["script"].as_str().expect("script"))),
+        Some("echo") => echo(&args),
         other => panic!("fake-claude: no mode {other:?}"),
     }
+}
+
+/// A pause its config asks for (`key`, in milliseconds): a slow step of the
+/// real one's, for the bridge's tests to cut it in.
+fn pause(cfg: &serde_json::Value, key: &str) {
+    if let Some(ms) = cfg[key].as_u64() {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// The code its sign-in takes (the stub image's, and the tests'): any other
+/// is invalid, as a mistyped one is.
+pub const SIGN_IN_CODE: &str = "the-right-code";
+
+/// `claude auth login` as the real one runs with no display: it says its
+/// URL and waits for a pasted code (no newline after its prompt), takes
+/// `SIGN_IN_CODE` (its credentials written, then it exits), and says any
+/// other is invalid and asks again. Its URL comes in two writes, apart, as
+/// a pipe may deliver it. Its input closed, it waits on (only a kill ends
+/// it: the bridge's tests see that it was killed). Slow where its config
+/// says (`pause`): before its URL, and in a code's exchange. Each code it
+/// reads, it marks (`login-took-a-code` beside it; never the code).
+fn auth_login(cfg: &serde_json::Value, creds: &Path) -> ! {
+    let mut stdout = std::io::stdout();
+    let prompt = |out: &mut std::io::Stdout| {
+        write!(out, "Paste code here if prompted > ").expect("written");
+        out.flush().expect("flushed");
+    };
+    pause(cfg, "login_url_after_ms");
+    writeln!(stdout, "Opening browser to sign in…").expect("written");
+    write!(stdout, "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=fa").expect("written");
+    stdout.flush().expect("flushed");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    writeln!(stdout, "ke&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=fake").expect("written");
+    prompt(&mut stdout);
+    // bounded by its input: one code per pass
+    for line in std::io::stdin().lock().lines() {
+        let Ok(code) = line else { break };
+        let exe = std::env::current_exe().and_then(std::fs::canonicalize).expect("its own path");
+        std::fs::write(exe.with_file_name("login-took-a-code"), b"").expect("its mark");
+        if code.trim() == SIGN_IN_CODE {
+            pause(cfg, "login_exchange_ms");
+            std::fs::create_dir_all(creds.parent().expect("a config dir")).expect("its config dir");
+            std::fs::write(creds, b"{}").expect("its credentials");
+            writeln!(stdout, "\nLogin successful.").expect("written");
+            std::process::exit(0);
+        }
+        writeln!(stdout, "Invalid code. Please make sure the full code was copied.").expect("written");
+        prompt(&mut stdout);
+    }
+    loop {
+        std::thread::park();
+    }
+}
+
+/// A scripted Claude Code (the stub image's: images/stub/Dockerfile): each
+/// message answered `echo: <its words>` on Claude Code's own stream-json
+/// wire, its session's transcript kept as the real one keeps it (so a
+/// later process resumes it), an interrupt answered.
+fn echo(args: &[String]) {
+    let id = flag(args, "--session-id").or_else(|| flag(args, "--resume")).unwrap_or("echo").to_string();
+    let config = PathBuf::from(std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_else(|_| ".claude".into()));
+    let cwd = std::env::current_dir().expect("a working directory");
+    let project: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let transcript = config.join("projects").join(project).join(format!("{id}.jsonl"));
+    let mut stdout = std::io::stdout();
+    let mut inited = false;
+    // bounded by its input: one line per pass
+    for line in std::io::stdin().lock().lines() {
+        let Ok(line) = line else { return };
+        let got: serde_json::Value = serde_json::from_str(&line).unwrap_or(serde_json::Value::Null);
+        let out = match got["type"].as_str() {
+            Some("user") => {
+                if !transcript.is_file() {
+                    let _ = std::fs::create_dir_all(transcript.parent().expect("a project"));
+                    let _ = std::fs::write(&transcript, b"");
+                }
+                let content = &got["message"]["content"];
+                let said = content.as_str().map(str::to_string).unwrap_or_else(|| content.as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join(" "));
+                let text = format!("echo: {said}");
+                let mut out = Vec::new();
+                if !inited {
+                    inited = true;
+                    out.push(serde_json::json!({ "type": "system", "subtype": "init", "session_id": id }));
+                }
+                out.push(serde_json::json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] }, "parent_tool_use_id": null }));
+                out.push(serde_json::json!({ "type": "result", "subtype": "success", "is_error": false, "result": text }));
+                out
+            }
+            Some("control_request") => vec![serde_json::json!({ "type": "control_response", "response": { "subtype": "success", "request_id": got["request_id"], "response": {} } })],
+            _ => Vec::new(),
+        };
+        for v in out {
+            writeln!(stdout, "{v}").expect("written");
+        }
+        stdout.flush().expect("flushed");
+    }
+}
+
+/// A line it was given, appended to `heard.jsonl` beside it.
+fn heard(line: &str) {
+    let path = std::env::current_exe().expect("its own path").with_file_name("heard.jsonl");
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).expect("heard.jsonl");
+    writeln!(f, "{line}").expect("written");
 }
 
 /// The next `<n>.jsonl` in `dir` no process has taken (made empty, so the
@@ -56,8 +200,9 @@ fn next_file(dir: &Path, taken: &str) -> (usize, PathBuf) {
 }
 
 fn record(args: &[String], real: &Path, out: &Path) {
-    // recording spends its user's own plan: Haiku 5.5 alone (Paul, 2026-10-30)
-    assert_eq!(flag(args, "--model"), Some("claude-haiku-5-5"), "fake-claude records only with --model claude-haiku-5-5");
+    // recording spends its user's own plan: Haiku 5.5 alone (Paul,
+    // 2026-10-30), by its name or Claude Code's alias for the latest Haiku
+    assert!(matches!(flag(args, "--model"), Some("claude-haiku-5-5" | "haiku")), "fake-claude records only with --model claude-haiku-5-5 or haiku: {args:?}");
     let (_, path) = next_file(out, "recorded");
     let log = Arc::new(Mutex::new(std::fs::File::create(&path).expect("its recording")));
     let put = |log: &Arc<Mutex<std::fs::File>>, v: serde_json::Value| {
@@ -96,6 +241,7 @@ fn record(args: &[String], real: &Path, out: &Path) {
     let input = std::thread::spawn(move || {
         // bounded by its input: ends when the bridge closes it
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            heard(&line);
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
                 put(&log_in, serde_json::json!({ "in": scrub(v) }));
             }
@@ -126,7 +272,11 @@ fn record(args: &[String], real: &Path, out: &Path) {
 }
 
 /// A recorded line, without the machine it was recorded on: its init's
-/// directories and sockets dropped, and its home directory `~` elsewhere.
+/// directories and sockets dropped; a tool input's streamed pieces emptied
+/// (the bridge reads the whole input from its `assistant` line, and a piece
+/// can split a path past scrubbing); its working directory (where its tools
+/// ran) the image's, `/data/work/<agent>`; its home directory `~`; and its
+/// user's name, as a word (a listing's owner), `user`.
 fn scrub(mut v: serde_json::Value) -> serde_json::Value {
     if v["type"] == "system" && v["subtype"] == "init" {
         if let Some(o) = v.as_object_mut() {
@@ -135,10 +285,40 @@ fn scrub(mut v: serde_json::Value) -> serde_json::Value {
             }
         }
     }
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() => serde_json::from_str(&v.to_string().replace(&home, "~")).unwrap_or(v),
-        _ => v,
+    if v["type"] == "stream_event" && v["event"]["delta"]["type"] == "input_json_delta" {
+        v["event"]["delta"]["partial_json"] = serde_json::Value::String(String::new());
     }
+    let mut text = v.to_string();
+    if let Ok(cwd) = std::env::current_dir() {
+        let name = cwd.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        text = text.replace(&cwd.to_string_lossy().to_string(), &format!("/data/work/{name}"));
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() {
+        text = text.replace(&home, "~");
+    }
+    let user = std::path::Path::new(&home).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    if user.len() >= 3 {
+        text = whole_word(&text, &user, "user");
+    }
+    serde_json::from_str(&text).unwrap_or(v)
+}
+
+/// `text` with each `word` that stands alone (no letter, digit, `_` or `-`
+/// either side) as `with`.
+fn whole_word(text: &str, word: &str, with: &str) -> String {
+    let part = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-');
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    // bounded by `text`: each pass moves past one match
+    while let Some(i) = rest.find(word) {
+        let (before, after) = (rest[..i].chars().next_back(), rest[i + word.len()..].chars().next());
+        out.push_str(&rest[..i]);
+        out.push_str(if part(before) || part(after) { word } else { with });
+        rest = &rest[i + word.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The value of `--<flag>` among `args`.
@@ -188,6 +368,7 @@ fn replay(args: &[String], script: &Path) {
     for l in &lines {
         if let Some(expected) = l.get("in") {
             let Some(Ok(line)) = input.next() else { std::process::exit(0) };
+            heard(&line);
             let got: serde_json::Value = serde_json::from_str(&line).unwrap_or(serde_json::Value::Null);
             if kind(&got) != kind(expected) {
                 eprintln!("fake-claude: recording {n} expected `{}`, got `{}`", kind(expected), kind(&got));

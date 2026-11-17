@@ -4,15 +4,24 @@
 //! real service does not have (they are methods, never production routes):
 //! code.storage, Workers AI (the model route's lower rung, text and
 //! images), Email Sending (the platform's mail), a web push service, WorkOS
-//! (AuthKit and Pipes), OpenRouter (an own key's sign-in and its models),
-//! and the provider APIs a computer's swap sends to.
+//! (AuthKit and Pipes), an OpenID Connect provider (sign-in on self-host),
+//! OpenRouter (an own key's sign-in and its models), the platform's search
+//! write API (until the cell serves it), the
+//! finite.computer mover (a client the platform is called by), and the
+//! provider APIs a computer's swap sends to.
 
 pub mod codestorage;
 pub mod http;
 pub mod mail;
+pub mod mover;
+pub mod observability;
+pub mod oidc;
+pub mod old_home;
 pub mod openrouter;
 pub mod push;
+pub mod search;
 pub mod stripe;
+pub mod telegram;
 pub mod upstream;
 pub mod workers_ai;
 pub mod workos;

@@ -1,5 +1,6 @@
 // The operators' admin page (docs/billing.md, "The operator's admin";
-// decision 59): people, orgs, trial codes, billing's health and the log
+// decision 59): a glance at who joined and what runs, people, orgs, trial
+// codes, billing's health and the log
 // of what operators did, through `/api/admin/*` with the operator's own
 // platform session (`x-fragment-shell`, same-origin only). The page is
 // served to an operator's session alone (anyone else gets the 404 of a
@@ -203,6 +204,51 @@ async function trials() {
   say(`${v.codes.length} codes`);
 }
 
+// ---- the glance: who joined, from the registry; what runs, from the
+// deployment's logs (`GET /api/admin/glance`). Read afresh each minute
+// while it is shown, never cached (Paul, 2026-11-04).
+const GLANCE_EVERY_MS = 60_000;
+const TROUBLE = { wont_wake: "won't wake", saves_failing: "a save failed", disk_filling: "disk nearly full" };
+let glanceTimer = null;
+
+function tile(label, big, small) {
+  const t = el("div", undefined, "tile");
+  t.append(el("div", label, "label"), el("div", String(big), "big"), el("div", small, "small"));
+  return t;
+}
+
+// a person in the glance opens their page, as the People tab does
+function openFromGlance(npub) {
+  return guard(async () => {
+    await show("people");
+    await openPerson(npub);
+  });
+}
+
+async function glance() {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const [v, h] = await Promise.all([api("GET", `/api/admin/glance?dayStart=${midnight.getTime()}`), api("GET", "/api/admin/health")]);
+  const logs = v.logs;
+  const read = logs.state === "read";
+  $("tiles").replaceChildren(
+    tile("Signups today", v.signups.today, `${v.signups.hour} in the last hour · ${v.signups.week} this week · ${v.signups.total} in all`),
+    tile("Computers awake now", read ? logs.computersAwakeNow : "–", read ? `${logs.computersAwakeToday} today · ${logs.computersAwakeWeek} this week` : "from the logs"),
+    tile("Fragments awake now", read ? logs.fragmentsAwakeNow : "–", read ? `${logs.fragmentsAwakeToday} today` : "from the logs"),
+    tile("Seats paid", h.seatsPaid, `${h.seatsComped} comped · ${h.orgsPaying} orgs paying`),
+    tile("Signed in, last 24 hours", v.signedIn.day, `${v.signedIn.week} in the last 7 days`),
+  );
+  $("glance-logs").textContent =
+    logs.state === "notConfigured" ? "Computers and fragments come from the deployment's logs, which aren't configured here (observability_read)." : logs.state === "failed" ? `The logs couldn't be read: ${logs.why}` : "";
+  const trouble = read ? logs.trouble : [];
+  $("trouble-head").hidden = $("trouble").hidden = trouble.length === 0;
+  $("trouble-rows").replaceChildren(...trouble.map((t) => row([t.email || t.npub || "no one's", el("code", t.computer), TROUBLE[t.kind] || t.kind, String(t.lines)], t.npub ? openFromGlance(t.npub) : undefined)));
+  const up = (p) => (p.computerUp == null ? "–" : p.computerUp ? "yes" : "not yet");
+  $("new-rows").replaceChildren(...v.newPeople.map((p) => row([p.email || p.npub, when(p.joinedAt), seatText(p.seat) || "none", p.agentAt ? when(p.agentAt) : "none", up(p)], openFromGlance(p.npub))));
+  $("glance-at").textContent = `Updated ${new Date(v.at).toLocaleTimeString()}; again each minute.`;
+  say("");
+}
+
 // ---- health and the log
 async function health() {
   const v = await api("GET", "/api/admin/health");
@@ -236,12 +282,15 @@ async function log(more = false) {
 }
 
 // ---- tabs
-const load = { people: () => people(), orgs: () => orgs(), trials, health, log: () => log() };
+const load = { glance, people: () => people(), orgs: () => orgs(), trials, health, log: () => log() };
 
 function show(tab) {
   for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === tab);
   for (const s of document.querySelectorAll("main > section")) s.hidden = s.id !== tab;
   history.replaceState(null, "", `/admin#${tab}`);
+  // the glance reads again each minute while it is shown, and the page is seen
+  clearInterval(glanceTimer);
+  glanceTimer = tab === "glance" ? setInterval(() => document.hidden || guard(glance)(), GLANCE_EVERY_MS) : null;
   return guard(load[tab])();
 }
 
@@ -276,5 +325,5 @@ document.addEventListener("DOMContentLoaded", guard(async () => {
   $("people-more").addEventListener("click", guard(() => people(true)));
   $("orgs-more").addEventListener("click", guard(() => orgs(true)));
   $("log-more").addEventListener("click", guard(() => log(true)));
-  await show(location.hash.slice(1) in load ? location.hash.slice(1) : "people");
+  await show(location.hash.slice(1) in load ? location.hash.slice(1) : "glance");
 }));

@@ -23,6 +23,9 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# a streamed model call is read once, in the background, and its lines
+# sent to the client from there (models.rs, `complete`)
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
 url = "2.5"
 fragment-proto = { path = "../crates/proto" }
 fragment-nip98 = { path = "../crates/nip98", features = ["signer"] }

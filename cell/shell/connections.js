@@ -1,15 +1,19 @@
-// a provider's name for people: google-places is Google Places, xai xAI
-const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "OpenRouter" };
-export const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
+import { KIND } from "./frame-messages.js";
+import { icon } from "./icons.js";
+import { providerMark } from "./provider-marks.js";
+
+// A provider's name for people: the platform's (`ProviderView.name`), or
+// its id where an older release answered without one (a deploy going out,
+// rolled back): the wire adds fields, so a reader takes each as optional.
+export const providerLabel = (p) => p.name || p.provider;
 
 // Provider/account UI keeps failed removals for the current settings visit.
-export function createConnections({ api, el, section, named, seg, computer, getAgents, computerIs, visitOf, isOpen, reopenSettings }) {
+export function createConnections({ api, el, section, named, seg, computer, getAgents, computerIs, asks, isOpen, reopenSettings }) {
   // ---- connections (decisions 22, 37 and 44): every provider the platform
   // offers, one row each: what it is, its state, which of the person's agents
   // may use it (all by default; a list narrows one agent), and this month's
   // calls by each agent, with an operator key's cost. Their agents use them
   // through the computer's swap, each with a placeholder of its own.
-  const PROVIDER_KIND = { connection: "Your account", operator: "The platform's key", own: "Your key" };
   const PROVIDER_STATE = {
     connected: "Connected",
     needs_reauthorization: "Needs reauthorization",
@@ -26,11 +30,19 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     "gmail.modify": "Gmail (manage)",
     "gmail.send": "Gmail (send)",
     drive: "Drive",
+    "drive.readonly": "Drive (read)",
     spreadsheets: "Sheets",
+    "spreadsheets.readonly": "Sheets (read)",
     documents: "Docs",
+    "documents.readonly": "Docs (read)",
     calendar: "Calendar",
+    "calendar.readonly": "Calendar (read)",
     "contacts.readonly": "Contacts",
   };
+  // what a connection's account lets its agents do, picked as the person
+  // connects it (`access`): its name for people, on a button and as said
+  const ACCESS = { read: "read only", write: "read and write" };
+  const ACCESS_NAME = { read: "Read only", write: "Read and write" };
   const scopeName = (scope) => {
     const last = scope.split("/").pop();
     return SCOPE_NAMES[last] ?? last;
@@ -70,6 +82,42 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     };
     return go;
   }
+  // The accesses a connection offers (`accesses`): read only and read and
+  // write, or, where its provider has no read-only scope, read and write
+  // alone, the account's own permissions its limit.
+  const offered = (p) => p.accesses ?? ["read", "write"];
+  // an account's access to connect it again with: its own, else the one
+  // its row offers, else read only (the lesser)
+  const accessFor = (p, access) => access ?? (offered(p).length === 1 ? offered(p)[0] : "read");
+  // A connect for each access the person may pick, read only and read and
+  // write (the platform never picks for them): `verb` and the access in
+  // words, each its own press (its window opened by that press); of a row
+  // that offers one, one press, `verb` alone. `body` as `connectButton`'s;
+  // each button's `data-access` is its access.
+  function accessButtons(p, verb, said, body = {}, action = "connect") {
+    const accesses = offered(p);
+    return accesses.map((access) => {
+      const go = connectButton(p, accesses.length > 1 ? `${verb} ${ACCESS[access]}` : verb, said, { ...body, access });
+      go.dataset.action = action;
+      go.dataset.access = access;
+      return go;
+    });
+  }
+  // What a connected account lets its agents do, said beside its state.
+  const accessSaid = (access) => {
+    const said = el("span", "provider-access", ACCESS_NAME[access]);
+    said.dataset.access = access;
+    return said;
+  };
+  // A read-only account's Allow changes: a reconnect asking for read and
+  // write (of several, that account). Going back to read only is a
+  // disconnect and a connect: a provider may keep what it granted before.
+  function allowChanges(p, said, body = {}) {
+    const go = connectButton(p, "Allow changes", said, { ...body, access: "write" });
+    go.dataset.action = "allow-changes";
+    return go;
+  }
+  const readOnlyHow = () => el("span", "muted provider-detail provider-access-how", "To make it read only again, disconnect it, then connect it read only.");
   // The own keys whose last Disconnect or Remove did not go through, each
   // with the visit of settings it was pressed in: said in their row by
   // whichever load of settings renders in that visit, while the row still
@@ -95,7 +143,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
         off.disabled = false;
         return;
       }
-      const name = providerName(p.provider);
+      const name = providerLabel(p);
       await reopenSettings(revoked ? null : [`${name} is disconnected`, `Your agents can no longer use it. ${name} may still list this platform's access to your account: remove it in your ${name} account's security settings.`]).catch(() => {});
     };
     return off;
@@ -103,7 +151,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
   // What the person left unticked when they connected an account, in words.
   const notAllowed = (missing) => el("span", "provider-detail provider-missing", `Not allowed: ${[...new Set(missing.map(scopeName))].join(", ")}`);
   // An account of several, for people: its label, or the provider's name.
-  const accountLabel = (p, a) => a.account ?? `A ${providerName(p.provider)} account`;
+  const accountLabel = (p, a) => a.account ?? `A ${providerLabel(p)} account`;
   // A connection that takes several accounts: each of the person's, oldest
   // first, with its label and state, what it was not allowed with a
   // Reconnect to add (that account), and its own Disconnect. One whose
@@ -119,6 +167,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       const who = el("div", "provider-identity");
       const stateName = a.disconnecting ? "Disconnecting didn't finish" : PROVIDER_STATE[a.state] ?? a.state;
       who.append(el("span", "provider-account", accountLabel(p, a)), el("span", `provider-state ${a.disconnecting ? "disconnecting" : a.state}`, stateName));
+      if (!a.disconnecting && a.access) who.append(accessSaid(a.access));
       const actions = el("div", "settings-actions");
       const said = el("span", "muted provider-detail provider-said");
       const details = [];
@@ -131,13 +180,16 @@ export function createConnections({ api, el, section, named, seg, computer, getA
         list.append(item);
         continue;
       }
-      if (a.state !== "connected") actions.append(connectButton(p, "Connect again", said, { account: a.id }));
+      // connected again as it was, or, its access unknown, as the person picks
+      if (a.state !== "connected") actions.append(...(a.access ? [connectButton(p, "Connect again", said, { account: a.id, access: a.access })] : accessButtons(p, "Connect again", said, { account: a.id })));
       if (a.state === "connected" && a.missing?.length) {
-        const again = connectButton(p, "Reconnect to add", said, { account: a.id });
+        const again = connectButton(p, "Reconnect to add", said, { account: a.id, access: accessFor(p, a.access) });
         again.dataset.action = "reconnect";
         actions.append(again);
         details.push(notAllowed(a.missing));
       }
+      if (a.state === "connected" && a.access === "read") actions.append(allowChanges(p, said, { account: a.id }));
+      if (a.state === "connected" && a.access === "write") details.push(readOnlyHow());
       actions.append(disconnectButton(p, said, a));
       head.append(who, actions);
       item.append(head, ...details, said);
@@ -153,7 +205,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
   function accountPick(p, a, theirs) {
     const pick = el("select", "provider-account-pick");
     pick.dataset.agent = a.fragment;
-    named(pick, a.fragment, (t) => `${t}'s ${providerName(p.provider)} account`, "aria-label");
+    named(pick, a.fragment, (t) => `${t}'s ${providerLabel(p)} account`, "aria-label");
     const option = (value, text) => {
       const o = el("option", "", text);
       o.value = value;
@@ -166,7 +218,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     if (mine && !theirs.some((c) => c.id === mine)) option(mine, "An account no longer connected (the default is used)");
     pick.value = mine ?? "";
     pick.onchange = async () => {
-      const visit = visitOf();
+      const visit = asks.now("settings");
       pick.disabled = true;
       // Default is no pick: the agent follows it
       const account = pick.value || null;
@@ -176,10 +228,36 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       } catch (e) {
         refused = e;
       }
-      await reopenSettings(refused && visit === visitOf() ? ["That was not changed", refused.message] : null);
+      await reopenSettings(refused && asks.current(visit) ? ["That was not changed", refused.message] : null);
     };
     return pick;
   }
+  // ---- the section (Skyler's design, 2026-11-04): a card per provider, in
+  // two groups (the person's own accounts and keys; the platform's keys,
+  // included with their seat), each opening its sheet: its state and what
+  // changes it, which agents may use it, and its details. A press reloads
+  // settings, and the sheet open in this visit is shown again (`openSheet`),
+  // but after a Disconnect or Remove, whose notice is the page's.
+  let openSheet = null;
+  // a sheet is Settings': leaving them (for a chat, Apps or History) closes it
+  const settingsPage = document.getElementById("settings-page");
+  new MutationObserver(() => {
+    if (settingsPage.hidden) for (const d of settingsPage.querySelectorAll("dialog.provider-sheet[open]")) d.close();
+  }).observe(settingsPage, { attributes: true, attributeFilter: ["hidden"] });
+  // "2026-11" as people say it: November
+  const monthName = (month) => {
+    const [y, m] = (month ?? "").split("-").map(Number);
+    return y && m ? new Date(Date.UTC(y, m - 1, 1)).toLocaleString(undefined, { month: "long", timeZone: "UTC" }) : "this month";
+  };
+  const callsSaid = (n) => `${n} ${n === 1 ? "call" : "calls"}`;
+  // what a call is charged (an operator key's `charged`, as the ledger charges it)
+  const perCall = (c) => (c ? money(Math.ceil(c.micros / c.per)) : null);
+  // its light: on while their agents may use it; amber while it waits on the
+  // person (connect again, or something they did not allow)
+  const lightOf = (p) => {
+    if (p.state === "needs_reauthorization" || (p.state === "connected" && p.missing?.length)) return "warn";
+    return ["connected", "set", "offered"].includes(p.state) ? "on" : "";
+  };
   function connectionsSection(linked, uses) {
     const s = section("Connections");
     s.id = "settings-connections";
@@ -188,192 +266,320 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       s.append(el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read."));
       return s;
     }
-    s.append(el("p", "muted", "Your agents use these through their computer, which adds each credential on the way out. None is ever on the computer."));
+    s.append(el("p", "muted", "Your agents use these to act, but can't see the credentials."));
     const agents = computer()?.agents ?? [];
-    for (const p of offered) {
-      const row = el("div", "provider");
-      row.dataset.provider = p.provider;
-      row.dataset.kind = p.kind;
-      row.dataset.state = p.state;
-      const head = el("div", "provider-head");
-      const identity = el("div", "provider-identity");
-      // an own key signed in to is the person's account there, its models theirs to pick
-      const kind = p.signIn ? (p.models?.length ? "Your account: its models for your agents" : "Your account") : PROVIDER_KIND[p.kind] ?? p.kind;
-      identity.append(el("span", "provider-name", providerName(p.provider)), el("span", "provider-kind", kind));
-      const stateName = p.signIn ? (p.state === "set" ? "Connected" : "Not connected") : PROVIDER_STATE[p.state] ?? p.state;
-      const st = el("span", `provider-state ${p.state}`, stateName);
-      identity.append(st);
-      // which account a connection is: the person's sign-in here may be another
-      // (of several, each is named in its own row)
-      const several = Array.isArray(p.accounts);
-      if (p.account && !several) {
-        const account = el("span", "provider-account", p.account);
-        account.dataset.account = p.account;
-        identity.append(account);
-      }
-      head.append(identity);
-      row.append(head);
-      // the deployment's word on it (its catalog row's note), connected or not
-      if (p.note) row.append(el("span", "muted provider-detail provider-note", p.note));
-      const actions = el("div", "settings-actions");
-      const details = [];
-      // what a Connect press says: a blocked window, or a start refused; and
-      // a Disconnect or Remove that did not go through
-      const said = el("span", "muted provider-detail provider-said");
-      // Disconnect or Remove: settings then reload, and the row they show says
-      // whether the key is still there; one that failed says so in it
-      const removeKey = (button) => async () => {
-        const visit = visitOf();
-        button.disabled = true;
-        unremoved.delete(p.provider);
-        try {
-          await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
-        } catch {
-          // kept only while its visit is the one shown: an older visit's
-          // answer never replaces a newer one's
-          if (visit === visitOf() && isOpen()) unremoved.set(p.provider, visit);
-        }
-        await reopenSettings();
-      };
-      if (p.kind === "connection" && p.state !== "connected" && !(several && p.accounts.some((a) => !a.disconnecting))) {
-        actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
-        details.push(said);
-      }
-      // of several, another while the platform takes more; each account is
-      // reconnected and disconnected in its own row
-      // theirs to use: none they disconnected (which Pipes may hold still)
-      const theirs = several ? p.accounts.filter((a) => !a.disconnecting) : [];
-      if (several && theirs.length && theirs.length < (p.accountsMax ?? 1)) {
-        const add = connectButton(p, `Add another ${providerName(p.provider)} account`, said, { add: true });
-        add.dataset.action = "add-account";
-        actions.append(add);
-        details.push(said);
-      }
-      // what the person left unticked when they connected it: a reconnect
-      // asks for it again (the provider keeps what they allowed before)
-      if (!several && p.kind === "connection" && p.state === "connected" && p.missing?.length) {
-        const again = connectButton(p, "Reconnect to add", said);
-        again.dataset.action = "reconnect";
-        actions.append(again);
-        details.push(notAllowed(p.missing), said);
-      }
-      if (!several && p.kind === "connection" && p.state !== "not_connected") {
-        actions.append(disconnectButton(p, said));
-        if (!details.includes(said)) details.push(said);
-      }
-      if (p.kind === "own" && p.signIn) {
-        // connected through the provider's own page (never a key pasted here):
-        // it makes a key of the person's, which their computer keeps sealed
-        if (p.state !== "set") {
-          const go = connectButton(p, "Connect", said);
-          go.dataset.action = "sign-in";
-          actions.append(go);
-          details.push(said);
-          if (p.models?.length) details.push(el("span", "muted provider-detail", `Your ${providerName(p.provider)} account pays for its models; then pick one for an agent under Agents.`));
-        } else {
-          const off = el("button", "quiet", "Disconnect");
-          off.type = "button";
-          off.dataset.action = "disconnect";
-          off.onclick = removeKey(off);
-          const manage = el("a", "quiet", `Revoke the key at ${providerName(p.provider)}`);
-          manage.href = p.signIn.manage;
-          manage.target = "_blank";
-          manage.rel = "noopener";
-          actions.append(off, manage);
-        }
-      } else if (p.kind === "own") {
-        const form = el("form", "provider-key");
-        const input = el("input");
-        input.type = "password";
-        input.autocomplete = "off";
-        input.placeholder = p.state === "set" ? "Replace your key" : `Your ${providerName(p.provider)} key`;
-        const save = el("button", "quiet", "Save");
-        save.type = "submit";
-        form.append(input, save);
-        form.onsubmit = async (e) => {
-          e.preventDefault();
-          save.disabled = true;
-          try {
-            await api("PUT", `/api/connections/${encodeURIComponent(p.provider)}/key`, { key: input.value });
-            await reopenSettings();
-          } catch (err) {
-            save.textContent = err.message;
-            save.disabled = false;
-          }
-        };
-        actions.append(form);
-        if (p.state === "set") {
-          const remove = el("button", "quiet", "Remove");
-          remove.type = "button";
-          remove.dataset.action = "remove-key";
-          remove.onclick = removeKey(remove);
-          actions.append(remove);
-        }
-      }
-      if (p.state === "set" && unremoved.get(p.provider) === visitOf()) {
-        said.textContent = "That didn't go through. Try again.";
-        details.push(said);
-      } else unremoved.delete(p.provider);
-      if (p.kind === "operator" && p.price) {
-        details.push(el("span", "muted provider-detail", `${money(p.price.micros / p.price.per)} a call at list, metered to your credit`));
-      }
-      if (actions.childElementCount) head.append(actions);
-      row.append(...details);
-      if (several && p.accounts.length) row.append(accountsList(p));
-      // which agents may use it: all by default; one narrowed to a list uses
-      // those; of two or more accounts, or a pick saved, which each uses
-      if (agents.length) {
-        const who = el("div", "provider-agents");
-        who.append(el("span", "settings-key", "Agents"));
-        for (const a of agents) {
-          const allowed = a.connections == null || a.connections.includes(p.provider);
-          const chip = named(el("button", "chip"), a.fragment);
-          chip.type = "button";
-          chip.dataset.agent = a.fragment;
-          chip.setAttribute("aria-pressed", String(allowed));
-          named(chip, a.fragment, (t) => (allowed ? `${t} may use it: press to take it away` : `${t} may not use it: press to let it`), "title");
-          chip.onclick = async () => {
-            const visit = visitOf();
-            chip.disabled = true;
-            const all = offered.map((x) => x.provider);
-            const now = a.connections ?? all;
-            const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
-            const list = all.every((x) => next.includes(x)) ? null : next;
-            let refused = null;
-            try {
-              computerIs(await api("PUT", `/api/computers/${seg(computer().computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
-            } catch (e) {
-              refused = e;
-            }
-            // a failure is said by the reload, in the visit it was pressed in,
-            // while the agent may use it or not as before (a newer press may
-            // have changed it since)
-            const was = getAgents().get(a.identity) ?? a;
-            const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
-            await reopenSettings(refused && unchanged && visit === visitOf() ? ["That was not changed", refused.message] : null);
-          };
-          who.append(chip);
-          if (allowed && several && (theirs.length >= 2 || a.accounts?.[p.provider])) who.append(accountPick(p, a, theirs));
-        }
-        row.append(who);
-      }
-      // this month's calls through the swap, by agent, and an operator key's cost
-      const mine = (uses?.uses ?? []).filter((u) => u.provider === p.provider);
-      const used = el("div", "provider-uses");
-      used.append(el("span", "settings-key", uses?.month ? `In ${uses.month}` : "This month"));
-      if (!mine.length) used.append(el("span", "muted", "No calls yet"));
-      for (const u of mine) {
-        const calls = `${u.calls} ${u.calls === 1 ? "call" : "calls"}`;
-        const item = named(el("span", "use"), u.agent, (t) => `${t}: ${p.kind === "operator" ? `${calls}, ${money(u.micros)}` : calls}`);
-        item.dataset.use = u.agent;
-        item.dataset.calls = String(u.calls);
-        item.dataset.micros = String(u.micros);
-        used.append(item);
-      }
-      row.append(used);
-      s.append(row);
+    const month = monthName(uses?.month);
+    const groups = [
+      ["Your accounts", null, offered.filter((p) => p.kind !== "operator")],
+      ["Included with your seat", "On the platform's keys, metered to your credit.", offered.filter((p) => p.kind === "operator")],
+    ];
+    for (const [title, sub, list] of groups) {
+      if (!list.length) continue;
+      const head = el("header", "provider-group-head");
+      head.append(el("h3", null, title), ...(sub ? [el("p", null, sub)] : []));
+      const grid = el("div", "provider-grid");
+      grid.append(...list.map((p) => providerCard(p, offered, agents, uses, month)));
+      s.append(head, grid);
     }
     return s;
+  }
+  function providerCard(p, offered, agents, uses, month) {
+    const name = providerLabel(p);
+    const card = el("article", "provider");
+    card.dataset.provider = p.provider;
+    card.dataset.kind = p.kind;
+    card.dataset.state = p.state;
+    const several = Array.isArray(p.accounts);
+    // an own key signed in to is the person's account there
+    const kind = p.kind === "operator" ? "Included with your seat" : p.signIn || p.kind === "connection" ? "Your account" : "Your key";
+    const stateName =
+      p.kind === "operator" ? "On for your agents" : p.signIn ? (p.state === "set" ? "Connected" : "Not connected") : PROVIDER_STATE[p.state] ?? p.state;
+    const price = p.kind === "operator" ? perCall(p.charged) : null;
+    // this month's calls through the swap, by agent, and an operator key's charge
+    const mine = (uses?.uses ?? []).filter((u) => u.provider === p.provider);
+    const calls = mine.reduce((n, u) => n + u.calls, 0);
+    const micros = mine.reduce((n, u) => n + u.micros, 0);
+    const charge = p.kind === "operator" && calls ? ` · ${money(micros)}` : "";
+    // its mark (provider-marks.js), else its name's first letter
+    const tile = (big) => {
+      const mark = providerMark(p.provider);
+      const t = el("span", `provider-tile${big ? " big" : ""}`, mark ? "" : name.slice(0, 1));
+      if (mark) t.append(mark);
+      return t;
+    };
+    const light = () => {
+      const st = el("span", "provider-state");
+      st.append(el("span", `provider-light ${lightOf(p)}`));
+      return st;
+    };
+    // the card: its name, the deployment's note on it and a key's price, its
+    // light, and this month's calls; the whole card opens its sheet
+    const body = el("span", "provider-body");
+    const sub = el("span", "provider-sub");
+    if (p.note) sub.append(el("span", "provider-note", p.note));
+    if (price) sub.append(el("span", "provider-price", `${price} a call`));
+    body.append(el("span", "provider-name", name), sub);
+    const foot = el("span", "provider-foot", calls ? `${callsSaid(calls)} in ${month}${charge}` : `No calls in ${month}`);
+    const open = el("button", "provider-open");
+    open.type = "button";
+    open.dataset.action = "open";
+    open.setAttribute("aria-haspopup", "dialog");
+    open.setAttribute("aria-label", `${name}: ${stateName}`);
+    // the sheet
+    const sheet = el("dialog", "provider-sheet");
+    sheet.setAttribute("aria-label", name);
+    // focused itself as it opens (`show`), not its X, whose ring and tooltip
+    // would show: Chrome's dialog focusing skips a dialog's own autofocus
+    sheet.tabIndex = -1;
+    const show = () => {
+      sheet.showModal();
+      sheet.focus();
+    };
+    const top = el("div", "provider-sheet-head");
+    const titled = el("div");
+    titled.append(el("h3", null, name), el("p", "provider-kind", kind));
+    const close = el("button", "icon-button provider-close");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close");
+    close.append(icon("x"));
+    close.onclick = () => sheet.close();
+    top.append(tile(true), titled, close);
+    const inner = el("div", "provider-sheet-body");
+    if (p.note) inner.append(el("p", "provider-about", p.note));
+    // what a connection's account allows, in words
+    const granted = !several && p.kind === "connection" && p.state === "connected" ? p.granted ?? [] : [];
+    // (never its sign-in's: openid, email, profile)
+    const scopes = [...new Set(granted.map(scopeName))].filter((g) => !/^(openid|email|profile|userinfo\.\w+)$/.test(g));
+    if (scopes.length) {
+      const chips = el("div", "provider-chips");
+      chips.append(...scopes.map((g) => el("span", null, g)));
+      inner.append(chips);
+    }
+    // its state, with what changes it
+    const status = el("div", "provider-status");
+    const words = el("span", "provider-status-text");
+    words.append(el("span", "provider-state-name", stateName));
+    if (p.account && !several) {
+      const account = el("span", "provider-account", p.account);
+      account.dataset.account = p.account;
+      words.append(account);
+    }
+    if (!several && p.kind === "connection" && p.state === "connected" && p.access) words.append(accessSaid(p.access));
+    const actions = el("div", "settings-actions");
+    status.append(light(), words, actions);
+    const details = [];
+    // what a Connect press says: a blocked window, or a start refused; and
+    // a Disconnect or Remove that did not go through
+    const said = el("span", "muted provider-detail provider-said");
+    // Disconnect or Remove: settings then reload, and the row they show says
+    // whether the key is still there; one that failed says so in it
+    const removeKey = (button) => async () => {
+      const visit = asks.now("settings");
+      button.disabled = true;
+      unremoved.delete(p.provider);
+      openSheet = null;
+      try {
+        await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
+      } catch {
+        // kept only while its visit is the one shown: an older visit's
+        // answer never replaces a newer one's
+        if (asks.current(visit) && isOpen()) {
+          unremoved.set(p.provider, visit);
+          openSheet = { provider: p.provider, visit };
+        }
+      }
+      await reopenSettings();
+    };
+    // Connect, read only or read and write, as the person picks; connected
+    // again as it was where its access is known
+    if (p.kind === "connection" && p.state !== "connected" && !(several && p.accounts.some((a) => !a.disconnecting))) {
+      const again = p.state === "needs_reauthorization";
+      actions.append(...(again && p.access ? [connectButton(p, "Connect again", said, { access: p.access })] : accessButtons(p, again ? "Connect again" : "Connect", said)));
+      details.push(said);
+    }
+    // of several, another while the platform takes more; each account is
+    // reconnected and disconnected in its own row
+    // theirs to use: none they disconnected (which Pipes may hold still)
+    const theirs = several ? p.accounts.filter((a) => !a.disconnecting) : [];
+    if (several && theirs.length && theirs.length < (p.accountsMax ?? 1)) {
+      actions.append(...accessButtons(p, `Add another ${name} account`, said, { add: true }, "add-account"));
+      details.push(said);
+    }
+    // what the person left unticked when they connected it: a reconnect
+    // asks for it again (the provider keeps what they allowed before)
+    if (!several && p.kind === "connection" && p.state === "connected" && p.missing?.length) {
+      const again = connectButton(p, "Reconnect to add", said, { access: accessFor(p, p.access) });
+      again.dataset.action = "reconnect";
+      actions.append(again);
+      details.push(notAllowed(p.missing), said);
+    }
+    // read only: Allow changes; read and write: how to go back
+    if (!several && p.kind === "connection" && p.state === "connected" && p.access === "read") {
+      actions.append(allowChanges(p, said));
+      if (!details.includes(said)) details.push(said);
+    }
+    if (!several && p.kind === "connection" && p.state === "connected" && p.access === "write") details.push(readOnlyHow());
+    if (!several && p.kind === "connection" && p.state !== "not_connected") {
+      const off = disconnectButton(p, said);
+      const press = off.onclick;
+      off.onclick = () => {
+        openSheet = null;
+        return press();
+      };
+      actions.append(off);
+      if (!details.includes(said)) details.push(said);
+    }
+    if (p.kind === "own" && p.signIn) {
+      // connected through the provider's own page (never a key pasted here):
+      // it makes a key of the person's, which their computer keeps sealed
+      if (p.state !== "set") {
+        const go = connectButton(p, "Connect", said);
+        go.dataset.action = "sign-in";
+        actions.append(go);
+        details.push(said);
+        if (p.models?.length) details.push(el("span", "muted provider-detail", `Your ${name} account pays for its models; then pick one for an agent under Agents.`));
+      } else {
+        const off = el("button", "quiet", "Disconnect");
+        off.type = "button";
+        off.dataset.action = "disconnect";
+        off.onclick = removeKey(off);
+        const manage = el("a", "provider-manage", `Revoke the key at ${name}`);
+        manage.href = p.signIn.manage;
+        manage.target = "_blank";
+        manage.rel = "noopener";
+        actions.append(off);
+        details.push(manage);
+      }
+    } else if (p.kind === "own") {
+      const form = el("form", "provider-key");
+      const input = el("input");
+      input.type = "password";
+      input.autocomplete = "off";
+      input.placeholder = p.state === "set" ? "Replace your key" : `Your ${name} key`;
+      input.setAttribute("aria-label", `Your ${name} key`);
+      const save = el("button", "quiet", "Save");
+      save.type = "submit";
+      form.append(input, save);
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        save.disabled = true;
+        try {
+          await api("PUT", `/api/connections/${encodeURIComponent(p.provider)}/key`, { key: input.value });
+          await reopenSettings();
+        } catch (err) {
+          save.textContent = err.message;
+          save.disabled = false;
+        }
+      };
+      details.unshift(form);
+      if (p.state === "set") {
+        const remove = el("button", "quiet", "Remove");
+        remove.type = "button";
+        remove.dataset.action = "remove-key";
+        remove.onclick = removeKey(remove);
+        actions.append(remove);
+      }
+    }
+    if (p.state === "set" && asks.current(unremoved.get(p.provider))) {
+      said.textContent = "That didn't go through. Try again.";
+      details.push(said);
+    } else unremoved.delete(p.provider);
+    inner.append(status);
+    const more = el("div", "provider-details");
+    more.append(...new Set(details));
+    if (more.childElementCount) inner.append(more);
+    if (several && p.accounts.length) inner.append(accountsList(p));
+    // which agents may use it: all by default; one narrowed to a list uses
+    // those; of two or more accounts, or a pick saved, which each uses
+    if (agents.length) {
+      const who = el("div", "provider-block provider-agents");
+      if (!lightOf(p)) who.classList.add("dim");
+      who.append(el("h4", null, "Which agents may use it"));
+      for (const a of agents) {
+        const allowed = a.connections == null || a.connections.includes(p.provider);
+        const line = el("div", "provider-agent");
+        const face = el("span", "settings-agent-name");
+        face.dataset.agentFace = a.fragment;
+        const used = mine.find((u) => u.agent === a.fragment);
+        const use = el("span", "use", used ? (p.kind === "operator" ? `${callsSaid(used.calls)}, ${money(used.micros)}` : callsSaid(used.calls)) : "No calls");
+        if (used) {
+          use.dataset.use = used.agent;
+          use.dataset.calls = String(used.calls);
+          use.dataset.micros = String(used.micros);
+        }
+        const flip = el("button", "provider-switch");
+        flip.type = "button";
+        flip.dataset.agent = a.fragment;
+        flip.setAttribute("aria-pressed", String(allowed));
+        named(flip, a.fragment, (t) => `${t} may use ${name}`, "aria-label");
+        flip.onclick = async () => {
+          const visit = asks.now("settings");
+          flip.disabled = true;
+          openSheet = { provider: p.provider, visit };
+          const all = offered.map((x) => x.provider);
+          const now = a.connections ?? all;
+          const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
+          const list = all.every((x) => next.includes(x)) ? null : next;
+          let refused = null;
+          try {
+            computerIs(await api("PUT", `/api/computers/${seg(computer().computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
+          } catch (e) {
+            refused = e;
+          }
+          // a failure is said by the reload, in the visit it was pressed in,
+          // while the agent may use it or not as before (a newer press may
+          // have changed it since)
+          const was = getAgents().get(a.identity) ?? a;
+          const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
+          const failed = refused && unchanged && asks.current(visit);
+          // said over settings, the sheet closed so it is seen
+          if (failed) openSheet = null;
+          await reopenSettings(failed ? ["That was not changed", refused.message] : null);
+        };
+        line.append(face, use, flip);
+        who.append(line);
+        if (allowed && several && (theirs.length >= 2 || a.accounts?.[p.provider])) who.append(accountPick(p, a, theirs));
+      }
+      inner.append(who);
+    }
+    // its details: this month's use, what a call is charged, where it
+    // reaches, the variable an agent names it by, and an own key's models
+    const facts = el("dl", "provider-facts");
+    const fact = (term, ...value) => {
+      const dd = el("dd");
+      dd.append(...value);
+      facts.append(el("dt", null, term), dd);
+    };
+    const codes = (list) => list.flatMap((x, i) => [...(i ? [", "] : []), el("code", null, x)]);
+    fact(`In ${month}`, calls ? `${callsSaid(calls)}${p.kind === "operator" ? `, ${money(micros)} charged to your credit` : ""}` : "No calls yet");
+    if (price) fact("Price", `${price} a call, metered to your credit`);
+    if (p.models?.length) fact("Models", ...p.models.map((m) => el("span", "provider-model", m.name)));
+    if (p.hosts?.length) fact("Reaches", ...codes(p.hosts));
+    if (p.env?.length) fact("Variable", ...codes(p.env.map((v) => `$${v}`)));
+    const block = el("div", "provider-block");
+    block.append(el("h4", null, "Details"), facts);
+    inner.append(block);
+    sheet.append(top, inner);
+    // closed by its X, Escape or a press outside it (its backdrop)
+    sheet.onclick = (e) => {
+      if (e.target === sheet) sheet.close();
+    };
+    sheet.addEventListener("close", () => {
+      // (not one a reload took away: its replacement is shown)
+      if (openSheet?.provider === p.provider && sheet.isConnected) openSheet = null;
+    });
+    open.onclick = () => {
+      openSheet = { provider: p.provider, visit: asks.now("settings") };
+      show();
+    };
+    // the sheet open before this reload, shown again once the page has it
+    if (openSheet?.provider === p.provider && asks.current(openSheet.visit)) {
+      queueMicrotask(() => {
+        if (sheet.isConnected && !sheet.open) show();
+      });
+    }
+    card.append(tile(false), body, light(), foot, open, sheet);
+    return card;
   }
   return { connectionsSection };
 }
@@ -406,23 +612,34 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
   // a link's box, an unlink), each through the agent's one writer. A read is
   // let go when a write began or ended after it was asked (`homeWrites`), so
   // it never undoes one. One that fails leaves it unknown and says so in
-  // Settings, with Try again (`homeUnread`); Settings shown read it again. ----
+  // Settings, with Try again (`homeUnread`); Settings shown read it again.
+  // That line stays while a read is out (a list's refresh reads it too), so
+  // it never jumps from under a hand: an answer takes it away. Reads may
+  // overlap (Try again reads afresh): only the newest one's answer applies,
+  // success or failure (`homeReads`, each read's number), so an older one
+  // never puts back what a newer one replaced. ----
   const homes = new Map();
   const homeWrites = new Map();
-  const homeReads = new Set();
+  const homeReads = new Map();
+  let homeReadsAsked = 0;
   const homeUnread = new Set();
   const wrote = (agent) => homeWrites.set(agent, (homeWrites.get(agent) ?? 0) + 1);
-  function readHome(agent) {
-    if (homeReads.has(agent)) return;
-    homeReads.add(agent);
-    if (homeUnread.delete(agent)) paintHomes();
+  // (`afresh`: a read of its own, whatever read is out)
+  function readHome(agent, afresh = false) {
+    if (!afresh && homeReads.has(agent)) return;
+    const mine = ++homeReadsAsked;
+    homeReads.set(agent, mine);
     const asked = homeWrites.get(agent) ?? 0;
     agentJson(agent)
       .catch((e) => (e.status === 404 ? {} : null))
       .then((j) => {
+        if (homeReads.get(agent) !== mine) return;
         homeReads.delete(agent);
         if ((homeWrites.get(agent) ?? 0) !== asked) return;
-        if (j) return homeIs(agent, j.home);
+        if (j) {
+          homeUnread.delete(agent);
+          return homeIs(agent, j.home);
+        }
         homeUnread.add(agent);
         paintHomes();
       });
@@ -465,8 +682,7 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
       });
     } catch (e) {
       wrote(agent);
-      homeReads.delete(agent);
-      readHome(agent);
+      readHome(agent, true);
       throw e;
     }
     wrote(agent);
@@ -492,7 +708,8 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
     };
     const again = el("button", "quiet", "Try again");
     again.type = "button";
-    again.onclick = () => readHome(a.fragment);
+    // a read of its own, whatever read is out: that one was asked before
+    again.onclick = () => readHome(a.fragment, true);
     const unread = actionLine(el("span", "muted", "Couldn't read where it reaches you."), again);
     unread.dataset.homeUnread = a.fragment;
     homeUnreadLines.set(pick, unread);
@@ -519,24 +736,32 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
     pick.dataset.read = "1";
   }
   const paintHomes = () => document.querySelectorAll("select[data-home-for]").forEach(paintHome);
-  return { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome };
+  return { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf };
 }
 
 // The computer port UI owns its frame-message listener and origin checks.
-export function createSimplex({ api, el, section, actionLine, named, seg, computer, getSeat, titleOf, frameOf, show, paneIcon, notice, setHome }) {
+export function createSimplex({ api, el, section, actionLine, named, seg, computer, getSeat, titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome }) {
   // ---- an agent's SimpleX: its link page, a port of its computer's own
   // origin as its screen is, through a ticket (docs/bridge.md, "SimpleX"):
-  // the one-time QR code, and whom it is linked to ----
+  // the one-time QR code, and whom it is linked to. Shown in the connector
+  // setup dialog (connector-setup.js), as Telegram's setup is (FIN-393);
+  // linking again (Unlink, then Link) is how a person reconnects ----
+  const opening = new Set();
   async function openSimplex(agent) {
-    if (!computer()?.simplex || !agent) return;
+    if (!computer()?.simplex || !agent || opening.has(agent)) return;
+    opening.add(agent);
+    const pressed = pressSetup();
     try {
       const t = await api("POST", `/api/computers/${seg(computer().computer)}/ports/6080/ticket`, { path: `/simplex/?agent=${encodeURIComponent(agent)}` });
       const frame = named(frameOf(t.url, `${titleOf(agent)} on SimpleX`), agent, (n) => `${n} on SimpleX`, "aria-label");
       frame.dataset.simplex = agent;
       frame.addEventListener("load", () => nameSimplex(frame));
-      show({ key: `simplex:${agent}`, title: titleOf(agent), subtitle: "SimpleX", icon: paneIcon("link"), body: frame, persist: false });
+      // its invitation's QR code, whole, on a wide screen (connector-setup.js)
+      openSetup({ pressed, frame, agent, title: "SimpleX", tall: true, onClose: refreshSimplex });
     } catch (e) {
       notice("SimpleX did not open", e.message);
+    } finally {
+      opening.delete(agent);
     }
   }
   // Its page knows the agent by its label: told its name as it loads, and
@@ -544,11 +769,12 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
   function nameSimplex(frame) {
     const agent = frame.dataset.simplex;
     try {
-      frame.contentWindow?.postMessage({ fragment: "simplex", agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
+      frame.contentWindow?.postMessage({ fragment: KIND.simplex, agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
     } catch {}
   }
-  // The link page asks for a ticket to link or unlink its agent (`{fragment:
-  // "simplex", agent, want}`): only a pane of Settings' onto its computer's
+  // The link page asks for a ticket to link, unlink or adopt (FIN-463: keep
+  // its owner's SimpleX chat with their old agent) for its agent (`{fragment:
+  // "simplex", agent, want}`): only a frame of Settings' dialog onto its computer's
   // port, for its own agent. The platform makes it for the agent's owner
   // alone, signed (an unlink's closes the agent's door at once), and the
   // page hands it to the computer, which takes nothing else (docs/api.md,
@@ -558,16 +784,17 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
   // unlink's takes its home back to its own chat.
   const onMessage = async (e) => {
     const m = e.data;
-    if (m?.fragment !== "simplex" || !["link", "unlink"].includes(m.want) || !computer()?.simplex) return;
+    if (m?.fragment !== KIND.simplex || !["link", "unlink", "adopt"].includes(m.want) || !computer()?.simplex) return;
     const frame = [...document.querySelectorAll("iframe[data-simplex]")].find((f) => f.contentWindow === e.source);
     if (!frame || frame.dataset.simplex !== m.agent || e.origin !== new URL(frame.dataset.src).origin) return;
-    const reply = { fragment: "simplex", agent: m.agent, for: m.want };
+    const reply = { fragment: KIND.simplex, agent: m.agent, for: m.want };
     try {
       reply.ticket = await api("POST", `/api/computers/${seg(computer().computer)}/agents/${seg(m.agent)}/door`, { door: "simplex", act: m.want });
     } catch (err) {
       reply.error = err.message;
     }
-    const home = m.want === "link" ? (typeof m.home === "boolean" ? m.home : null) : false;
+    // an adoption (its chat with their old agent kept) leaves its home be
+    const home = m.want === "link" ? (typeof m.home === "boolean" ? m.home : null) : m.want === "unlink" ? false : null;
     if (reply.ticket && home !== null) {
       await setHome(m.agent, home).then(() => { reply.home = home; }, (err) => { reply.homeError = err.message; });
     }
@@ -585,7 +812,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
     fillSimplex(s);
     return s;
   }
-  const simplexKey = (c) => JSON.stringify([!!c?.simplex, !!c?.alwaysOn, (c?.agents ?? []).map((a) => a.fragment), getSeat()?.good, getSeat()?.kind, getSeat()?.sleeps]);
+  const simplexKey = (c) => JSON.stringify([!!c?.simplex, !!c?.alwaysOn, (c?.agents ?? []).map((a) => [a.fragment, simplexChatOf(a.fragment)?.name ?? null]), getSeat()?.good, getSeat()?.kind, getSeat()?.sleeps]);
   // A computer's view read again (its list's socket told of a change): the
   // section shown, changed or hidden as the view now says.
   function refreshSimplex() {
@@ -601,7 +828,14 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
     if (jump) jump.hidden = s.hidden;
     if (s.hidden) return;
     const agents = c.agents ?? [];
-    s.append(el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
+    // what it is, a word each (Paul, 2026-10-31), beside Telegram's
+    // "Less secure" (templates/telegram): not in the heading, which names
+    // its nav link
+    const tags = el("div", "connector-tags");
+    const secure = el("span", "role-tag connector-tag", "Secure");
+    secure.title = "End-to-end encrypted to your computer";
+    tags.append(el("span", "role-tag connector-tag", "Experimental"), secure);
+    s.append(tags, el("p", "muted", "Message your agents from SimpleX Chat."));
     if (!agents.length) {
       s.append(el("p", "muted", "Make an agent first."));
       return;
@@ -611,15 +845,201 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
       // checkbox) is told how to take it back; anyone else, what keeps it on
       const seat = getSeat();
       const chose = seat?.good && seat.kind === "seat_always_on" && seat.sleeps;
-      s.append(el("p", "muted", chose ? 'SimpleX needs your computer to stay on. Untick "Let my computer sleep when nothing is open" in Billing.' : "SimpleX works while your computer stays on, which the always-on plan does."));
+      s.append(el("p", "muted", chose ? 'SimpleX needs your computer to stay on. Turn off "Let my computer sleep when nothing is open" in Billing.' : "SimpleX works while your computer stays on, which the always-on plan does."));
       return;
     }
+    // Set up, and Open once it has its SimpleX chat (its computer makes
+    // one as its link is made: the list says so, never a guess)
     for (const a of agents) {
-      const open = el("button", "row", "Set up");
-      open.type = "button";
-      open.onclick = () => openSimplex(a.fragment);
-      s.append(actionLine(named(el("span"), a.fragment), open));
+      const go = el("button", "row", "Set up");
+      go.type = "button";
+      go.dataset.simplexFor = a.fragment;
+      go.onclick = () => openSimplex(a.fragment);
+      const actions = [go];
+      const chat = simplexChatOf(a.fragment);
+      if (chat) {
+        const open = el("button", "row", "Open");
+        open.type = "button";
+        open.dataset.simplexOpen = chat.name;
+        open.onclick = () => openChat(chat.name);
+        actions.unshift(open);
+      }
+      s.append(actionLine(named(el("span"), a.fragment), ...actions));
     }
   }
   return { simplexSection, refreshSimplex, nameSimplex, dispose: () => removeEventListener("message", onMessage) };
+}
+
+// Settings' Telegram (templates/telegram/README.md): each agent's Telegram
+// chat, a connector of the person's own and a hosted door (docs/api.md, "An
+// agent's doors"), for an agent whose runtime takes one (agent-runtimes.js
+// `doors`). Its row: Set up, its connector's own setup page in the connector
+// setup dialog (connector-setup.js), a connector made first and bound as
+// the agent's door when it has none; and, with one, Open, its chat.
+// Setting up again is how a person reconnects (a new token, on that page).
+// Which chat is whose is read, never assumed: each of the person's own
+// chats with reach (a door is reach: reach.rs) and each this page bound,
+// its door as its owner reads it (`GET /api/f/{name}/door`), as Settings
+// opens, as the list's chats with reach change, and again as Set up is
+// pressed, the list read anew first (another tab may have made one since,
+// which this page's list may not show yet). Its doors are the latest
+// read's, whole, or none: while that read failed (or the list was not
+// read) its rows say Try again, which reads the list again first.
+// A connector Set up makes whose binding is refused (a 4xx) is deleted
+// again; one whose binding's answer was lost is read: bound to its agent,
+// it is set up; bound to another meanwhile (its owner, elsewhere), kept as
+// theirs; not bound, deleted; unreadable, kept (its row finds it once its
+// door reads). So a press never deletes one it could not account for.
+export function createTelegram({ api, el, section, actionLine, named, seg, computer, fragments, listed, own, connectorLabel, markOffer, framed, pressSetup, openSetup, openChat, notice, load }) {
+  const DOOR = "telegram";
+  const TITLE = "Telegram";
+  const SETUP = "/setup.html";
+  // each read connector's door by its name ({door, agent}, or null), as the
+  // latest read says; null while it has not answered whole
+  let doors = null;
+  let reads = 0;
+  const bound = new Set();
+  // the chats with reach the last read asked about
+  let asked = "";
+  // the agents whose Set up is under way
+  const making = new Set();
+  const agentsNow = () => computer()?.agents ?? [];
+  const reaching = () => [...new Set([...fragments().filter((f) => own(f) && f.kind === "chat" && f.sharing?.reach === true).map((f) => f.name), ...bound])].sort();
+  // Its doors read now; whether that read answered whole (and is the latest).
+  async function readTelegram() {
+    const mine = ++reads;
+    // a list not read is no word that no chat is a connector
+    if (!listed()) {
+      doors = null;
+      return false;
+    }
+    const names = reaching();
+    asked = JSON.stringify(names);
+    // a connector deleted since binds nothing
+    const answers = await Promise.all(names.map((name) => api("GET", `/api/f/${seg(name)}/door`).then((r) => [name, r.bound ?? null], (e) => [name, e.status === 404 ? null : undefined])));
+    if (mine !== reads) return false;
+    const whole = answers.every(([, b]) => b !== undefined);
+    doors = whole ? new Map(answers) : null;
+    return whole;
+  }
+  // the connector bound as `agent`'s Telegram door, if any
+  const boundOf = (agent) => [...(doors ?? [])].find(([, b]) => b?.door === DOOR && b.agent === agent)?.[0] ?? null;
+  // its setup page, offering the bot token its owner's Vault holds for
+  // `agent` (a bot moved from finite.computer, FIN-463 F11): a secret bound
+  // to it toward api.telegram.org alone. A Vault not read offers none
+  async function openConnector(pressed, name, agent) {
+    const vault = await api("GET", "/api/vault").then((v) => v.secrets ?? [], () => []);
+    const bot = vault.find((v) => v.hosts?.length === 1 && v.hosts[0] === "api.telegram.org" && v.agents?.includes(agent));
+    const src = bot ? `${SETUP}?vault=${encodeURIComponent(bot.name)}` : SETUP;
+    openSetup({ pressed, src: framed(name, src), name, agent, title: TITLE, onClose: () => refreshTelegram(true) });
+  }
+  // Its binding, as `POST …/door` answers or, its answer lost, as its door
+  // reads: the binding to `agent`; a refusal, or no binding, throws (the
+  // connector deleted), and so do a read that fails and a binding to
+  // another agent (`keep`: the connector is left be).
+  async function bind(name, agent) {
+    try {
+      return await api("POST", `/api/f/${seg(name)}/door`, { act: "link", agent });
+    } catch (e) {
+      if (e.status >= 400 && e.status < 500) throw e;
+      const now = await api("GET", `/api/f/${seg(name)}/door`).then((r) => r.bound ?? null, () => undefined);
+      if (now === undefined) throw Object.assign(new Error("Couldn't tell whether it was set up. Try again."), { keep: true });
+      if (now?.door === DOOR && now.agent === agent) return now;
+      if (now) throw Object.assign(new Error("It was linked to another agent meanwhile."), { keep: true });
+      throw e;
+    }
+  }
+  async function setUp(agent) {
+    if (making.has(agent)) return;
+    making.add(agent);
+    const pressed = pressSetup();
+    refreshTelegram();
+    let made = null;
+    try {
+      // the list read anew, then its doors: a connector another tab made is
+      // found, whatever this page's list said (a list that fails, none made)
+      await load().catch(() => {});
+      if (!(await readTelegram())) throw new Error("Couldn't read your Telegram chats. Try again.");
+      const connector = boundOf(agent);
+      if (connector) {
+        await openConnector(pressed, connector, agent);
+        return;
+      }
+      made = await api("POST", "/api/fragments", { label: connectorLabel(agent, DOOR), template: DOOR });
+      bound.add(made.name);
+      const door = await bind(made.name, agent);
+      reads++;
+      doors = new Map(doors ?? []);
+      doors.set(made.name, { door: door.door, agent: door.agent });
+      // the list read first, so its chat is under its agent as its setup opens
+      await load().catch(() => {});
+      await openConnector(pressed, made.name, agent);
+    } catch (e) {
+      if (made && !e.keep) {
+        bound.delete(made.name);
+        await api("DELETE", `/api/f/${seg(made.name)}`).catch(() => {});
+      }
+      notice("Telegram was not set up", e.message);
+    } finally {
+      making.delete(agent);
+      await refreshTelegram();
+    }
+  }
+  // Try again: the list first when it was not read, then the doors
+  async function again() {
+    if (!listed()) await load().catch(() => {});
+    await refreshTelegram(true);
+  }
+  function telegramSection() {
+    const s = section(TITLE);
+    s.id = "settings-telegram";
+    // hidden, nav link and all, with none of its rows shown (agent-runtimes.js `renderOffers`)
+    s.dataset.offers = "";
+    fillTelegram(s);
+    return s;
+  }
+  const telegramKey = () => JSON.stringify([agentsNow().map((a) => a.fragment), doors && [...doors], [...making]]);
+  function fillTelegram(s) {
+    s.replaceChildren(...s.querySelectorAll(":scope > h2"));
+    s.dataset.key = telegramKey();
+    // what it is, a word each, as on its setup page (Paul, 2026-10-31):
+    // less secure, literally, as Telegram's servers read its messages
+    const tags = el("div", "connector-tags");
+    const less = el("span", "role-tag connector-tag", "Less secure");
+    less.title = "Telegram's servers can read these messages";
+    tags.append(el("span", "role-tag connector-tag", "Experimental"), less);
+    s.append(tags, el("p", "muted", doors ? "Message your agents from Telegram." : "Couldn't read your Telegram chats."));
+    const rows = agentsNow().map((a) => {
+      const connector = boundOf(a.fragment);
+      const busy = making.has(a.fragment);
+      const go = el("button", "row", busy ? "Setting up…" : doors ? "Set up" : "Try again");
+      go.type = "button";
+      go.disabled = busy;
+      go.dataset.telegramFor = a.fragment;
+      go.onclick = () => (doors ? setUp(a.fragment) : again());
+      const actions = [go];
+      if (connector) {
+        const open = el("button", "row", "Open");
+        open.type = "button";
+        open.dataset.telegramOpen = connector;
+        open.onclick = () => openChat(connector);
+        actions.unshift(open);
+      }
+      return markOffer(actionLine(named(el("span"), a.fragment), ...actions), a.fragment, "doors");
+    });
+    s.append(...rows);
+    s.hidden = !rows.some((r) => !r.hidden);
+    const jump = document.querySelector('.settings-nav-link[data-section="settings-telegram"]');
+    if (jump) jump.hidden = s.hidden;
+  }
+  // The section drawn again as its view and doors now say, while Settings
+  // show it; its doors read first when asked (`read`) or when the list's
+  // chats with reach changed since they were.
+  async function refreshTelegram(read = false) {
+    if (!document.getElementById("settings-telegram")) return;
+    if (read || (listed() && JSON.stringify(reaching()) !== asked)) await readTelegram();
+    const s = document.getElementById("settings-telegram");
+    if (s && s.dataset.key !== telegramKey()) fillTelegram(s);
+  }
+  return { telegramSection, refreshTelegram, readTelegram };
 }

@@ -37,6 +37,7 @@ struct Pending {
     expires_at: i64,
     intent: String,
     account: Option<String>,
+    access: String,
 }
 
 impl RegistryCell {
@@ -74,8 +75,8 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::RateLimited, "too many connection authorizations under way; finish one or wait ten minutes"));
         }
         let (intent, account) = b.intent.columns();
-        self.exec("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at, intent, account) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            vec![sha(&state).into(), live.hash.into(), b.provider.as_str().into(), issuer.into(), subject.into(), sha(&serde_json::to_string(o).expect("OAuth config serializes")).into(), sealed.into(), (now + roundtrip::TTL_S * 1000).into(), intent.into(), account.map_or(SqlStorageValue::Null, |a| a.into())])?;
+        self.exec("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at, intent, account, access) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![sha(&state).into(), live.hash.into(), b.provider.as_str().into(), issuer.into(), subject.into(), sha(&serde_json::to_string(o).expect("OAuth config serializes")).into(), sealed.into(), (now + roundtrip::TTL_S * 1000).into(), intent.into(), account.map_or(SqlStorageValue::Null, |a| a.into()), b.access.word().into()])?;
         Ok(ConnectionBegun { state, challenge: own_signin::challenge(&verifier) })
     }
 
@@ -115,9 +116,13 @@ impl RegistryCell {
         let (status, answer) = keys::connection_exchange(&self.env, &b.provider, o, &callback, &code, verifier).await?;
         if (400..500).contains(&status) { return Ok(CodeRefused); }
         if status != 200 { return Ok(Failed); }
-        // a partial grant is imported as granted; one of signing in alone
-        // gives the person's agents nothing, and is said so
-        let tokens = match connection_signin::tokens(&answer, &o.scopes) {
+        // asked for what the person picked; a partial grant is imported as
+        // granted, and one of signing in alone gives their agents nothing,
+        // and is said so
+        let Some(access) = fragment_proto::computer::ConnectionAccess::of_word(&pending.access) else { return Ok(NotUnderWay) };
+        // an access its row no longer offers (read only, gone since) finishes nothing
+        let Some(grant) = o.access.of(access) else { return Ok(NotUnderWay) };
+        let tokens = match connection_signin::tokens(&answer, &grant.scopes) {
             Ok(tokens) => tokens,
             Err(connection_signin::Refused::NoScopes) => return Ok(NoScopes),
             Err(connection_signin::Refused::Invalid) => return Ok(Failed),
@@ -168,6 +173,12 @@ impl RegistryCell {
         // fenced the account while the code was exchanged cancels it (its
         // tokens are dropped, never revoked: `Finishing`), and one from
         // here on is refused until this answers
+        // an account host's grant names its account's host, or is no use:
+        // its calls there would all be refused (of one account a person:
+        // no turn to give back)
+        let account_host = self.cfg.providers.get(&b.provider).and_then(|p| p.account_host.as_ref());
+        let metadata = account_host.and_then(|a| connection_signin::import_metadata(&answer, a));
+        if account_host.is_some() && metadata.is_none() { return Ok(Failed); }
         if !self.finishing.borrow_mut().may_import(id) { return Ok(NotUnderWay); }
         // An import that fails, or whose outcome is unknown (a timeout, a
         // 5xx), leaves a disconnect's lasting fence standing: it may yet
@@ -177,7 +188,7 @@ impl RegistryCell {
         if let Some(t) = &turn {
             t.uncertain.set(Some(js::now_ms() + accounts::UNCERTAIN_HOLD_MS));
         }
-        let imported = keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens, label.as_deref(), import.as_ref().map(|i: &Import| (i, identifier.as_deref()))).await?;
+        let imported = keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens.keeping(metadata), label.as_deref(), import.as_ref().map(|i: &Import| (i, identifier.as_deref()))).await?;
         if let Some(t) = turn.as_ref().filter(|_| imported != Imported::Failed) {
             t.uncertain.set(None);
         }

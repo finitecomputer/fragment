@@ -15,16 +15,25 @@ pub struct CellError {
     /// Never reconstructed from an object's JSON answer: it may have acted
     /// before a call of its own was refused (routed.rs).
     pub release_refused: Option<String>,
+    /// How long its caller waits before asking again (`ErrorBody::
+    /// retry_after_ms`, and a `Retry-After` header in seconds), where known.
+    pub retry_after_ms: Option<u64>,
 }
 
 impl CellError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> CellError {
-        CellError { code, message: message.into(), reason: None, release_refused: None }
+        CellError { code, message: message.into(), reason: None, release_refused: None, retry_after_ms: None }
     }
 
     /// The refusal, naming its cause.
     pub fn because(mut self, reason: Reason) -> CellError {
         self.reason = Some(reason);
+        self
+    }
+
+    /// The refusal, saying how long to wait before asking again.
+    pub fn retry_after(mut self, ms: u64) -> CellError {
+        self.retry_after_ms = Some(ms);
         self
     }
 
@@ -41,8 +50,12 @@ impl CellError {
     }
 
     pub fn response(&self) -> worker::Result<Response> {
-        let body = ErrorBody { error: self.code, message: self.message.clone(), reason: self.reason };
-        Ok(Response::from_json(&body)?.with_status(self.code.status()))
+        let body = ErrorBody { error: self.code, message: self.message.clone(), reason: self.reason, retry_after_ms: self.retry_after_ms };
+        let mut resp = Response::from_json(&body)?.with_status(self.code.status());
+        if let Some(ms) = self.retry_after_ms {
+            resp.headers_mut().set("retry-after", &ms.div_ceil(1000).to_string())?;
+        }
+        Ok(resp)
     }
 }
 

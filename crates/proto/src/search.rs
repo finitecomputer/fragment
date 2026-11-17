@@ -66,12 +66,21 @@ pub struct Upsert {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fields: BTreeMap<String, String>,
     pub sections: Vec<Section>,
+    /// A writer's own generation for the source (0 to 2^53 − 1): taken only
+    /// at or above the highest the index took for it, so a writer's stale
+    /// work never lands over its newer (409 `conflict` naming `fence`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fence: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Delete {
     pub source: String,
+    /// As an upsert's: a delete keeps it, so a stale write cannot bring the
+    /// source back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -125,6 +134,13 @@ pub struct Hit {
     /// Where the meaning leg found it, if it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic: Option<Semantic>,
+    /// Each of the question's words' BM25 in the chunk the words leg found
+    /// best (0: not in it), in its answer's `words` order, by this
+    /// fragment's own statistics: only on a hit found by words, in an
+    /// answer to `/search/asked`, which a question across fragments scores
+    /// again with all of theirs (`WordStats`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<f64>>,
 }
 
 /// A section's place in the words leg: its rank there (from 1) and its
@@ -152,8 +168,9 @@ pub struct Semantic {
 /// bit, which the first pass reads.
 pub const SCHEME: &str = "i8x508+sign";
 
-/// What a deployment's vectors mean: its embeddings model, their
-/// dimensions, and the version it names, if any.
+/// What a fragment's search vectors mean: the deployment's embeddings
+/// model, their dimensions, the version it names, if any, and the
+/// prefixes its search embeds after.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Space {
@@ -161,6 +178,12 @@ pub struct Space {
     pub dimensions: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// The task instructions its chunks and questions were embedded after
+    /// (the slot's `document_prefix` and `query_prefix`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,6 +202,24 @@ pub struct Found {
     pub space: Option<Space>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
+    /// What its index knows of the question's words, when its words leg
+    /// ran: only in an answer to `/search/asked`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<WordStats>,
+}
+
+/// What a fragment's index knows of a question's words (FIN-238): the
+/// words as its words leg asked them (fragment_core::search_index::
+/// words_of), its chunks, and how many of them hold each word (`with`, in
+/// `words`' order). BM25 weighs a word by these, so a question across
+/// fragments sums them over every fragment asked and scores each hit's
+/// words again with the sums, comparable across fragments
+/// (fragment_core::across::pool_words).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WordStats {
+    pub words: Vec<String>,
+    pub chunks: u64,
+    pub with: Vec<u64>,
 }
 
 /// A question the platform embedded already, for one fragment of many
@@ -192,4 +233,73 @@ pub struct Forwarded {
     pub query: Query,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector: Option<String>,
+}
+
+/// Fragments one question across fragments asks, at most.
+pub const IN_MAX: usize = 32;
+/// Hits a question across fragments asks each one for, at least: the
+/// merge's depth (fragment_core::across::asked_limit).
+pub const ASKED_MIN: usize = 20;
+
+/// `POST /api/search`: one question, asked of several fragments' own
+/// indexes as the signer (docs/api.md, "Search across fragments").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Across {
+    pub q: String,
+    /// The fragments asked, each named in full.
+    #[serde(rename = "in")]
+    pub fragments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub mode: Mode,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
+/// How a fragment asked answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reached {
+    /// Its index was searched (its hits may be none).
+    Searched,
+    /// It holds no index: no source was ever written.
+    NoIndex,
+    /// The signer may not read it.
+    Denied,
+    /// There is no such fragment.
+    Missing,
+    /// It did not answer, or refused for another reason (`message`).
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Asked {
+    pub name: String,
+    pub state: Reached,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// A hit, and the fragment it is from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FromFragment {
+    pub fragment: String,
+    #[serde(flatten)]
+    pub hit: Hit,
+}
+
+/// The answer across fragments: the hits merged, best first, and how each
+/// fragment asked answered, in the order asked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FoundAcross {
+    pub results: Vec<FromFragment>,
+    pub fragments: Vec<Asked>,
+    /// `on` when the question was searched by its meaning too.
+    pub semantic: String,
 }

@@ -67,6 +67,7 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, missing, Caller, FragmentCell, MetaKey};
 use crate::ops::{Invocation, JOB_ID_PREFIX};
 use crate::{js, keys};
+use fragment_core::gather::Gathered;
 
 /// Set by the Workflow on its callbacks; the router never sets or passes it.
 pub const JOB_HEADER: &str = "x-fragment-job";
@@ -185,7 +186,8 @@ fn run_row(r: &Value) -> RunRow {
     let row = RunRow {
         id: int("id"),
         op: text("op").to_string(),
-        via: Via::parse(text("via")).unwrap_or_else(|| panic!("runs.via is one the cell writes: {r}")),
+        // a via a later release writes reads as written (Via::Unknown)
+        via: Via::from(text("via").to_string()),
         trigger: r["trigger"].as_str().map(str::to_string),
         principal: text("principal").to_string(),
         role: Role::parse(text("role")).unwrap_or_else(|| panic!("runs.role is a role: {r}")),
@@ -204,7 +206,7 @@ fn run_row(r: &Value) -> RunRow {
 /// A JSON column the cell wrote from a value.
 fn stored_json(r: &Value, column: &str) -> Value {
     let text = r[column].as_str().unwrap_or_else(|| panic!("runs.{column} is TEXT: {r}"));
-    serde_json::from_str(text).unwrap_or_else(|e| panic!("runs.{column} is the JSON the cell wrote: {e}"))
+    crate::json_text(text).unwrap_or_else(|e| panic!("runs.{column} is the JSON the cell wrote: {e}"))
 }
 
 /// A secret's row: its sealed value, and the hosts it may go to (none for
@@ -278,7 +280,7 @@ impl StepRow {
     /// value and error: anything else is corruption.
     fn answer(self) -> StepResult {
         let outcome = match (self.value, self.error) {
-            (Some(v), None) => StepOutcome::Value(serde_json::from_str(&v).unwrap_or_else(|e| panic!("steps.value is the JSON the cell wrote: {e}"))),
+            (Some(v), None) => StepOutcome::Value(crate::json_text(&v).unwrap_or_else(|e| panic!("steps.value is the JSON the cell wrote: {e}"))),
             (None, Some(e)) => StepOutcome::Error(e),
             _ => panic!("a steps row holds a value or an error, not both or neither"),
         };
@@ -667,7 +669,7 @@ impl FragmentCell {
                     "attempt": attempt,
                     "via": run.via.as_str(),
                     "fragment": self.name()?,
-                    "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                    "channels": self.declared_channel_names()?,
                     // a connector's binding, its door's (doors.rs), or null
                     "door": self.job_door()?,
                 });
@@ -697,6 +699,9 @@ impl FragmentCell {
                     return Ok(json!({ "done": true }));
                 }
                 if let Some(why) = answer["failed"].as_str() {
+                    // the platform code catches the job's throw: a runtime
+                    // limit on the facet stops it here, as a thrown one does
+                    facet.stop_at_limit(why);
                     return fail(why.to_string());
                 }
                 if answer["error"] == "unknown_operation" {
@@ -868,7 +873,7 @@ impl FragmentCell {
                 self.step_write(run, index, &w.path, Some(bytes), w.expect).await
             }
             Step::FilesRemove { path, expect } => self.step_write(run, index, &path, None, expect).await,
-            ai @ (Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo {}) => {
+            ai @ (Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo(_)) => {
                 self.step_ai(run, index, &ai, tried).await
             }
             // what the fragment's own page reads, read for its code: who is
@@ -913,7 +918,7 @@ impl FragmentCell {
         };
         match self.invoke(inv).await {
             // a step's value is a tree (its answers are stored as JSON with the run's)
-            Ok(r) => serde_json::from_str(r.result.get()).map_err(|e| permanent(format!("{op}: its result does not read as JSON: {e}"))),
+            Ok(r) => crate::json_text(r.result.get()).map_err(|e| permanent(format!("{op}: its result does not read as JSON: {e}"))),
             Err(e) => match e.code {
                 ErrorCode::HostFailed | ErrorCode::UpstreamFailed => Err(StepFail::Retry(e.message)),
                 _ => Err(permanent(format!("{op}: {}", e.message))),
@@ -947,7 +952,7 @@ impl FragmentCell {
     }
 
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
-        let url = egress::check(&f.url, self.cfg.egress_local).map_err(permanent)?;
+        let url = egress::check(&f.url, self.cfg.egress_local, &self.cfg.egress_allow).map_err(permanent)?;
         // a connector bound as a door that is shut sends nothing (doors.rs)
         if let Some(why) = self.door_shut().map_err(|e| StepFail::Retry(e.message))? {
             return Err(permanent(why));
@@ -973,11 +978,15 @@ impl FragmentCell {
             }
         }
         let headers = Headers::new();
+        // every value it fills, a header's or the URL's, is named as its
+        // placeholder in what goes back to the job (`redact`, below)
+        let mut filled = BTreeMap::new();
         for (k, given) in &f.headers {
             let mut value = given.clone();
             for name in placeholders(given) {
                 let secret = self.fill(name, &url).await?;
                 value = value.replace(&format!("{{{{{name}}}}}"), &secret);
+                filled.insert(name.to_string(), secret);
             }
             headers.set(k, &value).map_err(|e| permanent(format!("header {k}: {e}")))?;
         }
@@ -995,10 +1004,12 @@ impl FragmentCell {
                 fragment_core::secrets::UrlUnfilled::Moved => permanent("a secret's value would change where this fetch goes (its host, or its path's segments or query's parameters): it is not sent"),
             })?
         };
-        // what goes back to the job names the URL's secrets as it wrote them:
-        // a failure's message, and an answer that echoes its URL (a redirect's
-        // `location`, an error page)
-        let redact = |text: String| fragment_core::secrets::redact(text, &opened);
+        // what goes back to the job names each secret it filled as the job
+        // wrote it, however the vendor spelled it: a failure's message, and
+        // an answer that echoes the request (a redirect's `location`, an
+        // error page, a debug echo of its headers)
+        filled.extend(opened);
+        let redact = |text: String| fragment_core::secrets::redact(text, &filled);
         if !matches!(method, Method::Get | Method::Head) && !f.headers.keys().any(|k| k.eq_ignore_ascii_case(IDEMPOTENCY_HEADER)) {
             let key = format!("{}-s{index}", self.run_key(run.id).map_err(|e| StepFail::Retry(e.message))?);
             headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
@@ -1025,7 +1036,7 @@ impl FragmentCell {
         if answer.cut {
             return Err(permanent(format!("{host} answered more than {max} bytes; a fetch reads at most that")));
         }
-        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(redact(v)))).collect();
+        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(redact(v)))).gathered();
         Ok(json!({ "status": status, "headers": out_headers, "body": redact(String::from_utf8_lossy(&answer.body).into_owned()) }))
     }
 
@@ -1034,8 +1045,10 @@ impl FragmentCell {
     /// triggers did not start before.
     async fn step_publish(&self, run: &RunRow, index: u32, channel: &str, kind: &str, body: Value) -> Result<Value, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
-        // the one check a mutation's records meet too
-        fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?, self.hosted_door().map_err(retry)?.as_ref()).map_err(permanent)?;
+        // the one check a mutation's records meet too, on its channel's
+        // declaration alone
+        let decl = self.declared_channel(channel).map_err(retry)?;
+        fragment_core::effects::check_record(channel, kind, &body, decl.as_ref(), self.hosted_door().map_err(retry)?.as_ref()).map_err(permanent)?;
         let key = format!("{JOB_ID_PREFIX}{}", run.id);
         let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
         self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;
@@ -1131,8 +1144,189 @@ impl FragmentCell {
                 }),
                 owner_read_only: read_only,
             })?;
+            // a woke trigger of the same operation has this move covered
+            self.cover_woke(&t.run, commit)?;
         }
         Ok(())
+    }
+
+    /// Starts the runs an install of new code triggers, in the step that
+    /// installs it (plane.rs `install_code`): one install, one run each,
+    /// however often what installs it is asked again. Blocked when
+    /// `read_only` (the owner's standing, read before the install).
+    pub(crate) fn fire_installed(&self, triggers: &[TriggerDecl], sha: &str, code: &str, read_only: Option<Why>) -> CellResult<()> {
+        for t in triggers.iter().filter(|t| matches!(t.on, TriggerOn::Installed(_))) {
+            self.start_run(NewRun {
+                op: &t.run,
+                via: Via::Installed,
+                trigger: Some(code.to_string()),
+                principal: &self.own_key()?,
+                role: Role::Editor,
+                depth: self.commit_depth(Some(sha))?,
+                call: None,
+                input: json!({ "ref": "live", "commit": sha, "code": code }),
+                owner_read_only: read_only,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A woke trigger (`{"woke": true, "run": op}`, FIN-372) starts its run
+    /// at most once per activation of this object, for the first request
+    /// of it that a person or an agent made: one the router signed for
+    /// them, or a page's whose credential resolves to one. Never for an
+    /// alarm (it makes no request), the platform's own routes (answered
+    /// before the router's), or an anonymous visitor (a share link's
+    /// reader, or the card's browser, which opens the page as one), so a
+    /// wake no one caused starts nothing. Whether it is someone, and the
+    /// run, are found after the answer: the request waits on neither.
+    pub(crate) fn woke_chance(&self, caller: &Caller, name: &str) {
+        if self.woke.get() || (caller.signed.is_none() && caller.unresolved.is_none()) {
+            return;
+        }
+        let declared = self.triggers().is_ok_and(|t| t.iter().any(|t| matches!(t.on, TriggerOn::Woke(_))));
+        if !declared {
+            // the chance is spent: code installed later this activation waits for the next
+            self.woke.set(true);
+            return;
+        }
+        let (caller, name) = (caller.clone(), name.to_string());
+        // SAFETY: as `later`'s: `waitUntil` holds the object while this runs.
+        let cell: &'static FragmentCell = unsafe { &*(self as *const FragmentCell) };
+        self.state.wait_until(async move { cell.woke_run(&caller, &name).await });
+    }
+
+    async fn woke_run(&self, caller: &Caller, name: &str) {
+        let someone = self.identified(caller, name).await.is_ok_and(|c| c.signed.is_some());
+        // two first requests at once: the first to get here starts it
+        if !someone || self.woke.replace(true) {
+            return;
+        }
+        let started = async {
+            // nothing to catch up is decided here, before any await: no
+            // ledger read, no run
+            if self.woke_due()?.is_empty() {
+                return Ok(0);
+            }
+            if self.cfg.test_hooks {
+                self.held_woke().await?;
+            }
+            let read_only = self.read_only().await?;
+            // and decided again after the ledger's answer, with no await
+            // before the runs it starts: a files trigger's run, or a pause,
+            // may have come while it was asked
+            let fired = self.fire_woke(read_only);
+            if self.cfg.test_hooks {
+                // a held wake has decided (`woke-held` reads false again)
+                self.del_meta(MetaKey::TestWokeHeld)?;
+            }
+            fired
+        };
+        match started.await {
+            Ok(0) => {}
+            Ok(_) => {
+                self.launch_queued().await;
+            }
+            Err(e) => self.event("woke.failed", &e.message, json!({ "code": e.code })),
+        }
+    }
+
+    /// The woke triggers' operations with something to catch up: main moved
+    /// since the operation's last triggered run started (`WokeCovered`),
+    /// or its latest run ended without succeeding (failed, held, blocked).
+    /// One queued or running is on it already; a paused one would only be
+    /// blocked, so it waits for its unpause. Each wake used to start one
+    /// whatever was left, a job of 1.3 to 1.8 s on a brain whose index was
+    /// current, and a brain's object sleeps after about 10 s idle (bench,
+    /// 2026-11-02): a person met one nearly every time they came back.
+    fn woke_due(&self) -> CellResult<Vec<String>> {
+        let ops: Vec<String> = self.triggers()?.iter().filter(|t| matches!(t.on, TriggerOn::Woke(_))).map(|t| t.run.clone()).collect();
+        if ops.is_empty() {
+            return Ok(vec![]);
+        }
+        let main = self.pin("main")?;
+        let covered = self.woke_covered()?;
+        let mut due = vec![];
+        for op in ops {
+            if self.is_paused(&op)? {
+                continue;
+            }
+            // any run on it, however old: a newer one's end says nothing of it
+            let active = self.rows("SELECT 1 FROM runs WHERE status IN ('queued', 'running') AND op = ? LIMIT 1", vec![op.as_str().into()])?;
+            if !active.is_empty() {
+                continue;
+            }
+            let latest = self.rows("SELECT status FROM runs WHERE op = ? ORDER BY id DESC LIMIT 1", vec![op.as_str().into()])?;
+            let status = latest.first().and_then(|r| r["status"].as_str().and_then(RunStatus::parse));
+            let caught_up = status == Some(RunStatus::Succeeded) && covered.get(&op) == Some(&main);
+            if !caught_up && !due.contains(&op) {
+                due.push(op);
+            }
+        }
+        Ok(due)
+    }
+
+    /// `WokeCovered`: per woke trigger's operation, the main commit its
+    /// last triggered run started at.
+    fn woke_covered(&self) -> CellResult<BTreeMap<String, Option<String>>> {
+        match self.meta(MetaKey::WokeCovered)? {
+            Some(text) => crate::json_text(&text).map_err(|e| CellError::host(format!("the stored woke commits do not decode: {e}"))),
+            None => Ok(Default::default()),
+        }
+    }
+
+    /// A triggered run of `op` started with main at `main`: a woke trigger
+    /// of `op` has that much covered. Kept for woke triggers' operations
+    /// alone (at most the triggers a manifest declares).
+    fn cover_woke(&self, op: &str, main: Option<&str>) -> CellResult<()> {
+        let woke: Vec<String> = self.triggers()?.iter().filter(|t| matches!(t.on, TriggerOn::Woke(_))).map(|t| t.run.clone()).collect();
+        if !woke.iter().any(|w| w == op) {
+            return Ok(());
+        }
+        let mut covered = self.woke_covered()?;
+        covered.retain(|o, _| woke.contains(o));
+        covered.insert(op.to_string(), main.map(str::to_string));
+        self.set_meta(MetaKey::WokeCovered, &serde_json::to_string(&covered).expect("commits serialize"))
+    }
+
+    /// Test fleets: while `hold-woke` is on, a wake with something due
+    /// waits here, before the ledger is read, at most `TEST_HOLD_MAX_MS`.
+    async fn held_woke(&self) -> CellResult<()> {
+        assert!(self.cfg.test_hooks, "only a test fleet holds a wake");
+        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
+            if self.meta(MetaKey::TestHoldWoke)?.is_none() {
+                return Ok(());
+            }
+            self.set_meta(MetaKey::TestWokeHeld, "1")?;
+            Delay::from(Duration::from_millis(TEST_HOLD_POLL_MS)).await;
+        }
+        Ok(())
+    }
+
+    /// The runs a woke trigger starts (`woke_chance`) for the operations
+    /// with something to catch up (`woke_due`, decided here again: no await
+    /// comes between it and the runs it starts), as the fragment, from the
+    /// code installed now: how many.
+    fn fire_woke(&self, read_only: Option<Why>) -> CellResult<usize> {
+        let due = self.woke_due()?;
+        let mut started = 0;
+        let main = self.pin("main")?;
+        for t in self.triggers()?.iter().filter(|t| matches!(t.on, TriggerOn::Woke(_)) && due.contains(&t.run)) {
+            self.cover_woke(&t.run, main.as_deref())?;
+            self.start_run(NewRun {
+                op: &t.run,
+                via: Via::Woke,
+                trigger: None,
+                principal: &self.own_key()?,
+                role: Role::Editor,
+                depth: 0,
+                call: None,
+                input: json!({}),
+                owner_read_only: read_only,
+            })?;
+            started += 1;
+        }
+        Ok(started)
     }
 
     /// After code is installed: an operation it does not have loses its
@@ -1163,7 +1357,7 @@ impl FragmentCell {
             .rows("SELECT op, cron, next_at FROM schedules", vec![])?
             .iter()
             .map(|r| ((r["op"].as_str().unwrap_or("").to_string(), r["cron"].as_str().unwrap_or("").to_string()), r["next_at"].as_i64().unwrap_or(0)))
-            .collect();
+            .gathered();
         self.exec("DELETE FROM schedules", vec![])?;
         let now = js::now_ms();
         for (i, t) in triggers.iter().enumerate() {
@@ -1274,9 +1468,10 @@ impl FragmentCell {
             "DELETE FROM runs WHERE status NOT IN ('queued', 'running') AND (finished_at < ? OR id <= (SELECT MAX(id) FROM runs) - ?)",
             vec![SqlStorageValue::Integer(js::now_ms() - limits::RUN_RETENTION_MS), SqlStorageValue::Integer(limits::RUNS_KEPT)],
         )?;
-        // a run's charges and what its steps bought go with it (the ledger keeps the month's usage)
+        // a run's charges, what its steps bought and asked for go with it (the ledger keeps the month's usage)
         self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
-        self.exec("DELETE FROM paid WHERE run NOT IN (SELECT id FROM runs)", vec![])
+        self.exec("DELETE FROM paid WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
+        self.exec("DELETE FROM making WHERE run NOT IN (SELECT id FROM runs)", vec![])
 
     }
 
@@ -1384,18 +1579,25 @@ impl FragmentCell {
     /// `GET /api/f/<name>/triggers`
     pub(crate) fn triggers_api(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        let next: BTreeMap<i64, i64> =
-            self.rows("SELECT idx, next_at FROM schedules", vec![])?.iter().filter_map(|r| Some((r["idx"].as_i64()?, r["next_at"].as_i64()?))).collect();
+        // keyed as sync_schedules keys them, not by position: triggers()
+        // leaves out a kind this release does not know
+        let next: BTreeMap<(String, String), i64> = self
+            .rows("SELECT op, cron, next_at FROM schedules", vec![])?
+            .iter()
+            .filter_map(|r| Some(((r["op"].as_str()?.to_string(), r["cron"].as_str()?.to_string()), r["next_at"].as_i64()?)))
+            .gathered();
         let paused = self.paused_ops()?;
         let triggers: Vec<Value> = self
             .triggers()?
             .into_iter()
-            .enumerate()
-            .map(|(i, t)| {
+            .map(|t| {
                 let mut v = serde_json::to_value(&t).expect("a trigger serializes");
                 v["paused"] = json!(paused.contains(&t.run));
-                if let Some(at) = next.get(&(i as i64)) {
-                    v["nextAt"] = json!(at);
+                if let TriggerOn::Cron(expr) = &t.on {
+                    v["said"] = json!(fragment_core::schedule::said(expr));
+                    if let Some(at) = next.get(&(t.run.clone(), expr.clone())) {
+                        v["nextAt"] = json!(at);
+                    }
                 }
                 v
             })

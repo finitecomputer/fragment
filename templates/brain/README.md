@@ -8,8 +8,10 @@ the platform's release serves the rest, so every brain runs the same code
 and one deploy updates them all. The platform knows nothing of brains:
 everything here is this template's app code and files.
 
-Make one with the CLI (yours, or your agent's) or the API; the shell
-makes none (its Add suggests what to ask an agent for: `APP_PROMPTS` in
+The shell lists a person's brains on its Brains page (`/brains`), apart
+from their apps, and keeps each on their dock until they take it off
+(apps-page.js's shelves). Make one with the CLI (yours, or your agent's)
+or the API; the shell makes none (its Add suggests what to ask an agent for: `APP_PROMPTS` in
 cell/shell/shell.js):
 
     fragment create garden --template brain --title Garden
@@ -21,7 +23,9 @@ a `name` must be one in full: docs/api.md, Names).
 ## The files
 
 Kept as Finite Brain keeps them (its wiki skill, adapted to the fragment
-CLI in the brain's AGENTS.md, `applib/guide.mjs`):
+CLI in the brain's AGENTS.md: the template's `AGENTS.md`, which the
+release lists among every brain's files, held to `applib/guide.mjs` by its
+tests):
 
 - Each top-level folder is a wiki: `raw/` (sources as captured, never
   edited), `wiki/` (synthesized pages), `inventory/`, `datasets/`,
@@ -43,49 +47,87 @@ CLI in the brain's AGENTS.md, `applib/guide.mjs`):
 ## Search
 
 `search {q, limit?, wiki?}` (a query, viewers and up) answers ranked
-sections, best first: `{q, words, results: [{rank, path, wiki, title,
-heading, ancestry, snippet}], pending}`.
+sections, best first, by words and by meaning: `{q, results: [{rank, path,
+wiki, title, heading, ancestry, snippet, signals}], semantic, pending,
+indexing, waiting_ms, hint?}`.
 
-- **The index** is FTS5 in the app's own SQLite (`unicode61`, accents
-  removed): a row per section (the text under a heading, with the headings
-  above it and the page's title, `applib/sections.mjs`), ranked by BM25
-  weighted title 4, heading 3, path and ancestry 2, body 1. It indexes
-  markdown, not a wiki's `AGENTS.md` or a made `_index.md`.
-- **Kept by a file trigger.** `{"files": "**", "run": "changed"}`: each
-  move of `main` runs the job `changed`, which marks the paths that moved
-  (`mark`, a mutation, which open pages follow through `last_change`),
-  then indexes them 32 files a step (`reindex`, an editor's query that
-  reads the files at `main` and writes the index) until none are left.
-  Each path is marked at a generation, so a read overtaken by a newer
-  mark writes nothing. A page whose bytes hash the same keeps its sections:
-  the same files again change nothing. More than 200 paths in one move,
-  or an index of an older shape (`FORMAT`), read every file again. A
-  search first takes up to 8 pending files itself, so an index behind a
-  sync catches up even when no trigger runs.
-- **A query is words**: runs of letters, digits and marks, each a quoted
-  prefix phrase, all required. FTS5's syntax (`OR`, `NOT`, `NEAR(…)`,
-  quotes, `column:`, `*`, `^`) is never read.
-- **Limits.** `q` is 1 to 256 characters (the schema: 400 past it) and at
-  most 16 words (422); `limit` 1 to 50 (10 by default); a snippet at most
-  300 bytes. A page of 1 MiB or more is a blob, not read, and is listed as
-  skipped; a page keeps at most 500 sections of 8000 characters. Past 12
-  MiB of database the index takes no new page (they are skipped "the index
-  is full", and tried again at their next change), so the app's mutations
-  keep room under its 16 MiB.
-- `index_status {}` answers `{format, pages, sections, pending, writes,
-  skipped}`; `reindex {full: true}` (editors) reads every file again.
+- **The index** is the fragment's own (docs/api.md, "A fragment's
+  search"), written and asked through the app's `this.searchIndex`: each
+  markdown page a source (its path; its bytes' sha256, under the index's
+  format, the revision, so a new format writes every page again), cut
+  into sections (the text under a heading, with the headings above it as
+  context and the page's title: `applib/sections.mjs`; a wiki link its
+  words, `[[page|words]]` "words" and `[[frost-dates]]` "frost dates"),
+  its wiki a field that `wiki` narrows by. It indexes markdown, not a
+  wiki's `AGENTS.md` or an `_index.md`. A question asked through the
+  brain (its page, or this operation) is paid by its owner; `fragment
+  search --in` by its asker.
+- **Kept by a file trigger.** `{"files": "**", "run": "changed"}`: each move
+  of `main` runs the job `changed`, which marks the paths that moved
+  (`mark`, a mutation, which open pages follow; marking alone indexes
+  nothing, so whoever calls `mark` calls `changed` after it), then indexes them 8 files a
+  step (`reindex`, a query that reads the files at `main` and writes the
+  index, within its 50 capability calls: `CALLS_MAX`) until none are left
+  for it, going on in a run of its own past one run's steps. An installed
+  trigger (`{"installed": true, "run": "changed"}`) runs it once per install
+  of a new release too, at the brain's next request, so a release that
+  changes the index's shape (`FORMAT`) is taken in with no member acting;
+  and a woke trigger (`{"woke": true, "run": "changed"}`) when its object
+  starts again for a person or an agent (never an alarm, the platform's
+  own calls, or an anonymous visitor) and there is something to catch up:
+  main moved since `changed`'s last run, or that run did not succeed (one
+  that died). A
+  batch claims its pages (for two minutes), so runs side by side take
+  different pages and nothing is read or embedded twice: any member may
+  start `changed`, and one with
+  nothing left to do takes two steps. A batch that fails lets go of its
+  claims; a run that finds the rest held waits out one claim, then takes
+  what a batch that died left. Each path is marked at a generation, and a
+  new mark keeps a batch's claim: one batch at a time reads a page, and a
+  read overtaken by a newer mark is read again. Each write and delete
+  carries its batch's generation as a fence (docs/api.md, "A fragment's
+  search"), so a batch whose claim lapsed never lands a write or a delete
+  over a newer batch's. Every page a batch takes is written through its
+  fence, its bytes unchanged too: the index writes (and embeds) nothing for
+  a revision it holds, but takes the newer fence, so an older batch's write
+  still on its way is refused. A page `main` deletes is taken out, its
+  tombstone kept. More than 200 paths in one move, an index of an older
+  shape (`FORMAT`, which drops the app's old tables), `reindex {full: true}`
+  (an editor's), or a write the index answers `cleared` (its embedding model
+  changed and it emptied) take every page again.
+- **Behind its files**, a search answers `indexing: true` and a `hint`
+  naming the job that finishes it, and the page's status line says so.
+- **A pause the search service asks for** (429 `rate_limited`, as a rate
+  limit answers, with its `retry_after_ms`: kept within a second and ten
+  minutes, a minute if it names none) fails nothing: the batch lets go of
+  its claims, no batch claims until the pause is over, and a run sleeps it
+  out (a durable step, in the run: a rebuild may meet more rate windows
+  than a chain has hops) and goes on. Meanwhile a search answers
+  `waiting_ms`, what is left of it, its `hint` says so, and the page's
+  status line says "Indexing: waiting for the search service".
+- **Limits.** `q` is 1 to 256 characters; `limit` 1 to 50 (10 by default).
+  A page of 1 MiB or more is a blob, not read, and is listed as skipped;
+  a page keeps at most 500 sections of 8000 characters. The index holds
+  at most 50,000 chunks and should be split into child brains past 25,000
+  (a page refused for room is skipped "the index is full", and tried
+  again at its next pass).
+- `index_status {}` answers `{line, busy, format, pages, sections, pending,
+  indexing, running, waiting_ms, writes, skipped, index: {chunks,
+  chunks_split, chunks_max, semantic}}`: `line` says it in a few words
+  ("25 pages, all searchable", "Indexing: 2 pages to go"), `busy` while
+  pages are left; `reindex {full: true}` (editors) reads every file again.
 
 ## The page
 
-`site/` is the notes template's viewer (`site/assets`, a symlink to
-`templates/notes/site/assets`, embedded once: crates/templates/build.rs),
-which reads `api/tree` and `api/file` from `app.mjs`, plus the brain's
-search box (`brain.js`, `brain.css`). The viewer is plain source and
-renders markdown with the platform's renderer (`./__markdown.js`: DOM
-only, so a note's HTML shows as text). `api/tree` lists the
-brain's files and two it makes: `_index.md` (its wikis, the landing) and
-`AGENTS.md` (the guide), each unless the brain holds one of its own. An
-asset's bytes come from the platform's `__file`.
+A brain has no page of its own: its manifest makes the platform's files
+view its page (`"files": {"page": true, "status": "index_status", "graph":
+true}`, FIN-372). That is the tree and reader every fragment has
+(`__files`), with the fragment's own search above the tree and
+`index_status`'s `line` as its status line. With no file named, it opens
+on the graph of the brain's pages and their links, coloured by wiki (a
+page chosen there is previewed beside it, its links listed); the brain's
+front page is the release's `index.md` (beside `AGENTS.md`, the
+template's data), unless the brain holds an `index.md` of its own.
 
 ## Parent brains
 
@@ -95,5 +137,6 @@ The served guide (`applib/guide.mjs`, “A parent brain”) defines the source
 list, incorporated revision file and restart reconciliation. Synthesis is
 publication: keep the parent members-only and its audience inside every
 child's. A denied child makes dependent pages stale or withdrawn; cached
-copies must never feed a new synthesis. Search children as the reader via
-their existing search operations; browser search covers the parent alone.
+copies must never feed a new synthesis. Search a parent and its children
+as one, as the reader: `fragment search --in <parent>,<children>`; browser
+search covers the parent alone.

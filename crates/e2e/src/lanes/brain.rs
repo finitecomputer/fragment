@@ -1,20 +1,25 @@
 //! The brain template (docs/cloudflare-v1.md, decision 30): a fragment app
 //! on the blessed `brain` template, made as the CLI makes it, whose repo
 //! holds only its face and its files. Its files are wikis (raw/ wiki/ …,
-//! index.md, log.md); its search is FTS5 sections ranked by BM25 in the
-//! app's own SQLite, kept by a file trigger. An agent's path through it:
-//! the CLI syncs a folder, writes a source into raw/ and a page into wiki/,
-//! and searches. Then: FTS5's syntax is plain words, an over-long query is
-//! refused, a viewer searches and a stranger may not; the same files again
-//! change nothing; the index survives a restart and follows the next
-//! change; an asset's blob, named by its source note, is served; and the
-//! page (the notes viewer and the brain's search) loads for a member.
+//! index.md, log.md); its search is the fragment's own index, by words and
+//! by meaning, written through the app's `this.searchIndex` and kept by
+//! its triggers (each move of main, each install of a new release). An
+//! agent's path through it: the CLI syncs a folder, writes a source into
+//! raw/ and a page into wiki/, and searches. Then: search
+//! syntax is plain words, an over-long query is refused, a viewer searches
+//! and a stranger may not, and a viewer's start of the index's job is safe;
+//! the same files again change nothing; the index survives a restart and
+//! follows the next change; an asset's blob, named by its source note, is
+//! served; an index behind its files says so, and a member's page starts
+//! its job; the page (the notes viewer and the brain's search) loads for a
+//! member; and a page grown past 1 MiB leaves the index by the brain's own
+//! fenced delete, while a delete a newer writer fenced is stale, no failure.
 
 #[path = "brain_parent.rs"]
 mod parent;
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use fragment_core::blob::{self, sha256_hex};
@@ -23,6 +28,7 @@ use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use super::jobs;
+use super::ledger::lever;
 use super::shell::shell;
 use super::signin::site_cookie;
 use super::templates::person;
@@ -114,6 +120,11 @@ const SOLAR: &str = "garden/wiki/solar-panels.md";
 const CAFE: &str = "garden/raw/2026-10-03-cafe-solaire.md";
 const NOTE: &str = "garden/raw/roof-survey.md";
 const ASSET: &str = "garden/raw/assets/roof-survey.bin";
+const GROWS: &str = "garden/wiki/anemometer.md";
+const GUST: &str = "garden/wiki/gust.md";
+const HEDGES: &str = "garden/wiki/hedges.md";
+/// A page whose links go to its own heading, both ways a page writes one.
+const HEDGES_PAGE: &str = "# Hedges\n\nRead [the details](#details), or [[#Details|the same by wikilink]].\n\n## Details\n\nA hawthorn hedge takes five years to thicken.\n";
 
 pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     // the code.storage fake (a pointer read back), a restart, Chrome
@@ -150,11 +161,33 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
             && st.body["code"]["id"].as_str() == release.as_deref()
             && ops["search"]["kind"] == "query"
             && ops["changed"]["kind"] == "job"
-            && ops["reindex"]["role"] == "editor",
+            && ops["changed"]["role"] == "viewer",
         &st.body["code"],
     );
     let t = api.signed(&keys, "GET", &format!("/api/f/{name}/triggers"), None)?;
-    s.ok("a file trigger keeps the index", t.body["triggers"].as_array().is_some_and(|l| l.iter().any(|x| x["files"] == "**" && x["run"] == "changed")), &t);
+    let listed = |want: Value| t.body["triggers"].as_array().is_some_and(|l| l.iter().any(|x| x["run"] == "changed" && want.as_object().is_some_and(|w| w.iter().all(|(k, v)| x[k] == *v))));
+    s.ok(
+        "a file trigger keeps the index, an installed trigger takes each new release, and a woke trigger catches up when someone comes back",
+        listed(json!({ "files": "**" })) && listed(json!({ "installed": true })) && listed(json!({ "woke": true })),
+        &t,
+    );
+    // each install of the release runs `changed` once, as the brain: a new
+    // release (an index of an older shape among them) is taken in with no
+    // one acting, at the brain's next request
+    let own = st.body["npub"].clone();
+    let installs = || jobs::runs(api, &keys, &name, "&op=changed").into_iter().filter(|r| r["via"] == "installed").collect::<Vec<Value>>();
+    let first = s.eventually(WAIT, || installs().first().is_some_and(|r| r["status"] == "succeeded"));
+    let stale = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "blessed-stale" })))?;
+    let asked = index(api, &keys, &name);
+    let again = s.eventually(WAIT, || {
+        let l = installs();
+        l.len() == 2 && l.iter().all(|r| r["status"] == "succeeded" && r["principal"] == own)
+    });
+    s.ok(
+        "its install ran changed once, as the brain; a newer release of the template runs it once more at the brain's next request, no one starting it",
+        first && stale.status == 200 && stale.body["stale"] == true && asked["format"].is_string() && again,
+        json!({ "stale": stale.body, "installs": installs() }),
+    );
 
     // ingest, as an agent does: sync a folder, write a source and a page, sync
     let dir = s.dir("brain");
@@ -197,50 +230,46 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "a search from the CLI finds the page's section: path, heading, the headings above it, a snippet",
         first["rank"] == 1 && first["path"] == SOLAR && first["heading"] == "Inverters" && first["ancestry"] == json!(["Solar panels"]) && first["title"] == "Solar panels"
-            && first["wiki"] == "garden" && first["snippet"].as_str().is_some_and(|t| t.to_lowercase().contains("inverter")) && r["pending"] == 0,
+            && first["wiki"] == "garden" && first["snippet"].as_str().is_some_and(|t| t.to_lowercase().contains("inverter")) && r["pending"] == 0 && r["indexing"] == false,
         &r,
     );
     let r = search(api, &keys, &name, json!({ "q": "photovoltaic" }))?;
     s.ok(
-        "ranked: the page whose section is about it first, the source that mentions it after",
-        found(&r) == vec![at(SOLAR, "Photovoltaic cells"), at(CAFE, "Café solaire")],
+        "ranked: the page whose section is about it first, the source that mentions it after, before what only means something like it",
+        found(&r).get(..2) == Some(&[at(SOLAR, "Photovoltaic cells"), at(CAFE, "Café solaire")][..]),
         &r,
     );
-    let r = search(api, &keys, &name, json!({ "q": "PHOTOVOLT" }))?;
-    s.ok("a word's start finds it, whatever its case", found(&r).first().is_some_and(|f| f.0 == SOLAR), &r);
+    let r = search(api, &keys, &name, json!({ "q": "PHOTOVOLTAIC" }))?;
+    s.ok("a word finds it, whatever its case", found(&r).first().is_some_and(|f| f.0 == SOLAR), &r);
     let r = search(api, &keys, &name, json!({ "q": "cafe" }))?;
-    s.ok("accents are ignored: cafe finds the café source first", found(&r).first().is_some_and(|f| f.0 == CAFE), &r);
+    // the page cites it as "the café article" (a link's words: FIN-367), as
+    // the log does: both after the source, in either order
+    s.ok(
+        "accents are ignored: cafe finds the café source first, and the page that cites it among the next",
+        found(&r).first().is_some_and(|f| f.0 == CAFE) && found(&r).iter().take(3).any(|f| f.0 == SOLAR),
+        &r,
+    );
     let r = search(api, &keys, &name, json!({ "q": "photovoltaic", "wiki": "kitchen" }))?;
     let mine = search(api, &keys, &name, json!({ "q": "photovoltaic", "wiki": "garden", "limit": 1 }))?;
     s.ok("a search narrows to one wiki, and to a limit", r.status == 200 && results(&r).is_empty() && found(&mine) == vec![at(SOLAR, "Photovoltaic cells")], format!("{r} | {mine}"));
     let r = search(api, &keys, &name, json!({ "q": "zeppelin" }))?;
-    s.ok("a wiki's AGENTS.md is read by agents, not searched", r.status == 200 && results(&r).is_empty(), &r);
+    s.ok("a wiki's AGENTS.md is read by agents, not searched", r.status == 200 && found(&r).iter().all(|f| f.0 != "garden/AGENTS.md"), &r);
 
-    // invalid: FTS5's syntax is words; a query too long is refused
-    let r = search(api, &keys, &name, json!({ "q": "inverter OR zebra" }))?;
-    s.ok("OR is a word, not an operator: every word must be there", r.status == 200 && results(&r).is_empty(), &r);
-    let r = search(api, &keys, &name, json!({ "q": "NOT roof" }))?;
-    s.ok("NOT is a word too: it finds the section that says it", r.status == 200 && found(&r).first() == Some(&at(SOLAR, "Caveats")), &r);
-    let r = search(api, &keys, &name, json!({ "q": "heading:inverter" }))?;
-    s.ok("a column filter is two words (no section has \"heading\")", r.status == 200 && results(&r).is_empty(), &r);
-    // each as words: the Inverters section, or nothing when a word is in no section
+    // invalid: search syntax is words; a query too long is refused
     let mut tried = vec![];
-    for (q, want) in [("\"inverter", 1), ("inverter*", 1), ("^inverter", 1), ("inverter)", 1), ("NEAR(inverter", 0), ("inverter AND", 0)] {
+    for q in ["inverter OR zebra", "heading:inverter", "\"inverter", "inverter*", "^inverter", "inverter)", "NEAR(inverter", "inverter AND"] {
         let r = search(api, &keys, &name, json!({ "q": q }))?;
-        tried.push((q, r.status, found(&r).len(), want));
+        tried.push((q, r.status, found(&r).iter().take(3).any(|f| *f == at(SOLAR, "Inverters"))));
     }
     s.ok(
-        "quotes, stars, carets, brackets and a dangling AND are text, never a syntax error",
-        tried.iter().all(|(_, status, n, want)| *status == 200 && n == want),
+        "OR, a column filter, quotes, stars, carets, brackets, NEAR and a dangling AND are words, never a syntax error: each finds the Inverters section",
+        tried.iter().all(|(_, status, found)| *status == 200 && *found),
         format!("{tried:?}"),
     );
     let r = search(api, &keys, &name, json!({ "q": "?! …" }))?;
-    s.ok("a query with no word answers nothing, and is no error", r.status == 200 && r.body["result"]["words"] == json!([]) && results(&r).is_empty(), &r);
+    s.ok("a query with no word is no error", r.status == 200, &r);
     let r = search(api, &keys, &name, json!({ "q": "x".repeat(257) }))?;
     s.ok("a query over 256 characters is refused (400), naming it", r.status == 400 && r.message().contains("/q"), &r);
-    let many = (0..17).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
-    let r = search(api, &keys, &name, json!({ "q": many }))?;
-    s.ok("so is one of more than 16 words", r.status >= 400 && r.message().contains("at most 16 words"), &r);
     let r = search(api, &keys, &name, json!({ "q": "" }))?;
     let r2 = search(api, &keys, &name, json!({ "q": "inverter", "limit": 51 }))?;
     let r3 = search(api, &keys, &name, json!({ "q": "inverter", "sql": "1" }))?;
@@ -256,9 +285,40 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let r = search(api, &stranger, &name, json!({ "q": "inverter" }))?;
     let anon = api.browser_op(&name, "search", "q", json!({ "q": "inverter" }), None)?;
     s.ok("a stranger may not (403), nor anyone without the link (401)", r.status == 403 && anon.status == 401, format!("{r} | {anon}"));
-    let r = api.op(&viewer, &name, "reindex", "r", json!({}))?;
-    let r2 = api.op(&viewer, &name, "mark", "m", json!({ "paths": [SOLAR], "full": true }))?;
-    s.ok("nor may a viewer write the index (reindex and mark are an editor's)", r.status == 403 && r2.status == 403, format!("{r} | {r2}"));
+    // a viewer reads it through the CLI, as the guide's parent refresh
+    // reads a child: its main pin, then a page whole, signed and sent to
+    // the platform (a brain's own address serves no platform API)
+    let reader = s.dir("brain-viewer-home");
+    s.login(api, &reader);
+    let reader_keys = s.cli_keys(&reader).context("the viewer's CLI logged in")?;
+    let r = api.share(&name, &npub::encode(reader_keys.pubkey_hex()), "viewer")?;
+    anyhow::ensure!(r.status == 200, "adding the CLI's viewer: {r}");
+    let pin = s.cli_json(api, &reader, &["status", &name, "--json"]).map(|d| d["pins"]["main"].clone()).unwrap_or_default();
+    let read = s.cli(api, &reader, &["read", &name, SOLAR]);
+    let read_json = s.cli_json(api, &reader, &["read", &name, SOLAR, "--json"]).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+    let missing = s.cli(api, &reader, &["read", &name, "garden/wiki/none.md"]);
+    s.ok(
+        "a viewer's CLI reads a brain's main pin (fragment status) and a page whole (fragment read; --json its text), and a missing page is refused",
+        pin.as_str().is_some_and(|p| !p.is_empty())
+            && read.status.success()
+            && read.stdout == PAGE.as_bytes()
+            && read_json["path"] == SOLAR
+            && read_json["text"] == PAGE
+            && !missing.status.success(),
+        json!({ "pin": pin, "read": String::from_utf8_lossy(&read.stderr), "json": read_json, "missing": String::from_utf8_lossy(&missing.stderr) }),
+    );
+    // a viewer may start the index's job, which costs nothing with nothing to do: no full pass is theirs
+    let writes = index(api, &keys, &name)["writes"].clone();
+    let r = api.op(&viewer, &name, "reindex", "r", json!({ "full": true }))?;
+    let r2 = api.op(&viewer, &name, "mark", "m", json!({ "paths": [], "full": true }))?;
+    let started = api.op(&viewer, &name, "changed", "v-changed", json!({ "full": true }))?;
+    let run = jobs::settle(api, &keys, &name, jobs::started(&started), &["succeeded", "held"], WAIT);
+    s.ok(
+        "a viewer may start the index's job: with nothing to do it takes two steps and writes nothing, and a full pass is an editor's alone",
+        r.status == 200 && r.body["result"]["claimed"] == 0 && r2.status == 200 && r2.body["result"]["full"] == false
+            && run["status"] == "succeeded" && run["output"]["steps"] == 1 && run["output"]["full"] == false && index(api, &keys, &name)["writes"] == writes,
+        json!({ "reindex": r.body, "mark": r2.body, "run": run }),
+    );
 
     // an asset: its bytes a blob, named by its source note, served
     let pointer = s.fake.file_at(&repo, "main", ASSET).unwrap_or_default();
@@ -271,26 +331,45 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its source note is searched", found(&r).first().is_some_and(|f| f.0 == NOTE), &r);
     let viewer_site = format!("fragment_site={}", site_cookie(api, &viewer_session, &name)?);
     let get = |url: String| api.call(Call { method: "GET", url, cookie: Some(viewer_site.clone()), ..Call::default() });
-    let note = get(api.site_url(&name, &format!("api/file?path={}", url_enc(NOTE))))?;
+    let note = get(api.site_url(&name, &format!("__file?path={}", url_enc(NOTE))))?;
     let resource = note.text.lines().find_map(|l| l.strip_prefix("resource: ")).unwrap_or("").to_string();
     let hash = note.text.lines().find_map(|l| l.trim().strip_prefix("content_hash: sha256:")).unwrap_or("").to_string();
-    let to = get(api.site_url(&name, &format!("api/file?path={}", url_enc(&format!("garden/{resource}")))))?;
-    let location = to.header("location");
-    let bytes = if location.starts_with("http") { Some(get(location.clone())?) } else { None };
+    let bytes = get(api.site_url(&name, &format!("__file?path={}", url_enc(&format!("garden/{resource}")))))?;
     s.ok(
-        "the note names its asset, whose bytes the brain serves to a member: the blob it hashes to",
-        note.status == 200 && to.status == 302 && location.contains("__file?path=") && bytes.as_ref().is_some_and(|b| b.status == 200 && b.bytes == asset) && hash == asset_sha,
-        format!("note {} ({resource}), {to} → {location}, {:?} bytes", note.status, bytes.map(|b| (b.status, b.bytes.len()))),
+        "the note names its asset, whose bytes the platform serves a member: the blob it hashes to",
+        note.status == 200 && bytes.status == 200 && bytes.bytes == asset && hash == asset_sha,
+        format!("note {} ({resource}), its bytes {} ({})", note.status, bytes.status, bytes.bytes.len()),
     );
-    let landing = get(api.site_url(&name, "api/file?path=_index.md"))?;
-    let guide = get(api.site_url(&name, "api/file?path=AGENTS.md"))?;
-    let tree = get(api.site_url(&name, "api/tree"))?;
-    let listed: Vec<&str> = tree.body["files"].as_array().map(|l| l.iter().filter_map(|f| f["path"].as_str()).collect()).unwrap_or_default();
+    // its page is the files view (FIN-372): its files and the release's guide
+    // and front page, searchable, its status line its own query
+    let listing = api.call(Call { method: "GET", url: api.site_url(&name, "__files"), cookie: Some(viewer_site.clone()), extra: vec![("accept", "application/json".into())], ..Call::default() })?;
+    let front = get(api.site_url(&name, "__file?path=index.md"))?;
+    let guide = get(api.site_url(&name, "__file?path=AGENTS.md"))?;
+    let listed: Vec<&str> = listing.body["files"].as_array().map(|l| l.iter().filter_map(|f| f["path"].as_str()).collect()).unwrap_or_default();
     s.ok(
-        "the viewer's tree is the brain's files and the two it makes: its landing (its wikis) and the guide",
-        landing.text.contains("# Garden") && landing.text.contains("[[garden/index.md|garden]]") && guide.text.starts_with("# This brain")
-            && listed.contains(&"_index.md") && listed.contains(&"AGENTS.md") && listed.contains(&SOLAR) && !listed.contains(&"fragment.json"),
-        format!("{landing} | {listed:?}"),
+        "its files view lists the brain's files with the release's guide and front page (never its machinery), searchable, its status line index_status",
+        front.text.contains("Each folder here is a wiki") && guide.text.starts_with("# This brain")
+            && listed.contains(&"index.md") && listed.contains(&"AGENTS.md") && listed.contains(&SOLAR) && !listed.contains(&"fragment.json")
+            && listing.body["searchable"] == true && listing.body["status"] == "index_status",
+        json!({ "files": listing.body, "front": front.status }),
+    );
+    // its page asks its own index, as the asker (`__search`): a member finds
+    // the section, someone who may not read the brain is refused
+    let ask = |cookie: Option<String>| {
+        api.call(Call {
+            method: "POST",
+            url: api.site_url(&name, "__search"),
+            cookie,
+            body: Some(json!({ "q": "inverter" }).to_string().into_bytes()),
+            content_type: Some("application/json"),
+            ..Call::default()
+        })
+    };
+    let (member, stranger) = (ask(Some(viewer_site.clone()))?, ask(None)?);
+    s.ok(
+        "its page searches its own index as the asker: a member finds the section, a stranger is refused",
+        member.status == 200 && member.body["results"][0]["source"] == SOLAR && member.body["results"][0]["heading"] == "Inverters" && (400..500).contains(&stranger.status),
+        json!({ "member": member.body, "stranger": stranger.status }),
     );
     let out = s.cli_json(api, &home, &["call", &name, "guide", "--input", "{}", "--json"]);
     s.ok("an agent reads the guide from the CLI", out.as_ref().is_ok_and(|d| d["result"]["text"] == guide.text.as_str()), out.map(|d| d["result"]["text"].to_string().chars().take(80).collect::<String>()).unwrap_or_else(|e| format!("{e:#}")));
@@ -330,7 +409,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     std::fs::remove_file(dir.join(CAFE))?;
     let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
     let followed = s.eventually(WAIT, || {
-        settled(api, &keys, &name, 4) && search(api, &keys, &name, json!({ "q": "lithium" })).is_ok_and(|r| found(&r) == vec![at(SOLAR, "Batteries")])
+        settled(api, &keys, &name, 4) && search(api, &keys, &name, json!({ "q": "lithium" })).is_ok_and(|r| found(&r).first() == Some(&at(SOLAR, "Batteries")))
     });
     let st = index(api, &keys, &name);
     let r = search(api, &keys, &name, json!({ "q": "cafe" }))?;
@@ -340,7 +419,95 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "index": st, "cafe": r.body }),
     );
 
-    // the page: the notes viewer and the brain's search, for a member
+    // a page the index has no room for is left out, saying why, and taken once there is room
+    // (the index's 507 crosses the capability whole)
+    let held_chunks = index(api, &keys, &name)["index"]["chunks"].as_u64().unwrap_or(0);
+    let capped = lever(api, &name, "search-index", json!({ "chunks_max": held_chunks }))?;
+    write(&dir, "garden/wiki/wind.md", b"# Wind\n\nA small turbine on the ridge.\n")?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let left_out = s.eventually(WAIT, || {
+        let st = index(api, &keys, &name);
+        st["pending"] == 0 && st["skipped"].as_array().is_some_and(|l| l.iter().any(|x| x["path"] == "garden/wiki/wind.md" && x["why"].as_str().is_some_and(|w| w.contains("full"))))
+    });
+    let roomy = lever(api, &name, "search-index", json!({ "chunks_max": 50_000 }))?;
+    let r = api.op(&keys, &name, "changed", "after-room", json!({ "paths": ["garden/wiki/wind.md"] }))?;
+    jobs::settle(api, &keys, &name, jobs::started(&r), &["succeeded", "held"], WAIT);
+    let taken = search(api, &keys, &name, json!({ "q": "turbine ridge" }))?;
+    s.ok(
+        "a page past the index's room is left out (\"the index is full\", in index_status), and taken at its next pass once there is room",
+        capped.status == 200 && out.status.success() && left_out && roomy.status == 200 && found(&taken).first().is_some_and(|f| f.0 == "garden/wiki/wind.md"),
+        json!({ "index": index(api, &keys, &name), "taken": taken.body }),
+    );
+
+    // embeddings moved to another space: the first page written empties the index (`cleared`,
+    // across the capability), and the brain writes every page again
+    s.stop()?;
+    let api = &s.start_repinned()?;
+    let before = index(api, &keys, &name);
+    let mut page = PAGE.to_string();
+    page.push_str(BATTERIES);
+    page.push_str("\n## Tilt\n\nThe panels lean thirty degrees.\n");
+    write(&dir, SOLAR, page.as_bytes())?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let rebuilt = s.eventually(WAIT, || {
+        let st = index(api, &keys, &name);
+        st["indexing"] == false && st["index"]["semantic"] == "on"
+            && search(api, &keys, &name, json!({ "q": "roof survey" })).is_ok_and(|r| results(&r).first().is_some_and(|h| h["path"] == NOTE && h["signals"].as_array().is_some_and(|s| s.iter().any(|x| x == "semantic"))))
+    });
+    let after = index(api, &keys, &name);
+    s.ok(
+        "embeddings moved to another space: one page written empties the index, and the brain writes every page again (an unchanged page found by meaning again)",
+        out.status.success() && rebuilt && after["writes"].as_u64().unwrap_or(0) >= before["writes"].as_u64().unwrap_or(0) + after["pages"].as_u64().unwrap_or(0),
+        json!({ "before": before, "after": after }),
+    );
+    let woke_runs = |api: &Api| jobs::runs(api, &keys, &name, "&op=changed").into_iter().filter(|r| r["via"] == "woke").collect::<Vec<Value>>();
+    let settled = |api: &Api| jobs::runs(api, &keys, &name, "&op=changed").iter().all(|r| r["status"] != "running" && r["status"] != "queued");
+    anyhow::ensure!(s.eventually(WAIT, || settled(api)), "changed's runs never ended before the restart");
+    let woken = woke_runs(api).len();
+    s.stop()?;
+    let api = &s.start(false)?;
+    // a fresh start with nothing changed since changed last ran: the first
+    // request someone makes (this one) has the woke trigger's chance, and
+    // starts nothing (its chance spent: the lever says it had it)
+    let _ = index(api, &keys, &name);
+    let decided = s.eventually(WAIT, || lever(api, &name, "woke-reset", json!({})).is_ok_and(|r| r.body["had"] == true));
+    s.ok(
+        "a restart with nothing changed since changed's last run starts no run when someone comes back",
+        decided && woke_runs(api).len() == woken,
+        json!({ "woke": woke_runs(api), "before": woken }),
+    );
+
+    // behind its files (a page marked, no run on it), a search says so, and how to finish it
+    let r = api.op(&keys, &name, "mark", "behind", json!({ "paths": [SOLAR], "full": false }))?;
+    let behind = search(api, &keys, &name, json!({ "q": "inverter" }))?;
+    s.ok(
+        "a page marked alone is not indexed, and mark says to call changed after it",
+        r.status == 200 && r.body["result"]["marked"] == 1 && r.body["result"]["hint"].as_str().is_some_and(|h| h.contains("call changed after mark")),
+        &r,
+    );
+    s.ok(
+        "an index behind its files says so: indexing, results may be incomplete, and the job that finishes it",
+        r.status == 200 && behind.body["result"]["indexing"] == true && behind.body["result"]["hint"].as_str().is_some_and(|h| h.contains("changed")) && found(&behind).first() == Some(&at(SOLAR, "Inverters")),
+        &behind,
+    );
+
+    // someone coming back (its woke trigger, FIN-372) after changed's last
+    // run did not succeed (paused while main moved: blocked): as if its
+    // object had just started, an anonymous visit spends nothing, and the
+    // first request a person makes starts changed once, as the brain, which
+    // catches the marked page up
+    let pause = |paused: bool| api.signed(&keys, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "changed", "paused": paused })));
+    pause(true)?;
+    write(&dir, "garden/raw/assets/roof.txt", b"a source's bytes, while changed was paused")?;
+    let synced = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let blocked = s.eventually(WAIT, || jobs::runs(api, &keys, &name, "&op=changed").first().is_some_and(|r| r["status"] == "blocked"));
+    anyhow::ensure!(synced.status.success() && blocked, "a move of main while changed was paused left no blocked run");
+    pause(false)?;
+    let woke = || woke_runs(api);
+    let woke_before = woke().len();
+    let armed = lever(api, &name, "woke-reset", json!({}))?;
+    let anonymous = api.call(Call { method: "GET", url: api.site_url(&name, ""), ..Call::default() })?;
+    let kept = lever(api, &name, "woke-reset", json!({}))?;
     let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the brain's page (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
@@ -348,29 +515,323 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &viewer_session)?;
     let tab = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     let wait = Duration::from_secs(20);
-    let shown = chrome.until(&tab, "document.getElementById('tree')?.textContent.includes('solar-panels') && document.getElementById('content')?.textContent.includes('Wikis')", wait);
+    // its page is the files view, on its graph: the brain's tree, its pages, titled by it
+    let node = |p: &str| format!("!!document.querySelector('#graph .node[data-path=\"{p}\"]')");
+    let shown = chrome.until(&tab, &format!("document.getElementById('tree')?.textContent.includes('garden') && !document.getElementById('graph').hidden && {} && {}", node(SOLAR), node("garden/index.md")), wait);
+    let caught_up = s.eventually(WAIT, || {
+        let l = woke();
+        l.len() == woke_before + 1 && l.iter().all(|r| r["status"] == "succeeded" && r["principal"] == own) && index(api, &keys, &name)["indexing"] == false
+    });
+    s.ok(
+        "someone coming back catches the index up: an anonymous visit spends nothing; a member's page starts one run of changed, as the brain; the requests after start none",
+        armed.status == 200 && anonymous.status < 500 && kept.body["had"] == false && caught_up && woke().len() == woke_before + 1,
+        json!({ "woke": woke(), "kept": kept.body, "index": index(api, &keys, &name) }),
+    );
+    let _ = lever(api, &name, "woke-reset", json!({}))?;
+    let _ = index(api, &keys, &name);
+    let decided = s.eventually(WAIT, || lever(api, &name, "woke-reset", json!({})).is_ok_and(|r| r.body["had"] == true));
+    s.ok("and coming back again, with nothing changed since, starts none", decided && woke().len() == woke_before + 1, json!(woke()));
     let brand = chrome.eval(&tab, "document.getElementById('brand')?.textContent ?? ''")?;
-    s.ok("the viewer shows a member the brain's tree and its landing, titled by the brain", shown && brand == "Garden", chrome.eval(&tab, "document.body.innerText.slice(0, 300)")?);
+    s.ok("its page is the files view on its graph: the brain's tree and its pages, titled by the brain", shown && brand == "Garden", chrome.eval(&tab, "document.body.innerText.slice(0, 300)")?);
+    // a page chosen in the graph is previewed with what links to it, as the
+    // reader resolves links; the café source, removed above, left the graph
+    // and its link with it
+    chrome.eval(&tab, &format!("(location.hash = '#graph/{SOLAR}', true)"))?;
+    let rows = |label: &str| format!("[...document.querySelectorAll('#peek .peek-list')].find((l) => l.querySelector('h3')?.textContent.startsWith('{label}'))?.querySelectorAll('.peek-row') ?? []");
+    let previewed = chrome.until(
+        &tab,
+        &format!(
+            "document.querySelector('#peek .peek-title')?.textContent === 'Solar panels' && [...{}].length === 0 && ['garden/index.md', 'garden/log.md'].every((p) => [...{}].some((r) => r.dataset.path === p)) && document.querySelector('#tree .row.active')?.dataset.path === '{SOLAR}' && !{}",
+            rows("Links to"),
+            rows("Linked from"),
+            node(CAFE),
+        ),
+        wait,
+    );
+    s.ok("a page chosen in its graph is previewed, with the index and the log that link to it (the source it linked, removed, gone with its link), and marked in the tree", previewed, chrome.eval(&tab, "document.getElementById('peek')?.innerText.slice(0, 400) ?? ''")?);
+    // its front page, read, and a page that says what links to it
+    chrome.eval(&tab, "(location.hash = '#/index.md', true)")?;
+    let front = chrome.until(&tab, "document.getElementById('reader')?.textContent.includes('Each folder here is a wiki') && document.getElementById('graph').hidden", wait);
+    chrome.eval(&tab, &format!("(location.hash = '#/{SOLAR}', true)"))?;
+    let linked = chrome.until(&tab, "[...document.querySelectorAll('#reader .linked-row')].some((a) => a.dataset.path === 'garden/index.md')", wait);
+    s.ok("its front page reads, and a page read lists the pages that link to it", front && linked, chrome.eval(&tab, "document.getElementById('reader')?.innerText.slice(-300) ?? ''")?);
+    let status = chrome.until(&tab, "/searchable/.test(document.getElementById('status-line')?.textContent ?? '')", wait);
+    s.ok("its status line is its own (index_status's line)", status, chrome.eval(&tab, "document.getElementById('status')?.innerText ?? ''")?);
     chrome.eval(&tab, "(() => { const q = document.getElementById('q'); q.value = 'inverter'; q.dispatchEvent(new Event('input', { bubbles: true })); return true; })()")?;
-    let listed = chrome.until(&tab, "document.querySelector('.brain-result .brain-title')?.textContent === 'Solar panels'", wait);
-    let said = chrome.eval(&tab, "document.querySelector('.brain-result')?.innerText ?? ''")?;
-    s.ok("its search box lists the ranked sections", listed && said.as_str().is_some_and(|t| t.contains("Inverters")), &said);
-    chrome.click(&tab, ".brain-result .brain-title")?;
-    let opened = chrome.until(&tab, "document.querySelector('#content .md')?.textContent.includes('Photovoltaic cells')", wait);
-    s.ok("and a result opens its page in the viewer", opened, chrome.eval(&tab, "document.getElementById('content')?.innerText.slice(0, 200) ?? ''")?);
+    let listed = chrome.until(&tab, "document.querySelector('.hit .hit-title')?.textContent === 'Solar panels'", wait);
+    let said = chrome.eval(&tab, "document.querySelector('.hit')?.innerText ?? ''")?;
+    s.ok("its search lists the ranked sections", listed && said.as_str().is_some_and(|t| t.contains("Inverters")), &said);
+    // the page as a person sees it (kept with the run's scratch: FRAGMENT_E2E_KEEP)
+    let _ = chrome.screenshot(&tab, &s.dir("brain-page").join("search.png"));
+    chrome.click(&tab, ".hit")?;
+    let opened = chrome.until(&tab, "document.querySelector('#reader .doc')?.textContent.includes('Photovoltaic cells')", wait);
+    s.ok("and a hit opens its page in the files view", opened, chrome.eval(&tab, "document.getElementById('reader')?.innerText.slice(0, 200) ?? ''")?);
+
+    // a view asked later wins, whichever answer comes first (FIN-372's
+    // review). The page's fetch is held where a test says (`__hold`), then
+    // let go. A held answer's body, once read, counts `__consumed`, and the
+    // view's continuation after that read runs in the same turn, so an
+    // evaluation after the count sees all it did: no clock to wait on.
+    chrome.eval(&tab, crate::browser::HOLD_FETCH)?;
+    let let_go = "(window.__held.splice(0).forEach((go) => go()), true)";
+    let ask = |q: &str| format!("(() => {{ window.__hold = null; const q = document.getElementById('q'); q.value = {}; q.dispatchEvent(new Event('input', {{ bubbles: true }})); return true; }})()", serde_json::to_string(q).unwrap_or_default());
+    let solar_read = "(window.__hold = /__file\\?path=garden%2Fwiki%2Fsolar/, true)";
+    let hash = |h: &str| -> Result<String> { Ok(format!("(() => {{ location.hash = {}; return true; }})()", serde_json::to_string(h)?)) };
+    // a search out, then a file opened: the search's late answer leaves the file
+    chrome.eval(&tab, "(window.__hold = /__search/, true)")?;
+    chrome.eval(&tab, &ask("lithium").replace("window.__hold = null; ", ""))?;
+    let search_held = chrome.until(&tab, "window.__held.length === 1", wait);
+    chrome.eval(&tab, "(window.__hold = null, true)")?;
+    chrome.eval(&tab, &hash(&format!("#/{NOTE}"))?)?;
+    let file_shown = chrome.until(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'Roof survey'", wait);
+    chrome.eval(&tab, let_go)?;
+    let search_answered = chrome.until(&tab, "window.__consumed === 1", wait);
+    let file_stays = chrome.eval(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'Roof survey' && !document.querySelector('.hits')")? == true;
+    // a file being read, then a search: the file's late answer leaves the results
+    chrome.eval(&tab, solar_read)?;
+    chrome.eval(&tab, &hash(&format!("#/{SOLAR}"))?)?;
+    let read_held = chrome.until(&tab, "window.__held.length === 1", wait);
+    chrome.eval(&tab, &ask("turbine"))?;
+    let hits_shown = chrome.until(&tab, "document.querySelectorAll('.hit').length > 0", wait);
+    chrome.eval(&tab, let_go)?;
+    let read_answered = chrome.until(&tab, "window.__consumed === 2", wait);
+    let hits_stay = chrome.eval(&tab, "document.querySelectorAll('.hit').length > 0 && !document.querySelector('#reader .doc')")? == true;
+    // a section's file still being read, chosen again: it is read again for
+    // the newer view and drawn, whatever the first read's answer does later
+    chrome.eval(&tab, solar_read)?;
+    chrome.eval(&tab, &hash(&format!("#/{SOLAR}#Inverters"))?)?;
+    let first_held = chrome.until(&tab, "window.__held.length === 1", wait);
+    chrome.eval(&tab, "(window.__hold = null, window.dispatchEvent(new HashChangeEvent('hashchange')), true)")?;
+    let drawn = chrome.until(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'Solar panels'", wait);
+    chrome.eval(&tab, let_go)?;
+    let first_answered = chrome.until(&tab, "window.__consumed === 3", wait);
+    let stays_drawn = chrome.eval(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'Solar panels'")? == true;
+    s.ok(
+        "a view asked later wins, whichever answer comes first: a search answered after a file was opened leaves the file; a file read answered after a search leaves its results; a section's file chosen again while still read is drawn",
+        search_held && file_shown && search_answered && file_stays && read_held && hits_shown && read_answered && hits_stay && first_held && drawn && first_answered && stays_drawn,
+        json!({
+            "search": [search_held, file_shown, search_answered, file_stays],
+            "read": [read_held, hits_shown, read_answered, hits_stay],
+            "again": [first_held, drawn, first_answered, stays_drawn],
+        }),
+    );
 
     // a page an agent wrote is data, whatever a model put in it (audit H2:
     // the viewer's markdown once went into innerHTML): its markup is text
     write(&dir, "garden/raw/hostile.md", include_bytes!("../../fixtures/hostile-note.md"))?;
     let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
     chrome.eval(&tab, "location.hash = '#/garden/raw/hostile.md'; true")?;
-    let shown = out.status.success() && chrome.until(&tab, "document.querySelector('#content .md h1')?.textContent === 'A hostile note'", wait);
+    let shown = out.status.success() && chrome.until(&tab, "document.querySelector('#reader .doc h1')?.textContent === 'A hostile note'", wait);
     std::thread::sleep(Duration::from_millis(500));
     s.ok(
         "a brain's page shows its <img onerror>, <script>, <svg onload> and javascript: links as their text, and runs none of it",
-        shown && chrome.eval(&tab, "(() => { const c = document.getElementById('content'); return window.__ran === undefined && !c.querySelector('img,script,svg,iframe,a[href^=\"javascript\" i]') && c.textContent.includes('<img src=x onerror='); })()")? == true,
-        chrome.eval(&tab, "JSON.stringify({ ran: window.__ran ?? null, text: document.getElementById('content')?.innerText.slice(0, 400) })")?,
+        shown && chrome.eval(&tab, "(() => { const c = document.querySelector('#reader .doc'); return window.__ran === undefined && !c.querySelector('img,script,svg,iframe,a[href^=\"javascript\" i]') && c.textContent.includes('<img src=x onerror='); })()")? == true,
+        chrome.eval(&tab, "JSON.stringify({ ran: window.__ran ?? null, text: document.getElementById('reader')?.innerText.slice(0, 400) })")?,
+    );
+
+    // a page previewed in the graph links to its own headings, whichever
+    // page the reader read last (or none, on a visit that opens on the graph)
+    write(&dir, HEDGES, HEDGES_PAGE.as_bytes())?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    anyhow::ensure!(out.status.success(), "the hedges page synced: {}", String::from_utf8_lossy(&out.stderr));
+    let own = format!("#/{HEDGES}#");
+    let links = "document.querySelectorAll('#peek .peek-text a')";
+    let chosen = format!("(location.hash = '#graph/{HEDGES}', true)");
+    // a link, clicked from the preview, reads the page itself at its heading
+    let follows = |chrome: &mut crate::browser::Browser, tab: &crate::browser::Page, i: usize| -> Result<Value> {
+        chrome.eval(tab, &chosen)?;
+        let ready = chrome.until(tab, &format!("document.querySelector('#peek .peek-title')?.textContent === 'Hedges' && {links}.length === 2"), wait);
+        if ready {
+            chrome.eval(tab, &format!("({links}[{i}].click(), true)"))?;
+        }
+        let read = ready && chrome.until(tab, &format!("location.hash.startsWith('{own}') && document.querySelector('#reader .doc h1')?.textContent === 'Hedges'"), wait);
+        Ok(json!({ "read": read, "hash": chrome.eval(tab, "location.hash")?, "peek": chrome.eval(tab, "document.getElementById('peek')?.innerText.slice(0, 200) ?? ''")? }))
+    };
+    // each link (0, the markdown one; 1, the wikilink) on a fresh visit,
+    // which opens on the graph with no page read yet
+    let mut first = vec![];
+    for i in 0..2 {
+        let fresh = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+        let on_graph = chrome.until(&fresh, &format!("!document.getElementById('graph').hidden && !!document.querySelector('#graph .node[data-path=\"{HEDGES}\"]')"), wait);
+        first.push(if on_graph { follows(&mut chrome, &fresh, i)? } else { json!({ "read": false, "on graph": false }) });
+    }
+    // and each after the front page was read (the first tab, reloaded to know the new page)
+    chrome.reload(&tab)?;
+    let mut after = vec![];
+    for i in 0..2 {
+        chrome.eval(&tab, "(location.hash = '#/index.md', true)")?;
+        let read = chrome.until(&tab, "document.getElementById('reader')?.textContent.includes('Each folder here is a wiki')", wait);
+        after.push(if read { follows(&mut chrome, &tab, i)? } else { json!({ "read": false, "front page read": false }) });
+    }
+    let all_went = |l: &[Value]| l.len() == 2 && l.iter().all(|w| w["read"] == true);
+    s.ok(
+        "a page previewed in its graph links to its own heading, by link and by wikilink: on a visit that opened on the graph, and after another page was read",
+        all_went(&first) && all_went(&after),
+        json!({ "fresh": first, "after another page": after }),
+    );
+
+    // a page that grows past 1 MiB leaves the index: no file left main, so the
+    // platform forgets nothing, and only the brain's fenced delete takes it out
+    // (across the capability, its source whole). Last here: a newer writer's
+    // fence, set through the owner's API as a batch that took the page after
+    // this one's claim lapsed would, stays for the life.
+    write(&dir, GROWS, b"# Anemometer\n\nAn anemometer on the ridge counts the wind.\n")?;
+    write(&dir, GUST, b"# Gust\n\nThe strongest gust this winter.\n")?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let small = s.eventually(WAIT, || {
+        index(api, &keys, &name)["pending"] == 0
+            && search(api, &keys, &name, json!({ "q": "anemometer" })).is_ok_and(|r| found(&r).first().is_some_and(|f| f.0 == GROWS))
+            && search(api, &keys, &name, json!({ "q": "strongest gust" })).is_ok_and(|r| found(&r).first().is_some_and(|f| f.0 == GUST))
+    });
+    anyhow::ensure!(out.status.success() && small, "the two small pages indexed: {}", index(api, &keys, &name));
+    let newer = json!({
+        "source": GUST, "revision": "newer", "title": "Gust", "fields": { "wiki": "garden" },
+        "sections": [{ "id": "s0", "text": "A newer writer's gale." }], "fence": 1u64 << 40,
+    });
+    let newer = api.signed(&keys, "POST", &format!("/api/f/{name}/search/upsert"), Some(&newer))?;
+    anyhow::ensure!(newer.status == 200, "the newer writer's write: {newer}");
+    write(&dir, GROWS, "An anemometer on the ridge counts the wind.\n".repeat(25_000).as_bytes())?;
+    write(&dir, GUST, "The strongest gust this winter.\n".repeat(35_000).as_bytes())?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let skipped = s.eventually(WAIT, || {
+        index(api, &keys, &name)["skipped"].as_array().is_some_and(|l| l.iter().any(|x| x["path"] == GROWS && x["why"].as_str().is_some_and(|w| w.contains("1 MiB"))))
+    });
+    let gone = search(api, &keys, &name, json!({ "q": "anemometer" }))?;
+    s.ok(
+        "a page grown past 1 MiB (a blob, still at main) is taken out of the index by the brain's fenced delete, and listed as skipped",
+        out.status.success() && skipped && gone.status == 200 && found(&gone).iter().all(|f| f.0 != GROWS),
+        json!({ "index": index(api, &keys, &name), "anemometer": gone.body }),
+    );
+    let done = s.eventually(WAIT, || index(api, &keys, &name)["pending"] == 0);
+    let stands = search(api, &keys, &name, json!({ "q": "gale" }))?;
+    s.ok(
+        "a delete below a newer writer's fence is refused across the capability whole: the brain counts it stale, fails nothing, and the newer write stands",
+        done && found(&stands).first().is_some_and(|f| f.0 == GUST),
+        json!({ "index": index(api, &keys, &name), "gale": stands.body }),
     );
     parent::run(s, api, &keys)?;
+    Ok(())
+}
+
+/// A brain's pages, made up for `brain-release`: two wikis, five pages.
+const RELEASE_PAGES: [(&str, &str); 5] = [
+    ("garden/index.md", "# garden\n\n- [[garden/wiki/tomatoes.md|Tomatoes]]\n"),
+    ("garden/log.md", "# Log\n\n## 2026-11-01\n\nWrote [[garden/wiki/tomatoes.md|Tomatoes]].\n"),
+    (TOMATOES, "# Tomatoes\n\n## Spacing\n\nPlant tomatoes about 60 cm apart, in rows a metre apart, so air moves between them and blight has less to hold on to.\n\n## Watering\n\nWater at the base in the morning: leaves left wet overnight invite blight.\n"),
+    ("home/index.md", "# home\n\n- [[home/wiki/boiler.md|Boiler]]\n"),
+    ("home/wiki/boiler.md", "# Boiler\n\n## Annual service\n\nThe boiler is serviced every October: the engineer checks its pressure and bleeds the radiators.\n"),
+];
+const TOMATOES: &str = "garden/wiki/tomatoes.md";
+const TOMATO_QUESTION: &str = "how far apart should tomatoes be";
+/// What its person may spend: each page's embeddings (one call a page) and
+/// a few questions, well inside a hosted run's budget.
+const RELEASE_PAID_CALLS: u64 = 30;
+
+/// A brain as a person meets one on a deployment's own vendors (the hosted
+/// lane's: preview's embeddings; locally its fakes): made and synced with
+/// the CLI, it indexes itself. Left behind its files (a full pass marked,
+/// as a release that changes the index's shape marks one), a release of the
+/// template and one plain read catch it up, no one starting a job: its
+/// installed trigger's run, timed from the read to the index caught up.
+/// Then a page of it is found across fragments, as the launcher's Knowledge
+/// asks (`fragment search --all`), and on its page (a screenshot). The
+/// launcher itself is the shell lane's: a new person's shell makes their
+/// first agent, a real computer on a deployment.
+pub fn brain_release(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("brain-release", &[crate::Need::Levers, crate::Need::Models, crate::Need::Chrome]) {
+        return Ok(());
+    }
+    let keys = api.person_paying(RELEASE_PAID_CALLS)?;
+    let session = api.sign_in(&Api::email_of(&keys))?;
+    // the CLI as that person's: their key in a home of its own
+    let home = s.dir("brain-release-home");
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": keys.secret_hex() }).to_string())?;
+    let label = s.name("garden-home");
+    let made = s.cli_json(api, &home, &["create", &label, "--template", "brain", "--title", "Garden & home", "--json"]).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+    let name = made["name"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(!name.is_empty(), "no brain to test: {made}");
+    let dir = s.dir("brain-release");
+    let dir_s = dir.to_str().context("a utf-8 path")?.to_string();
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    anyhow::ensure!(out.status.success(), "the first sync: {}", String::from_utf8_lossy(&out.stderr));
+    for (path, text) in RELEASE_PAGES {
+        write(&dir, path, text.as_bytes())?;
+    }
+    let t0 = Instant::now();
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    let took = s.eventually(WAIT, || settled(api, &keys, &name, RELEASE_PAGES.len() as u64));
+    let synced_ms = t0.elapsed().as_millis() as u64;
+    let st = index(api, &keys, &name);
+    s.ok(
+        &format!("made and synced with the CLI, a brain indexes its {} pages itself (its file trigger)", RELEASE_PAGES.len()),
+        out.status.success() && took,
+        json!({ "index": st, "sync_to_indexed_ms": synced_ms }),
+    );
+
+    // behind its files as a release that changes the index's shape leaves
+    // it (every page marked again), and a release of the template since
+    let own = api.status(&keys, &name)?.body["npub"].clone();
+    let before: Vec<Value> = jobs::runs(api, &keys, &name, "&op=changed").iter().map(|r| r["id"].clone()).collect();
+    let marked = api.op(&keys, &name, "mark", "behind", json!({ "paths": [], "full": true }))?;
+    let behind = index(api, &keys, &name)["indexing"] == true;
+    let stale = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "blessed-stale" })))?;
+    anyhow::ensure!(marked.status == 200 && behind && stale.status == 200 && stale.body["stale"] == true, "behind, at an older release: {marked} {stale}");
+    // one plain read (a query: it starts nothing), then the index caught up
+    let t0 = Instant::now();
+    let visit = index(api, &keys, &name);
+    let caught = s.eventually(WAIT, || {
+        let st = index(api, &keys, &name);
+        st["indexing"] == false && st["pending"] == 0
+    });
+    let visit_ms = t0.elapsed().as_millis() as u64;
+    // The installed trigger's run, as the brain, ends a step after: its last
+    // batch finds nothing left. Were the read its object's first request of
+    // an activation, its woke trigger finds that run on it and starts none
+    // (jobs.rs `woke_due`). Every run the brain's: no person's.
+    let since = || jobs::runs(api, &keys, &name, "&op=changed").into_iter().filter(|r| !before.contains(&r["id"])).collect::<Vec<Value>>();
+    s.eventually(WAIT, || since().iter().any(|r| r["via"] == "installed" && r["status"] != "running" && r["status"] != "queued"));
+    let since = since();
+    let installed: Vec<&Value> = since.iter().filter(|r| r["via"] == "installed").collect();
+    let no_person = since.iter().all(|r| r["principal"] == own);
+    let run_ms = installed.first().and_then(|r| Some(r["finishedAt"].as_i64()? - r["createdAt"].as_i64()?));
+    println!("      a release, then one read: indexed {visit_ms} ms after the read (its installed run took {} ms)", run_ms.map_or("?".into(), |ms| ms.to_string()));
+    s.ok(
+        "behind its files at an older release, one plain read installs the new release and its installed trigger catches the brain up, as the brain, no person starting a job",
+        visit["format"].is_string() && caught && installed.len() == 1 && installed[0]["status"] == "succeeded" && no_person,
+        json!({ "read_to_indexed_ms": visit_ms, "run_ms": run_ms, "runs": since }),
+    );
+
+    // found across fragments, as Knowledge asks: the CLI's --all is the same question
+    let t0 = Instant::now();
+    let found = s.cli_json(api, &home, &["search", TOMATO_QUESTION, "--all", "--json"]).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+    let across_ms = t0.elapsed().as_millis() as u64;
+    let hits: Vec<(String, String)> = found["results"].as_array().into_iter().flatten().map(|h| (h["fragment"].as_str().unwrap_or("").to_string(), h["source"].as_str().unwrap_or("").to_string())).collect();
+    s.ok(
+        "fragment search --all (the question the launcher's Knowledge asks) finds the brain's page among the first three",
+        hits.iter().take(3).any(|(f, p)| *f == name && p == TOMATOES) && found["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == name.as_str())),
+        json!({ "answer": found, "ms": across_ms }),
+    );
+
+    // its page, as its person sees it: the brain's search box finds the page
+    let shots = s.dir("brain-release-page");
+    let Some(mut chrome) = s.browser()? else {
+        s.ok("Chrome is installed for the brain's page (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let tab = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    let wait = Duration::from_secs(30);
+    // its tree and its graph drawn (a brain opens on its graph, files.graph):
+    // the page's scripts, the search box's among them, have run
+    let shown = chrome.until(&tab, &format!("document.getElementById('tree')?.textContent.includes('garden') && !document.getElementById('graph').hidden && !!document.querySelector('#graph .node[data-path=\"{TOMATOES}\"]')"), wait);
+    chrome.eval(&tab, &format!("(() => {{ const q = document.getElementById('q'); q.value = {}; q.dispatchEvent(new Event('input', {{ bubbles: true }})); return true; }})()", serde_json::to_string(TOMATO_QUESTION)?))?;
+    let listed = chrome.until(&tab, "document.querySelector('.hit .hit-title')?.textContent === 'Tomatoes'", wait);
+    let _ = chrome.screenshot(&tab, &shots.join("search.png"));
+    s.ok("its page's search finds the page for its person", shown && listed, chrome.eval(&tab, "document.querySelector('.hits')?.innerText ?? ''")?);
+    let timings = json!({ "deployment": api.base, "brain": name, "pages": RELEASE_PAGES.len(), "semantic": found["semantic"], "sync_to_indexed_ms": synced_ms, "read_to_indexed_ms": visit_ms, "installed_run_ms": run_ms, "search_all_ms": across_ms });
+    std::fs::write(shots.join("timings.json"), serde_json::to_vec_pretty(&timings)?)?;
+    println!("      (timings: {}; screenshot: {})", shots.join("timings.json").display(), shots.join("search.png").display());
     Ok(())
 }

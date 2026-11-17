@@ -1,37 +1,80 @@
 import { avatar } from "./agent-identity.js";
 import { icon } from "./icons.js";
+import { ownRow, holdsView } from "./making.js";
 
 // Newest first, with a newly made chat (no preview yet) before older ones.
 export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
 // A section's order: the person's pinned chats first, then the rest, each
 // the newest first (Paul, 2026-10-31).
 export const pinnedFirst = (a, b) => Number(!!b.pinned) - Number(!!a.pinned) || newestChat(a, b);
+// The sidebar's agents (Paul, 2026-11-07: ordering them is a sidebar
+// matter, nothing deeper): the ones the person pinned first, then the rest,
+// each in their computer's order (`mine`'s; the sort keeps it). Pinned is
+// their own view of the agent's fragment, as a chat's is (`PUT …/pinned`),
+// so every device of theirs reads the one order; their main agent stays the
+// computer's first wherever it is drawn.
+export const pinnedAgentsFirst = (mine, pinned) => [...mine].sort((a, b) => Number(pinned(b.fragment)) - Number(pinned(a.fragment)));
 // What a section shows of its chats (in `pinnedFirst`'s order): all of
-// them unfolded; else its first `max`, pinned ones among them, and the open
-// one wherever it is. `more`: whether it has more than `max` (More, Less).
-export function sectionShown(list, { unfolded = false, current = null, max = 5 } = {}) {
+// them unfolded; else its first `max`, pinned ones among them, the open one
+// wherever it is, and each whose row says what its agent is doing (`busy`,
+// names: waiting for them or working), so none is folded under More (Paul,
+// 2026-11-02). `more`: whether it has more than `max` (More, Less).
+export function sectionShown(list, { unfolded = false, current = null, max = 5, busy = new Set() } = {}) {
   const sorted = [...list].sort(pinnedFirst);
-  const shown = unfolded ? sorted : sorted.filter((f, i) => i < max || f.name === current);
+  const shown = unfolded ? sorted : sorted.filter((f, i) => i < max || f.name === current || busy.has(f.name));
   return { shown, more: sorted.length > max };
 }
 
-export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
+// What a chat's row says its agent is doing there (Paul, 2026-10-31): what
+// its agents of theirs are doing in it (`doing`, the most pressing first),
+// else whom it waits on (`waits`: a thread asked from it, still out, its own
+// turn over: threads.js `waitingOn`), else nothing (null). Its row says it
+// and its section never folds it away (`sectionShown`'s `busy`), both from
+// this one answer, so they cannot disagree (Codex on #977).
+export function rowStatus(doing, waits) {
+  if (doing.length) return { doing: doing[0], seen: doing };
+  return waits ? { waits, seen: [] } : null;
+}
+
+// Whom the ways to ask for an app ask (the desktop's, the dock's Add's),
+// as their words name it (Paul, 2026-10-31: an agent's chosen name, every
+// surface): a prompt goes into the open chat when it is the person's own
+// (shell.js `promptChat`), so that chat's agent of theirs, the lead first;
+// else their main agent's chat, so their main agent.
+export function askedAgentOf({ open, own, agentsOf, mine, main }) {
+  if (open?.kind !== "chat" || !own(open)) return main;
+  return agentsOf(open.name).map((id) => mine.find((a) => a.identity === id)).find(Boolean) ?? main;
+}
+
+export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load }) {
   const { $, el, patch, agentFace, notice } = ui;
-  const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads } = data;
-  const { current, page, getFrame } = selection;
+  const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads, offers } = data;
+  // `onScreen`: the chat whose row is active (making.js `shownChat`);
+  // `reading`: the chat whose messages are on screen (`readChat`), the one
+  // alone marked seen and counted nothing unread (a chat being made's room
+  // shows none)
+  const { current, page, getFrame, making, onScreen, reading } = selection;
   const { menu, menuEdge, menuOwner, openMenu, closeMenu, shareItem, archiveItem, pinItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
-    const open = current() && byName(current()) && !page();
+    // a chat its New chat is making, its room shown (making.js): its
+    // title, nothing to do with it yet
+    const m = holdsView(making()) ? making() : null;
+    const open = !!m || (current() && byName(current()) && !page());
     // the session archive is read here, never a chat to add to or share
-    const archive = byName(current())?.kind === "sessions";
+    const archive = !m && byName(current())?.kind === "sessions";
     $("chat-heading").hidden = !open;
-    $("page-title").hidden = !page();
+    $("page-title").hidden = !page() || !!m;
     $("page-title").textContent = page() ?? "";
-    $("new-chat").hidden = !open || archive || isGuest() || !primaryAgent()?.identity;
-    $("chat-options").hidden = !open || archive;
+    $("new-chat").hidden = !!m || !open || archive || isGuest() || !primaryAgent()?.identity;
+    $("chat-options").hidden = !!m || !open || archive;
     if (!open) return;
+    if (m) {
+      $("chat-title").textContent = m.title;
+      $("chat-title").title = m.title;
+      return;
+    }
     const title = chatTitle(current());
     $("chat-title").textContent = title;
     $("chat-title").title = title;
@@ -44,7 +87,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // xtask/src/guards.rs `the_shell_copies_its_limits`).
   const UNREAD_MAX = 100;
   function unreadMark(f) {
-    const n = f.name === current() && !page() ? 0 : f.unread ?? 0;
+    const n = f.name === reading() ? 0 : f.unread ?? 0;
     if (!n) return [];
     const b = el("span", "unread", n >= UNREAD_MAX ? "99+" : String(n));
     b.setAttribute("aria-label", n >= UNREAD_MAX ? "More than 99 unread" : `${n} unread`);
@@ -148,10 +191,11 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // A chat's row (Paul, 2026-10-31): its name, and how long ago its newest
   // message was said; under it what its agent is doing there, while it is,
   // else whom it waits on (a thread asked from here: threads.js), else that
-  // message's first line. Its section names its agent. Its ⋯ (in the
+  // message's first line; none of these, its name alone. Its section names
+  // its agent. Its ⋯ (in the
   // time's place on hover, always on touch) renames or archives it.
-  function chatRow(f, doing, now) {
-    const active = f.name === current() && !page();
+  function chatRow(f, status, now) {
+    const active = f.name === onScreen();
     const row = el("div", `row chat-row${active ? " active" : ""}`);
     row.dataset.key = `chat:${f.name}`;
     const open = el("button", "chat-open");
@@ -175,12 +219,13 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       next = until;
     }
     const sub = el("span", "chat-sub");
-    const waits = doing ? null : waitingOn(f.name);
+    const { doing, waits } = status ?? {};
     if (doing) sub.append(el("span", `agent-doing ${doing.doing}`, DOING_SAYS[doing.doing]));
     else if (waits) sub.append(el("span", "agent-doing waiting", `Waiting on ${titleOf(waits.fragment)}`));
-    else sub.append(el("span", "chat-preview", f.preview ?? ""));
+    else if (f.preview) sub.append(el("span", "chat-preview", f.preview));
     sub.append(...unreadMark(f));
-    open.append(line, sub);
+    // nothing said in it yet (a chat continued, its history alone): one line
+    open.append(line, ...(sub.childElementCount ? [sub] : []));
     const more = el("button", "row-more", "⋯");
     more.type = "button";
     more.title = "Pin, rename or archive";
@@ -204,20 +249,20 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // The launcher's key, as the person's keyboard names it.
   const LAUNCHER_KEY = /Mac|iPhone|iPad|iPod/.test(navigator.userAgentData?.platform ?? navigator.platform ?? "") ? "⌘K" : "Ctrl K";
   // An agent's hero (Paul, 2026-10-31: the sidebar is a section per agent,
-  // each headed by the original pill): its face, its name, and under it
-  // what it is doing in any of its chats (the most pressing), real state
-  // only. It opens its agent's menu, attached below it. Drawn again, it
-  // keeps the edge its pointer lit and whether its menu is open, so it stays
-  // the same node unless what it shows changed.
-  function hero(agent, doing) {
-    const says = DOING_SAYS[doing?.doing];
+  // each headed by the original pill): its face and its name. What it is
+  // doing is said on its chats' rows alone, never here too (Paul,
+  // 2026-11-02), each such row shown however many its section folds
+  // (`sectionShown`'s `busy`). It opens its agent's menu, attached below
+  // it. Drawn again, it keeps the edge its pointer lit and whether its menu
+  // is open, so it stays the same node unless what it shows changed.
+  function hero(agent) {
     const name = titleOf(agent.fragment);
     const row = el("button", "row agent-hero");
     row.type = "button";
     row.dataset.key = `agent:${agent.fragment}`;
     const was = $("chats").querySelector(`[data-key="${CSS.escape(row.dataset.key)}"]`);
     if (was?.hasAttribute("style")) row.setAttribute("style", was.getAttribute("style"));
-    row.setAttribute("aria-label", `${name}${says ? `, ${says.toLowerCase()}` : ""}: its menu`);
+    row.setAttribute("aria-label", `${name}: its menu`);
     row.setAttribute("aria-haspopup", "menu");
     row.setAttribute("aria-controls", "menu");
     row.setAttribute("aria-expanded", String(!!was && menuOwner()?.button === was));
@@ -225,8 +270,14 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     face.append(avatar(agentFace(agent.fragment, agent.identity), "small"));
     const named = el("span", "agent-hero-named");
     named.append(el("strong", "title", name));
-    if (says) named.append(el("span", `agent-doing ${doing.doing}`, says));
     row.append(face, named);
+    // pinned to the top (`pinnedAgentsFirst`), marked as a pinned chat is
+    if (byName(agent.fragment)?.pinned) {
+      const pin = el("span", "pin-mark");
+      pin.title = "Pinned";
+      pin.append(icon("pin"));
+      row.append(pin);
+    }
     // its agent as it is when pressed: a hero kept from an earlier drawing
     // (the same node) may have been drawn before its computer was read
     row.onclick = () => openAgentMenu(agentNow(agent.fragment), row);
@@ -237,7 +288,8 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   const agentNow = (fragment) => ownAgents().find((a) => a.fragment === fragment) ?? (primaryAgent()?.fragment === fragment ? primaryAgent() : { fragment, identity: null });
   // An agent's menu: where it is doing something (each chat opens; read as
   // it opens, not from when its hero was drawn), a new chat with it, its
-  // name, its profile and its screen. Its hero is first scrolled up enough
+  // name, and its profile and its screen where its runtime offers them
+  // (`offers`: agent-runtimes.js). Its hero is first scrolled up enough
   // for the menu to hang below it in the window, as far as the list scrolls.
   const DOING_LISTED = 5;
   function openAgentMenu(agent, trigger) {
@@ -246,8 +298,9 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       ...doing.map((x) => ({ icon: "agent", text: `${DOING_SAYS[x.doing]} in ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
       ...(agent.identity && !isGuest() ? [{ icon: "newChat", text: "New chat", onClick: () => { newChat(agent.identity); leaveSidebar(); } }] : []),
       { icon: "rename", text: "Rename…", onClick: () => rename(agent.fragment) },
-      { icon: "agent", text: "Its profile", onClick: () => openApp(agent.fragment) },
-      ...(computer() ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent.fragment) }] : []),
+      ...(byName(agent.fragment) ? [pinItem(agent.fragment, "Pin to top")] : []),
+      ...(offers(agent.fragment, "profile") ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent.fragment) }] : []),
+      ...(computer() && offers(agent.fragment, "screen") ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent.fragment) }] : []),
     ];
     const nav = $("chats");
     const short = items.length * 34 + 16 - (innerHeight - trigger.getBoundingClientRect().bottom - 8);
@@ -266,12 +319,13 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     else if (menuOwner()?.button.classList.contains("agent-hero")) closeMenu(true);
   }, { passive: true });
   // A section's chats (`sectionShown`): its first five, pinned ones first,
-  // and the open one wherever it is; then More, which shows the rest, and
-  // Less, which folds them again.
+  // the open one wherever it is, and each whose row says what its agent is
+  // doing (`busy`); then More, which shows the rest, and Less, which folds
+  // them again.
   const unfolded = new Set();
-  function sectionRows(key, list, rowOf) {
+  function sectionRows(key, list, rowOf, busy) {
     const open = unfolded.has(key);
-    const { shown, more: many } = sectionShown(list, { unfolded: open, current: page() ? null : current() });
+    const { shown, more: many } = sectionShown(list, { unfolded: open, current: onScreen(), busy });
     const rows = shown.map(rowOf);
     if (many) {
       const more = el("button", "row more-row", open ? "Less" : "More");
@@ -284,8 +338,9 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     return rows;
   }
   // The sidebar's chats, a section per agent of the person's (Paul,
-  // 2026-10-31): their main agent first, then the others as their computer
-  // took them, an order nothing reshuffles; each its hero, then its chats
+  // 2026-10-31): the ones they pinned first, then their main agent, then
+  // the others as their computer took them (`pinnedAgentsFirst`), an order
+  // nothing but they reshuffle; each its hero, then its chats
   // (a chat goes under its lead agent, else the first of theirs in it, else
   // their main agent), the newest first. Chats someone else shared with them
   // are the last section, Shared. Before their computer is read, their main
@@ -299,7 +354,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       $(id).dataset.tooltip = `${launcherLabel} (${LAUNCHER_KEY})`;
       $(id).setAttribute("aria-label", launcherLabel);
     }
-    const mine = ownAgents();
+    const mine = pinnedAgentsFirst(ownAgents(), (name) => !!byName(name)?.pinned);
     const ids = new Map(mine.map((a) => [a.identity, a]));
     const sections = new Map(mine.map((a) => [a.identity, { agent: a, chats: [] }]));
     const main = primaryAgent();
@@ -311,7 +366,10 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     for (const f of shown(chats()).filter((x) => !isThread(x)).sort(newestChat)) {
       if (!own(f)) shared.push(f);
       else {
-        const lead = agentsOf(f.name).find((id) => ids.has(id)) ?? first;
+        // a chat with none of their agents in it (yet) is under none of
+        // them: never filed under the first while its agent joins (Paul,
+        // 2026-11-04); before their computer is read, all are the main agent's
+        const lead = agentsOf(f.name).find((id) => ids.has(id)) ?? (mine.length ? undefined : first);
         if (lead === undefined) loose.push(f);
         else sections.get(lead).chats.push(f);
       }
@@ -319,25 +377,42 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const seen = [];
     const now = Date.now();
     let next = Infinity;
+    // what each listed chat's row says, its row and its section's fold both from it
+    const statuses = new Map([...sections.values()].flatMap((x) => x.chats).concat(loose, shared).map((f) => [f.name, rowStatus(doingIn(f, agentsOf(f.name).filter((id) => ids.has(id))), waitingOn(f.name))]));
+    const busy = new Set([...statuses].filter(([, st]) => st).map(([name]) => name));
     const rowOf = (f) => {
-      const theirs = agentsOf(f.name).filter((id) => ids.has(id));
-      const doing = doingIn(f, theirs);
-      seen.push(...doing);
-      const [row, until] = chatRow(f, doing[0], now);
+      const status = statuses.get(f.name) ?? null;
+      seen.push(...(status?.seen ?? []));
+      const [row, until] = chatRow(f, status, now);
       next = Math.min(next, until);
       return row;
     };
+    // the chat its agent's New chat is making, at once under it (open while
+    // its room is shown), until the list has it (making.js)
+    const makingRow = (key) => {
+      const m = making();
+      if (!ownRow(m, (name) => !!byName(name)) || m.agent !== key) return [];
+      const active = holdsView(m);
+      const row = el("div", `row chat-row${active ? " active" : ""} making`);
+      row.dataset.key = `making:${m.agent}`;
+      const open = el("button", "chat-open");
+      open.type = "button";
+      open.disabled = true;
+      open.setAttribute("aria-current", active ? "page" : "false");
+      const line = el("span", "chat-line");
+      line.append(el("span", "label", m.title));
+      // one line, as the chat it makes is with nothing said in it yet (`chatRow`)
+      open.append(line);
+      row.append(open);
+      return [row];
+    };
     const rows = [];
-    for (const [key, { agent, chats: list }] of sections) {
-      const doing = agent.identity ? chats().flatMap((f) => doingIn(f, [agent.identity])).sort(pressing) : [];
-      seen.push(...doing);
-      rows.push(hero(agent, doing[0]), ...sectionRows(key, list, rowOf));
-    }
-    rows.push(...sectionRows("own", loose, rowOf));
+    for (const [key, { agent, chats: list }] of sections) rows.push(hero(agent), ...makingRow(key), ...sectionRows(key, list, rowOf, busy));
+    rows.push(...sectionRows("own", loose, rowOf, busy));
     if (shared.length) {
       const head = el("div", "section-head", "Shared");
       head.dataset.key = "head:shared";
-      rows.push(head, ...sectionRows("shared", shared, rowOf));
+      rows.push(head, ...sectionRows("shared", shared, rowOf, busy));
     }
     if (!rows.some((r) => r.dataset.key.startsWith("chat:"))) rows.push(el("div", "empty-row", chats().length ? "Every chat is archived" : isGuest() ? "Chats shared with you show here" : "Your chats will appear here"));
     doingAgain(seen);
@@ -346,61 +421,6 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     renderThreads();
   }
 
-  // ---- invites: shared by email, and theirs only once they accept (decision 63) ----
-  // The invites waiting on the emails the person signs in with, above their
-  // chats: what each shares, who shared it, and as what, with Accept and
-  // Decline. Read as the page starts, as its list's socket opens, and when
-  // the socket says they changed (`invited`: one made, renewed or taken
-  // back). Accepted, it is in their list, and opens; declined, it goes.
-  const invitesRead = { asked: 0, shown: 0 };
-  async function loadInvites() {
-    const mine = ++invitesRead.asked;
-    // failed, what was read before stays: a failure is not "none"
-    const got = await api("GET", "/api/invites").catch(() => null);
-    if (!got || mine < invitesRead.shown) return;
-    invitesRead.shown = mine;
-    setInvites(got.invites ?? []);
-    renderInvites();
-  }
-  function renderInvites() {
-    const rows = invites().map((i) => {
-      const box = el("div", "invite");
-      box.dataset.key = `invite:${i.fragment}`;
-      box.dataset.invite = i.fragment;
-      const may = i.role === "editor" ? "edit" : "view";
-      box.append(el("strong", "invite-title", i.title), el("span", "invite-from", `${i.from ?? "Someone"} invited you to ${may} it`));
-      const actions = el("div", "invite-actions");
-      actions.append(inviteButton(i, "accept", "Accept"), inviteButton(i, "decline", "Decline"));
-      box.append(actions);
-      return box;
-    });
-    patch($("invites"), rows);
-    $("invites").hidden = !rows.length;
-  }
-  // What it shares opens as its kind does: a chat in the middle, else a window.
-  const openShared = (name) => (byName(name)?.kind === "chat" ? openChat(name) : openApp(name));
-  function inviteButton(invite, verb, text) {
-    const b = el("button", `invite-${verb}`, text);
-    b.type = "button";
-    b.onclick = async () => {
-      const both = [...b.parentElement.children];
-      for (const x of both) x.disabled = true;
-      try {
-        await api("POST", `/api/invites/${seg(invite.fragment)}/${verb}`, {});
-        await Promise.all([load(), loadInvites()]);
-        if (verb === "accept") { openShared(invite.fragment); leaveSidebar(); }
-      } catch (e) {
-        // gone (taken back, answered in another tab, run out): read again, and
-        // one theirs already (accepted elsewhere) opens
-        await Promise.all([load(), loadInvites()]).catch(() => {});
-        if (e.status === 404 && verb === "accept" && byName(invite.fragment)) return openShared(invite.fragment);
-        const gone = e.status === 404 ? "It isn't open any more: it was taken back, answered, or ran out." : "Try again in a moment.";
-        notice(verb === "accept" ? "The invite wasn't accepted" : "The invite wasn't declined", gone);
-        for (const x of both) x.disabled = false;
-      }
-    };
-    return b;
-  }
   // Match the chat composer's edge reflection, including its 64px falloff.
   // The pointer's reflection on the launcher's button and each agent's hero,
   // as the chat composer's (its 64px falloff): each frame the pointer moved,
@@ -462,8 +482,8 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // is hidden; one ask at a time.
   let marking = null;
   function markSeen() {
-    const f = byName(current());
-    if (!f || page() || document.hidden || !f.unread || marking === f.name) return;
+    const f = byName(reading());
+    if (!f || document.hidden || !f.unread || marking === f.name) return;
     marking = f.name;
     api("PUT", `/api/fragments/${seg(f.name)}/seen`)
       .then(() => {
@@ -483,13 +503,14 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const group = isGroup(name);
     const agent = agentOfChat(name);
     // a group's agents each have a profile; a direct chat's agent has one
+    // (each where its runtime offers one: `offers`)
     const profiles = group
-      ? agentsOf(name).map((id) => agents().get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "agent", text: `${titleOf(a)}'s profile`, onClick: () => openApp(a) }))
-      : agent ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent) }] : [];
+      ? agentsOf(name).map((id) => agents().get(id)?.fragment).filter((a) => a && offers(a, "profile")).map((a) => ({ icon: "agent", text: `${titleOf(a)}'s profile`, onClick: () => openApp(a) }))
+      : agent && offers(agent, "profile") ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent) }] : [];
     // each agent's own desktop: a group's agents each have one to pick from
     const screens = !computer() ? [] : group
-      ? agentsOf(name).map((id) => agents().get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "screen", text: `${titleOf(a)}'s screen`, onClick: () => openScreen(a) }))
-      : agent ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent) }] : [];
+      ? agentsOf(name).map((id) => agents().get(id)?.fragment).filter((a) => a && offers(a, "screen")).map((a) => ({ icon: "screen", text: `${titleOf(a)}'s screen`, onClick: () => openScreen(a) }))
+      : agent && offers(agent, "screen") ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent) }] : [];
     openMenu(trigger, [
       { icon: "rename", text: "Rename…", onClick: () => rename(name) },
       shareItem(name),
@@ -498,5 +519,6 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       archiveItem(name),
     ]);
   }
-  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ownAgents, markSeen, edgeAgain: updateSidebarEdge };
+  const askedAgent = () => askedAgentOf({ open: current() && !page() ? byName(current()) : null, own, agentsOf, mine: ownAgents(), main: primaryAgent() });
+  return { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownAgents, markSeen, edgeAgain: updateSidebarEdge };
 }

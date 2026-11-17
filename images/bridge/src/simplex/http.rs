@@ -13,7 +13,10 @@
 //! - `POST /simplex/link?agent=…` with a link's ticket (the body): its
 //!   owner links it (a one-time invitation, shown to the page whose
 //!   ticket's nonce is its session);
-//! - `POST /simplex/unlink?agent=…` with an unlink's ticket.
+//! - `POST /simplex/unlink?agent=…` with an unlink's ticket;
+//! - `POST /simplex/adopt?agent=…` with an adoption's ticket: its owner
+//!   keeps their SimpleX chat with their old agent (FIN-463, `stage`),
+//!   staged from its move, its contact the same in their app.
 //!
 //! The tickets come from the owner's Settings alone, signed by the
 //! platform (`door`): the agent's tools, which reach this port too, can
@@ -55,7 +58,7 @@ fn session_of(query: Option<&str>) -> Option<String> {
 }
 
 /// `?agent=` alone, an agent fragment's name.
-fn agent_of(query: Option<&str>) -> Result<String, String> {
+pub(crate) fn agent_of(query: Option<&str>) -> Result<String, String> {
     let mut found = query.unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).filter(|(k, _)| *k == "agent").map(|(_, v)| v);
     match (found.next(), found.next()) {
         (Some(a), None) if crate::screen::agent_name_ok(a) => Ok(a.to_string()),
@@ -100,12 +103,13 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
     let path = req.uri().path().to_string();
     let answer = match (req.method().clone(), path.as_str()) {
         (Method::GET, "/simplex/state") => h.view(&agent, session.as_deref()).await.ok_or_else(|| Refused { status: 404, why: format!("no agent {agent} runs on this computer") }),
-        (Method::POST, "/simplex/link" | "/simplex/unlink") => match ticket_of(req).await {
+        (Method::POST, "/simplex/link" | "/simplex/unlink" | "/simplex/adopt") => match ticket_of(req).await {
             Err(why) => Err(Refused { status: 403, why }),
             Ok(t) if path == "/simplex/link" => h.link(&agent, t).await,
+            Ok(t) if path == "/simplex/adopt" => h.adopt(&agent, t).await,
             Ok(t) => h.unlink(&agent, t).await,
         },
-        _ => return net::refusal(StatusCode::NOT_FOUND, "not_found", "GET /simplex/, /simplex/state or /simplex/qr.svg; POST /simplex/link or /simplex/unlink"),
+        _ => return net::refusal(StatusCode::NOT_FOUND, "not_found", "GET /simplex/, /simplex/state or /simplex/qr.svg; POST /simplex/link, /simplex/unlink or /simplex/adopt"),
     };
     match answer {
         Ok(v) => net::json_answer(StatusCode::OK, &serde_json::to_value(v).expect("a view serializes")),
@@ -115,6 +119,7 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
                 403 => "forbidden",
                 404 => "not_found",
                 409 => "conflict",
+                422 => "invalid",
                 503 => "starting",
                 _ => "failed",
             };
@@ -164,7 +169,7 @@ mod tests {
         // Paul, 2026-10-26: as a link starts it asks once whether the agent
         // reaches its person here (its home), yes by default, and says so in
         // the link's ask; a link tried again or an unlink says nothing of it
-        assert!(PAGE.contains("let home = true;") && PAGE.contains("act(\"link\", null, { home })") && PAGE.contains("box.checked = home;"));
+        assert!(PAGE.contains("let home = true;") && PAGE.contains("act(\"link\", { home })") && PAGE.contains("box.checked = home;"));
         assert_eq!(PAGE.matches("{ home }").count(), 1, "only the first link's ask says it");
         // Alex's review of #620: the shell's answer kept whole, and a choice
         // it could not save said in one line, the link going ahead
@@ -173,9 +178,17 @@ mod tests {
         let note_then_link = PAGE.find("homeNote = answer.homeError").zip(PAGE.find("view = await ask(\"POST\", want, ticket)"));
         assert!(note_then_link.is_some_and(|(note, link)| note < link), "and the link goes ahead after it");
         assert!(!PAGE.contains("fetch(\"/"), "no absolute path: it runs under /p/6080/");
-        assert!(PAGE.contains("encrypted between your SimpleX app and your computer"));
+        assert!(PAGE.contains("Encrypted between your SimpleX app and your computer"));
         // Alex's review: a stuck link has its way on, and a poll begun before a change shows nothing
-        assert!(PAGE.contains("button(\"Try again\", \"primary\", () => act(\"link\"))"));
+        assert!(PAGE.contains("button(\"Try again\", \"\", () => act(\"link\"))"));
+        // FIN-393: framed in a dialog, an unlink is made sure of in its own step, no browser dialog
+        assert!(!PAGE.contains("window.confirm") && PAGE.contains("button(\"Unlink\", \"\", () => act(\"unlink\"))"));
         assert!(PAGE.contains("if (at !== epoch || busy) return;"));
+        // FIN-463: a chat staged by its move is offered first, kept by an
+        // adoption's ticket, or set aside for a new link; while the
+        // computer sleeps, said why
+        assert!(PAGE.contains("button(\"Keep my SimpleX chat\", \"\", () => act(\"adopt\"))") && PAGE.contains("if (view.staged && !fresh) {"));
+        assert!(PAGE.contains("view.phase === \"adopting\"") && PAGE.contains("case \"adopting\":"));
+        assert!(PAGE.contains("if (!view.alwaysOn && view.staged)"));
     }
 }

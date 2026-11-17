@@ -3,17 +3,24 @@
 //! A fragment that wrote nothing answers `indexed: false`, embedding
 //! nothing; an editor writes a source whole, chunked and embedded once; a
 //! reader finds it by its words and its meaning, each hit placed in each
-//! leg; a replay and a grown source embed nothing again; a stale write is
-//! refused; limits are checked before anything is sent; a viewer only
+//! leg, its answer's waits named in `Server-Timing`, the index's int8 dot
+//! product Wasm SIMD's; a reader's question in another person's fragment
+//! asks the reader's ledger and the owner's beside it, waiting on neither,
+//! a refusal heard so stopping the next, the reader's said first, a
+//! restart forgetting it until a question teaches it again; a replay and a grown
+//! source embed nothing again; a stale write is refused; limits are
+//! checked before anything is sent; a viewer only
 //! reads, a stranger neither, and a member removed reads nothing more; a
 //! push that deletes a source's file forgets it, and a forget the index's
 //! outage held back, or one past a pass's hundred, never lands after the
 //! source's next write; a write held at its embedding, or at the index
 //! itself, while its fragment is deleted and made again writes nothing to
-//! either life; a deleted fragment's index is ended, its rows gone; the
-//! node restarted still holds what was written; and a deployment whose
-//! tiers are private, with no private embeddings slot, indexes by words
-//! alone.
+//! either life; an index takes writes up to its cap, a source replaced at
+//! capacity counted once; a deleted fragment's index is ended, its rows
+//! gone; the node restarted still holds what was written; restarted with
+//! its embeddings in another space, an index answers by words alone until
+//! a write empties it; and a deployment whose tiers are private, with no
+//! private embeddings slot, indexes by words alone.
 
 use std::time::Duration;
 
@@ -21,8 +28,8 @@ use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use super::ledger::lever;
-use crate::api::Api;
+use super::ledger::{entries, forget_gate, gate_hears, lever, quiet};
+use crate::api::{Api, Reply};
 use crate::Suite;
 
 const MODEL: &str = fragment_core::embed::MODEL_DEFAULT;
@@ -30,6 +37,22 @@ const MODEL: &str = fragment_core::embed::MODEL_DEFAULT;
 /// How many texts the embeddings model was asked for since `from`.
 fn embedded(s: &Suite, from: usize) -> usize {
     s.ai.calls()[from..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].as_array().map_or(0, Vec::len)).sum()
+}
+
+/// The parts a reply's `Server-Timing` names, sorted: none unless each
+/// entry is `<part>;dur=<ms>` and nothing more.
+fn timed_parts(r: &crate::api::Reply) -> Option<Vec<&'static str>> {
+    let value = r.headers.get("server-timing")?.to_str().ok()?;
+    let mut parts = value
+        .split(", ")
+        .map(|entry| {
+            let (part, ms) = entry.split_once(";dur=")?;
+            ms.parse::<u64>().ok()?;
+            ["embed", "gate", "index", "key"].into_iter().find(|p| *p == part)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    parts.sort_unstable();
+    Some(parts)
 }
 
 fn upsert(source: &str, revision: &str, sections: Value) -> Value {
@@ -41,6 +64,120 @@ fn turns() -> Value {
         { "id": "t0", "text": "Person: the harbour lantern audit moved to the north annex\nAgent: noted", "at": "2026-10-29T10:00:00.000Z", "location": { "from": 0, "to": 1 } },
         { "id": "t1", "text": "Person: taxes are due in april\nAgent: I will remind you", "location": { "from": 2, "to": 3 } },
     ])
+}
+
+/// A reader's question in a fragment another person owns asks two ledgers
+/// (models.rs `gate`): the reader's, who pays, and the owner's, whose cap
+/// applies, side by side (`ledger::gate::asked_together`'s host test) and
+/// off its path (`ledger::may_beside`): a gate that heard nothing lets the
+/// question start at once and asks beside it, and what it hears answers
+/// the next one. A refusal heard so stops the next question before
+/// anything is embedded; both refusing, the reader's is said. Its reader,
+/// left refused, and the fragment's name: the restart's check.
+fn gate_checks(s: &mut Suite, api: &Api) -> Result<(Keys, String, String)> {
+    let owner = api.person()?;
+    let reader = api.person()?;
+    let (owner_id, reader_id) = (api.identity(&owner)?, api.identity(&reader)?);
+    let created = s.create(api, &owner, "gated")?;
+    let name = created["name"].as_str().context("its name")?.to_string();
+    let r = api.share(&name, &reader_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "a viewer: {r}");
+    let w = api.signed(&owner, "POST", &format!("/api/f/{name}/search/upsert"), Some(&upsert("sessions/a.json", "r1", turns())))?;
+    anyhow::ensure!(w.status == 200, "a source: {w}");
+    let ledger_lever = |identity: &str, hook: Value| -> Result<()> {
+        let mut body = hook.clone();
+        body["identity"] = json!(identity);
+        let r = api.unsigned("POST", "/api/test/ledger", Some(&body))?;
+        anyhow::ensure!(r.status == 200, "the ledger lever {hook}: {r}");
+        Ok(())
+    };
+    // the reader's ledger refuses a paid call past its lending
+    let lend = |max: u64| ledger_lever(&reader_id, json!({ "op": "paid-calls", "max": max }));
+    let cap = |id: &str, micros: Option<u64>| -> Result<()> {
+        let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": id, "micros": micros })))?;
+        anyhow::ensure!(r.status == 200, "the fragment's cap: {r}");
+        Ok(())
+    };
+    // a question's answer, and the texts it embedded
+    type Asked = (Reply, usize);
+    let question = || -> Result<Asked> {
+        let calls = s.ai.calls().len();
+        let r = api.signed(&reader, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": "harbour lantern audit" })))?;
+        Ok((r, embedded(s, calls)))
+    };
+    // the reader's charged calls, once the rows of calls before have landed
+    let rows = || quiet(api, &reader_id, "aig:");
+    // From a gate that heard nothing (as an isolate made anew holds): the
+    // first question, what the gate then heard of each person whose answer
+    // `hears` names, and the next question, answered from it.
+    let taught = |hears: &[(&str, &str)]| -> Result<(Asked, bool, Asked)> {
+        forget_gate(api, &reader_id)?;
+        let first = question()?;
+        let heard = hears.iter().all(|(identity, answer)| gate_hears(s, api, identity, answer));
+        Ok((first, heard, question()?))
+    };
+    let both_allowed = [(reader_id.as_str(), "allowed"), (owner_id.as_str(), "allowed")];
+    let start = rows();
+    let ((allowed, allowed_embeds), allowed_heard, (again, again_embeds)) = taught(&both_allowed)?;
+    lend(0)?;
+    // those two questions' charges, landed or not yet: a ledger's queue may
+    // deliver past `quiet`'s second (celld's does), so they are not counted
+    let before = start + 2;
+    let ((paid, paid_embeds), payer_heard, (payer, payer_embeds)) = taught(&[(reader_id.as_str(), "refused")])?;
+    let (replayed, replayed_embeds) = question()?;
+    // its row once it lands (a ledger's queue may take past `quiet`'s
+    // second to deliver it: celld's does), and no other after
+    let charged_once = s.eventually(Duration::from_secs(20), || entries(api, &reader_id, "aig:").len() == before + 1) && rows() == before + 1;
+    lend(1_000)?;
+    cap("g0", Some(0))?;
+    let ((_, open_first_embeds), owner_heard, (open, open_embeds)) = taught(&[(owner_id.as_str(), "refused")])?;
+    lend(0)?;
+    let ((_, both_first_embeds), both_heard, (both, both_embeds)) = taught(&[(reader_id.as_str(), "refused"), (owner_id.as_str(), "refused")])?;
+    lend(1_000)?;
+    cap("g1", None)?;
+    // both ledgers slowed past the gate's old wait: a cold gate waits on neither
+    ledger_lever(&reader_id, json!({ "op": "slow", "ms": 10_000 }))?;
+    ledger_lever(&owner_id, json!({ "op": "slow", "ms": 10_000 }))?;
+    forget_gate(api, &reader_id)?;
+    let (slowed, slowed_embeds) = question()?;
+    ledger_lever(&reader_id, json!({ "op": "slow", "ms": 0 }))?;
+    ledger_lever(&owner_id, json!({ "op": "slow", "ms": 0 }))?;
+    lend(0)?;
+    let lent = |r: &Reply| r.status == 402 && r.message().contains("agents are stopped");
+    let capped = |r: &Reply| r.status == 402 && r.message().contains("cap this month");
+    s.ok(
+        "a reader's question in another person's fragment, both ledgers allowing it, is embedded as the reader's and answered by meaning, and so is the next",
+        allowed.status == 200 && allowed.body["semantic"] == "on" && allowed_embeds == 1 && (allowed_heard || !s.one_isolate()) && again.status == 200 && again_embeds == 1,
+        json!({ "found": allowed.body, "embedded": [allowed_embeds, again_embeds], "heard": allowed_heard }),
+    );
+    s.ok(
+        "the reader's ledger refusing (its lending used up): the first question, its gate cold, is answered and charged once; the refusal heard beside it refuses the next, 402, saying so, and a replay too, nothing embedded or charged",
+        paid.status == 200 && paid_embeds == 1 && (payer_heard || !s.one_isolate()) && lent(&payer) && payer_embeds == 0 && lent(&replayed) && replayed_embeds == 0 && charged_once,
+        json!({ "first": paid.status, "heard": payer_heard, "next": payer.body, "replayed": replayed.status, "charged_once": charged_once }),
+    );
+    s.ok(
+        "the owner's ledger refusing (the fragment at its cap, $0 here): the first goes on, the next is refused, 402, saying so, with nothing embedded",
+        open_first_embeds == 1 && (owner_heard || !s.one_isolate()) && capped(&open) && open_embeds == 0,
+        json!({ "heard": owner_heard, "next": open.body, "embedded": open_embeds }),
+    );
+    s.ok(
+        "both refusing: the first goes on, and the next is refused with the reader's refusal, nothing embedded",
+        both_first_embeds == 1 && (both_heard || !s.one_isolate()) && lent(&both) && !capped(&both) && both_embeds == 0,
+        json!({ "heard": both_heard, "next": both.body, "embedded": both_embeds }),
+    );
+    let gate = part_ms(&slowed, "gate");
+    s.ok(
+        "both ledgers slowed to 10 s an answer, a question with its gate cold waits on neither: answered and embedded, its gate under the 1.5 s the gate once waited (it awaits no ledger)",
+        slowed.status == 200 && slowed_embeds == 1 && gate.is_some_and(|ms| ms < 1_500),
+        json!({ "status": slowed.status, "gate_ms": gate }),
+    );
+    Ok((reader, reader_id, name))
+}
+
+/// How long a reply's `Server-Timing` says `part` took, in ms.
+fn part_ms(r: &Reply, part: &str) -> Option<u64> {
+    let value = r.headers.get("server-timing")?.to_str().ok()?;
+    value.split(", ").find_map(|entry| entry.strip_prefix(part)?.strip_prefix(";dur=")?.parse().ok())
 }
 
 /// The index of `name`'s life `incarnation` (its live one's, none named),
@@ -68,11 +205,28 @@ pub fn search(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let (owner, name) = checks(s, api)?;
+    let (refused, refused_id, gated) = gate_checks(s, api)?;
     // ---- the node restarted holds what was written
     s.stop()?;
     let api = s.start(false)?;
     let found = api.signed(&owner, "POST", &format!("/api/f/{name}/search"), Some(&json!({ "q": "ferry friday" })))?;
     s.ok("the node restarted, what was written is searched still", found.status == 200 && found.body["results"][0]["section"] == "t2", &found);
+    // its gates restarted empty: a refused reader's first question goes on
+    // and teaches the gate again, the next is refused
+    let ask = || api.signed(&refused, "POST", &format!("/api/f/{gated}/search"), Some(&json!({ "q": "harbour lantern audit" })));
+    let first = ask()?;
+    let taught = gate_hears(s, &api, &refused_id, "refused");
+    let next = ask()?;
+    s.ok(
+        "the node restarted, its gates empty: a refused reader's first question goes on, the refusal heard beside it refuses the next, 402",
+        first.status == 200 && (taught || !s.one_isolate()) && next.status == 402,
+        json!({ "first": first.status, "taught": taught, "next": next.body }),
+    );
+    s.stop()?;
+    let moved = match s.start_repinned() {
+        Ok(api) => moved_checks(s, &api, &owner, &name),
+        Err(e) => Err(e),
+    };
     s.stop()?;
     let private = match s.start_as_private_tier() {
         Ok(api) => private_checks(s, &api),
@@ -80,7 +234,53 @@ pub fn search(s: &mut Suite, api: &Api) -> Result<()> {
     };
     s.stop()?;
     s.start(false)?;
-    private
+    moved.and(private)
+}
+
+/// On the node restarted with its embeddings in another space: `name`'s
+/// index, written in the space before, is searched by its words alone
+/// until a write empties it (a refused one too), and is written again.
+fn moved_checks(s: &mut Suite, api: &Api, owner: &Keys, name: &str) -> Result<()> {
+    let path = |route: &str| format!("/api/f/{name}/search{route}");
+    let before = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "ferry friday" })))?;
+    let held = api.signed(owner, "GET", &path("/status"), None)?;
+    let mut stale = upsert("sessions/a.json", "r9", turns());
+    stale["replaces"] = json!("r2");
+    let refused = api.signed(owner, "POST", &path("/upsert"), Some(&stale))?;
+    let emptied = api.signed(owner, "GET", &path("/status"), None)?;
+    let nothing = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "ferry friday" })))?;
+    let mut fresh = upsert("sessions/a.json", "r3", turns());
+    fresh["replaces"] = json!("");
+    let calls = s.ai.calls().len();
+    let again = api.signed(owner, "POST", &path("/upsert"), Some(&fresh))?;
+    let written: Vec<String> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).flat_map(|c| c.body["text"].as_array().cloned().unwrap_or_default()).filter_map(|t| t.as_str().map(str::to_string)).collect();
+    let batches: Vec<usize> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].as_array().map_or(0, Vec::len)).collect();
+    let calls = s.ai.calls().len();
+    let found = api.signed(owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
+    let asked: Vec<Value> = s.ai.calls()[calls..].iter().filter(|c| c.model == MODEL).map(|c| c.body["text"].clone()).collect();
+    s.ok(
+        "embeddings moved to another space: the index of the space before answers by its words alone (semantic off); the first write in the new one empties it first, a compare-and-set it then refuses (409, naming none) included; questions find nothing until its sources are written again, then by words and meaning",
+        before.status == 200 && before.body["semantic"] == "off" && before.body["results"][0]["section"] == "t2" && before.body["results"][0].get("semantic").is_none()
+            && held.body["sources"].as_u64().is_some_and(|n| n > 0) && held.body["space"].get("version").is_none()
+            && refused.status == 409 && refused.body["error"] == "conflict" && refused.body["current"].is_null()
+            && emptied.body["sources"] == 0 && emptied.body["chunks"] == 0 && emptied.body["space"]["version"] == "e2e-2"
+            && nothing.status == 200 && nothing.body["results"] == json!([])
+            && again.status == 200 && again.body["written"] == true
+            && found.body["semantic"] == "on" && found.body["results"][0]["section"] == "t0" && found.body["results"][0]["signals"] == json!(["lexical", "semantic"]),
+        json!({ "before": before.body, "held": held.body, "refused": refused.body, "emptied": emptied.body, "nothing": nothing.body, "found": found.body }),
+    );
+    s.ok(
+        "a slot's task prefixes: each chunk is embedded after its document prefix, each question after its query prefix, and the index's space names both",
+        written.len() == 2 && written.iter().all(|t| t.starts_with("search_document: ")) && asked == [json!(["search_query: harbour lantern audit"])]
+            && emptied.body["space"]["document_prefix"] == "search_document: " && emptied.body["space"]["query_prefix"] == "search_query: ",
+        json!({ "written": written, "asked": asked, "space": emptied.body["space"] }),
+    );
+    s.ok(
+        "a slot's model that takes one input a call is sent a write's chunks one a call",
+        again.status == 200 && batches == [1, 1],
+        json!({ "batches": batches }),
+    );
+    Ok(())
 }
 
 /// A fragment labelled `label`, made by `owner`, its index made by a
@@ -138,6 +338,22 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
         json!({ "write": w.body, "embedded": wrote, "found": found.body, "status": status.body }),
     );
 
+    // ---- its answer says what it waited on, by part: names and durations only
+    let lexical = api.signed(&reader, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit", "mode": "lexical" })))?;
+    s.ok(
+        "a search's answer says what it waited on in `Server-Timing`, names and durations only: by meaning, the gate, the embedding and the index; by words, the index alone",
+        timed_parts(&found) == Some(vec!["embed", "gate", "index"]) && timed_parts(&lexical) == Some(vec!["index"]),
+        json!({ "meaning": found.headers.get("server-timing").and_then(|v| v.to_str().ok()), "words": lexical.headers.get("server-timing").and_then(|v| v.to_str().ok()) }),
+    );
+
+    // ---- the index's int8 dot product is Wasm SIMD's, and agrees with the scalar one
+    let index = index_of(api, &name, None, None)?;
+    s.ok(
+        "the cell is built for Wasm SIMD, and its index's int8 dot product (SIMD's) agrees with the scalar one, in the Wasm a deploy ships",
+        index["index"]["simd"]["built"] == true && index["index"]["simd"]["agrees"] == true,
+        &index,
+    );
+
     // ---- a replay writes and embeds nothing; a grown source embeds only its new turn
     let calls = s.ai.calls().len();
     let again = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/a.json", "r1", turns())))?;
@@ -155,6 +371,23 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
     stale["replaces"] = json!("r0");
     let r = api.signed(&owner, "POST", &path("/upsert"), Some(&stale))?;
     s.ok("a write that replaces a revision the source has not is 409 conflict, naming the one it has", r.status == 409 && r.body["error"] == "conflict" && r.body["current"] == "r2", &r);
+
+    // ---- the embeddings model's rate limit: the write says how long to wait; a question goes on by words
+    s.ai.fail_next(&[429]);
+    let limited = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/r.json", "r1", json!([{ "id": "t0", "text": "Person: the rate-limited note" }]))))?;
+    let again = api.signed(&owner, "POST", &path("/upsert"), Some(&upsert("sessions/r.json", "r1", json!([{ "id": "t0", "text": "Person: the rate-limited note" }]))))?;
+    s.ai.fail_next(&[429]);
+    let asked = api.signed(&owner, "POST", &path(""), Some(&json!({ "q": "harbour lantern audit" })))?;
+    s.ok(
+        "a write its embeddings model rate-limits is refused 429 rate_limited, saying how long to wait (retry_after_ms, the model's own or 60 s, and Retry-After), and written when sent again; a question it rate-limits is answered by its words",
+        limited.status == 429 && limited.body["error"] == "rate_limited" && limited.body["retry_after_ms"] == fragment_core::embed::RETRY_AFTER_DEFAULT_MS
+            && limited.header("retry-after") == "60" && again.status == 200 && again.body["written"] == true
+            && asked.status == 200 && asked.body["semantic"] == "off" && asked.body["results"][0]["section"] == "t0",
+        json!({ "limited": limited.body, "again": again.body, "asked": asked.body["semantic"] }),
+    );
+    // gone again: the checks after count this fragment's sources
+    let gone = api.signed(&owner, "POST", &path("/delete"), Some(&json!({ "source": "sessions/r.json" })))?;
+    anyhow::ensure!(gone.status == 200 && gone.body["deleted"] == true, "the rate-limited source's delete: {gone}");
 
     // ---- limits, before anything is embedded or sent
     let calls = s.ai.calls().len();
@@ -291,12 +524,97 @@ fn checks(s: &mut Suite, api: &Api) -> Result<(Keys, String)> {
         json!({ "wrote": wrote.body, "old": old, "now": now.body, "found": found.body }),
     );
 
+    // ---- an index holds up to its cap; a source written again at capacity counts once
+    let created_full = s.create(api, &owner, "search-full")?;
+    let full = created_full["name"].as_str().context("its name")?.to_string();
+    let write = |source: &str, revision: &str, n: usize| {
+        let sections: Vec<Value> = (0..n).map(|i| json!({ "id": format!("t{i}"), "text": format!("Person: note {i} of {revision}") })).collect();
+        api.signed(&owner, "POST", &format!("/api/f/{full}/search/upsert"), Some(&upsert(source, revision, json!(sections))))
+    };
+    let first = write("notes/a.md", "r1", 1)?;
+    let capped = lever(api, &full, "search-index", json!({ "chunks_max": 3 }))?;
+    let at_cap = write("notes/b.md", "r1", 2)?;
+    let past = write("notes/c.md", "r1", 1)?;
+    let same_size = write("notes/b.md", "r2", 2)?;
+    let larger = write("notes/b.md", "r3", 3)?;
+    let status = api.signed(&owner, "GET", &format!("/api/f/{full}/search/status"), None)?;
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{full}/search/sources"), None)?;
+    let revisions: Vec<(String, String)> = listed.body["sources"].as_array().into_iter().flatten().map(|x| (x["source"].as_str().unwrap_or("").to_string(), x["revision"].as_str().unwrap_or("").to_string())).collect();
+    s.ok(
+        "an index takes writes up to its cap (lowered to 3 chunks here) and refuses one past it, 507 storage_full, holding what it held; a source written again at capacity counts once: as large it is taken, larger refused, its revision before kept",
+        first.status == 200 && capped.status == 200 && at_cap.status == 200 && past.status == 507 && past.body["error"] == "storage_full"
+            && same_size.status == 200 && larger.status == 507 && status.body["chunks"] == 3 && status.body["chunks_max"] == 3
+            && revisions == [("notes/a.md".to_string(), "r1".to_string()), ("notes/b.md".to_string(), "r2".to_string())],
+        json!({ "past": past.body, "larger": larger.body, "status": status.body, "sources": revisions }),
+    );
+
+    // ---- a fence: a writer's stale work never lands over its newer
+    let (fenced, _) = life(s, api, &owner, "fenced")?;
+    let at = |route: &str| format!("/api/f/{fenced}/search{route}");
+    let note = |revision: &str, fence: Option<u64>| {
+        let mut u = upsert("notes/f.md", revision, json!([{ "id": "t0", "text": format!("Person: the quartz ledger, {revision}") }]));
+        if let Some(f) = fence {
+            u["fence"] = json!(f);
+        }
+        u
+    };
+    let holds = |revision: &str| -> Result<bool> {
+        let r = api.signed(&owner, "POST", &at(""), Some(&json!({ "q": "quartz ledger", "mode": "lexical" })))?;
+        Ok(r.body["results"].as_array().is_some_and(|h| h.iter().any(|h| h["source"] == "notes/f.md" && h["revision"] == revision)))
+    };
+    let written = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r5", Some(5))))?;
+    let deleted = api.signed(&owner, "POST", &at("/delete"), Some(&json!({ "source": "notes/f.md", "fence": 6 })))?;
+    let stale_write = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r4", Some(4))))?;
+    let still_gone = !holds("r4")? && !holds("r5")?;
+    s.ok(
+        "a fenced write below the fence of a newer delete is refused (409 naming the fence): the deleted source stays gone",
+        written.status == 200 && deleted.status == 200 && deleted.body["deleted"] == true
+            && stale_write.status == 409 && stale_write.body["error"] == "conflict" && stale_write.body["fence"] == 6 && still_gone,
+        json!({ "deleted": deleted.body, "stale": stale_write.body }),
+    );
+    let newer = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r7", Some(7))))?;
+    let stale_delete = api.signed(&owner, "POST", &at("/delete"), Some(&json!({ "source": "notes/f.md", "fence": 6 })))?;
+    let replayed = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r7", Some(7))))?;
+    s.ok(
+        "a fenced delete below the fence of a newer write is refused, the source kept; the same fence again is taken (a replay writes nothing)",
+        newer.status == 200 && stale_delete.status == 409 && stale_delete.body["fence"] == 7 && holds("r7")?
+            && replayed.status == 200 && replayed.body["written"] == false,
+        json!({ "stale": stale_delete.body, "replayed": replayed.body }),
+    );
+    let unfenced = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r8", None)))?;
+    let then_fenced = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r9", Some(7))))?;
+    let too_high = api.signed(&owner, "POST", &at("/upsert"), Some(&note("r10", Some(1 << 53))))?;
+    s.ok(
+        "a writer that sends no fence is never refused for one and moves none (a fence of 7 is taken after it); a fence past 2^53 - 1 is refused (400)",
+        unfenced.status == 200 && unfenced.body["written"] == true && then_fenced.status == 200 && holds("r9")? && too_high.status == 400,
+        json!({ "unfenced": unfenced.body, "then": then_fenced.body, "too_high": too_high.body }),
+    );
+
     // ---- a deleted fragment's index is ended with it, its rows gone
     let (doomed, life_d) = life(s, api, &owner, "doomed")?;
     let w = api.signed(&owner, "POST", &format!("/api/f/{doomed}/search/upsert"), Some(&upsert("sessions/a.json", "r1", turns())))?;
     let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{doomed}"), None)?;
     let dropped = s.eventually(wait, || index_of(api, &doomed, Some(life_d), None).is_ok_and(|i| ended_empty(&i)));
     s.ok("a deleted fragment's index is ended with its other data, its sources and chunks gone", w.status == 200 && deleted.status == 200 && dropped, json!({ "write": w.body }));
+
+    // ---- a Session Archive's import writes its search (cli/src/session/search.rs)
+    let home = s.dir("search-archive-home");
+    s.login(api, &home);
+    let person = s.cli_keys(&home).context("the CLI logged in")?;
+    let root = s.dir("search-archive-export");
+    super::sessions::export(&root)?;
+    let import = |s: &Suite| s.cli_json(api, &home, &["session", "import", root.to_str().expect("utf-8 path"), "--json"]);
+    let first = import(s)?;
+    let archive = first["archive"].as_str().unwrap_or_default().to_string();
+    let found = api.signed(&person, "POST", &format!("/api/f/{archive}/search"), Some(&json!({ "q": "plant beans" })))?;
+    let again = import(s)?;
+    s.ok(
+        "an import writes its archive's search, each conversation it keeps a source of its turns, which its person finds by their words; the same import again writes nothing",
+        first["search"]["state"] == "written" && first["search"]["written"] == 3 && first["search"]["refused_count"] == 0
+            && found.status == 200 && found.body["results"][0]["source"] == "sessions/hermes-e2e_beans.json"
+            && again["search"]["state"] == "written" && again["search"]["written"] == 0 && again["search"]["unchanged"] == 3,
+        json!({ "first": first["search"], "found": found.body["results"][0], "again": again["search"] }),
+    );
     Ok((owner, name))
 }
 

@@ -1,0 +1,29 @@
+# The runner's disk freed before a job builds the Hermes image. Some
+# ubuntu-24.04 runners (image 20261018.96.1) have a 72 GB root, about
+# 12 GB free, which the image (held twice where BuildKit's container
+# builds it and `--load` copies it to Docker) and its build cache fill:
+# the Docker lane's tests ran out (runs 41249649091, 41253027860; PR
+# #890), and so did the merge queue's preview image, its runner's own log
+# "No space left on device" (runs 41265350002, 41266642000; FIN-360).
+# Most have 145 GB. None of these jobs uses the image's Android (12 GB),
+# .NET (5.8), Haskell (3.7), Swift (3.5) or CodeQL (1.4), nor its cached
+# Docker images (2.5): they go first, 28 GB in about 90 seconds. The
+# disk's layout is said, as it differs between runners, and the root's use
+# and the memory's are sampled every 5 seconds into
+# `$RUNNER_TEMP/disk-used` (MiB, one line each: disk, then memory), whose
+# peaks the job's `disk, after` says.
+name: free the disk
+description: the runner's unused toolchains and cached Docker images deleted, its disk and memory then sampled
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        df -h /
+        free -h
+        lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+        sudo dmsetup status 2>/dev/null || true
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+        docker image prune -af > /dev/null
+        df -h /
+        nohup sh -c 'while :; do echo "$(df -B1M --output=used / | tail -1 | tr -d " ") $(free -m | awk "/^Mem:/ { print \$3 }")"; sleep 5; done' > "$RUNNER_TEMP/disk-used" 2>&1 &

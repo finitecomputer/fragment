@@ -1,0 +1,253 @@
+import SwiftUI
+import WebKit
+
+@MainActor @Observable
+final class AccountConnection {
+    struct Code: Decodable { let code: String; let expiresAt: Int64 }
+    var account: DeviceAccount?
+    var code: Code?
+    var error: String?
+    var busy = false
+    @ObservationIgnored private var cachedAPI: FragmentAPI?
+    var api: FragmentAPI? {
+        guard let account, account.approved, let key = try? account.signingKey else { return nil }
+        if let cachedAPI, cachedAPI.baseURL == account.origin, cachedAPI.identity.publicKey == key.publicKey, cachedAPI.accountID == account.identity { return cachedAPI }
+        let client = FragmentAPI(baseURL: account.origin, identity: key, accountID: account.identity, session: session)
+        cachedAPI = client
+        return client
+    }
+    /// Where its account is kept, and what it may reach (`LaunchScope`).
+    private let scope: LaunchScope
+    /// The session its requests go through (the platform's, or a test's stub).
+    @ObservationIgnored private let session: URLSession?
+    /// Clears the app's web data (its sheets' store), every app's page state with it.
+    @ObservationIgnored private let clearWebData: @MainActor () async -> Void
+    init(scope: LaunchScope = .current, session: URLSession? = nil,
+         clearWebData: @escaping @MainActor () async -> Void = {
+             await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+         }) {
+        self.scope = scope
+        self.session = session
+        self.clearWebData = clearWebData
+        do {
+            if let stored = try DeviceKeychain.read(service: scope.keychainService) {
+                guard try PlatformOrigin.parse(stored.origin.absoluteString, scope: scope) == stored.origin else { throw APIError.invalidResponse }
+                _ = try stored.signingKey
+                account = stored
+            }
+        }
+        catch { self.error = error.localizedDescription }
+    }
+    func begin(_ raw: String, newKey: Bool = false) async {
+        busy = true; error = nil; code = nil; defer { busy = false }
+        do {
+            let origin = try PlatformOrigin.parse(raw, scope: scope)
+            if let existing = account, existing.origin != origin && existing.approved {
+                throw APIError.server("Disconnect this iPhone before pairing a different account.")
+            }
+            if newKey || account == nil || account?.origin != origin {
+                let key = try DeviceIdentity()
+                let next = DeviceAccount(origin: origin, secret: key.secret, approved: false)
+                try DeviceKeychain.save(next, service: scope.keychainService); account = next
+            }
+            guard let account else { throw APIError.invalidResponse }
+            let api = try FragmentAPI(baseURL: origin, identity: account.signingKey, session: session)
+            if try await finish(api) { return }
+            code = try await api.request("cli/begin", method: "POST", body: .object([:]))
+        } catch { self.error = error.localizedDescription }
+    }
+    func poll() async {
+        guard let code, let account else { return }
+        do {
+            let api = try FragmentAPI(baseURL: account.origin, identity: account.signingKey, session: session)
+            // The same interval and ten-minute bound as fragment login.
+            for _ in 0..<300 {
+                try Task.checkCancellation()
+                guard Int64(Date().timeIntervalSince1970 * 1000) < code.expiresAt else { error = "This code expired. Start again for a new code."; return }
+                if try await finish(api) { self.code = nil; return }
+                try await Task.sleep(for: .seconds(2))
+            }
+            error = "This code expired. Start again for a new code."
+        } catch { if !Task.isCancelled { self.error = error.localizedDescription } }
+    }
+    private func finish(_ api: FragmentAPI) async throws -> Bool {
+        do {
+            let person: JSONValue = try await api.request("api/identities/me")
+            try Task.checkCancellation()
+            guard person["kind"].string == "person", let identity = person["id"].string else { throw APIError.invalidResponse }
+            // newest wins: an answer for an account no longer this app's
+            // (removed, or replaced by another key) does nothing at all
+            guard isCurrent(api) else { throw CancellationError() }
+            // the app's web data is the person's it was kept for: another
+            // person (a new key, or this one approved by someone else) starts
+            // with none of it, before they can open an app
+            if account?.identity != identity {
+                await clearWebData()
+                try Task.checkCancellation()
+            }
+            // the account as it is now: one removed meanwhile stays removed
+            guard isCurrent(api), var next = account else { throw CancellationError() }
+            next.identity = identity; next.email = person["email"].string; next.approved = true
+            try DeviceKeychain.save(next, service: scope.keychainService); account = next; error = nil
+            return true
+        } catch APIError.unauthorized { return false }
+    }
+    /// Whether `api` is this app's account as it is now: its origin and key.
+    private func isCurrent(_ api: FragmentAPI) -> Bool {
+        guard let account, account.origin == api.baseURL, let key = try? account.signingKey else { return false }
+        return key.publicKey == api.identity.publicKey
+    }
+    func validate() async {
+        guard let api else { return }
+        do {
+            if try await finish(api) == false, isCurrent(api) { expire() }
+        } catch is CancellationError { return }
+        catch { self.error = error.localizedDescription }
+    }
+    func expire() {
+        guard var next = account, next.approved else { return }
+        next.approved = false
+        do { try DeviceKeychain.save(next, service: scope.keychainService); account = next; error = "This iPhone’s authorization ended. Pair again to reconnect." }
+        catch { self.error = error.localizedDescription; account = nil }
+    }
+    func disconnect() async {
+        busy = true; error = nil; defer { busy = false }
+        do {
+            let client = api
+            if let api = client, let account {
+                let _: JSONValue = try await api.request("api/identities/me/keys/\(try account.signingKey.publicKey)", method: "DELETE")
+            }
+            try await removeLocalAccount()
+        } catch { self.error = error.localizedDescription }
+    }
+    func forget() async {
+        busy = true; error = nil; defer { busy = false }
+        do { try await removeLocalAccount() }
+        catch { self.error = error.localizedDescription }
+    }
+    private func removeLocalAccount() async throws {
+        if let account {
+            let client = try FragmentAPI(baseURL: account.origin, identity: account.signingKey, accountID: account.identity)
+            try ChatDraftStore.removeAccount(api: client)
+        }
+        try DeviceKeychain.clear(service: scope.keychainService); account = nil; code = nil; cachedAPI = nil
+        // every app's page data goes with the account
+        await clearWebData()
+    }
+}
+
+struct AccountConnectionView: View {
+    let connection: AccountConnection
+    var close: () -> Void = {}
+    /// The address to pair with, as the screen first shows it: Debug's
+    /// `--pair-server`, else the saved account's, else Finite's own.
+    @State private var server: String
+    init(connection: AccountConnection, close: @escaping () -> Void = {}) {
+        self.connection = connection
+        self.close = close
+        _server = State(initialValue: Self.pairServer ?? connection.account?.origin.absoluteString ?? "https://finite.chat")
+    }
+    @State private var editingServer = false
+    @State private var logoY: CGFloat?
+    @State private var replaceKey = false
+    @State private var forgetConnection = false
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
+    var body: some View {
+        if connection.account == nil { intro } else { pairing }
+    }
+    /// The first screen of an iPhone with no key yet: Connect takes the
+    /// address as it stands, Finite's own unless changed here.
+    private var intro: some View {
+        ZStack {
+            DesktopWallpaper().glassLogo(size: 162, y: logoY)
+                .accessibilityElement().accessibilityLabel("Finite.Computer").accessibilityAddTraits(.isImage)
+            VStack(spacing: 12) {
+                // The logo sits midway down the room the controls leave.
+                Spacer().onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).midY } action: { logoY = $0 }
+                if let error = connection.error {
+                    Text(error).font(.footnote).multilineTextAlignment(.center).padding(.horizontal, 20).padding(.vertical, 12)
+                        .glassEffect(.regular, in: .rect(cornerRadius: 20))
+                }
+                if editingServer {
+                    TextField("https://finite.chat", text: $server).textContentType(.URL).keyboardType(.URL)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityIdentifier("accountServer")
+                        .padding(.horizontal, 24).frame(height: 56).glassEffect(.regular, in: .capsule)
+                } else {
+                    Button("Use a different server") { editingServer = true }
+                        .buttonStyle(.glass).accessibilityIdentifier("changeServer")
+                }
+                Button { Task { await connection.begin(server) } } label: {
+                    Text("Connect").font(.title3.weight(.semibold)).foregroundStyle(Color(.systemBackground))
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                }
+                .buttonStyle(.glassProminent).buttonBorderShape(.capsule).controlSize(.extraLarge)
+                .accessibilityIdentifier("pairAccount")
+            }
+            .padding(.horizontal, 20).padding(.bottom, 12)
+        }
+        .disabled(connection.busy)
+    }
+    private var pairing: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text("Finite.Computer").font(.title2.weight(.semibold))
+                    Text("Connect this iPhone to your account.").foregroundStyle(.secondary)
+                }
+                if let account = connection.account, account.approved {
+                    Section("Connected") {
+                        Text(account.email ?? "Your account")
+                        Text(account.origin.absoluteString).font(.footnote).foregroundStyle(.secondary)
+                        Button("Disconnect this iPhone", role: .destructive) { Task { await connection.disconnect() } }
+                            .accessibilityIdentifier("disconnectAccount")
+                    }
+                } else {
+                    Section("Your Finite server") {
+                        TextField("https://finite.chat", text: $server).textContentType(.URL).keyboardType(.URL)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityIdentifier("accountServer")
+                        Button(connection.code == nil ? "Connect" : "Get a new code") { Task { await connection.begin(server) } }
+                            .accessibilityIdentifier("pairAccount")
+                    }
+                    if let code = connection.code, let origin = connection.account?.origin {
+                        Section("Approve this iPhone") {
+                            Text(code.code).font(.system(.largeTitle, design: .monospaced).weight(.semibold)).textSelection(.enabled).accessibilityIdentifier("pairingCode")
+                            Button("Copy code", systemImage: "doc.on.doc") { UIPasteboard.general.string = code.code }
+                            Button("Open approval page", systemImage: "safari") { openURL(origin.appending(path: "cli")) }
+                            Text("Enter this code on that page, check the Finite-iOS request, and approve. You can also use a browser on another device. Return here to finish connecting.").font(.footnote).foregroundStyle(.secondary)
+                            ProgressView("Waiting for approval…")
+                        }
+                    }
+                    if connection.code == nil {
+                        Section { Button("Create a new device key") { replaceKey = true } }
+                    }
+                }
+                Section {
+                    Button("Remove from this iPhone", role: .destructive) { forgetConnection = true }
+                        .accessibilityIdentifier("forgetAccount")
+                } footer: {
+                    Text("Use this if the server is unreachable. This removes the saved key and drafts from this iPhone; revoke its approved key from the website when you can.")
+                }
+                if connection.busy { ProgressView() }
+                if let error = connection.error { Section { Text(error).foregroundStyle(.secondary) } }
+            }
+            .navigationTitle("Connect Finite").navigationBarTitleDisplayMode(.inline)
+            .disabled(connection.busy)
+            .task(id: "\(connection.code?.code ?? "")|\(scenePhase)") { if connection.code != nil && scenePhase == .active { await connection.poll() } }
+            .onChange(of: connection.account?.approved) { _, approved in if approved == true { close() } }
+            .confirmationDialog("Remove this connection from this iPhone?", isPresented: $forgetConnection, titleVisibility: .visible) {
+                Button("Remove saved connection", role: .destructive) { Task { await connection.forget() } }
+            } message: { Text("The key may still be approved on the server. This removes only the key and saved drafts on this iPhone.") }
+            .confirmationDialog("Create a new device key?", isPresented: $replaceKey, titleVisibility: .visible) {
+                Button("Create new key") { Task { await connection.begin(server, newKey: true) } }
+            } message: { Text("Use this if the previous key was revoked. Other devices keep their own keys.") }
+        }
+    }
+    private static var pairServer: String? {
+        #if DEBUG
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "--pair-server"), args.indices.contains(i + 1) { return args[i + 1] }
+        #endif
+        return nil
+    }
+}

@@ -11,8 +11,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bytes::Bytes;
+use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::{Method, Request, StatusCode};
+use hyper::body::Incoming;
+use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -439,7 +441,14 @@ pub enum FileChange {
 #[derive(Clone)]
 pub struct Api {
     base: Base,
-    client: Client<HttpConnector, Full<Bytes>>,
+    client: Client<HttpConnector, ReqBody>,
+}
+
+/// A request's body: whole bytes, or a file streamed (`put_blob_file`).
+type ReqBody = UnsyncBoxBody<Bytes, std::io::Error>;
+
+fn whole(bytes: Bytes) -> ReqBody {
+    Full::new(bytes).map_err(|never| match never {}).boxed_unsync()
 }
 
 fn encode(s: &str) -> String {
@@ -452,6 +461,16 @@ fn encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// A refusal's answer: its status and `{error, message}`.
+fn refused(status: StatusCode, bytes: &[u8]) -> ApiError {
+    let v: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+    ApiError::Refused {
+        status: status.as_u16(),
+        error: v["error"].as_str().unwrap_or("").to_string(),
+        message: v["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&bytes[..bytes.len().min(300)]).into_owned()),
+    }
 }
 
 /// A fragment's name in a path: a name's characters only, so no name ever
@@ -492,7 +511,7 @@ impl Api {
             }
             None => Bytes::new(),
         };
-        let req = req.body(Full::new(body)).map_err(|e| ApiError::Transport(e.to_string()))?;
+        let req = req.body(whole(body)).map_err(|e| ApiError::Transport(e.to_string()))?;
         let call = async {
             let res = self.client.request(req).await.map_err(|e| ApiError::Transport(e.to_string()))?;
             let status = res.status();
@@ -512,12 +531,27 @@ impl Api {
         if status.is_success() {
             return Ok(bytes);
         }
-        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        Err(ApiError::Refused {
-            status: status.as_u16(),
-            error: v["error"].as_str().unwrap_or("").to_string(),
-            message: v["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&bytes[..bytes.len().min(300)]).into_owned()),
-        })
+        Err(refused(status, &bytes))
+    }
+
+    /// A request whose answer's body is the caller's to read: its head
+    /// within `HTTP_TIMEOUT_MS`, a refusal read whole (at most
+    /// `ANSWER_MAX_BYTES`) as `Refused`.
+    async fn head_of(&self, req: Request<ReqBody>, path: &str) -> Result<Response<Incoming>, ApiError> {
+        let res = match tokio::time::timeout(Duration::from_millis(limits::HTTP_TIMEOUT_MS), self.client.request(req)).await {
+            Ok(r) => r.map_err(|e| ApiError::Transport(e.to_string()))?,
+            Err(_) => return Err(ApiError::Transport(format!("{path}: no answer in {} ms", limits::HTTP_TIMEOUT_MS))),
+        };
+        if res.status().is_success() {
+            return Ok(res);
+        }
+        let status = res.status();
+        let read = tokio::time::timeout(Duration::from_millis(limits::HTTP_TIMEOUT_MS), Limited::new(res.into_body(), limits::ANSWER_MAX_BYTES).collect()).await;
+        let bytes = match read {
+            Ok(Ok(b)) => b.to_bytes(),
+            _ => Bytes::new(),
+        };
+        Err(refused(status, &bytes))
     }
 
     async fn json<T: DeserializeOwned>(&self, method: Method, path: &str, agent: Option<&str>, body: Option<Value>) -> Result<T, ApiError> {
@@ -689,17 +723,79 @@ impl Api {
         Ok(())
     }
 
-    /// `PUT /api/f/{name}/blobs/{sha256}`, typed `content-type`.
-    pub async fn put_blob(&self, agent: &str, fragment: &str, sha256: &str, content_type: &str, bytes: Bytes) -> Result<(), ApiError> {
+    /// `PUT /api/f/{name}/blobs/{sha256}`, typed `content-type`: the file at
+    /// `path`, its first `size` bytes (whose hash is `sha256`), streamed with
+    /// its length declared. Cut when the platform takes no byte for
+    /// `TRANSFER_STALL_MS`, or does not answer within `HTTP_TIMEOUT_MS` of
+    /// the last (transfer.rs, `Paced`).
+    pub async fn put_blob_file(&self, agent: &str, fragment: &str, sha256: &str, content_type: &str, path: &std::path::Path, size: u64) -> Result<(), ApiError> {
         assert!(sha256.len() == 64, "a blob is named by its sha256");
-        self.call(Method::PUT, &format!("/api/f/{}/blobs/{sha256}", name(fragment)?), Some(agent), Some((content_type, bytes)), limits::ANSWER_MAX_BYTES).await?;
-        Ok(())
+        let route = format!("/api/f/{}/blobs/{sha256}", name(fragment)?);
+        let file = tokio::fs::File::open(path).await.map_err(|e| ApiError::Transport(format!("{}: {e}", path.display())))?;
+        let pace = crate::transfer::Pace::new();
+        let body = crate::transfer::file_body(file, size, pace.clone());
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(self.base.url(&route))
+            .header("host", self.base.authority())
+            .header(AGENT_HEADER, agent)
+            .header("content-type", content_type)
+            .header("content-length", size)
+            .body(body)
+            .map_err(|e| ApiError::Transport(e.to_string()))?;
+        let call = async {
+            let res = self.client.request(req).await.map_err(|e| ApiError::Transport(e.to_string()))?;
+            let status = res.status();
+            let bytes = Limited::new(res.into_body(), limits::ANSWER_MAX_BYTES).collect().await.map_err(|e| ApiError::Transport(e.to_string()))?.to_bytes();
+            Ok::<_, ApiError>((status, bytes))
+        };
+        let (status, bytes) = pace.watch(call).await.ok_or_else(|| ApiError::Transport(format!("{route}: stalled")))??;
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(refused(status, &bytes))
     }
 
-    /// `GET /api/f/{name}/blobs/{sha256}`, at most `ATTACHMENT_MAX_BYTES`.
-    pub async fn get_blob(&self, agent: &str, fragment: &str, sha256: &str) -> Result<Bytes, ApiError> {
-        let max = usize::try_from(limits::ATTACHMENT_MAX_BYTES).expect("25 MiB fits");
-        self.call(Method::GET, &format!("/api/f/{}/blobs/{}", name(fragment)?, encode(sha256)), Some(agent), None, max).await
+    /// `GET /api/f/{name}/blobs/{sha256}` from byte `from` on (`Range`, past
+    /// the first): the answer's head, its body streamed by the caller
+    /// (transfer.rs, `download`).
+    pub async fn blob_from(&self, agent: &str, fragment: &str, sha256: &str, from: u64) -> Result<Response<Incoming>, ApiError> {
+        let route = format!("/api/f/{}/blobs/{}", name(fragment)?, encode(sha256));
+        let mut req = Request::builder().method(Method::GET).uri(self.base.url(&route)).header("host", self.base.authority()).header(AGENT_HEADER, agent);
+        if from > 0 {
+            req = req.header("range", format!("bytes={from}-"));
+        }
+        let req = req.body(whole(Bytes::new())).map_err(|e| ApiError::Transport(e.to_string()))?;
+        self.head_of(req, &route).await
+    }
+
+    /// `GET /api/migrations/stages/{stage}/zip`, bytes `from` to `to`
+    /// (inclusive), as `agent`: its own stage, which the platform answers
+    /// only while its move imports (docs/migrations.md). The bytes, and the
+    /// zip's whole size (its `content-range`): at most `to - from + 1`
+    /// bytes, read within `HTTP_TIMEOUT_MS`.
+    pub async fn stage_range(&self, agent: &str, stage: &str, from: u64, to: u64) -> Result<(Bytes, u64), ApiError> {
+        assert!(to >= from && to - from < 64 << 20, "a stage's range is bounded");
+        let ok = !stage.is_empty() && stage.len() <= 96 && stage.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+        if !ok {
+            return Err(ApiError::Decode(format!("{stage:?} is not a stage's id")));
+        }
+        let route = format!("/api/migrations/stages/{stage}/zip");
+        let req = Request::builder().method(Method::GET).uri(self.base.url(&route)).header("host", self.base.authority()).header(AGENT_HEADER, agent).header("range", format!("bytes={from}-{to}"));
+        let req = req.body(whole(Bytes::new())).map_err(|e| ApiError::Transport(e.to_string()))?;
+        let res = self.head_of(req, &route).await?;
+        let total = res.headers().get("content-range").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit_once('/')).and_then(|(_, t)| t.parse::<u64>().ok());
+        let total = match (res.status(), total) {
+            (StatusCode::PARTIAL_CONTENT, Some(t)) => t,
+            _ => return Err(ApiError::Decode(format!("{route}: a range answered without its place in the whole"))),
+        };
+        let max = usize::try_from(to - from + 1).expect("bounded above");
+        let read = tokio::time::timeout(Duration::from_millis(limits::HTTP_TIMEOUT_MS), Limited::new(res.into_body(), max).collect()).await;
+        match read {
+            Ok(Ok(b)) => Ok((b.to_bytes(), total)),
+            Ok(Err(e)) => Err(ApiError::Transport(e.to_string())),
+            Err(_) => Err(ApiError::Transport(format!("{route}: its bytes did not come in {} ms", limits::HTTP_TIMEOUT_MS))),
+        }
     }
 
     /// `GET /api/f/{name}/files`: the files at main.
@@ -799,6 +895,32 @@ impl Api {
     pub async fn bind_door(&self, agent: &str, owner: &str, fragment: &str) -> Result<Value, ApiError> {
         let body = json!({ "act": "link", "agent": agent });
         self.json(Method::POST, &format!("/api/f/{}/door?for={}", name(fragment)?, encode(owner)), Some(agent), Some(body)).await
+    }
+
+    /// What an editor does to a fragment, asked by the agent for its owner,
+    /// or as itself (`itself`): `secret` sets its `TELEGRAM_WEBHOOK_SECRET`,
+    /// `files` writes it a page, `token` asks for a token to push its code,
+    /// `seen` and `propose` call a Telegram connector's operations of an
+    /// editor's. On a connector, refused whomever an agent acts for, and
+    /// whatever its membership (docs/api.md, "An agent's doors"). The
+    /// script's `door poke` asks it, for the platform's lanes.
+    pub async fn poke(&self, agent: &str, owner: &str, fragment: &str, what: &str, itself: bool) -> Result<Value, ApiError> {
+        let op = |op: &str, input: Value| (Method::POST, format!("ops/{op}"), Some(json!({ "id": format!("poke-{op}"), "input": input })));
+        let (method, route, body) = match what {
+            "secret" => (Method::PUT, "secrets/TELEGRAM_WEBHOOK_SECRET".to_string(), Some(json!({ "value": "the-agent-knows-this", "hosts": ["api.telegram.org"] }))),
+            "files" => (Method::POST, "files".to_string(), Some(json!({ "key": "poke", "message": "a page of the agent's", "files": [{ "path": "site/setup.html", "text": "<script>/* the agent's */</script>" }] }))),
+            "token" => (Method::GET, "storage-token".to_string(), None),
+            "seen" => op("seen", json!({ "update": 999_999 })),
+            "propose" => op("propose", json!({ "nonce": "0".repeat(32), "user": 1, "chat": 1, "name": "Paul" })),
+            "visibility" => (Method::PUT, "visibility".to_string(), Some(json!({ "visibility": "link" }))),
+            "invite" => (Method::POST, "invites".to_string(), Some(json!({ "email": "poked@e2e.test", "role": "viewer" }))),
+            "rotate" => (Method::POST, "rotate".to_string(), Some(json!({ "scopes": ["view"] }))),
+            "status" => (Method::GET, "status".to_string(), None),
+            _ => return Err(ApiError::Refused { status: 400, error: "invalid_request".into(), message: format!("poke {what:?}: secret, files, token, seen, propose, visibility, invite, rotate or status") }),
+        };
+        let path = format!("/api/f/{}/{route}", name(fragment)?);
+        let path = if itself { path } else { format!("{path}?for={}", encode(owner)) };
+        self.json(method, &path, Some(agent), body).await
     }
 
     /// `GET /f/{name}/__live`, as the agent.

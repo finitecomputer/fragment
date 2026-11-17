@@ -5,6 +5,9 @@
 //! - **After live moves** (plane.rs `interpret`) the fragment wants a card
 //!   of the new live, in the same turn, and nothing more: the deploy's
 //!   request shoots nothing.
+//! - **After main moves** while live stays (the app's files: a brain's
+//!   pages), its live is wanted again, the first time since its shot only
+//!   (`card::Cards::content_moved`, FIN-368).
 //! - **Its alarm** takes the shot, after the rest of its work: it asks
 //!   whether the live is shot at all (an app or a brain, not members-only,
 //!   an owner who pays), then takes it with the `BROWSER` binding: a
@@ -42,7 +45,7 @@ use fragment_core::card::{self, Cards, Fault, Heard, Next, Outcome, Pace, Skip, 
 use fragment_core::site::VIEW_COOKIE;
 use fragment_core::ledger::{Refused, Spend};
 use fragment_core::price::Usage;
-use fragment_proto::{ErrorCode, PageErrorKind, Role};
+use fragment_proto::{ErrorCode, PageErrorKind, Role, Visibility};
 use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -70,7 +73,7 @@ impl FragmentCell {
     pub(crate) fn cards(&self) -> CellResult<Cards> {
         match self.meta(MetaKey::Cards)? {
             None => Ok(Cards::default()),
-            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the kept cards do not decode: {e}"))),
+            Some(text) => crate::json_text(&text).map_err(|e| CellError::host(format!("the kept cards do not decode: {e}"))),
         }
     }
 
@@ -91,6 +94,18 @@ impl FragmentCell {
         let before = cards.clone();
         cards.want(live, js::now_ms()).map_err(|_| CellError::host(format!("live moved to {live}, which is no commit id")))?;
         if cards != before {
+            self.keep_cards(&cards)?;
+        }
+        Ok(())
+    }
+
+    /// Main moved (plane.rs `interpret`): the card of live as it is is
+    /// wanted again when this is its first change since live's shot
+    /// (`card::Cards::content_moved`). The alarm takes the shot.
+    pub(crate) fn card_content_moved(&self) -> CellResult<()> {
+        let Some(live) = self.meta(MetaKey::PinLive)? else { return Ok(()) };
+        let mut cards = self.cards()?;
+        if cards.content_moved(&live, js::now_ms()).map_err(|_| CellError::host(format!("live is at {live}, which is no commit id")))? {
             self.keep_cards(&cards)?;
         }
         Ok(())
@@ -123,6 +138,12 @@ impl FragmentCell {
                 return Ok(());
             }
         };
+        // test fleets: gone members only between this look and the shot's
+        // page, as an owner restricting it while it is shot makes it
+        if self.test_countdown(MetaKey::TestMembersWhileShot, "members only while shot").is_err() {
+            self.set_meta(MetaKey::Visibility, Visibility::Members.as_str())?;
+            self.sharing_changed()?;
+        }
         let shot = match cards.next(now, self.card_pace()) {
             Next::Shoot(shot) => shot,
             Next::GaveUp { failures } => {
@@ -345,7 +366,7 @@ async fn acquire(env: &Env) -> Result<String, Failure> {
         // a 429 or 5xx passes; anything else is the binding's say, tried again all the same
         return Err(Failure::retry(format!("Browser Rendering answered {status} to a new session")));
     }
-    let id = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["sessionId"].as_str().map(str::to_string)).unwrap_or_default();
+    let id = crate::json_text::<Value>(&text).ok().and_then(|v| v["sessionId"].as_str().map(str::to_string)).unwrap_or_default();
     if id.is_empty() || id.len() > SESSION_ID_MAX || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         return Err(Failure::retry("Browser Rendering named no session"));
     }
@@ -436,6 +457,11 @@ async fn shoot(cdp: &mut Cdp<'_>, page: &card::Visit, deadline: i64) -> Result<V
     let load_by = deadline.min(js::now_ms() + card::LOAD_TIMEOUT_MS as i64);
     cdp.loaded(load_by).await?;
     Delay::from(Duration::from_millis(card::SETTLE_MS)).await;
+    // where it landed: the app's own origin, or a sign-in (gone members
+    // only meanwhile), whose shot is no card of it; tried again, the next
+    // look finds it members only and lets it go (FIN-359)
+    let tree = cdp.call("Page.getFrameTree", json!({}), deadline).await?;
+    card::landed(&page.url, tree["frameTree"]["frame"]["url"].as_str().unwrap_or("")).map_err(|e| Failure::retry(e.message()))?;
     let mut size = 0;
     for quality in card::QUALITIES {
         let shot = cdp.call("Page.captureScreenshot", json!({ "format": "jpeg", "quality": quality, "fromSurface": true }), deadline).await?;
@@ -480,7 +506,7 @@ impl Cdp<'_> {
         match select(next, timer).await {
             Either::Left((Some(Ok(WebsocketEvent::Message(m))), _)) => {
                 let text = m.text().or_else(|| m.bytes().map(|b| String::from_utf8_lossy(&b).into_owned())).unwrap_or_default();
-                let v: Value = serde_json::from_str(&text).map_err(|_| Failure::retry("CDP said something that is not JSON"))?;
+                let v: Value = crate::json_text(&text).map_err(|_| Failure::retry("CDP said something that is not JSON"))?;
                 if self.target_session.is_some() && v["sessionId"].as_str() == self.target_session.as_deref() {
                     self.loaded |= v["method"] == "Page.loadEventFired";
                     self.heard.hear(&v);

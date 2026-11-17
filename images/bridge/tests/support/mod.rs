@@ -45,6 +45,15 @@ pub fn dir(name: &str) -> PathBuf {
     d
 }
 
+/// A large file's length: past Hermes' own 25 MiB, and past the 32 MiB a
+/// whole-body read took before (the egress, `/relay/media`).
+pub const BIG_BYTES: usize = 40 * 1024 * 1024;
+
+/// `n` bytes no two runs differ in, none repeating within a page.
+pub fn big(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i as u32).wrapping_mul(2_654_435_761).rotate_right(13) as u8).collect()
+}
+
 pub fn settings() -> Settings {
     Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 60_000 }
 }
@@ -67,7 +76,7 @@ pub struct Running {
 }
 
 pub fn config(api: &str, state: &Path, settings: Settings) -> Config {
-    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), left_out: vec![], settings, agents_file: None, screen: None, keepalive_ping: Duration::from_millis(fragment_bridge::limits::KEEPALIVE_PING_MS), simplex: None }
+    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), left_out: vec![], settings, agents_file: None, screen: None, keepalive_ping: Duration::from_millis(fragment_bridge::limits::KEEPALIVE_PING_MS), simplex: None }
 }
 
 /// A bridge on the test's runtime, beside the fakes, as the tests have run
@@ -261,10 +270,10 @@ impl Runtime for Counting {
     }
 
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
-        let RuntimeIo { mut commands, events, shutdown } = io;
+        let RuntimeIo { mut commands, events, shutdown, held, unquiet } = io;
         let (to_inner, inner_commands) = mpsc::channel::<Command>(256);
         let runs = self.runs;
-        let inner = self.inner.run(RuntimeIo { commands: inner_commands, events, shutdown });
+        let inner = self.inner.run(RuntimeIo { commands: inner_commands, events, shutdown, held, unquiet });
         Box::pin(async move {
             // On the bridge's runtime, so a kill ends it with the bridge.
             tokio::spawn(async move {
@@ -281,4 +290,24 @@ impl Runtime for Counting {
             inner.await
         })
     }
+}
+
+/// One HTTP/1.1 request to the screen port, read to its end: its status
+/// and body.
+pub async fn http(base: &fragment_bridge::net::Base, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(base.authority()).await.expect("the screen answers");
+    let mut req = format!("{method} {path} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\ncontent-length: {}\r\n", base.authority(), body.len());
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    s.write_all(req.as_bytes()).await.unwrap();
+    s.write_all(body).await.unwrap();
+    let mut got = Vec::new();
+    s.read_to_end(&mut got).await.unwrap();
+    let got = String::from_utf8_lossy(&got).into_owned();
+    let status = got.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let body = got.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+    (status, body)
 }

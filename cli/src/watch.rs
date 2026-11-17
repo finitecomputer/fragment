@@ -1,4 +1,4 @@
-// Continuous sync: OS events (debounced) + a live `__watch` websocket
+// Continuous sync: OS events (settled by notify's debouncer) + a live `__watch` websocket
 // from the cell + periodic sweeps as the correctness floor. Falls back to
 // polling when native watching is unavailable. A wakeup costs what it
 // needs: the folder's echo of a pull and the feed's echo of our own commit
@@ -13,9 +13,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-const DEBOUNCE_MS: u64 = 300;
+/// How long a path's OS events must be quiet before the watcher hears of
+/// them: notify's debouncer holds them that long, the one wait between a
+/// save and its pass. An editor's save and its droppings (a temp file, a
+/// rename, a mode change) land within it. A second quiet period of our own
+/// (300 ms more, polled every 50 ms) once followed it, for about 0.6 s from
+/// a save to its first request (bench, 2026-11-02).
+const QUIET_MS: u64 = 200;
 const POLL_INTERVAL_SECS: u64 = 5;
 const RESCAN_SECS: u64 = 60;
 /// Wakeups one batch takes from the queue at most: a burst (a checkout,
@@ -35,38 +41,6 @@ fn relevant(roots: &[PathBuf], paths: &[PathBuf]) -> bool {
         Some(rel) => sync::syncable(&rel.to_string_lossy().replace('\\', "/")),
         None => true,
     })
-}
-
-/// The debounce window: hold the latest wakeups until things go quiet, or
-/// until the max-latency cap forces a flush, then run ONE pass.
-struct Debounced {
-    pending: Arc<AtomicBool>,
-    debounce: Duration,
-    max_latency: Duration,
-}
-
-impl Debounced {
-    /// block until quiet (or the cap), then clear
-    fn wait(&self) {
-        let started = Instant::now();
-        let mut quiet_for = Duration::ZERO;
-        // bounded by max_latency: a folder that never goes quiet (a long
-        // copy) still gets a pass every max_latency
-        loop {
-            std::thread::sleep(Duration::from_millis(50));
-            if self.pending.swap(false, Ordering::Relaxed) {
-                quiet_for = Duration::ZERO; // still churning
-            } else {
-                quiet_for += Duration::from_millis(50);
-                if quiet_for >= self.debounce {
-                    return;
-                }
-            }
-            if started.elapsed() >= self.max_latency {
-                return;
-            }
-        }
-    }
 }
 
 /// What woke the watcher.
@@ -113,11 +87,15 @@ struct Watcher<'a> {
     /// main's head as the last pass left it: the feed's frame naming it is
     /// our own commit's echo, or a move a pass already took
     head: Option<String>,
+    /// the folder as it was (`Local::content_hash`) when a pass left
+    /// changes in it unsent, its fragment only read: the same folder is
+    /// no change to pass for
+    unsent_at: Option<String>,
 }
 
 impl<'a> Watcher<'a> {
     fn new(client: &'a Client, name: &'a str, dir: &'a Path, opts: &'a SyncOptions) -> Watcher<'a> {
-        Watcher { client, name, dir, opts, storage: Held::new(name), head: None }
+        Watcher { client, name, dir, opts, storage: Held::new(name, opts.mode.wants()), head: None, unsent_at: None }
     }
 
     /// Folds one wakeup into its batch.
@@ -139,7 +117,16 @@ impl<'a> Watcher<'a> {
             return Ok(Served::Nothing);
         }
         let local = sync::read_local(self.dir, self.name)?;
-        let full = due.remote || !local.matches_journal() || (due.sweep && (!live_up || self.head_moved()?));
+        let folder = local.content_hash();
+        // the folder as a pass that only read left it is settled while the
+        // token still only reads: once it writes (the viewer made an editor,
+        // which a sweep's head read mints again within a minute), the
+        // changes it held go out with the next pass
+        let unsent = self.unsent_at.as_ref() == Some(&folder);
+        let full = due.remote
+            || !(local.matches_journal() || unsent)
+            || (due.sweep && (!live_up || self.head_moved()?))
+            || (unsent && self.storage.writes());
         if !full {
             return Ok(if due.sweep { Served::Checked } else { Served::Nothing });
         }
@@ -147,9 +134,10 @@ impl<'a> Watcher<'a> {
         let passed = self.storage.get(client).map_err(SyncError::from).and_then(|storage| sync::pass_over(client, storage, name, dir, opts, local));
         let report = self.refused_on_auth(passed)?;
         if report.landed {
-            sync::refresh_pins(client, name);
+            sync::refresh_pins(client, name, MAIN);
         }
         self.head = report.head.clone();
+        self.unsent_at = (!report.unsent.is_empty()).then_some(folder);
         Ok(Served::Passed(Box::new(report)))
     }
 
@@ -168,18 +156,15 @@ impl<'a> Watcher<'a> {
     }
 }
 
-/// Blocks for the next wakeup (or the sweep's deadline), lets a burst
-/// settle, then folds everything queued into one batch: a burst of saves
-/// spanning a pass is one more pass, not one per save.
-fn next_batch(rx: &Receiver<Wakeup>, gate: &Debounced, watcher: &Watcher<'_>) -> Due {
+/// Blocks for the next wakeup (or the sweep's deadline), then folds
+/// everything queued into one batch: a burst of saves spanning a pass is
+/// one more pass, not one per save. OS events arrive settled (`QUIET_MS`).
+fn next_batch(rx: &Receiver<Wakeup>, watcher: &Watcher<'_>) -> Due {
     let first = match rx.recv_timeout(Duration::from_secs(RESCAN_SECS)) {
         Ok(wakeup) => wakeup,
         Err(RecvTimeoutError::Timeout) => Wakeup::Sweep,
         Err(RecvTimeoutError::Disconnected) => unreachable!("run holds a sender for as long as it loops"),
     };
-    if first != Wakeup::Sweep {
-        gate.wait(); // let a burst settle into one pass
-    }
     let mut due = Due::default();
     watcher.note(&mut due, first);
     for wakeup in rx.try_iter().take(WAKEUPS_BATCH_MAX) {
@@ -191,16 +176,17 @@ fn next_batch(rx: &Receiver<Wakeup>, gate: &Debounced, watcher: &Watcher<'_>) ->
 /// Syncs `dir` until the process ends, woken by the OS's events, the
 /// cell's change feed, and a sweep.
 pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<()> {
+    // in full: the folder's journal and the live socket both name it so;
+    // a refusal keeps its code (`Client::fragment`'s own error)
+    let name = &client.fragment(name)?;
     let _lock = SyncLock::acquire(dir)?; // one watcher per folder, ever
-    let debounce = Duration::from_millis(DEBOUNCE_MS);
-    let gate = Debounced { pending: Arc::new(AtomicBool::new(false)), debounce, max_latency: debounce * 3 };
 
     // channel of wakeups; `tx` lives as long as the loop below
     let (tx, rx) = std::sync::mpsc::channel::<Wakeup>();
 
     // ---- backend 1: OS events (with poll fallback) ----
     let mut backend_in_use = "native";
-    let _watcher = match spawn_native(dir, tx.clone(), gate.pending.clone()) {
+    let _watcher = match spawn_native(dir, tx.clone()) {
         Ok(w) => Some(w),
         Err(e) => {
             eprintln!("warning: native watcher unavailable ({e}); falling back to polling every {}s", POLL_INTERVAL_SECS);
@@ -241,12 +227,16 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Resul
             Ok(served) => {
                 err_backoff = 1;
                 if let Served::Passed(report) = served {
-                    if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.deleted_remote.is_empty() || !report.deleted_local.is_empty() || !report.conflicts.is_empty() {
+                    if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.deleted_remote.is_empty() || !report.deleted_local.is_empty() || !report.conflicts.is_empty() || !report.unsent.is_empty() || !report.outside_sync.is_empty() {
                         let at = now_utc();
-                        println!("{at} pushed {} pulled {} deleted {} conflicts {}", report.pushed.len(), report.pulled.len(), report.deleted_remote.len() + report.deleted_local.len(), report.conflicts.len());
+                        let unsent = if report.unsent.is_empty() { String::new() } else { format!(" not sent {} (you may only read it)", report.unsent.len()) };
+                        let outside = if report.outside_sync.is_empty() { String::new() } else { format!(" no longer synced {} (kept here)", report.outside_sync.len()) };
+                        println!("{at} pushed {} pulled {} deleted {} conflicts {}{unsent}{outside}", report.pushed.len(), report.pulled.len(), report.deleted_remote.len() + report.deleted_local.len(), report.conflicts.len());
                     }
                 }
             }
+            // a folder sync refuses stays refused: stop, as a fresh sync would
+            Err(SyncError::Refused(e)) => return Err(crate::api::CodedError::from(e).into()),
             Err(e) => {
                 let at = now_utc();
                 eprintln!("{at} sync failed (retrying in {err_backoff}s): {e}");
@@ -254,7 +244,7 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Resul
                 err_backoff = (err_backoff * 2).min(60);
             }
         }
-        due = next_batch(&rx, &gate, &watcher);
+        due = next_batch(&rx, &watcher);
         // a failed pass is retried by the next batch: the folder still
         // differs from its journal, or main from the head we hold
     }
@@ -267,19 +257,18 @@ fn view_token(client: &Client, name: &str) -> Option<String> {
 
 /// native OS watcher; the boxed return keeps the watcher alive (dropping it
 /// stops events)
-fn spawn_native(dir: &Path, tx: Sender<Wakeup>, pending: Arc<AtomicBool>) -> Result<Box<dyn Send>> {
+fn spawn_native(dir: &Path, tx: Sender<Wakeup>) -> Result<Box<dyn Send>> {
     use notify_debouncer_full::{new_debouncer, DebounceEventResult};
     let dir_owned: PathBuf = dir.to_path_buf();
     // the folder as given, and as the OS may report it (macOS names
     // /var/… by its real path, /private/var/…)
     let roots = vec![dir.to_path_buf(), dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())];
     let mut debouncer = new_debouncer(
-        Duration::from_millis(200),
+        Duration::from_millis(QUIET_MS),
         None,
         move |res: DebounceEventResult| {
             if let Ok(events) = res {
                 if events.iter().any(|e| relevant(&roots, &e.paths)) {
-                    pending.store(true, Ordering::Relaxed);
                     let _ = tx.send(Wakeup::Events);
                 }
             }
@@ -317,7 +306,7 @@ fn watch_url(host: &str, signer: &crate::api::Signer, name: &str, view: Option<&
         Some(t) => format!("/f/{name}/__watch?view={t}"),
         None => format!("/f/{name}/__watch"),
     };
-    format!("{ws}{}", signer.path(&path))
+    format!("{ws}{}", signer.path("GET", &path))
 }
 
 /// the cell's change channel: frames arrive per remote mutation; reconnect
@@ -379,7 +368,7 @@ fn now_utc() -> String {
 pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) -> Result<()> {
     use fragment_proto::live::{Cursor, LiveIn, LiveOut, Subscribe};
     use tungstenite::client::IntoClientRequest;
-    let http = client.url(&format!("/f/{name}/__live"));
+    let http = client.url("GET", &format!("/f/{name}/__live"));
     let ws_url = http.replacen("http", "ws", 1);
     let subscribe = |after: i64| LiveIn::Subscribe(Subscribe { channel: channel.to_string(), from: Cursor::After(after) }).encode();
     let mut last = after;
@@ -452,6 +441,21 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
 
+    /// Goal (Codex on #985): `fragment sync --watch` with a label that names
+    /// nothing fails as `sync` does, its refusal keeping its code (so its
+    /// exit status and hint are the code's), before it takes the folder.
+    #[test]
+    fn a_watch_of_no_fragment_keeps_its_refusals_code() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[]);
+        let dir = tmpdir("unnamed");
+        let c = Client::new(&mock.url, auth::fixed(7));
+        let err = run(&c, "garden", &dir, &SyncOptions { mode: Mode::Mirror, ..Default::default() }).unwrap_err();
+        assert_eq!(err.downcast_ref::<crate::api::CodedError>().map(|e| e.code), Some(crate::api::Code::NotFound), "{err:#}");
+        assert!(!dir.join(".fragment").exists(), "the folder is not taken");
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Goal: an editor's own state is not a change, however an event
     /// names it. Method: `relevant` over events' path lists; the old rule
     /// tested `.obsidian/workspace` against one path segment, so it never
@@ -505,7 +509,6 @@ mod tests {
     #[test]
     fn a_burst_is_one_batch_and_an_echo_asks_nothing() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let gate = Debounced { pending: Arc::new(AtomicBool::new(false)), debounce: Duration::ZERO, max_latency: Duration::ZERO };
         let c = Client::new("http://127.0.0.1:9", auth::fixed(7));
         let dir = tmpdir("burst");
         let o = opts();
@@ -515,12 +518,76 @@ mod tests {
             tx.send(Wakeup::Events).unwrap();
         }
         tx.send(Wakeup::Head(Some("b".repeat(40)))).unwrap();
-        assert_eq!(next_batch(&rx, &gate, &watcher), LOCAL);
+        assert_eq!(next_batch(&rx, &watcher), LOCAL);
         assert!(rx.try_recv().is_err(), "the batch took every queued wakeup");
         tx.send(Wakeup::Head(Some("b".repeat(40)))).unwrap();
-        assert_eq!(next_batch(&rx, &gate, &watcher), Due::default(), "an echo alone asks nothing");
+        assert_eq!(next_batch(&rx, &watcher), Due::default(), "an echo alone asks nothing");
         tx.send(Wakeup::Head(Some("c".repeat(40)))).unwrap();
-        assert_eq!(next_batch(&rx, &gate, &watcher), REMOTE);
+        assert_eq!(next_batch(&rx, &watcher), REMOTE);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: a viewer's watcher (its token only reads) passes once for an
+    /// edit it may not send, and not again while the folder stays as that
+    /// pass left it: a save, or a sweep with the feed up, asks nothing, and
+    /// mints nothing. Another edit is a pass again. Method: the host routes
+    /// hold the caller a viewer; count the fake's requests.
+    #[test]
+    fn a_viewers_unsent_edit_is_one_pass_not_one_a_sweep() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"a")]);
+        mock.view_only("t--k3x9", true);
+        let c = Client::new(&mock.url, auth::fixed(7));
+        let dir = tmpdir("viewer-watch");
+        let o = opts();
+        let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
+        assert!(matches!(watcher.serve(REMOTE, true).unwrap(), Served::Passed(r) if r.pulled == ["a.md"] && r.read_only));
+
+        fs::write(dir.join("a.md"), "mine").unwrap();
+        let Served::Passed(report) = watcher.serve(LOCAL, true).unwrap() else { panic!("an edit is a pass") };
+        assert_eq!(report.unsent, ["a.md"]);
+        mock.take_requests("");
+        assert!(matches!(watcher.serve(LOCAL, true).unwrap(), Served::Nothing), "the same folder: no pass");
+        assert!(matches!(watcher.serve(SWEEP, true).unwrap(), Served::Checked), "a sweep reads main's head alone");
+        let asked = mock.take_requests("");
+        assert!(!asked.contains_key("GET storage-token") && !asked.contains_key("GET files/metadata"), "{asked:?}");
+
+        fs::write(dir.join("b.md"), "more").unwrap();
+        let Served::Passed(report) = watcher.serve(LOCAL, true).unwrap() else { panic!("another edit is a pass") };
+        assert_eq!(report.unsent, ["a.md", "b.md"]);
+        assert_eq!(mock.commit_pack_count(), 0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: a viewer's watcher made an editor sends what it held, with
+    /// the folder and main as they were: a reconnect naming the same head
+    /// asks nothing, and the next sweep, whose head read mints a token
+    /// that writes, passes and pushes it. Method: tokens that are minted
+    /// again at each use (a lifetime inside the margin); the host routes
+    /// hold the caller a viewer, then its editor.
+    #[test]
+    fn a_viewers_watcher_made_an_editor_sends_what_it_held() {
+        let mock = crate::mockcs::with_token_ttl(crate::codestorage::TOKEN_REMINT_BEFORE_EXPIRY_MS / 1000 / 2);
+        mock.seed_repo("t--k3x9", &[("a.md", b"a")]);
+        mock.view_only("t--k3x9", true);
+        let c = Client::new(&mock.url, auth::fixed(7));
+        let dir = tmpdir("viewer-promoted");
+        let o = opts();
+        let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
+        assert!(matches!(watcher.serve(REMOTE, true).unwrap(), Served::Passed(r) if r.read_only));
+        fs::write(dir.join("a.md"), "mine").unwrap();
+        let Served::Passed(report) = watcher.serve(LOCAL, true).unwrap() else { panic!("an edit is a pass") };
+        assert_eq!(report.unsent, ["a.md"]);
+        assert!(matches!(watcher.serve(SWEEP, true).unwrap(), Served::Checked), "a viewer's sweep holds it");
+
+        mock.view_only("t--k3x9", false);
+        let mut reconnect = Due::default();
+        watcher.note(&mut reconnect, Wakeup::Head(watcher.head.clone()));
+        assert!(matches!(watcher.serve(reconnect, true).unwrap(), Served::Nothing), "the same head asks nothing");
+        let Served::Passed(report) = watcher.serve(SWEEP, true).unwrap() else { panic!("the sweep after the promotion passes") };
+        assert!(report.pushed == ["a.md"] && !report.read_only && report.unsent.is_empty(), "{report:?}");
+        assert_eq!(mock.file_at("t--k3x9", "main", "a.md").as_deref(), Some(&b"mine"[..]));
+        assert!(matches!(watcher.serve(SWEEP, true).unwrap(), Served::Checked), "and then it is settled");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -641,5 +708,84 @@ mod tests {
         // an agent acting for its owner names them: a fragment's own route honors `for`
         let agent = crate::api::Signer::Agent(crate::api::AgentMode { agent: "juniper--k3x9".into(), acting_for: Some("npub1paul".into()) });
         assert_eq!(watch_url("http://api.fragment.internal", &agent, "t--k3x9", Some("v")), "ws://api.fragment.internal/f/t--k3x9/__watch?view=v&for=npub1paul");
+    }
+
+    /// A browser profile at `dir/at`.
+    fn profile(dir: &Path, at: &str) {
+        fs::create_dir_all(dir.join(at).join("Default")).unwrap();
+        fs::write(dir.join(at).join("Default/Cookies"), b"x").unwrap();
+    }
+
+    /// A folder with `note.md`, and a browser profile `.gitignore` keeps out.
+    fn folder_with_ignored_profile(tag: &str) -> PathBuf {
+        let dir = tmpdir(tag);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".gitignore"), "browser/\n").unwrap();
+        profile(&dir, "browser");
+        fs::write(dir.join("note.md"), "n").unwrap();
+        dir
+    }
+
+    /// Goal (FIN-401, review on #1187): a pass refuses what a fresh sync
+    /// refuses, so a watcher never sends a browser profile that appears, or
+    /// that `.gitignore` stops keeping out, after its first pass.
+    #[test]
+    fn a_watchers_pass_refuses_a_profile_that_appears() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[]);
+        let c = Client::new(&mock.url, auth::fixed(7));
+        let dir = folder_with_ignored_profile("profile-appears");
+        let o = opts();
+        let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
+        assert!(matches!(watcher.serve(REMOTE, true).unwrap(), Served::Passed(r) if r.pushed == ["note.md"]), "an ignored profile is not sent");
+
+        profile(&dir, "chrome");
+        let refused = watcher.serve(LOCAL, true);
+        assert!(matches!(refused, Err(SyncError::Refused(sync::DirRefused::BrowserProfile { .. }))), "{:?}", refused.err());
+        fs::remove_dir_all(dir.join("chrome")).unwrap();
+        fs::write(dir.join(".gitignore"), "").unwrap();
+        let refused = watcher.serve(LOCAL, true);
+        assert!(matches!(refused, Err(SyncError::Refused(sync::DirRefused::BrowserProfile { .. }))), "{:?}", refused.err());
+        assert_eq!(mock.file_at("t--k3x9", "main", "chrome/Default/Cookies"), None);
+        assert_eq!(mock.file_at("t--k3x9", "main", "browser/Default/Cookies"), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Runs `fragment sync --watch` over `dir` until its first pass sent
+    /// `note.md`, makes `change`, and returns how the watch ended.
+    fn watch_through(tag: &str, change: impl FnOnce(&Path)) -> (anyhow::Error, crate::mockcs::MockServer) {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[]);
+        let dir = folder_with_ignored_profile(tag);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (url, at) = (mock.url.clone(), dir.clone());
+        std::thread::spawn(move || tx.send(run(&Client::new(&url, auth::fixed(7)), "t--k3x9", &at, &opts())));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while mock.file_at("t--k3x9", "main", "note.md").is_none() {
+            assert!(std::time::Instant::now() < deadline, "the first pass never sent note.md");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        change(&dir);
+        let ended = rx.recv_timeout(Duration::from_secs(30)).expect("the watch stops at the profile");
+        fs::remove_dir_all(&dir).ok();
+        (ended.expect_err("a refusal"), mock)
+    }
+
+    /// Goal (FIN-401, review on #1187): `fragment sync --watch` stops at a
+    /// browser profile that appears, or that `.gitignore` stops keeping
+    /// out, with a fresh sync's refusal and exit code, and sends none of it.
+    #[test]
+    fn a_watch_stops_at_a_profile_that_appears() {
+        let created = watch_through("stop-created", |dir| profile(dir, "chrome"));
+        let unignored = watch_through("stop-unignored", |dir| {
+            fs::write(dir.join(".gitignore"), "").unwrap();
+            fs::write(dir.join("note.md"), "edited").unwrap();
+        });
+        for (err, mock) in [created, unignored] {
+            assert_eq!(err.downcast_ref::<crate::api::CodedError>().map(|e| e.code), Some(crate::api::Code::InvalidUsage), "{err:#}");
+            assert!(err.to_string().contains("browser profile"), "{err:#}");
+            assert_eq!(mock.file_at("t--k3x9", "main", "chrome/Default/Cookies"), None);
+            assert_eq!(mock.file_at("t--k3x9", "main", "browser/Default/Cookies"), None);
+        }
     }
 }

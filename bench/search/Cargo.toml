@@ -23,6 +23,10 @@ ureq = { version = "2", default-features = false, features = ["json"] }
 # The parser ureq itself uses, so the local-only check reads a URL as it does.
 url = "2"
 regex = "1"
+# The route's merge itself (`fragment_core::across`), so the quality gate
+# scores the code a question across fragments runs.
+fragment-core = { path = "../../crates/core" }
+fragment-proto = { path = "../../crates/proto" }
 
 [profile.release]
 debug-assertions = true

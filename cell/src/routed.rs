@@ -27,11 +27,13 @@ use std::ops::Deref;
 
 use fragment_core::{npub, release};
 use fragment_proto::{routed, valid_fragment_name, ErrorBody, ErrorCode, Identity, IdentityKind};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 // the macro's generated code names `wasm_bindgen`: worker's re-export
 use worker::wasm_bindgen::{self, prelude::*, JsCast};
 use worker::{console_log, Delay, Env, Headers, Method, Request, RequestInit, Response, Url};
 
+use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls;
@@ -159,7 +161,7 @@ impl Routed {
         let url = headers.get(routed::URL)?.and_then(|u| Url::parse(&u).ok()).ok_or_else(|| CellError::host("no URL from the router"))?;
         let signed = match headers.get(routed::SIGNED)? {
             Some(json) => {
-                let signed: Signed = serde_json::from_str(&json).map_err(|e| CellError::host(format!("the router's signer: {e}")))?;
+                let signed: Signed = crate::json_text(&json).map_err(|e| CellError::host(format!("the router's signer: {e}")))?;
                 if !npub::is_identity(&signed.id) || signed.key.as_deref().is_some_and(|k| !npub::is_hex_key(k)) {
                     return Err(CellError::host("the router named a malformed signer"));
                 }
@@ -173,7 +175,7 @@ impl Routed {
         };
         let credential = match headers.get(routed::CREDENTIAL)? {
             Some(json) => {
-                let credential: Credential = serde_json::from_str(&json).map_err(|e| CellError::host(format!("the router's credential: {e}")))?;
+                let credential: Credential = crate::json_text(&json).map_err(|e| CellError::host(format!("the router's credential: {e}")))?;
                 if !credential.well_formed() || signed.is_some() {
                     return Err(CellError::host("the router named a malformed credential"));
                 }
@@ -194,6 +196,8 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::jobs::JOB_HEADER, "1")))
     } else if path.starts_with("cap/files/") {
         Ok(Some((crate::files::CAP_HEADER, "files")))
+    } else if path.starts_with("cap/search/") {
+        Ok(Some((crate::files::CAP_HEADER, "search")))
     } else if path == "deliver/report" || path == "deliver/authorize" {
         Ok(Some((crate::deliveries::REPORT_HEADER, "1")))
     } else if path.starts_with("computer/") {
@@ -202,11 +206,18 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::meter::METER_HEADER, "1")))
     } else if path == "invites/claim" || path == "invites/decline" || path == "members/agent" {
         Ok(Some((crate::members::CLAIM_HEADER, "1")))
+    } else if path == "signin/visibility" {
+        Ok(Some((crate::auth::SIGNIN_HEADER, "1")))
+    } else if path.starts_with("stage/routine/") {
+        Ok(Some((crate::migrations::ROUTINE_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
-    } else if path.starts_with("test/") || path.starts_with("index/") {
+    } else if path.starts_with("vault/") {
+        Ok(Some((crate::vault::VAULT_HEADER, "1")))
+    } else if path.starts_with("test/") || path.starts_with("index/") || path.starts_with("migrations/") {
         // a search index is called by its fragment's supervisor alone:
-        // the router never names one
+        // the router never names one; the move's object is the router's
+        // alone (its routes check who asks before they call it)
         Ok(None)
     } else {
         Err(CellError::host(format!("{path} is not an internal route")))
@@ -266,14 +277,25 @@ enum Sent {
 }
 
 async fn sent(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<Sent> {
+    let stub = namespace(env, binding)?.get_by_name(name)?;
+    sent_to(env, binding, name, stub, req).await
+}
+
+/// The objects of `binding`, reached here alone (xtask guards.rs).
+fn namespace(env: &Env, binding: &str) -> CellResult<worker::ObjectNamespace> {
+    Ok(env.durable_object(binding)?)
+}
+
+/// `sent`, to the object `stub` is (`name` says which, in a refusal's words).
+async fn sent_to(env: &Env, binding: &str, name: &str, stub: worker::Stub, req: Request) -> CellResult<Sent> {
     stamp(&req, env)?;
-    let mut resp = env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await?;
+    let mut resp = stub.fetch_with_request(req).await?;
     // an app's answer passed through with the mark would only be its own
     // request's refusal, as `serve::REFUSAL`'s would
     let Some(theirs) = resp.headers().get(release::REFUSED)?.filter(|_| resp.status_code() == 503) else {
         return Ok(Sent::Answered(resp));
     };
-    let message = match resp.json::<ErrorBody>().await {
+    let message = match resp.read_json::<ErrorBody>().await {
         Ok(b) if b.error == ErrorCode::Deploying => b.message,
         _ => format!("{binding} {name} runs another release: a deploy is going out; try again in a few seconds"),
     };
@@ -316,18 +338,42 @@ pub(crate) async fn send_again(env: &Env, binding: &str, name: &str, make: impl 
 }
 
 /// The internal call `path` with a JSON `body` on the Durable Object
-/// `name` of `binding`: its JSON answer, or its refusal as it named it.
-pub(crate) async fn ask_object(env: &Env, binding: &str, name: &str, path: &str, body: &serde_json::Value) -> CellResult<serde_json::Value> {
-    let body = body.to_string();
+/// `name` of `binding`: its answer, read from its bytes once as `T`, or its
+/// refusal as it named it (`refusal`).
+pub(crate) async fn ask_object<T: DeserializeOwned>(env: &Env, binding: &str, name: &str, path: &str, body: &impl Serialize) -> CellResult<T> {
+    let bytes = ask_bytes(env, binding, name, path, body).await?;
+    serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("{binding} {name}'s answer to {path}: {e}")))
+}
+
+/// `ask_object`'s answer as its bytes, unread: for a caller that passes it
+/// on as it came (the router, a person's Vault's answer to them).
+pub(crate) async fn ask_bytes(env: &Env, binding: &str, name: &str, path: &str, body: &impl Serialize) -> CellResult<Vec<u8>> {
+    let body = serde_json::to_string(body).map_err(|e| CellError::host(format!("{path}'s body: {e}")))?;
+    object_answer(env, binding, name, path, body).await
+}
+
+/// `ask_object`'s round trip, one copy for every answer's type: its 200's
+/// bytes, or its refusal. The move's router (migrations.rs) asks with a
+/// body already text, and passes its answers on unread.
+pub(crate) async fn object_answer(env: &Env, binding: &str, name: &str, path: &str, body: String) -> CellResult<Vec<u8>> {
     let mut resp = send_again(env, binding, name, || internal_request(path, &body)).await?;
     let status = resp.status_code();
-    let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let bytes = resp.bytes().await?;
     if status == 200 {
-        return Ok(v);
+        return Ok(bytes);
     }
-    let code = v["error"].as_str().and_then(|c| serde_json::from_value::<ErrorCode>(serde_json::json!(c)).ok()).unwrap_or(ErrorCode::HostFailed);
-    let message = v["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("{binding} {name} answered {status}"));
-    Err(CellError::new(code, message))
+    Err(refusal(&bytes, || format!("{binding} {name} answered {status}")))
+}
+
+/// A refusal another object (or a fragment's handler) answered, read from
+/// its bytes as `CellError::response` wrote it: its code, message, reason
+/// (FIN-352's, through a computer's door ticket) and wait (a paused shared
+/// key's: FIN-448); or, not one, a host failure saying who answered what.
+pub(crate) fn refusal(bytes: &[u8], what: impl FnOnce() -> String) -> CellError {
+    match serde_json::from_slice::<ErrorBody>(bytes) {
+        Ok(e) => CellError { reason: e.reason, retry_after_ms: e.retry_after_ms, ..CellError::new(e.error, e.message) },
+        Err(_) => CellError::host(what()),
+    }
 }
 
 /// The internal call `path` on the Durable Object `name` of `binding`, its
@@ -348,13 +394,16 @@ const PROBE_HEADER: &str = "x-fragment-probe";
 /// at a deploy), and an object of each other class named for the probe, a
 /// name no fragment, person or computer has (`__`). One that never existed
 /// is made by the probe, its schema's steps run and nothing more.
-const PROBED: [(&str, &str, &str); 6] = [
+const PROBED: [(&str, &str, &str); 8] = [
     ("Registry", "REGISTRY", crate::registry::NAME),
     ("Principal", "PRINCIPAL", "__probe"),
     ("Ledger", "LEDGER", "__probe"),
     ("Fragment", "FRAGMENT", "__probe"),
     ("Computer", "COMPUTER", "__probe"),
     ("SearchIndex", "SEARCH_INDEX", "__probe"),
+    ("Vault", "VAULT", "__probe"),
+    // one object, the move's (migrations.rs): its own name, as the registry's
+    ("Migrations", "MIGRATIONS", crate::migrations::NAME),
 ];
 
 /// An object's answer to a deploy's probe, the second thing its `fetch`
@@ -371,6 +420,57 @@ pub(crate) fn probed(req: &Request, schema: &crate::schema::Schema) -> worker::R
     }
 }
 
+/// The request a deploy's probe of an object asks (`probed`).
+fn probe_request() -> CellResult<Request> {
+    let headers = Headers::new();
+    headers.set(PROBE_HEADER, "1")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get).with_headers(headers);
+    Ok(Request::new_with_init(&format!("https://probe.internal{PROBE_PATH}"), &init)?)
+}
+
+/// The object an operator wakes (`wake`), by the id Cloudflare lists it
+/// under: 64 lowercase hex digits.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Wake {
+    id: String,
+}
+
+/// An operator's wake of one platform object (`POST /api/admin/objects/
+/// {class}/wake`; docs/api.md, Operators): it starts as any call starts
+/// it, its schema made current (an object made before versions adopted at
+/// step 1, or refused), and answers as a deploy's probe does (`probed`):
+/// `{class, id, ready: true}`, or its refusal (`schema_refused`, naming
+/// it and why; `deploying` from another release). Asked again, it answers the
+/// same and runs nothing. It exists for the objects no call has started
+/// since versions came (docs/technical-debt-ledger.md), and goes with them.
+pub(crate) async fn wake(env: &Env, class: &str, Wake { id }: Wake) -> CellResult<serde_json::Value> {
+    let Some((class, binding, _)) = PROBED.iter().find(|(c, _, _)| c.eq_ignore_ascii_case(class)).copied() else {
+        let classes: Vec<&str> = PROBED.iter().map(|(c, _, _)| *c).collect();
+        return Err(CellError::invalid(format!("no class {class:?}: one of {}", classes.join(", "))));
+    };
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(CellError::invalid("an object's id is 64 lowercase hex digits"));
+    }
+    // Cloudflare refuses an id of another namespace (another class, another
+    // account's) here, before any object is made
+    let ns = namespace(env, binding)?;
+    let id = ns.id_from_string(&id).map_err(|_| CellError::invalid(format!("{id} is no {class} object's id")))?;
+    let named = id.to_string();
+    match sent_to(env, binding, &named, id.get_stub()?, probe_request()?).await? {
+        Sent::Answered(resp) if resp.status_code() == 200 => Ok(serde_json::json!({ "class": class, "id": named, "ready": true })),
+        Sent::Answered(mut resp) => {
+            let status = resp.status_code();
+            match resp.read_json::<ErrorBody>().await {
+                Ok(b) => Err(CellError::new(b.error, b.message)),
+                Err(_) => Err(CellError::host(format!("{class} {named} answered its wake {status}"))),
+            }
+        }
+        Sent::Refused(e, _) => Err(e),
+    }
+}
+
 /// `GET /healthz/objects` (docs/api.md, Health): this Worker's release,
 /// and what each class's probe object (`PROBED`) answered it, asked once
 /// each, at once: `{"release", "objects": {<class>: {"release"} |
@@ -381,14 +481,7 @@ pub(crate) fn probed(req: &Request, schema: &crate::schema::Schema) -> worker::R
 /// each ask is answered before anything else an object does, as cheaply as
 /// the refusal any call of another release gets.
 pub(crate) async fn objects(env: &Env, cfg: &Config) -> CellResult<Response> {
-    let ask = |binding: &'static str, name: &'static str| async move {
-        let headers = Headers::new();
-        headers.set(PROBE_HEADER, "1")?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Get).with_headers(headers);
-        let req = Request::new_with_init(&format!("https://probe.internal{PROBE_PATH}"), &init)?;
-        sent(env, binding, name, req).await
-    };
+    let ask = |binding: &'static str, name: &'static str| async move { sent(env, binding, name, probe_request()?).await };
     let answers = futures_util::future::join_all(PROBED.iter().map(|(_, binding, name)| ask(binding, name))).await;
     let mut objects = serde_json::Map::new();
     let mut all = true;
@@ -397,7 +490,7 @@ pub(crate) async fn objects(env: &Env, cfg: &Config) -> CellResult<Response> {
             Ok(Sent::Answered(resp)) if resp.status_code() == 200 => serde_json::json!({ "release": cfg.deploy_id }),
             Ok(Sent::Answered(mut resp)) => {
                 let status = resp.status_code();
-                let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+                let v: serde_json::Value = resp.read_json().await.unwrap_or(serde_json::Value::Null);
                 serde_json::json!({ "error": format!("{status} {}: {}", v["error"].as_str().unwrap_or("?"), v["message"].as_str().unwrap_or("")) })
             }
             Ok(Sent::Refused(_, theirs)) => serde_json::json!({ "refusedBy": theirs }),

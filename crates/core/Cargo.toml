@@ -28,6 +28,9 @@ p256 = { version = "0.13", default-features = false, features = ["ecdsa", "ecdh"
 # makes, to check it is one object and to crop around it. Images answers
 # PNGs; no smaller decoder reads all of theirs (indexed, 16-bit).
 png = "0.18"
+# The gate's two asks side by side (`ledger::gate::asked_together`):
+# `future::join`, already the cell's.
+futures-util = { version = "0.3", default-features = false }
 # The host's side of `migrate` (`migrate::host`: a real SQLite, the schema
 # lock), for xtask; never the cell's.
 rusqlite = { version = "0.40", default-features = false, features = ["bundled", "hooks"], optional = true }

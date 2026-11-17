@@ -54,13 +54,11 @@
 //!   nothing a page needs: it reads the list again as it reconnects. At
 //!   most `LIST_WATCHERS_MAX` at once; nothing is read from them.
 //!
-//!   Their computer tells the same sockets when what its owner is told of
-//!   it changes (`/changed`, from the Computer DO: `tell_changed`), so a
-//!   page reads it again with the list. The registry tells them when the
-//!   invites waiting on their emails change (`/invited`, `tell_invited`:
-//!   one made, renewed or taken back), as `{type: "invited"}`, naming
-//!   nothing, so a page reads those again (`GET /api/invites`), and only
-//!   those: the list is told of an invite accepted, a share like any.
+//!   Each owner of what they are told (FIN-458, `GET /api/notices`) tells
+//!   the same sockets when its notices change (`calls::Changed`),
+//!   so a page reads them again with the list: their computer, and the
+//!   registry for the invites waiting on their emails (one made, renewed,
+//!   answered or taken back). One frame for all, naming nothing.
 //! - **Their export** (docs/api.md, Export; export.rs): everything that is
 //!   theirs as one archive in R2, built here on this cell's alarm, which is
 //!   its only use, its place kept in its tables (`exports`, `export_tail`,
@@ -72,37 +70,45 @@
 //! nothing and lists nothing: a change still on its way from a fragment's
 //! outbox is taken (so the outbox forgets it) and kept nowhere, so nothing
 //! of a wiped person's list comes back. An identity is never made again.
+//!
+//! **Its calls** are `calls`' types, each a POST of its body to its route,
+//! and a page's socket (`watch`). Only platform code calls a list: the
+//! router hands it no request of a client's.
+
+pub(crate) mod calls;
 
 use std::cell::Cell;
 
 use fragment_core::npub;
 use fragment_core::search::{self, Query};
-use fragment_proto::{limits, valid_channel_name, Archived, Docked, ErrorCode, FragmentKind, FragmentList, ListedFragment, ListedRecord, MessageHit, Pinned, Role, SearchAnswer, Seen, Sharing};
+use fragment_proto::{limits, valid_channel_name, ErrorCode, FragmentKind, FragmentList, ListedFragment, ListedRecord, MessageHit, Role, SearchAnswer, Seen, Sharing};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use calls::{Call, Changed, ExportDownload, ExportLever, ExportNow, ExportStart, Face, IndexChange, List, ListLever, MarkSeen, Own, Search, SearchApplied, SearchBatch, SetOwn, WipeEnd, WipeEnded, WipeExports, WipePage, WipeRow, WipeView};
 
-/// The rows one `wipe/view` page lists.
+/// The rows one `WipeView` page lists.
 const WIPE_VIEW_PAGE: i64 = 200;
 
-/// The tag of the sockets that watch this list (`/watch`).
+/// A page's socket's route (`watch`): the one call that is no request and answer.
+const WATCH: &str = "/watch";
+/// The tag of the sockets that watch this list.
 const WATCH_TAG: &str = "watch";
 /// A watching socket's first frame, as it opens.
 const HELLO: &str = r#"{"type":"hello"}"#;
 /// What a watching socket is told of a change: no more.
 const CHANGED: &str = r#"{"type":"changed"}"#;
-/// What it is told of a change to the invites waiting on its person's
-/// emails, which the registry holds: no more.
-const INVITED: &str = r#"{"type":"invited"}"#;
 
-/// The columns `/list` and a search read of a row, its listed records
+/// The columns `List` and a search read of a row, its listed records
 /// (`listed`), a chat's newest search
 /// entry (`said`, and when: `said_at`), read by its place in its fragment's log, and its entries
 /// after the place its person last saw (`unread`), counted up to the one
-/// bound number (`limits::LISTED_UNREAD_MAX`, `listed_binds`).
+/// bound number (`limits::LISTED_UNREAD_MAX`, `listed_binds`). Its
+/// readers order it, and a search narrows it to the rows it names.
 const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived, dock, pinned,
   (SELECT records FROM listed l WHERE l.fragment = m.fragment) AS listed,
   CASE WHEN json_extract(face, '$.kind') = 'chat'
@@ -112,7 +118,7 @@ const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived, do
   CASE WHEN json_extract(face, '$.kind') = 'chat'
     THEN (SELECT COUNT(*) FROM (SELECT 1 FROM search_entries e WHERE e.fragment = m.fragment
       AND e.n > COALESCE((SELECT n FROM seen s WHERE s.fragment = m.fragment), 0) LIMIT ?)) ELSE 0 END AS unread
-  FROM memberships m WHERE role IS NOT NULL ORDER BY fragment";
+  FROM memberships m WHERE role IS NOT NULL";
 
 #[durable_object]
 pub struct PrincipalCell {
@@ -123,72 +129,14 @@ pub struct PrincipalCell {
     /// Its person was wiped (`wiped`'s row, read as it starts): it takes
     /// nothing more.
     pub(crate) wiped: Cell<bool>,
-    /// The fleet has test levers (`FRAGMENT_TEST_SECRET`): `test/…` answers.
+    /// The fleet has test levers (`FRAGMENT_TEST_SECRET`): `ListLever` and
+    /// `ExportLever` answer.
     pub(crate) test_hooks: bool,
     /// Its schema as it started (schema.rs): ready, or refused.
     pub(crate) schema: crate::schema::Schema,
 }
 
-/// `wipe/view`'s body: the page of rows after `after` (a fragment's name).
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WipeView {
-    #[serde(default)]
-    after: Option<String>,
-}
-
-/// A row as a wipe reads it: any role, or none (a fragment left or ended).
-#[derive(Serialize, Deserialize)]
-struct WipeRow {
-    fragment: String,
-    role: Option<Role>,
-}
-
-/// A fragment's change to this key's membership. `incarnation` is the
-/// fragment's creation time (a deleted and re-created fragment is a new
-/// incarnation); `version` orders changes within one. The owner's row
-/// carries the fragment's sharing, as it was when the change was sent.
-#[derive(Deserialize)]
-struct IndexChange {
-    fragment: String,
-    role: Option<Role>,
-    incarnation: i64,
-    version: i64,
-    #[serde(default)]
-    sharing: Option<Sharing>,
-    /// What it is and its title, on every row a role names.
-    #[serde(default)]
-    face: Option<Face>,
-    /// The channels its search holds (those every member may read), on
-    /// every row a role names.
-    #[serde(default)]
-    searched: Option<Vec<String>>,
-    /// What its members are doing (listed.rs in the fragment): the listed
-    /// records of the channels this row's role may read, on every row a
-    /// role names; none, or absent, takes away what the row showed.
-    #[serde(default)]
-    listed: Vec<ListedRecord>,
-}
-
-/// What a person's list shows of a fragment.
-#[derive(serde::Serialize, Deserialize)]
-struct Face {
-    #[serde(default)]
-    kind: FragmentKind,
-    #[serde(default)]
-    title: Option<String>,
-    /// An agent fragment's picture's address.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    picture: Option<String>,
-    /// An agent fragment's role (its `meta.role`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    role: Option<String>,
-    /// Its agent members, the first added first (`limits::LISTED_AGENTS_MAX`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    agents: Vec<String>,
-}
-
-/// A `memberships` row as `/list` reads it.
+/// A `memberships` row as `List` reads it.
 #[derive(Deserialize)]
 struct Listed {
     name: String,
@@ -204,36 +152,8 @@ struct Listed {
     unread: i64,
 }
 
-/// `PUT /archived`: the router's, for the signer (`SetArchived`, named).
-#[derive(Deserialize)]
-struct SetArchived {
-    fragment: String,
-    archived: bool,
-}
-
-/// `PUT /dock`: the router's, for the signer (`SetDock`, named).
-#[derive(Deserialize)]
-struct SetDock {
-    fragment: String,
-    dock: bool,
-}
-
-/// `PUT /pinned`: the router's, for the signer (`SetPinned`, named).
-#[derive(Deserialize)]
-struct SetPinned {
-    fragment: String,
-    pinned: bool,
-}
-
-/// The person's own flags on a row (`set_own`): its column's name.
-#[derive(Clone, Copy)]
-enum Own {
-    Archived,
-    Dock,
-    Pinned,
-}
-
 impl Own {
+    /// Its column on a row.
     fn column(self) -> &'static str {
         match self {
             Own::Archived => "archived",
@@ -243,50 +163,14 @@ impl Own {
     }
 }
 
-/// `PUT /seen`: the router's, for the signer (the fragment named).
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MarkSeen {
-    fragment: String,
-}
-
-/// `POST /search/entries`: a fragment's messages, for this person's search
-/// (search.rs sends it). One definition both ends build against.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct SearchBatch {
-    pub fragment: String,
-    pub incarnation: i64,
-    pub entries: Vec<SearchEntry>,
-}
-
-/// One message: its place in its fragment's search log (`n`, from 1,
-/// never reused within an incarnation), its record, and its text.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct SearchEntry {
-    pub n: i64,
-    pub channel: String,
-    pub seq: i64,
-    pub at: i64,
-    pub text: String,
-}
-
-/// What a delivery did: `member` is false when this list holds no role on
-/// the fragment at that incarnation (not yet, or not any more), and took
-/// nothing; `applied` counts the entries new here.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct SearchApplied {
-    pub member: bool,
-    pub applied: u64,
-}
-
-/// A search's first pass: the newest matching entries' places.
+/// A search's hit: a matching entry's place, and its snippet.
 #[derive(Deserialize)]
 struct Hit {
-    id: i64,
     fragment: String,
     channel: String,
     seq: i64,
     at: i64,
+    snippet: Option<String>,
 }
 
 impl DurableObject for PrincipalCell {
@@ -359,117 +243,101 @@ impl PrincipalCell {
     }
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
-        let url = req.url()?;
-        // the levers' view of its schema answers on a list that refuses it
-        if req.path() == "/test/schema" && self.test_hooks {
-            return Ok(Response::from_json(&crate::schema::view(self.sql(), &fragment_core::migrate::PRINCIPAL)?)?);
+        let path = req.path();
+        if path == WATCH {
+            if self.wiped.get() {
+                return Err(CellError::new(ErrorCode::NotFound, "this list's person was wiped: it has no socket"));
+            }
+            self.schema.ready()?;
+            return self.watch(&req);
+        }
+        let body = req.bytes().await?;
+        if self.test_hooks && (path == ListLever::PATH || path == ExportLever::PATH) {
+            return self.levers(&path, &body);
         }
         // a wipe ends a list that refuses its schema too, and a wiped
         // list answers as one, refused or not (schema.rs)
-        if let Some(route) = req.path().strip_prefix("/wipe/") {
-            // only a wipe's orchestrator sets the header (routed.rs `marker`)
-            if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route /wipe/{route}")));
-            }
-            let route = route.to_string();
-            let body = req.bytes().await?;
+        match path.as_str() {
+            WipeView::PATH => return reply::<WipeView>(self.wipe_view(decode(&body)?)),
+            WipeEnd::PATH => return reply::<WipeEnd>(self.wipe_end()),
             // its export's objects first: the step that ends it awaits nothing
-            if route == "exports" {
-                return Ok(Response::from_json(&self.wipe_exports(&body).await?)?);
+            WipeExports::PATH => return reply::<WipeExports>(self.wipe_exports(decode(&body)?).await),
+            _ => {}
+        }
+        if self.wiped.get() {
+            return self.wiped_answer(&path);
+        }
+        self.schema.ready()?;
+        match path.as_str() {
+            IndexChange::PATH => {
+                let applied = self.index(decode(&body)?)?;
+                if applied {
+                    self.tell();
+                }
+                reply::<IndexChange>(Ok(()))
             }
-            return Ok(Response::from_json(&self.wipe(&route, &body)?)?);
+            List::PATH => {
+                let list: List = decode(&body)?;
+                let rows: Vec<Listed> = self.typed(&format!("{LISTED} ORDER BY fragment"), listed_binds())?;
+                let fragments = rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?;
+                let kind = if list.agent { fragment_proto::IdentityKind::Agent } else { fragment_proto::IdentityKind::Person };
+                reply::<List>(Ok(FragmentList { fragments, limits: Some(crate::config::Config::from_env(&self.env).uploads_for(kind)) }))
+            }
+            SetOwn::PATH => {
+                self.set_own(decode(&body)?)?;
+                self.tell();
+                reply::<SetOwn>(Ok(()))
+            }
+            MarkSeen::PATH => {
+                let (seen, moved) = self.mark_seen(decode(&body)?)?;
+                if moved {
+                    self.tell();
+                }
+                reply::<MarkSeen>(Ok(seen))
+            }
+            SearchBatch::PATH => reply::<SearchBatch>(self.take_entries(decode(&body)?)),
+            Search::PATH => reply::<Search>(self.search(&decode::<Search>(&body)?.q)),
+            // their export (export.rs): the router's, for the signer
+            ExportStart::PATH => reply::<ExportStart>(self.start_export(&decode::<ExportStart>(&body)?.person).await),
+            ExportNow::PATH => reply::<ExportNow>(self.export_now()),
+            ExportDownload::PATH => self.download(decode(&body)?).await,
+            // something of theirs the list does not hold changed: their pages read again
+            Changed::PATH => {
+                decode::<Changed>(&body)?;
+                self.tell();
+                reply::<Changed>(Ok(()))
+            }
+            p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
+        }
+    }
+
+    /// The levers (`ListLever`, `ExportLever`), on fleets with them only.
+    /// Its schema's view answers on a list that refuses it.
+    fn levers(&self, path: &str, body: &[u8]) -> CellResult<Response> {
+        assert!(self.test_hooks, "a list's levers answer on fleets with them only");
+        if path == ListLever::PATH {
+            let lever: ListLever = decode(body)?;
+            if lever.op == "schema" {
+                return reply::<ListLever>(crate::schema::view(self.sql(), &fragment_core::migrate::PRINCIPAL));
+            }
+            if !self.wiped.get() {
+                self.schema.ready()?;
+            }
+            return reply::<ListLever>(self.test_lever(&lever.op));
         }
         if !self.wiped.get() {
             self.schema.ready()?;
         }
-        // the router's levers (`/api/test/list`, `/api/test/export`), on fleets with them only
-        if req.path() == "/test/export" && self.test_hooks {
-            let body = req.bytes().await?;
-            return Ok(Response::from_json(&self.export_lever(&body)?)?);
-        }
-        if let Some(op) = req.path().strip_prefix("/test/").filter(|_| self.test_hooks) {
-            return Ok(Response::from_json(&self.test_lever(op)?)?);
-        }
-        if self.wiped.get() {
-            return self.wiped_answer(&req);
-        }
-        match (req.method(), req.path().as_str()) {
-            (Method::Post, "/index") => {
-                let c: IndexChange = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                let applied = self.index(c)?;
-                if applied {
-                    self.tell();
-                }
-                Ok(Response::from_json(&json!({ "ok": true, "applied": applied }))?)
-            }
-            (Method::Get, "/list") => {
-                // `GET /api/fragments`'s answer, whole: the router passes it through
-                let rows: Vec<Listed> = self.typed(LISTED, listed_binds())?;
-                let fragments = rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?;
-                Ok(Response::from_json(&FragmentList { fragments })?)
-            }
-            (Method::Put, "/archived") => {
-                let s: SetArchived = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                self.set_own(&s.fragment, Own::Archived, s.archived)?;
-                self.tell();
-                Ok(Response::from_json(&Archived { name: s.fragment, archived: s.archived })?)
-            }
-            (Method::Put, "/dock") => {
-                let s: SetDock = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                self.set_own(&s.fragment, Own::Dock, s.dock)?;
-                self.tell();
-                Ok(Response::from_json(&Docked { name: s.fragment, dock: s.dock })?)
-            }
-            (Method::Put, "/pinned") => {
-                let s: SetPinned = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                self.set_own(&s.fragment, Own::Pinned, s.pinned)?;
-                self.tell();
-                Ok(Response::from_json(&Pinned { name: s.fragment, pinned: s.pinned })?)
-            }
-            (Method::Put, "/seen") => {
-                let s: MarkSeen = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                let (seen, moved) = self.mark_seen(s)?;
-                if moved {
-                    self.tell();
-                }
-                Ok(Response::from_json(&seen)?)
-            }
-            (Method::Post, "/search/entries") => {
-                let b: SearchBatch = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                Ok(Response::from_json(&self.take_entries(b)?)?)
-            }
-            (Method::Get, "/search") => {
-                let q = url.query_pairs().find(|(k, _)| k == "q").map(|(_, v)| v.into_owned());
-                let q = q.ok_or_else(|| CellError::invalid("name what to look for: ?q="))?;
-                Ok(Response::from_json(&self.search(&q)?)?)
-            }
-            (Method::Get, "/watch") => self.watch(&req),
-            // their export (export.rs): the router's, for the signer
-            (_, p) if p.starts_with("/export/") => self.export_route(req).await,
-            // something of theirs the list does not hold changed (their
-            // computer: what its owner is told of it), so their pages read
-            // again; only the Worker's own code reaches here
-            (Method::Post, "/changed") => {
-                self.tell();
-                Ok(Response::from_json(&json!({ "ok": true }))?)
-            }
-            // the invites waiting on their emails changed (the registry's)
-            (Method::Post, "/invited") => {
-                self.tell_with(INVITED);
-                Ok(Response::from_json(&json!({ "ok": true }))?)
-            }
-            (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
-        }
+        reply::<ExportLever>(self.export_lever(decode(body)?))
     }
 
-    /// The test levers on a list (`POST /api/test/list {identity, op}`):
-    /// `before-searched` makes it a list from before schema versions and
-    /// before its rows named the channels searched (#186), whose table never
-    /// gained the column (the lists on p5, 2026-10-08: every newer change
-    /// to one is refused, 500), as this start goes on; the next refuses it,
-    /// a reset required (schema.rs). Answers its columns.
+    /// A list lever (`POST /api/test/list {identity, op}`) but its
+    /// schema's view: `before-searched` makes it a list from before schema
+    /// versions and before its rows named the channels searched (#186),
+    /// whose table never gained the column (the lists on p5, 2026-10-08:
+    /// every newer change to one is refused, 500), as this start goes on;
+    /// the next refuses it, a reset required (schema.rs). Answers its columns.
     fn test_lever(&self, op: &str) -> CellResult<Value> {
-        assert!(self.test_hooks, "a list's levers answer on fleets with them only");
         let columns = |sql: &SqlStorage| -> CellResult<Vec<String>> {
             let cols: Vec<Value> = sql.exec("PRAGMA table_info(memberships)", None)?.to_array()?;
             Ok(cols.iter().filter_map(|c| c["name"].as_str().map(str::to_string)).collect())
@@ -489,55 +357,47 @@ impl PrincipalCell {
     }
 
     /// What a wiped list answers: a change taken and kept nowhere, an empty
-    /// list, a search that finds nothing, and no socket, archiving, dock or seen.
-    fn wiped_answer(&self, req: &Request) -> CellResult<Response> {
+    /// list, a search that finds nothing, and no archiving, dock or seen.
+    fn wiped_answer(&self, path: &str) -> CellResult<Response> {
         assert!(self.wiped.get(), "only a wiped list answers so");
-        match (req.method(), req.path().as_str()) {
-            (Method::Post, "/index") => Ok(Response::from_json(&json!({ "ok": true, "applied": false }))?),
-            (Method::Get, "/list") => Ok(Response::from_json(&FragmentList { fragments: vec![] })?),
-            (Method::Post, "/search/entries") => Ok(Response::from_json(&SearchApplied { member: false, applied: 0 })?),
-            (Method::Get, "/search") => Ok(Response::from_json(&SearchAnswer { fragments: vec![], messages: vec![] })?),
-            (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}: this list's person was wiped", m.as_ref()))),
+        match path {
+            IndexChange::PATH => reply::<IndexChange>(Ok(())),
+            List::PATH => reply::<List>(Ok(FragmentList { fragments: vec![], limits: None })),
+            SearchBatch::PATH => reply::<SearchBatch>(Ok(SearchApplied { member: false, applied: 0 })),
+            Search::PATH => reply::<Search>(Ok(SearchAnswer { fragments: vec![], messages: vec![] })),
+            p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}: this list's person was wiped"))),
         }
     }
 
-    /// A wipe's calls (docs/api.md, Operators; the router's cell/src/wipe.rs):
-    /// `view {after?}` → `{wiped, rows: [{fragment, role}], more, entries}`,
-    /// its rows a page at a time (any role, or none), and its search's
-    /// entries; `end` → `{wiped, rows}`: its sockets closed and every table
-    /// dropped and made again empty, with the row that says it was wiped,
-    /// in one step (no await). Again, it changes nothing.
-    fn wipe(&self, route: &str, body: &[u8]) -> CellResult<Value> {
-        match route {
-            "view" => {
-                let b: WipeView = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("wipe/view: {e}")))?;
-                let rows: Vec<WipeRow> = self.typed(
-                    "SELECT fragment, role FROM memberships WHERE fragment > ? ORDER BY fragment LIMIT ?",
-                    vec![b.after.unwrap_or_default().into(), SqlStorageValue::Integer(WIPE_VIEW_PAGE + 1)],
-                )?;
-                let more = rows.len() as i64 > WIPE_VIEW_PAGE;
-                let rows: Vec<WipeRow> = rows.into_iter().take(WIPE_VIEW_PAGE as usize).collect();
-                let entries = self.count("SELECT COUNT(*) AS n FROM search_entries", vec![])?;
-                Ok(json!({ "wiped": self.wiped.get(), "rows": rows, "more": more, "entries": entries }))
-            }
-            "end" => {
-                for ws in self.state.get_websockets() {
-                    let _ = ws.close(Some(4003), Some("this person was wiped"));
-                }
-                let rows = self.count("SELECT COUNT(*) AS n FROM memberships", vec![])?;
-                // one step, no await: emptied and marked, or neither
-                let sql = self.sql();
-                crate::schema::remake(sql.clone(), &fragment_core::migrate::PRINCIPAL)?;
-                if !self.wiped.get() {
-                    sql.exec("INSERT INTO wiped (at) VALUES (?)", vec![SqlStorageValue::Integer(crate::js::now_ms())])?;
-                }
-                self.wiped.set(true);
-                assert_eq!(self.count("SELECT COUNT(*) AS n FROM memberships", vec![])?, 0, "a wiped list holds no row");
-                assert_eq!(self.count("SELECT COUNT(*) AS n FROM wiped", vec![])?, 1, "a wiped list says so once");
-                Ok(json!({ "wiped": true, "rows": rows }))
-            }
-            other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
+    /// A wipe's read (wipe.rs): its rows a page at a time.
+    fn wipe_view(&self, view: WipeView) -> CellResult<WipePage> {
+        let rows: Vec<WipeRow> = self.typed(
+            "SELECT fragment, role FROM memberships WHERE fragment > ? ORDER BY fragment LIMIT ?",
+            vec![view.after.unwrap_or_default().into(), SqlStorageValue::Integer(WIPE_VIEW_PAGE + 1)],
+        )?;
+        let more = rows.len() as i64 > WIPE_VIEW_PAGE;
+        let rows: Vec<WipeRow> = rows.into_iter().take(WIPE_VIEW_PAGE as usize).collect();
+        Ok(WipePage { rows, more })
+    }
+
+    /// A wipe's end (wipe.rs): its sockets closed and every table dropped
+    /// and made again empty, with the row that says it was wiped, in one
+    /// step (no await).
+    fn wipe_end(&self) -> CellResult<WipeEnded> {
+        for ws in self.state.get_websockets() {
+            let _ = ws.close(Some(4003), Some("this person was wiped"));
         }
+        let rows = self.count("SELECT COUNT(*) AS n FROM memberships", vec![])?;
+        // one step, no await: emptied and marked, or neither
+        let sql = self.sql();
+        crate::schema::remake(sql.clone(), &fragment_core::migrate::PRINCIPAL)?;
+        if !self.wiped.get() {
+            sql.exec("INSERT INTO wiped (at) VALUES (?)", vec![SqlStorageValue::Integer(crate::js::now_ms())])?;
+        }
+        self.wiped.set(true);
+        assert_eq!(self.count("SELECT COUNT(*) AS n FROM memberships", vec![])?, 0, "a wiped list holds no row");
+        assert_eq!(self.count("SELECT COUNT(*) AS n FROM wiped", vec![])?, 1, "a wiped list says so once");
+        Ok(WipeEnded { rows: rows as u64 })
     }
 
     /// A socket that watches this list (the router decided whose it is):
@@ -561,15 +421,10 @@ impl PrincipalCell {
     /// (closing as it is told) is its page's to reconnect, which reads the
     /// list again then.
     fn tell(&self) {
-        self.tell_with(CHANGED);
-    }
-
-    /// Tells every watching socket `frame` (`CHANGED`, `INVITED`).
-    fn tell_with(&self, frame: &str) {
         let watching = self.state.get_websockets_with_tag(WATCH_TAG);
         assert!(watching.len() <= limits::LIST_WATCHERS_MAX, "a list holds at most its watchers");
         for ws in watching {
-            let _ = ws.send_with_str(frame);
+            let _ = ws.send_with_str(CHANGED);
         }
     }
 
@@ -672,7 +527,8 @@ impl PrincipalCell {
     /// that names a role
     /// (404 for any other, as for a fragment they cannot see). The same
     /// again answers the same.
-    fn set_own(&self, fragment: &str, own: Own, on: bool) -> CellResult<()> {
+    fn set_own(&self, SetOwn { fragment, own, on }: SetOwn) -> CellResult<()> {
+        let fragment = fragment.as_str();
         if !fragment_proto::valid_fragment_name(fragment) {
             return Err(CellError::invalid(format!("{fragment:?} is not a fragment's name (<label>--<suffix>)")));
         }
@@ -748,7 +604,7 @@ impl PrincipalCell {
             return Ok(SearchApplied { member: false, applied: 0 });
         };
         let searched = row["searched"].as_str().expect("a fenced row names its searched channels");
-        let searched: Vec<String> = serde_json::from_str(searched).map_err(|e| CellError::host(format!("{}'s stored searched channels: {e}", b.fragment)))?;
+        let searched: Vec<String> = crate::json_text(searched).map_err(|e| CellError::host(format!("{}'s stored searched channels: {e}", b.fragment)))?;
         let chat = row["chat"].as_i64() == Some(1);
         let mut applied = 0u64;
         for e in b.entries.iter().filter(|e| searched.contains(&e.channel)) {
@@ -792,70 +648,138 @@ impl PrincipalCell {
         let Some(fts) = query.fts() else {
             return Ok(SearchAnswer { fragments: vec![], messages: vec![] });
         };
-        let rows: Vec<Listed> = self.typed(LISTED, listed_binds())?;
-        let mut fragments = Vec::with_capacity(limits::SEARCH_FRAGMENTS_MAX);
-        for row in rows {
-            if fragments.len() == limits::SEARCH_FRAGMENTS_MAX {
-                break;
-            }
-            let f = listed(row)?;
-            if query.names(&f.name, f.title.as_deref()) {
-                fragments.push(f);
-            }
+        // each row's name and face alone (its title read as a list reads
+        // it: `listed`), then the whole rows of the first few they match
+        #[derive(Deserialize)]
+        struct Named {
+            name: String,
+            face: Option<String>,
         }
-        // the newest hits' places first; the snippets of those alone
+        let rows: Vec<Named> = self.typed("SELECT fragment AS name, face FROM memberships WHERE role IS NOT NULL ORDER BY fragment", vec![])?;
+        let named: Vec<String> = rows
+            .into_iter()
+            .filter(|r| query.names(&r.name, r.face.as_deref().and_then(|f| crate::json_text::<Face>(f).ok()).and_then(|f| f.title).as_deref()))
+            .take(limits::SEARCH_FRAGMENTS_MAX)
+            .map(|r| r.name)
+            .collect();
+        let fragments = match named.is_empty() {
+            true => vec![],
+            false => {
+                let mut binds = listed_binds();
+                binds.push(serde_json::to_string(&named).expect("names serialize").into());
+                let rows: Vec<Listed> = self.typed(&format!("{LISTED} AND fragment IN (SELECT value FROM json_each(?)) ORDER BY fragment"), binds)?;
+                rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?
+            }
+        };
+        assert!(fragments.len() <= limits::SEARCH_FRAGMENTS_MAX, "a search answers a bounded page");
+        // the newest hits' places, then the snippets of those alone, in one
+        // statement (each hit's rowid comes from a column, an INTEGER: a
+        // bound number reaches SQLite as a REAL, which FTS5 takes as no
+        // rowid bound at all)
         let hits: Vec<Hit> = self.typed(
-            "SELECT e.id AS id, e.fragment AS fragment, e.channel AS channel, e.seq AS seq, e.at AS at
-             FROM search_text JOIN search_entries e ON e.id = search_text.rowid
-             JOIN memberships m ON m.fragment = e.fragment AND m.role IS NOT NULL
-             WHERE search_text MATCH ? ORDER BY e.at DESC, e.id DESC LIMIT ?",
-            vec![fts.as_str().into(), SqlStorageValue::Integer(limits::SEARCH_MESSAGES_MAX as i64)],
+            "WITH hits AS (SELECT e.id AS id, e.fragment AS fragment, e.channel AS channel, e.seq AS seq, e.at AS at
+               FROM search_text JOIN search_entries e ON e.id = search_text.rowid
+               JOIN memberships m ON m.fragment = e.fragment AND m.role IS NOT NULL
+               WHERE search_text MATCH ? ORDER BY e.at DESC, e.id DESC LIMIT ?)
+             SELECT h.fragment AS fragment, h.channel AS channel, h.seq AS seq, h.at AS at, snippet(search_text, 0, '', '', '…', 24) AS snippet
+             FROM hits h JOIN search_text ON search_text.rowid = h.id WHERE search_text MATCH ? ORDER BY h.at DESC, h.id DESC",
+            vec![fts.as_str().into(), SqlStorageValue::Integer(limits::SEARCH_MESSAGES_MAX as i64), fts.as_str().into()],
         )?;
         assert!(hits.len() <= limits::SEARCH_MESSAGES_MAX, "a search answers a bounded page");
-        let mut messages = Vec::with_capacity(hits.len());
-        for hit in hits {
-            if !fragment_proto::valid_fragment_name(&hit.fragment) {
-                continue;
-            }
-            // A bound number reaches SQLite as a REAL, and FTS5 takes a rowid
-            // bound only from an INTEGER (any other is no bound at all, every
-            // match answering): the CAST keeps it one row.
-            let shown = self.rows(
-                "SELECT rowid AS id, snippet(search_text, 0, '', '', '…', 24) AS s FROM search_text WHERE search_text MATCH ? AND rowid = CAST(? AS INTEGER)",
-                vec![fts.as_str().into(), SqlStorageValue::Integer(hit.id)],
-            )?;
-            assert!(shown.len() <= 1 && shown.iter().all(|r| r["id"].as_i64() == Some(hit.id)), "a hit's snippet is its own");
-            let snippet = shown.first().and_then(|r| r["s"].as_str()).map(|s| search::snippet(s).to_string()).unwrap_or_default();
-            messages.push(MessageHit { fragment: hit.fragment, channel: hit.channel, seq: hit.seq, at: hit.at, snippet });
-        }
+        let messages = hits
+            .into_iter()
+            .filter(|hit| fragment_proto::valid_fragment_name(&hit.fragment))
+            .map(|hit| MessageHit { snippet: search::snippet(hit.snippet.as_deref().unwrap_or_default()).to_string(), fragment: hit.fragment, channel: hit.channel, seq: hit.seq, at: hit.at })
+            .collect();
         Ok(SearchAnswer { fragments, messages })
     }
 }
 
-/// Tells `identity`'s open pages that something of theirs their list does
-/// not hold changed (their computer's notices, docs/computers.md): each
-/// reads the list, and their computer, again. A page that missed it reads
-/// again as it reconnects.
-pub(crate) async fn tell_changed(env: &Env, identity: &str) -> CellResult<()> {
-    tell_pages(env, identity, "changed").await
+/// `people`'s pages told their notices changed (`Changed`), after the
+/// answer (`wait_until`), never on its path: best effort, a page not told
+/// reads them next time. One future type for every owner that tells so
+/// (the ledger, the registry), so the cell's Wasm carries one.
+pub(crate) fn tell_later(state: &State, env: &Env, people: Vec<String>, event: &'static str) {
+    let env = env.clone();
+    state.wait_until(async move {
+        for person in people {
+            if let Err(e) = ask(&env, &person, &Changed {}).await {
+                console_error!("{}", serde_json::json!({ "event": event, "person": person, "failed": e.message }));
+            }
+        }
+    });
 }
 
-/// Tells `identity`'s open pages that the invites waiting on their emails
-/// changed (the registry's, registry/invites.rs): each reads them again. A
-/// page that missed it reads them again as it reconnects.
-pub(crate) async fn tell_invited(env: &Env, identity: &str) -> CellResult<()> {
-    tell_pages(env, identity, "invited").await
+/// Asks `identity`'s list `call`: its answer, read as the call's type, or
+/// its refusal as it named it.
+pub(crate) async fn ask<C: Call>(env: &Env, identity: &str, call: &C) -> CellResult<C::Answer>
+where
+    C::Answer: DeserializeOwned,
+{
+    let bytes = answered(env, identity, C::PATH, body(call)).await?;
+    serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("{identity}'s list's answer to {}: {e}", C::PATH)))
 }
 
-async fn tell_pages(env: &Env, identity: &str, route: &str) -> CellResult<()> {
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post);
-    let req = Request::new_with_init(&format!("https://principal.internal/{route}"), &init)?;
-    let resp = crate::routed::send(env, "PRINCIPAL", identity, req).await?;
-    if resp.status_code() != 200 {
-        return Err(CellError::host(format!("{identity}'s list answered {} to a change", resp.status_code())));
+/// `ask`, its answer passed on as the list made it, unread: its status,
+/// headers and body (the router's, for a person's own requests). Not an
+/// `async fn`: one future type (`sent`'s) serves every call.
+pub(crate) fn pass<'a, C: Call>(env: &'a Env, identity: &'a str, call: &C) -> impl std::future::Future<Output = CellResult<Response>> + 'a {
+    sent(env, identity, C::PATH, body(call))
+}
+
+fn body<C: Call>(call: &C) -> CellResult<String> {
+    serde_json::to_string(call).map_err(|e| CellError::host(format!("{}'s body: {e}", C::PATH)))
+}
+
+/// `ask`'s round trip, one copy for every call: its 200's bytes, or its refusal.
+async fn answered(env: &Env, identity: &str, path: &str, body: CellResult<String>) -> CellResult<Vec<u8>> {
+    let mut resp = sent(env, identity, path, body).await?;
+    let status = resp.status_code();
+    let bytes = resp.bytes().await?;
+    if status == 200 {
+        return Ok(bytes);
     }
-    Ok(())
+    Err(crate::routed::refusal(&bytes, || format!("{identity}'s list answered {status} to {path}")))
+}
+
+/// Every call to a list: its body posted to its route, asked once (a
+/// caller retries on its own: an outbox, a page, an operator's wipe).
+async fn sent(env: &Env, identity: &str, path: &str, body: CellResult<String>) -> CellResult<Response> {
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_body(Some(body?.into()));
+    let req = Request::new_with_init(&format!("https://principal.internal{path}"), &init)?;
+    crate::routed::send(env, "PRINCIPAL", identity, req).await
+}
+
+/// A socket that watches `identity`'s list (`GET /api/fragments/watch`):
+/// a fresh request, the client's handshake and nothing else of theirs, and
+/// its answer, the socket.
+pub(crate) async fn watch(env: &Env, identity: &str, handshake: &Request) -> CellResult<Response> {
+    let headers = Headers::new();
+    headers.set("upgrade", "websocket")?;
+    headers.set("connection", "Upgrade")?;
+    for k in crate::WEBSOCKET_HEADERS {
+        if let Some(v) = handshake.headers().get(k)? {
+            headers.set(k, &v)?;
+        }
+    }
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get).with_headers(headers);
+    let req = Request::new_with_init(&format!("https://principal.internal{WATCH}"), &init)?;
+    crate::routed::send(env, "PRINCIPAL", identity, req).await
+}
+
+/// A call's body as the list decodes it: one it cannot is the caller's fault.
+fn decode<C: Call + DeserializeOwned>(body: &[u8]) -> CellResult<C> {
+    serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("{}: {e}", C::PATH)))
+}
+
+/// A call's answer, as its type says.
+fn reply<C: Call>(answer: CellResult<C::Answer>) -> CellResult<Response>
+where
+    C::Answer: Serialize,
+{
+    crate::json_answer(&answer?)
 }
 
 /// `LISTED`'s one bound number: the most unread a row counts.
@@ -865,18 +789,18 @@ fn listed_binds() -> Vec<SqlStorageValue> {
 
 /// A row as a list shows it.
 fn listed(r: Listed) -> CellResult<ListedFragment> {
-    let sharing = match r.sharing.as_deref().map(serde_json::from_str::<Sharing>) {
+    let sharing = match r.sharing.as_deref().map(crate::json_text::<Sharing>) {
         Some(Ok(s)) => Some(s),
         Some(Err(e)) => return Err(CellError::host(format!("{}'s stored sharing: {e}", r.name))),
         None => None,
     };
-    let face = r.face.as_deref().and_then(|f| serde_json::from_str::<Face>(f).ok());
+    let face = r.face.as_deref().and_then(|f| crate::json_text::<Face>(f).ok());
     let (kind, title, picture, agent_role, agents) = face.map_or((FragmentKind::App, None, None, None, Vec::new()), |f| (f.kind, f.title, f.picture, f.role, f.agents));
     let preview = r.said.as_deref().map(search::preview).filter(|p| !p.is_empty()).map(str::to_string);
     let preview_at = preview.as_ref().and(r.said_at);
     let unread = u32::try_from(r.unread).ok().filter(|n| *n <= limits::LISTED_UNREAD_MAX);
     let unread = unread.ok_or_else(|| CellError::host(format!("{}'s unread count {} is outside its bound", r.name, r.unread)))?;
-    let listed: Vec<ListedRecord> = match r.listed.as_deref().map(serde_json::from_str) {
+    let listed: Vec<ListedRecord> = match r.listed.as_deref().map(crate::json_text) {
         Some(Ok(records)) => records,
         Some(Err(e)) => return Err(CellError::host(format!("{}'s stored listed records: {e}", r.name))),
         None => vec![],

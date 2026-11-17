@@ -92,6 +92,9 @@ pub struct World {
     /// While down every request is 503 and every upgrade refused.
     pub down: bool,
     pub fail_posts: u32,
+    /// A blob upload past this many bytes is refused 413, as a computer's
+    /// egress that reads a body whole refuses one past 32 MiB.
+    pub blob_put_max: Option<usize>,
     /// The next posts on this channel (any fragment's) that would append a
     /// record: refused 503 before it is appended (`false`), or appended
     /// and answered 503, the answer lost (`true`). A retry of one appended
@@ -101,6 +104,8 @@ pub struct World {
     /// answer 503, as a platform that failed one read does.
     pub fail_computer_reads: u32,
     pub fail_lists: u32,
+    /// The next this many reads of any agent's `agent.json` answer 503.
+    pub fail_agent_json: u32,
     /// The next this many reads of a page of 100 records (a note's, or a
     /// late card answer's) answer 503, as a deploying platform does.
     pub fail_history_reads: u32,
@@ -113,6 +118,9 @@ pub struct World {
     /// Each post to a `work` channel (a claim, among others) is answered
     /// this much later: a claim held in flight.
     pub work_post_delay_ms: u64,
+    /// Each post to a `chat` channel (a reply, among others) is answered
+    /// this much later: a fragment's lane of posts held.
+    pub chat_post_delay_ms: u64,
     /// Records per `__live` page (the platform's is 1000).
     pub page: usize,
     /// Each agent's door, by its fragment: the nonce of the link ticket its
@@ -132,6 +140,18 @@ pub struct World {
     pub simplex_said: u32,
     pub simplex_unsaid: u32,
     pub doors: BTreeMap<String, String>,
+    /// Each move's stage the platform answers (`GET /api/migrations/stages/
+    /// {stage}/zip`, by ranges): the agent it is bound to, and its zip. A
+    /// stage not here is not importing (409), another agent's is 403.
+    pub stages: BTreeMap<String, (String, Bytes)>,
+    /// Range reads of stages, as they came: (stage, from, to).
+    pub stage_reads: Vec<(String, u64, u64)>,
+    /// Each stage read answers this late (a slow platform).
+    pub stage_read_ms: u64,
+    /// The stage its import ends the moment a turn is claimed on any
+    /// chat's `work` (an agent saying `done` as it gets its routine): its
+    /// reads refused from then on, as the platform's are after `done`.
+    pub done_on_claim: Option<String>,
     /// The fragments an agent made for its owner (`POST /api/fragments?for=`),
     /// by name, in order.
     pub made: Vec<String>,
@@ -172,7 +192,13 @@ impl World {
 
     /// Appends a record and sends it to every socket live on its channel.
     pub fn append(&mut self, fragment: &str, channel: &str, principal: &str, body: Value) -> Value {
-        let at = self.now();
+        self.append_aged(fragment, channel, principal, body, 0)
+    }
+
+    /// `append`, its time `ago_ms` before now: a message that waited (an
+    /// outage's backlog).
+    pub fn append_aged(&mut self, fragment: &str, channel: &str, principal: &str, body: Value, ago_ms: i64) -> Value {
+        let at = self.now() - ago_ms;
         let f = self.fragments.get_mut(fragment).expect("a fragment of the fake");
         let c = f.channels.get_mut(channel).expect("a channel of the fragment");
         let seq = c.records.len() as u64 + 1;
@@ -284,7 +310,7 @@ impl Fake {
         f(&mut self.world.lock().expect("the world"))
     }
 
-    /// A ticket for `act` (`link`, `unlink`) on agent `label`, as its
+    /// A ticket for `act` (`link`, `unlink`, `adopt`) on agent `label`, as its
     /// owner's Settings get one: signed by the agent's key, for this
     /// computer, for ten minutes. A link's is the one a door key redeems
     /// next; an unlink's closes the agent's door at once.
@@ -298,7 +324,7 @@ impl Fake {
         let sig = agent_key(label).sign_raw(&t.digest(), &[0u8; 32]).expect("signed");
         t.sig = fragment_bridge::records::hex(&sig.to_bytes());
         self.with(|w| {
-            if act == "link" {
+            if act == "link" || act == "adopt" {
                 w.door_tickets.insert(agent, nonce);
             } else {
                 w.door_tickets.remove(&agent);
@@ -356,6 +382,18 @@ impl Fake {
         });
     }
 
+    /// `add_agent`, its `agent.json` already `agent_json` when the computer
+    /// lists it: its runtime is read with it, never before it.
+    pub fn add_agent_with(&self, label: &str, agent_json: &str) {
+        self.with(|w| {
+            let (fragment, identity) = (format!("{label}--k3x9"), format!("npub1{label}"));
+            let mut f = agent_fragment(&identity);
+            f.files.insert("agent.json".into(), bytes::Bytes::from(agent_json.to_string()));
+            w.fragments.insert(fragment, f);
+            w.computer["agents"].as_array_mut().expect("the computer's agents").push(agent_view(label));
+        });
+    }
+
     /// Unassigns the agent `label` from the computer.
     pub fn remove_agent(&self, label: &str) {
         let fragment = format!("{label}--k3x9");
@@ -383,6 +421,12 @@ impl Fake {
     /// `principal` says `body` in `fragment`'s `chat`.
     pub fn say(&self, fragment: &str, principal: &str, body: Value) -> Value {
         self.with(|w| w.append(fragment, "chat", principal, body))
+    }
+
+    /// `say`, as said `ago` before now: one that waited.
+    pub fn say_aged(&self, fragment: &str, principal: &str, body: Value, ago: std::time::Duration) -> Value {
+        let ago = i64::try_from(ago.as_millis()).expect("an age");
+        self.with(|w| w.append_aged(fragment, "chat", principal, body, ago))
     }
 
     /// Closes every live and keepalive socket, as a deploy does.
@@ -477,7 +521,11 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         if w.down {
             return refuse(StatusCode::SERVICE_UNAVAILABLE, "the fake is down");
         }
-        if method == Method::POST && path.ends_with("/channels/work") { w.work_post_delay_ms } else { 0 }
+        match method {
+            Method::POST if path.ends_with("/channels/work") => w.work_post_delay_ms,
+            Method::POST if path.ends_with("/channels/chat") => w.chat_post_delay_ms,
+            _ => 0,
+        }
     };
     if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -511,6 +559,21 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             w.door_tickets.remove(agent);
             w.doors.insert(agent.to_string(), key.to_string());
             return answer(StatusCode::OK, json!({ "door": "simplex", "key": key }));
+        }
+        (Method::GET, ["api", "migrations", "stages", stage, "zip"]) => {
+            let range = req.headers().get("range").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes=")?.split_once('-')).and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
+            let late = world.lock().unwrap().stage_read_ms;
+            tokio::time::sleep(std::time::Duration::from_millis(late)).await;
+            let mut w = world.lock().unwrap();
+            let Some((bound, zip)) = w.stages.get(*stage).cloned() else { return refuse(StatusCode::CONFLICT, "that stage is not importing") };
+            if agent.as_deref() != Some(bound.as_str()) {
+                return refuse(StatusCode::FORBIDDEN, "only the agent the move is bound to reads its stage");
+            }
+            let Some((from, to)) = range.filter(|(a, b)| a <= b && (*b as usize) < zip.len()) else { return net::respond(StatusCode::OK, "application/zip", zip) };
+            w.stage_reads.push((stage.to_string(), from, to));
+            let mut r = net::respond(StatusCode::PARTIAL_CONTENT, "application/zip", zip.slice(from as usize..=to as usize));
+            r.headers_mut().insert("content-range", format!("bytes {from}-{to}/{}", zip.len()).parse().unwrap());
+            return r;
         }
         (Method::GET, ["api", "computer", "relay"]) => {
             let host = query(&q, "host").into_iter().next().unwrap_or_default();
@@ -684,8 +747,16 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         return refuse(StatusCode::NOT_FOUND, "no such route");
     }
     let fragment = p[2].to_string();
+    // `bytes=<from>-`, the one form the bridge asks (a blob's resumed download)
+    let from = req.headers().get("range").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes=")?.strip_suffix('-')?.parse::<usize>().ok());
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     let mut w = world.lock().unwrap();
+    // an agent saying `done` as its turn is claimed (`done_on_claim`)
+    if method == Method::POST && p[3..] == ["channels", "work"] && serde_json::from_slice::<Value>(&body).is_ok_and(|v| v["body"]["kind"] == "turn.start") {
+        if let Some(stage) = w.done_on_claim.take() {
+            w.stages.remove(&stage);
+        }
+    }
     let Some(f) = w.fragments.get(&fragment) else { return refuse(StatusCode::NOT_FOUND, "no such fragment") };
     let Some(role) = World::role_in(f, &me, acting_for.as_deref()) else { return refuse(StatusCode::FORBIDDEN, "not a member") };
     match (method, &p[3..]) {
@@ -756,6 +827,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             }
             let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let (Some(id), body) = (v["id"].as_str().map(str::to_string), v["body"].clone()) else { return refuse(StatusCode::BAD_REQUEST, "{id, body}") };
+
             // the platform's rule: a record that relays is its agent's door's alone
             if let Some(r) = body.get("relayed") {
                 use fragment_bridge::simplex::door;
@@ -811,6 +883,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             }
             answer(StatusCode::OK, json!({ "ok": true }))
         }
+        (Method::PUT, ["blobs", _]) if w.blob_put_max.is_some_and(|max| body.len() > max) => refuse(StatusCode::PAYLOAD_TOO_LARGE, "past what the egress reads"),
         (Method::PUT, ["blobs", sha]) => {
             let got = fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&body));
             if got != *sha {
@@ -820,9 +893,14 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             w.fragments.get_mut(&fragment).unwrap().blobs.insert(sha.to_string(), ("application/octet-stream".into(), body));
             answer(StatusCode::OK, json!({ "ok": true, "sha": sha, "size": size, "stored": true }))
         }
-        (Method::GET, ["blobs", sha]) => match f.blobs.get(*sha) {
-            Some((ty, bytes)) => net::respond(StatusCode::OK, ty, bytes.clone()),
-            None => refuse(StatusCode::NOT_FOUND, "no such blob"),
+        (Method::GET, ["blobs", sha]) => match (f.blobs.get(*sha), from) {
+            (Some((ty, bytes)), Some(from)) if from > 0 && from < bytes.len() => {
+                let mut r = net::respond(StatusCode::PARTIAL_CONTENT, ty, bytes.slice(from..));
+                r.headers_mut().insert("content-range", format!("bytes {from}-{}/{}", bytes.len() - 1, bytes.len()).parse().unwrap());
+                r
+            }
+            (Some((ty, bytes)), _) => net::respond(StatusCode::OK, ty, bytes.clone()),
+            (None, _) => refuse(StatusCode::NOT_FOUND, "no such blob"),
         },
         (Method::GET, ["files"]) => {
             // a file's version moves with its bytes, as a commit's does
@@ -832,6 +910,11 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         }
         (Method::GET, ["file"]) => {
             let path = query(&q, "path").into_iter().next().unwrap_or_default();
+            if path == "agent.json" && w.fail_agent_json > 0 {
+                w.fail_agent_json -= 1;
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying");
+            }
+            let f = &w.fragments[&fragment];
             match f.files.get(&path) {
                 Some(b) => net::respond(StatusCode::OK, "application/octet-stream", b.clone()),
                 None => refuse(StatusCode::NOT_FOUND, "no such file"),

@@ -71,11 +71,11 @@ pub enum Effect {
 /// app's record would be named for whoever called it), with a valid kind
 /// and a bounded body. It relays no one (`relayed`), unless the fragment is
 /// a hosted door (`hosted`) and it says exactly what that door relays.
-pub fn check_record(channel: &str, kind: &str, body: &Value, declared: &BTreeMap<String, ChannelDecl>, hosted: Option<&crate::door::Hosted>) -> Result<(), String> {
+pub fn check_record(channel: &str, kind: &str, body: &Value, decl: Option<&ChannelDecl>, hosted: Option<&crate::door::Hosted>) -> Result<(), String> {
     if BUILTIN_CHANNELS.contains(&channel) {
         return Err(format!("channel {channel:?} is the platform's; an app publishes to the channels its fragment.json declares"));
     }
-    let Some(decl) = declared.get(channel) else {
+    let Some(decl) = decl else {
         return Err(format!("channel {channel:?} is not declared in fragment.json"));
     };
     if let Some(from) = decl.from {
@@ -115,7 +115,7 @@ fn decode_one(v: &Value, declared: &BTreeMap<String, ChannelDecl>, hosted: Optio
         only(obj, &["channel", "kind", "body"])?;
         let (channel, kind) = (string(obj, "channel")?, string(obj, "kind")?);
         let body = obj.get("body").ok_or("body is missing")?;
-        check_record(channel, kind, body, declared, hosted)?;
+        check_record(channel, kind, body, declared.get(channel), hosted)?;
         Ok(Effect::Record { channel: channel.to_string(), kind: kind.to_string(), body: body.clone() })
     } else if obj.contains_key("file") {
         only(obj, &["file", "text", "base64"])?;
@@ -177,7 +177,7 @@ mod tests {
     use serde_json::json;
 
     fn declared() -> BTreeMap<String, ChannelDecl> {
-        BTreeMap::from([("room".to_string(), ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None })])
+        BTreeMap::from([("room".to_string(), ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None, newest: vec![] })])
     }
 
     fn refusal(effects: Value) -> String {
@@ -221,8 +221,8 @@ mod tests {
         let body = json!({ "blob": "x".repeat(limits::RECORD_BODY_MAX_BYTES) });
         assert!(refusal(json!([{ "channel": "room", "kind": "k", "body": body }])).contains(&limits::RECORD_BODY_MAX_BYTES.to_string()));
         // the job step's check is this one
-        assert!(check_record("room", "k", &json!("x".repeat(100)), &declared(), None).is_ok());
-        assert!(check_record("inbox", "k", &Value::Null, &declared(), None).is_err());
+        assert!(check_record("room", "k", &json!("x".repeat(100)), declared().get("room"), None).is_ok());
+        assert!(check_record("inbox", "k", &Value::Null, declared().get("inbox"), None).is_err());
     }
 
     /// Goal: a channel that says `from` holds only its posters' own records
@@ -232,15 +232,15 @@ mod tests {
     #[test]
     fn an_app_publishes_nothing_to_a_from_channel() {
         let mut channels = declared();
-        channels.insert("work".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(fragment_proto::IdentityKind::Agent), listed: None });
-        channels.insert("notes".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: None, listed: None });
-        let refused = check_record("work", "turn.step", &json!({ "turn": "t" }), &channels, None).expect_err("an app's record on an agents' channel");
+        channels.insert("work".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(fragment_proto::IdentityKind::Agent), listed: None, newest: vec![] });
+        channels.insert("notes".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: None, listed: None, newest: vec![] });
+        let refused = check_record("work", "turn.step", &json!({ "turn": "t" }), channels.get("work"), None).expect_err("an app's record on an agents' channel");
         assert!(refused.contains("agent members only"), "{refused}");
         assert!(decode(&json!([{ "channel": "work", "kind": "turn.step", "body": {} }]), &channels, None).is_err(), "a mutation's effect is refused there");
-        assert!(check_record("notes", "note", &json!({}), &channels, None).is_ok(), "a channel without from takes an app's record");
+        assert!(check_record("notes", "note", &json!({}), channels.get("notes"), None).is_ok(), "a channel without from takes an app's record");
         // nor does an app relay an agent's owner: that is a door's post alone (door.rs)
         let relayed = json!({ "text": "yes", "relayed": { "via": "simplex", "for": "npub1paul" } });
-        assert!(check_record("notes", "note", &relayed, &channels, None).is_err_and(|e| e.contains("door")), "a job step's record that relays");
+        assert!(check_record("notes", "note", &relayed, channels.get("notes"), None).is_err_and(|e| e.contains("door")), "a job step's record that relays");
         assert!(decode(&json!([{ "channel": "notes", "kind": "message", "body": relayed }]), &channels, None).is_err(), "a mutation's effect that relays");
     }
 
@@ -253,13 +253,13 @@ mod tests {
         let h = crate::door::Hosted { door: "telegram".into(), agent: "juniper--k3x9".into(), owner: "npub1paul".into() };
         let ok = json!({ "text": "hi from telegram", "to": ["npub1juniper"], "relayed": h.relayed() });
         assert_eq!(ok["relayed"], json!({ "via": "telegram", "for": "npub1paul", "agent": "juniper--k3x9" }));
-        assert!(check_record("room", "message", &ok, &declared(), Some(&h)).is_ok());
+        assert!(check_record("room", "message", &ok, declared().get("room"), Some(&h)).is_ok());
         assert!(decode(&json!([{ "channel": "room", "kind": "message", "body": ok }]), &declared(), Some(&h)).is_ok());
-        assert!(check_record("room", "message", &ok, &declared(), None).is_err(), "unbound: none");
+        assert!(check_record("room", "message", &ok, declared().get("room"), None).is_err(), "unbound: none");
         for (k, v) in [("via", json!("simplex")), ("agent", json!("maple--k3x9")), ("for", json!("npub1skyler")), ("sig", json!("ab".repeat(64))), ("at", json!(1))] {
             let mut bad = ok.clone();
             bad["relayed"][k] = v.clone();
-            assert!(check_record("room", "message", &bad, &declared(), Some(&h)).is_err(), "{k}: {v}");
+            assert!(check_record("room", "message", &bad, declared().get("room"), Some(&h)).is_err(), "{k}: {v}");
             assert!(decode(&json!([{ "channel": "room", "kind": "message", "body": bad }]), &declared(), Some(&h)).is_err(), "{k}: {v}");
         }
         assert_eq!(crate::door::blessed_template("blessed:telegram@0f1e2d"), Some("telegram"));

@@ -17,6 +17,7 @@
 
 mod chats;
 mod hermes;
+mod search;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -30,7 +31,7 @@ use serde::Serialize;
 
 use crate::api::{Client, Code, CodedError};
 use crate::blobs::Blobs;
-use crate::codestorage::{Author, Change, CodeStorage, CsError, MAIN};
+use crate::codestorage::{Author, Change, CodeStorage, CsError, Wants, MAIN};
 
 #[derive(Subcommand)]
 pub enum SessionCmd {
@@ -46,6 +47,11 @@ pub enum SessionCmd {
         /// job's runs), subagent (side tasks). All of them unless named
         #[arg(long = "kind", value_name = "KIND")]
         kinds: Vec<String>,
+        /// Where the agent's home keeps its Hermes home, when PATH is a
+        /// whole home or a zip of one (`fragment home`): `hermes` (the
+        /// home is its Hermes home, the default for a zip), or a layout file
+        #[arg(long)]
+        layout: Option<String>,
     },
 }
 
@@ -82,8 +88,11 @@ pub struct Imported {
     pub refused: Vec<RefusedOne>,
     /// What could not be read at all, each in a sentence.
     pub problems: Vec<String>,
-    /// What the archive holds now, by kind.
-    pub holds: BTreeMap<&'static str, usize>,
+    /// What the archive holds now, by kind (the known kinds always; any
+    /// other a newer CLI filed, by its name).
+    pub holds: BTreeMap<String, usize>,
+    /// What it did to the archive's search (search.rs).
+    pub search: search::Searched,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,8 +154,8 @@ impl Spool {
     }
 
     /// Whether an import keeps conversations of `kind` (`--kind`).
-    pub fn wants(&self, kind: Kind) -> bool {
-        self.kinds.is_empty() || self.kinds.contains(&kind)
+    pub fn wants(&self, kind: &Kind) -> bool {
+        self.kinds.is_empty() || self.kinds.contains(kind)
     }
 
     /// A file a message held, its bytes checked against `a` (its hash and
@@ -180,7 +189,7 @@ impl Spool {
     /// the format refuses is said, and the rest go on), the newer of two
     /// copies of one kept. An import past an archive's limits stops here.
     pub fn add(&mut self, s: Session) -> Result<()> {
-        if !self.wants(s.kind) {
+        if !self.wants(&s.kind) {
             return Ok(());
         }
         let id = s.id.clone();
@@ -236,8 +245,8 @@ fn clear_stale_spools(tmp: &Path) {
 
 /// `fragment session import`.
 pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
-    let SessionCmd::Import { path, kinds } = sub;
-    let kinds: BTreeSet<Kind> = kinds.iter().map(|k| Kind::parse(k).ok_or_else(|| usage(format!("--kind is chat, cron or subagent, not {k:?}")))).collect::<Result<_>>()?;
+    let SessionCmd::Import { path, kinds, layout } = sub;
+    let kinds: BTreeSet<Kind> = kinds.iter().map(|k| Kind::known(k).ok_or_else(|| usage(format!("--kind is chat, cron or subagent, not {k:?}")))).collect::<Result<_>>()?;
     if let Some(mode) = c.agent() {
         if mode.acting_for.is_none() {
             return Err(usage(format!("a session archive is a person's: {} imports into its owner's, acting for them (FRAGMENT_FOR)", mode.agent)));
@@ -247,36 +256,90 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
         bail!(usage(format!("{} is no file or folder", path.display())));
     }
     let mut spool = Spool::new(kinds)?;
-    let problems = match source(&path)? {
-        Source::Export(root) => chats::read(&root, &mut spool)?,
+    let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
+    let upload_max = upload_max(&list, c.agent().is_some());
+    // on a platform computer (as its agent), its own Hermes home's
+    // databases are its chats here already; a person's own Hermes is theirs
+    let own = c.agent().and(std::env::var_os("HERMES_HOME")).filter(|h| !h.is_empty()).map(PathBuf::from);
+    let problems = read(source(&path, layout.as_deref())?, &mut spool, upload_max, own.as_deref())?;
+    let (archive, made) = archive(c, &list)?;
+    let written = write(c, &archive, &spool)?;
+    let mut holds: BTreeMap<String, usize> = Kind::KNOWN.iter().map(|k| (k.as_str().to_string(), 0)).collect();
+    for e in written.entries.values() {
+        *holds.entry(e.kind.as_str().to_string()).or_default() += 1;
+    }
+    let search = search::sync(c, &archive, &spool);
+    let refused = std::mem::take(&mut spool.refused);
+    Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems, holds, search })
+}
+
+/// What `source` names, read into `spool`; what could not be read at all,
+/// each in a sentence. `own`: this platform computer's Hermes home, whose
+/// databases are refused.
+fn read(source: Source, spool: &mut Spool, upload_max: u64, own: Option<&Path>) -> Result<Vec<String>> {
+    Ok(match source {
+        Source::Export(root) => chats::read(&root, spool, upload_max)?,
         Source::Hermes(db) => {
-            // on a platform computer (as its agent), its own Hermes home's
-            // databases are its chats here already; a person's own Hermes is theirs
-            let own = c.agent().and(std::env::var_os("HERMES_HOME")).filter(|h| !h.is_empty()).map(PathBuf::from);
             // a conversation it cannot read whole is refused, in the spool
-            hermes::read(&db, &mut spool, own.as_deref())?;
+            hermes::read(&db, spool, own)?;
             Vec::new()
         }
-    };
-    let (archive, made) = archive(c)?;
-    let written = write(c, &archive, &spool)?;
-    let mut holds: BTreeMap<&'static str, usize> = Kind::ALL.iter().map(|k| (k.as_str(), 0)).collect();
-    for e in written.entries.values() {
-        *holds.entry(e.kind.as_str()).or_default() += 1;
+        Source::Home(home, db) => {
+            // a zip's database is copied out with what SQLite reads beside
+            // it, into the import's own folder, and goes with it
+            let scratch = crate::home::source::Scratch::in_dir(&spool.dir)?;
+            let local = home.local(&db, &scratch)?;
+            for beside in ["-wal", "-shm"] {
+                if home.get(&format!("{db}{beside}")).is_some() {
+                    home.local(&format!("{db}{beside}"), &scratch)?;
+                }
+            }
+            if let Some(home) = own {
+                hermes::refuse_shared(&local, home)?;
+            }
+            hermes::read(&local, spool, own)?;
+            Vec::new()
+        }
+    })
+}
+
+/// One file's bytes this import may send, at most: what the platform's
+/// list says this signer's messages carry (`limits`: a person's, the
+/// deployment's bound; an agent's, acting for its owner, a blob's). An
+/// older platform names none: a person's then passed its zone (the
+/// default), an agent's, from its computer, a blob's.
+pub(crate) fn upload_max(list: &FragmentList, agent: bool) -> u64 {
+    match list.limits {
+        Some(l) => l.upload_max_bytes,
+        None if agent => fragment_proto::limits::BLOB_MAX_BYTES,
+        None => fragment_proto::limits::UPLOAD_MAX_BYTES_DEFAULT,
     }
-    let refused = std::mem::take(&mut spool.refused);
-    Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems, holds })
 }
 
 /// Where a path a person names reads from.
 enum Source {
     Export(PathBuf),
     Hermes(PathBuf),
+    /// An agent's home (`fragment home`: a zip of one, or a folder read
+    /// through a layout), and its Hermes database's path in it.
+    Home(crate::home::source::Source, String),
 }
 
-/// The old Finite's export (its `chats/`, or the folder holding it), else
-/// Hermes' database (a file, or a Hermes home holding `state.db`).
-fn source(path: &std::path::Path) -> Result<Source> {
+/// An agent's home (a zip, or any path named with a layout), read as its
+/// layout says; else the old Finite's export (its `chats/`, or the folder
+/// holding it), else Hermes' database (a file, or a Hermes home holding
+/// `state.db`).
+fn source(path: &std::path::Path, layout: Option<&str>) -> Result<Source> {
+    if layout.is_some() || crate::home::source::is_zip(path) {
+        let layout = crate::home::Layout::named(layout.unwrap_or("hermes"))?;
+        // one rule for every source: what may hold a secret is skipped unread
+        let home = crate::home::open(path, &layout)?;
+        let db = layout.in_home("state.db");
+        if home.get(&db).is_none() {
+            bail!(usage(format!("{} holds no {db}: name the home's layout (--layout), or its Hermes home", path.display())));
+        }
+        return Ok(Source::Home(home, db));
+    }
     if let Some(root) = chats::root_of(path) {
         return Ok(Source::Export(root));
     }
@@ -293,8 +356,7 @@ fn source(path: &std::path::Path) -> Result<Source> {
 /// imports at once have made one each), or made now. Asked only once what
 /// was read is within an archive's limits (`Spool::add`), so a refused
 /// import makes none.
-fn archive(c: &Client) -> Result<(String, bool)> {
-    let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
+fn archive(c: &Client, list: &FragmentList) -> Result<(String, bool)> {
     let theirs = list.fragments.iter().filter(|f| f.kind == FragmentKind::Sessions && (f.role == Role::Owner || f.owned)).map(|f| f.name.clone()).min();
     if let Some(name) = theirs {
         return Ok((name, false));
@@ -305,6 +367,7 @@ fn archive(c: &Client) -> Result<(String, bool)> {
         visibility: None,
         template: Some(session::TEMPLATE.to_string()),
         title: Some(session::TITLE.to_string()),
+        agent: None,
     };
     let made: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
     Ok((made.name, true))
@@ -345,8 +408,10 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
     // describe, and one changed in a commit after it may be any copy (its
     // size the same or not), so it is read. A file's last commit, with its
     // path, names its bytes (code.storage lists it).
-    let index_paths: BTreeSet<String> = Kind::ALL.iter().map(|k| session::index_path(*k)).collect();
-    let index_commits: BTreeSet<&str> = listed.entries.iter().filter(|e| index_paths.contains(e.path.as_str())).map(|e| e.last_commit_sha.as_str()).collect();
+    // every kind's index main holds, a kind this CLI does not know too (a
+    // newer one's: FIN-296), so its conversations stay listed as they were
+    let indexes: Vec<(&str, Kind)> = listed.entries.iter().filter_map(|e| Some((e.path.as_str(), session::kind_of_index_path(e.path.as_str())?))).collect();
+    let index_commits: BTreeSet<&str> = listed.entries.iter().filter(|e| session::kind_of_index_path(e.path.as_str()).is_some()).map(|e| e.last_commit_sha.as_str()).collect();
     let since: Option<BTreeSet<String>> = if index_commits.is_empty() {
         Some(BTreeSet::new())
     } else {
@@ -363,12 +428,8 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
         .collect();
     let media = paths.iter().filter(|p| p.starts_with("media/")).map(|p| p.to_string()).collect();
     let mut indexed = BTreeMap::new();
-    for kind in Kind::ALL {
-        let path = session::index_path(kind);
-        if !paths.contains(path.as_str()) {
-            continue;
-        }
-        let bytes = blobs.resolve(storage.read_file(&path, &rev)?)?;
+    for (path, kind) in indexes {
+        let bytes = blobs.resolve(storage.read_file(path, &rev)?)?;
         // an index that is not one (an agent edited it): made again from
         // the conversations, as an index that is missing is
         let Ok(index) = serde_json::from_slice::<Index>(&bytes) else {
@@ -445,7 +506,7 @@ struct Written {
 }
 
 fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
-    let storage = CodeStorage::connect(c, name)?;
+    let storage = CodeStorage::connect(c, name, Wants::Write)?;
     let blobs = Blobs::new(c, name);
     let author = Author::writer(&c.writer_id());
     let h = held(&storage, &blobs)?;
@@ -483,7 +544,7 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     let indexes = Indexes { c, name, storage: &storage, author: &author };
     let (entries, indexed) = indexes.write(head, merge.entries, merge.indexes, &written)?;
     if total > 0 || indexed {
-        crate::sync::refresh_pins(c, name);
+        crate::sync::refresh_pins(c, name, crate::codestorage::MAIN);
     }
     Ok(Written { added, updated, unchanged, entries })
 }
@@ -510,8 +571,8 @@ impl Indexes<'_> {
             }
             let mut changes = Vec::new();
             for kind in &kinds {
-                let bytes = blobs.store(Index::of(*kind, &entries).file())?;
-                changes.push(Change::Upsert { path: RepoPath::parse(&session::index_path(*kind)).map_err(|e| anyhow!("{e}"))?, bytes });
+                let bytes = blobs.store(Index::of(kind.clone(), &entries).file())?;
+                changes.push(Change::Upsert { path: RepoPath::parse(&session::index_path(kind)).map_err(|e| anyhow!("{e}"))?, bytes });
             }
             match self.storage.commit(head.as_deref(), "session import: the indexes", self.author, &changes) {
                 Ok(_) => return Ok((entries, true)),
@@ -558,21 +619,66 @@ pub fn print(r: &Imported) {
     }
     let holds: usize = r.holds.values().sum();
     let noun = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    // kinds a newer CLI filed, kept as they are: named, not counted as these
+    let others: Vec<String> = r.holds.iter().filter(|(k, n)| Kind::known(k).is_none() && **n > 0).map(|(k, n)| format!("{n} {k}")).collect();
+    let others = if others.is_empty() { String::new() } else { format!(", and {} (kept as a newer CLI filed them)", others.join(", ")) };
     println!(
-        "It holds {}: {}, {}, {}.",
+        "It holds {}: {}, {}, {}{others}.",
         noun(holds, "conversation", "conversations"),
         noun(r.holds["chat"], "chat", "chats"),
         noun(r.holds["cron"], "scheduled run", "scheduled runs"),
         noun(r.holds["subagent"], "side task", "side tasks")
     );
+    match &r.search {
+        search::Searched::Skipped { why } => println!("Search: skipped ({why}); the next import puts it right."),
+        search::Searched::Written { written, unchanged, unresolved, left_out, refused, refused_count } => {
+            println!("Search: {written} written, {unchanged} up to date.");
+            if *unresolved > 0 {
+                println!("  {unresolved} kept changing under another import; the next import puts them right.");
+            }
+            for one in refused {
+                println!("  not searchable: {} ({})", one.id, one.why);
+            }
+            if *refused_count > refused.len() {
+                println!("  and {} more not searchable.", refused_count - refused.len());
+            }
+            if *left_out > 0 {
+                println!("  {} sections past search's limits left out.", left_out);
+            }
+        }
+    }
 }
 
-/// A fresh folder in the system's temporary place (a test's).
+/// A fresh folder in the system's temporary place, a test's own: removed,
+/// with all it holds, when its guard drops, so a test run leaves none
+/// behind (each `cargo xtask check` once left about twenty, and 22.7 GB of
+/// them had filled a shared box's /tmp by 2026-11-02).
 #[cfg(test)]
-pub(crate) fn tempdir() -> PathBuf {
+pub(crate) struct TempDir(PathBuf);
+
+#[cfg(test)]
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A fresh folder for a test, gone when the guard it answers drops: keep
+/// the guard while the folder is used (`let dir = tempdir();`, never
+/// `tempdir().join(…)`).
+#[cfg(test)]
+pub(crate) fn tempdir() -> TempDir {
     let d = std::env::temp_dir().join(format!("fragment-session-{}-{}", std::process::id(), rand::random::<u64>()));
     std::fs::create_dir_all(&d).unwrap();
-    d
+    TempDir(d)
 }
 
 #[cfg(test)]
@@ -581,6 +687,19 @@ mod tests {
     use fragment_core::session::Message;
 
     const NAME: &str = "sessions--k3x9";
+
+    /// Goal: a test run leaves no folder behind. Method: one written into,
+    /// then its guard dropped, as each test's is at its end or its panic.
+    #[test]
+    fn a_tests_folder_goes_with_its_guard() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("chats/a")).unwrap();
+        std::fs::write(dir.join("chats/a/state.db"), "x").unwrap();
+        let path = dir.to_path_buf();
+        assert!(path.is_dir());
+        drop(dir);
+        assert!(!path.exists(), "{} is left behind", path.display());
+    }
 
     fn session(id: &str, kind: Kind, at: &str, words: &[&str]) -> Session {
         let messages = words.iter().enumerate().map(|(i, w)| Message { role: if i % 2 == 0 { "user" } else { "assistant" }.into(), at: Some(at.into()), text: Some(w.to_string()), ..Default::default() }).collect();
@@ -607,7 +726,7 @@ mod tests {
     }
 
     fn index(mock: &crate::mockcs::MockServer, kind: Kind) -> Vec<(String, String)> {
-        let bytes = mock.file_at(NAME, "main", &session::index_path(kind)).unwrap_or_default();
+        let bytes = mock.file_at(NAME, "main", &session::index_path(&kind)).unwrap_or_default();
         serde_json::from_slice::<Index>(&bytes).map(|i| i.sessions.into_iter().map(|e| (e.key, e.sha256)).collect()).unwrap_or_default()
     }
 
@@ -637,7 +756,7 @@ mod tests {
         }
         assert_eq!(keys(&mock, Kind::Chat), ["hermes-b", "hermes-a"], "newest first");
         assert_eq!(keys(&mock, Kind::Cron), ["hermes-r"]);
-        assert!(mock.file_at(NAME, "main", &session::index_path(Kind::Subagent)).is_none(), "no index for a kind it holds none of");
+        assert!(mock.file_at(NAME, "main", &session::index_path(&Kind::Subagent)).is_none(), "no index for a kind it holds none of");
         assert!(mock.refresh_count() >= 1, "the cell is told main moved");
 
         let packs = mock.requests(NAME, "POST commit-pack");
@@ -895,6 +1014,280 @@ mod tests {
         assert!(!stale.exists() && fresh.exists() && other.exists());
     }
 
+    /// Goal: an import leaves its archive's search holding each of its
+    /// conversations as it is, and nothing else of the archive's: valid,
+    /// replay, update, an index lost (repaired from the archive's own
+    /// files), a conversation gone, and a host without search (skipped, the
+    /// import standing). Method: the search fake behind the host's routes.
+    #[test]
+    fn an_import_puts_its_archives_search_right() {
+        let (mock, c) = archive();
+        let upserts = || mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
+        write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"])])).unwrap();
+        let skipped = search::sync(&c, NAME, &spooled(vec![]));
+        assert!(matches!(&skipped, search::Searched::Skipped { why } if why.contains("no search")), "{skipped:?}");
+
+        mock.enable_search(NAME);
+        let spool = spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"]), session("r", Kind::Cron, "2026-10-02T06:00:00Z", &["digest"])]);
+        write(&c, NAME, &spool).unwrap();
+        upserts();
+        let s = search::sync(&c, NAME, &spool);
+        assert!(matches!(s, search::Searched::Written { written: 2, unchanged: 0, unresolved: 0, .. }), "{s:?}");
+        let held = |source: &str| mock.search_index(NAME, |ix| ix.sources.get(source).cloned()).flatten();
+        let a = held("sessions/hermes-a.json").expect("a is searched");
+        assert_eq!(a.revision, sha(&file_of(session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"]))));
+        assert_eq!(a.sections[0].text, "Person: hello\nAgent: hi");
+        assert_eq!(a.fields["kind"], "chat");
+        assert_eq!(upserts(), 2);
+
+        write(&c, NAME, &spool).unwrap();
+        let again = search::sync(&c, NAME, &spooled(vec![]));
+        assert!(matches!(again, search::Searched::Written { written: 0, unchanged: 2, .. }), "{again:?}");
+        assert_eq!(upserts(), 0, "a replay writes nothing");
+
+        let later = spooled(vec![session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello", "hi", "and peas?"])]);
+        write(&c, NAME, &later).unwrap();
+        assert!(matches!(search::sync(&c, NAME, &later), search::Searched::Written { written: 1, unchanged: 1, .. }));
+        assert_eq!(held("sessions/hermes-a.json").unwrap().sections.len(), 2);
+
+        mock.search_index(NAME, |ix| ix.sources.clear());
+        mock.external_commit(NAME, "main", &[(session::session_path("hermes-r").as_str(), None)], "a conversation removed");
+        write(&c, NAME, &spooled(vec![])).unwrap();
+        let other = fragment_fakes::search::Held { revision: "1".into(), title: None, at: None, fields: BTreeMap::new(), sections: vec![] };
+        mock.search_index(NAME, |ix| {
+            ix.sources.insert("sessions/hermes-gone.json".into(), other.clone());
+            ix.sources.insert("notes/x.md".into(), other);
+        });
+        let repaired = search::sync(&c, NAME, &spooled(vec![]));
+        assert!(matches!(repaired, search::Searched::Written { written: 1, unchanged: 0, .. }), "{repaired:?}");
+        assert!(held("sessions/hermes-a.json").is_some(), "read again from the archive");
+        assert!(held("sessions/hermes-gone.json").is_some() && held("notes/x.md").is_some(), "nothing deleted: the platform forgets a source when its file goes");
+    }
+
+    /// Goal (preview's embeddings rate limit): search's 429 with
+    /// `retry_after_ms` is waited out, every writer holding to one time,
+    /// and the import carries on: each conversation written, none refused,
+    /// a refused write sent again. Method: the fake refuses the first two
+    /// writes, 80 ms each.
+    #[test]
+    fn an_import_waits_out_searchs_rate_limit_and_carries_on() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let spool = spooled((0..3).map(|i| session(&format!("r{i}"), Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"])).collect());
+        write(&c, NAME, &spool).unwrap();
+        mock.search_index(NAME, |ix| ix.rate_limited.extend([80, 80]));
+        mock.take_requests("");
+        let began = std::time::Instant::now();
+        let s = search::sync(&c, NAME, &spool);
+        let sent = mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
+        assert!(matches!(s, search::Searched::Written { written: 3, refused_count: 0, unresolved: 0, .. }), "{s:?}");
+        assert_eq!(sent, 5, "each write refused for the limit is sent again, once");
+        assert!(began.elapsed() >= std::time::Duration::from_millis(80), "the wait is waited: {:?}", began.elapsed());
+        assert_eq!(mock.search_index(NAME, |ix| ix.sources.len()), Some(3));
+    }
+
+    /// Goal: a write refused for the rate limit `RATE_WAITS_MAX` times in a
+    /// row is counted refused, saying why, and the import stands. Method:
+    /// one conversation, the fake refusing every write, 1 ms each.
+    #[test]
+    fn a_write_rate_limited_past_its_waits_is_counted_refused() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let spool = spooled(vec![session("r", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])]);
+        write(&c, NAME, &spool).unwrap();
+        mock.search_index(NAME, |ix| ix.rate_limited.extend(std::iter::repeat_n(1, search::RATE_WAITS_MAX + 1)));
+        mock.take_requests("");
+        let s = search::sync(&c, NAME, &spool);
+        let sent = mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
+        assert!(matches!(&s, search::Searched::Written { written: 0, refused_count: 1, refused, .. } if refused[0].why.contains("rate limited")), "{s:?}");
+        assert_eq!(sent as usize, search::RATE_WAITS_MAX + 1, "waited out RATE_WAITS_MAX times, then refused");
+    }
+
+    /// A search that is full (507) is sent no more: the import's writes
+    /// stop there, and each conversation not written is counted refused.
+    #[test]
+    fn an_import_stops_writing_once_search_is_full() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let spool = spooled((0..40).map(|i| session(&format!("c{i:02}"), Kind::Chat, "2026-10-01T09:00:00Z", &["hello", "hi"])).collect());
+        write(&c, NAME, &spool).unwrap();
+        mock.search_index(NAME, |ix| ix.chunks_max = Some(1));
+        mock.take_requests("");
+        let s = search::sync(&c, NAME, &spool);
+        let sent = mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
+        assert!(matches!(&s, search::Searched::Written { written: 1, refused_count: 39, refused, .. } if refused[0].why.contains("at most 1")), "{s:?}");
+        assert!(sent < 40, "writes stop once search is full: {sent} of 40 sent");
+    }
+
+    /// Goal (FIN-296): an older CLI importing into an archive a newer one
+    /// wrote keeps the newer kind's conversation and its index as written,
+    /// trusting that index as it does its own (its file not read again,
+    /// and not again on a replay); a newer kind's file its index lacks is
+    /// listed in that kind's own index; a file whose kind is no kind's name
+    /// is left out, said, the import standing. Method: the archive seeded
+    /// as a newer CLI leaves it (a `heartbeat` conversation, its index's
+    /// entry titled apart from its file's so a read of the file shows),
+    /// then imports of chats.
+    #[test]
+    fn an_older_cli_keeps_a_newer_kinds_conversations() {
+        let (mock, c) = archive();
+        let hb = Kind::Other("heartbeat".into());
+        let beat = Session { kind: hb.clone(), ..session("beat", Kind::Chat, "2026-10-01T09:00:00Z", &["ping"]) };
+        let (mut listed, bytes) = beat.normalized().filed().unwrap();
+        listed.title = "as the newer CLI's index lists it".into();
+        let hb_index = session::index_path(&hb);
+        let seeded = Index::of(hb.clone(), &BTreeMap::from([(listed.key.clone(), listed.clone())])).file();
+        mock.external_commit(NAME, "main", &[(session::session_path(&listed.key).as_str(), Some(&bytes)), (hb_index.as_str(), Some(&seeded))], "a newer CLI's import");
+        // the index's commit came last: it describes the file
+        let spool = spooled(vec![session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hello"])]);
+        let w = write(&c, NAME, &spool).unwrap();
+        assert_eq!(w.added, 1);
+        assert_eq!(w.entries.get(&listed.key), Some(&listed), "kept as its index lists it: its file not read again");
+        assert_eq!(mock.file_at(NAME, "main", &hb_index), Some(seeded.clone()), "its index left as the newer CLI wrote it");
+        assert_eq!(keys(&mock, Kind::Chat), ["hermes-a"]);
+        let replay = write(&c, NAME, &spool).unwrap();
+        assert_eq!((replay.added, replay.updated, replay.unchanged), (0, 0, 1), "the same again writes nothing");
+        assert_eq!(replay.entries.get(&listed.key), Some(&listed));
+
+        // a newer kind's file its index lacks (a newer import cut off before
+        // its indexes): read, and listed in its own kind's index
+        let fresh = Session { kind: hb.clone(), ..session("beat2", Kind::Chat, "2026-10-03T09:00:00Z", &["pong"]) };
+        let (fresh_entry, fresh_bytes) = fresh.normalized().filed().unwrap();
+        mock.external_commit(NAME, "main", &[(session::session_path(&fresh_entry.key).as_str(), Some(&fresh_bytes))], "a newer import cut off before its indexes");
+        let w = write(&c, NAME, &spooled(vec![])).unwrap();
+        assert_eq!(w.entries.get(&fresh_entry.key), Some(&fresh_entry));
+        let listed_now: Index = serde_json::from_slice(&mock.file_at(NAME, "main", &hb_index).unwrap()).unwrap();
+        assert_eq!(listed_now.sessions.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), [fresh_entry.key.as_str(), listed.key.as_str()], "both, newest first, in their kind's index");
+
+        // a file whose kind is no kind's name: left out, the import standing
+        let mut bad: serde_json::Value = serde_json::from_slice(&file_of(session("odd", Kind::Chat, "2026-10-04T09:00:00Z", &["?"]))).unwrap();
+        bad["kind"] = serde_json::json!("Heart Beat");
+        let bad = bad.to_string();
+        mock.external_commit(NAME, "main", &[(session::session_path("hermes-odd").as_str(), Some(bad.as_bytes()))], "a file no CLI wrote");
+        let w = write(&c, NAME, &spooled(vec![])).unwrap();
+        assert!(!w.entries.contains_key("hermes-odd"), "no kind's name: not listed");
+        assert!(mock.file_at(NAME, "main", "index/Heart Beat.json").is_none());
+    }
+
+    /// Goal: an import that pauses between its writes and its search, while
+    /// another writes after it and puts search right, undoes nothing of the
+    /// other's search: no older copy written back over a newer one, no
+    /// conversation the other added removed. Method: import A writes `a`
+    /// and pauses; B writes a newer `a` and a new `b`, then its search; A's
+    /// search then.
+    #[test]
+    fn an_import_overtaken_undoes_nothing_of_a_later_ones_search() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let first = || session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"]);
+        let newer = || session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello", "and peas?"]);
+        let added = || session("b", Kind::Chat, "2026-10-03T10:00:00Z", &["beans"]);
+        let held = |source: &str| mock.search_index(NAME, |ix| ix.sources.get(source).map(|h| h.revision.clone())).flatten();
+        let a_spool = spooled(vec![first()]);
+        write(&c, NAME, &a_spool).unwrap();
+        let b_spool = spooled(vec![newer(), added()]);
+        write(&c, NAME, &b_spool).unwrap();
+        search::sync(&c, NAME, &b_spool);
+        let resumed = search::sync(&c, NAME, &a_spool);
+        assert_eq!(held("sessions/hermes-a.json"), Some(sha(&file_of(newer()))), "no older copy written back: {resumed:?}");
+        assert_eq!(held("sessions/hermes-b.json"), Some(sha(&file_of(added()))), "no conversation the other added removed: {resumed:?}");
+    }
+
+    /// Goal: a conversation another import wrote to search between this
+    /// one's reading search and writing it is left as the other wrote it:
+    /// this one's write names the revision it read (`replaces`), and is
+    /// refused, overtaken (`sync` reads anew then). Method: search read holding `a`'s
+    /// first copy; another import's newer copy written to the archive and
+    /// search since; this import's write of the first copy then.
+    #[test]
+    fn a_write_overtaken_leaves_the_others_as_it_wrote_it() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let first = || session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"]);
+        let newer = || session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello", "and peas?"]);
+        let spool = spooled(vec![first()]);
+        write(&c, NAME, &spool).unwrap();
+        search::sync(&c, NAME, &spool);
+        let read = sha(&file_of(first()));
+        let other = spooled(vec![newer()]);
+        write(&c, NAME, &other).unwrap();
+        search::sync(&c, NAME, &other);
+        let storage = CodeStorage::connect(&c, NAME, Wants::Write).unwrap();
+        let head = storage.branch_head(MAIN).unwrap().unwrap();
+        let entry = spool.entries["hermes-a"].clone();
+        let wrote = search::write_one(&c, NAME, &spool, &storage, &Blobs::new(&c, NAME), &head, "hermes-a", &entry, &read).unwrap();
+        assert_eq!(wrote, search::Wrote::Overtaken);
+        let now = mock.search_index(NAME, |ix| ix.sources["sessions/hermes-a.json"].revision.clone()).unwrap();
+        assert_eq!(now, sha(&file_of(newer())), "the other's write stands");
+    }
+
+    /// Goal (#774's review): whichever of two imports' writes to search
+    /// lands first, search ends holding the archive's copy, the newer: for
+    /// a conversation search held no copy of, and for one it held an older
+    /// copy of. Method: import A holds `a`'s older copy, B its newer, which
+    /// B commits after A read the archive. Older first: B's search, A's
+    /// write of the older copy landing just ahead of B's write (B
+    /// overtaken, then reading anew). Newer first: A's search, B's commit
+    /// and write landing just ahead of A's write (A overtaken, then finding
+    /// search as the archive is).
+    #[test]
+    fn search_ends_as_the_archive_whichever_imports_write_lands_first() {
+        let path = session::session_path("hermes-a");
+        let first = || session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"]);
+        let older = || session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hello", "beans?"]);
+        let newer = || session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello", "beans?", "and peas?"]);
+        let written = |s: Session| (path.clone(), fragment_fakes::search::Held { revision: sha(&file_of(s)), title: None, at: None, fields: BTreeMap::new(), sections: vec![] });
+        for held_before in [false, true] {
+            for older_first in [true, false] {
+                let case = format!("search held a copy before: {held_before}; the older write first: {older_first}");
+                let (mock, c) = archive();
+                mock.enable_search(NAME);
+                if held_before {
+                    let spool = spooled(vec![first()]);
+                    write(&c, NAME, &spool).unwrap();
+                    search::sync(&c, NAME, &spool);
+                }
+                let a_spool = spooled(vec![older()]);
+                write(&c, NAME, &a_spool).unwrap();
+                let s = if older_first {
+                    let b_spool = spooled(vec![newer()]);
+                    write(&c, NAME, &b_spool).unwrap();
+                    mock.land_before_upserts(NAME, vec![fragment_fakes::codestorage::Ahead { commit: vec![], source: Some(written(older())) }]);
+                    search::sync(&c, NAME, &b_spool)
+                } else {
+                    let b = fragment_fakes::codestorage::Ahead { commit: vec![(path.clone(), Some(file_of(newer())))], source: Some(written(newer())) };
+                    mock.land_before_upserts(NAME, vec![b]);
+                    search::sync(&c, NAME, &a_spool)
+                };
+                let now = mock.search_index(NAME, |ix| ix.sources.get(&path).map(|h| h.revision.clone())).flatten();
+                assert_eq!(now, Some(sha(&file_of(newer()))), "{case}: {s:?}");
+                assert!(matches!(s, search::Searched::Written { unresolved: 0, .. }), "{case}: {s:?}");
+            }
+        }
+    }
+
+    /// Goal: an import whose write is overtaken at every pass stops after
+    /// `PASSES_MAX` of them and says so, its other work standing. Method:
+    /// another writer's write of the conversation lands just ahead of each
+    /// of this one's.
+    #[test]
+    fn a_write_overtaken_every_pass_stops_and_is_said_unresolved() {
+        let (mock, c) = archive();
+        mock.enable_search(NAME);
+        let spool = spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])]);
+        write(&c, NAME, &spool).unwrap();
+        let other = |n: usize| fragment_fakes::codestorage::Ahead {
+            commit: vec![],
+            source: Some((session::session_path("hermes-a"), fragment_fakes::search::Held { revision: format!("other-{n}"), title: None, at: None, fields: BTreeMap::new(), sections: vec![] })),
+        };
+        mock.land_before_upserts(NAME, (0..search::PASSES_MAX + 1).map(other).collect());
+        mock.take_requests("");
+        let s = search::sync(&c, NAME, &spool);
+        let sent = mock.take_requests("").get("POST upsert").copied().unwrap_or(0);
+        assert!(matches!(s, search::Searched::Written { written: 0, unresolved: 1, refused_count: 0, .. }), "{s:?}");
+        assert_eq!(sent as usize, search::PASSES_MAX, "one write a pass, and no pass more");
+    }
+
     /// Goal: a newer copy of a conversation replaces the one held, and an
     /// older copy never does. Method: a chat, then it later with a reply
     /// more, then the first copy again.
@@ -915,13 +1308,102 @@ mod tests {
     #[test]
     fn a_path_names_a_store_or_says_what_to_name() {
         let dir = tempdir();
-        let e = source(&dir).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        let e = source(&dir, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("name the old Finite's export, Hermes' state.db, or a Hermes home"), "{e}");
         hermes::tests::database(&dir.join("state.db"), "");
-        assert!(matches!(source(&dir), Ok(Source::Hermes(p)) if p == dir.join("state.db")));
-        assert!(matches!(source(&dir.join("state.db")), Ok(Source::Hermes(_))));
+        assert!(matches!(source(&dir, None), Ok(Source::Hermes(p)) if p == dir.join("state.db")));
+        assert!(matches!(source(&dir.join("state.db"), None), Ok(Source::Hermes(_))));
         chats::tests::export(&dir);
-        assert!(matches!(source(&dir), Ok(Source::Export(p)) if p == dir), "an export's chats/ wins over a state.db beside it");
+        assert!(matches!(source(&dir, None), Ok(Source::Export(p)) if p == *dir), "an export's chats/ wins over a state.db beside it");
+    }
+
+    /// Goal: a home's zip (a stage) reads as the folder it was: its Hermes
+    /// database copied out of it into a scratch folder that goes after the
+    /// read; through a layout, at the layout's path. Invalid: a zip with no
+    /// database where its layout says.
+    #[test]
+    fn a_homes_zip_reads_as_its_folder() {
+        let dir = tempdir();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        rusqlite::Connection::open(home.join("state.db")).unwrap().execute_batch(&format!("PRAGMA foreign_keys = OFF;\n{}", include_str!("hermes-v0.21.7.sql"))).unwrap();
+        let db = std::fs::read(home.join("state.db")).unwrap();
+        let spool_of = |path: &Path, layout: Option<&str>| {
+            let mut spool = Spool::new(BTreeSet::new()).unwrap();
+            read(source(path, layout).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, None).unwrap();
+            // the copies out of a zip were made in the import's own folder,
+            // and are gone from it: read by its path, never counted among
+            // what other tests make
+            let left: Vec<_> = std::fs::read_dir(&spool.dir).unwrap().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && e.file_name() != "media").map(|e| e.path()).collect();
+            assert!(left.is_empty(), "the copies out of the zip are gone: {left:?}");
+            hermes::tests::spooled(&spool)
+        };
+        let from_folder = spool_of(&home.join("state.db"), None);
+        assert!(from_folder.len() >= 6, "the fixture's conversations: {}", from_folder.len());
+        let bare = dir.join("bare.zip");
+        crate::home::source::tests::zip_of(&bare, &[("state.db", &db), ("SOUL.md", b"me")]);
+        let staged = dir.join("stage.zip");
+        crate::home::source::tests::zip_of(&staged, &[("workspace/notes.md", b"n"), ("agent/hermes-home/state.db", &db)]);
+        let layout = dir.join("layout.json");
+        std::fs::write(&layout, r#"{"format":"fragment-home-layout/1","name":"x","hermes_home":"agent/hermes-home"}"#).unwrap();
+        assert_eq!(spool_of(&bare, None), from_folder, "a bare Hermes home's zip");
+        assert_eq!(spool_of(&staged, Some(layout.to_str().unwrap())), from_folder, "a stage, through its layout");
+        assert_eq!(spool_of(&dir.join("home"), Some("hermes")), from_folder, "a folder named with a layout");
+        let e = source(&staged, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("holds no state.db: name the home's layout"), "{e}");
+    }
+
+    /// Goal: on a platform computer, a zip of its own Hermes home (a backup
+    /// of it, kept in its home) is refused as its own database is; another
+    /// agent's zip, kept in the same place, reads. Method: a computer's
+    /// root with a profile's database, and two zips in that profile.
+    #[test]
+    fn a_zip_of_its_own_home_is_refused() {
+        let root = tempdir();
+        let mine = root.join("profiles/juniper");
+        std::fs::create_dir_all(&mine).unwrap();
+        let row = |id: &str| format!("INSERT INTO sessions VALUES ('{id}','cli',NULL,NULL,'m',NULL,NULL,100,200,NULL,'T',NULL,NULL); INSERT INTO messages (session_id, role, content, timestamp) VALUES ('{id}','user','hi',100);");
+        hermes::tests::database(&mine.join("state.db"), &row("own-1"));
+        let other = root.join("other.db");
+        hermes::tests::database(&other, &row("theirs-1"));
+        let (own_zip, their_zip) = (mine.join("backup.zip"), mine.join("old-agent.zip"));
+        crate::home::source::tests::zip_of(&own_zip, &[("state.db", &std::fs::read(mine.join("state.db")).unwrap())]);
+        crate::home::source::tests::zip_of(&their_zip, &[("state.db", &std::fs::read(&other).unwrap())]);
+        let read_as_agent = |zip: &Path| {
+            let mut spool = Spool::new(BTreeSet::new()).unwrap();
+            read(source(zip, None).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, Some(&mine)).map(|_| spool.entries.len())
+        };
+        let e = read_as_agent(&own_zip).map_err(|e| format!("{e:#}")).unwrap_err();
+        assert!(e.contains("this computer's own conversations"), "{e}");
+        assert_eq!(read_as_agent(&their_zip).unwrap(), 1, "another agent's, in the same place, reads");
+    }
+
+    /// Goal: a database's sidecar the home skips (a layout naming it a
+    /// secret) is not read: SQLite reads a WAL beside a database by
+    /// itself, so the database it opens is a copy beside what the source
+    /// still lists, a folder's as a zip's. Method: a folder home whose
+    /// database holds one conversation in its file and one only in its
+    /// live WAL, the layout skipping the WAL.
+    #[test]
+    fn a_skipped_wal_is_not_read() {
+        let dir = tempdir();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let row = |id: &str| format!("INSERT INTO sessions VALUES ('{id}','cli',NULL,NULL,'m',NULL,NULL,100,200,NULL,'T',NULL,NULL); INSERT INTO messages (session_id, role, content, timestamp) VALUES ('{id}','user','hi',100);");
+        hermes::tests::database(&home.join("state.db"), &row("in-file"));
+        // a writer holds the WAL open, its row not checkpointed into the file
+        let writer = rusqlite::Connection::open(home.join("state.db")).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        writer.execute_batch(&row("in-wal")).unwrap();
+        assert!(home.join("state.db-wal").is_file());
+        let layout = dir.join("layout.json");
+        std::fs::write(&layout, r#"{"format":"fragment-home-layout/1","name":"x","hermes_home":".","secret":["state.db-wal"]}"#).unwrap();
+        let mut spool = Spool::new(BTreeSet::new()).unwrap();
+        read(source(&home, Some(layout.to_str().unwrap())).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, None).unwrap();
+        let ids: Vec<String> = hermes::tests::spooled(&spool).into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, ["in-file"], "the skipped WAL's conversation is not read");
+        drop(writer);
     }
 
     /// Goal: a spool holds what an import read within an archive's limits,

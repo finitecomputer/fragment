@@ -4,7 +4,7 @@
 //!                    --dev is `dev`'s build (cell/wrangler.jsonc's rebuild):
 //!                    no fat LTO and no wasm-opt, so a change to a file of the
 //!                    release rebuilds in seconds; deploys and the e2e refuse it
-//!   dev [--clean] [--real-agent [--models <config>]]
+//!   dev [--clean] [--real-agent [--models <config>]] [--runtime wrangler|celld]
 //!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <name>.fragment.localhost:8790), the
@@ -12,7 +12,16 @@
 //!                    behind the model route (its calls spend their payer's
 //!                    ledger; new people are seats with the month's included
 //!                    credit); --real-agent runs computers on our Hermes image
-//!                    and text on real models (xtask/src/dev_agent.rs)
+//!                    and text on real models (xtask/src/dev_agent.rs);
+//!                    FRAGMENT_MODELS_FILE and FRAGMENT_MODEL_KEY_FILE put
+//!                    the text tiers on a deployment's own models, without
+//!                    the image (docs/self-host.md, seam 3)
+//!                    --runtime celld runs it on `celld dev` (CELLD_BIN;
+//!                    docs/self-host.md, seam 1): no computers, no cards,
+//!                    the secrets bound as on wrangler and read by celld
+//!                    from OpenBao on :8802, its audit log on, or with
+//!                    FRAGMENT_SECRETS_BACKEND=vars from its node's file
+//!                    of their values (seam 12)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -38,11 +47,17 @@
 //!                    markup (xtask/src/html_sinks.rs), no runtime code runs
 //!                    a string as script (xtask/src/eval_sinks.rs), the
 //!                    schema lock is what the Durable Objects' steps make
-//!                    (xtask/src/schema_lock.rs), then host tests and
+//!                    (xtask/src/schema_lock.rs), the wire's files are what
+//!                    crates/proto makes and its lock breaks nothing
+//!                    master's holds (xtask/src/wire/), then host tests and
 //!                    clippy, warnings denied
 //!   schema-lock      appends the Durable Objects' new schema steps to
 //!                    crates/core/migrations/schema.lock, refusing to change
 //!                    or drop a locked one (crates/core/src/migrate.rs)
+//!   wire             writes the wire's OpenAPI document and reference
+//!                    (docs/wire) and its lock (crates/proto/wire.lock) from
+//!                    crates/proto, then says what it breaks of master's
+//!                    (xtask/src/wire/)
 //!   secret set <name> --config <file> [--from-file <path>]
 //!   secret gen <name> --config <file>
 //!   secret list --config <file>
@@ -60,13 +75,11 @@
 //!                    rather than keeping it at its digest
 //!                    --preview-image-digest requires --branch preview
 //!                    --pinned-only, and changes only its in-memory pins
-//!   image preview --output <file> [--build | --queue | --dry-run] [--summary <file>]
-//!                    resolve master's input-keyed Hermes image, or copy the
-//!                    merge queue's build to it, or build it, and prepare it
-//!                    (--build); write its input key and digest for CI's
-//!                    preview deploy. --queue builds and prepares the merge
-//!                    queue's ahead (queue-<key>, never master's tag)
-//!                    --dry-run prints its plan without credentials or calls
+//!   image preview --output <file> [--build | --dry-run] [--summary <file>]
+//!                    resolve master's input-keyed Hermes image, or build it,
+//!                    and prepare it (--build); write its input key and digest
+//!                    for CI's preview deploy. --dry-run prints its plan
+//!                    without credentials or calls
 //!   cli-release plan | record <tag>
 //!                    CI's CLI input lookup/version plan, or record and
 //!                    verify inputs after publishing all four tarballs
@@ -104,6 +117,8 @@ use fragment_devstack as devstack;
 mod build;
 #[cfg(test)]
 mod ci_caches;
+#[cfg(test)]
+mod ci_gate;
 mod cloudflare;
 mod cli_release;
 mod deploy;
@@ -119,9 +134,10 @@ mod prepare;
 #[cfg(test)]
 mod markdown_dom;
 #[cfg(test)]
-mod session_archive_js;
+mod continue_js;
 mod rollout;
 mod schema_lock;
+mod wire;
 // CI's freshness of its cached builds, compiled by itself with rustc
 // (ci.yml); here for its tests alone
 #[cfg(test)]
@@ -141,6 +157,9 @@ const DEV_MAIL_PORT: u16 = 8798;
 /// The Stripe fake (docs/billing.md): dev never charges a card; its
 /// Checkout is a page with a Pay button.
 const DEV_STRIPE_PORT: u16 = 8800;
+/// OpenBao, on loopback, where the cell's secrets are (on celld, unless
+/// `FRAGMENT_SECRETS_BACKEND=vars`: `dev_openbao`).
+const DEV_OPENBAO_PORT: u16 = 8802;
 const DEV_STRIPE_KEY: &str = "sk_test_fragment_dev";
 const DEV_STRIPE_WEBHOOK: &str = "whsec_fragment_dev";
 /// Where dev's mail says it comes from.
@@ -148,7 +167,28 @@ const DEV_MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The WorkOS fake's environment in dev.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
+/// The identity door (crates/identity-door), dev's sign-in on celld, as a
+/// self-hosted box's (docs/self-host.md, seam 4): its port, the client the
+/// cell is bound as; and the OpenID Connect provider behind it (the fake,
+/// with its one-field form), its port and the door's client there.
+const DEV_DOOR_PORT: u16 = 8804;
+const DEV_DOOR_CLIENT: &str = "client_fragment_dev_door";
+const DEV_DOOR_KEY: &str = "sk_door_fragment_dev";
+const DEV_OIDC_PORT: u16 = 8806;
+const DEV_OIDC_CLIENT: &str = "fragment-dev-door";
+const DEV_OIDC_SECRET: &str = "fragment-dev-door-secret";
 const DEV_ORG: &str = "fragment-dev";
+/// Dev's one connection: the WorkOS fake's stand-in OAuth provider (the
+/// e2e `connections` lane's `e2e-oauth`), so settings' Connections can be
+/// connected, seen connected and turned off locally. Its consent answers at
+/// once and nothing real is connected; its client secret is the fake's.
+const DEV_CONNECTION: &str = "sample";
+/// Dev's stand-in operator keys (each its name, list price in micro-dollars
+/// a call, and a made-up key no host takes) and own key, beside
+/// `DEV_CONNECTION`, so settings' Connections shows each kind locally.
+/// Their hosts are `.test` names: a call to one goes nowhere.
+const DEV_OPERATOR_KEYS: [(&str, i64, &str); 2] = [("web-search", 5_000, "dev-web-search-key"), ("page-reader", 10_000, "dev-page-reader-key")];
+const DEV_OWN_KEY: &str = "mailbox";
 
 /// A command as errors show it: the program and its arguments only
 /// (`{cmd:?}` would print the environment set on it, where a deploy may
@@ -181,34 +221,55 @@ fn build_cmd(args: &[String]) -> Result<()> {
 }
 
 /// What `cargo xtask dev` is asked for: `--clean`, `--real-agent`, and
-/// `--models <config>` with it.
+/// `--models <config>` with it; `--runtime celld` (docs/self-host.md, seam 1).
 struct DevArgs {
     clean: bool,
     real_agent: bool,
     models: Option<std::path::PathBuf>,
+    celld: bool,
 }
 
 fn dev_args(args: &[String]) -> Result<DevArgs> {
-    let mut out = DevArgs { clean: false, real_agent: false, models: None };
+    let mut out = DevArgs { clean: false, real_agent: false, models: None, celld: false };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--clean" => out.clean = true,
             "--real-agent" => out.real_agent = true,
             "--models" => out.models = Some(it.next().context("--models names a deployment's config")?.into()),
-            other => bail!("dev takes --clean, --real-agent and --models <config>, not {other:?}"),
+            "--runtime" => {
+                out.celld = match it.next().map(String::as_str) {
+                    Some("wrangler") => false,
+                    Some("celld") => true,
+                    other => bail!("--runtime is wrangler or celld, not {}", other.unwrap_or("nothing")),
+                }
+            }
+            other => bail!("dev takes --clean, --real-agent, --models <config> and --runtime <wrangler|celld>, not {other:?}"),
         }
     }
     if out.models.is_some() && !out.real_agent {
         bail!("--models picks --real-agent's models: name --real-agent too");
+    }
+    if out.celld && out.real_agent {
+        bail!("--real-agent runs computers on our Hermes image, and celld runs no computers here (docs/self-host.md, seam 2)");
     }
     Ok(out)
 }
 
 fn dev(args: &[String]) -> Result<()> {
     let args = dev_args(args)?;
+    // the runtime: wrangler's local workerd, or celld (docs/self-host.md,
+    // seam 1), located first: a missing CELLD_BIN stops the run at once
+    let celld = args.celld.then(devstack::celld::CelldTools::locate).transpose()?;
     // its models and key are read before anything builds
     let real = args.real_agent.then(|| dev_agent::RealAgent::read(args.models.as_deref())).transpose()?;
+    // a self-hosted stack's own models (FRAGMENT_MODELS_FILE; docs/self-host.md, seam 3)
+    let file = dev_agent::ModelsFile::read()?;
+    if real.is_some() && file.is_some() {
+        bail!("--real-agent's models and {}'s are one or the other: unset {} or drop --real-agent", dev_agent::MODELS_FILE_ENV, dev_agent::MODELS_FILE_ENV);
+    }
+    // the text tiers' models and their key: --real-agent's, or the file's
+    let named = real.as_ref().map(|r| (&r.models, &r.slots, &r.key)).or(file.as_ref().map(|f| (&f.models, &f.slots, &f.key)));
     // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
@@ -216,8 +277,10 @@ fn dev(args: &[String]) -> Result<()> {
     build::cell_as(build::Profile::Dev)?;
     let clean = args.clean;
     let state = devstack::repo_root().join("target/devstack/codestorage.json");
+    let workos_users = devstack::repo_root().join("target/devstack/workos.json");
     if clean {
         let _ = std::fs::remove_file(&state);
+        let _ = std::fs::remove_file(&workos_users);
         // the node's state too, before the fleet seeds its local store again
         devstack::clear_state(&devstack::cell_dir())?;
     }
@@ -230,17 +293,26 @@ fn dev(args: &[String]) -> Result<()> {
         ..Default::default()
     })?;
     // sign-in: a real WorkOS environment when its files are named (its
-    // redirect URI must include http://127.0.0.1:8790/auth/callback), else the fake
+    // redirect URI must include http://127.0.0.1:8790/auth/callback); else
+    // on celld the identity door, as a self-hosted box signs people in;
+    // else the WorkOS fake
     let read = |var: &str| -> Result<Option<String>> {
         match std::env::var_os(var) {
             Some(path) => Ok(Some(std::fs::read_to_string(&path).with_context(|| format!("reading {}", Path::new(&path).display()))?.trim().to_string())),
             None => Ok(None),
         }
     };
-    let (workos, _workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
+    let mut door = None;
+    let (workos, workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
+        _ if celld.is_some() => {
+            let d = dev_door(DEV_DOOR_PORT)?;
+            let vars = devstack::WorkOsVars { client_id: DEV_DOOR_CLIENT.into(), api_key: DEV_DOOR_KEY.into(), api_url: Some(d.door.url.clone()) };
+            door = Some(d);
+            (vars, None)
+        }
         _ => {
-            let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
+            let fake = dev_workos_fake(&devstack::cell_dir(), &workos_users, DEV_WORKOS_PORT)?;
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
@@ -251,12 +323,16 @@ fn dev(args: &[String]) -> Result<()> {
     let operator = devstack::dev_secret("operator-key", || fragment_nip98::Keys::generate().secret_hex())?;
     let operator = fragment_nip98::Keys::from_secret_hex(operator.trim()).with_context(|| format!("{} holds an operator key (64 hex)", operator_file.display()))?;
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    // the cell's own secrets: wrangler's local store, or on celld its node's
+    // backend, a file of their values or OpenBao (docs/self-host.md, seam 12)
+    let openbao = dev_openbao(celld.is_some(), clean, DEV_OPENBAO_PORT)?;
     let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
     let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
     stripe.set_endpoint(&format!("http://127.0.0.1:{DEV_PORT}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
-    let workos_label = match &workos.api_url {
-        Some(u) => format!("{u} (the fake)"),
-        None => format!("WorkOS {}", workos.client_id),
+    let workos_label = match (&workos.api_url, &door) {
+        (Some(u), Some(d)) => format!("the identity door at {u}, signing people in at {} (the OpenID Connect fake: sign in as any email)", d.provider.url),
+        (Some(u), None) => format!("{u} (the fake)"),
+        (None, _) => format!("WorkOS {}", workos.client_id),
     };
     let fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
@@ -270,15 +346,15 @@ fn dev(args: &[String]) -> Result<()> {
         egress_local: true,
         job_retry_delay_s: 2,
         blob_grace_s: None,
+        upload_max_bytes: None,
         // text and images: the Workers AI fake, every tier on it, unless
         // --real-agent puts the text tiers on real models
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
-        models: real.as_ref().map(|r| r.models.clone()),
+        models: named.map(|(models, _, _)| models.clone()),
         // its slots on an OpenAI-compatible API, each on the one key dev binds
-        model_keys: real
-            .as_ref()
-            .map(|r| r.slots.iter().map(|slot| devstack::ModelKey { slot: slot.clone(), name: devstack::store::MODEL_KEY.into(), value: r.key.clone() }).collect())
+        model_keys: named
+            .map(|(_, slots, key)| slots.iter().map(|slot| devstack::ModelKey { slot: slot.clone(), name: devstack::store::MODEL_KEY.into(), value: key.clone() }).collect())
             .unwrap_or_default(),
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
@@ -294,35 +370,61 @@ fn dev(args: &[String]) -> Result<()> {
             portal: None,
             tax: false,
         }),
+        // dev's glance reads no logs: it says they are not configured
+        observability: None,
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
         operators: Some(fragment_core::npub::encode(operator.pubkey_hex())),
+        // dev runs no move (docs/migrations.md)
+        migrations: None,
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
         test_secret: None,
-        computer_image: Some(if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
+        // celld runs no computers here: they need the runtime's egress
+        // intercepts and snapshots (docs/self-host.md, seam 2)
+        computer_image: celld.is_none().then(|| if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
         images: match &real {
             Some(_) => vec![(dev_agent::RealAgent::IMAGE.into(), devstack::hermes_image())],
             None => vec![],
         },
         computer_snapshots: false,
+        computer_internet: true,
         computer_unsaved_max_ms: None,
-        providers: None,
-        operator_key_values: vec![],
-        connection_secret_values: vec![],
+        // with the WorkOS fake (dev's default), its stand-in provider; a real
+        // WorkOS environment has no such provider, so then none
+        providers: Some(dev_providers(workos_fake.as_ref().map(|f| f.connection_oauth()))),
+        operator_key_values: DEV_OPERATOR_KEYS.iter().map(|(name, _, key)| (name.to_string(), key.to_string())).collect(),
+        connection_secret_values: workos_fake.as_ref().map(|_| vec![(DEV_CONNECTION.into(), "mock-connection-secret".into())]).unwrap_or_default(),
         swap_upstream: None,
+        // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
+        connectors: celld.as_ref().map(|_| devstack::celld::connectors()),
+        // wrangler's local store under cell/.wrangler/state; on celld, its
+        // node's backend: a file of their values, or OpenBao (seam 12)
+        secrets: match (&celld, &openbao) {
+            (None, _) => devstack::Secrets::Store,
+            (Some(_), None) => devstack::Secrets::Vars,
+            (Some(_), Some((bao, _))) => devstack::Secrets::OpenBao(bao.target()),
+        },
     };
-    // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;
+    // the cell's token, renewed while the stack runs (each start renews it too)
+    let _renewer = openbao.as_ref().map(|(bao, _)| devstack::openbao::Renewer::start(bao.target(), devstack::openbao::RENEW_EVERY));
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
-        port: DEV_PORT,
+        listener: devstack::hold_port(DEV_PORT)?,
         log_dir: devstack::repo_root().join("target/devstack"),
         // in the terminal's group: Ctrl-C stops it with xtask
         own_group: false,
     };
-    let (node, took) = devstack::Node::start(&tools, &opts)?;
+    let (node, took) = match &celld {
+        None => devstack::Node::start(&tools, &opts)?,
+        Some(celld) => devstack::celld::start(celld, &opts)?,
+    };
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
+    match &celld {
+        None => println!("  runtime:      wrangler dev (workerd)"),
+        Some(c) => println!("  runtime:      celld dev ({}): no computers, no cards, no icons drawn (docs/self-host.md)", c.celld.display()),
+    }
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
@@ -331,21 +433,143 @@ fn dev(args: &[String]) -> Result<()> {
             println!("  models:       {} on real models, {}'s (paid by {}'s key); the rest on the Workers AI fake at {}", r.slots.join(", "), r.from.display(), dev_agent::KEY_FILE_ENV, ai.url);
             println!("  computers:    our Hermes image, built from the tree (its first build takes a while)");
         }
-        None => println!("  models:       {} (the Workers AI fake: echoes, never a real model; --real-agent for real ones)", ai.url),
+        None => match &file {
+            Some(f) => println!("  models:       {} on {}'s models (its key: {}); the rest on the Workers AI fake at {}", f.slots.join(", "), f.from.display(), dev_agent::MODEL_KEY_FILE_ENV, ai.url),
+            None => println!("  models:       {} (the Workers AI fake: echoes, never a real model; --real-agent for real ones)", ai.url),
+        },
     }
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
+    match &openbao {
+        Some((bao, took)) => println!(
+            "  secrets:      OpenBao {} at {} on loopback (ready in {took:.1?}; its state {}, its log {})",
+            devstack::openbao::OPENBAO_VERSION,
+            bao.target().addr,
+            bao.layout().dir.display(),
+            bao.layout().log().display()
+        ),
+        None if celld.is_some() => println!("  secrets:      celld's file of their values ({}, FRAGMENT_SECRETS_BACKEND=vars: `celld dev`'s alone)", devstack::celld::secrets_file(&devstack::cell_dir()).display()),
+        None => println!("  secrets:      wrangler's local Secrets Store"),
+    }
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
+    if workos_fake.is_some() {
+        println!("  connections:  {DEV_CONNECTION} (the WorkOS fake's stand-in: connects at once, nothing real)");
+    }
+    println!("  keys:         {}, and your own {DEV_OWN_KEY} (stand-ins: their hosts are .test names)", DEV_OPERATOR_KEYS.map(|(name, _, _)| name).join(", "));
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     println!("  wipe someone: fragment --host http://127.0.0.1:{DEV_PORT} operator wipe <email> --yes --key-file {}", operator_file.display());
     // Ctrl-C stops the node, and xtask outlives it to remove the containers
     // it left (wrangler's teardown removes its computers, not their sidecars)
     devstack::signals::outlive_interrupt()?;
+    // SIGTERM or SIGHUP to xtask alone, which the node never hears: it would
+    // run on, orphaned, starting Chromes; so all xtask started dies with it
+    // (`on_termination`; Ctrl-C, ignored here, still reaches the node itself)
+    devstack::signals::on_termination(|signal| {
+        println!("\nsignal {signal}: dev stopped its node and browsers, and removes its containers");
+        match devstack::containers::remove(&devstack::cell_dir()) {
+            Ok(r) => println!("removed {} containers the dev node left", r.containers),
+            Err(e) => println!("could not remove the dev node's containers: {e:#}"),
+        }
+    })?;
     let status = node.wait()?;
-    println!("wrangler dev exited: {status}");
-    let removed = devstack::containers::remove(&devstack::cell_dir())?;
-    println!("removed {} containers the dev node left", removed.containers);
+    println!("the node exited: {status}");
+    // the runtime's own containers: celld runs none here
+    if celld.is_none() {
+        let removed = devstack::containers::remove(&devstack::cell_dir())?;
+        println!("removed {} containers the dev node left", removed.containers);
+    }
     Ok(())
+}
+
+/// The dev stack's OpenBao (docs/self-host.md, seam 12), where the cell's
+/// secrets are: on celld, `FRAGMENT_SECRETS_BACKEND` is `openbao` (the
+/// default, as on any self-hosted deployment) or `vars` (a file of their
+/// values, which only `celld dev` reads); on wrangler, which has a Secrets
+/// Store of its own, unset. The pinned OpenBao (or
+/// `FRAGMENT_OPENBAO_TARBALL`'s), on loopback at `port`, its audit log on,
+/// its state in `target/devstack/openbao-<port>` (cleared by `--clean`,
+/// after which every secret is seeded again). With it, how long its start
+/// took.
+fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::openbao::OpenBao, std::time::Duration)>> {
+    let var = std::env::var("FRAGMENT_SECRETS_BACKEND").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    if !celld {
+        if let Some(v) = var {
+            bail!("FRAGMENT_SECRETS_BACKEND={v} is celld's: wrangler dev has a Secrets Store of its own (drop it, or add --runtime celld)");
+        }
+        return Ok(None);
+    }
+    match var.as_deref().unwrap_or("openbao") {
+        "vars" => return Ok(None),
+        "openbao" => {}
+        other => bail!("FRAGMENT_SECRETS_BACKEND is vars or openbao, not {other:?}"),
+    }
+    let dir = devstack::repo_root().join(format!("target/devstack/openbao-{port}"));
+    if clean && dir.exists() {
+        std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
+    }
+    let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let opts = devstack::openbao::Options { dir, port, audit: true };
+    Ok(Some(devstack::openbao::OpenBao::start(&bin, opts)?))
+}
+
+/// Dev's WorkOS fake on `port` (wrangler's: dev on celld signs in through
+/// the identity door, `dev_door`), its users kept in `users_file`, and every
+/// subject `project`'s node signs someone in by taken as it is (a node from
+/// before the file, or one whose file went): a fake made new each start
+/// would give the first email to sign in the subject of whoever had it
+/// before.
+fn dev_workos_fake(project: &Path, users_file: &Path, port: u16) -> Result<fragment_fakes::workos::WorkOs> {
+    let fake = fragment_fakes::workos::WorkOs::start_on(port, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
+    fake.keep_users_in(users_file)?;
+    fake.adopt(&devstack::signed_in_subjects(project, &format!("workos:{DEV_WORKOS_CLIENT}"))?)?;
+    Ok(fake)
+}
+
+/// Dev's sign-in on celld: the identity door on `port`, as a self-hosted
+/// box's (docs/self-host.md, seam 4), in front of the OpenID Connect fake
+/// on `DEV_OIDC_PORT`, whose form signs in as any email (a person's subject
+/// is derived from their email, so each is the same person at every
+/// start). The door's own secret is kept in target/devstack, so a sign-in
+/// under way when dev restarts still finishes.
+struct DevDoor {
+    door: fragment_identity_door::Door,
+    provider: fragment_fakes::oidc::Oidc,
+}
+
+fn dev_door(port: u16) -> Result<DevDoor> {
+    use fragment_identity_door::oidc::{Settings, Vars};
+    let provider = fragment_fakes::oidc::Oidc::start_on(DEV_OIDC_PORT, DEV_OIDC_CLIENT, DEV_OIDC_SECRET).context("start the OpenID Connect fake")?;
+    let secret = devstack::dev_secret("identity-door-secret", || devstack::random_hex(32))?;
+    let settings = Settings::parse(Vars { issuer: &provider.url, client_id: DEV_OIDC_CLIENT, ..Vars::default() })?;
+    let provider_config = fragment_identity_door::ProviderConfig { settings, client_secret: DEV_OIDC_SECRET.into(), ca_pem: None };
+    let client = fragment_identity_door::Client::with_secret(DEV_DOOR_CLIENT, DEV_DOOR_KEY, &[&format!("http://127.0.0.1:{DEV_PORT}/auth/callback")])?;
+    let url = format!("http://127.0.0.1:{port}");
+    let config = fragment_identity_door::Config::new(std::net::SocketAddr::from(([127, 0, 0, 1], port)), &url, secret.into_bytes(), provider_config, Default::default(), vec![client])?;
+    let door = fragment_identity_door::Door::start(config)?;
+    Ok(DevDoor { door, provider })
+}
+
+/// Dev's provider catalog: its connection (`DEV_CONNECTION`) where its
+/// authorization is, at `oauth` (the WorkOS fake's `connection_oauth`), its
+/// operator keys (`DEV_OPERATOR_KEYS`) and its own key (`DEV_OWN_KEY`).
+fn dev_providers(oauth: Option<serde_json::Value>) -> String {
+    let bearer = serde_json::json!([{ "header": "authorization", "format": "Bearer {}" }]);
+    let env = |name: &str| format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
+    let notes = ["A stand-in web search.", "A stand-in page reader."];
+    let mut rows: Vec<serde_json::Value> = oauth
+        .map(|oauth| {
+            serde_json::json!({
+                "name": DEV_CONNECTION, "kind": "connection", "hosts": ["sample.test"], "placements": bearer, "env": ["SAMPLE_TOKEN"],
+                "connection_oauth": oauth, "note": "A stand-in: nothing real is connected.",
+            })
+        })
+        .into_iter()
+        .collect();
+    for ((name, micros, _), note) in DEV_OPERATOR_KEYS.iter().zip(notes) {
+        rows.push(serde_json::json!({ "name": name, "kind": "operator", "hosts": [format!("{name}.test")], "placements": bearer, "env": [env(name)], "price": { "micros": micros, "per": 1 }, "note": note }));
+    }
+    rows.push(serde_json::json!({ "name": DEV_OWN_KEY, "kind": "own", "hosts": [format!("{DEV_OWN_KEY}.test")], "placements": bearer, "env": [env(DEV_OWN_KEY)], "note": "Your own key for a stand-in mail service." }));
+    serde_json::Value::Array(rows).to_string()
 }
 
 /// The templates `try` scaffolds.
@@ -445,13 +669,17 @@ const E2E_BIN: &str = "target/release/fragment-e2e";
 /// ahead beside them all so its build finds every layer cached.
 fn build_e2e() -> Result<()> {
     let t0 = std::time::Instant::now();
+    // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers, so
+    // no images (docs/self-host.md, seam 2)
+    let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
     let built = std::thread::scope(|s| {
-        let images = s.spawn(build::images);
+        let built_images = images.then(|| s.spawn(build::images));
         let native = s.spawn(build_native);
         let cell = build::cell();
-        cell.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
+        let built_images = built_images.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
+        cell.and(native.join().expect("the native build does not panic")).and(built_images)
     });
-    println!("built the cell, the CLI, the suite and the images in {:.1?}", t0.elapsed());
+    println!("built the cell, the CLI, the suite{} in {:.1?}", if images { " and the images" } else { "" }, t0.elapsed());
     built
 }
 
@@ -537,6 +765,7 @@ fn check() -> Result<()> {
     no_html_sinks(&root)?;
     no_eval_sinks(&root)?;
     schema_lock::holds(&root)?;
+    wire::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
     let copies = ["cli/GUIDE.md", "README.md", "cell/shell/settings.js"].map(|path| read(path).map(|text| (path, text)));
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
@@ -549,6 +778,7 @@ fn check() -> Result<()> {
         .current_dir(&root))?;
     run(Command::new("cargo")
         .args(["clippy", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
+        .env("CARGO_ENCODED_RUSTFLAGS", build::CELL_TARGET_FLAGS.join("\x1f"))
         .current_dir(Path::new(&devstack::cell_dir())))
 }
 
@@ -597,13 +827,14 @@ fn main() -> Result<()> {
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
+        Some("wire") => wire::write(&devstack::repo_root()),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
         Some("cli-release") => cli_release::run(&args[1..]),
-        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 
@@ -622,6 +853,24 @@ mod tests {
         for bad in [&["--hermes"][..], &["--real-agent", "--models"], &["--models", "preview.jsonc"]] {
             assert!(args(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// Dev's connection is one a deployment's catalog takes as it is.
+    #[test]
+    fn dev_providers_is_a_valid_catalog() {
+        let access = serde_json::json!({ "read": { "scopes": ["mail.read", "openid"] }, "write": { "scopes": ["mail.read", "mail.send", "openid"] } });
+        let oauth = serde_json::json!({ "authorize": "http://127.0.0.1:8794/test-oauth/authorize", "exchange": "http://127.0.0.1:8794/test-oauth/token", "client_id": "mock-connection-client", "access": access, "revoke": "http://127.0.0.1:8794/test-oauth/revoke" });
+        let rows: Vec<fragment_core::catalog::Provider> = serde_json::from_str(&super::dev_providers(Some(oauth))).expect("rows");
+        let catalog = fragment_core::catalog::Catalog::of(rows).expect("dev's catalog");
+        assert!(catalog.get(super::DEV_CONNECTION).is_some_and(|p| p.connection_oauth.is_some()));
+        for (name, micros, _) in super::DEV_OPERATOR_KEYS {
+            assert!(catalog.get(name).is_some_and(|p| p.kind == fragment_core::catalog::Kind::Operator && p.price.is_some_and(|pr| pr.micros == micros)), "{name}");
+        }
+        assert!(catalog.get(super::DEV_OWN_KEY).is_some_and(|p| p.kind == fragment_core::catalog::Kind::Own));
+        // with a real WorkOS environment: its keys, and no connection
+        let rows: Vec<fragment_core::catalog::Provider> = serde_json::from_str(&super::dev_providers(None)).expect("rows");
+        let catalog = fragment_core::catalog::Catalog::of(rows).expect("dev's catalog, no WorkOS fake");
+        assert!(catalog.get(super::DEV_CONNECTION).is_none() && catalog.providers().len() == super::DEV_OPERATOR_KEYS.len() + 1);
     }
 
     /// Git's markers, the diff3 base's included, are caught at a line's

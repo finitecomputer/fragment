@@ -58,6 +58,7 @@
 
 use fragment_core::ended::{self as rules, Failure};
 use fragment_core::npub;
+use fragment_core::seed::Stage;
 use fragment_core::wipe::{LifeLeft, LIVES_SHOWN_MAX};
 use fragment_proto::{limits, ErrorCode, Identity, IdentityKind};
 use futures_util::future::join_all;
@@ -66,7 +67,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{missing, Caller, FragmentCell, MetaKey, CLAIM_TTL_MS};
+use crate::fragment::{missing, Caller, FragmentCell, MetaKey};
 use crate::js;
 use crate::members::INDEX_FLUSH_MAX;
 use crate::registry::calls;
@@ -247,14 +248,17 @@ impl FragmentCell {
     pub(crate) fn end_life_wiped(&self) -> CellResult<Ended> {
         let [created_at, repo] = self.metas([MetaKey::CreatedAt, MetaKey::Repo])?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
-        let repo = repo.ok_or_else(|| missing(MetaKey::Repo))?;
-        assert!(!repo.is_empty(), "a created fragment names its repo");
-        self.exec(
-            "INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
-            vec![SqlStorageValue::Integer(incarnation), repo.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
+        // a life whose repo was not made yet (its template seeds after the
+        // create's answer, publish.rs `seeds_later`) records none
+        if let Some(repo) = &repo {
+            assert!(!repo.is_empty(), "a made repo has a name");
+            self.exec(
+                "INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
+                vec![SqlStorageValue::Integer(incarnation), repo.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+            )?;
+        }
         let ended = self.end(false)?;
-        assert_eq!(self.ended_repo_rows(incarnation)?, 1, "the ended life's repo is recorded beside it");
+        assert_eq!(self.ended_repo_rows(incarnation)?, u64::from(repo.is_some()), "the ended life's repo, if it had one, is recorded beside it");
         Ok(ended)
     }
 
@@ -321,8 +325,8 @@ impl FragmentCell {
         };
         assert!(due.len() as i64 <= INDEX_FLUSH_MAX, "a flush tells a bounded batch");
         let told = join_all(due.iter().map(|u| {
-            let body = json!({ "fragment": u.name, "role": null, "incarnation": u.incarnation, "version": u.version });
-            async move { self.tell_index(&u.principal, &body).await }
+            let change = crate::principal::calls::IndexChange::gone(u.name.clone(), u.incarnation, u.version);
+            async move { self.tell_index(&u.principal, &change).await }
         }))
         .await;
         let (mut failed, mut first_error) = (0usize, None::<String>);
@@ -526,9 +530,8 @@ impl FragmentCell {
             console_error!("the ended lives' errors were not forgotten ({:?}): {}", e.code, e.message);
         }
         let released = async {
-            let [created_at, claimed_at] = self.metas([MetaKey::CreatedAt, MetaKey::ClaimedAt])?;
-            let claimed = claimed_at.and_then(|c| c.parse::<i64>().ok()).is_some_and(|at| now - at < CLAIM_TTL_MS);
-            if created_at.is_some() || claimed || !self.rows("SELECT 1 FROM ended LIMIT 1", vec![])?.is_empty() {
+            // a life, or a create's claim that holds, keeps its storage
+            if self.stage()? != Stage::Free || !self.rows("SELECT 1 FROM ended LIMIT 1", vec![])?.is_empty() {
                 return Ok(false);
             }
             self.state.storage().delete_all().await?;
@@ -634,25 +637,29 @@ impl FragmentCell {
                 if b.agents.len() as u64 > limits::AGENTS_PER_OWNER_MAX {
                     return Err(CellError::invalid(format!("wipe/end names at most {} agents", limits::AGENTS_PER_OWNER_MAX)));
                 }
+                // a life ends between the plane's steps, never inside one
+                // (fragment.rs `delete`): held until it has ended
+                let held = self.plane.lock().await;
                 let [created_at, name] = self.metas([MetaKey::CreatedAt, MetaKey::Name])?;
                 let owner = match created_at {
                     Some(_) => Some(self.owner()?.name()),
                     None => None,
                 };
-                let ended = match (created_at, owner) {
-                    (None, _) => false,
-                    (Some(_), Some(owner)) if owner == b.owner => {
-                        let ended = self.end_life_wiped()?;
-                        console_log!("{}", json!({ "event": "wipe.fragment-ended", "fragment": name, "owner": owner }));
-                        self.tell_ended(Some(&ended.owner)).await;
-                        if let Some(name) = &name {
-                            self.forget_invites(name).await;
-                        }
-                        true
-                    }
+                let ended_now = match (created_at, owner) {
+                    (None, _) => None,
+                    (Some(_), Some(owner)) if owner == b.owner => Some((self.end_life_wiped()?, owner)),
                     // an org's fragment too: a person's wipe never ends what an org owns
                     (Some(_), _) => return Err(CellError::new(ErrorCode::Forbidden, format!("{} is someone else's: a wipe ends only its person's", name.unwrap_or_default()))),
                 };
+                drop(held);
+                let ended = ended_now.is_some();
+                if let Some((ended, owner)) = ended_now {
+                    console_log!("{}", json!({ "event": "wipe.fragment-ended", "fragment": name, "owner": owner }));
+                    self.tell_ended(Some(&ended.owner)).await;
+                    if let Some(name) = &name {
+                        self.forget_invites(name).await;
+                    }
+                }
                 // the lists the wipe empties itself: tried once (just now, or
                 // by an earlier call or pass), never waited on
                 let forgot = self.forget_wiped_lists(&b.owner, &b.agents)?;

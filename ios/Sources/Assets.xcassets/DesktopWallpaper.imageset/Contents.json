@@ -1,0 +1,22 @@
+{
+  "images": [
+    {
+      "filename": "wallpaper.jpg",
+      "idiom": "universal"
+    },
+    {
+      "filename": "wallpaper-dark.jpg",
+      "idiom": "universal",
+      "appearances": [
+        {
+          "appearance": "luminosity",
+          "value": "dark"
+        }
+      ]
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  }
+}

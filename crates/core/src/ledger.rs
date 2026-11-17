@@ -65,6 +65,8 @@ use crate::price::{self, dollars, PriceBook, PriceError, Priced, Usage, UsageFau
 
 pub mod gate;
 pub mod org;
+pub mod quote;
+pub mod said;
 #[cfg(test)]
 mod sim;
 #[cfg(test)]
@@ -175,6 +177,75 @@ pub struct Meter {
     pub rows: Vec<MeterRow>,
 }
 
+/// A batch on the ledger queue, on its way to its payer's ledger: from
+/// fragment `source`, its outbox's batch `seq`; or, `source` empty, a paid
+/// call's charge, which no fragment is told of (cell/src/meter.rs). The
+/// consumer reads it with `MeterBatch::from_queue`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeterBatch {
+    pub payer: String,
+    pub source: String,
+    pub seq: i64,
+    pub meter: Meter,
+}
+
+impl MeterBatch {
+    /// A batch from the JSON text of a queue message. A field a later
+    /// release added to the batch, its meter or a row is dropped first,
+    /// so its message still reads here, mid-deploy or after a rollback:
+    /// a paid call's charge has no outbox to send it again. That is what
+    /// worker's serde_wasm_bindgen read did, visiting only the fields a
+    /// struct names. What is left decodes through the one strict decoder
+    /// the ledger's route uses for a `Meter`, which still refuses a field it
+    /// does not know, so the cell's Wasm carries no second decoder of these
+    /// types. A usage stays as strict as it was (that read saw all of an
+    /// internally tagged enum's keys), and so does a missing or malformed field.
+    pub fn from_queue(text: &[u8]) -> Result<MeterBatch, String> {
+        let mut v: serde_json::Value = serde_json::from_slice(text).map_err(|e| e.to_string())?;
+        keep_named::<MeterBatch>(&mut v);
+        if let Some(meter) = v.get_mut("meter") {
+            keep_named::<Meter>(meter);
+            for row in meter.get_mut("rows").and_then(serde_json::Value::as_array_mut).into_iter().flatten() {
+                keep_named::<MeterRow>(row);
+            }
+        }
+        let kept = serde_json::to_vec(&v).expect("a JSON value serializes");
+        serde_json::from_slice(&kept).map_err(|e| e.to_string())
+    }
+}
+
+/// Drops the keys of `v`, an object, that `T`'s derived Deserialize does
+/// not name. The names are the ones `T` hands `deserialize_struct`, asked of
+/// it by a deserializer that only takes that list (`FieldNames`), so they
+/// cannot drift from the struct's own (renames included).
+fn keep_named<'de, T: Deserialize<'de>>(v: &mut serde_json::Value) {
+    let mut names = FieldNames(None);
+    let _ = T::deserialize(&mut names);
+    let names = names.0.expect("a struct names its fields");
+    if let Some(object) = v.as_object_mut() {
+        object.retain(|k, _| names.contains(&k.as_str()));
+    }
+}
+
+struct FieldNames(Option<&'static [&'static str]>);
+
+impl<'de> serde::Deserializer<'de> for &mut FieldNames {
+    type Error = serde::de::value::Error;
+
+    fn deserialize_struct<V: serde::de::Visitor<'de>>(self, _: &'static str, fields: &'static [&'static str], _: V) -> Result<V::Value, Self::Error> {
+        self.0 = Some(fields);
+        Err(serde::de::Error::custom("only its field names were asked"))
+    }
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+        Err(serde::de::Error::custom("not a struct"))
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map enum identifier ignored_any
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeterRow {
@@ -240,8 +311,12 @@ pub struct Swept {
 }
 
 /// Why a mutation or a question was refused. A refusal changes nothing.
+/// Written tagged by `refused`; read as its fields (`RefusedFields`), not
+/// as serde's internally tagged reading, which buffers each refusal to find
+/// its tag: about 20 KB more of the cell's Wasm. Both read every form a
+/// release has written (a batch's stored answer holds its rows' refusals).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "refused", rename_all = "snake_case")]
+#[serde(tag = "refused", rename_all = "snake_case", try_from = "RefusedFields")]
 pub enum Refused {
     /// The request breaks a rule of its shape.
     Invalid { what: Invalid },
@@ -285,6 +360,71 @@ pub enum Refused {
     /// the cell answers it for a ledger it emptied, so a row still on its
     /// way (a meter batch in the queue) is acknowledged, not retried.
     Wiped,
+}
+
+/// A `Refused` as it is read: every kind's fields, flat. A field it does
+/// not name is passed over, as the tagged reading passed it over.
+#[derive(Deserialize)]
+struct RefusedFields {
+    refused: RefusedKind,
+    what: Option<Invalid>,
+    current: Option<u64>,
+    why: Option<Why>,
+    cap: Option<i64>,
+    spent: Option<i64>,
+    budget: Option<i64>,
+}
+
+/// A refusal's `refused`: read as an identifier, a string alone, as the
+/// tagged reading read its tag (a derived enum also takes `{"<kind>": null}`).
+#[derive(Deserialize)]
+#[serde(variant_identifier, rename_all = "snake_case")]
+enum RefusedKind {
+    Invalid,
+    ConflictingBody,
+    StaleBook,
+    StaleSeat,
+    NoPrice,
+    TooLarge,
+    Stale,
+    GuestPayer,
+    GuestCreates,
+    AgentsStopped,
+    ReadOnly,
+    CapReached,
+    PersonsOnly,
+    OrgsOnly,
+    BudgetReached,
+    Wiped,
+}
+
+impl TryFrom<RefusedFields> for Refused {
+    type Error = String;
+
+    /// The refusal its `refused` names, with each of its fields.
+    fn try_from(f: RefusedFields) -> Result<Refused, String> {
+        fn need<T>(v: Option<T>, name: &str) -> Result<T, String> {
+            v.ok_or_else(|| format!("missing field `{name}`"))
+        }
+        Ok(match f.refused {
+            RefusedKind::Invalid => Refused::Invalid { what: need(f.what, "what")? },
+            RefusedKind::ConflictingBody => Refused::ConflictingBody,
+            RefusedKind::StaleBook => Refused::StaleBook { current: u32::try_from(need(f.current, "current")?).map_err(|_| "a book's version is a u32".to_string())? },
+            RefusedKind::StaleSeat => Refused::StaleSeat { current: need(f.current, "current")? },
+            RefusedKind::NoPrice => Refused::NoPrice,
+            RefusedKind::TooLarge => Refused::TooLarge,
+            RefusedKind::Stale => Refused::Stale,
+            RefusedKind::GuestPayer => Refused::GuestPayer,
+            RefusedKind::GuestCreates => Refused::GuestCreates,
+            RefusedKind::AgentsStopped => Refused::AgentsStopped { why: need(f.why, "why")? },
+            RefusedKind::ReadOnly => Refused::ReadOnly { why: need(f.why, "why")? },
+            RefusedKind::CapReached => Refused::CapReached { cap: need(f.cap, "cap")?, spent: need(f.spent, "spent")? },
+            RefusedKind::PersonsOnly => Refused::PersonsOnly,
+            RefusedKind::OrgsOnly => Refused::OrgsOnly,
+            RefusedKind::BudgetReached => Refused::BudgetReached { budget: need(f.budget, "budget")?, spent: need(f.spent, "spent")? },
+            RefusedKind::Wiped => Refused::Wiped,
+        })
+    }
 }
 
 /// The rule a request broke.
@@ -398,17 +538,20 @@ fn valid_names(names: [&Option<String>; 3]) -> bool {
 }
 
 /// A reference's record in the store, `{"entry": "row", …}` (or, from
-/// before, `{"entry": "reservation", …}`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// before, `{"entry": "reservation", …}`). Read as its fields
+/// (`EntryFields`), once, from the stored text.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "EntryFields")]
 pub enum Entry {
     /// A meter row: its price under the book of the time (`book`, its
     /// version; the book itself is kept by its digest, `book:<digest>`), and
     /// its charge (the price's, or nothing for a waived meter).
     Row { row: MeterRow, priced: Priced, charge: i64, book: u32 },
     /// A reservation of the releases before decision 62 (held, settled or
-    /// released), kept as it was written: never charged here, a row under
-    /// its reference another body, forgotten by its time as any.
-    Before(serde_json::Value),
+    /// released): never charged here, a row under its reference another
+    /// body, forgotten by its time as any. Its store keeps it as it was
+    /// written (no ledger writes one again); what it is read for is its time.
+    Before { at_ms: i64 },
 }
 
 impl Serialize for Entry {
@@ -421,32 +564,51 @@ impl Serialize for Entry {
             charge: i64,
             book: u32,
         }
+        #[derive(Serialize)]
+        struct Before {
+            entry: &'static str,
+            at_ms: i64,
+        }
         match self {
             Entry::Row { row, priced, charge, book } => Row { entry: "row", row, priced, charge: *charge, book: *book }.serialize(s),
-            Entry::Before(v) => v.serialize(s),
+            Entry::Before { at_ms } => Before { entry: "reservation", at_ms: *at_ms }.serialize(s),
         }
     }
 }
 
-impl<'de> Deserialize<'de> for Entry {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Entry, D::Error> {
-        use serde::de::Error;
-        #[derive(Deserialize)]
-        struct Row {
-            row: MeterRow,
-            priced: Priced,
-            charge: i64,
-            book: u32,
+/// An `Entry` as it is read: a row's fields, or a reservation's time; a
+/// reservation's other fields are passed over.
+#[derive(Deserialize)]
+struct EntryFields {
+    entry: EntryKind,
+    row: Option<MeterRow>,
+    priced: Option<Priced>,
+    charge: Option<i64>,
+    book: Option<u32>,
+    at_ms: Option<i64>,
+}
+
+/// An entry's `entry`: read as an identifier, a string alone, as its
+/// reading through a `Value` took it (a derived enum also takes
+/// `{"<kind>": null}`).
+#[derive(Deserialize)]
+#[serde(variant_identifier, rename_all = "snake_case")]
+enum EntryKind {
+    Row,
+    Reservation,
+}
+
+impl TryFrom<EntryFields> for Entry {
+    type Error = String;
+
+    fn try_from(f: EntryFields) -> Result<Entry, String> {
+        fn need<T>(v: Option<T>, name: &str) -> Result<T, String> {
+            v.ok_or_else(|| format!("missing field `{name}`"))
         }
-        let v = serde_json::Value::deserialize(d)?;
-        match v.get("entry").and_then(serde_json::Value::as_str) {
-            Some("row") => {
-                let r: Row = serde_json::from_value(v).map_err(D::Error::custom)?;
-                Ok(Entry::Row { row: r.row, priced: r.priced, charge: r.charge, book: r.book })
-            }
-            Some("reservation") if v.get("at_ms").is_some_and(serde_json::Value::is_i64) => Ok(Entry::Before(v)),
-            other => Err(D::Error::custom(format!("an entry is a row or a reservation from before, not {other:?}"))),
-        }
+        Ok(match f.entry {
+            EntryKind::Row => Entry::Row { row: need(f.row, "row")?, priced: need(f.priced, "priced")?, charge: need(f.charge, "charge")?, book: need(f.book, "book")? },
+            EntryKind::Reservation => Entry::Before { at_ms: f.at_ms.ok_or("a reservation from before has its time (`at_ms`)")? },
+        })
     }
 }
 
@@ -456,7 +618,7 @@ impl Entry {
     pub fn at_ms(&self) -> i64 {
         match self {
             Entry::Row { row, .. } => row.at_ms,
-            Entry::Before(v) => v["at_ms"].as_i64().expect("a reservation from before has its time"),
+            Entry::Before { at_ms } => *at_ms,
         }
     }
 
@@ -464,7 +626,7 @@ impl Entry {
     pub fn charge(&self) -> Option<i64> {
         match self {
             Entry::Row { charge, .. } => Some(*charge),
-            Entry::Before(_) => None,
+            Entry::Before { .. } => None,
         }
     }
 }
@@ -561,7 +723,7 @@ impl Store for Memory {
 
     fn spends(&self, month: Month, limit: usize) -> Vec<(String, i64)> {
         let mut all: Vec<(String, i64)> = self.spent.get(&month).map(|m| m.iter().map(|(f, s)| (f.clone(), *s)).collect()).unwrap_or_default();
-        all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        all.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         all.truncate(limit);
         all
     }
@@ -595,6 +757,16 @@ pub fn included(plan: Plan, seat: SeatState) -> i64 {
         (Plan::SeatAlwaysOn, SeatState::Active) => SEAT_ALWAYS_ON_INCLUDED,
         _ => 0,
     }
+}
+
+/// What a row of `usage` is charged on a ledger of `plan`, priced with
+/// `book`: its price, and the charge it draws. A $200 seat's awake time is
+/// not metered (decision 25; one computer per person, decision 13). A
+/// ledger's rows and a quote's items (`quote`) are charged by this alone.
+pub fn row_charge(usage: &Usage, book: &PriceBook, plan: Plan) -> Result<(Priced, i64), PriceError> {
+    let priced = book.price(usage)?;
+    let waived = matches!(usage, Usage::Awake { .. }) && plan == Plan::SeatAlwaysOn;
+    Ok((priced, if waived { 0 } else { priced.charge }))
 }
 
 /// A person's standing, from their plan, seat, balance, and whether the
@@ -794,6 +966,28 @@ impl Ledger {
         money
     }
 
+    /// What this ledger tells its person (FIN-458; `said::standing`): its
+    /// standing short of `Ok` for want of credit, with a pack to buy when
+    /// packs are `sold` and they hold an active seat the registry gave them
+    /// (a pack's buyer holds one: `PackBegin`; a deployment's default plan,
+    /// which no registry pushed, `seat_seq` 0, is none). An org's ledger
+    /// tells no one here.
+    pub fn said(&self, now_ms: i64, sold: bool) -> Vec<fragment_proto::notice::Notice> {
+        if self.org.is_some() {
+            return vec![];
+        }
+        let seat = matches!(self.money.plan, Plan::Seat | Plan::SeatAlwaysOn) && self.money.seat == SeatState::Active && self.money.seat_seq > 0;
+        said::standing(self.standing(now_ms), sold && seat).into_iter().collect()
+    }
+
+    /// What the ledger keeps of what it last told its person (`told` in its
+    /// meta): its notices as `said` says them, so whatever changes them is
+    /// told to their pages once (`said::news`), its standing or anything
+    /// else they say (a seat's Buy credit). As the route answers them.
+    pub fn told_key(&self, now_ms: i64, sold: bool) -> String {
+        serde_json::to_string(&fragment_proto::notice::NoticeList { notices: self.said(now_ms, sold) }).expect("notices serialize")
+    }
+
     pub fn standing(&self, now_ms: i64) -> Standing {
         let money = self.money_at(now_ms);
         match self.org {
@@ -893,12 +1087,9 @@ impl Ledger {
         self.money.roll(Month::of(now_ms));
     }
 
-    /// A usage's price, and its charge here: a $200 seat's awake time is
-    /// not metered (decision 25; one computer per person, decision 13).
+    /// A usage's price, and its charge here (`row_charge`).
     fn charge_for(&self, usage: &Usage, book: &PriceBook) -> Result<(Priced, i64), PriceError> {
-        let priced = book.price(usage)?;
-        let waived = matches!(usage, Usage::Awake { .. }) && self.money.plan == Plan::SeatAlwaysOn;
-        Ok((priced, if waived { 0 } else { priced.charge }))
+        row_charge(usage, book, self.money.plan)
     }
 
     /// A charge to the balance, counted in its fragment's month.

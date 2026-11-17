@@ -137,8 +137,8 @@ fn the_front_door_loses_no_request_wranglers_proxy_does() {
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("worker.js"), WORKER).unwrap();
     std::fs::write(devstack::local_config(&project), r#"{ "name": "front-door", "main": "worker.js", "compatibility_date": "2026-01-01" }"#).unwrap();
-    let port = devstack::free_port().unwrap();
-    let opts = devstack::NodeOptions { project: project.clone(), port, log_dir: project.clone(), own_group: true };
+    let opts = devstack::NodeOptions { project: project.clone(), listener: devstack::hold_port(0).unwrap(), log_dir: project.clone(), own_group: true };
+    let port = opts.port();
     let (node, _) = devstack::Node::start(&tools, &opts).expect("a node");
     // wrangler's own port, its proxy's, as it says it is ready
     let text = std::fs::read_to_string(&node.log).unwrap();

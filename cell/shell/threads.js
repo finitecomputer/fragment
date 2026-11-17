@@ -28,7 +28,7 @@ const NEWEST = Number.MAX_SAFE_INTEGER;
 // agents' labels in order, joined by `-`, each cut to fit when both do not:
 // proto's `LABEL_ROOM_MIN_BYTES` (shell.js's `LABEL_ROOM`).
 const LABEL_ROOM = 39;
-const STATE_SAYS = { asked: "Asked", working: "Working", you: "Needs you", done: "Done", stopped: "Stopped", lost: "Lost" };
+const STATE_SAYS = { asked: "Asked", working: "Working", you: "Waiting for you", done: "Done", stopped: "Stopped", lost: "Lost" };
 
 export function pairLabel(a, b) {
   const [x, y] = [a, b].sort();
@@ -67,14 +67,11 @@ export function createThreads({ $, el, patch, api, seg, avatar, data, navigation
   // their agents asked another (its `to`, and its `return_to`), its turn's
   // start and end when they are among them.
   async function threadsOf(name) {
-    const [said, work] = await Promise.all([
-      api("GET", `/api/f/${seg(name)}/channels/chat?before=${NEWEST}&limit=${CHAT_RECORDS}`),
-      api("GET", `/api/f/${seg(name)}/channels/work?before=${NEWEST}&limit=${WORK_RECORDS}`),
-    ]);
+    const [said, work] = await Promise.all([newest(name, "chat", CHAT_RECORDS), newest(name, "work", WORK_RECORDS)]);
     const mine = new Set(ownAgents().map((a) => a.identity));
-    const turns = (work.records ?? []).map((r) => ({ at: r.at, principal: r.principal, ...r.body }));
+    const turns = work.map((r) => ({ at: r.at, principal: r.principal, ...r.body }));
     const out = [];
-    for (const r of said.records ?? []) {
+    for (const r of said) {
       const b = r.body ?? {};
       const asked = Array.isArray(b.to) ? b.to[0] : null;
       if (!mine.has(r.principal) || !mine.has(asked) || typeof b.return_to !== "string" || typeof b.text !== "string") continue;
@@ -85,6 +82,66 @@ export function createThreads({ $, el, patch, api, seg, avatar, data, navigation
     return out;
   }
 
+  // A channel's newest `n` records, oldest first. Records are only ever
+  // appended (the oldest may go), so once read they are held, and a read
+  // asks only for those past the newest held (`since`); the first read, or
+  // one `since` cannot answer, reads them all (`back`). Of two reads of one
+  // channel at once, the one asked last is held.
+  const tails = new Map();
+  async function newest(name, channel, n) {
+    const held = tails.get(name)?.get(channel);
+    const asked = (held?.asked ?? 0) + 1;
+    if (!tails.has(name)) tails.set(name, new Map());
+    tails.get(name).set(channel, { records: held?.records, asked });
+    const records = (held?.records && (await since(name, channel, held.records, n))) ?? (await back(name, channel, n));
+    const now = tails.get(name)?.get(channel);
+    if (now?.asked === asked) now.records = records;
+    return records;
+  }
+
+  // Page after page back from the newest: a page ends at its bytes as well
+  // as its count (docs/api.md), so one may hold fewer than asked while more
+  // remain; an older release's page says no `more`, and a short one was its
+  // last. Bounded: each page moves its cursor back, `n` records in all at
+  // most.
+  async function back(name, channel, n) {
+    const out = [];
+    let before = NEWEST;
+    while (out.length < n) {
+      const want = n - out.length;
+      const page = await api("GET", `/api/f/${seg(name)}/channels/${channel}?before=${before}&limit=${want}`);
+      const records = page.records ?? [];
+      out.unshift(...records);
+      if (!records.length || !(page.more ?? records.length >= want)) break;
+      before = page.next;
+    }
+    return out;
+  }
+
+  // The held records and those appended since, the newest `n`: read forward
+  // from the newest held, which comes first as it was. Not so, its name's
+  // fragment was made again (docs/api.md), its records new; more than `n`
+  // past it, the newest are nearer back. Either way null, and `back` reads
+  // them. Bounded as `back` is, at `n` + 1 records.
+  async function since(name, channel, held, n) {
+    const last = held.at(-1);
+    const out = [];
+    let after = last ? last.seq - 1 : 0;
+    for (;;) {
+      const want = n + 1 - out.length;
+      const page = await api("GET", `/api/f/${seg(name)}/channels/${channel}?after=${after}&limit=${want}`);
+      const records = page.records ?? [];
+      out.push(...records);
+      if (!records.length || !(page.more ?? records.length >= want)) break;
+      if (out.length > n) return null;
+      after = page.next;
+    }
+    if (!last) return out.slice(-n);
+    const first = out[0];
+    if (first?.seq !== last.seq || first.at !== last.at || first.principal !== last.principal) return null;
+    return held.concat(out.slice(1)).slice(-n);
+  }
+
   // Reads again the pair chats whose rows say their threads changed (each
   // one's reads at once; a pair chat whose read failed is read at its next
   // change); then the lines are drawn.
@@ -92,6 +149,7 @@ export function createThreads({ $, el, patch, api, seg, avatar, data, navigation
     const mine = ++reading;
     const pairs = chats().filter(isPair);
     for (const name of [...reads.keys()]) if (!pairs.some((f) => f.name === name)) reads.delete(name);
+    for (const name of [...tails.keys()]) if (!byName(name)) tails.delete(name);
     const due = pairs.filter((f) => reads.get(f.name)?.signature !== signature(f));
     await Promise.all(due.map(async (f) => {
       const sig = signature(f);
@@ -114,15 +172,15 @@ export function createThreads({ $, el, patch, api, seg, avatar, data, navigation
     await Promise.all(chatsOf.map(async (name) => {
       const check = checkOf(name);
       const ours = waiting.filter((t) => t.returnTo === name);
-      const work = await api("GET", `/api/f/${seg(name)}/channels/work?before=${NEWEST}&limit=${WORK_RECORDS}`);
+      const work = await newest(name, "work", WORK_RECORDS);
       for (const asker of new Set(ours.map((t) => t.asker))) {
         const agent = agentNamed(asker);
         if (!agent) continue;
-        const tasks = await api("GET", `/api/f/${seg(agent.fragment)}/channels/tasks?before=${NEWEST}&limit=${TASK_RECORDS}`);
+        const tasks = await newest(agent.fragment, "tasks", TASK_RECORDS);
         for (const t of ours.filter((x) => x.asker === asker)) {
-          const answer = (tasks.records ?? []).find((r) => r.principal === asker && r.body?.kind === "answer" && r.body?.turn === t.turn);
-          const start = answer && (work.records ?? []).find((r) => r.principal === asker && r.body?.kind === "turn.start" && r.body?.cause?.fragment === agent.fragment && r.body?.cause?.channel === "tasks" && r.body?.cause?.seq === answer.seq);
-          if (start && (work.records ?? []).some((r) => r.principal === asker && r.body?.kind === "turn.end" && r.body?.turn === start.body.turn)) answeredTurns.add(t.turn);
+          const answer = tasks.find((r) => r.principal === asker && r.body?.kind === "answer" && r.body?.turn === t.turn);
+          const start = answer && work.find((r) => r.principal === asker && r.body?.kind === "turn.start" && r.body?.cause?.fragment === agent.fragment && r.body?.cause?.channel === "tasks" && r.body?.cause?.seq === answer.seq);
+          if (start && work.some((r) => r.principal === asker && r.body?.kind === "turn.end" && r.body?.turn === start.body.turn)) answeredTurns.add(t.turn);
         }
       }
       answerChecks.set(name, check);

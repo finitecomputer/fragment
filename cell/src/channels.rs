@@ -60,7 +60,7 @@ use fragment_core::access::{Purpose, Standing};
 use fragment_core::effects::{self, Effect};
 use fragment_core::{door, npub};
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_id, ChannelDecl, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
+    limits, valid_channel_name, valid_op_id, ChannelDecl, ChannelNewest, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
     BUILTIN_CHANNELS, POST_KIND,
 };
 use futures_util::lock::{Mutex, OwnedMutexGuard};
@@ -70,9 +70,18 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell};
+use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 
+/// The `meta` row of a postable channel's running total of body bytes
+/// (`posted_bytes`).
+fn posted_key(channel: &str) -> String {
+    format!("{}:{channel}", MetaKey::PostedBytes.key())
+}
+
+/// Records one read of a page takes from storage at a time (at most
+/// 6.4 MiB of bodies), so a page cut by its bytes reads little past them.
+const PAGE_READ_BATCH: usize = 100;
 /// Due pending mutations one sweep settles.
 const SWEEP_ROWS: i64 = 64;
 /// Mutations waiting for their effects; past this, new mutations are
@@ -234,33 +243,57 @@ impl FragmentCell {
             None => (SqlStorageValue::Null, SqlStorageValue::Null),
         };
         let raw = serde_json::value::to_raw_value(body).expect("a JSON value serializes");
+        // retention: the built-in channels keep their newest records; those
+        // people may post to, their newest by count and by bytes (a post's
+        // key goes with its record). Its declaration is read once, here, in
+        // the append's own step, and is all it reads of it: an install may
+        // land at any await before (a post's, or between a mutation's
+        // records), and what a record does follows what is installed as it
+        // is appended.
+        let declared = if BUILTIN_CHANNELS.contains(&channel) { None } else { self.declared_channel(channel)? };
+        let (kept, posted) = match &declared {
+            None if BUILTIN_CHANNELS.contains(&channel) => (Some(limits::AUDIT_KEPT), false),
+            None => (None, false),
+            Some(d) if d.post.is_some() => (Some(self.posted_kept()?), true),
+            Some(_) => (None, false),
+        };
+        let size = i64::try_from(raw.get().len()).expect("a body's length fits i64");
+        // its place, taken before any room is made: a channel emptied to fit
+        // it (one record near the byte bound) never numbers from 1 again
+        let next = self.rows("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM records WHERE channel = ?", vec![channel.into()])?[0]["n"].as_i64().expect("a seq is an integer");
+        // room made before the insert, in its turn, so an append past a bound
+        // frees space first; a replay appends nothing, and frees nothing
+        let room = match (posted, op) {
+            (true, Some((id, i))) if !self.rows("SELECT 1 AS x FROM records WHERE op = ? AND idx = ?", vec![id.into(), SqlStorageValue::Integer(i)])?.is_empty() => None,
+            (true, _) => Some(self.make_room(channel, kept.expect("a postable channel keeps a count"), size)?),
+            (false, _) => None,
+        };
         let rows = self.rows(
             "INSERT INTO records (channel, seq, at, principal, kind, body, op, idx, outboxed)
-             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE channel = ?), ?, ?, ?, ?, ?, ?, 0)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
              ON CONFLICT DO NOTHING RETURNING seq",
-            vec![channel.into(), channel.into(), SqlStorageValue::Integer(now), principal.into(), kind.into(), raw.get().into(), op_id, idx],
+            vec![channel.into(), SqlStorageValue::Integer(next), SqlStorageValue::Integer(now), principal.into(), kind.into(), raw.get().into(), op_id, idx],
         )?;
         let Some(row) = rows.first() else { return Ok(None) };
         let seq = row["seq"].as_i64().expect("records.seq is INTEGER");
-        assert!(seq > 0, "a channel's records number from 1");
-        // retention: the built-in channels, and those people may post to,
-        // keep their newest records (a post's key goes with its record)
-        let declared = if BUILTIN_CHANNELS.contains(&channel) { None } else { self.declared_channel(channel)? };
-        let kept = match &declared {
-            None if BUILTIN_CHANNELS.contains(&channel) => Some(limits::AUDIT_KEPT),
-            None => None,
-            Some(d) => d.post.map(|_| limits::POSTED_KEPT),
-        };
-        // a message on an app channel goes to its people's search, in this
-        // turn, as its read role says (`channel_read_role`, the one source)
-        if declared.is_some() {
-            self.log_search(self.channel_read_role(channel)?, channel, seq, now, body)?;
+        assert!(seq > 0 && seq == next, "a channel's records number from 1, each the next");
+        if let Some(bytes) = room {
+            let first = self.channel_first(channel)?.expect("the record just appended is kept");
+            self.exec(
+                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                vec![posted_key(channel).into(), format!("{} {first} {seq}", bytes + size).into()],
+            )?;
         }
-        // and, of a kind it lists, to its members' lists (listed.rs)
-        if let Some(listed) = declared.as_ref().and_then(|d| d.listed.as_ref()) {
-            self.list_record(channel, listed, principal, seq, now, body)?;
+        if let Some(d) = &declared {
+            // a message on an app channel goes to its people's search, in
+            // this turn, as its read role says (`channel_read_role`'s rule)
+            self.log_search(d.read, channel, seq, now, body)?;
+            // and, of a kind it lists, to its members' lists (listed.rs)
+            self.list_record(channel, d, principal, seq, now, body)?;
+            // and, of a kind it keeps the newest of, as its poster's newest
+            self.keep_newest(channel, &d.newest, principal, seq, body)?;
         }
-        if let Some(kept) = kept {
+        if let Some(kept) = kept.filter(|_| !posted) {
             assert!(kept >= 1, "a channel keeps the record just appended");
             self.exec(
                 "DELETE FROM records WHERE channel = ? AND seq <= (SELECT MAX(seq) FROM records WHERE channel = ?) - ?",
@@ -270,6 +303,112 @@ impl FragmentCell {
         let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), kind: kind.to_string(), body: raw };
         self.broadcast_record(&record);
         Ok(Some(record))
+    }
+
+    /// A record just appended to `channel`, which keeps each poster's newest
+    /// of `kinds` (`ChannelDecl::newest`), in its append's turn: of such a
+    /// kind (its body's `kind`), it is its poster's newest of it now, and
+    /// past `NEWEST_KEPT_MAX` the channel's newest posted longest ago goes.
+    /// One row written, and a delete of at most one: no list fan-out, and
+    /// nothing read back of the channel's history.
+    fn keep_newest(&self, channel: &str, kinds: &[String], principal: &str, seq: i64, body: &Value) -> CellResult<()> {
+        let Some(kind) = body.get("kind").and_then(Value::as_str).filter(|k| kinds.iter().any(|d| d == k)) else { return Ok(()) };
+        self.exec(
+            "INSERT INTO newest (channel, principal, kind, seq) VALUES (?, ?, ?, ?) ON CONFLICT (channel, principal, kind) DO UPDATE SET seq = excluded.seq",
+            vec![channel.into(), principal.into(), kind.into(), SqlStorageValue::Integer(seq)],
+        )?;
+        self.exec(
+            "DELETE FROM newest WHERE channel = ? AND seq NOT IN (SELECT seq FROM newest WHERE channel = ? ORDER BY seq DESC LIMIT ?)",
+            vec![channel.into(), channel.into(), SqlStorageValue::Integer(limits::NEWEST_KEPT_MAX as i64)],
+        )?;
+        Ok(())
+    }
+
+    /// Each poster's newest record of each kind `channel` keeps the newest
+    /// of (`keep_newest`), the newest first: at most `NEWEST_KEPT_MAX`
+    /// rows and records read, each by its key. A record the channel no
+    /// longer keeps is none. The caller checked the channel's read role.
+    pub(crate) fn channel_newest(&self, channel: &str) -> CellResult<ChannelNewest> {
+        let rows: Vec<RecordRow> = self.typed(
+            "SELECT r.channel, r.seq, r.at, r.principal, r.kind, r.body FROM newest n JOIN records r ON r.channel = n.channel AND r.seq = n.seq
+             WHERE n.channel = ? ORDER BY n.seq DESC LIMIT ?",
+            vec![channel.into(), SqlStorageValue::Integer(limits::NEWEST_KEPT_MAX as i64)],
+        )?;
+        let records = rows.into_iter().map(RecordRow::record).collect::<CellResult<Vec<_>>>()?;
+        assert!(records.len() <= limits::NEWEST_KEPT_MAX, "a channel's newest are bounded");
+        Ok(ChannelNewest { channel: channel.to_string(), records })
+    }
+
+    /// Makes room in a postable channel for a record of `size` bytes: its
+    /// oldest go until, with it, the channel holds at most `kept` records and
+    /// `posted_bytes_max` bytes of bodies. Answers the bytes left. The count
+    /// is one indexed range delete; the bytes, the oldest one at a time (one
+    /// a record appended, once the channel is full), bounded by `kept`.
+    fn make_room(&self, channel: &str, kept: i64, size: i64) -> CellResult<i64> {
+        assert!(kept >= 1, "a channel keeps the record about to be appended");
+        let max = self.posted_bytes_max()?;
+        let mut bytes = self.posted_bytes(channel)?;
+        let gone = self.rows(
+            "DELETE FROM records WHERE channel = ? AND seq <= (SELECT MAX(seq) FROM records WHERE channel = ?) + 1 - ? RETURNING length(CAST(body AS BLOB)) AS n",
+            vec![channel.into(), channel.into(), SqlStorageValue::Integer(kept)],
+        )?;
+        bytes -= gone.iter().filter_map(|r| r["n"].as_i64()).sum::<i64>();
+        for _ in 0..kept {
+            if bytes + size <= max {
+                break;
+            }
+            let gone = self.rows(
+                "DELETE FROM records WHERE channel = ? AND seq = (SELECT MIN(seq) FROM records WHERE channel = ?) RETURNING length(CAST(body AS BLOB)) AS n",
+                vec![channel.into(), channel.into()],
+            )?;
+            // (empty: a record larger than the bound alone is kept alone)
+            let Some(n) = gone.first().and_then(|r| r["n"].as_i64()) else { break };
+            bytes -= n;
+        }
+        assert!(bytes >= 0, "a channel's bytes never go below none: {bytes}");
+        Ok(bytes)
+    }
+
+    /// The bytes of bodies a postable channel holds: its running total
+    /// (`posted_key`: "bytes first last"), while it covers the channel's
+    /// first and last record as they are; else counted again, once (a total
+    /// never kept, or one an older release left behind as it appended and
+    /// trimmed).
+    fn posted_bytes(&self, channel: &str) -> CellResult<i64> {
+        let span = self.rows(fragment_core::retention::POSTED_SPAN_SQL, vec![channel.into(), channel.into(), posted_key(channel).into()])?;
+        let (lo, hi) = (span[0]["lo"].as_i64(), span[0]["hi"].as_i64());
+        let kept: Vec<i64> = span[0]["kept"].as_str().unwrap_or("").split(' ').filter_map(|n| n.parse().ok()).collect();
+        if let ([bytes, first, last], Some(lo), Some(hi)) = (kept.as_slice(), lo, hi) {
+            if (*first, *last) == (lo, hi) {
+                return Ok(*bytes);
+            }
+        }
+        let n = self.rows("SELECT COALESCE(SUM(length(CAST(body AS BLOB))), 0) AS n FROM records WHERE channel = ?", vec![channel.into()])?;
+        Ok(n[0]["n"].as_i64().expect("a sum of lengths is an integer"))
+    }
+
+    fn channel_first(&self, channel: &str) -> CellResult<Option<i64>> {
+        let rows = self.rows("SELECT MIN(seq) AS n FROM records WHERE channel = ?", vec![channel.into()])?;
+        Ok(rows.first().and_then(|r| r["n"].as_i64()))
+    }
+
+    /// Bytes of bodies a channel people may post to keeps:
+    /// `limits::POSTED_BYTES_MAX`, or fewer a test set (`posted-bytes`, on
+    /// fleets with test hooks only).
+    pub(crate) fn posted_bytes_max(&self) -> CellResult<i64> {
+        if !self.cfg.test_hooks {
+            return Ok(limits::POSTED_BYTES_MAX);
+        }
+        Ok(self.meta(MetaKey::TestPostedBytes)?.and_then(|v| v.parse().ok()).unwrap_or(limits::POSTED_BYTES_MAX))
+    }
+
+    /// Records a channel people may post to keeps: `limits::POSTED_KEPT`,
+    /// or fewer a test set (`posted-kept`, on fleets with test hooks only).
+    pub(crate) fn posted_kept(&self) -> CellResult<i64> {
+        if !self.cfg.test_hooks {
+            return Ok(limits::POSTED_KEPT);
+        }
+        Ok(self.meta(MetaKey::TestPostedKept)?.and_then(|v| v.parse().ok()).unwrap_or(limits::POSTED_KEPT))
     }
 
     /// Appends a keyed record, or finds the one an earlier try of the same
@@ -328,7 +467,8 @@ impl FragmentCell {
     /// asks here, and compares the caller's role to the answer: the channel
     /// API, `__channel`, live sockets, subscriptions (a person's and an
     /// agent's), search's fence, a run's input (`input_shown`), and the
-    /// listed records each list row carries (listed.rs).
+    /// listed records each list row carries (listed.rs). A path that holds
+    /// the declaration already reads its `read`, which is this answer.
     pub(crate) fn channel_read_role(&self, channel: &str) -> CellResult<Role> {
         if BUILTIN_CHANNELS.contains(&channel) {
             return Ok(Role::Viewer);
@@ -522,6 +662,42 @@ impl FragmentCell {
         Ok((record, appended))
     }
 
+    /// Posts filled in as `principal`, a member, made them (`records`, a
+    /// test lever: on fleets with test hooks only), at most
+    /// `limits::RECORDS_FILL_MAX` a call: each appended under its post's key and
+    /// published as a post is (`post`), without the poster's checks. A
+    /// lane's fixture of thousands of records would otherwise take one call
+    /// a record (FIN-452: 11,100 took about two minutes). An id filled
+    /// before is refused, as no fixture posts one twice. Answers the newest
+    /// record's seq.
+    pub(crate) async fn fill_records(&self, channel: &str, principal: &str, posts: &[Value]) -> CellResult<Option<i64>> {
+        if posts.len() > limits::RECORDS_FILL_MAX {
+            return Err(CellError::invalid(format!("records: at most {} a call", limits::RECORDS_FILL_MAX)));
+        }
+        let decl = self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))?;
+        if decl.post.is_none() {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts")));
+        }
+        if self.rows("SELECT 1 AS x FROM members WHERE principal = ?", vec![principal.into()])?.is_empty() {
+            return Err(CellError::invalid(format!("{principal} is no member of this fragment")));
+        }
+        let mut newest = None;
+        for post in posts {
+            let id = post["id"].as_str().filter(|id| valid_op_id(id)).ok_or_else(|| CellError::invalid("each record has an id matching ^[A-Za-z0-9._:-]{1,128}$"))?;
+            let body = &post["body"];
+            let size = body.to_string().len();
+            if size > limits::RECORD_BODY_MAX_BYTES {
+                return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
+            }
+            let record = self
+                .append(channel, principal, POST_KIND, body, Some((&post_key(principal, id), POST_INDEX)))?
+                .ok_or_else(|| CellError::invalid(format!("post {id} was filled before")))?;
+            self.published(&record, true, POST_TRIGGERS_DEPTH, &mut js::Laps::start()).await?;
+            newest = Some(record.seq);
+        }
+        Ok(newest)
+    }
+
     /// The record an earlier post under `key` appended, when it is this
     /// post again: the same channel and the same body. Anything else is
     /// the poster reusing an id (409), as a call with another input is.
@@ -530,7 +706,7 @@ impl FragmentCell {
             self.typed("SELECT channel, seq, at, principal, kind, body FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(POST_INDEX)])?;
         // the append conflicted on (op, idx), so a row holds them
         let record = rows.into_iter().next().ok_or_else(|| CellError::host(format!("post {key} conflicted, and no record holds it")))?.record()?;
-        let stored: Value = serde_json::from_str(record.body.get()).map_err(|e| CellError::host(format!("post {key}: its stored body is not JSON: {e}")))?;
+        let stored: Value = crate::json_text(record.body.get()).map_err(|e| CellError::host(format!("post {key}: its stored body is not JSON: {e}")))?;
         if record.channel != channel || stored != *body {
             return Err(CellError::new(ErrorCode::ConflictingBody, "this post id was already used with a different body (or on another channel)"));
         }
@@ -593,7 +769,7 @@ impl FragmentCell {
             out.push(json!({ "name": name, "read": decl.read, "post": decl.post, "signedIn": decl.signed_in, "from": decl.from, "listed": decl.listed, "seq": seq }));
             Ok(())
         };
-        let builtin = ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None };
+        let builtin = ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None, newest: vec![] };
         for b in BUILTIN_CHANNELS {
             add(b, &builtin)?;
         }
@@ -601,17 +777,6 @@ impl FragmentCell {
             add(&name, &decl)?;
         }
         json_response(&json!({ "channels": out }))
-    }
-
-    /// A bounded page before an exclusive cursor, returned in display order.
-    pub(crate) fn read_channel_before(&self, channel: &str, before: i64, limit: usize) -> CellResult<Vec<ChannelRecord>> {
-        let rows: Vec<RecordRow> = self.typed(
-            "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq < ? ORDER BY seq DESC LIMIT ?",
-            vec![channel.into(), SqlStorageValue::Integer(before), SqlStorageValue::Integer(limit.clamp(1, limits::CHANNEL_PAGE) as i64)],
-        )?;
-        let mut records: Vec<ChannelRecord> = rows.into_iter().map(RecordRow::record).collect::<CellResult<_>>()?;
-        records.reverse();
-        Ok(records)
     }
 
     /// `GET /api/f/<name>/channels/<channel>?after=|before=&limit=`
@@ -625,17 +790,71 @@ impl FragmentCell {
         json_response(&self.channel_page(channel, after, before, limit)?)
     }
 
+    /// `GET /api/f/<name>/channels/<channel>/newest` (`channel_newest`):
+    /// read as the channel is.
+    pub(crate) fn newest_api(&self, caller: &Caller, channel: &str) -> CellResult<Response> {
+        self.require(caller, false, Role::Public)?;
+        if !valid_channel_name(channel) {
+            return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
+        }
+        let read = self.channel_read_role(channel)?;
+        self.require(caller, false, read)?;
+        json_response(&self.channel_newest(channel)?)
+    }
+
+    /// A page of `channel` (`GET …/channels/{c}`, `__channel/{c}`): at most
+    /// `limit` records (1 to `CHANNEL_PAGE`) and, past the first, about
+    /// `CHANNEL_HTTP_PAGE_MAX_BYTES` of their bodies; read in batches, so
+    /// a page holds no more than one batch past its bound in memory.
+    /// `more` says whether records remain past it in the direction read.
     pub(crate) fn channel_page(&self, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<ChannelPage> {
-        let (records, next) = if let Some(before) = before {
-            let records = self.read_channel_before(channel, before, limit)?;
-            let next = records.first().map_or(before, |r| r.seq);
-            (records, next)
-        } else {
-            let records = self.read_channel(channel, after, limit)?;
-            let next = records.last().map_or(after, |r| r.seq);
-            (records, next)
+        let limit = limit.clamp(1, limits::CHANNEL_PAGE);
+        let (mut records, mut bytes, mut more) = (Vec::<ChannelRecord>::new(), 0usize, false);
+        let mut cursor = before.unwrap_or(after);
+        // bounded: each full batch adds PAGE_READ_BATCH records toward `limit`
+        'page: for _ in 0..=limits::CHANNEL_PAGE.div_ceil(PAGE_READ_BATCH) {
+            let want = (limit - records.len()).min(PAGE_READ_BATCH);
+            let batch = self.read_batch(channel, cursor, before.is_some(), want)?;
+            let end = batch.len() < want;
+            for r in batch {
+                let size = r.body.get().len();
+                if !records.is_empty() && bytes + size > limits::CHANNEL_HTTP_PAGE_MAX_BYTES {
+                    more = true;
+                    break 'page;
+                }
+                bytes += size;
+                cursor = r.seq;
+                records.push(r);
+            }
+            if end {
+                break;
+            }
+            if records.len() == limit {
+                more = !self.read_batch(channel, cursor, before.is_some(), 1)?.is_empty();
+                break;
+            }
+        }
+        assert!(!records.is_empty() || !more, "a page cut short holds a record");
+        if before.is_some() {
+            records.reverse();
+        }
+        let next = match before {
+            Some(b) => records.first().map_or(b, |r| r.seq),
+            None => records.last().map_or(after, |r| r.seq),
         };
-        Ok(ChannelPage { channel: channel.to_string(), records, next })
+        Ok(ChannelPage { channel: channel.to_string(), records, next, more })
+    }
+
+    /// Up to `n` records of `channel` past `cursor`: after it, ascending,
+    /// or before it, descending (`back`).
+    fn read_batch(&self, channel: &str, cursor: i64, back: bool, n: usize) -> CellResult<Vec<ChannelRecord>> {
+        let q = if back {
+            "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq < ? ORDER BY seq DESC LIMIT ?"
+        } else {
+            "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq > ? ORDER BY seq LIMIT ?"
+        };
+        let rows: Vec<RecordRow> = self.typed(q, vec![channel.into(), SqlStorageValue::Integer(cursor), SqlStorageValue::Integer(n as i64)])?;
+        rows.into_iter().map(RecordRow::record).collect()
     }
 
     /// Waits for, then holds, one ledger id.

@@ -11,7 +11,8 @@
 <header>
   <h1>fragment admin</h1>
   <nav id="tabs">
-    <button data-tab="people" class="on">People</button>
+    <button data-tab="glance" class="on">Glance</button>
+    <button data-tab="people">People</button>
     <button data-tab="orgs">Orgs</button>
     <button data-tab="trials">Trials</button>
     <button data-tab="health">Health</button>
@@ -21,7 +22,16 @@
 </header>
 <p id="status" role="status"></p>
 <main>
-  <section id="people">
+  <section id="glance">
+    <div id="tiles"></div>
+    <p id="glance-logs"></p>
+    <h2 id="trouble-head" hidden>In trouble, the last 24 hours</h2>
+    <table id="trouble" hidden><thead><tr><th>Who</th><th>Computer</th><th>What</th><th>Lines</th></tr></thead><tbody id="trouble-rows"></tbody></table>
+    <h2>New people</h2>
+    <table><thead><tr><th>Email</th><th>Joined</th><th>Seat</th><th>First agent</th><th>Computer up</th></tr></thead><tbody id="new-rows"></tbody></table>
+    <p id="glance-at" class="quiet"></p>
+  </section>
+  <section id="people" hidden>
     <form id="search"><input name="q" placeholder="email starts with…" autocomplete="off"> <button>Search</button></form>
     <form id="comp"><input name="email" type="email" placeholder="email" required>
       <select name="kind"><option value="seat_always_on">always-on seat</option><option value="seat">seat that sleeps (comps only)</option></select>

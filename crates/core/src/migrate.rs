@@ -1,6 +1,6 @@
 //! Versioned schemas for the platform's own Durable Objects: `Fragment`'s
-//! supervisor, `Registry`, `Principal`, `Ledger`, `Computer` and
-//! `SearchIndex` (an app facet's SQLite is its author's). Each class declares its steps in
+//! supervisor, `Registry`, `Principal`, `Ledger`, `Computer`,
+//! `SearchIndex` and `Vault` (an app facet's SQLite is its author's). Each class declares its steps in
 //! order, one SQL file each under `crates/core/migrations/<class>/`. An
 //! object keeps the steps it took in its `_schema` table, one row each
 //! (the step's number, name and SHA-256, whether it ran or was adopted,
@@ -114,6 +114,9 @@ pub const FRAGMENT: Class = Class {
         step!("record_schedules", "fragment/0003_record_schedules.sql"),
         step!("search_forget", "fragment/0004_search_forget.sql"),
         step!("ended_search", "fragment/0005_ended_search.sql"),
+        step!("installed_forward_only", "fragment/0006_installed_forward_only.sql"),
+        step!("making", "fragment/0007_making.sql"),
+        step!("newest", "fragment/0008_newest.sql"),
     ],
     variants: &[Variant {
         name: "members",
@@ -135,6 +138,9 @@ pub const REGISTRY: Class = Class {
         step!("connection_accounts", "registry/0006_connection_accounts.sql"),
         step!("public_addresses", "registry/0007_public_addresses.sql"),
         step!("org_content", "registry/0008_org_content.sql"),
+        step!("key_sessions", "registry/0009_key_sessions.sql"),
+        step!("comp_until", "registry/0010_comp_until.sql"),
+        step!("connection_signin_access", "registry/0011_connection_signin_access.sql"),
     ],
     variants: &[],
     kept: &[],
@@ -149,14 +155,23 @@ pub const PRINCIPAL: Class = Class {
 
 pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
 
-pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql")], variants: &[], kept: &["wiped"] };
+pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql")], variants: &[], kept: &["wiped"] };
 
 /// A fragment life's search index: its end releases its storage whole
 /// (`deleteAll`), so it keeps nothing.
-pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("baseline", "searchindex/0001_baseline.sql")], variants: &[], kept: &[] };
+pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("baseline", "searchindex/0001_baseline.sql"), step!("fences", "searchindex/0002_fences.sql")], variants: &[], kept: &[] };
+
+/// A person's Vault (FIN-466): its secrets; a wipe empties it and keeps
+/// the row that says so.
+pub const VAULT: Class = Class { name: "Vault", steps: &[step!("baseline", "vault/0001_baseline.sql"), step!("claims", "vault/0002_claims.sql"), step!("receipts", "vault/0003_receipts.sql")], variants: &[], kept: &["wiped"] };
 
 /// Every platform class, as the lock lists them.
-pub const CLASSES: [&Class; 6] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX];
+/// The finite.computer move's one object (docs/migrations.md): removable
+/// with the move, by a `deleted_classes` tag (the debt ledger).
+pub const MIGRATIONS: Class = Class { name: "Migrations", steps: &[step!("baseline", "migrations/0001_baseline.sql"), step!("opened_manifest", "migrations/0002_opened_manifest.sql"), step!("routine_generation", "migrations/0003_routine_generation.sql"), step!("people_by_person", "migrations/0004_people_by_person.sql"), step!("people_comped", "migrations/0005_people_comped.sql"), step!("withdrawn_why", "migrations/0006_withdrawn_why.sql"), step!("waiting_forward_only", "migrations/0007_waiting_forward_only.sql")], variants: &[], kept: &[] };
+
+/// Every platform class, as the lock lists them.
+pub const CLASSES: [&Class; 8] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX, &VAULT, &MIGRATIONS];
 
 /// What the runner needs of an object's SQLite: statements run, and rows
 /// read, each an object of its columns. The cell's is the object's
@@ -878,7 +893,7 @@ mod tests {
         assert_eq!(commits, ["035ee8e8", "33e323cd", "76adcb35", "7b84dcd3", "e62d9991"]);
         for commit in &commits {
             // a class made since versions has no object from before them
-            for class in CLASSES.into_iter().filter(|c| c.name != SEARCH_INDEX.name) {
+            for class in CLASSES.into_iter().filter(|c| c.name != SEARCH_INDEX.name && c.name != VAULT.name && c.name != MIGRATIONS.name) {
                 let ddl = std::fs::read_to_string(root.join(commit).join(format!("{}.sql", class.name.to_ascii_lowercase()))).expect("a class's schema");
                 let db = Lite::new();
                 db.exec(&ddl).expect("as it ran");

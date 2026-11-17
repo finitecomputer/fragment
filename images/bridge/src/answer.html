@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>An answer for this computer</title>
+</head>
+<body>
+<script>
+  // An answer for the computer (images/bridge/src/answer.rs): framed, unseen,
+  // by the platform's page alone (every answer of this origin carries
+  // frame-ancestors <platform>), which hands it the answer its chat's card
+  // took (`card-to-computer`), for this page's own agent. Posted to this
+  // computer, by a relative URL (it is served under the port's path), and
+  // what came of it told back (`computer-answered`). The value is never
+  // shown, kept or logged here.
+  (() => {
+    const agent = new URLSearchParams(location.search).get("agent") || "";
+    addEventListener("message", async (e) => {
+      const m = e.data;
+      if (e.source !== window.parent || !m || m.fragment !== "card-to-computer" || m.agent !== agent || typeof m.nonce !== "string") return;
+      const tell = (ok, error) => window.parent.postMessage({ fragment: "computer-answered", agent, nonce: m.nonce, ok, ...(error ? { error } : {}) }, e.origin);
+      try {
+        const r = await fetch(`../answer?agent=${encodeURIComponent(agent)}`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ turn: m.turn, prompt: m.prompt, option: m.option, value: m.value }),
+        });
+        if (r.ok) return tell(true);
+        const said = await r.json().catch(() => ({}));
+        tell(false, typeof said.message === "string" ? said.message : "Your computer did not take it: try again.");
+      } catch {
+        tell(false, "Your computer could not be reached: try again.");
+      }
+    });
+    // ready for it: the platform's page hands it nothing before
+    window.parent.postMessage({ fragment: "computer-ready", agent }, "*");
+  })();
+</script>
+</body>
+</html>

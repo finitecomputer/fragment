@@ -15,6 +15,8 @@
 //!   signs), and only the link's door key speaks for them (Paul's design of
 //!   2026-10-23).
 //! - `audio`: how long a voice reply plays, from its file.
+//! - `stage`: an owner's SimpleX conversation with their old
+//!   finite.computer agent, carried from its move's stage (FIN-463).
 //! - `socks`: the cores' way out: SimpleX's file servers through the
 //!   platform's XFTP relay, everything else straight out of the computer.
 //!
@@ -27,6 +29,7 @@ pub mod http;
 pub mod link;
 pub mod run;
 pub mod socks;
+pub mod stage;
 pub mod wire;
 
 /// The core's release, pinned: the latest stable on 2026-10-22, the one the

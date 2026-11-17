@@ -50,6 +50,7 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let missing = get(&operator, "/people/npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq")?;
     s.ok("no one by that npub is 404", missing.status == 404, &missing);
+    glance(s, api, &operator, &ivy, &ivy_id, &ivy_email)?;
 
     // ---- a person's computer pinned by an operator (docs/computers.md,
     // "Preview and production"): onto another image, and back
@@ -232,10 +233,55 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     let session = api.sign_in("operator@e2e.test")?;
     let _ = api.approve(&session, &s.operator);
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    // the glance first, its default tab: a person whose computer the logs
+    // say is awake and won't wake (lines planted in the fake, a local run's)
+    let glancer = api.person()?;
+    let glancer_id = api.identity(&glancer)?;
+    let glancer_email = Api::email_of(&glancer);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    if !s.hosted() {
+        let computer = fragment_core::computer::default_computer_of(&glancer_id);
+        let script = crate::OBSERVABILITY_SCRIPT;
+        s.observability.log(now - 30_000, json!({ "$workers.scriptName": script, "computer": computer, "phase": { "phase": "awake" } }));
+        s.observability.log(now - 20_000, json!({ "$workers.scriptName": script, "computer": computer, "phase": { "phase": "failed" } }));
+    }
     let page = b.open(&format!("{}/admin", api.base))?;
-    let listed = b.until(&page, "document.querySelectorAll('#people-rows tr').length > 0 && /people/.test(document.getElementById('status').textContent)", wait);
+    let tiles = b.until(&page, "document.querySelectorAll('#tiles .tile').length === 5 && /Updated/.test(document.getElementById('glance-at').textContent)", wait);
+    let shown = b.eval(&page, "[...document.querySelectorAll('#tiles .tile')].map(t => t.querySelector('.label').textContent + ': ' + t.querySelector('.big').textContent)")?;
     let me = b.eval(&page, "document.getElementById('me').textContent")?;
-    s.ok("an operator's session opens the admin's page: it lists people, and says who they are", listed && me == "operator@e2e.test", &me);
+    s.ok("an operator's session opens the admin's page on its glance: five tiles, and says who they are", tiles && me == "operator@e2e.test", &shown);
+    // the glance as an operator sees it, for review
+    let _ = b.screenshot(&page, &s.dir("admin-page").join("glance.png"));
+    if !s.hosted() {
+        let day = b.eval(&page, "(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); })()")?;
+        let read = api.signed(&s.operator, "GET", &format!("/api/admin/glance?dayStart={day}"), None)?;
+        let awake = read.body["logs"]["computersAwakeNow"].as_u64().unwrap_or(0);
+        let rows = b.until(
+            &page,
+            &format!(
+                "[...document.querySelectorAll('#trouble-rows tr')].some(r => r.textContent.includes({glancer_email:?}) && r.textContent.includes(\"won't wake\")) && [...document.querySelectorAll('#new-rows tr')].some(r => r.textContent.includes({glancer_email:?}) && r.textContent.endsWith('yes'))"
+            ),
+            wait,
+        );
+        let tile = |b: &mut crate::browser::Browser| b.eval(&page, "[...document.querySelectorAll('#tiles .tile')].find(t => t.querySelector('.label').textContent === 'Computers awake now').querySelector('.big').textContent");
+        let before = tile(&mut b)?;
+        s.ok(
+            "its tiles are the glance's numbers, its trouble names the person whose computer won't wake, and its new people say whose computer came up",
+            rows && before == json!(awake.to_string()),
+            json!({ "page": shown, "glance": read.body["logs"] }),
+        );
+        // no cache: a computer awake since, and the glance read again
+        s.observability.log(now, json!({ "$workers.scriptName": crate::OBSERVABILITY_SCRIPT, "computer": "computer:000000000000000000000a11", "phase": { "phase": "awake" } }));
+        b.click(&page, "#tabs button[data-tab=glance]")?;
+        let again = b.until(&page, &format!("[...document.querySelectorAll('#tiles .tile')].find(t => t.querySelector('.label').textContent === 'Computers awake now')?.querySelector('.big').textContent === '{}'", awake + 1), wait);
+        s.ok("read again, the glance asks afresh: a computer awake since counts", again, tile(&mut b)?);
+        b.eval(&page, &format!("[...document.querySelectorAll('#trouble-rows tr')].find(r => r.textContent.includes({glancer_email:?})).click()"))?;
+        let opened = b.until(&page, &format!("!document.getElementById('people').hidden && !document.getElementById('person').hidden && document.getElementById('person').textContent.includes({glancer_email:?})"), wait);
+        s.ok("a person in trouble opens their page", opened, b.eval(&page, "document.getElementById('person').textContent")?);
+    }
+    b.click(&page, "#tabs button[data-tab=people]")?;
+    let listed = b.until(&page, "document.querySelectorAll('#people-rows tr').length > 0 && /people/.test(document.getElementById('status').textContent)", wait);
+    s.ok("its People tab lists people", listed, b.eval(&page, "document.getElementById('status').textContent")?);
 
     let email = format!("admin-page-{}@e2e.test", &Keys::generate().pubkey_hex()[..10]);
     b.eval(&page, &format!("(() => {{ const f = document.getElementById('comp'); f.email.value = {email:?}; f.kind.value = 'seat_always_on'; f.requestSubmit(); }})()"))?;
@@ -280,5 +326,102 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     let theirs = b.open(&format!("{}/admin", api.base))?;
     let missing = b.until(&theirs, "document.readyState === 'complete' && !document.getElementById('status') && document.body.innerText.includes('no route /admin')", wait);
     s.ok("to anyone else it is the 404 of a path that is not there: nothing of the page", missing, b.eval(&theirs, "document.body.innerText")?);
+    Ok(())
+}
+
+/// The operators' glance (`GET /api/admin/glance`): the registry's people
+/// and the logs' numbers, read afresh each time, from lines planted in the
+/// Workers Observability fake (a local run's); an operator's alone. Valid,
+/// invalid (another caller, a day that is not today), and the logs' read
+/// failing (the registry's numbers stay). Hosted, it answers its shape.
+fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, ivy_email: &str) -> Result<()> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    let day = now - 3_600_000;
+    let ask = |keys: &Keys, day: i64| api.signed(keys, "GET", &format!("/api/admin/glance?dayStart={day}"), None);
+    if s.hosted() {
+        let r = ask(operator, day)?;
+        s.ok("the glance answers an operator: the registry's people, and the logs' numbers or why not", r.status == 200 && r.body["signups"]["total"].as_u64().is_some() && r.body["logs"]["state"].is_string(), &r);
+        return Ok(());
+    }
+    let theirs = fragment_core::computer::default_computer_of(ivy_id);
+    let stranger = "computer:00000000000000000000beef".to_string();
+    // the node's Worker's lines, and another deployment's in the same
+    // account (a branch's), which name the same person's computer (a hash
+    // of them) and are never counted
+    let of = |script: &str, mut line: Value| {
+        line["$workers.scriptName"] = json!(script);
+        line
+    };
+    let (ours, foreign) = (crate::OBSERVABILITY_SCRIPT, "fragment-elsewhere");
+    s.observability.log(now - 60_000, of(ours, json!({ "computer": theirs, "event": { "event": "alarm" }, "phase": { "phase": "awake" } })));
+    s.observability.log(now - 2 * 3_600_000, of(ours, json!({ "computer": stranger, "phase": { "phase": "awake" } })));
+    for (id, ago) in [("frag-a", 1_000), ("frag-a", 2_000), ("frag-b", 3_000)] {
+        s.observability.log(now - ago, of(ours, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": id })));
+    }
+    for ago in [10_000, 20_000] {
+        s.observability.log(now - ago, of(ours, json!({ "computer": theirs, "phase": { "phase": "failed", "why": "its container kept stopping" } })));
+    }
+    s.observability.log(now - 30_000, of(ours, json!({ "computer": stranger, "disk": { "total": 20_000_000_000_u64, "free": 1_000_000_000_u64 }, "generation": 3 })));
+    s.observability.log(now - 5_000, of(foreign, json!({ "computer": "computer:0000000000000000000f0e1d", "phase": { "phase": "awake" } })));
+    s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "phase": { "phase": "failed" } })));
+    s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "event": { "event": "save_failed" } })));
+    s.observability.log(now - 5_000, of(foreign, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "frag-elsewhere" })));
+    let r = ask(operator, day)?;
+    let b = &r.body;
+    let listed = b["newPeople"].as_array().into_iter().flatten().find(|p| p["npub"] == ivy_id).cloned().unwrap_or(Value::Null);
+    s.ok(
+        "an operator's glance: signups in the last hour, today and the week, and the newest people, each with their email, seat, and computer, which the logs say came up",
+        r.status == 200
+            && b["signups"]["hour"].as_u64() >= Some(1)
+            && b["signups"]["today"].as_u64() >= Some(1)
+            && b["signups"]["total"].as_u64() >= b["signups"]["week"].as_u64()
+            && listed["email"] == ivy_email
+            && listed["seat"]["comped"] == true
+            && listed["computer"] == theirs.as_str()
+            && listed["computerUp"] == true,
+        b,
+    );
+    let read = &b["logs"];
+    let trouble = read["trouble"].as_array().cloned().unwrap_or_default();
+    s.ok(
+        "its logs' numbers, of this deployment's Worker's lines alone: computers awake now (a line in ten minutes), today and this week, fragments that ran, and computers in trouble, each named with its person when it is one's (another deployment's lines about the same person's computer count for nothing)",
+        read["state"] == "read"
+            && read["computersAwakeNow"] == 1
+            && read["computersAwakeToday"] == 1
+            && read["computersAwakeWeek"] == 2
+            && read["fragmentsAwakeNow"] == 2
+            && trouble.first() == Some(&json!({ "computer": theirs, "kind": "wont_wake", "lines": 2, "npub": ivy_id, "email": ivy_email }))
+            && trouble.get(1) == Some(&json!({ "computer": stranger, "kind": "disk_filling", "lines": 1, "npub": null, "email": null }))
+            && trouble.len() == 2,
+        read,
+    );
+    let asked = s.observability.asked();
+    s.ok(
+        "each read asks afresh: one query a question, with the account's read-only key, each of this deployment's Worker",
+        asked.len() == fragment_core::glance::Question::ALL.len() && asked.iter().all(|q| q["queryId"] == fragment_core::glance::QUERY_ID && q["parameters"]["filters"][0]["value"] == crate::OBSERVABILITY_SCRIPT),
+        json!(asked.len()),
+    );
+    let person = ask(ivy, day)?;
+    let tomorrow = ask(operator, now + 3_600_000)?;
+    let stale = ask(operator, now - 2 * 24 * 3_600_000)?;
+    // the integers' ends: refused, never an overflow past the bound
+    let least = ask(operator, i64::MIN)?;
+    let most = ask(operator, i64::MAX)?;
+    s.ok(
+        "anyone else's glance is refused (403), and a day that is not today is invalid (400), the integers' ends too",
+        person.status == 403 && [&tomorrow, &stale, &least, &most].iter().all(|r| r.status == 400),
+        json!([person.status, tomorrow.status, stale.status, least.status, most.status]),
+    );
+    s.observability.fail_next(403, "Authentication error");
+    let failed = ask(operator, day)?;
+    s.ok(
+        "when the logs refuse their key, the glance says why and keeps the registry's numbers; whether a computer came up is unknown",
+        failed.status == 200
+            && failed.body["logs"]["state"] == "failed"
+            && failed.body["logs"]["why"].as_str().is_some_and(|w| w.contains("Authentication error"))
+            && failed.body["signups"] == b["signups"]
+            && failed.body["newPeople"].as_array().into_iter().flatten().all(|p| p["computerUp"].is_null()),
+        &failed,
+    );
     Ok(())
 }

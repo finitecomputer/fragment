@@ -7,10 +7,20 @@
 // decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import { connect } from "cloudflare:sockets";
-import { DirectoryBackup, SandboxBackupError } from "@cloudflare/sandbox";
+import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError } from "@cloudflare/sandbox";
+import { readAgain } from "./backup-reads.mjs";
 import * as rs from "./build/index.js";
 
-export { DirectoryBackupGateway } from "@cloudflare/sandbox";
+// The Sandbox SDK's gateway between a computer's container and its saves in
+// R2, whose ranged reads (a restore's) that storage failed are asked again
+// (backup-reads.mjs); every other request is the SDK's own, once.
+export class DirectoryBackupGateway extends SandboxGateway {
+  fetch(request) {
+    if (request.method !== "GET") return super.fetch(request);
+    const again = (tried, status) => console.log(JSON.stringify({ backup: "read again", status, tried, key: this.ctx.props?.key }));
+    return readAgain(() => super.fetch(request), again);
+  }
+}
 
 export default rs.default;
 
@@ -54,6 +64,26 @@ export class SearchIndex extends DurableObject {
   alarm(info) { return this.rs.alarm(info); }
 }
 
+// A person's Vault (vault.rs): their secrets, sealed; the router and the
+// platform's own code call it.
+export class Vault extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.rs = new rs.VaultCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+}
+
+// The finite.computer move (migrations.rs): one object, the router's alone.
+export class Migrations extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.rs = new rs.MigrationsCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
+}
+
 export class Registry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -88,6 +118,42 @@ export class Files extends WorkerEntrypoint {
   read(path) { return this.#answer("read", { path: String(path) }); }
   list(prefix = "") { return this.#answer("list", { prefix: String(prefix) }); }
   stat(path) { return this.#answer("stat", { path: String(path) }); }
+}
+
+// The app's own search index (searchable.rs, "A fragment's search"), handed
+// to its facet as `env.SEARCH` bound to one fragment by `props`, as FILES
+// is: the app writes and asks its own fragment's index, never another's. It
+// answers `{answer}`, or a refusal as a plain `{error}`: Workers RPC keeps
+// none of a thrown Error's own fields, so platform.mjs's `searchIndex`
+// throws it on the app's side, its fields whole.
+export class Search extends WorkerEntrypoint {
+  async #answer(op, body) {
+    const { fragment } = this.ctx.props;
+    const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `cap/search/${op}`, JSON.stringify(body)));
+    const answer = await resp.json().catch(() => ({}));
+    if (resp.ok) return { answer };
+    return {
+      error: {
+        message: answer.message || `search.${op} answered ${resp.status}`,
+        code: answer.error ?? null,
+        status: resp.status,
+        // a write's: whether it emptied an index of another embeddings space
+        // first, the newer fence that refused it, and the wait a 429 asks for
+        cleared: answer.cleared === true,
+        fence: answer.fence ?? null,
+        retry_after_ms: answer.retry_after_ms ?? null,
+      },
+    };
+  }
+
+  upsert(source) { return this.#answer("upsert", source); }
+  // `{source, fence?}`, or a source's name alone
+  delete(d) {
+    const asked = typeof d === "string" ? { source: d } : { source: String(d?.source), fence: d?.fence };
+    return this.#answer("delete", asked);
+  }
+  query(question) { return this.#answer("query", question); }
+  status() { return this.#answer("status", {}); }
 }
 
 // One run of an operation (docs/api.md, Jobs and triggers). Each round asks
@@ -127,7 +193,11 @@ export class Job extends WorkflowEntrypoint {
         }
         try {
           // `try`: this step's try, from 1 (a text step's timing says it)
-          const done = await step.do(`${kind} ${i}`, retrying, (ctx) => post("effect", { index: i, kind, args, try: ctx?.attempt }));
+          // a video's call waits while its model makes it (ai.rs `step_video`):
+          // its try outlasts a making (Workflows advise 30 minutes at most), so
+          // it is not tried again meanwhile
+          const tries = kind === "ai.video" ? { ...retrying, timeout: "15 minutes" } : retrying;
+          const done = await step.do(`${kind} ${i}`, tries, (ctx) => post("effect", { index: i, kind, args, try: ctx?.attempt }));
           if (done.stop) return done;
         } catch (e) {
           failed = { index: i, kind, error: String((e && e.message) || e) };
@@ -254,7 +324,10 @@ class ContainerHost {
   // any reason, is reported as `computer/exited` for this generation.
   start(generation, image, snapshot, env, instance) {
     this.#generation = generation;
-    const opts = { env, enableInternet: true };
+    // `FRAGMENT_COMPUTER_INTERNET=off` (the e2e's fleet): a run must not
+    // depend on public DNS, which local workerd's sidecar asks first for
+    // the intercepted hosts while the internet is on (devstack::Fleet)
+    const opts = { env, enableInternet: this.#env.FRAGMENT_COMPUTER_INTERNET !== "off" };
     if (instance) opts.instance = instance;
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];

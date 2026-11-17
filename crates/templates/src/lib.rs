@@ -94,104 +94,112 @@ pub const RELEASE_BLANK: &str = "{{release}}";
 #[cfg(feature = "platform")]
 pub const DEPLOYED_BLANK: &str = "{{deployed}}";
 
-/// The shell's page (`index.html`'s text) as `release` answers it, deployed
-/// at `deployed`: each blank filled once. `release` is a release's id
-/// (`fragment_core::release::valid`), which an attribute holds as it is,
-/// as it does digits.
+/// Its third blank (`<meta name="fragment-origin">`): a fragment's own
+/// origin with `ORIGIN_NAME` where its name goes (the cell's
+/// `Config::origin`), so the shell knows a chat's origin with no request:
+/// its frame's policy names it before the frame navigates (shell.js).
 #[cfg(feature = "platform")]
-pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
+pub const ORIGIN_BLANK: &str = "{{fragment-origin}}";
+
+/// Where a fragment's name goes in the origin `ORIGIN_BLANK` is filled with.
+#[cfg(feature = "platform")]
+pub const ORIGIN_NAME: &str = "{name}";
+
+/// Whether `origin` is one `ORIGIN_BLANK` may hold: a scheme, a host and a
+/// port at most, the name's place once, and nothing an attribute ends at.
+#[cfg(feature = "platform")]
+fn origin_fits(origin: &str) -> bool {
+    origin.matches(ORIGIN_NAME).count() == 1
+        && (origin.starts_with("https://") || origin.starts_with("http://"))
+        && origin.bytes().all(|b| b.is_ascii_alphanumeric() || b"{}:/.-".contains(&b))
+}
+
+/// The shell's page (`index.html`'s text) as `release` answers it, deployed
+/// at `deployed`, its fragments at `origin` (`ORIGIN_NAME` in it): each
+/// blank filled once. `release` is a release's id
+/// (`fragment_core::release::valid`), which an attribute holds as it is,
+/// as it does digits and an origin.
+#[cfg(feature = "platform")]
+pub fn shell_page(text: &str, release: &str, deployed: Option<u64>, origin: &str) -> String {
     assert!(
-        fragment_core::release::valid(release) && text.matches(RELEASE_BLANK).count() == 1 && text.matches(DEPLOYED_BLANK).count() == 1,
+        fragment_core::release::valid(release) && [RELEASE_BLANK, DEPLOYED_BLANK, ORIGIN_BLANK].iter().all(|b| text.matches(b).count() == 1),
         "the shell's page has each of its blanks once, for a release's id"
     );
+    assert!(origin_fits(origin), "a fragment's origin, its name's place once: {origin:?}");
     let deployed = deployed.map(|d| d.to_string()).unwrap_or_default();
-    text.replacen(RELEASE_BLANK, release, 1).replacen(DEPLOYED_BLANK, &deployed, 1)
+    text.replacen(RELEASE_BLANK, release, 1).replacen(DEPLOYED_BLANK, &deployed, 1).replacen(ORIGIN_BLANK, origin, 1)
 }
 
 /// The shell's files it publishes at `/__shell/<name>` (cell/src/shell.rs),
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 47] = [
-    // the cell's server-rendered pages' base look (share.rs `sheet_html`),
-    // on the platform's origin and, as /__sheet.css, on a fragment's
-    ("sheet.css", "text/css; charset=utf-8"),
-    // the platform's pages' look and Funnel Sans (vendor/funnel-sans-OFL.txt),
-    // which the shell loads too: its type, and its first run's card; their
-    // card's pointer-following rim
-    ("platform-pages.css", "text/css; charset=utf-8"),
-    ("platform-pages.js", "text/javascript; charset=utf-8"),
-    ("platform-landscape.jpg", "image/jpeg"),
-    ("platform-landscape-dark.jpg", "image/jpeg"),
-    ("funnel-sans-400.ttf", "font/ttf"),
-    ("funnel-sans-500.ttf", "font/ttf"),
-    ("funnel-sans-600.ttf", "font/ttf"),
-    ("funnel-sans-700.ttf", "font/ttf"),
-    ("shell.js", "text/javascript; charset=utf-8"),
+const SHELL_PUBLISHED: &[(&str, &str)] = &[
+    // the operators' admin page (`/admin`)
+    ("admin.css", "text/css; charset=utf-8"),
+    ("admin.js", "text/javascript; charset=utf-8"),
+    // every agent's image, tinted to its colour (shell.css; CREDITS.md)
+    ("agent.png", "image/png"),
     // a chat's alerts: the service worker the shell registers for each
     // chat whose alerts are on (shell.js, "a chat's alerts")
     ("alerts-sw.js", "text/javascript; charset=utf-8"),
-    ("shell.css", "text/css; charset=utf-8"),
-    ("layout.js", "text/javascript; charset=utf-8"),
-    ("viewer.js", "text/javascript; charset=utf-8"),
-    ("agent-identity.js", "text/javascript; charset=utf-8"),
-    // an agent's colour: the agent template's, linked (templates/agent/site)
-    ("agent-color.js", "text/javascript; charset=utf-8"),
-    // its icons (Lucide's among them: vendor/lucide-LICENSE) and an app's
-    ("icons.js", "text/javascript; charset=utf-8"),
-    // an app's own icon in the dock, and the sheet that makes one (docs/api.md, Icons)
-    ("app-icon.js", "text/javascript; charset=utf-8"),
-    // the Apps page: each app's dock, card, icon and who has access
-    ("apps-page.js", "text/javascript; charset=utf-8"),
-    ("activity.js", "text/javascript; charset=utf-8"),
-    ("fragment-title.js", "text/javascript; charset=utf-8"),
-    ("tooltips.js", "text/javascript; charset=utf-8"),
-    // Settings' Billing: a seat, credit, an org (docs/billing.md)
-    ("billing.js", "text/javascript; charset=utf-8"),
-    // the launcher: ⌘K, to start a chat or find one again
-    ("settings.js", "text/javascript; charset=utf-8"),
-    ("chat-list.js", "text/javascript; charset=utf-8"),
-    // the Session Archive under the chats (templates/sessions/README.md)
-    ("session-archive.js", "text/javascript; charset=utf-8"),
-    // delegation threads: a line each over the chat an agent asked from
-    ("threads.js", "text/javascript; charset=utf-8"),
-    ("session-refresh.js", "text/javascript; charset=utf-8"),
-    ("onboarding.js", "text/javascript; charset=utf-8"),
-    ("computer.js", "text/javascript; charset=utf-8"),
-    ("agent-settings.js", "text/javascript; charset=utf-8"),
-    ("connections.js", "text/javascript; charset=utf-8"),
-    ("exports.js", "text/javascript; charset=utf-8"),
-    ("launcher.js", "text/javascript; charset=utf-8"),
-    ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
-    ("manifest.webmanifest", "application/manifest+json"),
-    // the shell's favicon (a tab's, and the sign-in page's logo, which WorkOS takes from
-    // it): Finite's mark full-bleed, black, or white in a dark scheme
-    ("icon.svg", "image/svg+xml"),
     // the app's icon (the manifest's; iOS's home screen takes only a PNG of it): the mark,
     // white, on a dark square, inside a maskable icon's safe zone
     ("app-icon.svg", "image/svg+xml"),
     ("apple-touch-icon.png", "image/png"),
     // Finite's logo, above the splash's and the welcome's card (CREDITS.md)
     ("finite-logo.svg", "image/svg+xml"),
-    // the desktop's and the launcher's light and dark landscapes (cell/shell/CREDITS.md)
-    ("wallpaper.jpg", "image/jpeg"),
-    ("wallpaper-dark.jpg", "image/jpeg"),
-    // every agent's image, tinted to its colour (shell.css; CREDITS.md)
-    ("agent.png", "image/png"),
-    // the operators' admin page (`/admin`)
-    ("admin.js", "text/javascript; charset=utf-8"),
-    ("admin.css", "text/css; charset=utf-8"),
+    // Funnel Sans (vendor/funnel-sans-OFL.txt): the platform's pages' type,
+    // which the shell loads too
+    ("funnel-sans-400.ttf", "font/ttf"),
+    ("funnel-sans-500.ttf", "font/ttf"),
+    ("funnel-sans-600.ttf", "font/ttf"),
+    ("funnel-sans-700.ttf", "font/ttf"),
+    // the shell's favicon (a tab's, and the sign-in page's logo, which WorkOS takes from
+    // it): Finite's mark full-bleed, black, or white in a dark scheme
+    ("icon.svg", "image/svg+xml"),
     // the look of Finite's about page, privacy policy and terms (`/about`,
-    // `/privacy`, `/terms`): a sheet of paper, its edges bowed by this mask
+    // `/privacy`, `/terms`): a sheet of paper, its edges bowed by paper-edge.svg
     ("legal.css", "text/css; charset=utf-8"),
+    ("manifest.webmanifest", "application/manifest+json"),
     ("paper-edge.svg", "image/svg+xml"),
+    // the platform's pages' look: their first run's card, and its
+    // pointer-following rim
+    ("platform-landscape-dark.jpg", "image/jpeg"),
+    ("platform-landscape.jpg", "image/jpeg"),
+    ("platform-pages.css", "text/css; charset=utf-8"),
+    ("platform-pages.js", "text/javascript; charset=utf-8"),
+    // the cell's server-rendered pages' base look (share.rs `sheet_html`),
+    // on the platform's origin and, as /__sheet.css, on a fragment's
+    ("sheet.css", "text/css; charset=utf-8"),
+    // the desktop's and the launcher's light and dark landscapes (cell/shell/CREDITS.md)
+    ("wallpaper-dark.jpg", "image/jpeg"),
+    ("wallpaper.jpg", "image/jpeg"),
 ];
 
-/// A file the shell publishes, by its name, and its content type.
+/// A file the shell publishes, by its name, and its content type: one it
+/// holds as written (`SHELL_PUBLISHED`), or one it holds at a hashed name
+/// (fragment_core::site::hashed), which only its page's build makes
+/// (bundle.rs; a test): its scripts, their maps and its stylesheets.
 #[cfg(feature = "platform")]
 pub fn shell_published(name: &str) -> Option<(&'static File, &'static str)> {
+    if fragment_core::site::hashed(name) {
+        let content_type = match name.rsplit('.').next()? {
+            "js" => "text/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "map" => "application/json",
+            _ => return None,
+        };
+        return Some((shell(name)?, content_type));
+    }
     let (_, content_type) = SHELL_PUBLISHED.iter().find(|(n, _)| *n == name)?;
     Some((shell(name).expect("every file the shell publishes is indexed (a test)"), content_type))
+}
+
+/// Whether `path` of `at` (`shell`, or a template) is a file a page's build
+/// made or named anew, not as the repo holds it.
+pub fn built(at: &str, path: &str) -> bool {
+    BUILT.iter().any(|&(a, p)| a == at && p == path)
 }
 
 #[cfg(feature = "platform")]
@@ -202,7 +210,7 @@ pub mod blessed;
 #[cfg(feature = "platform")]
 pub fn release_files() -> Vec<&'static File> {
     let templates = blessed::BLESSED.iter().filter_map(|n| blessed::template(n)).chain(CATALOG);
-    let all = templates.flat_map(|t| t.files.iter()).chain(SHELL).chain(BROWSER.iter().copied()).chain([&SKILL_MD, &GUIDE_MD]);
+    let all = templates.flat_map(|t| t.files.iter()).chain(SHELL).chain(BROWSER.iter().copied()).chain([&SKILL_MD, &GUIDE_MD, &EXPORT_README]);
     let mut seen = std::collections::BTreeSet::new();
     all.filter(|f| seen.insert(f.sha256)).collect()
 }
@@ -264,6 +272,15 @@ pub(crate) mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
+    /// A built file's bytes: embedded, or, without `embed`, none to read
+    /// (the build's directory is its own): its index entry's own.
+    pub(crate) fn built_bytes(f: &File) -> Vec<u8> {
+        #[cfg(feature = "embed")]
+        return f.bytes.to_vec();
+        #[cfg(not(feature = "embed"))]
+        panic!("{}: a built file's bytes are embedded alone", f.path)
+    }
+
     /// A template's file's bytes, as the repo holds them.
     pub(crate) fn bytes_of(t: &Template, f: &File) -> Vec<u8> {
         std::fs::read(repo().join("templates").join(t.name).join(f.path)).unwrap_or_else(|e| panic!("templates/{}/{}: {e}", t.name, f.path))
@@ -288,7 +305,7 @@ pub(crate) mod tests {
         for t in ALL {
             let mut release = Sha256::new();
             for f in t.files {
-                let bytes = bytes_of(t, f);
+                let bytes = if built(t.name, f.path) { built_bytes(f) } else { bytes_of(t, f) };
                 check(&format!("templates/{}/{}", t.name, f.path), f, &bytes);
                 release.update(f.path.as_bytes());
                 release.update([0]);
@@ -302,16 +319,21 @@ pub(crate) mod tests {
             // the cell commits each at its path (publish.rs `stamped`)
             assert!(t.files.iter().all(|f| fragment_proto::RepoPath::parse(f.path).is_ok()), "{}'s files are at repo paths", t.name);
         }
-        for f in SHELL {
+        for f in SHELL.iter().filter(|f| !built("shell", f.path)) {
             check(&format!("cell/shell/{}", f.path), f, &std::fs::read(repo().join("cell/shell").join(f.path)).unwrap());
             assert_eq!(shell(f.path), Some(f));
         }
         assert!(SHELL.windows(2).all(|w| w[0].path < w[1].path), "the shell's files are in path order");
         check("cli/SKILL.md", &SKILL_MD, &std::fs::read(repo().join("cli/SKILL.md")).unwrap());
         check("cli/GUIDE.md", &GUIDE_MD, &std::fs::read(repo().join("cli/GUIDE.md")).unwrap());
-        assert!(shell("index.html").is_some() && shell("shell.js").is_some() && shell("nope.js").is_none());
+        check("crates/core/src/export_readme.md", &EXPORT_README, &std::fs::read(repo().join("crates/core/src/export_readme.md")).unwrap());
+        assert!(shell("index.html").is_some() && shell("sheet.css").is_some() && shell("nope.js").is_none());
         let count = |dir: &str| walkdir(&repo().join(dir));
-        assert_eq!(SHELL.len(), count("cell/shell"), "every file of the shell is indexed");
+        // its built files are named anew, its page in place of its own,
+        // and the sources its bundle holds are not
+        let made = BUILT.iter().filter(|(at, p)| *at == "shell" && *p != "index.html").count();
+        assert!(SHELL_BUNDLED.contains(&"shell.js") && SHELL_BUNDLED.iter().all(|f| shell(f).is_none()), "{SHELL_BUNDLED:?}");
+        assert_eq!(SHELL.len(), count("cell/shell") + made - SHELL_BUNDLED.len(), "every file of the shell is indexed");
     }
 
     /// Goal: the agent docs name no host of their own: a deployment's
@@ -343,13 +365,24 @@ pub(crate) mod tests {
     /// its pages, credits and licenses are indexed but not published.
     #[test]
     fn the_shell_publishes_its_files_alone() {
-        for (name, content_type) in SHELL_PUBLISHED {
+        for &(name, content_type) in SHELL_PUBLISHED {
             assert_eq!(shell_published(name), Some((shell(name).unwrap(), content_type)), "{name}");
         }
+        // sorted by name, each once, so two changes conflict only where they
+        // add beside each other (no count to bump)
+        assert!(SHELL_PUBLISHED.windows(2).all(|w| w[0].0 < w[1].0), "SHELL_PUBLISHED is sorted by name, each once");
         for name in ["index.html", "admin.html", "about.html", "privacy.html", "terms.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt", "vendor/funnel-sans-OFL.txt"] {
             assert!(shell(name).is_some() && shell_published(name).is_none(), "{name}");
         }
         assert!(shell_published("nope.js").is_none() && shell_published("../templates/chat/app.mjs").is_none());
+        // kept for good by the one rule, by name (fragment_core::site::hashed):
+        // each file its page's build named, and none it holds as written
+        // (its name names other bytes once a release changes it)
+        let made: Vec<&str> = BUILT.iter().filter(|(at, p)| *at == "shell" && *p != "index.html").map(|(_, p)| *p).collect();
+        assert!(made.len() >= 4 && made.iter().all(|n| fragment_core::site::hashed(n) && shell_published(n).is_some()), "{made:?}");
+        let hashed: Vec<&str> = SHELL.iter().map(|f| f.path).filter(|p| fragment_core::site::hashed(p)).collect();
+        assert_eq!(hashed, made, "a hashed name in the shell is its build's alone");
+        assert!(shell_published("index.html").is_none() && shell_published("shell.js").is_none());
     }
 
     /// Goal: the shell's page names the release that answered it, and when
@@ -363,19 +396,27 @@ pub(crate) mod tests {
         let page = std::fs::read_to_string(repo().join("cell/shell/index.html")).unwrap();
         assert!(page.contains(&format!(r#"<meta name="fragment-release" content="{RELEASE_BLANK}">"#)), "its meta holds the blank");
         assert!(page.contains(&format!(r#"<meta name="fragment-release-deployed" content="{DEPLOYED_BLANK}">"#)), "and its time's");
-        let filled = shell_page(&page, "bc8b87e7a1b2-dirty-1760918400", Some(1_792_615_843));
+        assert!(page.contains(&format!(r#"<meta name="fragment-origin" content="{ORIGIN_BLANK}">"#)), "and its fragments' origin's");
+        let origin = "https://{name}--preview.finite.build";
+        let filled = shell_page(&page, "bc8b87e7a1b2-dirty-1760918400", Some(1_792_615_843), origin);
         assert!(filled.contains(r#"<meta name="fragment-release" content="bc8b87e7a1b2-dirty-1760918400">"#) && !filled.contains(RELEASE_BLANK));
         assert!(filled.contains(r#"<meta name="fragment-release-deployed" content="1792615843">"#) && !filled.contains(DEPLOYED_BLANK));
-        let blanks = RELEASE_BLANK.len() + DEPLOYED_BLANK.len();
-        assert_eq!(filled.len(), page.len() - blanks + "bc8b87e7a1b2-dirty-1760918400".len() + "1792615843".len(), "nothing else changes");
-        assert!(shell_page(&page, "dev", None).contains(r#"<meta name="fragment-release-deployed" content="">"#), "no time: empty");
+        assert!(filled.contains(r#"<meta name="fragment-origin" content="https://{name}--preview.finite.build">"#) && !filled.contains(ORIGIN_BLANK));
+        let blanks = RELEASE_BLANK.len() + DEPLOYED_BLANK.len() + ORIGIN_BLANK.len();
+        assert_eq!(filled.len(), page.len() - blanks + "bc8b87e7a1b2-dirty-1760918400".len() + "1792615843".len() + origin.len(), "nothing else changes");
+        assert!(shell_page(&page, "dev", None, origin).contains(r#"<meta name="fragment-release-deployed" content="">"#), "no time: empty");
+        assert!(shell_page(&page, "dev", None, "http://{name}.localhost:8790").contains(r#"content="http://{name}.localhost:8790""#), "a dev node's, its port");
         for bad in [r#"x" onload="y"#, "a b", ""] {
-            assert!(std::panic::catch_unwind(|| shell_page(&page, bad, None)).is_err(), "{bad:?}");
+            assert!(std::panic::catch_unwind(|| shell_page(&page, bad, None, origin)).is_err(), "{bad:?}");
         }
-        assert!(std::panic::catch_unwind(|| shell_page("<html>", "dev", None)).is_err(), "no blank");
-        assert!(std::panic::catch_unwind(|| shell_page(RELEASE_BLANK, "dev", None)).is_err(), "no time's blank");
-        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{RELEASE_BLANK}{DEPLOYED_BLANK}"), "dev", None)).is_err(), "two");
-        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{DEPLOYED_BLANK}{DEPLOYED_BLANK}"), "dev", None)).is_err(), "two times");
+        for bad in ["https://preview.finite.build", r#"https://{name}" onload="y"#, "javascript:{name}", "https://{name}.{name}.x"] {
+            assert!(std::panic::catch_unwind(|| shell_page(&page, "dev", None, bad)).is_err(), "{bad:?}");
+        }
+        assert!(std::panic::catch_unwind(|| shell_page("<html>", "dev", None, origin)).is_err(), "no blank");
+        assert!(std::panic::catch_unwind(|| shell_page(RELEASE_BLANK, "dev", None, origin)).is_err(), "no time's blank");
+        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{RELEASE_BLANK}{DEPLOYED_BLANK}{ORIGIN_BLANK}"), "dev", None, origin)).is_err(), "two");
+        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{DEPLOYED_BLANK}{DEPLOYED_BLANK}{ORIGIN_BLANK}"), "dev", None, origin)).is_err(), "two times");
+        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{DEPLOYED_BLANK}"), "dev", None, origin)).is_err(), "no origin's blank");
     }
 
     fn walkdir(dir: &std::path::Path) -> usize {
@@ -387,7 +428,7 @@ pub(crate) mod tests {
     /// each, and nothing else. Method: the blessed and catalog templates',
     /// the shell's and the docs' files are all there; a file two hold (the
     /// agent's image) is one; a template the cell does not serve adds only
-    /// what another it serves holds too (notes' viewer is the brain's).
+    /// none of it (notes, the CLI's: a manifest and its notes).
     #[test]
     fn the_release_files_are_what_the_cell_reads() {
         let files = release_files();
@@ -397,8 +438,7 @@ pub(crate) mod tests {
             assert!(t.files.iter().all(|f| hashes.contains(f.sha256)), "{}", t.name);
         }
         assert!(SHELL.iter().chain([&SKILL_MD, &GUIDE_MD]).all(|f| hashes.contains(f.sha256)));
-        assert!(NOTES.files.iter().any(|f| f.path == "app.mjs" && !hashes.contains(f.sha256)), "notes is the CLI's");
-        assert!(NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")).all(|f| hashes.contains(f.sha256)), "its viewer is the brain's");
+        assert!(NOTES.files.iter().all(|f| !hashes.contains(f.sha256)), "notes is the CLI's alone");
         assert_eq!(CATALOG.map(|t| t.name), ["blank", "todo", "inbox", "calories", "doc"]);
     }
 
@@ -420,10 +460,31 @@ pub(crate) mod tests {
         let (guide, skill, api) = (flat("cli/GUIDE.md"), flat("cli/SKILL.md"), flat("docs/api.md"));
         assert!(guide.contains(&format!("one of {} is copied in", ticked(&catalog))), "cli/GUIDE.md names the catalog");
         assert!(guide.contains(&format!("a blessed one, {}, runs", ticked(&blessed::BLESSED))), "cli/GUIDE.md names the blessed templates");
-        assert!(skill.contains(&format!("one with no folder: {}", catalog.join("|"))), "cli/SKILL.md names the catalog");
+        assert!(skill.contains(&format!("# no folder: {}", catalog.join("|"))), "cli/SKILL.md names the catalog");
         assert!(api.contains(&format!("With `template` ({}; any other is 400", ticked(&catalog))), "docs/api.md names the catalog");
         assert!(api.contains(&format!("{} are blessed", ticked(&blessed::BLESSED))), "docs/api.md names the blessed templates");
         assert!(!catalog.contains(&"notes") && NOTES.name == "notes", "notes is the CLI's alone");
+    }
+
+    /// Goal: an agent asked for one of the templates `fragment new`
+    /// scaffolds finds it by name in the docs it reads, and learns whether
+    /// `fragment create` takes it. Method: every template that is not
+    /// blessed (the CLI's `ALL`) has its own line in cli/GUIDE.md's list,
+    /// is in cli/SKILL.md's, and those outside `CATALOG` are named as the
+    /// CLI's alone in the guide and in docs/api.md. Invalid: a template
+    /// added under templates/ and to no doc (board and slides were).
+    #[test]
+    fn the_docs_name_every_template_new_scaffolds() {
+        let ticked = |names: &[&str]| names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        let scaffolded: Vec<&str> = ALL.iter().map(|t| t.name).filter(|n| !blessed::BLESSED.contains(n)).collect();
+        let cli_only: Vec<&str> = scaffolded.iter().copied().filter(|n| !CATALOG.iter().any(|t| t.name == *n)).collect();
+        let (guide, skill, api) = (flat("cli/GUIDE.md"), flat("cli/SKILL.md"), flat("docs/api.md"));
+        for name in &scaffolded {
+            assert!(guide.contains(&format!("- `{name}`: ")), "cli/GUIDE.md's list after `fragment new --list` has no line for {name}");
+        }
+        assert!(skill.contains(&format!("templates: {}", scaffolded.join("|"))), "cli/SKILL.md names the templates {scaffolded:?}");
+        assert!(guide.contains(&format!("({} are `new`'s and `init`'s alone)", ticked(&cli_only))), "cli/GUIDE.md names {cli_only:?} as the CLI's alone");
+        assert!(api.contains(&format!("{} are the CLI's only", ticked(&cli_only))), "docs/api.md names {cli_only:?} as the CLI's only");
     }
 
     /// Goal: the chat template's README names every file of its page.
@@ -432,7 +493,7 @@ pub(crate) mod tests {
     fn the_chat_readme_names_its_pages_files() {
         let readme = flat("templates/chat/README.md");
         let chat = blessed::template("chat").expect("chat is blessed");
-        for f in chat.files.iter().filter_map(|f| f.path.strip_prefix("site/")) {
+        for f in chat.files.iter().filter(|f| !built("chat", f.path)).filter_map(|f| f.path.strip_prefix("site/")) {
             assert!(readme.contains(&format!("`{f}`")), "templates/chat/README.md does not name site/{f}");
         }
     }
@@ -543,5 +604,70 @@ pub(crate) mod tests {
             assert!(page.contains(wanted), "the page has {wanted}");
         }
         assert!(page.contains("<html lang=\"en\">"), "cursors are off by default (the e2e turns them on by this tag)");
+    }
+
+    /// Goal: the slides template holds its sources and no build, so the
+    /// CLI and every image that carries it pay for no deck's toolchain or
+    /// output (the e2e's prebuilt deck is crates/e2e/fixtures/slides-site,
+    /// checked beside it); its pins are exact and its lockfile is theirs;
+    /// one deck; its notes are the doc's. Invalid: a built file in the
+    /// template, a range pin, a lockfile for other pins.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn the_slides_template_is_its_sources() {
+        use fragment_proto::Role;
+        let file = |path: &str| SLIDES.file(path).unwrap_or_else(|| panic!("slides has {path}")).bytes;
+        let text = |path: &str| std::str::from_utf8(file(path)).expect("utf-8");
+        let site: Vec<&str> = SLIDES.files.iter().filter_map(|f| f.path.strip_prefix("site/")).collect();
+        assert_eq!(site, ["index.html"], "no build in the template: only the page that says to build it");
+        assert!(text("site/index.html").contains("node scripts/build.mjs") && !text("site/index.html").contains("<script"), "a page with no code, saying how to build");
+        let total: u64 = SLIDES.files.iter().map(|f| f.size).sum();
+        assert!(total < 256 * 1024, "the template's sources are small: {total} bytes");
+        let pkg: serde_json::Value = serde_json::from_str(text("package.json")).expect("package.json");
+        for (dep, pin) in pkg["dependencies"].as_object().expect("its dependencies") {
+            assert!(pin.as_str().is_some_and(|v| v.bytes().all(|b| b.is_ascii_digit() || b == b'.')), "{dep} is pinned to one version, not {pin}");
+        }
+        let lock: serde_json::Value = serde_json::from_str(text("package-lock.json")).expect("package-lock.json");
+        assert_eq!(lock["packages"][""]["dependencies"], pkg["dependencies"], "the lockfile is package.json's");
+        let decks: std::collections::BTreeSet<&str> = SLIDES.files.iter().filter_map(|f| f.path.strip_prefix("slides/")?.split_once('/').map(|(d, _)| d)).collect();
+        assert_eq!(decks.into_iter().collect::<Vec<_>>(), ["deck"], "one deck");
+        assert_eq!(file("applib/notes.mjs"), DOC.file("applib/notes.mjs").expect("doc's notes").bytes, "the notes are the doc's, copied whole");
+        assert!(text("app.mjs").contains("extends withNotes(DurableObject)"), "app.mjs takes the mixin");
+        let m = fragment_core::manifest::parse(file("fragment.json")).expect("slides' fragment.json");
+        assert_eq!(m.operations.keys().map(String::as_str).collect::<Vec<_>>(), ["annotate", "notes", "remove_note", "resolve"]);
+        let present = m.channels.get("present").expect("the present channel");
+        assert!(present.read == Role::Public && present.post == Some(Role::Editor), "editors and up present, whoever sees the deck follows");
+        let raw: serde_json::Value = serde_json::from_slice(file("fragment.json")).expect("json");
+        assert_eq!(raw["immutable"], serde_json::json!(["assets/**"]), "its hashed assets are kept for good, and nothing else");
+    }
+
+    /// Goal: the board template is plain files, no package and no build;
+    /// its three operations are described (each a tool of `fragment mcp`),
+    /// the manifest readable by whoever opens the board and changed by
+    /// editors; it holds no frame of its own (an agent writes them at
+    /// main), and a frame's page runs only in the board's sandboxed iframe.
+    /// Invalid: a dependency, a build output, a frame shipped, a sandbox
+    /// that lets a frame be this origin, a frame served as this origin's page.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn the_board_template_is_plain_files() {
+        use fragment_proto::Role;
+        let file = |path: &str| BOARD.file(path).unwrap_or_else(|| panic!("board has {path}")).bytes;
+        let text = |path: &str| std::str::from_utf8(file(path)).expect("utf-8");
+        let paths: Vec<&str> = BOARD.files.iter().map(|f| f.path).collect();
+        assert_eq!(paths, ["README.md", "app.mjs", "fragment.json", "site/board.css", "site/board.js", "site/index.html"], "plain files: no package, no build, no frame");
+        let m = fragment_core::manifest::parse(file("fragment.json")).expect("board's fragment.json");
+        assert_eq!(m.operations.keys().map(String::as_str).collect::<Vec<_>>(), ["frames", "put_frame", "remove_frame"]);
+        for (name, op) in &m.operations {
+            let want = if name == "frames" { Role::Public } else { Role::Editor };
+            assert_eq!(op.role, want, "{name}: the board's visibility decides who reads; editors change it");
+            assert!(op.description.as_deref().is_some_and(|d| d.len() > 40), "{name} is described");
+            assert!(text("README.md").contains(&format!("`{name}`")), "the README names {name}");
+        }
+        assert!(m.triggers.is_empty(), "put_frame is the one signal: a trigger pauses itself past its hourly runs");
+        let page = text("site/board.js");
+        assert!(page.contains("const SANDBOX = \"allow-scripts allow-forms\";"), "the board's iframes run scripts and forms");
+        assert!(page.contains("frame.srcdoc = body;") && !text("app.mjs").contains("text/html"), "a page is shown from its bytes, and no frame is served as a page of this origin");
+        assert_eq!(page.matches("setAttribute(\"sandbox\"").count(), 1, "every frame's iframe is made in one place, with SANDBOX (never allow-same-origin)");
     }
 }

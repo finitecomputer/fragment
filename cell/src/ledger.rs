@@ -39,11 +39,13 @@
 //! and kept nowhere, so nothing makes the ledger again.
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
-use fragment_core::ledger::gate::Gate;
+use fragment_core::ledger::gate::{Gate, Step};
 use fragment_core::ledger::org::Payer;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
 use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
+use fragment_proto::notice::NoticeList;
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -76,6 +78,11 @@ const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// or far ledger costs a call at most this, once a minute, and one that
 /// does not answer lets the call through (decision 62).
 const GATE_WAIT_MS: u64 = 1_500;
+/// How long an ask beside a model call waits on a ledger (`may_beside`):
+/// no call waits on it, so longer than `GATE_WAIT_MS`, a slow ledger's
+/// answer still kept for the next call; within the 30 s a Worker keeps a
+/// request's `waitUntil` work alive after its answer.
+const BESIDE_WAIT_MS: u64 = 20_000;
 
 thread_local! {
     /// What each person's ledger last answered this isolate's gate (`may`).
@@ -86,6 +93,14 @@ thread_local! {
 pub struct LedgerCell {
     state: State,
     raw: JsValue,
+    env: Env,
+    /// What its person was last told (`told`; `Ledger::told_key`), as kept
+    /// in its meta: read once an activation, so a call compares in memory.
+    told: RefCell<Option<String>>,
+    /// What the last transaction left the ledger saying (`settled`), for
+    /// `told`: kept beside, not in, what `transact` answers, so its
+    /// closures' types (one for each caller) carry none of it.
+    left: Rc<Cell<Option<String>>>,
     /// The isolate's settings (config.rs: built once per isolate).
     cfg: &'static Config,
     /// When this activation last set the alarm for (the ledger's clock):
@@ -110,7 +125,7 @@ impl DurableObject for LedgerCell {
         let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
         let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
+        LedgerCell { state, raw, env, told: RefCell::new(None), left: Rc::default(), cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -121,7 +136,7 @@ impl DurableObject for LedgerCell {
             return Ok(probed);
         }
         match self.route(req).await {
-            Ok(answer) => Response::from_json(&answer),
+            Ok(answer) => Ok(answer),
             Err(Failed::Refused(why)) => refusal(why, why.message()),
             Err(Failed::Saying(why, message)) => refusal(why, message),
             Err(Failed::Cell(e)) => e.response(),
@@ -148,6 +163,12 @@ impl DurableObject for LedgerCell {
 fn refusal(why: Refused, message: String) -> Result<Response> {
     let body = json!({ "error": why.code(), "message": message, "refused": why });
     Ok(Response::from_json(&body)?.with_status(why.code().status()))
+}
+
+/// A route's answer, as JSON, once (no `Value` between), through the one
+/// response builder every type shares (`json_answer`).
+fn reply<T: Serialize>(answer: T) -> Result<Response, Failed> {
+    Ok(crate::json_response::json_answer(&answer)?)
 }
 
 /// How a route failed: the ledger refused (typed), or the cell did.
@@ -207,13 +228,21 @@ pub struct FragmentOpen {
 #[serde(deny_unknown_fields)]
 pub struct Status {}
 
+/// What the ledger tells its person (FIN-458; `GET /api/notices`): their
+/// standing short of `Ok` for want of credit, in words (`Ledger::said`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoticesOf {}
+
 /// An org's ledger now.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrgStatus {}
 
 /// Fleets with levers only (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs):
-/// move this ledger's clock (`clock {offsetMs}`), run its sweep now
+/// move this ledger's clock (`clock {offsetMs}`: its now, and the times of
+/// the rows it hears, so a lane's spends and its cap's checks share a
+/// month), run its sweep now
 /// (`sweep`), list the references under a prefix (`entries {prefix}`),
 /// read what moved its balance (`totals`), read the price book its head
 /// holds as of its last call (`book`, answering `{book}`), or cap its paid
@@ -229,12 +258,17 @@ pub struct OrgStatus {}
 /// (`slow {ms}`, at most `TEST_SLOW_MAX_MS`, 0 to end it: a slow or far
 /// ledger, which no paid call waits on past the gate's wait), or make the
 /// gate of its isolate (and, through the router's lever, the router's)
-/// forget what it heard (`forget-gate`), or fail its next `times` grants
+/// forget what it heard (`forget-gate`), or say what the router's gate
+/// heard for this person within the window (`gate-heard`: answered by the
+/// router, the ledger not asked; locally one isolate runs them all), or
+/// fail its next `times` grants
 /// before it takes them (`fail-grants {times}`, at most
 /// `TEST_FAIL_GRANTS_MAX`, 0 to end it: a ledger not reached once the
 /// router recorded an org's grant, which its retry completes).
+/// Read as its fields (`TestHookFields`), not as serde's internally tagged
+/// reading, which buffers each to find its `op`: about 17 KB of the cell's Wasm.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "kebab-case")]
+#[serde(tag = "op", rename_all = "kebab-case", try_from = "TestHookFields")]
 pub enum TestHook {
     #[serde(rename_all = "camelCase")]
     Clock { offset_ms: i64 },
@@ -250,9 +284,70 @@ pub enum TestHook {
         ms: u64,
     },
     ForgetGate,
+    GateHeard,
     FailGrants {
         times: u32,
     },
+}
+
+/// A `TestHook` as it is read: every op's fields, flat, and the lever's
+/// `identity`, whose ledger it is (levers.rs, which reads both at once).
+/// A field it does not name is passed over, as the tagged reading did.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestHookFields {
+    pub identity: Option<String>,
+    op: TestOp,
+    offset_ms: Option<i64>,
+    prefix: Option<String>,
+    max: Option<u64>,
+    seat: Option<SeatState>,
+    seq: Option<u64>,
+    ms: Option<u64>,
+    times: Option<u32>,
+}
+
+/// A hook's `op`: read as an identifier, a string alone, as the tagged
+/// reading read its tag (a derived enum also takes `{"<op>": null}`).
+#[derive(Deserialize)]
+#[serde(variant_identifier, rename_all = "kebab-case")]
+enum TestOp {
+    Clock,
+    Sweep,
+    Entries,
+    Book,
+    Totals,
+    PaidCalls,
+    LegacySeat,
+    Schema,
+    Slow,
+    ForgetGate,
+    GateHeard,
+    FailGrants,
+}
+
+impl TryFrom<TestHookFields> for TestHook {
+    type Error = String;
+
+    fn try_from(f: TestHookFields) -> Result<TestHook, String> {
+        fn need<T>(v: Option<T>, name: &str) -> Result<T, String> {
+            v.ok_or_else(|| format!("missing field `{name}`"))
+        }
+        Ok(match f.op {
+            TestOp::Clock => TestHook::Clock { offset_ms: need(f.offset_ms, "offsetMs")? },
+            TestOp::Sweep => TestHook::Sweep,
+            TestOp::Entries => TestHook::Entries { prefix: need(f.prefix, "prefix")? },
+            TestOp::Book => TestHook::Book,
+            TestOp::Totals => TestHook::Totals,
+            TestOp::PaidCalls => TestHook::PaidCalls { max: f.max },
+            TestOp::LegacySeat => TestHook::LegacySeat { seat: need(f.seat, "seat")?, seq: need(f.seq, "seq")? },
+            TestOp::Schema => TestHook::Schema,
+            TestOp::Slow => TestHook::Slow { ms: need(f.ms, "ms")? },
+            TestOp::ForgetGate => TestHook::ForgetGate,
+            TestOp::GateHeard => TestHook::GateHeard,
+            TestOp::FailGrants => TestHook::FailGrants { times: need(f.times, "times")? },
+        })
+    }
 }
 
 impl Route for core::Meter {
@@ -293,6 +388,12 @@ impl Route for SetOverdraft {
 impl Route for SetFragmentCap {
     const PATH: &'static str = "/cap";
     type Answer = Done;
+}
+
+impl Route for NoticesOf {
+    const PATH: &'static str = "/notices";
+    /// Joined as bytes with the other owners' (`notices.rs`): read by no one.
+    type Answer = NoticeList;
 }
 
 impl Route for Status {
@@ -379,7 +480,7 @@ impl SqlStore {
 
     /// A JSON column as the core's type: one that does not read is corruption.
     fn read<T: DeserializeOwned>(&self, what: &str, text: &str) -> Option<T> {
-        match serde_json::from_str(text) {
+        match crate::json_text(text) {
             Ok(v) => Some(v),
             Err(e) => {
                 self.fail(format!("{what} does not read as the ledger wrote it: {e}"));
@@ -542,7 +643,7 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
         _ => None,
     };
     if let Some(row) = rows.into_iter().next() {
-        let mut ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+        let mut ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
         if let Some(terms) = org {
             ledger.bind_org(terms);
         }
@@ -558,6 +659,18 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
         ledger.set_plan(store, &set, now_ms).map_err(|why| CellError::host(format!("a new ledger refused its default plan: {}", why.message())))?;
     }
     Ok(ledger)
+}
+
+/// How every transaction ends, the same for each (`transact`'s closures,
+/// one for each caller, carry none of it): the head written back, the
+/// store's fault if any, what it leaves the ledger saying kept in `left`
+/// (`told`; packs sold here or not), and when the next sweep is due.
+#[inline(never)]
+fn settled(store: &SqlStore, ledger: &Ledger, now: i64, cfg: &Config, left: &Cell<Option<String>>) -> CellResult<i64> {
+    save(store, ledger);
+    store.checked()?;
+    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok())));
+    Ok(ledger.next_sweep_ms(now))
 }
 
 /// Writes the head back, and an org's budget in its own row, which no
@@ -602,28 +715,52 @@ impl LedgerCell {
     /// ledger's now: the head is written back whatever `op` answers (a
     /// refusal changed nothing but the month it rolled to), and a store
     /// that failed rolls everything back. Answers `op`'s
-    /// answer and when the next sweep is due (the ledger's clock).
+    /// answer and when the next sweep is due (the ledger's clock); the
+    /// what it leaves the ledger saying is in `left`.
     fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64)> {
         let now = js::now_ms() + self.offset_ms()?;
-        let (sql, cfg) = (self.sql(), self.cfg);
+        let (sql, cfg, left) = (self.sql(), self.cfg, self.left.clone());
         js::transaction_sync(&self.raw, move || {
             let mut store = SqlStore::new(sql);
             let mut ledger = head(&mut store, cfg, now)?;
             let answer = op(&mut ledger, &mut store, now);
-            save(&store, &ledger);
-            store.checked()?;
-            Ok((answer, ledger.next_sweep_ms(now)))
+            Ok((answer, settled(&store, &ledger, now, cfg, &left)?))
         })
     }
 
     /// `transact`, then the alarm set for the next sweep when it is due
-    /// sooner than this activation last set it.
+    /// sooner than this activation last set it, and its person told when
+    /// what their ledger says changed (`told`).
     async fn mutate<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
         let (answer, next) = self.transact(op)?;
         if self.armed.get().is_none_or(|armed| next < armed) {
             self.arm(next).await?;
         }
+        self.told();
         answer.map_err(Failed::Refused)
+    }
+
+    /// Its person's pages told (`changed`) when what the ledger says (its
+    /// notices, `Ledger::told_key`) is not what it last told them (FIN-458,
+    /// `GET /api/notices`): its standing, or anything else its notices say,
+    /// a seat's Buy credit. Kept in its meta, so a change by the
+    /// clock alone (a month's credit, its sweep) is told too, and told once.
+    /// An org's ledger tells no one; none told yet is news too (`said::news`).
+    /// Told after the answer (`wait_until`), never on its path: a gate's ask
+    /// waits on no page. Best effort: a page not told reads it next time.
+    #[inline(never)]
+    fn told(&self) {
+        let Some(said) = self.left.take() else { return };
+        if self.told.borrow().as_deref() == Some(said.as_str()) {
+            return;
+        }
+        let Ok(Some(payer)) = self.meta("payer") else { return };
+        *self.told.borrow_mut() = Some(said.clone());
+        let Some(Payer::Person(person)) = Payer::parse(&payer) else { return };
+        if !core::said::news(self.meta("told").ok().flatten().as_deref(), &said) || self.set_meta("told", &said).is_err() {
+            return;
+        }
+        crate::principal::tell_later(&self.state, &self.env, vec![person], "ledger.told-failed");
     }
 
     /// Sets the alarm for `at` on the ledger's clock.
@@ -643,10 +780,11 @@ impl LedgerCell {
         let (swept, next) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
         let swept = swept.expect("a sweep refuses nothing");
         self.arm(next).await?;
+        self.told();
         Ok(swept)
     }
 
-    async fn route(&self, mut req: Request) -> Result<Value, Failed> {
+    async fn route(&self, mut req: Request) -> Result<Response, Failed> {
         // a wipe ends a ledger that refuses its schema too, and a wiped
         // ledger answers as one, refused or not (schema.rs)
         if let Some(route) = req.path().strip_prefix("/wipe/") {
@@ -654,7 +792,7 @@ impl LedgerCell {
             if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route /wipe/{route}")).into());
             }
-            return Ok(self.wipe(route).await?);
+            return reply(self.wipe(route).await?);
         }
         if self.wiped.get() {
             return Err(Failed::Refused(Refused::Wiped));
@@ -675,16 +813,19 @@ impl LedgerCell {
             Delay::from(std::time::Duration::from_millis(slow)).await;
         }
         let body = req.bytes().await?;
-        fn reply<T: Serialize>(answer: T) -> Result<Value, Failed> {
-            Ok(serde_json::to_value(answer).expect("the ledger's answers serialize"))
-        }
         fn done(answer: ()) -> Done {
             let () = answer;
             Done {}
         }
         match path.as_str() {
             <core::Meter as Route>::PATH => {
-                let m: core::Meter = decode(&body)?;
+                let mut m: core::Meter = decode(&body)?;
+                // a clock a test fleet moved (`TestHook::Clock`) reads the
+                // rows' times on it too, so a row's month is its clock's
+                let offset = self.offset_ms()?;
+                for row in &mut m.rows {
+                    row.at_ms = row.at_ms.saturating_add(offset);
+                }
                 let book = &self.cfg.book;
                 reply(self.mutate(move |l, s, now| l.meter(s, &m, now, book)).await?)
             }
@@ -727,6 +868,22 @@ impl LedgerCell {
                 let Status {} = decode(&body)?;
                 let book = &self.cfg.book;
                 reply(self.mutate(move |l, s, now| if l.is_org() { Err(Refused::PersonsOnly) } else { Ok(l.status(s, now, book)) }).await?)
+            }
+            NoticesOf::PATH => {
+                // read alone, outside any transaction, as nothing is written:
+                // the head as last written (its body, `{}`, says nothing). A
+                // ledger no call has written yet has none to tell (its
+                // standing ok, or a guest's), and an org's tells no one.
+                let now = js::now_ms() + self.offset_ms()?;
+                let rows: Vec<Json> = self.sql().exec("SELECT ledger AS value FROM head WHERE id = 1", None)?.to_array()?;
+                let notices = match (Payer::parse(&payer), rows.into_iter().next()) {
+                    (Some(Payer::Person(_)), Some(row)) => {
+                        let ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+                        ledger.said(now, self.cfg.stripe().is_ok())
+                    }
+                    _ => vec![],
+                };
+                reply(NoticeList { notices })
             }
             OrgStatus::PATH => {
                 let OrgStatus {} = decode(&body)?;
@@ -808,21 +965,23 @@ impl LedgerCell {
         Ok(())
     }
 
-    async fn test_hook(&self, hook: TestHook) -> Result<Value, Failed> {
+    async fn test_hook(&self, hook: TestHook) -> Result<Response, Failed> {
         assert!(self.cfg.test_hooks, "test hooks answer on test fleets only");
         match hook {
-            TestHook::Schema => Ok(crate::schema::view(self.sql(), &fragment_core::migrate::LEDGER)?),
+            TestHook::Schema => reply(crate::schema::view(self.sql(), &fragment_core::migrate::LEDGER)?),
             TestHook::Slow { ms } => {
                 self.slow_ms.set(ms.min(TEST_SLOW_MAX_MS));
-                Ok(json!({ "slowMs": self.slow_ms.get() }))
+                reply(json!({ "slowMs": self.slow_ms.get() }))
             }
             TestHook::ForgetGate => {
                 forget_gate();
-                Ok(json!({ "forgot": true }))
+                reply(json!({ "forgot": true }))
             }
+            // the router answers it, never forwarding it here (levers.rs)
+            TestHook::GateHeard => Err(CellError::new(ErrorCode::NotFound, "gate-heard is the router's lever").into()),
             TestHook::FailGrants { times } => {
                 self.fail_grants.set(times.min(TEST_FAIL_GRANTS_MAX));
-                Ok(json!({ "failGrants": self.fail_grants.get() }))
+                reply(json!({ "failGrants": self.fail_grants.get() }))
             }
             TestHook::PaidCalls { max } => {
                 let max = match max {
@@ -830,7 +989,7 @@ impl LedgerCell {
                     None => self.meta(PAID_CALLS_MAX)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0),
                 };
                 self.set_meta(PAID_CALLS_MAX, &max.to_string())?;
-                Ok(json!({ "max": max, "used": self.paid_calls_used()? }))
+                reply(json!({ "max": max, "used": self.paid_calls_used()? }))
             }
             TestHook::Clock { offset_ms } => {
                 self.set_meta("clock_offset", &offset_ms.to_string())?;
@@ -838,9 +997,9 @@ impl LedgerCell {
                 let status = self.mutate(move |l, s, now| Ok(l.status(s, now, book))).await?;
                 // the alarm follows the clock
                 self.armed.set(None);
-                Ok(json!({ "offsetMs": offset_ms, "month": status.month }))
+                reply(json!({ "offsetMs": offset_ms, "month": status.month }))
             }
-            TestHook::Sweep => Ok(serde_json::to_value(self.swept().await?).expect("a sweep serializes")),
+            TestHook::Sweep => reply(self.swept().await?),
             TestHook::Entries { prefix } => {
                 #[derive(Deserialize)]
                 struct Row {
@@ -853,20 +1012,20 @@ impl LedgerCell {
                 let entries: Vec<Value> = rows
                     .into_iter()
                     .map(|r| {
-                        let entry: Value = serde_json::from_str(&r.entry).expect("an entry is JSON the ledger wrote");
+                        let entry: Value = crate::json_text(&r.entry).expect("an entry is JSON the ledger wrote");
                         json!({ "ref": r.r#ref, "entry": entry })
                     })
                     .collect();
-                Ok(json!({ "entries": entries }))
+                reply(json!({ "entries": entries }))
             }
-            TestHook::Totals => Ok(serde_json::to_value(self.mutate(|l, _, _| Ok(l.totals())).await?).expect("totals serialize")),
+            TestHook::Totals => reply(self.mutate(|l, _, _| Ok(l.totals())).await?),
             // the book it charges with: its release's (it keeps none)
-            TestHook::Book => Ok(json!({ "book": self.cfg.book })),
+            TestHook::Book => reply(json!({ "book": self.cfg.book })),
             TestHook::LegacySeat { seat, seq } => {
                 let c = SetSeat { id: format!("legacy-seat:{seq}"), seat, seq };
                 let book = &self.cfg.book;
                 let status = self.mutate(move |l, s, now| l.set_seat(s, &c, now).map(|()| l.status(s, now, book))).await?;
-                Ok(serde_json::to_value(status).expect("a status serializes"))
+                reply(status)
             }
         }
     }
@@ -918,7 +1077,7 @@ pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Ans
 /// `ask`'s round trip, one copy for every route (the cell's Wasm is held
 /// to a budget, and a copy per route type costs it): route `path`'s
 /// answer, as bytes, or its refusal.
-async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u8>, LedgerError> {
+pub(crate) async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u8>, LedgerError> {
     assert!(Payer::parse(payer).is_some(), "a ledger is a payer's, named as `Payer::name` names it");
     let headers = Headers::new();
     headers.set(PAYER_HEADER, payer)?;
@@ -954,18 +1113,55 @@ async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u
 /// out), lets it start, says so in the log, and is asked again next time
 /// (decision 62: billing never stops an agent).
 pub async fn may<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R) -> Result<(), LedgerError> {
-    gated(env, person, R::PATH, serde_json::to_string(question).expect("a gate's question serializes")).await
+    gated(env, person, R::PATH, serde_json::to_string(question).expect("a gate's question serializes"), GATE_WAIT_MS).await
 }
 
-/// `may`, one copy for both questions: route `path` with `body`.
-async fn gated(env: &Env, person: &str, path: &'static str, body: String) -> Result<(), LedgerError> {
-    let key = format!("{person} {path} {body}");
+/// A model call's gate, off its path (`fragment_core::ledger::gate::Step`):
+/// what this isolate heard of `question` within the window answers at
+/// once; a question last heard refused, longer ago, is asked first, as
+/// `may` asks; anything else lets the call start at once, and `question`
+/// is asked beside it (`after`), its answer kept for the next call. The
+/// ask beside holds nothing of the call's: a refusal it hears never stops
+/// or undoes a call already started.
+pub async fn may_beside<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R, after: &dyn crate::models::Background) -> Result<(), LedgerError> {
+    let body = serde_json::to_string(question).expect("a gate's question serializes");
+    match GATE.with(|g| g.borrow().step(&gate_key(person, R::PATH, &body), js::now_ms())) {
+        Step::Go => Ok(()),
+        Step::Refuse(why) => Err(why.into()),
+        Step::AskFirst => gated(env, person, R::PATH, body, GATE_WAIT_MS).await,
+        Step::GoAndAsk => {
+            let (env, person) = (env.clone(), person.to_string());
+            // its answer is kept by `gated`; a refusal is the next call's
+            after.later(Box::pin(async move {
+                let _ = gated(&env, &person, R::PATH, body, BESIDE_WAIT_MS).await;
+            }));
+            Ok(())
+        }
+    }
+}
+
+/// A gate question's key in the isolate's cache.
+fn gate_key(person: &str, path: &str, body: &str) -> String {
+    format!("{person} {path} {body}")
+}
+
+/// What this isolate's gate heard for `person` within the window
+/// (`gate-heard`): whether it holds a refusal, and an allowance.
+pub fn gate_heard(person: &str) -> Value {
+    let heard = GATE.with(|g| g.borrow().heard_for(person, js::now_ms()));
+    json!({ "refused": heard.iter().any(Result::is_err), "allowed": heard.iter().any(Result::is_ok) })
+}
+
+/// `may`, one copy for both questions: route `path` with `body`, the
+/// ledger waited on for at most `wait_ms`.
+async fn gated(env: &Env, person: &str, path: &'static str, body: String, wait_ms: u64) -> Result<(), LedgerError> {
+    let key = gate_key(person, path, &body);
     let now = js::now_ms();
     if let Some(answer) = GATE.with(|g| g.borrow().fresh(&key, now)) {
         return answer.map_err(LedgerError::from);
     }
     let asked = std::pin::pin!(asked(env, person, path, body));
-    let waited = std::pin::pin!(Delay::from(std::time::Duration::from_millis(GATE_WAIT_MS)));
+    let waited = std::pin::pin!(Delay::from(std::time::Duration::from_millis(wait_ms)));
     // what the ledger said, and its refusal as it said it (its message)
     let (heard, said) = match futures_util::future::select(asked, waited).await {
         // the routes answer `{}` when they allow it
@@ -976,7 +1172,7 @@ async fn gated(env: &Env, person: &str, path: &'static str, body: String) -> Res
             (None, None)
         }
         futures_util::future::Either::Right(_) => {
-            console_error!("{}", json!({ "event": "ledger.gate-unknown", "path": path, "message": format!("no answer in {GATE_WAIT_MS} ms") }));
+            console_error!("{}", json!({ "event": "ledger.gate-unknown", "path": path, "message": format!("no answer in {wait_ms} ms") }));
             (None, None)
         }
     };

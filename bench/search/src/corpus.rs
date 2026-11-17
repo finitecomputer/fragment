@@ -117,15 +117,21 @@ static ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s+-\s+(.*)$").unw
 static KV: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([A-Za-z_][\w-]*):\s*(.*)$").unwrap());
 static INLINE_LIST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[(.*)\]$").unwrap());
 
-/// Markdown's inline marks, gone: what a heading or a title reads as.
-pub fn plain(text: &str) -> String {
+/// A wiki's links as their words, as sections.mjs's `linkWords` (FIN-367):
+/// `[[page|its words]]` its words, `[[page]]` the page's name as `stem` says it.
+pub fn link_words(text: &str) -> String {
     static WIKI_ALIAS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]|]+)\|([^\]]+)\]\]").unwrap());
     static WIKI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
+    let t = WIKI_ALIAS.replace_all(text, "$2");
+    WIKI.replace_all(&t, |c: &regex::Captures| stem(&c[1])).into_owned()
+}
+
+/// Markdown's inline marks, gone: what a heading or a title reads as.
+pub fn plain(text: &str) -> String {
     static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").unwrap());
     static MARKS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[*_`~]+").unwrap());
     static SPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
-    let t = WIKI_ALIAS.replace_all(text, "$2");
-    let t = WIKI.replace_all(&t, "$1");
+    let t = link_words(text);
     let t = LINK.replace_all(&t, "$1");
     let t = MARKS.replace_all(&t, "");
     SPACE.replace_all(&t, " ").trim().to_owned()

@@ -433,6 +433,28 @@ impl Stripe {
         self.state.lock().expect("stripe state").items.values().filter(|(_, s, _)| s == subscription).map(|(_, _, a)| *a).collect()
     }
 
+    /// A trialing subscription's trial now ends at `at` (seconds), its
+    /// period with it, as a trial near its end would read, and its event is
+    /// delivered.
+    pub fn set_trial_end(&self, sub: &str, at: i64) -> Result<(), String> {
+        let event = {
+            let mut s = self.state.lock().expect("stripe state");
+            let object = {
+                let sb = s.subs.get_mut(sub).ok_or_else(|| format!("no subscription {sub}"))?;
+                if sb.status != "trialing" {
+                    return Err(format!("{sub} is {}, not trialing", sb.status));
+                }
+                sb.trial_end = Some(at);
+                sb.period_end = at;
+                sb.clone()
+            };
+            let object = s.sub_json(&object);
+            s.event("customer.subscription.updated", object)
+        };
+        self.deliver(vec![event]);
+        Ok(())
+    }
+
     /// A subscription is set to cancel at its period's end, as the portal
     /// sets it, or not, and its event is delivered.
     pub fn set_cancel_at_end(&self, sub: &str, on: bool) -> Result<(), String> {

@@ -1,5 +1,8 @@
 {
   "kind": "skills",
+  "files": {
+    "page": true
+  },
   "meta": {
     "title": "Skills",
     "description": "What your agents know how to do: the platform's managed skills, by category, which every computer of yours installs for its agents."

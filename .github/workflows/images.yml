@@ -1,16 +1,24 @@
 # The computer images' Rust (images/: the bridge and hermes-boot,
 # docs/bridge.md): its own workspace, so its own jobs.
 #
-# - `check`: host tests and clippy, warnings denied, on every change here.
-# - `docker`: the Docker lane (images/bridge/tests/docker.rs): both images
-#   built for linux/amd64 and run in Docker against the fake API and a
-#   scripted model, real Hermes included (`cargo test -p fragment-bridge
-#   --test docker -- --ignored`). It runs only when a change touches what it
+# - `check`: host tests and clippy, warnings denied, on every change to
+#   images/, what it compiles in from outside it, or this workflow
+#   (`changes`, below).
+# - `docker (real Hermes)`: the Docker lane (images/bridge/tests/docker.rs),
+#   both images built for linux/amd64 and run in Docker against the fake
+#   API and a scripted model, real Hermes included (`cargo test -p
+#   fragment-bridge --test docker -- --ignored`): two jobs side by side,
+#   the stub image's and the Hermes image's, and the check that needs both. It runs only when a change touches what it
 #   builds or runs (`changes` below: images/hermes, images/bridge,
 #   images/stub, the images' manifest and lock, the Hermes image's CLI
-#   stage's inputs, or this workflow), on pull requests, merge groups and
-#   master's pushes, on every run by hand, and whenever `changes` itself
-#   did not succeed.
+#   stage's inputs, or this workflow), on master's pushes, on every run by
+#   hand, and whenever `changes` itself did not succeed. Never on a pull
+#   request's runs: master's push is the gate, as for ci.yml's e2e (Paul,
+#   2026-11-08); a run by hand runs it on a branch's head.
+#
+# The workflow runs on every pull request and master push, with no path
+# filter of its own: each job decides (`changes`), one its inputs did not
+# change skips, and one `changes` could not decide for runs.
 #
 # Their Rust cache (the registry and images/target's dependencies) is
 # Swatinem/rust-cache's, one key for both jobs, saved only from master's
@@ -20,23 +28,24 @@ name: images
 on:
   push:
     branches: [master]
-    paths: ["images/**", ".github/workflows/images.yml", ".dockerignore", "Cargo.toml", "Cargo.lock", "cli/**", "crates/core/**", "crates/nip98/**", "crates/proto/**", "crates/templates/**", "templates/blank/**", "templates/calories/**", "templates/doc/**", "templates/inbox/**", "templates/notes/**", "templates/todo/**", "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "xtask/Cargo.toml"]
   pull_request:
-    paths: ["images/**", ".github/workflows/images.yml", ".dockerignore", "Cargo.toml", "Cargo.lock", "cli/**", "crates/core/**", "crates/nip98/**", "crates/proto/**", "crates/templates/**", "templates/blank/**", "templates/calories/**", "templates/doc/**", "templates/inbox/**", "templates/notes/**", "templates/todo/**", "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "xtask/Cargo.toml"]
-  # No event-level path filter exists for merge_group. `changes` compares
-  # the group's exact base and head, so the Docker lane stays conditional.
-  merge_group:
-    types: [checks_requested]
   workflow_dispatch:
 
+# as ci.yml's: a pull request's newer run cancels its older one; a master
+# push's waits for the one under way (and replaces one already waiting),
+# so the newest push's Docker lane always finishes
 concurrency:
   group: images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
     # ci.yml also has `check`; required checks need unambiguous names.
     name: images check
+    needs: changes
+    # as the Docker lane's: skips when images/ and this workflow did not
+    # change, and runs whenever `changes` did not succeed
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.check == 'true') }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -55,24 +64,56 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
-  # Whether the Docker lane runs: a change to what it builds or runs. Its own
-  # job, since a job's `if` reads only another job's outputs. The changed
-  # files are the pull request's (from the API, every page), or the push's
-  # since its `before`, or the merge group's since its exact base (by git,
-  # hence the checkout); a run by hand runs the lane whatever it says.
+  # Whether `check` and the Docker lane run: a change to what each checks,
+  # builds or runs. Its own job, since a job's `if` reads only another
+  # job's outputs. The changed
+  # files are the pull request's (from the API, every page), or a master
+  # push's since the newest master commit this workflow passed on (`base`,
+  # below; by git, hence the checkout); a run by hand runs the lane
+  # whatever it says.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: read # this workflow's runs, through the API
+      contents: read
+      pull-requests: read # a pull request's files
     outputs:
+      check: ${{ steps.paths.outputs.check }}
       docker: ${{ steps.paths.outputs.docker }}
     steps:
       - uses: actions/checkout@v4
+      # Not the push's `before`: a push whose run waited and was replaced
+      # by a newer push's (`concurrency`) never ran, so its change (an image
+      # change, beside a newer push's to the cell) is this run's to test
+      # (Codex review of #1118). A run that failed is no base: its change
+      # is tested again until one passes. With none to name this fails,
+      # and every job runs.
+      - name: the newest master commit this workflow passed on
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          workflow=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          sha=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" -f branch=master -f event=push -f status=success -f per_page=1 --jq '.workflow_runs[0].head_sha // ""')
+          [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no master run of this workflow passed, to compare with: every job runs"; exit 1; }
+          echo "comparing with $sha, the newest master commit this workflow passed on"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - id: paths
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
-          base: ${{ github.event.merge_group.base_sha || github.ref }}
-          ref: ${{ github.event.merge_group.head_sha || github.ref }}
+          base: ${{ steps.base.outputs.sha || github.ref }}
           filters: |
+            check:
+              - images/**
+              - .github/workflows/images.yml
+              # what images/ compiles in from outside it, which a host test
+              # (xtask/src/image/preview.rs) holds this list to
+              - cli/SKILL.md
+              - templates/skills/**
+              - crates/e2e/fixtures/chat-preview.pdf
             docker:
               - images/hermes/**
               - images/bridge/**
@@ -92,14 +133,17 @@ jobs:
               - crates/proto/**
               - crates/templates/**
               - templates/blank/**
+              - templates/board/**
               - templates/calories/**
               - templates/doc/**
               - templates/inbox/**
               - templates/notes/**
+              - templates/slides/**
               - templates/todo/**
               - crates/devstack/Cargo.toml
               - crates/e2e/Cargo.toml
               - crates/fakes/Cargo.toml
+              - crates/identity-door/Cargo.toml
               - xtask/Cargo.toml
 
   # The Docker lane. The images are built first by the runner's own Docker
@@ -108,8 +152,9 @@ jobs:
   # parallel (one per CPU). Measured on ubuntu-latest (4 CPUs, 16 GB, a
   # 145 GB disk with about 85 GB free): the Hermes image builds in about
   # 7 minutes (its two Rust stages, the CLI's and the bridge's, about
-  # 5.5 of them), the tests take about 3, and the job uses at most about
-  # 11 GB of the disk (71 GB used of 145 at its peak, 75 GB free).
+  # 5.5 of them), the tests take about 3. Its disk, measured on ubuntu-24.04
+  # (PR #890): from the 31 GB used once the disk is freed, a peak of 44.7
+  # GiB used, about 14 GiB of the lane's own.
   #
   # No layer cache, by measurement (PR #252): with BuildKit's layers in the
   # Actions cache (mode=max), an image whose every input was unchanged built
@@ -124,13 +169,60 @@ jobs:
   # caches ci.yml reads on every run.
   #
   # The tests' container logs are kept on failure.
-  docker:
-    name: docker (real Hermes)
+  #
+  # The Docker lane is two jobs, side by side, each building only the image
+  # its tests run: the stub image's one test (`the_stub_image`), and the
+  # Hermes image's, every other. Built one after the other on one runner,
+  # the stub's 4.6 minutes were the Hermes image's to wait out (the two
+  # share no layer: their stages' cache mounts and copies differ), on the
+  # merge queue's longest job (25 to 26.5 minutes, 2026-11-02). `docker
+  # (real Hermes)`, the required check, is the job that needs both.
+  docker-stub:
+    name: docker lane (stub)
+    needs: changes
+    # as `docker-hermes`'s, which says why
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    # the Docker `docker-hermes` runs on, which says why
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: images
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/free-disk
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: images
+          workspaces: images -> target
+          cache-bin: false
+          save-if: false
+      - run: cargo test -p fragment-bridge --test docker --locked --no-run
+      - name: the runner
+        run: nproc; free -g; df -h /; docker version --format '{{.Server.Version}}'
+      - name: build the stub image
+        working-directory: .
+        run: docker build --platform linux/amd64 -f images/stub/Dockerfile -t fragment-stub:test .
+      - name: the Docker lane, the stub image's
+        run: cargo test -p fragment-bridge --test docker --locked -- --ignored --exact the_stub_image --show-output
+        env:
+          FRAGMENT_DOCKER_SKIP_BUILD: "1"
+          RUST_BACKTRACE: "1"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-lane-stub-logs
+          path: images/target/tmp/**/*.log
+          retention-days: 7
+
+  docker-hermes:
+    name: docker lane (Hermes)
     needs: changes
     # fails closed: a `changes` that did not succeed (it failed, or ran out
-    # its time, as in run 41100441445) runs the lane rather than skip it,
-    # which a required check would count as a pass
-    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    # its time, as in run 41100441445) runs the lane rather than skip it;
+    # a pull request's run skips it
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
     # ubuntu-24.04 (Docker 28), not ubuntu-latest: since 2026-10-25,
     # ubuntu-latest is 26.04 with Docker 29, whose containerd image store
     # names `containerd` in every container's root mount, so Hermes takes
@@ -144,6 +236,8 @@ jobs:
         working-directory: images
     steps:
       - uses: actions/checkout@v4
+      # its disk freed first (the action says why: PR #890), and sampled
+      - uses: ./.github/actions/free-disk
       - uses: dtolnay/rust-toolchain@stable
       # the check job's cache, read only
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -155,28 +249,51 @@ jobs:
       - run: cargo test -p fragment-bridge --test docker --locked --no-run
       - name: the runner
         run: nproc; free -g; df -h /; docker version --format '{{.Server.Version}}'
-      # as the tests' own `build` does (docker.rs), both from the repo's root
-      # (each carries the fragment CLI, of the root workspace)
-      - name: build the stub image
-        working-directory: .
-        run: docker build --platform linux/amd64 -f images/stub/Dockerfile -t fragment-stub:test .
+      # as the tests' own `build` does (docker.rs), from the repo's root (it
+      # carries the fragment CLI, of the root workspace)
       - name: build the Hermes image
         working-directory: .
         run: docker build --platform linux/amd64 -f images/hermes/Dockerfile -t fragment-hermes:test .
+      # the tests build only the SimpleX lab's image, from its own
+      # Dockerfile: the build's cache goes before them
       - name: disk, built
-        run: docker system df; df -h /
-      - name: the Docker lane
-        run: cargo test -p fragment-bridge --test docker --locked -- --ignored --show-output
+        run: docker system df; docker builder prune -af > /dev/null; df -h /
+      - name: the Docker lane, the Hermes image's
+        run: cargo test -p fragment-bridge --test docker --locked -- --ignored --skip the_stub_image --show-output
         env:
           FRAGMENT_DOCKER_SKIP_BUILD: "1"
           RUST_BACKTRACE: "1"
       - if: always()
         name: disk, after
-        run: df -h /
+        run: |
+          docker system df; df -h /; free -h
+          echo "peak: $(awk '$1 > d { d = $1 } END { print d }' "$RUNNER_TEMP/disk-used") MiB of the disk used, $(awk '$2 > m { m = $2 } END { print m }' "$RUNNER_TEMP/disk-used") MiB of the memory"
       # each container's log (Container's drop) and the tests' own
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: docker-lane-logs
+          name: docker-lane-hermes-logs
           path: images/target/tmp/**/*.log
           retention-days: 7
+
+  # The lane's check: green when both halves of the lane are, skipped when
+  # the lane is not to run (a pull request's run, or nothing it builds
+  # changed), and red otherwise. It runs through a cancelled run (`always()`,
+  # never `!cancelled()`): a check that skips reads as passed, so one
+  # cancelled with a half still running would read green (Codex review of
+  # #981). Its check runs whatever came before it, and a half cancelled,
+  # skipped or failed is red.
+  docker:
+    name: docker (real Hermes)
+    needs: [changes, docker-stub, docker-hermes]
+    if: ${{ always() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: always()
+        env:
+          STUB: ${{ needs.docker-stub.result }}
+          HERMES: ${{ needs.docker-hermes.result }}
+        run: |
+          echo "the stub image's half: $STUB; the Hermes image's: $HERMES"
+          test "$STUB" = success && test "$HERMES" = success

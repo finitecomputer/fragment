@@ -123,7 +123,7 @@ pub enum Step {
     /// The ended fragments' cleanup done: their members' lists told, their
     /// apps' databases, blobs and repos deleted.
     Cleanup,
-    /// Their ledger.
+    /// Their ledger, and their Vault (its secrets).
     Ledger,
     /// Their and their agents' lists of fragments (`Principal`s).
     Lists,
@@ -359,7 +359,7 @@ pub fn cleanup_note(left: &[fragment_proto::wipe::Cleaning]) -> String {
 /// each once, all counted, the first `NAMES_SHOWN_MAX` shown.
 pub fn listed(names: impl IntoIterator<Item = String>) -> Listed {
     let mut all: Vec<String> = names.into_iter().collect();
-    all.sort();
+    all.sort_unstable();
     all.dedup();
     let count = all.len() as u64;
     let more = all.len() > NAMES_SHOWN_MAX;

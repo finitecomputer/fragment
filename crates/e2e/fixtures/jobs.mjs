@@ -34,6 +34,13 @@ export class App extends DurableObject {
     return { status: resp.status, saved: saved.saved, run: job.run };
   }
 
+  // Fetches `url` (a secret in it, the caller's) with the fragment's API_KEY
+  // in a header too, and answers what came back whole.
+  async spell({ url }, job) {
+    const r = await job.fetch(url, { headers: { authorization: "Bearer {{API_KEY}}" } });
+    return { status: r.status, text: r.text() };
+  }
+
   // The inbox's trigger: a delivery's items (or its text) saved.
   async ingest({ record }, job) {
     const { source, payload } = record.body;

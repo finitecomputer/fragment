@@ -5,10 +5,23 @@
 //! hosted run labels its fragments `e2e-<run>-<base>` (`label`): its id
 //! (`RUN_HEX` hex digits: the clock as it starts, then a random nonce)
 //! right after the prefix, so a label a lane extends (`<agent label>-chat`)
-//! still names its run. A sweep walks every e2e person (the levers' list),
-//! signs each in again (a session that leaves the paid calls they were lent
-//! as they are: a run beside it may be spending them) and acts as them: it
-//! has no power of its own.
+//! still names its run. A sweep signs e2e people in again (a session that
+//! leaves the paid calls they were lent as they are: a run beside it may be
+//! spending them) and acts as them: it has no power of its own.
+//!
+//! **Whom it signs in** (`Who`). A run notes the emails its people signed
+//! in by as it ends (`note_run_people`), so its sweep signs in those alone,
+//! a handful, rather than every e2e person on the preview (hundreds, each
+//! sign-in a registry call and two to their ledger: FIN-362). Nothing
+//! smaller is open to it: a preview's levers list no fragments by label
+//! (the registry's lever is no route there), so a fragment is found as its
+//! owner, signed in. A run not noted here (another checkout's) and
+//! `--sweep-all` walk every e2e person (the levers' list).
+//!
+//! **A failure is skipped and said.** A person whose sign-in, list or
+//! computers did not answer, a fragment that did not go, a computer that
+//! did not sleep: each is noted (`Swept::left`) and the sweep goes on;
+//! `left` decides its exit, after it has said what it did.
 //!
 //! - **`Scope::Run`** (`--sweep <run>`; `--sweep`, the last run that
 //!   finished here; a rehearsal's end) deletes that run's fragments,
@@ -165,10 +178,22 @@ pub fn computers(scope: &Scope, chosen: usize, spared: usize) -> Computers {
     }
 }
 
+/// Whom a sweep signs in.
+#[derive(Debug, Clone, Copy)]
+pub enum Who<'a> {
+    /// Every e2e person, as the levers list them.
+    Everyone,
+    /// These, by the emails they signed in by (a run's own, as it noted
+    /// them).
+    These(&'a [String]),
+}
+
 /// What a sweep did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Swept {
     pub people: usize,
+    /// What it did not do, each said: a sweep again finishes it.
+    pub left: Vec<String>,
     pub deleted: usize,
     pub slept: usize,
     /// The fragments it kept that are not the e2e's.
@@ -215,6 +240,9 @@ impl Swept {
             out += &format!("\n  {unknown} whose age did not answer");
         }
         out += &format!("\nkept {} not the e2e's; left {} awake (their people own a fragment kept)", count(self.not_e2e, "fragment"), count(self.awake, "computer"));
+        if !self.left.is_empty() {
+            out += &format!("\nleft {} undone (sweep again):\n  {}", count(self.left.len(), "thing"), self.left.join("\n  "));
+        }
         out
     }
 }
@@ -250,87 +278,116 @@ fn created_ms(api: &Api, session: &str, name: &str) -> Option<i64> {
 }
 
 /// The sweep of `scope`, on the deployment `api` reaches (a preview, or a
-/// rehearsal's node), as of `now_ms`.
-pub fn sweep_on(api: &Api, scope: &Scope, now_ms: i64) -> Result<Swept> {
+/// rehearsal's node), as of `now_ms`, signing in `who`. A failure is in
+/// `Swept::left`, the rest done; only a list of people that did not answer
+/// ends it early (there is no one further to reach).
+pub fn sweep_on(api: &Api, scope: &Scope, who: Who<'_>, now_ms: i64) -> Swept {
     assert!(api.signs_in_by_levers(), "a sweep signs the e2e people in through the levers");
     match scope {
         Scope::Run(run) => assert!(is_run(run), "a run's sweep names a run: {run:?}"),
         Scope::All { spared_for_ms } => assert!(*spared_for_ms >= 0, "a sweep spares fragments younger than an age"),
     }
     let mut swept = Swept::default();
-    // one that did not go is named at the end; the rest still go, and a
-    // sweep again finishes it. A delete answers within one round of its
-    // members' lists (the cell's ended.rs), well inside the client's 60 s
-    let mut left: Vec<String> = Vec::new();
-    let mut after: Option<String> = None;
-    for page in 0..=PAGES_MAX {
-        anyhow::ensure!(page < PAGES_MAX, "more than {PAGES_MAX} pages of e2e people: sweep again");
-        let r = api.unsigned("POST", "/api/test/people", Some(&json!({ "after": after })))?;
-        anyhow::ensure!(r.status == 200, "the e2e people: {r}");
-        for person in r.body["people"].as_array().into_iter().flatten() {
-            let email = person["email"].as_str().context("an e2e person has an email")?;
-            swept.people += 1;
-            let (session, _) = api.e2e_session(email)?;
-            let listed = match shell(api, &session, "GET", "/api/fragments") {
-                Ok(r) if r.status == 200 => r,
-                Ok(r) => {
-                    left.push(format!("listing {email}'s fragments: {r}"));
-                    continue;
-                }
-                Err(e) => {
-                    left.push(format!("listing {email}'s fragments: {e:#}"));
-                    continue;
-                }
-            };
-            let (mut chosen, mut spared) = (0usize, 0usize);
-            for f in listed.body["fragments"].as_array().into_iter().flatten().filter(|f| f["role"] == "owner") {
-                let name = f["name"].as_str().unwrap_or("");
-                let label = fragment_proto::split_fragment_name(name).map_or(name, |(label, _)| label);
-                match choose(scope, label, || created_ms(api, &session, name), now_ms) {
-                    Choice::Keep(Kept::NotE2e) => swept.not_e2e += 1,
-                    Choice::Keep(why) => {
-                        spared += 1;
-                        swept.spared.push((name.to_string(), why));
-                    }
-                    Choice::Delete => {
-                        chosen += 1;
-                        match shell(api, &session, "DELETE", &format!("/api/f/{name}")) {
-                            Ok(r) if r.status == 200 || r.status == 404 => swept.deleted += 1,
-                            Ok(r) => left.push(format!("deleting {name}: {r}")),
-                            Err(e) => left.push(format!("deleting {name}: {e:#}")),
-                        }
-                    }
-                }
-            }
-            let fate = computers(scope, chosen, spared);
-            if fate == Computers::Untouched {
-                continue;
-            }
-            let listed = shell(api, &session, "GET", "/api/computers")?;
-            anyhow::ensure!(listed.status == 200, "{email}'s computers: {listed}");
-            for c in listed.body["computers"].as_array().into_iter().flatten().filter(|c| c["phase"] != "asleep") {
-                if fate == Computers::LeftAwake {
-                    swept.awake += 1;
-                    continue;
-                }
-                let id = c["computer"].as_str().unwrap_or("");
-                match shell(api, &session, "POST", &format!("/api/computers/{id}/sleep")) {
-                    Ok(r) if r.status == 200 => swept.slept += 1,
-                    Ok(r) => left.push(format!("putting {id} to sleep: {r}")),
-                    Err(e) => left.push(format!("putting {id} to sleep: {e:#}")),
-                }
+    match who {
+        Who::These(emails) => {
+            for email in emails {
+                sweep_person(api, scope, email, now_ms, &mut swept);
             }
         }
-        after = r.body["next"].as_str().map(str::to_string);
-        if after.is_none() {
-            break;
+        Who::Everyone => {
+            let mut after: Option<String> = None;
+            for page in 0..=PAGES_MAX {
+                if page == PAGES_MAX {
+                    swept.left.push(format!("more than {PAGES_MAX} pages of e2e people: the rest"));
+                    break;
+                }
+                let r = match api.unsigned("POST", "/api/test/people", Some(&json!({ "after": after }))) {
+                    Ok(r) if r.status == 200 => r,
+                    Ok(r) => {
+                        swept.left.push(format!("the e2e people after {after:?}: {r}"));
+                        break;
+                    }
+                    Err(e) => {
+                        swept.left.push(format!("the e2e people after {after:?}: {e:#}"));
+                        break;
+                    }
+                };
+                for person in r.body["people"].as_array().into_iter().flatten() {
+                    match person["email"].as_str() {
+                        Some(email) => sweep_person(api, scope, email, now_ms, &mut swept),
+                        None => swept.left.push(format!("an e2e person with no email: {person}")),
+                    }
+                }
+                after = r.body["next"].as_str().map(str::to_string);
+                if after.is_none() {
+                    break;
+                }
+            }
         }
     }
-    anyhow::ensure!(left.is_empty(), "the sweep left {} (sweep again):\n  {}", left.len(), left.join("\n  "));
     if let Scope::Run(run) = scope {
         assert!(swept.spared.iter().all(|(n, _)| run_of(fragment_proto::split_fragment_name(n).map_or("", |(label, _)| label)) != Some(run.as_str())), "a run's sweep spares none of its run's");
     }
-    Ok(swept)
+    swept
+}
+
+/// One e2e person's part of a sweep: signed in again, their fragments
+/// chosen (`choose`) and deleted, their computers put to sleep or left
+/// (`computers`). What does not answer is noted and passed.
+fn sweep_person(api: &Api, scope: &Scope, email: &str, now_ms: i64, swept: &mut Swept) {
+    swept.people += 1;
+    let session = match api.e2e_session(email) {
+        Ok((session, _)) => session,
+        Err(e) => return swept.left.push(format!("signing {email} in: {e:#}")),
+    };
+    let listed = match shell(api, &session, "GET", "/api/fragments") {
+        Ok(r) if r.status == 200 => r,
+        Ok(r) => return swept.left.push(format!("listing {email}'s fragments: {r}")),
+        Err(e) => return swept.left.push(format!("listing {email}'s fragments: {e:#}")),
+    };
+    // a delete answers within one round of its members' lists (the cell's
+    // ended.rs), well inside the client's 60 s
+    let (mut chosen, mut spared) = (0usize, 0usize);
+    for f in listed.body["fragments"].as_array().into_iter().flatten().filter(|f| f["role"] == "owner") {
+        let name = f["name"].as_str().unwrap_or("");
+        let label = fragment_proto::split_fragment_name(name).map_or(name, |(label, _)| label);
+        match choose(scope, label, || created_ms(api, &session, name), now_ms) {
+            Choice::Keep(Kept::NotE2e) => swept.not_e2e += 1,
+            Choice::Keep(why) => {
+                spared += 1;
+                swept.spared.push((name.to_string(), why));
+            }
+            Choice::Delete => {
+                chosen += 1;
+                match shell(api, &session, "DELETE", &format!("/api/f/{name}")) {
+                    Ok(r) if r.status == 200 || r.status == 404 => swept.deleted += 1,
+                    Ok(r) => swept.left.push(format!("deleting {name}: {r}")),
+                    Err(e) => swept.left.push(format!("deleting {name}: {e:#}")),
+                }
+            }
+        }
+    }
+    let fate = computers(scope, chosen, spared);
+    if fate == Computers::Untouched {
+        return;
+    }
+    let listed = match shell(api, &session, "GET", "/api/computers") {
+        Ok(r) if r.status == 200 => r,
+        Ok(r) => return swept.left.push(format!("listing {email}'s computers: {r}")),
+        Err(e) => return swept.left.push(format!("listing {email}'s computers: {e:#}")),
+    };
+    for c in listed.body["computers"].as_array().into_iter().flatten().filter(|c| c["phase"] != "asleep") {
+        if fate == Computers::LeftAwake {
+            swept.awake += 1;
+            continue;
+        }
+        let id = c["computer"].as_str().unwrap_or("");
+        match shell(api, &session, "POST", &format!("/api/computers/{id}/sleep")) {
+            Ok(r) if r.status == 200 => swept.slept += 1,
+            Ok(r) => swept.left.push(format!("putting {id} to sleep: {r}")),
+            Err(e) => swept.left.push(format!("putting {id} to sleep: {e:#}")),
+        }
+    }
 }
 
 /// Where a hosted run that finished here notes its id, for `--sweep`
@@ -346,6 +403,27 @@ pub fn note_last_run(preview: &Preview, run: &str) -> Result<()> {
     let file = last_run_file(preview);
     std::fs::create_dir_all(file.parent().context("the file is in a directory")?)?;
     std::fs::write(&file, format!("{run}\n")).with_context(|| format!("write {}", file.display()))
+}
+
+/// Where a hosted run that finished here notes the emails its people
+/// signed in by, for its sweep (`Who::These`): one file a run.
+pub fn run_people_file(preview: &Preview, run: &str) -> PathBuf {
+    devstack::repo_root().join("target/e2e").join(format!("hosted-{}.{}.{run}.people", preview.branch, preview.zone))
+}
+
+/// Notes `emails` as the people of `run` on `preview`, one a line.
+pub fn note_run_people(preview: &Preview, run: &str, emails: &[String]) -> Result<()> {
+    assert!(is_run(run), "a run's id is {RUN_HEX} hex digits: {run:?}");
+    assert!(emails.iter().all(|e| !e.is_empty() && !e.contains('\n')), "an email is one line");
+    let file = run_people_file(preview, run);
+    std::fs::create_dir_all(file.parent().context("the file is in a directory")?)?;
+    std::fs::write(&file, emails.iter().map(|e| format!("{e}\n")).collect::<String>()).with_context(|| format!("write {}", file.display()))
+}
+
+/// The people `run` noted here on `preview`, if it ran here.
+pub fn run_people(preview: &Preview, run: &str) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(run_people_file(preview, run)).ok()?;
+    Some(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
 }
 
 /// The last run that finished here on `preview`, as `note_last_run` noted it.

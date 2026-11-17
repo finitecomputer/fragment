@@ -126,11 +126,11 @@ impl FragmentCell {
     }
 
     /// `computer/…`: the internal calls a computer's routes and egress make.
-    pub(crate) async fn runs_on(&self, route: &str, body: &Value) -> CellResult<Value> {
+    pub(crate) async fn runs_on(&self, route: &str, body: &[u8]) -> CellResult<Value> {
         self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
         match route {
             "assign" => {
-                let b: Assign = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let b: Assign = crate::json_body(body)?;
                 // an org's fragment runs on no one's computer: its owner is no person
                 if !self.owner()?.is(&b.owner) {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner runs it on their computer"));
@@ -158,7 +158,7 @@ impl FragmentCell {
                 Ok(json!({ "identity": identity }))
             }
             "unassign" => {
-                let b: Assign = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let b: Assign = crate::json_body(body)?;
                 // an org's fragment runs on no one's computer: its owner is no person
                 if !self.owner()?.is(&b.owner) {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner moves it"));
@@ -171,14 +171,18 @@ impl FragmentCell {
             }
             // its face (kind, title, picture), for whatever names it: an
             // agent shows by its fragment's (share.rs, `name_agents`)
-            "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str::<Value>(&f).ok()).unwrap_or(Value::Null)),
+            "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| crate::json_text::<Value>(&f).ok()).unwrap_or(Value::Null)),
+            // its reach and whether its link opens it, for an operator's
+            // census (reach.rs): no names
+            "reach" => Ok(json!({ "kind": self.kind()?, "reach": self.reaches()?, "beyond": self.sharing_counts()?.beyond() })),
             "identity" => {
+                let body: Value = crate::json_body(body)?;
                 let computer = body["computer"].as_str().unwrap_or("");
                 self.assigned_to(computer)?;
                 Ok(json!({ "identity": self.must(MetaKey::AgentIdentity)? }))
             }
             "sign" => {
-                let b: Sign = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let b: Sign = crate::json_body(body)?;
                 self.assigned_to(&b.computer)?;
                 let header = self.own_keys().await?.header_for_payload(&b.method, &b.url, b.payload.as_deref(), crate::js::now_ms() / 1000);
                 Ok(json!({ "header": header }))
@@ -188,28 +192,38 @@ impl FragmentCell {
             // Their bodies are read field by field, with no derive: the
             // cell's wasm budget (xtask/src/build.rs)
             "door-ticket" => {
+                let body: Value = crate::json_body(body)?;
                 let text = |k: &str| body[k].as_str().unwrap_or("");
                 if !self.owner()?.is(text("owner")) {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner opens or closes its door"));
                 }
                 self.assigned_to(text("computer"))?;
+                // an adoption (FIN-463: its owner keeps their SimpleX chat with
+                // their old agent) opens the door as a link does
                 let act = match text("act") {
                     "link" => door::Act::Link,
                     "unlink" => door::Act::Unlink,
-                    _ => return Err(CellError::invalid("act: link or unlink")),
+                    "adopt" => door::Act::Adopt,
+                    _ => return Err(CellError::invalid("act: link, unlink or adopt")),
                 };
-                self.door_allowed(text("door"), if act == door::Act::Link { Action::Link } else { Action::Unlink })?;
+                self.door_allowed(text("door"), if act.opens() { Action::Link } else { Action::Unlink })?;
+                // a door is reach: none while the agent's link opens it
+                // (reach.rs); an unlink always closes
+                if act.opens() {
+                    self.reach_while_private()?;
+                }
                 let nonce = hex::encode(js::random_bytes::<16>());
                 let ticket = door::Ticket { door: text("door").into(), act, agent: self.name()?, computer: text("computer").into(), nonce, exp: js::now_ms() + door::TICKET_MS, sig: String::new() };
                 assert!(ticket.well_formed(), "a ticket the platform makes is well formed");
                 match act {
-                    door::Act::Link => self.set_meta(MetaKey::DoorTicket, &format!("{} {} {}", ticket.door, ticket.nonce, ticket.exp))?,
+                    door::Act::Link | door::Act::Adopt => self.set_meta(MetaKey::DoorTicket, &format!("{} {} {}", ticket.door, ticket.nonce, ticket.exp))?,
                     // closed the moment its owner asks: its door signs nothing more
                     door::Act::Unlink => {
                         self.del_meta(MetaKey::DoorTicket)?;
                         if self.meta(MetaKey::Door)?.is_some() {
                             self.del_meta(MetaKey::Door)?;
                             self.event("door.closed", "its door closed by its owner", json!({ "door": ticket.door }));
+                            self.sharing_changed()?;
                         }
                     }
                 }
@@ -217,6 +231,7 @@ impl FragmentCell {
                 Ok(json!({ "door": ticket.door, "act": act.as_str(), "agent": ticket.agent, "computer": ticket.computer, "nonce": ticket.nonce, "exp": ticket.exp, "sig": sig }))
             }
             "door-key" => {
+                let body: Value = crate::json_body(body)?;
                 let text = |k: &str| body[k].as_str().unwrap_or("");
                 self.assigned_to(text("computer"))?;
                 let (door, key) = (text("door"), text("key"));
@@ -231,12 +246,16 @@ impl FragmentCell {
                 if was != door || nonce.is_empty() || nonce != text("nonce") || exp < js::now_ms() {
                     return Err(CellError::new(ErrorCode::Forbidden, "that ticket is not the link its owner started last, or it is past its time: they start one from Settings"));
                 }
+                // opened by its link since its ticket was made: no door (reach.rs)
+                self.reach_while_private()?;
                 self.del_meta(MetaKey::DoorTicket)?;
                 self.set_meta(MetaKey::Door, &format!("{door} {key}"))?;
+                self.sharing_changed()?;
                 self.event("door.opened", "its door opened by its owner", json!({ "door": door, "key": key }));
                 Ok(json!({ "door": door, "key": key }))
             }
             "door-check" => {
+                let body: Value = crate::json_body(body)?;
                 let text = |k: &str| body[k].as_str().unwrap_or("");
                 let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("a relayed record {why}"));
                 if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(text("identity")) {
@@ -257,6 +276,7 @@ impl FragmentCell {
             // a connector fragment of its owner's, bound as one of its doors
             // by them (doors.rs): it is theirs, and an agent, and says so
             "door-actor" => {
+                let body: Value = crate::json_body(body)?;
                 let text = |k: &str| body[k].as_str().unwrap_or("");
                 if self.must(MetaKey::Owner)? != text("owner") {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner binds a connector as its door"));
@@ -268,7 +288,7 @@ impl FragmentCell {
                 Ok(json!({ "identity": identity }))
             }
             "subscribe" => {
-                let b: Subscribe = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let b: Subscribe = crate::json_body(body)?;
                 if !valid_channel_name(&b.channel) {
                     return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
                 }
@@ -284,7 +304,7 @@ impl FragmentCell {
             "joined" => {
                 // this agent was added to `fragment`: its guest hears so on
                 // `tasks`, when it declares one it can post to
-                let b: Joined = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let b: Joined = crate::json_body(body)?;
                 self.assigned_to(&b.computer)?;
                 if !valid_fragment_name(&b.fragment) || b.at <= 0 {
                     return Err(CellError::invalid("a join names a fragment and when it joined"));
@@ -299,6 +319,18 @@ impl FragmentCell {
             }
             r => Err(CellError::new(ErrorCode::NotFound, format!("no route computer/{r}"))),
         }
+    }
+
+    /// The finite.computer move's routine (migrations.rs): appended to this
+    /// agent fragment's own `tasks`, with no chat, once by its key, as a
+    /// join's notice is; nothing when it declares no postable `tasks`.
+    pub(crate) async fn move_routine(&self, key: &str, text: &str) -> CellResult<Value> {
+        if self.declared_channel(TASKS)?.is_none_or(|d| d.post.is_none()) {
+            return Ok(json!({ "posted": false, "why": "its fragment declares no postable tasks channel" }));
+        }
+        let routine = json!({ "kind": "routine", "text": text });
+        let (record, appended) = self.append_own(TASKS, &routine, key).await?;
+        Ok(json!({ "posted": true, "seq": record.seq, "replayed": !appended }))
     }
 
     /// An agent became a member here (`set_member`, `join`): its computer
@@ -323,8 +355,14 @@ impl FragmentCell {
         self.exec("DELETE FROM joined_outbox WHERE principal = ?", vec![identity.into()])
     }
 
-    /// When the joined outbox next has a row due (for the alarm).
+    /// When the joined outbox next has a row due (for the alarm): none
+    /// while its joins wait (`Stage::joins_wait`), whose end tells them:
+    /// the seed that installs it (publish.rs `seed`), else the alarm's pass
+    /// after its seed.
     pub(crate) fn joined_due_at(&self) -> CellResult<Option<i64>> {
+        if self.stage()?.joins_wait() {
+            return Ok(None);
+        }
         Ok(self.rows("SELECT MIN(next_at) AS at FROM joined_outbox", vec![])?.first().and_then(|r| r["at"].as_i64()))
     }
 
@@ -337,6 +375,10 @@ impl FragmentCell {
     /// an event (never silently).
     pub(crate) async fn flush_joined(&self) {
         let Ok(name) = self.name() else { return };
+        // a template still to land: told once it is in (`Stage::joins_wait`)
+        if self.stage().map_or(true, |s| s.joins_wait()) {
+            return;
+        }
         let Ok(due) = self.typed::<Notice>(
             "SELECT principal, owner, added_at, attempts FROM joined_outbox WHERE next_at <= ? ORDER BY next_at LIMIT ?",
             vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(JOINED_FLUSH_MAX)],

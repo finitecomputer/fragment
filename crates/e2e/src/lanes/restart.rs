@@ -4,7 +4,9 @@
 //! more in its configuration, and the crash's without it again, as an
 //! operator adds a row and then rolls it back: each time, a ledger made
 //! before charges with the book its release configured, no version raised
-//! (#451; it keeps none of its own: decision 62).
+//! (#451; it keeps none of its own: decision 62). Where the cell's secrets
+//! are OpenBao's (docs/self-host.md, seam 12), OpenBao itself stops and
+//! starts under a node.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,8 +23,11 @@ use super::app::ship;
 use super::jobs;
 use super::posts;
 use super::signin::{site_cookie, who};
-use crate::api::Api;
+use crate::api::{Api, Call};
 use crate::{Suite, ADDED_KEY};
+
+/// Why a check of a computer's is a skip on celld, which runs none.
+const NO_COMPUTERS: &str = "celld runs no computers here: they need egress intercepts and snapshots its Docker engine lacks (docs/self-host.md, seam 2)";
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
@@ -50,6 +55,149 @@ fn added_key_price(book: &Value) -> Option<Value> {
     book["keys"].as_array()?.iter().find(|k| k["key"] == ADDED_KEY.0).cloned()
 }
 
+/// Each of `paths`' cache policy on public fragment `name`, revalidated
+/// (`public, max-age=60`) or not: `{ok, paths: {path: [status, cache]}}`.
+fn revalidated(api: &Api, name: &str, paths: &[&str]) -> Result<Value> {
+    let mut seen = serde_json::Map::new();
+    let mut ok = true;
+    for path in paths {
+        let r = api.page(name, path, None)?;
+        ok &= r.status == 200 && r.header("cache-control") == "public, max-age=60";
+        seen.insert(path.to_string(), json!([r.status, r.header("cache-control")]));
+    }
+    Ok(json!({ "ok": ok, "paths": seen }))
+}
+
+/// A public site that keeps `assets/**` for good (its first deploy, checked
+/// so), then a deploy of `manifest` (`immutable` gone or changed, and a
+/// refused field) adding `added`: its install refused, its tree served
+/// with none of the first's kept paths. Its name, and `added` under `site/`.
+fn kept_then_refused(s: &mut Suite, api: &Api, owner: &Keys, label: &str, manifest: &[u8], added: &str) -> Result<(String, String)> {
+    let name = s.named(api, owner, label)?;
+    let c = s.create(api, owner, &name)?;
+    api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    s.commit(&c, &[("fragment.json", Some(br#"{"immutable":["assets/**"]}"#)), ("site/index.html", Some(b"<p>kept</p>")), ("site/assets/a-Ikq0sZO3.js", Some(b"1"))]);
+    s.deploy(&c);
+    let first = api.page(&name, "assets/a-Ikq0sZO3.js", None)?;
+    s.ok(&format!("{label}: its first deploy keeps assets/** for good"), first.status == 200 && first.header("cache-control") == "public, max-age=31536000, immutable", &first);
+    let added_bytes: &[u8] = b"2";
+    s.commit(&c, &[("fragment.json", Some(manifest)), (added, Some(added_bytes))]);
+    let live = s.deploy(&c);
+    let status = api.status(owner, &name)?;
+    let added = added.strip_prefix("site/").expect("a site file").to_string();
+    let seen = revalidated(api, &name, &["assets/a-Ikq0sZO3.js", &added])?;
+    s.ok(
+        &format!("{label}: a deploy whose install is refused (fragment.json {}) is served with none of the last install's kept paths: its old and new files revalidated", String::from_utf8_lossy(manifest)),
+        status.body["code"]["error"].as_str().is_some_and(|e| e.contains(&live[..12])) && seen["ok"] == true,
+        json!({ "code": status.body["code"], "seen": seen }),
+    );
+    Ok((name, added))
+}
+
+/// A public site's blob-backed asset: its name, its path under `site/`,
+/// and the commit that last changed it before the cut refresh.
+struct Blobbed {
+    name: String,
+    /// Its two blob-backed assets.
+    path: String,
+    other: String,
+    /// Its live commit, and the next one, whose refresh the caller replays.
+    commit: String,
+    next: String,
+}
+
+/// The asset's cache policy by its path and by its version (`__file?v=`):
+/// `{kept, asset: [status, cache, bytes], version: [status, cache]}`,
+/// `kept` whether either is kept for good.
+fn blob_caching(api: &Api, b: &Blobbed) -> Result<Value> {
+    let asset = api.page(&b.name, b.path.strip_prefix("site/").expect("a site file"), None)?;
+    let version = api.page(&b.name, &format!("__file?path={}&v={}", b.path, b.commit), None)?;
+    let kept = [&asset, &version].iter().any(|r| r.header("cache-control").contains("immutable"));
+    Ok(json!({ "kept": kept, "asset": [asset.status, asset.header("cache-control"), asset.text], "version": [version.status, version.header("cache-control")] }))
+}
+
+/// The other asset's bytes, by its path (`[status, bytes]`).
+fn other_asset(api: &Api, b: &Blobbed) -> Result<Value> {
+    let r = api.page(&b.name, b.other.strip_prefix("site/").expect("a site file"), None)?;
+    Ok(json!([r.status, r.text]))
+}
+
+/// FIN-391 and FIN-407: a blob's bytes come by the pointer table, which a
+/// refresh publishes with the tree and its pin, all or none, after every
+/// pointer is read: so a refresh mid-read serves the commit before it,
+/// whole, and a refresh cut between two reads (the second failing)
+/// publishes nothing, which the caller checks again after a crash, then
+/// replays. A declared asset stored as a blob is still never kept for
+/// good, nor its version (FIN-391). The cut read stays failing until the
+/// caller clears it.
+fn blobs_never_kept(s: &mut Suite, api: &Api, owner: &Keys) -> Result<Blobbed> {
+    let name = s.named(api, owner, "restart-blobbed")?;
+    let c = s.create(api, owner, &name)?;
+    api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    let upload = |text: &str| -> Result<String> {
+        let bytes = text.as_bytes().to_vec();
+        let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+        let r = api.call(Call { method: "PUT", url: format!("{}/api/f/{name}/blobs/{sha}", api.base), body: Some(bytes.clone()), keys: Some(owner), ..Call::default() })?;
+        anyhow::ensure!(r.status == 200, "a blob's upload: {r}");
+        Ok(fragment_core::blob::pointer(&sha, bytes.len() as u64))
+    };
+    let (a, b) = ("site/assets/a-Ikq0sZO3.js", "site/assets/b-S4M26L7U.js");
+    let (a1, b1) = (upload("console.log('a, first')")?, upload("console.log('b, first')")?);
+    let first = s.commit(&c, &[("fragment.json", Some(br#"{"immutable":["assets/**"]}"#)), ("site/index.html", Some(b"<p>blobs</p>")), (a, Some(a1.as_bytes())), (b, Some(b1.as_bytes()))]);
+    s.deploy(&c);
+    let mut blobbed = Blobbed { name: name.clone(), path: a.into(), other: b.into(), commit: first.clone(), next: String::new() };
+    let deployed = blob_caching(api, &blobbed)?;
+    s.ok(
+        "a declared asset stored as a blob is served its bytes, revalidated, and so is its version: never kept for good",
+        deployed["kept"] == false && deployed["asset"][2] == "console.log('a, first')" && deployed["version"][0] == 200,
+        &deployed,
+    );
+
+    // a refresh racing a change of both: live's refresh to the next commit
+    // held at its second pointer read, a reader meanwhile served the first
+    // commit whole (its pin, its tree and its pointers); released, the next
+    let (a2, b2) = (upload("console.log('a, second')")?, upload("console.log('b, second')")?);
+    let second = s.commit(&c, &[(a, Some(a2.as_bytes())), (b, Some(b2.as_bytes()))]);
+    let repo = c["repo"].as_str().filter(|r| !r.is_empty()).ok_or_else(|| anyhow::anyhow!("{name}'s repo: {c}"))?.to_string();
+    s.fake.hold_file_read(Some(b));
+    s.fake.set_branch(&repo, "live", &second);
+    let (held, during, released) = std::thread::scope(|scope| -> Result<(bool, Value, Value)> {
+        let refreshing = scope.spawn(|| api.signed(owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({}))));
+        let held = s.eventually(Duration::from_secs(30), || s.fake.read_held());
+        let during = json!({ "pins": api.status(owner, &name)?.body["pins"], "a": blob_caching(api, &blobbed)?, "b": other_asset(api, &blobbed)? });
+        s.fake.hold_file_read(None);
+        let r = refreshing.join().expect("the refresh's thread")?;
+        Ok((held, during, json!({ "status": r.status, "pins": api.status(owner, &name)?.body["pins"], "a": blob_caching(api, &blobbed)?, "b": other_asset(api, &blobbed)? })))
+    })?;
+    s.ok(
+        "a refresh held between its two pointer reads serves the commit before it whole: its pin, and both assets' bytes, the first commit's (FIN-407)",
+        held && during["pins"]["live"] == first.as_str() && during["a"]["asset"][2] == "console.log('a, first')" && during["b"] == json!([200, "console.log('b, first')"]) && during["a"]["kept"] == false,
+        json!({ "held": held, "during": during }),
+    );
+    s.ok(
+        "released, the refresh publishes the next commit whole: its pin and both assets' bytes",
+        released["status"] == 200 && released["pins"]["live"] == second.as_str() && released["a"]["asset"][2] == "console.log('a, second')" && released["b"] == json!([200, "console.log('b, second')"]),
+        &released,
+    );
+
+    // a refresh cut between two pointer reads (the second failing): nothing
+    // published, before a crash and after it (the caller's), then replayed
+    let (a3, b3) = (upload("console.log('a, third')")?, upload("console.log('b, third')")?);
+    let third = s.commit(&c, &[(a, Some(a3.as_bytes())), (b, Some(b3.as_bytes()))]);
+    s.fake.fail_file_read(Some(b));
+    s.fake.set_branch(&repo, "live", &third);
+    let refused = api.signed(owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
+    let cut = json!({ "status": refused.status, "pins": api.status(owner, &name)?.body["pins"], "a": blob_caching(api, &blobbed)?, "b": other_asset(api, &blobbed)? });
+    s.ok(
+        "a refresh cut between its two pointer reads publishes nothing: live still the commit before, both assets' bytes its own, neither kept for good",
+        refused.status != 200 && cut["pins"]["live"] == second.as_str() && cut["a"]["asset"][2] == "console.log('a, second')" && cut["b"] == json!([200, "console.log('b, second')"]) && cut["a"]["kept"] == false,
+        &cut,
+    );
+    blobbed.commit = second;
+    blobbed.next = third;
+    Ok(blobbed)
+}
+
 pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     if !s.section("restart", &[crate::Need::Node, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
@@ -66,6 +214,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let live = ship(s, &c, TODO_APP, TODO_JSON);
     // a site session on the fragment, and the fragment's VAPID key (sealed like a secret)
     let member_site = site_cookie(&api, &member_session, &name)?;
+    // and the member's key's own, as a native app opens the fragment (native.rs)
+    let member_key_site = super::native::key_site_cookie(&api, &member, &name)?;
     let push_key = |api: &Api| api.page(&name, "__push-key", Some(&format!("fragment_site={member_site}")));
     let r = push_key(&api)?;
     anyhow::ensure!(r.status == 200 && r.body["key"].is_string(), "push key setup: {r}");
@@ -176,15 +326,22 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         "access setup: {access_before}"
     );
     // an agent's name and picture (faces.rs): its fragment's, in its own
-    // storage and its git, shown from its face
-    let (face_owner, face_session) = super::templates::person(&api)?;
-    let (faced, face_id) = super::faces::agent_of(s, &api, &face_owner, "restart-face", "Juniper")?;
-    let faced = faced["name"].as_str().unwrap_or("").to_string();
-    let face_png = super::faces::orange();
-    let (w, d) = super::faces::set_face(&api, &face_owner, &faced, Some("Frank"), Some(Some(&face_png)), None)?;
-    let face_path = super::faces::picture_path(&face_id, &face_png);
-    let shown = s.eventually(Duration::from_secs(30), || super::faces::row(&api, &face_owner, &faced)["picture"] == face_path.as_str());
-    anyhow::ensure!(w.status == 200 && d.is_some_and(|d| d.status == 200) && shown, "face setup: {w}");
+    // storage and its git, shown from its face. An agent's identity is its
+    // computer's to give: none on celld
+    let face = match s.on_celld() {
+        true => None,
+        false => {
+            let (face_owner, face_session) = super::templates::person(&api)?;
+            let (faced, face_id) = super::faces::agent_of(s, &api, &face_owner, "restart-face", "Juniper")?;
+            let faced = faced["name"].as_str().unwrap_or("").to_string();
+            let face_png = super::faces::orange();
+            let (w, d) = super::faces::set_face(&api, &face_owner, &faced, Some("Frank"), Some(Some(&face_png)), None)?;
+            let face_path = super::faces::picture_path(&face_id, &face_png);
+            let shown = s.eventually(Duration::from_secs(30), || super::faces::row(&api, &face_owner, &faced)["picture"] == face_path.as_str());
+            anyhow::ensure!(w.status == 200 && d.is_some_and(|d| d.status == 200) && shown, "face setup: {w}");
+            Some((face_owner, face_session, faced, face_png, face_path))
+        }
+    };
     // a tool loop held after the call it bought (a tool call), its next
     // call refused for good (ai_tools.rs)
     let tooled = ai_tools::tools_fragment(s, &api, &owner, "restart-tools")?;
@@ -199,13 +356,21 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // computer's rows, and the browser's cookie
     let pending_key = Keys::generate();
     let pending_code = api.cli_begin(&pending_key)?.body["code"].as_str().unwrap_or("").to_string();
-    let connector = api.person()?;
-    let connector_session = api.sign_in(&Api::email_of(&connector))?;
-    let made = api.signed(&connector, "POST", "/api/computers", Some(&json!({})))?;
-    let asked = super::credentials::shell_authorize(&api, &connector_session)?;
-    let bound = super::credentials::own_key_cookie(&asked);
-    let back = super::credentials::sent_back(&api, asked.body["url"].as_str().unwrap_or_default())?;
-    anyhow::ensure!(made.status == 200 && asked.status == 200 && !pending_code.is_empty() && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {asked} {back}");
+    anyhow::ensure!(!pending_code.is_empty(), "pending CLI code setup");
+    // an own key's sign-in finishes at its person's computer: none on celld
+    let own_key = match s.on_celld() {
+        true => None,
+        false => {
+            let connector = api.person()?;
+            let connector_session = api.sign_in(&Api::email_of(&connector))?;
+            let made = api.signed(&connector, "POST", "/api/computers", Some(&json!({})))?;
+            let asked = super::credentials::shell_authorize(&api, &connector_session)?;
+            let bound = super::credentials::own_key_cookie(&asked);
+            let back = super::credentials::sent_back(&api, asked.body["url"].as_str().unwrap_or_default())?;
+            anyhow::ensure!(made.status == 200 && asked.status == 200 && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {asked} {back}");
+            Some((connector, connector_session, bound, back))
+        }
+    };
 
     s.stop()?;
     let api = s.start_with_a_key_more()?;
@@ -232,22 +397,30 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         typed.status == 200 && pressed.status == 200 && theirs.status == 200 && theirs.body["email"] == MEMBER_EMAIL,
         json!({ "typed": typed.status, "added": pressed.status, "me": theirs.body }),
     );
-    let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
-    let state = api.signed(&connector, "GET", "/api/connections", None)?;
-    let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
-    s.ok(
-        "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected",
-        page.status == 200 && page.text.contains("is connected") && connected,
-        json!({ "page": page.to_string(), "connections": state.body }),
-    );
-    let face_row = super::faces::row(&api, &face_owner, &faced);
-    let face_got = super::faces::fetched(&api, &face_path)?;
-    let face_sheet = super::signin::with_session(&api, "GET", &format!("/share/{faced}"), &face_session)?;
-    s.ok(
-        "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them",
-        face_row["title"] == "Frank" && face_row["picture"] == face_path.as_str() && face_got.status == 200 && face_got.bytes == face_png && face_sheet.text.contains("Frank") && face_sheet.text.contains(&face_path),
-        json!({ "row": face_row, "picture": face_got.status, "sheet": face_sheet.status }),
-    );
+    const OWN_KEY: &str = "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected";
+    match own_key {
+        Some((connector, connector_session, bound, back)) => {
+            let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
+            let state = api.signed(&connector, "GET", "/api/connections", None)?;
+            let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
+            s.ok(OWN_KEY, page.status == 200 && page.text.contains("is connected") && connected, json!({ "page": page.to_string(), "connections": state.body }));
+        }
+        None => s.skip(OWN_KEY, NO_COMPUTERS),
+    }
+    const FACE: &str = "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them";
+    match face {
+        Some((face_owner, face_session, faced, face_png, face_path)) => {
+            let face_row = super::faces::row(&api, &face_owner, &faced);
+            let face_got = super::faces::fetched(&api, &face_path)?;
+            let face_sheet = super::signin::with_session(&api, "GET", &format!("/share/{faced}"), &face_session)?;
+            s.ok(
+                FACE,
+                face_row["title"] == "Frank" && face_row["picture"] == face_path.as_str() && face_got.status == 200 && face_got.bytes == face_png && face_sheet.text.contains("Frank") && face_sheet.text.contains(&face_path),
+                json!({ "row": face_row, "picture": face_got.status, "sheet": face_sheet.status }),
+            );
+        }
+        None => s.skip(FACE, NO_COMPUTERS),
+    }
     let access_after = access_row(&api);
     s.ok(
         "after a restart the access view answers as it did: who is in, by email, and the invite waiting",
@@ -356,11 +529,22 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let ran = jobs::settle(&api, &owner, &stored, jobs::started(&r), &["succeeded", "held"], Duration::from_secs(40));
     let got = seen.lock().expect("upstream log").clone();
     s.ok("after a restart a sealed secret opens: the job's fetch carries it", ran["status"] == "succeeded" && got == [format!("Bearer {SECRET}")], format!("{ran} {got:?}"));
+    // and, holding it, it is still its owner's and their agents' alone
+    // (FIN-352): its link refused as before the restart
+    let shared = api.signed(&owner, "PUT", &format!("/api/f/{stored}/visibility"), Some(&json!({ "visibility": "link" })))?;
+    let status = api.status(&owner, &stored)?;
+    s.ok(
+        "after a restart a fragment holding a key still has reach, and its link is refused (403 private_while_reaching)",
+        shared.status == 403 && shared.body["reason"] == "private_while_reaching" && status.body["reach"] == true && status.body["visibility"] == "members",
+        format!("{shared} {status}"),
+    );
     // a browser's sessions, and the key its push subscriptions were made with
     let r = who(&api, &member_session)?;
     s.ok("after a restart a browser's platform session still signs it in", r.to_string().contains(MEMBER_EMAIL), &r);
     let r = push_key(&api)?;
     s.ok("and its site session on a fragment still works", r.status == 200, &r);
+    let r = api.page(&name, "__push-key", Some(&member_key_site))?;
+    s.ok("and so does a site session a key opened (native.rs)", r.status == 200, &r);
     s.ok("the fragment's VAPID key is the one it had (sealed, and opened again)", r.body["key"].is_string() && r.body["key"] == vapid, format!("{} vs {vapid}", r.body["key"]));
     s.ok("after a restart a person's search finds what it found", found(&api, "kale") == 1, "");
     let r = api.signed(&owner, "GET", "/api/fragments", None)?;
@@ -378,8 +562,15 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("a mutation before the crash", r.status == 200, &r);
     // Local workerd's Workflows keep a sleep as a timer in the process
     // (miniflare's engine: no alarm behind it), so one sleeping through a
-    // crash of `wrangler dev` never wakes; Cloudflare's do.
-    s.skip("a job sleeping through a crash wakes and finishes, once", "local Workflows do not outlive their process");
+    // crash of `wrangler dev` never wakes; Cloudflare's do, and celld's
+    // (each instance a cell, its sleep an alarm: docs/self-host.md, seam 1).
+    let napper = match s.durable_workflows() {
+        true => Some(jobs::jobs_fragment(s, &api, &owner, "restart-jobs", |_| {})?.0),
+        false => {
+            s.skip("a job sleeping through a crash wakes and finishes, once", "local Workflows do not outlive their process");
+            None
+        }
+    };
     // a delete whose cleanup the crash cuts short (cell ended.rs): the
     // fragment's alarm finishes it after
     let ended = s.named(&api, &owner, "restart-ended")?;
@@ -395,8 +586,60 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = api.op(&owner, &decider, "decide", "bad-before-crash", decision)?;
     let bad_decision = jobs::settle(&api, &owner, &decider, jobs::started(&r), &["held"], Duration::from_secs(40));
     let calls_before_crash = s.ai.calls().iter().filter(|c| c.model == fragment_core::decide::Model::ClefFlash.id()).count();
+    // a file's version (FIN-340), named before the crash
+    s.commit(&c, &[("kept.md", Some(b"the same bytes"))]);
+    let site = format!("fragment_site={member_site}");
+    let files = api.call(Call { method: "GET", url: api.site_url(&name, "__files"), cookie: Some(site.clone()), extra: vec![("accept", "application/json".into())], ..Call::default() })?;
+    let kept = files.body["files"].as_array().and_then(|a| a.iter().find(|f| f["path"] == "kept.md")).and_then(|f| f["commit"].as_str()).unwrap_or_default().to_string();
+    anyhow::ensure!(fragment_core::site::valid_version(&kept), "a version before the crash: {files}");
+    // FIN-391: a site's paths kept for good describe the commit they were
+    // read from: a deploy whose install is refused leaves its tree served
+    // with none of the last one's, before a crash and after it
+    let unkept = kept_then_refused(s, &api, &owner, "restart-unkept", br#"{"operations":3}"#, "site/assets/new-B4k9Qz2m.js")?;
+    let moved = kept_then_refused(s, &api, &owner, "restart-moved", br#"{"immutable":["fonts/**"],"operations":3}"#, "site/fonts/new.woff2")?;
+    let blobbed = blobs_never_kept(s, &api, &owner)?;
+    // the nap starts last, just before the crash: running, its sleep under
+    // way and its record not yet written when the node dies
+    let nap = match napper {
+        Some(jobs) => {
+            let r = api.op(&owner, &jobs, "nap", "through-the-crash", json!({ "ms": 4000 }))?;
+            let started = jobs::started(&r);
+            let running = s.eventually(Duration::from_secs(10), || jobs::run(&api, &owner, &jobs, started).is_ok_and(|r| r.body["status"] == "running"));
+            let asleep = running && !jobs::records(&api, &owner, &jobs, "feed").iter().any(|r| r["kind"] == "nap");
+            anyhow::ensure!(asleep, "the nap sleeps when the node crashes");
+            Some((jobs, started))
+        }
+        None => None,
+    };
     s.crash()?;
     let api = s.start(false)?;
+    if let Some((jobs, started)) = nap {
+        let woke = jobs::settle(&api, &owner, &jobs, started, &["succeeded", "held"], Duration::from_secs(60));
+        let naps = jobs::records(&api, &owner, &jobs, "feed").iter().filter(|r| r["kind"] == "nap").count();
+        s.ok("a job sleeping through a crash wakes and finishes, once", woke["status"] == "succeeded" && naps == 1, format!("{woke} ({naps} nap records)"));
+    }
+    let seen = json!({ "pins": api.status(&owner, &blobbed.name)?.body["pins"], "a": blob_caching(&api, &blobbed)?, "b": other_asset(&api, &blobbed)? });
+    s.ok(
+        "after a crash, a refresh cut between its pointer reads kept nothing of it: live the commit before, both assets' bytes its own, revalidated, never kept for good",
+        seen["pins"]["live"] == blobbed.commit.as_str() && seen["a"]["asset"][2] == "console.log('a, second')" && seen["b"] == json!([200, "console.log('b, second')"]) && seen["a"]["kept"] == false && seen["a"]["version"][0] == 200,
+        &seen,
+    );
+    // its replay, the read answering again: the next commit whole; and again, the same
+    s.fake.fail_file_read(None);
+    let refresh = |api: &Api| api.signed(&owner, "POST", &format!("/api/f/{}/refresh", blobbed.name), Some(&json!({})));
+    let (once, twice) = (refresh(&api)?, refresh(&api)?);
+    let replayed = json!({ "once": once.status, "twice": twice.status, "pins": api.status(&owner, &blobbed.name)?.body["pins"], "a": blob_caching(&api, &blobbed)?, "b": other_asset(&api, &blobbed)? });
+    s.ok(
+        "its refresh replayed lands the next commit whole, its pin and both assets' bytes; replayed again, the same",
+        once.status == 200 && twice.status == 200 && replayed["pins"]["live"] == blobbed.next.as_str() && replayed["a"]["asset"][2] == "console.log('a, third')" && replayed["b"] == json!([200, "console.log('b, third')"]),
+        &replayed,
+    );
+    let after: Vec<Value> = [&unkept, &moved].iter().map(|(name, added)| revalidated(&api, name, &["assets/a-Ikq0sZO3.js", added])).collect::<Result<_>>()?;
+    s.ok(
+        "after a crash a refused deploy's tree is still served with none of the last install's kept paths: its files revalidated, the new ones too",
+        after.iter().all(|r| r["ok"] == true),
+        json!(after),
+    );
     let (book, shown) = book_of(&api, &owner)?;
     s.ok(
         "after a crash back on the configuration from before the key's row (a rollback), the ledger charges with that book again",
@@ -411,6 +654,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("after a crash no acknowledged write is lost", count(&api, &owner, &name) == 2, "count");
     let r = api.status(&owner, &name)?;
     s.ok("after a crash pins and code survive", r.body["pins"]["live"] == live.as_str() && r.body["code"]["sha"] == live.as_str(), &r);
+    let r = api.page(&name, &format!("__file?path=kept.md&v={kept}"), Some(&site))?;
+    s.ok("after a crash a file's version still answers its bytes, kept for good", r.status == 200 && r.text == "the same bytes" && r.header("cache-control") == "private, max-age=31536000, immutable", &r);
     let r = api.signed(&member, "GET", "/api/fragments", None)?;
     s.ok("after a crash the member's list survives", r.text.contains(&name), &r);
     s.ok("and a person's search, both messages in it", found(&api, "kale") == 2, "");
@@ -421,5 +666,36 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok(&format!("after a crash a delete's cleanup it cut short finishes ({lists_left} lists were left to tell)"), lists_left > 0 && cleaned, last);
     let r = api.signed(&member, "GET", "/api/fragments", None)?;
     s.ok("and the deleted fragment has left its member's list", r.status == 200 && !r.text.contains(&format!("\"{ended}\"")), &r);
+    openbao_restart(s)
+}
+
+/// The checks of OpenBao behind the cell's secrets, across its stop and
+/// start (docs/self-host.md, seam 12).
+const OPENBAO: [&str; 2] = [
+    "with OpenBao down, a sign-in fails at once, naming OpenBao: the cell's read of its sign-in's secrets is an error, never a hang",
+    "OpenBao started again unseals itself from its key file, initialised once, and the next sign-in reads its secrets: the cell not restarted",
+];
+
+/// OpenBao down, then up, under a node started fresh: no isolate holds the
+/// secrets a sign-in reads (WorkOS's client id as it begins).
+fn openbao_restart(s: &mut Suite) -> Result<()> {
+    if !s.has_openbao() {
+        for label in OPENBAO {
+            s.skip(label, "the run's secrets are not OpenBao's (FRAGMENT_E2E_SECRETS=vars, or wrangler's own store)");
+        }
+        return Ok(());
+    }
+    s.stop()?;
+    let api = s.start(false)?;
+    s.openbao_down()?;
+    let t0 = std::time::Instant::now();
+    let r = api.unsigned("GET", "/auth/login?return=/&login_hint=openbao-down%40e2e.test", None)?;
+    let took = t0.elapsed();
+    s.ok(OPENBAO[0], r.status >= 500 && r.text.contains("OpenBao") && r.text.contains("is not answering") && took < Duration::from_secs(10), format!("{r} in {took:?}"));
+    let up = s.openbao_up()?;
+    let r = api.workos_callback("openbao-up@e2e.test")?;
+    let signed = r.cookies().into_iter().any(|c| c.starts_with("fragment_session=") && c.len() > "fragment_session=".len() + 1);
+    let once = s.openbao_initialisations()?;
+    s.ok(OPENBAO[1], r.status == 302 && signed && once == 1, format!("{r} (OpenBao up again in {up:?}, initialised {once} time(s))"));
     Ok(())
 }

@@ -38,7 +38,7 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
-use crate::principal::{SearchApplied, SearchBatch, SearchEntry};
+use crate::principal::calls::{SearchApplied, SearchBatch, SearchEntry};
 
 /// Due cursors one flush sends a batch to (more wait for the next pass,
 /// the alarm armed again at once).
@@ -93,8 +93,8 @@ impl FragmentCell {
     pub(crate) fn searched_channels(&self) -> CellResult<Vec<String>> {
         let mut out = vec![];
         // bounded by the manifest's channels
-        for (channel, _) in self.declared_channels()? {
-            if searched(self.channel_read_role(&channel)?) {
+        for (channel, decl) in self.declared_channels()? {
+            if searched(decl.read) {
                 out.push(channel);
             }
         }
@@ -121,14 +121,25 @@ impl FragmentCell {
     /// An agent member gets none. Runs in the index change's turn.
     pub(crate) fn search_follows(&self, principal: &str, role: Option<Role>) -> CellResult<()> {
         match role {
-            Some(_) => self.exec(
-                "INSERT INTO search_outbox (principal, sent, attempts, next_at)
-                 SELECT principal, 0, 0, ? FROM members WHERE principal = ? AND (kind IS NULL OR kind != 'agent')
-                 ON CONFLICT (principal) DO NOTHING",
-                vec![SqlStorageValue::Integer(js::now_ms()), principal.into()],
-            ),
+            Some(_) => self.search_follow_rows("principal = ?", vec![principal.into()]),
             None => self.exec("DELETE FROM search_outbox WHERE principal = ?", vec![principal.into()]),
         }
+    }
+
+    /// Each person among the members `who` (a condition on `members`)
+    /// picks gets a cursor, as `search_follows` makes one: one statement,
+    /// one pass over the members, however many.
+    pub(crate) fn search_follow_rows(&self, who: &str, binds: Vec<SqlStorageValue>) -> CellResult<()> {
+        let mut all = vec![SqlStorageValue::Integer(js::now_ms())];
+        all.extend(binds);
+        self.exec(
+            &format!(
+                "INSERT INTO search_outbox (principal, sent, attempts, next_at)
+                 SELECT principal, 0, 0, ? FROM members WHERE ({who}) AND (kind IS NULL OR kind != 'agent')
+                 ON CONFLICT (principal) DO NOTHING"
+            ),
+            all,
+        )
     }
 
     /// When a cursor is next due (for the alarm): the MIN of an index.
@@ -209,17 +220,6 @@ impl FragmentCell {
     }
 
     async fn deliver_search(&self, principal: &str, batch: &SearchBatch) -> CellResult<SearchApplied> {
-        let body = serde_json::to_string(batch).map_err(|e| CellError::host(format!("a search batch: {e}")))?;
-        let headers = Headers::new();
-        headers.set("content-type", "application/json")?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
-        let req = Request::new_with_init("https://principal.internal/search/entries", &init)?;
-        let mut resp = crate::routed::send(&self.env, "PRINCIPAL", principal, req).await?;
-        if resp.status_code() != 200 {
-            let why: Value = resp.json().await.unwrap_or(Value::Null);
-            return Err(CellError::host(format!("their list answered {}: {why}", resp.status_code())));
-        }
-        resp.json::<SearchApplied>().await.map_err(|e| CellError::host(format!("their list's answer: {e}")))
+        crate::principal::ask(&self.env, principal, batch).await
     }
 }

@@ -287,3 +287,55 @@ async fn an_earlier_lives_lease_is_given_back_and_a_gone_agents_screen_closes() 
     drop((juniper, fred));
     running.stop().await;
 }
+
+/// Goal (FIN-353): an answer for the computer. The script's `code-card` card
+/// asks for a code its option `code` takes on the computer alone
+/// (`PromptOption::computer`); posted to the screen port's `/answer`, as
+/// the shell's unseen frame of `GET /answer/` posts it, it reaches the
+/// runtime and never a record: the turn says how many characters it took,
+/// the card closes answered with nothing of them, and no record anywhere
+/// holds them. Invalid: a form's post (415), another site's page's (403),
+/// an agent the bridge does not run (404). Replay: a second answer, 409,
+/// saying why in words.
+#[tokio::test]
+async fn a_cards_answer_for_the_computer_reaches_its_runtime_alone() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("screen-answer");
+    write_ready(&dir, &["juniper--k3x9"]);
+    write_screens(&dir, &[]);
+    let chat = fake.chat("talk", &["juniper"]);
+    let (running, base) = bridge(&fake, &dir).await;
+    fake.until(10_000, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+
+    let (status, page) = support::http(&base, "GET", "/answer/", &[], b"").await;
+    assert!(status == 200 && page.contains("card-to-computer") && page.contains("computer-answered"), "its page: {status}");
+
+    fake.say(&chat, &support::fake::person("paul"), json!({ "text": "code-card" }));
+    fake.until(10_000, "its card", |w| w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["options"][0]["computer"] == true)).await;
+    let card = fake.with(|w| w.bodies(&chat, "work", "turn.prompt")[0].clone());
+    let answer = json!({ "turn": card["turn"], "prompt": card["prompt"], "option": "code", "value": "the-code-123" }).to_string();
+    let post = |agent: &'static str, headers: Vec<(&'static str, &'static str)>, body: String| {
+        let base = base.clone();
+        async move { support::http(&base, "POST", &format!("/answer?agent={agent}"), &headers, body.as_bytes()).await }
+    };
+    let json_type = ("content-type", "application/json");
+    assert_eq!(post("juniper--k3x9", vec![("content-type", "application/x-www-form-urlencoded")], answer.clone()).await.0, 415, "a form's");
+    assert_eq!(post("juniper--k3x9", vec![json_type, ("sec-fetch-site", "cross-site")], answer.clone()).await.0, 403, "another site's page's");
+    assert_eq!(post("oak--k3x9", vec![json_type], answer.clone()).await.0, 404, "an agent it does not run");
+
+    let (status, said) = post("juniper--k3x9", vec![json_type, ("sec-fetch-site", "same-origin")], answer.clone()).await;
+    assert_eq!((status, said.as_str()), (200, r#"{"ok":true}"#));
+    fake.until(10_000, "the turn's end", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
+    fake.with(|w| {
+        let replies = w.bodies(&chat, "chat", "reply");
+        assert!(replies.iter().any(|r| r["text"].as_str().is_some_and(|t| t.ends_with("(took 12 characters)"))), "{replies:?}");
+        let closed = w.bodies(&chat, "work", "turn.prompt.closed");
+        assert_eq!((closed[0]["outcome"].as_str(), closed[0]["option"].as_str(), closed[0].get("text")), (Some("answered"), Some("code"), None), "{closed:?}");
+        let anywhere = format!("{:?}", w.log) + &format!("{:?}", w.requests) + &w.bodies(&chat, "chat", "reply").iter().chain(w.bodies(&chat, "work", "turn.prompt.closed").iter()).map(|b| b.to_string()).collect::<String>();
+        assert!(!anywhere.contains("the-code-123"), "no record holds it");
+    });
+    let (status, said) = post("juniper--k3x9", vec![json_type], answer).await;
+    // its turn has ended by now: answered once, it says so
+    assert!(status == 409 && said.contains("This ended before your answer came"), "{status} {said}");
+    running.stop().await;
+}

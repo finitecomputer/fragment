@@ -42,7 +42,10 @@ use fragment_devstack::node::{Node, NODE_VERSION};
 
 /// Built or vendored JavaScript, each prefix with where it is recorded:
 /// never edited here, so never checked.
-pub const VENDORED: [(&str, &str); 1] = [("cell/shell/vendor/", "split-grid, vendored unmodified (cell/shell/CREDITS.md)")];
+pub const VENDORED: [(&str, &str); 2] = [
+    ("cell/shell/vendor/", "split-grid, vendored unmodified (cell/shell/CREDITS.md)"),
+    ("crates/e2e/fixtures/slides-site/", "the slides template's starter deck, built by its scripts/build.mjs for the e2e; its own files are templates/slides/live/'s, checked there (crates/e2e `the_slides_fixture_is_the_templates_build`)"),
+];
 
 /// The `.js` files loaded as classic scripts, not modules.
 pub const CLASSIC: [(&str, &str); 2] = [
@@ -60,9 +63,41 @@ pub const PROCESSES_MAX: usize = 8;
 const SHELL: &str = "cell/shell/shell.js";
 /// A test file's name ends so (`node --test`'s own default).
 const TEST_SUFFIX: &str = ".test.mjs";
-/// The shell's tests, which a walk must find: the chat page's control.js's,
-/// chat-list.js's, onboarding.js's and threads.js's.
-const SHELL_TESTS: [&str; 4] = ["cell/shell-tests/chat-control.test.mjs", "cell/shell-tests/chat-list.test.mjs", "cell/shell-tests/onboarding.test.mjs", "cell/shell-tests/threads.test.mjs"];
+/// The shell's tests, which a walk must find (each named in its file).
+const SHELL_TESTS: &[&str] = &[
+    "cell/shell-tests/agent-claude.test.mjs",
+    "cell/shell-tests/agent-home-read.test.mjs",
+    "cell/shell-tests/agent-remove.test.mjs",
+    "cell/shell-tests/agent-runtimes.test.mjs",
+    "cell/shell-tests/agent-settings-read.test.mjs",
+    "cell/shell-tests/apps-cards.test.mjs",
+    "cell/shell-tests/apps-page.test.mjs",
+    "cell/shell-tests/asked-agent.test.mjs",
+    "cell/shell-tests/asks.test.mjs",
+    "cell/shell-tests/chat-control.test.mjs",
+    "cell/shell-tests/chat-list.test.mjs",
+    "cell/shell-tests/chat-pages.test.mjs",
+    "cell/shell-tests/chat-speakers.test.mjs",
+    "cell/shell-tests/computer-answer.test.mjs",
+    "cell/shell-tests/computer-state.test.mjs",
+    "cell/shell-tests/connections-names.test.mjs",
+    "cell/shell-tests/frame-messages.test.mjs",
+    "cell/shell-tests/frame-standin.test.mjs",
+    "cell/shell-tests/history-page.test.mjs",
+    "cell/shell-tests/launcher-knowledge.test.mjs",
+    "cell/shell-tests/limits.test.mjs",
+    "cell/shell-tests/making.test.mjs",
+    "cell/shell-tests/move-page.test.mjs",
+    "cell/shell-tests/notices-band.test.mjs",
+    "cell/shell-tests/onboarding.test.mjs",
+    "cell/shell-tests/restart-follow.test.mjs",
+    "cell/shell-tests/schedules-page.test.mjs",
+    "cell/shell-tests/session-archive.test.mjs",
+    "cell/shell-tests/session-text.test.mjs",
+    "cell/shell-tests/simplex-settings.test.mjs",
+    "cell/shell-tests/telegram-settings.test.mjs",
+    "cell/shell-tests/threads.test.mjs",
+];
 
 /// How Node is told to parse a file (`--input-type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +292,7 @@ mod tests {
             ("cell/shell/onboarding.js", Some(InputType::Module)),
             ("cell/shell/computer.js", Some(InputType::Module)),
             ("cell/shell/agent-settings.js", Some(InputType::Module)),
+            ("cell/shell/agent-runtimes.js", Some(InputType::Module)),
             ("cell/shell/connections.js", Some(InputType::Module)),
             ("cell/shell/exports.js", Some(InputType::Module)),
             ("cell/client.mjs", Some(InputType::Module)),
@@ -267,7 +303,7 @@ mod tests {
             ("tools/config.cjs", Some(InputType::CommonJs)),
             ("cell/src/lib.rs", None),
             ("templates/todo/site/index.html", None),
-            ("templates/notes/site/assets/viewer.js.map", None),
+            ("templates/sessions/site/sessions.js.map", None),
             ("package.json", None),
         ] {
             assert_eq!(input_type(path), kind, "{path}");
@@ -275,19 +311,26 @@ mod tests {
     }
 
     /// The walk over the repo itself finds the shell, the templates' site
-    /// and app code (the notes viewer's among them), and the classic
-    /// service worker, and leaves out vendored code.
+    /// and app code (the session archive's page among them), the classic service
+    /// worker and every test, and leaves out vendored code.
     #[test]
     fn the_walk_covers_the_shell_and_templates_and_skips_vendored_code() {
         let found = files(&devstack::repo_root()).expect("the repo's walk");
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
-        assert_eq!(tests(&found), SHELL_TESTS);
+        // the Worker's restore reads (beside the module it tests), the shell's
+        // tests, and the board's, brain's and Telegram connector's apps' and the slides'
+        // build's and presenter's (beside the templates crate: a file under templates/
+        // would ship with its template)
+        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
+        // sorted, each once, so two changes conflict only where they add
+        // beside each other (no count to bump)
+        assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");
         // the launcher, a module shell.js imports
         assert_eq!(kind("cell/shell/launcher.js"), Some(InputType::Module));
         assert_eq!(kind("templates/todo/app.mjs"), Some(InputType::Module));
         assert_eq!(kind("templates/chat/site/chat.js"), Some(InputType::Module));
-        assert_eq!(kind("templates/notes/site/assets/viewer.js"), Some(InputType::Module));
+        assert_eq!(kind("templates/sessions/site/sessions.js"), Some(InputType::Module));
         assert_eq!(kind("cell/markdown.mjs"), Some(InputType::Module));
         assert_eq!(kind("cell/sw.js"), Some(InputType::CommonJs));
         assert_eq!(kind("cell/shell/alerts-sw.js"), Some(InputType::CommonJs));
@@ -301,7 +344,7 @@ mod tests {
     #[test]
     fn a_stale_list_or_a_walk_without_the_shell_is_refused() {
         let paths = |extra: &[&str]| {
-            let mut all: Vec<String> = ["cell/shell/alerts-sw.js", "cell/shell/shell.js", "cell/sw.js", "cell/shell/vendor/split-grid.js"].map(String::from).to_vec();
+            let mut all: Vec<String> = ["cell/shell/alerts-sw.js", "cell/shell/shell.js", "cell/sw.js", "cell/shell/vendor/split-grid.js", "crates/e2e/fixtures/slides-site/assets/index-C_sEAvZ8.js"].map(String::from).to_vec();
             all.extend(extra.iter().map(|p| p.to_string()));
             all
         };

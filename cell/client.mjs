@@ -5,6 +5,7 @@
 //   await fragment.call("add_todo", { text: "milk" });        // an operation
 //   await fragment.post("chat", { text: "hi" });               // a record, no app code
 //   const file = await fragment.blob(picked);                  // a blob: {sha256, size, type, name}
+//   fragment.limits();                                         // {uploadMaxBytes, filesPerMessage}, as said last
 //   fragment.live("list", {}, (r) => render(r.todos));         // a query, re-run on changes
 //   fragment.subscribe("activity", (rec) => log(rec.body));    // a channel, from a cursor
 //   fragment.subscribe("chat", show, { last: 100 });           // or from near its end
@@ -114,13 +115,25 @@ export function observePosts(handler) {
 /// Reads one page without changing a live subscription's cursor. With
 /// `before`, the nearest older records come in ascending seq order; pass
 /// the returned `next` as `before` for the next older page. Otherwise read
-/// forward after `after` (default 0). A page holds at most 1000 records.
+/// forward after `after` (default 0). A page holds at most 1000 records,
+/// and about 4 MiB of their bodies; its `more` says whether records remain
+/// past it in the direction read.
 export async function read(channel, { after, before, limit = 1000 } = {}) {
   if (after !== undefined && before !== undefined) throw new TypeError("choose after or before, not both");
   const url = new URL(`__channel/${encodeURIComponent(channel)}`, base);
   url.searchParams.set(before !== undefined ? "before" : "after", before ?? after ?? 0);
   url.searchParams.set("limit", limit);
   const response = await fetch(url, { credentials: "same-origin" });
+  const page = await response.json();
+  if (!response.ok) throw new FragmentError(response.status, page);
+  return page;
+}
+
+/// Reads each poster's newest record of each kind the channel keeps the
+/// newest of (fragment.json's `"newest": [kinds]`), the newest first: the
+/// latest state each poster said, however long ago. At most 32 records.
+export async function newest(channel) {
+  const response = await fetch(new URL(`__channel/${encodeURIComponent(channel)}/newest`, base), { credentials: "same-origin" });
   const page = await response.json();
   if (!response.ok) throw new FragmentError(response.status, page);
   return page;
@@ -206,11 +219,28 @@ function wanted() {
   return subs.size > 0 || lives.size > 0 || presenceHandlers.size > 0 || presenceData !== null || helloWaiters.length > 0;
 }
 
+// A socket a page asked for before this client came (`__fragmentLive`, the
+// chat's inline script: its handshake overlaps the page's modules), claimed
+// once, with what it heard meanwhile: its claim ends the bounds it kept
+// while unclaimed (a deadline, a cap on what it holds), so they never close
+// this client's socket. Taken if it is this client's own URL and still
+// opening or open; else closed. One that gave up first (its deadline, its
+// cap, its close) is no longer there, and this client dials as before, from
+// its own cursor, never from a cut-short replay.
+function adopted(url) {
+  const early = globalThis.__fragmentLive?.claim?.();
+  if (!early) return null;
+  if (early.ws.url === url.href && early.ws.readyState <= WebSocket.OPEN) return early;
+  early.ws.close();
+  return null;
+}
+
 function connect() {
   if (socket || ended) return;
   const url = new URL("__live", base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(url);
+  const early = adopted(url);
+  const ws = early ? early.ws : new WebSocket(url);
   socket = ws;
   const opening = setTimeout(() => ws.close(), OPEN_WAIT_MS + backoff);
   ws.onopen = () => {
@@ -223,7 +253,7 @@ function connect() {
   ws.onmessage = (event) => {
     const m = JSON.parse(event.data);
     if (m.type === "hello") {
-      hello = { id: m.id, principal: m.principal, role: m.role, platform: m.platform };
+      hello = { id: m.id, principal: m.principal, role: m.role, platform: m.platform, limits: m.limits };
       present.clear();
       for (const p of m.presence) present.set(p.id, p);
       helloWaiters.splice(0).forEach((resolve) => resolve(hello));
@@ -280,6 +310,12 @@ function connect() {
     if (wanted()) setTimeout(connect, backoff * (0.5 + Math.random()));
     backoff = Math.min(backoff * 2, 30000);
   };
+  // an adopted socket: as it happened, its opening (if it has), then what
+  // it heard since
+  if (early) {
+    if (ws.readyState === WebSocket.OPEN) ws.onopen();
+    for (const event of early.heard) ws.onmessage(event);
+  }
 }
 
 // One run of a live query: over the socket when it is open, else over
@@ -408,12 +444,51 @@ export function closed(handler) {
   return () => closedHandlers.delete(handler);
 }
 
-/// Who this page is to the fragment: { id, principal, role, platform }
-/// (`platform` the platform's origin, the one page that frames it with its
-/// person's session).
-export function me() {
+/// Who this page is to the fragment: { id, principal, role, platform,
+/// limits } (`platform` the platform's origin, the one page that frames it
+/// with its person's session; `limits` as `limits()` reads them), once the
+/// socket's hello comes. `me({ email: true })` adds `email` for a signed-in
+/// member, as `__people` gives it (a member's, to a member: decision 48),
+/// none for an anonymous visitor, a link holder or an agent: one more ask,
+/// so a page that only needs its role does not wait on it.
+export async function me({ email = false } = {}) {
   connect();
-  return hello ? Promise.resolve(hello) : new Promise((resolve) => helloWaiters.push(resolve));
+  const h = hello ?? (await new Promise((resolve) => helloWaiters.push(resolve)));
+  if (!email) return h;
+  const mine = await emailOf(h.principal);
+  return mine ? { ...h, email: mine } : h;
+}
+
+// How long `me({ email: true })` waits on `__people` before it answers
+// without the email: a page that asked for it is never held by a slow ask.
+const EMAIL_WAIT_MS = 5_000;
+// The caller's own email, asked once a principal; an ask that fails or is
+// cut short is asked again by the next `me({ email: true })`.
+const emails = new Map(); // principal -> Promise<string | null>
+function emailOf(principal) {
+  if (principal.startsWith("anon:")) return Promise.resolve(null);
+  if (!emails.has(principal)) {
+    const url = new URL(`__people?id=${encodeURIComponent(principal)}`, base);
+    const asked = fetch(url, { credentials: "same-origin", signal: AbortSignal.timeout(EMAIL_WAIT_MS) })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`__people answered ${r.status}`))))
+      .then((r) => r.profiles?.[principal]?.email ?? null)
+      .catch((e) => {
+        emails.delete(principal);
+        console.warn("fragment.me(): no email", e);
+        return null;
+      });
+    emails.set(principal, asked);
+  }
+  return emails.get(principal);
+}
+
+/// What one message of a person's may carry, as the platform said it last
+/// ({uploadMaxBytes, filesPerMessage}: the latest hello's, which each
+/// reconnect brings again): null before the first hello, or from an older
+/// platform. A page checks files against it when it takes them and again
+/// as it sends them, since a deploy may change it while the page is open.
+export function limits() {
+  return hello?.limits ?? null;
 }
 
 // ---- web push: the fragment's service worker (./__sw.js) and VAPID key

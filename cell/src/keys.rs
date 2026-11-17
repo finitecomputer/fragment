@@ -38,6 +38,11 @@ const CODESTORAGE_SCOPES: [&str; 4] = ["git:read", "git:write", "repo:write", "o
 /// read (its answers are a user, a token, or a link: a few KiB).
 const VENDOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const VENDOR_ANSWER_MAX_BYTES: usize = 64 * 1024;
+/// A glance's query to Workers Observability: its deadline (the queries run
+/// together, so the page waits about this at most), and its answer read
+/// whole (`glance::GROUPS_MAX` groups of a computer's id each: some 200 KB).
+const OBSERVABILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const OBSERVABILITY_ANSWER_MAX_BYTES: usize = 1024 * 1024;
 
 thread_local! {
     /// What each binding read last (`secrets_store::Cache`: a minute at most).
@@ -191,6 +196,26 @@ impl WorkOs<'_> {
     }
 }
 
+/// One query of the operators' glance (`fragment_core::glance::Question`)
+/// to the account's Workers Observability, with its read-only key (bound
+/// as `OBSERVABILITY_READ`): Cloudflare's answer, whatever its status (an
+/// error is in it: `glance::uniq_of`), read whole within
+/// `OBSERVABILITY_TIMEOUT` and `OBSERVABILITY_ANSWER_MAX_BYTES`.
+pub async fn observability_query(env: &Env, o: &crate::config::ObservabilityConfig, body: &Value) -> CellResult<Value> {
+    let key = required(env, store::OBSERVABILITY_READ).await?;
+    let headers = Headers::new();
+    headers.set("content-type", "application/json")?;
+    headers.set("authorization", &format!("Bearer {key}"))?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
+    let req = Request::new_with_init(&format!("{}/accounts/{}/workers/observability/telemetry/query", o.api, o.account_id), &init)?;
+    let a = crate::cs::fetch_all(req, OBSERVABILITY_TIMEOUT, OBSERVABILITY_ANSWER_MAX_BYTES).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Workers Observability did not answer: {}", e.message)))?;
+    if a.cut {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("Workers Observability answered more than {OBSERVABILITY_ANSWER_MAX_BYTES} bytes")));
+    }
+    serde_json::from_slice(&a.body).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Workers Observability answered {} with no JSON: {e}", a.status)))
+}
+
 /// The account's restricted Stripe key (bound as `STRIPE_KEY`).
 pub async fn stripe_key(env: &Env) -> CellResult<String> {
     required(env, store::STRIPE_KEY).await
@@ -223,6 +248,13 @@ pub async fn workos<'a>(env: &Env, cfg: &'a Config) -> CellResult<WorkOs<'a>> {
 /// read whole within `VENDOR_TIMEOUT`. Not reaching the host in time is
 /// `UpstreamFailed`; an answer over `VENDOR_ANSWER_MAX_BYTES` is null.
 async fn post_json(url: &str, method: Method, bearer: Option<&str>, body: Option<&Value>, host: &str) -> CellResult<(u16, Value)> {
+    let (status, bytes) = post(url, method, bearer, body, host).await?;
+    Ok((status, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
+}
+
+/// `post_json`'s request: (status, the answer's bytes, none when it was cut
+/// at `VENDOR_ANSWER_MAX_BYTES`), for a caller that reads its own type.
+async fn post(url: &str, method: Method, bearer: Option<&str>, body: Option<&Value>, host: &str) -> CellResult<(u16, Vec<u8>)> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
     if let Some(key) = bearer {
@@ -235,8 +267,7 @@ async fn post_json(url: &str, method: Method, bearer: Option<&str>, body: Option
     }
     let req = Request::new_with_init(url, &init)?;
     let a = crate::cs::fetch_all(req, VENDOR_TIMEOUT, VENDOR_ANSWER_MAX_BYTES).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {}", e.message)))?;
-    let answer = if a.cut { Value::Null } else { serde_json::from_slice(&a.body).unwrap_or(Value::Null) };
-    Ok((a.status, answer))
+    Ok((a.status, if a.cut { vec![] } else { a.body }))
 }
 
 /// An own key's sign-in code exchanged at its provider for the person's
@@ -247,15 +278,12 @@ pub async fn own_key_exchange(url: &str, body: &Value, host: &str) -> CellResult
 }
 
 /// WorkOS's code exchange with the API key added: (status, WorkOS's
-/// answer, its refresh token dropped: the platform keeps its own session).
-pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &str) -> CellResult<(u16, Value)> {
+/// answer's bytes, which its caller reads as the fields it keeps: never
+/// the refresh token, as the platform keeps its own session).
+pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &str) -> CellResult<(u16, Vec<u8>)> {
     let key = required(env, store::WORKOS_KEY).await?;
     let payload = json!({ "client_id": client_id, "client_secret": key, "grant_type": "authorization_code", "code": code });
-    let (status, mut answer) = post_json(&format!("{api}/user_management/authenticate"), Method::Post, None, Some(&payload), "WorkOS").await?;
-    if let Some(o) = answer.as_object_mut() {
-        o.remove("refresh_token");
-    }
-    Ok((status, answer))
+    post(&format!("{api}/user_management/authenticate"), Method::Post, None, Some(&payload), "WorkOS").await
 }
 
 /// A WorkOS Pipes access token for `user`'s account at `provider`
@@ -266,6 +294,20 @@ pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &s
 /// several (its id, with the plural opt-in, in the body as WorkOS' SDK
 /// sends them); None is the compatibility connection's, as with one.
 pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str, account: Option<&str>) -> CellResult<(u16, Value)> {
+    pipes_vend(env, api, provider, user, account, "token").await
+}
+
+/// `user`'s credential for `provider` beside what Pipes keeps of its
+/// provider's token answers (WorkOS Pipes' vend, `POST
+/// /data-integrations/{provider}/credentials`): `{active, credential:
+/// {value, metadata, …}}`, or `{active: false, error}`. A connection with an
+/// account host asks it, to learn its account's host (`metadata`). As
+/// `pipes_token`, `account` names one of several.
+pub async fn pipes_credential(env: &Env, api: &str, provider: &str, user: &str, account: Option<&str>) -> CellResult<(u16, Value)> {
+    pipes_vend(env, api, provider, user, account, "credentials").await
+}
+
+async fn pipes_vend(env: &Env, api: &str, provider: &str, user: &str, account: Option<&str>, what: &str) -> CellResult<(u16, Value)> {
     assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
     let key = required(env, store::WORKOS_KEY).await?;
     let body = match account {
@@ -275,7 +317,7 @@ pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str, accou
         }
         None => json!({ "user_id": user }),
     };
-    post_json(&format!("{api}/data-integrations/{provider}/token"), Method::Post, Some(&key), Some(&body), "WorkOS").await
+    post_json(&format!("{api}/data-integrations/{provider}/{what}"), Method::Post, Some(&key), Some(&body), "WorkOS").await
 }
 
 /// A connected account as Pipes describes it, with no token
@@ -319,19 +361,28 @@ pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> Ce
 
 /// Standard OAuth code exchange. Called only by the Registry after consuming
 /// the browser/session/provider-bound transaction. No redirects, retries or
-/// response-body diagnostics: these messages carry credentials.
+/// response-body diagnostics: these messages carry credentials. Its client
+/// authenticates as its row says (`client_auth`): its secret in the form,
+/// or in an HTTP Basic header.
 pub(super) async fn connection_exchange(env: &Env, provider: &str, o: &fragment_core::catalog::ConnectionOAuth, callback: &str, code: &str, verifier: &str) -> CellResult<(u16, Value)> {
     let cfg = Config::from_env(env);
     if !o.exchange.starts_with("https://") && !cfg.egress_local { return Err(CellError::host("a local OAuth endpoint is disabled on this fleet")); }
     let secret = required(env, &store::connection_secret(provider)).await?;
-    let form = fragment_core::connection_signin::exchange_form(o, callback, code, verifier, &secret);
-    confidential_request(&o.exchange, Method::Post, "application/x-www-form-urlencoded", None, &form).await
+    let auth = cfg.providers.get(provider).map(|p| p.client_auth).unwrap_or_default();
+    let (authorization, form) = fragment_core::connection_signin::exchange(o, auth, callback, code, verifier, &secret);
+    confidential_request(&o.exchange, Method::Post, "application/x-www-form-urlencoded", authorization.as_deref(), &form).await
 }
 
-async fn confidential_request(url: &str, method: Method, content_type: &str, bearer: Option<&str>, body: &str) -> CellResult<(u16, Value)> {
+/// A request that carries a credential, with `authorization` as its
+/// header of that name (a bearer key, or a client's HTTP Basic).
+async fn confidential_request(url: &str, method: Method, content_type: &str, authorization: Option<&str>, body: &str) -> CellResult<(u16, Value)> {
     let headers = Headers::new();
     headers.set("content-type", content_type)?;
-    if let Some(key) = bearer { headers.set("authorization", &format!("Bearer {key}"))?; }
+    // its answer is read as JSON: said so, since a token endpoint may pick
+    // its answer's format by `Accept` (Salesforce's answers JSON, XML or a
+    // form)
+    headers.set("accept", "application/json")?;
+    if let Some(a) = authorization { headers.set("authorization", a)?; }
     let mut init = RequestInit::new();
     init.with_method(method).with_headers(headers).with_redirect(worker::RequestRedirect::Manual).with_body(Some(body.into()));
     let req = Request::new_with_init(url, &init)?;
@@ -351,11 +402,15 @@ async fn confidential_request(url: &str, method: Method, content_type: &str, bea
 /// query, as WorkOS' SDK sends them); Pipes' refusals of an addition are
 /// told apart (`connection_accounts::imported`). An uncertain outcome is
 /// never retried. Refresh stays at WorkOS, using the same OAuth client.
+/// What the tokens keep of their answer (`Tokens::metadata`, a connection's
+/// account host's) goes with an import that makes an account, never an
+/// update (WorkOS takes it on create alone; Pipes keeps it from the
+/// provider's refreshes after).
 pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &str, tokens: fragment_core::connection_signin::Tokens, account: Option<&str>, several: Option<(&Import, Option<&str>)>) -> CellResult<Imported> {
     assert!(fragment_core::catalog::valid_name(provider));
     if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err(CellError::host("invalid WorkOS user id")); }
-    let key = required(env, store::WORKOS_KEY).await?;
-    let expires_at = fragment_core::export::rfc3339(js::now_ms() + i64::from(tokens.expires_in) * 1000);
+    let authorization = format!("Bearer {}", required(env, store::WORKOS_KEY).await?);
+    let expires_at = tokens.expires_at(js::now_ms());
     let mut body = tokens.import_body(&expires_at, account);
     let import = match several {
         Some((import, identifier)) => {
@@ -364,14 +419,33 @@ pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &st
         }
         None => &Import::Compatibility,
     };
-    let body = body.to_string();
+    let update = body.to_string();
+    // an account host's grant: Pipes keeps its host only as an account is
+    // made (WorkOS takes `metadata` on create alone)
+    let replace = tokens.metadata().is_some();
+    if let Some(m) = tokens.metadata() {
+        body["metadata"] = m.clone();
+    }
+    let create = body.to_string();
     let url = format!("{api}/user_management/users/{user}/connected_accounts/{provider}");
     let (status, answer) = match import {
-        Import::Reauthorize(id) => confidential_request(&format!("{url}?{}", fragment_core::connection_accounts::reauthorize_query(id)), Method::Put, "application/json", Some(&key), &body).await?,
-        Import::Compatibility | Import::Add => confidential_request(&url, Method::Post, "application/json", Some(&key), &body).await?,
+        Import::Reauthorize(id) => confidential_request(&format!("{url}?{}", fragment_core::connection_accounts::reauthorize_query(id)), Method::Put, "application/json", Some(&authorization), &update).await?,
+        Import::Compatibility | Import::Add => confidential_request(&url, Method::Post, "application/json", Some(&authorization), &create).await?,
     };
     Ok(match (import, imported(status, &answer)) {
-        (Import::Compatibility, Imported::Conflict) => match imported(confidential_request(&url, Method::Put, "application/json", Some(&key), &body).await?.0, &Value::Null) {
+        // one there already, of an account host: replaced, never updated,
+        // so its token and its host are always one grant's (an update would
+        // keep the earlier grant's host, another org's, beside this token).
+        // A delete that lands and a make that fails leaves none: the person
+        // connects again
+        (Import::Compatibility, Imported::Conflict) if replace => {
+            pipes_delete(env, api, provider, user, None).await?;
+            match imported(confidential_request(&url, Method::Post, "application/json", Some(&authorization), &create).await?.0, &Value::Null) {
+                i @ (Imported::Done | Imported::Refused | Imported::Failed) => i,
+                _ => Imported::Refused,
+            }
+        }
+        (Import::Compatibility, Imported::Conflict) => match imported(confidential_request(&url, Method::Put, "application/json", Some(&authorization), &update).await?.0, &Value::Null) {
             i @ (Imported::Done | Imported::Refused | Imported::Failed) => i,
             _ => Imported::Refused,
         },
@@ -406,13 +480,22 @@ pub async fn pipes_delete(env: &Env, api: &str, provider: &str, user: &str, acco
     }
 }
 
-/// A connection's grant revoked at its provider (RFC 7009) with `form`
-/// (`connection_signin::revoke_form`: an access token Pipes just minted
-/// for it, or one a fenced callback was given): whether the provider says
-/// so (200). No redirects or retries, and nothing of its answer is kept:
-/// the request carries a credential.
-pub async fn connection_revoke(revoke: &str, form: &str) -> CellResult<bool> {
-    Ok(confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", None, form).await?.0 == 200)
+/// A connection's grant revoked at its provider (RFC 7009), at `revoke`,
+/// with `form` (`connection_signin::revoke_form`: an access token Pipes
+/// just minted for it, or one a fenced callback was given): whether the
+/// provider says so (200). A row whose client authenticates with HTTP
+/// Basic (`client_auth`) does so here too (RFC 7009 §2.1; Zoom's refuses
+/// a revocation that does not), which is all its secret is read for; any
+/// other sends the token alone, as before. No redirects or retries, and
+/// nothing of its answer is kept: the request carries a credential.
+pub async fn connection_revoke(env: &Env, provider: &str, revoke: &str, form: &str) -> CellResult<bool> {
+    use fragment_core::catalog::ClientAuth;
+    let client = Config::from_env(env).providers.get(provider).filter(|p| p.client_auth == ClientAuth::Basic).and_then(|p| p.connection_oauth.as_ref());
+    let authorization = match client {
+        Some(o) => fragment_core::connection_signin::client_authorization(ClientAuth::Basic, &o.client_id, &required(env, &store::connection_secret(provider)).await?),
+        None => None,
+    };
+    Ok(confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", authorization.as_deref(), form).await?.0 == 200)
 }
 
 /// Whether the deployment binds the operator's key `name`

@@ -1,6 +1,7 @@
-// The brain's AGENTS.md: how an agent keeps a brain, shown as AGENTS.md at
-// the top of its viewer (api/file?path=AGENTS.md) and answered by its
-// guide operation (app.mjs; fragment call <brain> guide --input '{}').
+// The brain's AGENTS.md: how an agent keeps a brain, listed as AGENTS.md
+// among its files (the template's AGENTS.md, which its tests hold to this
+// text) and answered by its guide operation (app.mjs; fragment call
+// <brain> guide --input '{}').
 // It is the release's (decision 40), so every brain reads the
 // same one and it updates with the platform; a wiki's own AGENTS.md, in the
 // brain's files, adds to it. Adapted from Finite Brain's wiki skill
@@ -33,9 +34,9 @@ own index and log.
       datasets/     manifests, schemas, samples, query recipes
       output/       reports, plans, summaries and other deliverables
 
-At the top level, fragment.json holds the brain's title, and _index.md is
-the brain's own list of its wikis (made for you: never write one).
-Everything else at the top level is a wiki.
+At the top level, fragment.json holds the brain's title, and index.md is
+its front page: the platform's, unless the brain holds one of its own.
+Each folder at the top level is a wiki.
 
 ## Working on a brain
 
@@ -103,28 +104,33 @@ update a page rather than duplicate it.
     fragment call <brain> search --input '{"q": "battery storage"}'
     fragment call <brain> search --input '{"q": "tariff", "wiki": "garden", "limit": 20}'
 
-The answer is ranked sections, best first (BM25 over each section's text,
-its headings, its page's title and its path):
+The answer is ranked sections, best first, found by their words and by
+their meaning (a section about solar panels answers "photovoltaic"):
 
-    {"results": [{"rank", "path", "wiki", "title", "heading", "ancestry", "snippet"}], "pending"}
+    {"results": [{"rank", "path", "wiki", "title", "heading", "ancestry", "snippet", "signals"}], "indexing"}
 
-A query is plain words, at most 16 of them and 256 characters. Each word
-must be in the section, as a word or the start of one, ignoring case and
-accents. Search syntax means nothing: OR, NOT, NEAR, quotes, a colon or a
-star are words or nothing. "wiki" narrows it to one wiki; "limit" is 1 to
-50 (10 unless you ask). "pending" above 0 means the index is still taking
-in a sync: ask again in a moment.
+A query is plain words or a question, at most 256 characters. "wiki"
+narrows it to one wiki; "limit" is 1 to 50 (10 unless you ask). "signals"
+says what found a section: its words, its meaning, or both. "indexing"
+true means the index is still taking in a sync, and the answer may be
+incomplete: its changed job finishes it (fragment call <brain> changed
+--input '{}'); ask again once it has run. With "waiting_ms" above 0 the
+search service asked for a pause, and the job already running goes on by
+itself after it: start nothing, ask again later. A question asked here is
+paid by the brain's owner.
 
-A result points at a section: open its page and read it whole before you
-answer from it, and cite the pages and sources you used. When the brain
-has no answer, say so, and say what to ingest.
+A result points at a section: open its page (your synced copy, or
+fragment read <brain> <path>) and read it whole before you answer from
+it, and cite the pages and sources you used. When the brain has no
+answer, say so, and say what to ingest.
 
     fragment call <brain> index_status --input '{}'
 
-says how many pages and sections are indexed, what is pending, and which
-pages were skipped and why (a page of 1 MiB or more is not indexed: split
-it). The index is the brain's own, rebuilt from its files; a sync is all
-it needs.
+says how many pages and sections are indexed, what is pending, whether a
+run is on it, and which pages were skipped and why (a page of 1 MiB or
+more is not indexed: split it). The index is the brain's own, rebuilt from
+its files; a sync is all it needs. A brain past about 25,000 chunks
+should be split into child brains under a parent (below).
 
 ## A parent brain (the meta-brain convention)
 
@@ -153,14 +159,17 @@ Keep these ordinary files in the parent's wiki, for example executive/:
   child has its own read time, not a common snapshot.
 
 Refresh only when asked, as the agent with viewer access to children and
-editor access to the parent:
+editor access to the parent. Read and write through the fragment CLI,
+which signs each request and sends it to the platform; a brain's own
+address serves its pages, not the platform's API.
 
 1. Read the parent's source list, incorporated file and existing outputs
-   from the fragment, even after a restart. Reconcile current child state
-   against them; a local working copy or a missed notification is no
-   authority. Never acquire editor access just to sync a child.
-2. Read each child's status pin (GET /api/f/<child>/status, pins.main),
-   selected files (GET /api/f/<child>/file?path=...), then its status pin
+   from the fragment (fragment read <parent> <path>), even after a
+   restart. Reconcile current child state against them; a local working
+   copy or a missed notification is no authority. Never acquire editor
+   access just to sync a child.
+2. Read each child's main pin (fragment status <child>, its pins.main),
+   its selected files (fragment read <child> <path>), then its pin
    again. Require successful reads and equal nonempty pins; otherwise
    discard the attempt and retry from status, with a bounded retry count.
    If it keeps moving, report incomplete refresh and mark affected pages
@@ -168,9 +177,12 @@ editor access to the parent:
 3. Synthesize into stable output paths, citing each child page and its
    verified revision. Update existing pages, index and log rather than
    appending duplicate summaries. Publish outputs and incorporated.json
-   together in one file batch (POST /api/f/<parent>/files, at most 16
-   files / 1 MiB); split larger work into independently consistent batches.
-   On an uncertain write result, reread the parent before retrying. An
+   together in one write, which lands whole or not at all: put them in a
+   folder at their paths and run fragment write <parent> --dir <folder>
+   <path>... (at most 16 files / 1 MiB); split larger work into
+   independently consistent writes. Never sync the parent for this: a
+   sync sends what does not conflict and holds back what does. On an
+   uncertain write result, reread the parent before retrying. An
    unchanged source revision with matching outputs needs no new write.
 4. Reconcile removals too: a deleted source page withdraws its dependent
    claims. If a child becomes unreadable, mark dependent pages stale or
@@ -178,11 +190,13 @@ editor access to the parent:
    copies. Withdraw the text when it should no longer be disclosed. Access
    revocation cannot recall old git versions, chats, exports or downloads.
 
-For questions spanning children, call each child's existing search as the
-reader (fragment call <child> search --input '{"q":"launch","limit":10}').
-Bound the source count and results; group by source, report denied or
-unavailable sources and pending indexes, and don't compare BM25 ranks
-across brains. Reopen pages with the pin check before citing them. Search
+For questions spanning children, search them as one, as the reader:
+
+    fragment search "launch readiness" --in <parent>,<child>,<child>
+
+Its results are merged across the brains, each named by its fragment, and
+it says which brains it could not search (denied, no index). Name at most
+32. Reopen pages with the pin check before citing them. Search
 snippets, answers and the chat receiving them need the same audience
 check. The parent's browser search covers only its own synthesis. Child
 references and a parent's job confer no reader credentials.
@@ -193,7 +207,7 @@ references and a parent's job confer no reader credentials.
 - Each wiki's index.md and log.md speak of that wiki alone.
 - Prefer updating a page to making a near-duplicate. Delete a page only
   when someone asks you to.
-- Never write _index.md, app.mjs, applib/ or site/: the brain's code is
+- Never write app.mjs, applib/ or site/: the brain's code is
   the platform's, and a brain that carries code of its own is a fork.
 - Everyone the brain is shared with (fragment members) reads all of it.
   There are no folder permissions and no encryption: put what a narrower

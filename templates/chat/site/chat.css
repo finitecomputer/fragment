@@ -132,11 +132,15 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .fragment-chat button, .fragment-chat a, .fragment-chat summary, .fragment-chat label { touch-action: manipulation; }
 .md-code pre, .md .md-table, .step pre, .mentions, .commands { overscroll-behavior: contain; }
 .history, .latest-wrap { overflow-anchor: none; }
-.history { text-align: center; padding-top: 12px; }
-.history:has(button[hidden]) { display: none; }
-.history button { font: inherit; font-size: 13px; border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; background: var(--bg-card); color: var(--text-secondary); cursor: pointer; }
-.history button:disabled { cursor: wait; }
-#history-error { display: block; color: var(--text-secondary); font-size: 12px; }
+/* older messages load as the reader nears #earlier (chat.js `earlier`) */
+.history { text-align: center; }
+#earlier, #later { height: 1px; }
+/* the same, for a keyboard or a screen reader: seen once focused */
+.history { position: relative; }
+.history button[aria-disabled="true"] { cursor: wait; }
+#earlier-load:not(:focus) { position: absolute; top: 0; left: 0; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#history-status:not(:empty) { display: block; padding-top: 12px; color: var(--text-secondary); font-size: 12px; }
+.history button { margin-top: 8px; font: inherit; font-size: 13px; border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; background: var(--bg-card); color: var(--text-secondary); cursor: pointer; }
 .latest-wrap { position: relative; z-index: 2; height: 0; display: flex; justify-content: center; }
 #latest { position: absolute; bottom: 12px; padding: 9px 15px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); box-shadow: 0 3px 12px #0002; font: inherit; font-size: 13px; cursor: pointer; }
 .column { width: min(760px, calc(100vw - 16px)); margin: 0 0 0 max(8px, calc((100vw - 760px) / 2)); padding: 16px 17px 32px; }
@@ -171,6 +175,23 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .here .faces { display: inline-flex; }
 .here .faces > * { box-shadow: 0 0 0 2px var(--bg-chat); }
 .here .faces > * + * { margin-left: -5px; }
+/* the helpers working now, just above the composer: one quiet row,
+   opened to a line a task (chat.js renderHelpers) */
+.helpers { margin: 0 4px 6px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-subtle); font-size: 12.5px; color: var(--text-secondary); overflow: hidden; }
+.helpers-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 0 10px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.helpers-head:hover { color: var(--text-primary); }
+.helpers-head .helpers-icon { width: 14px; height: 14px; flex: none; color: var(--text-icon); }
+.helpers-said { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.helpers-head .chev { width: 14px; height: 14px; flex: none; transform: rotate(-90deg); transition: transform .14s; }
+.helpers.open .helpers-head .chev { transform: rotate(90deg); }
+.helpers .faces { display: inline-flex; flex: none; }
+.helpers .faces > * { box-shadow: 0 0 0 2px var(--surface-subtle); }
+.helpers .faces > * + * { margin-left: -5px; }
+.helpers-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 2px 10px 9px 32px; list-style: none; }
+.helper { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.helper-goal { flex: 1 1 auto; min-width: 0; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.helper-since { flex: none; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.helpers-more { color: var(--text-tertiary); }
 /* A person's words use the same body typography as the agent's response. */
 .bubble { width: fit-content; max-width: min(520px, 82%); padding: 10px 12px; border-radius: var(--chat-message-radius); background: var(--chat-user-bubble); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.user.other .bubble { background: color-mix(in srgb, var(--text-primary) 6%, transparent); border: 1px solid var(--border-strong); }
@@ -306,6 +327,10 @@ button.step-name:hover, button.step-name:focus-visible { color: var(--text-secon
 .step-verb { flex: none; }
 .step-args { display: block; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .step.running .step-name { color: var(--text-secondary); }
+.step-label:has(.step-since) .step-args { flex: 0 1 auto; }
+.step-since { flex: none; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.step-since::before { content: "· "; }
+.step.maybe .step-verb { color: var(--text-secondary); }
 .step.error .step-name, .step.error .step-result { color: var(--step-failed); }
 /* a step opened: its whole arguments, then what came of it */
 .step-detail { margin: 4px 0 6px 20px; padding: 10px 12px; border-radius: 8px; background: var(--chat-code); }
@@ -347,6 +372,8 @@ details.tools.rolling.advanced > .step:nth-last-child(4) { display: block; overf
 .options form.words:focus-within { border-color: var(--chat-agent-color, var(--border-strong)); }
 .options form.words input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: inherit; font: inherit; font-size: 16px; }
 .options form.words input:disabled { opacity: .42; }
+/* a code for the computer alone, masked without being a password (chat.js, `computerField`) */
+.options form.words input.masked { -webkit-text-security: disc; }
 .options form.words button { display: grid; place-items: center; width: 26px; min-height: 26px; height: 26px; padding: 0; border: 0; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); }
 .options form.words button svg { width: 14px; height: 14px; }
 .prompt-note { margin-top: 10px; font-size: 12.5px; color: var(--text-tertiary); }

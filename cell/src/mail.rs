@@ -11,6 +11,7 @@ use fragment_core::mail;
 use fragment_proto::ErrorCode;
 use worker::*;
 
+use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::js;
@@ -51,7 +52,7 @@ pub async fn send(env: &Env, cfg: &Config, mail: &Mail) -> CellResult<String> {
         .send()
         .await
         .map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the mail fake did not answer: {e}")))?;
-    let answer: Answer = resp.json().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the mail fake's answer: {e}")))?;
+    let answer: Answer = resp.read_json().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the mail fake's answer: {e}")))?;
     match (resp.status_code(), answer.message_id) {
         (200, Some(id)) => Ok(id),
         _ => Err(refused(answer.code.as_deref().unwrap_or(""), answer.message.as_deref().unwrap_or("no reason given"))),

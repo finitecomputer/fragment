@@ -7,12 +7,17 @@
 //! command carries (a token, a URL) says no rule by chance (`says`):
 //!
 //! - default: two drafts, then the reply `echo: [<asker>] <text>`;
-//! - `tool`: its words before a tool call (`Let me look.`), a reply of
-//!   their own, then a step (`search`, a `web` one: the message's first 40
-//!   characters its args, ok, an excerpt), then the reply;
+//! - `tool`: a tool call said before it runs (`turn.call`: `search`, a
+//!   `web` one, the message's first 40 characters its args), its words
+//!   before it (`Let me look.`), a reply of their own, then (`slow`:
+//!   `CALL_PACES` paces on) its step (ok, an excerpt), then the reply;
 //! - `approve` or `risky`: a step, then a prompt (`once`, `deny`) the
 //!   owner answers; the reply says `(approved)`, `(denied)`, or
 //!   `(not approved)` once it expired;
+//! - `code-card`: a card whose one option, `code`, is answered on the agent's
+//!   computer, never in a record (`PromptOption::computer`, as a sign-in's
+//!   code is); the reply says `(took N characters)`, never what they were,
+//!   or `(took nothing)` once it expired;
 //! - `choose`: a prompt of choices (`c0` Basil, `c1` Mint) and `other`, answered
 //!   in words, as Hermes' clarify asks it; the reply says `(chose: <the
 //!   label, or the words>)`, or `(chose: nothing)` once it expired. `other`
@@ -36,9 +41,10 @@
 //!   header of ours: `<value>` is `$<NAME>`, the agent's credential in that
 //!   environment variable as `GET /api/computer` lists it now, or a literal;
 //!   it goes in a header (`authorization: Bearer …` unless named), a query
-//!   parameter, or basic auth's password beside `<user>`. The reply is the
-//!   answer's status and its first 300 characters (the computer's swap,
-//!   decisions 22 and 37);
+//!   parameter, or basic auth's password beside `<user>`; with `posting
+//!   <json>` (the rest of the message) it is a POST of that JSON, else a
+//!   GET. The reply is the answer's status and its first 300 characters
+//!   (the computer's swap, decisions 22 and 37);
 //! - `credentials`: what the agent's guest is given now (`GET
 //!   /api/computer`): each credential's provider, its environment variables
 //!   and its placeholder (and `models at <base>` for a provider that serves
@@ -80,15 +86,19 @@
 //!   <the refusal>`;
 //! - `door link <ticket>`, `door say <text>`, `door forge <text>`, `door
 //!   other <text>`: an agent's door as SimpleX's is (fragment_core::door),
-//!   for the platform's lanes: a link's ticket (its JSON, as the owner's
+//!   for the platform's lanes: a link's or an adoption's ticket (its JSON, as the owner's
 //!   Settings made it) checked as the bridge checks one, then redeemed with
 //!   a door key the script makes (kept while it runs); a relayed record
 //!   that key signs, posted on this chat; one with no door's signature
 //!   (only the agent's own key's, as every request of its is); one signed
 //!   by a key that is no door's; `door bind <fragment>`: the agent asking,
-//!   for its owner, to bind that connector as its own door. The reply is
-//!   `door linked`, `door said <seq>`, `door bound`, or `door refused:
-//!   <why>`;
+//!   for its owner, to bind that connector as its own door; `door poke
+//!   <fragment> <secret|files|token|seen|propose|visibility|invite|rotate|status>
+//!   [itself]`: the agent asking, for its owner (or as itself), to do an
+//!   editor's or a sharer's thing there (`Api::poke`). The reply is `door
+//!   linked`, `door said <seq>`, `door bound`, `door poked <what>` (and
+//!   `, its share link shown` when the answer holds it), or `door
+//!   refused: <why>`;
 //! - `ask <agent> <words>`: another agent of its computer asked `<words>`
 //!   with the fragment CLI, `fragment ask --return-to <this chat>`, as the
 //!   agent acting for its owner, as our Hermes image's `fragment_ask` runs
@@ -97,6 +107,12 @@
 //!   agent's own (docs/chat-records.md, "An ask"). Its post id is the
 //!   turn's, so a turn read again asks once. The reply: `asked <its name>`,
 //!   or `ask refused: <why>`;
+//! - `sync <fragment> <MiB>`: a file of `<MiB>` MiB (`big.bin`, the same
+//!   bytes every time) synced into `<fragment>` with the fragment CLI,
+//!   `fragment sync`, as the agent acting for its owner, as its terminal
+//!   would: a large file's bytes go up through the egress as a blob, its
+//!   pointer to git. The reply: `synced <sha256> <bytes>`, or `sync
+//!   refused: <why>`;
 //! - a message with attachments: the reply names them;
 //! - a turn told something first (`TurnStart::note`: its agent's turn before
 //!   it in the chat was cut by a restart): the reply ends with
@@ -120,7 +136,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::records::{Category, NoticeCategory, Outcome, PromptOption, Step};
+use crate::records::{Call, Category, NoticeCategory, Outcome, PromptOption, Step};
 use crate::runtime::{Command, Event, How, LocalFile, MenuItem, Runtime, RuntimeFuture, RuntimeIo, TurnStart};
 
 /// How long `speak`'s voice reply plays.
@@ -275,16 +291,19 @@ enum Place<'a> {
     Basic(&'a str),
 }
 
-/// `fetch`'s words: the URL, the value (`$NAME` or a literal), and where it goes.
-fn fetch_words(text: &str) -> Result<(&str, &str, Place<'_>), String> {
+/// `fetch`'s words: the URL, the value (`$NAME` or a literal), where it
+/// goes, and the JSON body it posts, if any (all after ` posting `).
+fn fetch_words(text: &str) -> Result<(&str, &str, Place<'_>, Option<&str>), String> {
+    let (text, posted) = text.split_once(" posting ").map_or((text, None), |(t, b)| (t, Some(b)));
     let words: Vec<&str> = text.split_whitespace().collect();
-    match words.as_slice() {
-        [_, url, "with", v] => Ok((url, v, Place::Header("authorization"))),
-        [_, url, "with", v, "in", "query", q] => Ok((url, v, Place::Query(q))),
-        [_, url, "with", v, "as", "basic", user] => Ok((url, v, Place::Basic(user))),
-        [_, url, "with", v, "in", h] => Ok((url, v, Place::Header(h))),
-        _ => Err("say `fetch <http url> with <$NAME or a value> [in <header> | in query <param> | as basic <user>]`".into()),
-    }
+    let (url, value, place) = match words.as_slice() {
+        [_, url, "with", v] => (*url, *v, Place::Header("authorization")),
+        [_, url, "with", v, "in", "query", q] => (*url, *v, Place::Query(q)),
+        [_, url, "with", v, "as", "basic", user] => (*url, *v, Place::Basic(user)),
+        [_, url, "with", v, "in", h] => (*url, *v, Place::Header(h)),
+        _ => return Err("say `fetch <http url> with <$NAME or a value> [in <header> | in query <param> | as basic <user>] [posting <json>]`".into()),
+    };
+    Ok((url, value, place, posted))
 }
 
 /// `agent`'s credentials, as `GET /api/computer` lists them now.
@@ -303,15 +322,15 @@ async fn credential(agent: &str, name: &str) -> Result<String, String> {
 }
 
 /// `fetch <url> with <value> [in <header> | in query <param> | as basic
-/// <user>]`, as `agent`'s guest sends it (no header of ours): the answer's
-/// status and body.
+/// <user>] [posting <json>]`, as `agent`'s guest sends it (no header of
+/// ours; a GET, or a POST of the JSON): the answer's status and body.
 async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
     use base64::Engine;
-    use http_body_util::{BodyExt, Empty, Limited};
+    use http_body_util::{BodyExt, Either, Empty, Full, Limited};
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
 
-    let (url, value, place) = fetch_words(text)?;
+    let (url, value, place, posted) = fetch_words(text)?;
     let value = match value.strip_prefix('$') {
         Some(name) => credential(agent, name).await?,
         None => value.to_string(),
@@ -323,11 +342,12 @@ async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
         Place::Basic(user) => (url.to_string(), "authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{value}")))),
     };
     let base = crate::net::Base::parse(&url)?;
-    let req = hyper::Request::get(&url)
-        .header("host", base.authority())
-        .header(header, header_value)
-        .body(Empty::<bytes::Bytes>::new())
-        .map_err(|e| e.to_string())?;
+    let req = hyper::Request::builder().uri(&url).header("host", base.authority()).header(header, header_value);
+    let req = match posted {
+        None => req.method("GET").body(Either::Left(Empty::<bytes::Bytes>::new())),
+        Some(json) => req.method("POST").header("content-type", "application/json").body(Either::Right(Full::new(bytes::Bytes::from(json.to_string())))),
+    }
+    .map_err(|e| e.to_string())?;
     let client = Client::builder(TokioExecutor::new()).build_http();
     let call = async {
         let res = client.request(req).await.map_err(|e| e.to_string())?;
@@ -459,6 +479,46 @@ async fn ask_another(agent: &crate::runtime::Agent, chat: &str, turn: &str, rest
     format!("asked {}", asked["title"].as_str().or(asked["name"].as_str()).unwrap_or(who))
 }
 
+/// A sync of a large file is the CLI hashing it, uploading its bytes and
+/// committing its pointer: at most this long.
+const SYNC_WAIT: Duration = Duration::from_secs(180);
+
+/// `sync <fragment> <MiB>`: the module's list.
+async fn sync_big(agent: &crate::runtime::Agent, turn: &str, rest: &str) -> String {
+    use sha2::Digest;
+    let mut words = rest.split_whitespace();
+    let (Some(fragment), Some(mib)) = (words.next(), words.next().and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=256).contains(n))) else {
+        return "say `sync <fragment> <MiB>`, at most 256".into();
+    };
+    let dir = std::env::temp_dir().join(format!("fragment-sync-{}", &crate::records::hex(&sha2::Sha256::digest(turn.as_bytes()))[..16]));
+    let bytes: Vec<u8> = (0..mib * 1024 * 1024).map(|i| (i as u32).wrapping_mul(2_654_435_761).rotate_right(13) as u8).collect();
+    let sha = crate::records::hex(&sha2::Sha256::digest(&bytes));
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    if let Err(e) = async {
+        tokio::fs::create_dir_all(&dir).await?;
+        tokio::fs::write(dir.join("big.bin"), &bytes).await
+    }
+    .await
+    {
+        return format!("sync refused: {e}");
+    }
+    let run = tokio::process::Command::new(CLI)
+        .args(["sync", fragment, "--dir"])
+        .arg(&dir)
+        .env("FRAGMENT_AS_AGENT", &agent.fragment)
+        .env("FRAGMENT_FOR", &agent.owner)
+        .kill_on_drop(true)
+        .output();
+    let said = match tokio::time::timeout(SYNC_WAIT, run).await {
+        Ok(Ok(out)) if out.status.success() => format!("synced {sha} {}", bytes.len()),
+        Ok(Ok(out)) => format!("sync refused: {}", String::from_utf8_lossy(&out.stderr).chars().take(300).collect::<String>()),
+        Ok(Err(e)) => format!("sync refused: the CLI did not run ({e})"),
+        Err(_) => format!("sync refused: not done in {} s", SYNC_WAIT.as_secs()),
+    };
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    said
+}
+
 /// The door keys `door link` made, by agent, for the process's life.
 static DOORS: std::sync::Mutex<BTreeMap<String, crate::simplex::door::Key>> = std::sync::Mutex::new(BTreeMap::new());
 
@@ -515,10 +575,19 @@ async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<S
         api.bind_door(&agent.fragment, &agent.owner, said.trim()).await.map_err(|e| e.to_string())?;
         return Ok("door bound".into());
     }
+    if verb == "poke" {
+        let words: Vec<&str> = said.split_whitespace().collect();
+        let [fragment, what, rest @ ..] = &words[..] else { return Err("say `door poke <fragment> <secret|files|token|seen|propose|visibility|invite|rotate|status> [itself]`".into()) };
+        let answer = api.poke(&agent.fragment, &agent.owner, fragment, what, rest == ["itself"]).await.map_err(|e| e.to_string())?;
+        let link = if answer["viewToken"].is_string() { ", its share link shown" } else { "" };
+        return Ok(format!("door poked {what}{link}"));
+    }
     if verb == "link" {
         let ticket: Ticket = serde_json::from_str(said.trim()).map_err(|e| format!("not a ticket: {e}"))?;
         let computer = api.computer(false).await.map_err(|e| e.to_string())?.computer;
-        door::check(&ticket, "link", &agent.fragment, &computer, agent.key.as_deref().unwrap_or(""), now).map_err(str::to_string)?;
+        // a link's ticket, or an adoption's (FIN-463), redeemed as the bridge's are
+        let act = if ticket.act == "adopt" { "adopt" } else { "link" };
+        door::check(&ticket, act, &agent.fragment, &computer, agent.key.as_deref().unwrap_or(""), now).map_err(str::to_string)?;
         let key = Key::generate().map_err(|e| e.to_string())?;
         api.door(&agent.fragment, door::DOOR, &ticket.nonce, &key.public_hex()).await.map_err(|e| e.to_string())?;
         DOORS.lock().expect("not poisoned").insert(agent.fragment.clone(), key);
@@ -705,6 +774,10 @@ async fn decide(agent: &str, rest: &str) -> Result<String, String> {
 }
 
 /// Waits `pace`, hearing a Stop meanwhile (true).
+/// How many paces a slow tool call runs before its step (two seconds at the
+/// image's 40 ms: long enough for a page to show it running).
+const CALL_PACES: u32 = 50;
+
 async fn pause(pace: Duration, rx: &mut mpsc::Receiver<Heard>) -> bool {
     tokio::select! {
         _ = tokio::time::sleep(pace) => false,
@@ -799,6 +872,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if let Some(rest) = ts.text.strip_prefix("ask ") {
         reply = ask_another(&ts.agent, &ts.fragment, &id, rest).await;
     }
+    if let Some(rest) = ts.text.strip_prefix("sync ") {
+        reply = sync_big(&ts.agent, &id, rest).await;
+    }
     if let Some(rest) = ts.text.strip_prefix("relay ") {
         reply = relay(&ts.agent.fragment, rest).await.unwrap_or_else(|e| format!("relay failed: {e}"));
     }
@@ -819,17 +895,29 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     let mut part = 1;
     if says(&text, "tool") {
-        // its words before the call, a reply of their own, then the step
+        // its call said before it runs, its words before the call, a reply
+        // of their own, then (a slow call runs on a while) the step
+        let args: String = ts.text.chars().take(40).collect();
+        let call = Call { response: format!("script-{}", &id[..12]), position: 0, tool_call_id: "call-search".into(), tool: "search".into(), args: args.clone(), category: Category::Web };
+        emit(Event::Called { turn: id.clone(), call }).await;
         emit(Event::Reply { turn: id.clone(), part, text: "Let me look.".into() }).await;
         part += 1;
-        let step = Step { tool: "search".into(), args: ts.text.chars().take(40).collect(), ok: true, excerpt: "3 results".into(), category: Category::Web, evidence: None };
+        if says(&text, "slow") {
+            for _ in 0..CALL_PACES {
+                if pause(cfg.pace, &mut rx).await {
+                    emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
+                    return;
+                }
+            }
+        }
+        let step = Step { tool: "search".into(), args, ok: true, excerpt: "3 results".into(), category: Category::Web, evidence: None };
         emit(Event::Step { turn: id.clone(), step }).await;
     }
     if says(&text, "approve") || says(&text, "risky") {
         emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None } }).await;
         let options = vec![
-            PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()), words: false },
-            PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false },
+            PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()), words: false, computer: false },
+            PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false, computer: false },
         ];
         let prompt = format!("p-{}", &id[..12]);
         emit(Event::Prompt { turn: id.clone(), prompt, text: "Run `rm -rf ./scratch`?".into(), options, ttl_ms: None }).await;
@@ -844,8 +932,24 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         };
         reply = format!("{reply} ({said})");
     }
+    // a word no other command says (`door poke <fragment> secret` does say
+    // `secret`)
+    if text.split_whitespace().any(|w| w == "code-card") {
+        let options = vec![PromptOption { id: "code".into(), label: "Paste the code".into(), style: None, words: true, computer: true }];
+        let prompt = format!("s-{}", &id[..12]);
+        emit(Event::Prompt { turn: id.clone(), prompt, text: "Paste the code your browser shows you.".into(), options, ttl_ms: None }).await;
+        let took = match rx.recv().await {
+            Some(Heard::Answer(Some(_), Some(words))) => format!("{} characters", words.chars().count()),
+            Some(Heard::Answer(..) | Heard::Told(_) | Heard::Steered(_)) => "nothing".into(),
+            Some(Heard::Stop) | None => {
+                emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
+                return;
+            }
+        };
+        reply = format!("{reply} (took {took})");
+    }
     if text.split_whitespace().any(|w| w == "choose") {
-        let options = [("c0", "Basil", false), ("c1", "Mint", false), ("other", "Something else", true)].map(|(id, label, words)| PromptOption { id: id.into(), label: label.into(), style: None, words });
+        let options = [("c0", "Basil", false), ("c1", "Mint", false), ("other", "Something else", true)].map(|(id, label, words)| PromptOption { id: id.into(), label: label.into(), style: None, words, computer: false });
         let prompt = format!("c-{}", &id[..12]);
         emit(Event::Prompt { turn: id.clone(), prompt, text: "What should I plant?".into(), options: options.to_vec(), ttl_ms: None }).await;
         let chose = match rx.recv().await {
@@ -916,7 +1020,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let path = cfg.scratch.join(format!("{id}-drawing.txt"));
         let body = format!("a drawing for {}\n", ts.asker_name);
         if tokio::fs::write(&path, &body).await.is_ok() {
-            let file = LocalFile { path, media_type: "text/plain".into(), name: "drawing.txt".into(), size: body.len() as u64 };
+            let file = LocalFile { path, media_type: "text/plain".into(), name: "drawing.txt".into(), size: body.len() as u64, pin: Default::default() };
             emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }
@@ -924,7 +1028,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let path = cfg.scratch.join(format!("{id}-speech.mp3"));
         let body = crate::simplex::audio::silence_mp3(SPOKEN_SECS);
         if tokio::fs::write(&path, &body).await.is_ok() {
-            let file = LocalFile { path, media_type: "audio/mpeg".into(), name: "speech.mp3".into(), size: body.len() as u64 };
+            let file = LocalFile { path, media_type: "audio/mpeg".into(), name: "speech.mp3".into(), size: body.len() as u64, pin: Default::default() };
             emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }
@@ -944,11 +1048,14 @@ mod tests {
     /// parameter, or basic auth; anything else is refused, saying how.
     #[test]
     fn fetch_reads_where_its_value_goes() {
-        assert_eq!(fetch_words("fetch http://a.test/x with $PERPLEXITY_API_KEY").unwrap(), ("http://a.test/x", "$PERPLEXITY_API_KEY", Place::Header("authorization")));
-        assert_eq!(fetch_words("fetch http://a.test/x with $K in xi-api-key").unwrap(), ("http://a.test/x", "$K", Place::Header("xi-api-key")));
-        assert_eq!(fetch_words("fetch http://a.test/x with $K in query key").unwrap(), ("http://a.test/x", "$K", Place::Query("key")));
-        assert_eq!(fetch_words("fetch http://a.test/x with fck_p_00 as basic api").unwrap(), ("http://a.test/x", "fck_p_00", Place::Basic("api")));
-        for bad in ["fetch http://a.test/x", "fetch http://a.test/x with", "fetch http://a.test/x with $K in", "fetch http://a.test/x with $K as basic"] {
+        assert_eq!(fetch_words("fetch http://a.test/x with $PERPLEXITY_API_KEY").unwrap(), ("http://a.test/x", "$PERPLEXITY_API_KEY", Place::Header("authorization"), None));
+        assert_eq!(fetch_words("fetch http://a.test/x with $K in xi-api-key").unwrap(), ("http://a.test/x", "$K", Place::Header("xi-api-key"), None));
+        assert_eq!(fetch_words("fetch http://a.test/x with $K in query key").unwrap(), ("http://a.test/x", "$K", Place::Query("key"), None));
+        assert_eq!(fetch_words("fetch http://a.test/x with fck_p_00 as basic api").unwrap(), ("http://a.test/x", "fck_p_00", Place::Basic("api"), None));
+        // a JSON body, its spaces as they came
+        let posted = fetch_words(r#"fetch http://a.test/x with $K in xi-api-key posting {"text": "two words"}"#).unwrap();
+        assert_eq!(posted, ("http://a.test/x", "$K", Place::Header("xi-api-key"), Some(r#"{"text": "two words"}"#)));
+        for bad in ["fetch http://a.test/x", "fetch http://a.test/x with", "fetch http://a.test/x with $K in", "fetch http://a.test/x with $K as basic", "fetch http://a.test/x posting {}"] {
             assert!(fetch_words(bad).is_err(), "{bad}");
         }
     }

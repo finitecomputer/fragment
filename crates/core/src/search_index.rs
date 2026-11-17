@@ -73,10 +73,66 @@ pub fn hold(v: &[f32]) -> Option<Held> {
     Some(Held { code, q })
 }
 
-/// The int8 dot product of two held vectors.
+/// The int8 dot product of two held vectors: Wasm SIMD's, sixteen
+/// components a step, where the cell is built for it (`simd128`:
+/// xtask/src/build.rs), else `dot_scalar`'s. The two agree exactly (an
+/// i8·i8 product and its sums fit i32 at any dimensions a slot names).
 pub fn dot(a: &[i8], b: &[i8]) -> i32 {
     assert_eq!(a.len(), b.len(), "held vectors of one space");
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    let d = simd::dot(a, b);
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    let d = dot_scalar(a, b);
+    d
+}
+
+/// `dot`, one component at a time: the reference SIMD's is checked against
+/// (the index's test lever, in the Wasm itself).
+pub fn dot_scalar(a: &[i8], b: &[i8]) -> i32 {
     a.iter().zip(b).map(|(x, y)| i32::from(*x) * i32::from(*y)).sum()
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod simd {
+    use core::arch::wasm32::*;
+
+    /// Sixteen lanes of `s` from `at`.
+    fn lanes(s: &[i8], at: usize) -> v128 {
+        let c = &s[at..at + 16];
+        i8x16(c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15])
+    }
+
+    /// Each sixteen components widened to i16 and multiplied in pairs
+    /// into i32 (`i32x4.dot_i16x8_s`); the tail one at a time.
+    pub(super) fn dot(a: &[i8], b: &[i8]) -> i32 {
+        let whole = a.len() / 16 * 16;
+        let mut acc = i32x4_splat(0);
+        for at in (0..whole).step_by(16) {
+            let (x, y) = (lanes(a, at), lanes(b, at));
+            acc = i32x4_add(acc, i32x4_dot_i16x8(i16x8_extend_low_i8x16(x), i16x8_extend_low_i8x16(y)));
+            acc = i32x4_add(acc, i32x4_dot_i16x8(i16x8_extend_high_i8x16(x), i16x8_extend_high_i8x16(y)));
+        }
+        let lanes = i32x4_extract_lane::<0>(acc) + i32x4_extract_lane::<1>(acc) + i32x4_extract_lane::<2>(acc) + i32x4_extract_lane::<3>(acc);
+        lanes + super::dot_scalar(&a[whole..], &b[whole..])
+    }
+}
+
+/// Whether `dot` agrees with `dot_scalar` on a pseudo-random pair of each
+/// length from 0 to 1040, every one (a slot's 1024, its tails, and a
+/// step past): what the index's test lever answers, run in the very Wasm
+/// a deploy ships.
+pub fn dot_agrees() -> bool {
+    let mut s: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        (s >> 32) as i8
+    };
+    (0..=1040usize).all(|len| {
+        let (a, b): (Vec<i8>, Vec<i8>) = (0..len).map(|_| (next(), next())).unzip();
+        dot(&a, &b) == dot_scalar(&a, &b)
+    })
 }
 
 /// An int8 dot product as the cosine it estimates.
@@ -117,6 +173,24 @@ impl Table {
     }
 }
 
+/// A fence, at most: what JavaScript holds exactly, and SQLite's integer.
+pub const FENCE_MAX: u64 = (1 << 53) - 1;
+
+/// Whether a write or delete sent at fence `asked` is taken, the source's
+/// stored fence `stored` (none: none taken yet). Only a lower one is
+/// refused: the same batch's retry, at its own fence, is taken again.
+pub fn admits(stored: Option<u64>, asked: u64) -> bool {
+    assert!(asked <= FENCE_MAX, "a fence is checked against FENCE_MAX before it is compared");
+    stored.is_none_or(|s| asked >= s)
+}
+
+/// Whether an index holding `held` chunks takes a source's write of `new`
+/// chunks that replaces `replaced` of them, holding at most `max`: a
+/// source written again counts once, so one at capacity is replaced.
+pub fn fits(held: u64, replaced: u64, new: u64, max: u64) -> bool {
+    held.saturating_sub(replaced).checked_add(new).is_some_and(|n| n <= max)
+}
+
 /// How many of `n` chunks the sign pass hands to int8.
 pub fn candidates(n: usize) -> usize {
     (n * CANDIDATES_PERCENT / 100).max(DEPTH).min(n)
@@ -147,9 +221,9 @@ pub fn vector_of(b64: &str, dims: u32) -> Result<Vec<f32>, String> {
     Ok(v)
 }
 
-/// The question's words as FTS5 asks for them: each quoted, any of them,
-/// at most `WORDS_MAX` distinct (lower-cased); none, no words leg.
-pub fn match_of(q: &str) -> Option<String> {
+/// The question's words, as the words leg asks for them: its runs of
+/// alphanumerics, lower-cased, each once, in order, at most `WORDS_MAX`.
+pub fn words_of(q: &str) -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
     for w in q.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
         let w = w.to_lowercase();
@@ -160,12 +234,45 @@ pub fn match_of(q: &str) -> Option<String> {
             break;
         }
     }
-    // alphanumerics alone: nothing to escape inside the quotes
-    (!words.is_empty()).then(|| words.iter().map(|w| format!("\"{w}\"")).collect::<Vec<_>>().join(" OR "))
+    words
+}
+
+/// One word as FTS5 asks for it alone: quoted. Alphanumerics alone
+/// (`words_of`), so nothing to escape inside the quotes.
+pub fn phrase(word: &str) -> String {
+    format!("\"{word}\"")
+}
+
+/// `words` as FTS5 asks for any of them.
+pub fn any_of(words: &[String]) -> String {
+    words.iter().map(|w| phrase(w)).collect::<Vec<_>>().join(" OR ")
+}
+
+/// The question's words as FTS5 asks for them: any of them (`words_of`);
+/// none, no words leg.
+pub fn match_of(q: &str) -> Option<String> {
+    let words = words_of(q);
+    (!words.is_empty()).then(|| any_of(&words))
+}
+
+/// A line's label, its first word or two and a colon ("Agent: "), at most
+/// this long: kept when a snippet starts inside its line, so a cut line still
+/// says whose words it holds (FIN-365: a Session Archive's "Agent: …").
+pub const LABEL_MAX_BYTES: usize = 24;
+
+/// `line`'s label, when it begins with one: letters (and spaces between
+/// them) then ": ", within `LABEL_MAX_BYTES`.
+fn label_of(line: &str) -> Option<&str> {
+    let head = line.char_indices().take_while(|&(i, _)| i < LABEL_MAX_BYTES).last().map_or(0, |(i, c)| i + c.len_utf8());
+    let colon = line[..head].find(": ")?;
+    let name = &line[..colon];
+    let worded = name.starts_with(|c: char| c.is_alphabetic()) && name.chars().all(|c| c.is_alphabetic() || c == ' ');
+    (worded && colon + 2 <= LABEL_MAX_BYTES).then(|| &line[..colon + 2])
 }
 
 /// At most `SNIPPET_MAX_BYTES` of `body`, around the first of the
-/// question's words it holds (else its start), cut at characters.
+/// question's words it holds (else its start), cut at characters; begun
+/// inside a line with a label, that label first (`label_of`).
 pub fn snippet(body: &str, q: &str) -> String {
     let lower = body.to_lowercase();
     let at = q
@@ -180,11 +287,23 @@ pub fn snippet(body: &str, q: &str) -> String {
     while !body.is_char_boundary(start) {
         start -= 1;
     }
-    let mut end = (start + SNIPPET_MAX_BYTES).min(body.len());
+    // the line it starts in, and that line's label: begun inside the label,
+    // it starts at the line; past it, the label leads
+    let line = body[..start].rfind('\n').map_or(0, |i| i + 1);
+    let mut label = (start > line).then(|| label_of(&body[line..])).flatten();
+    if label.is_some_and(|l| start < line + l.len()) {
+        start = line;
+        label = None;
+    }
+    let budget = SNIPPET_MAX_BYTES - label.map_or(0, str::len);
+    let mut end = (start + budget).min(body.len());
     while !body.is_char_boundary(end) {
         end -= 1;
     }
     let mut s = String::new();
+    if let Some(l) = label {
+        s.push_str(l);
+    }
     if start > 0 {
         s.push('…');
     }
@@ -241,7 +360,7 @@ pub fn fuse(lexical: &[Found], semantic: &[Found], limit: usize) -> Vec<Fused> {
         }
     }
     let mut all: Vec<Fused> = by.into_values().collect();
-    all.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.section.cmp(&b.section)));
+    all.sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.section.cmp(&b.section)));
     all.truncate(limit);
     all
 }
@@ -333,6 +452,26 @@ mod tests {
     }
 
     #[test]
+    fn dot_agrees_with_its_reference_at_every_length() {
+        assert!(dot_agrees());
+        // the extremes: every product at its most
+        let (a, b) = (vec![-128i8; 1040], vec![-128i8; 1040]);
+        assert_eq!(dot(&a, &b), 1040 * 128 * 128);
+        assert_eq!(dot(&a, &vec![127i8; 1040]), -(1040 * 128 * 127));
+    }
+
+    #[test]
+    fn an_index_holds_up_to_its_cap_counting_a_replaced_source_once() {
+        assert!(fits(2, 0, 1, 3), "up to the cap");
+        assert!(!fits(3, 0, 1, 3), "past it");
+        assert!(fits(3, 2, 2, 3), "a source replaced at capacity, as large");
+        assert!(!fits(3, 2, 3, 3), "or larger, past it");
+        assert!(fits(3, 3, 0, 3), "emptied");
+        assert!(fits(0, 5, 3, 3), "a count that drifted below what it replaces is no room");
+        assert!(!fits(u64::MAX, 0, 1, u64::MAX));
+    }
+
+    #[test]
     fn candidates_are_a_share_at_least_the_depth() {
         assert_eq!(candidates(50), 50);
         assert_eq!(candidates(1000), 100);
@@ -359,6 +498,7 @@ mod tests {
 
     #[test]
     fn the_words_leg_asks_for_any_word_quoted() {
+        assert_eq!(words_of("Harbour lantern, harbour"), ["harbour", "lantern"]);
         assert_eq!(match_of("Harbour lantern, harbour"), Some("\"harbour\" OR \"lantern\"".into()));
         assert_eq!(match_of("\"x\" OR y* NEAR(z)"), Some("\"x\" OR \"or\" OR \"y\" OR \"near\" OR \"z\"".into()), "FTS5's syntax is only words here");
         assert_eq!(match_of("?! —"), None);
@@ -373,6 +513,42 @@ mod tests {
         assert!(s.contains("lantern") && s.starts_with('…') && s.ends_with('…'));
         assert!(s.len() <= SNIPPET_MAX_BYTES + 2 * '…'.len_utf8());
         assert_eq!(snippet("short body", "nothing"), "short body");
+    }
+
+    /// Goal: a snippet begun inside a line keeps that line's label, so a
+    /// cut line still says whose words it holds (FIN-365). Valid: a long
+    /// "Agent: " line found deep in leads with its label. Invalid: a line
+    /// with no label (a page's paragraph), or a "label" too long or not
+    /// words, is cut as before. Edge: begun inside the label itself, the
+    /// snippet starts at the line; begun at a line's start, nothing doubles.
+    #[test]
+    fn a_snippet_begun_inside_a_labelled_line_keeps_its_label() {
+        let reply = format!("Nice sketch. {} Pole beans fix nitrogen, which helps the tomatoes. {}", "The south fence gets the most sun. ".repeat(4), "x ".repeat(200));
+        let body = format!("Person: Here's the plot plan.\nAgent: {reply}\nPerson: thanks");
+        let s = snippet(&body, "nitrogen");
+        assert!(s.starts_with("Agent: …") && s.contains("nitrogen"), "{s}");
+        assert!(s.len() <= SNIPPET_MAX_BYTES + 2 * '…'.len_utf8(), "{}", s.len());
+        // no label: a page's paragraph, cut as before
+        let page = format!("Tomatoes need sun. {} Pole beans fix nitrogen. {}", "Water them well. ".repeat(8), "y ".repeat(200));
+        let p = snippet(&page, "nitrogen");
+        assert!(p.starts_with('…') && p.contains("nitrogen"), "{p}");
+        // not a label: too long, or not words
+        for line in [format!("A label far too long to be one: {reply}"), format!("https://x.test: {reply}"), format!("2026-10-01: {reply}")] {
+            let t = snippet(&line, "nitrogen");
+            assert!(t.starts_with('…') && t.contains("nitrogen"), "{t}");
+        }
+        // begun inside the label: the line's start, the label whole and once
+        // (the word 3 bytes past the window's lead, the window starts in "Agent: ")
+        let near = format!("q\nAgent: {} nitrogen", "b".repeat(SNIPPET_MAX_BYTES / 3 - 7 + 3 - 1));
+        let lead = near.find("nitrogen").unwrap() - SNIPPET_MAX_BYTES / 3;
+        assert!((2..2 + "Agent: ".len()).contains(&lead), "the window starts inside the label: {lead}");
+        let n = snippet(&near, "nitrogen");
+        assert!(n.starts_with("…Agent: b") && n.matches("Agent:").count() == 1, "{n}");
+        // begun at a line's start: as before
+        assert_eq!(snippet("Agent: beans fix nitrogen", "nitrogen"), "Agent: beans fix nitrogen");
+        // a label of more than one byte a character
+        let s2 = snippet(&format!("Élève: {reply}"), "nitrogen");
+        assert!(s2.starts_with("Élève: …") && s2.contains("nitrogen"), "{s2}");
     }
 
     #[test]
@@ -390,5 +566,14 @@ mod tests {
         assert_eq!((hits[1].chunk, hits[1].semantic), (10, None), "its best chunk, its second unranked");
         assert_eq!((hits[2].chunk, hits[2].lexical, hits[2].semantic.map(|p| p.rank)), (30, None, Some(2)));
         assert_eq!(fuse(&lexical, &semantic, 1).len(), 1);
+    }
+
+    #[test]
+    fn a_fence_refuses_only_a_lower_one() {
+        assert!(admits(None, 0) && admits(None, FENCE_MAX), "none stored: any");
+        assert!(admits(Some(7), 7), "the same batch's retry");
+        assert!(admits(Some(7), 8));
+        assert!(!admits(Some(7), 6), "a stale batch's");
+        assert_eq!(FENCE_MAX, 9_007_199_254_740_991);
     }
 }

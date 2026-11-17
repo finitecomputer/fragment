@@ -36,7 +36,7 @@
 //!
 //! Test levers are methods on [`CodeStorage`]; none is an HTTP route.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -111,6 +111,16 @@ struct Repo {
 pub type Change<'a> = (&'a str, Option<&'a [u8]>);
 type OwnedChange = (String, Option<Vec<u8>>);
 
+/// What another writer does just ahead of a search upsert to a fragment
+/// (`land_before_upserts`): its commit to main (no CAS), then its write
+/// of a source to search: the moves that land between a writer's reads
+/// and its write.
+#[derive(Debug, Clone, Default)]
+pub struct Ahead {
+    pub commit: Vec<(String, Option<Vec<u8>>)>,
+    pub source: Option<(String, crate::search::Held)>,
+}
+
 /// A commit's files, by path.
 type Tree = BTreeMap<String, Entry>;
 
@@ -135,9 +145,19 @@ struct State {
     counter: u64,
     #[serde(skip)]
     sabotage: u32,
+    /// what each sabotaging commit writes (none: `competitor.txt`)
+    #[serde(skip)]
+    competitor: Option<Vec<(String, Option<Vec<u8>>)>>,
+    /// another writer's commit to main, landed just before the next commit
+    /// pack, which is then served as ever (`land_before_next_commit`)
+    #[serde(skip)]
+    before_commit: Option<Vec<(String, Option<Vec<u8>>)>>,
     /// commit packs that land before `sabotage` starts (`sabotage_commit_packs_after`)
     #[serde(skip)]
     sabotage_after: u32,
+    /// Commit packs answer 503, landing nothing, while set (`fail_commit_packs`).
+    #[serde(skip)]
+    packs_failing: bool,
     /// Per repo url: commit packs still to land with their answer dropped.
     #[serde(skip)]
     unanswered: BTreeMap<String, u32>,
@@ -148,6 +168,12 @@ struct State {
     /// File reads answer 503 while set (an outage).
     #[serde(skip)]
     reads_failing: bool,
+    /// Every request answers 503 while set (`fail_all`: the whole service down).
+    #[serde(skip)]
+    all_failing: bool,
+    /// Reads of this one path answer 503 while set (`fail_file_read`).
+    #[serde(skip)]
+    read_failing: Option<String>,
     /// Repo deletes still to answer 503 (`fail_repo_deletes`).
     #[serde(skip)]
     deletes_failing: u32,
@@ -166,6 +192,23 @@ struct State {
     tokens_minted: u64,
     #[serde(skip)]
     tokens_revoked_below: u64,
+    /// The search index of each fragment whose search a test turned on
+    /// (`enable_search`; crate::search), by its name.
+    #[serde(skip)]
+    search: BTreeMap<String, crate::search::Index>,
+    /// Another writer's moves still to land, each just ahead of the next
+    /// search upsert to that fragment (`land_before_upserts`), by its name.
+    #[serde(skip)]
+    ahead: BTreeMap<String, VecDeque<Ahead>>,
+    /// The fragments whose CLI caller the host routes hold a viewer
+    /// (`view_only`): a token that writes is refused them (403), one that
+    /// reads (`?access=read`) is theirs.
+    #[serde(skip)]
+    viewing: BTreeSet<String>,
+    /// The upload limit the caller's list advertises (`limits`), if any
+    /// (`advertise_upload_max`); none, as an older platform's.
+    #[serde(skip)]
+    upload_max: Option<u64>,
 }
 
 struct Inner {
@@ -179,6 +222,12 @@ struct Inner {
     state: Mutex<State>,
     /// How long every call waits before it is served (`set_latency`).
     latency_ms: AtomicU64,
+    /// A read of this one path waits, before it is served, while set
+    /// (`hold_file_read`): a refresh caught between its reads.
+    held_read: Mutex<Option<String>>,
+    released: std::sync::Condvar,
+    /// Reads waiting on `held_read` now.
+    held_waiting: AtomicU64,
 }
 
 pub struct CodeStorage {
@@ -364,6 +413,17 @@ impl State {
         self.repos.get(name_or_url).or_else(|| self.repos.values().find(|r| r.name == name_or_url))
     }
 
+    /// Another writer's moves (`Ahead`) on fragment `name`, landed now.
+    fn land(&mut self, name: &str, a: Ahead) {
+        if !a.commit.is_empty() {
+            let url = self.url_of(name).expect("a landing on a known repo");
+            self.commit(&url, Write { branch: "main", message: "another writer", author: "external", changes: &a.commit, from: None });
+        }
+        if let (Some((source, held)), Some(index)) = (a.source, self.search.get_mut(name)) {
+            index.sources.insert(source, held);
+        }
+    }
+
     fn url_of(&self, name_or_url: &str) -> Option<String> {
         self.repo_by(name_or_url).map(|r| r.url.clone())
     }
@@ -445,8 +505,22 @@ impl Inner {
         if latency > 0 {
             std::thread::sleep(std::time::Duration::from_millis(latency));
         }
+        // a held path's read waits for its release (each connection is a
+        // thread of its own: nothing else waits with it), two minutes at most
+        if matches!(req.method.as_str(), "GET" | "HEAD") && route_key(req).ends_with(" file") {
+            let held = self.held_read.lock().expect("held read lock");
+            let path = req.query.get("path").cloned();
+            if held.is_some() && *held == path {
+                self.held_waiting.fetch_add(1, Ordering::SeqCst);
+                let (_held, _) = self.released.wait_timeout_while(held, std::time::Duration::from_secs(120), |h| h.is_some() && *h == path).expect("held read lock");
+                self.held_waiting.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
         let mut st = self.state.lock().expect("fake state lock");
         *st.requests.entry((bearer_subject(req), repo_of(req), route_key(req))).or_default() += 1;
+        if st.all_failing {
+            return problem(503, "code.storage is unavailable (the fake's outage lever)");
+        }
         let resp = self.route(&mut st, req);
         if req.method != "GET" && req.method != "HEAD" {
             self.persist(&st);
@@ -467,9 +541,42 @@ impl Inner {
                         name.to_string()
                     }
                 };
-                let token = self.mint(st, &url, &["git:read", "git:write"], self.token_ttl_s);
+                // as the platform: a token that writes is an editor's; one
+                // that reads (`?access=read`) any member's
+                let write = match req.query.get("access").map(String::as_str) {
+                    None => true,
+                    Some("read") => false,
+                    Some(other) => return Response::json(400, &json!({ "error": "invalid_request", "message": format!("access is read, not {other:?}") })),
+                };
+                if write && st.viewing.contains(name) {
+                    return Response::json(403, &json!({ "error": "forbidden", "message": "this needs the editor role" }));
+                }
+                let scopes: &[&str] = if write { &["git:read", "git:write"] } else { &["git:read"] };
+                let token = self.mint(st, &url, scopes, self.token_ttl_s);
                 // the host's whole answer (fragment_proto::StorageToken)
-                return Response::json(200, &json!({ "token": token, "repo": url, "api": self.url, "expiresAt": now_ms() + self.token_ttl_s * 1000 }));
+                return Response::json(200, &json!({ "token": token, "repo": url, "api": self.url, "expiresAt": now_ms() + self.token_ttl_s * 1000, "write": write }));
+            }
+            // the search write API (crate::search), for a fragment whose
+            // search is on; another's is a host without it (404)
+            if let Some((name, op)) = path.strip_prefix("/api/f/").and_then(|p| p.split_once("/search/")) {
+                if (m, op) == ("POST", "upsert") {
+                    if let Some(a) = st.ahead.get_mut(name).and_then(VecDeque::pop_front) {
+                        st.land(name, a);
+                    }
+                }
+                return match st.search.get_mut(name) {
+                    Some(index) => index.handle(op, req),
+                    None => problem(404, &format!("no route {m} {path}")),
+                };
+            }
+            // the caller's list (`GET /api/fragments`): every repo, as its
+            // owner's, so a bare label resolves (`Client::fragment`)
+            if path == "/api/fragments" && m == "GET" {
+                let fragments: Vec<Value> = st.repos.values().map(|r| json!({ "name": r.name, "role": "owner" })).collect();
+                return Response::json(200, &match st.upload_max {
+                    Some(n) => json!({ "fragments": fragments, "limits": { "uploadMaxBytes": n, "filesPerMessage": 8 } }),
+                    None => json!({ "fragments": fragments }),
+                });
             }
             if path.starts_with("/api/f/") && path.ends_with("/refresh") && m == "POST" {
                 st.refreshes += 1;
@@ -610,6 +717,9 @@ impl Inner {
             }
             ("GET", "files/metadata") => self.tree_page(&st.repos[&url], req),
             ("GET" | "HEAD", "file") if st.reads_failing => problem(503, "file reads are unavailable (the fake's outage lever)"),
+            ("GET" | "HEAD", "file") if st.read_failing.is_some() && req.query.get("path") == st.read_failing.as_ref() => {
+                problem(503, "this file's read is unavailable (the fake's one-path lever)")
+            }
             ("GET" | "HEAD", "file") => file(&st.repos[&url], req),
             ("GET", "commits") => commits(&st.repos[&url], req),
             ("GET", "merge/preview") => merge_preview(&st.repos[&url], req),
@@ -640,12 +750,18 @@ impl Inner {
 
     fn commit_pack(&self, st: &mut State, url: &str, req: &Request) -> Response {
         st.commit_packs += 1;
+        if st.packs_failing {
+            return problem(503, "commits are unavailable (the fake's commit outage lever)");
+        }
+        if let Some(theirs) = st.before_commit.take() {
+            st.commit(url, Write { branch: "main", message: "another writer", author: "another", changes: &theirs, from: None });
+        }
         if st.sabotage > 0 && st.sabotage_after > 0 {
             st.sabotage_after -= 1;
         } else if st.sabotage > 0 {
             st.sabotage -= 1;
             let n = st.counter;
-            let competitor = [("competitor.txt".to_string(), Some(format!("competitor {n}").into_bytes()))];
+            let competitor = st.competitor.clone().unwrap_or_else(|| vec![("competitor.txt".to_string(), Some(format!("competitor {n}").into_bytes()))]);
             let (_, tip) = st.commit(url, Write { branch: "main", message: "competitor", author: "competitor", changes: &competitor, from: None });
             return cas_failed("main", &tip);
         }
@@ -1008,6 +1124,9 @@ impl CodeStorage {
             url: url.clone(),
             state: Mutex::new(state),
             latency_ms: AtomicU64::new(0),
+            held_read: Mutex::new(None),
+            released: std::sync::Condvar::new(),
+            held_waiting: AtomicU64::new(0),
         });
         let handler_inner = Arc::clone(&inner);
         let server = Server::serve(listener, Arc::new(move |req: &Request| handler_inner.handle(req)))?;
@@ -1112,10 +1231,25 @@ impl CodeStorage {
         });
     }
 
+    /// Deletes a branch (a live branch its owner removed).
+    pub fn delete_branch(&self, repo: &str, branch: &str) {
+        self.with(|st| {
+            let url = st.url_of(repo).expect("delete_branch on a known repo");
+            st.repos.get_mut(&url).expect("a known repo").branches.remove(branch);
+            self.inner.persist(st);
+        });
+    }
+
     /// Every call waits this long before it is served, as a call to the
     /// real service travels (zero: at once, the default).
     pub fn set_latency(&self, latency: std::time::Duration) {
         self.inner.latency_ms.store(latency.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Every request answers 503 while `on`: the whole service down, as an
+    /// outage leaves it (no repo made, read, or written).
+    pub fn fail_all(&self, on: bool) {
+        self.with(|st| st.all_failing = on);
     }
 
     /// File reads answer 503 until this is cleared.
@@ -1123,9 +1257,59 @@ impl CodeStorage {
         self.with(|st| st.reads_failing = failing);
     }
 
+    /// Reads of `path` answer 503 until this is cleared (`None`): one
+    /// file of many failing, wherever it falls in a pull.
+    pub fn fail_file_read(&self, path: Option<&str>) {
+        self.with(|st| st.read_failing = path.map(str::to_string));
+    }
+
+    /// Reads of `path` wait, unanswered, until this is cleared (`None`):
+    /// a refresh held between two reads, for a test to look meanwhile.
+    pub fn hold_file_read(&self, path: Option<&str>) {
+        *self.inner.held_read.lock().expect("held read lock") = path.map(str::to_string);
+        self.inner.released.notify_all();
+    }
+
+    /// Whether a read is waiting on `hold_file_read` now.
+    pub fn read_held(&self) -> bool {
+        self.inner.held_waiting.load(Ordering::SeqCst) > 0
+    }
+
     /// The next `n` commit packs each lose to a competitor commit (409).
     pub fn sabotage_commit_packs(&self, n: u32) {
         self.with(|st| st.sabotage = n);
+    }
+
+    /// Another writer's commit of `files` (path, bytes; `None` deletes) to
+    /// main lands just before the next commit pack, which is then served as
+    /// ever: its CAS, if it names one, sees the moved head; one naming none
+    /// lands on it.
+    pub fn land_before_next_commit(&self, files: Vec<(String, Option<Vec<u8>>)>) {
+        self.with(|st| st.before_commit = Some(files));
+    }
+
+    /// `sabotage_commit_packs(n)`, each competitor's commit writing `files`
+    /// (path, bytes; `None` deletes) instead of `competitor.txt`.
+    pub fn sabotage_commit_packs_with(&self, n: u32, files: Vec<(String, Option<Vec<u8>>)>) {
+        self.with(|st| (st.sabotage, st.competitor) = (n, Some(files)));
+    }
+
+    /// Every commit pack answers 503 and lands nothing while `on`: a
+    /// commit outage, its repos and reads as ever.
+    pub fn fail_commit_packs(&self, on: bool) {
+        self.with(|st| st.packs_failing = on);
+    }
+
+    /// The host routes hold the CLI's caller a viewer of `name` (true) or
+    /// its editor again (false).
+    pub fn view_only(&self, name: &str, viewing: bool) {
+        self.with(|st| {
+            if viewing {
+                st.viewing.insert(name.to_string());
+            } else {
+                st.viewing.remove(name);
+            }
+        });
     }
 
     /// `sabotage_commit_packs(n)`, from the commit pack after the next
@@ -1163,6 +1347,33 @@ impl CodeStorage {
     /// Host `refresh` nudges received (with `host_routes`).
     pub fn refresh_count(&self) -> u32 {
         self.with(|st| st.refreshes)
+    }
+
+    /// The upload limit the caller's list (`GET /api/fragments`, with
+    /// `host_routes`) advertises from now on; None, none.
+    pub fn advertise_upload_max(&self, bytes: Option<u64>) {
+        self.with(|st| st.upload_max = bytes);
+    }
+
+    /// Turns on the search write API for fragment `name` (with
+    /// `host_routes`), its index empty; it is off until then.
+    pub fn enable_search(&self, name: &str) {
+        self.with(|st| {
+            st.search.entry(name.into()).or_default();
+        });
+    }
+
+    /// Each of `ahead` lands just ahead of one of the next search upserts
+    /// to fragment `name`, in order: another writer's moves between a
+    /// writer's reads and its write.
+    pub fn land_before_upserts(&self, name: &str, ahead: Vec<Ahead>) {
+        self.with(|st| st.ahead.entry(name.into()).or_default().extend(ahead));
+    }
+
+    /// `f` of fragment `name`'s search index, when its search is on: to
+    /// read it, or change it as a test needs (an index lost).
+    pub fn search_index<T>(&self, name: &str, f: impl FnOnce(&mut crate::search::Index) -> T) -> Option<T> {
+        self.with(|st| st.search.get_mut(name).map(f))
     }
 
     /// The requests answered since the last take, by route (`GET branch`,

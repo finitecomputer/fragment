@@ -1,0 +1,6 @@
+{"args":["--session-id","00000000-0000-4000-8000-000000000003"]}
+{"in":{"type":"user"}}
+{"out":{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000003"}}
+{"sleep_ms":1500}
+{"out":{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]},"parent_tool_use_id":null}}
+{"out":{"type":"result","subtype":"success","is_error":false,"result":"done"}}

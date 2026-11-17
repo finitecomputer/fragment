@@ -78,6 +78,9 @@ pub(crate) struct Write {
     /// The space its vectors are in; none, the deployment embeds nothing.
     pub space: Option<wire::Space>,
     pub sections: Vec<WriteSection>,
+    /// Its writer's fence (`engine::admits`), if it sends one.
+    #[serde(default)]
+    pub fence: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,13 +116,31 @@ pub(crate) enum Wrote {
     /// `chunks`; `cleared`, the index held another space's and was
     /// emptied first.
     Written { written: bool, chunks: usize, cleared: bool },
-    /// `replaces` is not the source's revision now.
-    Conflict { current: Option<String> },
+    /// `replaces` is not the source's revision now. Here and below,
+    /// `cleared` as above: a clear comes first, so a refused write may
+    /// follow one, and its writer is told so it writes every source again.
+    Conflict {
+        current: Option<String>,
+        #[serde(default)]
+        cleared: bool,
+    },
     /// A chunk sent without its vector is one the index no longer holds
     /// (a write in between took it): sent again, embedded.
-    MissingVectors,
-    /// Past `CHUNKS_MAX`, with `chunks` held.
-    Full { chunks: u64 },
+    MissingVectors {
+        #[serde(default)]
+        cleared: bool,
+    },
+    /// Past `max` (`CHUNKS_MAX`, or a test fleet's lower), with `chunks`
+    /// held.
+    Full {
+        chunks: u64,
+        max: u64,
+        #[serde(default)]
+        cleared: bool,
+    },
+    /// Its writer's fence is below `fence`, the source's: nothing is
+    /// written (a newer write or delete of it was taken).
+    Fenced { fence: u64 },
     /// Its life ended: nothing is written.
     Ended,
 }
@@ -144,13 +165,20 @@ pub(crate) struct Ask {
     /// The question's float32 vector, base64, in `space`.
     pub vector: Option<String>,
     pub space: Option<wire::Space>,
+    /// Whether to say what it knows of the question's words, for a
+    /// question across fragments (`wire::WordStats`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub words: bool,
 }
 
-/// A search's answer: its hits, and whether the meaning leg ran.
+/// A search's answer: its hits, whether the meaning leg ran, and what it
+/// knows of the question's words, if asked and its words leg ran.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Answer {
     pub results: Vec<wire::Hit>,
     pub semantic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<wire::WordStats>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -252,7 +280,7 @@ impl DurableObject for SearchIndexCell {
             return Ok(probed);
         }
         match self.route(req).await {
-            Ok(answer) => Response::from_json(&answer),
+            Ok(answer) => Ok(answer),
             Err(e) => e.response(),
         }
     }
@@ -282,15 +310,21 @@ impl SearchIndexCell {
         self.state.id().to_string()
     }
 
-    async fn route(&self, mut req: Request) -> CellResult<Value> {
+    async fn route(&self, mut req: Request) -> CellResult<Response> {
         self.schema.ready()?;
         let path = req.path();
         let op = path.strip_prefix("/index/").ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no route {path}")))?.to_string();
-        let body: Value = req.json().await.map_err(|e| CellError::invalid(format!("a search index's call is JSON: {e}")))?;
-        let parse = |what: &str, e: serde_json::Error| CellError::invalid(format!("index/{what}: {e}"));
+        // each op reads its own type from the call's bytes, once
+        let body = req.bytes().await?;
+        fn read<'a, T: Deserialize<'a>>(op: &str, body: &'a [u8]) -> CellResult<T> {
+            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("index/{op}: {e}")))
+        }
+        fn answer(a: &impl Serialize) -> CellResult<Response> {
+            Ok(Response::from_json(a)?)
+        }
         match op.as_str() {
             "upsert" => {
-                let w: Write = serde_json::from_value(body).map_err(|e| parse("upsert", e))?;
+                let w: Write = read(&op, &body)?;
                 if self.cfg.test_hooks && self.holding.get() {
                     self.held.set(self.held.get() + 1);
                     let mut waited = 0;
@@ -299,47 +333,74 @@ impl SearchIndexCell {
                         waited += 20;
                     }
                 }
+                let max = self.chunks_max()?;
                 let me = self.parts();
-                let wrote = js::transaction_sync(&self.raw, move || me.upsert(w))?;
+                let wrote = js::transaction_sync(&self.raw, move || me.upsert(w, max))?;
                 // a refusal may follow a clear (another space's), which wrote
-                if !matches!(wrote, Wrote::Ended | Wrote::Written { written: false, cleared: false, .. }) {
+                if !matches!(wrote, Wrote::Ended | Wrote::Fenced { .. } | Wrote::Written { written: false, cleared: false, .. }) {
                     self.after_write().await?;
                 }
-                Ok(serde_json::to_value(wrote).expect("an outcome serializes"))
+                answer(&wrote)
             }
             "delete" => {
+                let body: Value = read(&op, &body)?;
                 let source = body["source"].as_str().ok_or_else(|| CellError::invalid("index/delete names its source"))?.to_string();
+                let fence = body["fence"].as_u64();
                 let me = self.parts();
-                let deleted = js::transaction_sync(&self.raw, move || me.remove(&source))? > 0;
-                if deleted {
-                    self.after_write().await?;
+                // the fence's check, the removal and its tombstone, one transaction
+                let removed = js::transaction_sync(&self.raw, move || me.remove_fenced(&source, fence))?;
+                match removed {
+                    Err(stored) => answer(&json!({ "deleted": false, "fenced": stored })),
+                    Ok(n) => {
+                        if n > 0 {
+                            self.after_write().await?;
+                        }
+                        answer(&json!({ "deleted": n > 0 }))
+                    }
                 }
-                Ok(json!({ "deleted": deleted }))
             }
             "known" => {
-                let k: Known = serde_json::from_value(body).map_err(|e| parse("known", e))?;
-                Ok(json!({ "known": self.parts().known(&k)? }))
+                let k: Known = read(&op, &body)?;
+                answer(&json!({ "known": self.parts().known(&k)? }))
             }
             "sources" => {
-                let p: Page = serde_json::from_value(body).map_err(|e| parse("sources", e))?;
-                self.parts().sources(&p)
+                let p: Page = read(&op, &body)?;
+                answer(&self.parts().sources(&p)?)
             }
-            "status" => self.parts().status(),
+            "status" => answer(&self.parts().status(self.chunks_max()?)?),
             "search" => {
-                let a: Ask = serde_json::from_value(body).map_err(|e| parse("search", e))?;
-                Ok(serde_json::to_value(self.parts().search(&a)?).expect("an answer serializes"))
+                let a: Ask = read(&op, &body)?;
+                answer(&self.parts().search(&a)?)
             }
-            "end" => self.end().await,
+            "end" => answer(&self.end().await?),
             "test" if self.cfg.test_hooks => {
+                let body: Value = read(&op, &body)?;
                 if let Some(hold) = body["hold"].as_bool() {
                     self.holding.set(hold);
                 }
-                let mut status = self.parts().status()?;
+                match &body["chunks_max"] {
+                    Value::Null => {}
+                    Value::Number(n) if n.as_u64().is_some_and(|n| (1..=CHUNKS_MAX).contains(&n)) => self.parts().set_meta("test_chunks_max", &n.to_string())?,
+                    _ => return Err(CellError::invalid(format!("chunks_max is 1 to {CHUNKS_MAX}"))),
+                }
+                let mut status = self.parts().status(self.chunks_max()?)?;
                 status["held"] = json!(self.held.get());
-                Ok(status)
+                // the build's SIMD, and its dot product checked against the
+                // scalar one in this very Wasm
+                status["simd"] = json!({ "built": cfg!(all(target_arch = "wasm32", target_feature = "simd128")), "agrees": engine::dot_agrees() });
+                answer(&status)
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
         }
+    }
+
+    /// The chunks it holds at most: `CHUNKS_MAX`, or on a test fleet one
+    /// its lever lowered (`index/test`), so a run reaches the cap.
+    fn chunks_max(&self) -> CellResult<u64> {
+        if !self.cfg.test_hooks {
+            return Ok(CHUNKS_MAX);
+        }
+        Ok(self.parts().meta("test_chunks_max")?.and_then(|m| m.parse().ok()).unwrap_or(CHUNKS_MAX))
     }
 
     /// Its rows, as a transaction's closure holds them (`'static`).
@@ -387,6 +448,15 @@ fn opt(s: Option<&str>) -> SqlStorageValue {
     s.map_or(SqlStorageValue::Null, text)
 }
 
+/// A chunk's BM25, as SQLite answered it.
+fn bm25(v: &SqlStorageValue) -> CellResult<f64> {
+    match v {
+        SqlStorageValue::Float(f) => Ok(*f),
+        SqlStorageValue::Integer(i) => Ok(*i as f64),
+        _ => Err(CellError::host("a chunk's BM25 is a number")),
+    }
+}
+
 impl Parts {
     /// Rows as JSON objects: one reader for every query (each row type
     /// read otherwise is code of its own, and the cell's Wasm is budgeted).
@@ -428,7 +498,7 @@ impl Parts {
     fn space(&self) -> CellResult<Option<wire::Space>> {
         match self.meta("space")?.filter(|s| !s.is_empty()) {
             None => Ok(None),
-            Some(s) => serde_json::from_str(&s).map(Some).map_err(|e| CellError::host(format!("an index's space reads: {e}"))),
+            Some(s) => crate::json_text(&s).map(Some).map_err(|e| CellError::host(format!("an index's space reads: {e}"))),
         }
     }
 
@@ -444,6 +514,39 @@ impl Parts {
         self.exec("INSERT INTO chunk_words (chunk_words) VALUES ('delete-all')", vec![])?;
         self.set_meta("chunks", "0")?;
         self.set_meta("removed", &js::now_ms().to_string())
+    }
+
+    /// `source`'s fence, if a writer sent one.
+    fn fence(&self, source: &str) -> CellResult<Option<u64>> {
+        Ok(self.rows("SELECT fence FROM fences WHERE source = ?", vec![text(source)])?.first().and_then(|r| r["fence"].as_u64()))
+    }
+
+    /// `fence`, taken for `source`: its stored fence moves up to it.
+    fn keep_fence(&self, source: &str, fence: Option<u64>) -> CellResult<()> {
+        let Some(f) = fence else { return Ok(()) };
+        let f = i64::try_from(f).expect("a fence is at most FENCE_MAX");
+        self.exec(
+            "INSERT INTO fences (source, fence) VALUES (?, ?) ON CONFLICT (source) DO UPDATE SET fence = MAX(fence, excluded.fence)",
+            vec![text(source), SqlStorageValue::Integer(f)],
+        )
+    }
+
+    /// `remove`, if `fence` is the source's or above (else `Err` its
+    /// stored fence), keeping the fence even when there was nothing to
+    /// remove: a tombstone, so a stale write cannot bring it back.
+    fn remove_fenced(&self, source: &str, fence: Option<u64>) -> CellResult<Result<u64, u64>> {
+        if let Some(f) = fence {
+            if f > engine::FENCE_MAX {
+                return Err(CellError::invalid(format!("a fence is 0 to {}", engine::FENCE_MAX)));
+            }
+            let stored = self.fence(source)?;
+            if !engine::admits(stored, f) {
+                return Ok(Err(stored.expect("only a stored fence refuses")));
+            }
+        }
+        let n = self.remove(source)?;
+        self.keep_fence(source, fence)?;
+        Ok(Ok(n))
     }
 
     /// `source`'s sections, chunks, words and vectors gone, its own row
@@ -485,9 +588,16 @@ impl Parts {
         Ok(out)
     }
 
-    fn upsert(&self, w: Write) -> CellResult<Wrote> {
+    fn upsert(&self, w: Write, max: u64) -> CellResult<Wrote> {
         if self.meta("ended")?.is_some() {
             return Ok(Wrote::Ended);
+        }
+        // a fence below the source's is refused before anything, a clear included
+        if let Some(f) = w.fence {
+            let stored = self.fence(&w.source)?;
+            if !engine::admits(stored, f) {
+                return Ok(Wrote::Fenced { fence: stored.expect("only a stored fence refuses") });
+            }
         }
         let mut cleared = false;
         if self.space()? != w.space {
@@ -501,20 +611,23 @@ impl Parts {
         let current: Vec<Value> = self.rows("SELECT revision, chunks FROM sources WHERE source = ?", vec![text(&w.source)])?;
         let current_revision = current.first().and_then(|r| r["revision"].as_str()).map(str::to_string);
         if current_revision.as_deref() == Some(w.revision.as_str()) {
+            // taken, so its fence moves: a newer writer's same revision fences out an older's
+            self.keep_fence(&w.source, w.fence)?;
             return Ok(Wrote::Written { written: false, chunks: 0, cleared });
         }
         if let Some(r) = &w.replaces {
             let matches = if r.is_empty() { current_revision.is_none() } else { current_revision.as_deref() == Some(r.as_str()) };
             if !matches {
-                return Ok(Wrote::Conflict { current: current_revision });
+                return Ok(Wrote::Conflict { current: current_revision, cleared });
             }
         }
         let new: usize = w.sections.iter().map(|s| s.chunks.len()).sum();
         let old = current.first().and_then(|r| r["chunks"].as_u64()).unwrap_or(0);
-        let total = self.chunks()?.saturating_sub(old) + new as u64;
-        if total > CHUNKS_MAX {
-            return Ok(Wrote::Full { chunks: self.chunks()? });
+        let held = self.chunks()?;
+        if !engine::fits(held, old, new as u64, max) {
+            return Ok(Wrote::Full { chunks: held, max, cleared });
         }
+        let total = held.saturating_sub(old) + new as u64;
         // each vector, held: its own, or this index's of its hash (read
         // before the source's old chunks go, which may hold it)
         let dims = w.space.as_ref().map(|s| s.dimensions as usize);
@@ -540,7 +653,7 @@ impl Parts {
             missing.dedup();
             let found = if cleared { HashMap::new() } else { self.held(&missing)? };
             if missing.iter().any(|h| !found.contains_key(*h) && !vectors.contains_key(*h)) {
-                return Ok(Wrote::MissingVectors);
+                return Ok(Wrote::MissingVectors { cleared });
             }
             vectors.extend(found);
         }
@@ -573,6 +686,7 @@ impl Parts {
             }
         }
         self.set_meta("chunks", &total.to_string())?;
+        self.keep_fence(&w.source, w.fence)?;
         Ok(Wrote::Written { written: true, chunks: new, cleared })
     }
 
@@ -603,7 +717,7 @@ impl Parts {
         Ok(json!({ "sources": page, "next": next }))
     }
 
-    fn status(&self) -> CellResult<Value> {
+    fn status(&self, max: u64) -> CellResult<Value> {
         let sources = self.count("SELECT COUNT(*) AS n FROM sources")?;
         let chunks = self.chunks()?;
         Ok(json!({
@@ -614,7 +728,7 @@ impl Parts {
             "bytes": self.sql.database_size(),
             "space": self.space()?,
             "chunks_split": CHUNKS_SPLIT,
-            "chunks_max": CHUNKS_MAX,
+            "chunks_max": max,
         }))
     }
 
@@ -653,12 +767,7 @@ impl Parts {
         let mut found = Vec::new();
         for row in self.sql.exec(&q, binds)?.raw() {
             if let [SqlStorageValue::Integer(chunk), SqlStorageValue::Integer(section), score] = row?.as_slice() {
-                let score = match score {
-                    SqlStorageValue::Float(f) => *f,
-                    SqlStorageValue::Integer(i) => *i as f64,
-                    _ => return Err(CellError::host("a chunk's BM25 is a number")),
-                };
-                found.push(Found { section: *section, chunk: *chunk, score });
+                found.push(Found { section: *section, chunk: *chunk, score: bm25(score)? });
             }
         }
         Ok(found)
@@ -731,10 +840,11 @@ impl Parts {
         if !(1..=wire::RESULTS_MAX).contains(&a.limit) {
             return Err(CellError::invalid(format!("limit is 1 to {}", wire::RESULTS_MAX)));
         }
-        let lexical = match (a.mode, engine::match_of(&a.q)) {
-            (wire::Mode::Semantic, _) | (_, None) => vec![],
-            (_, Some(words)) => self.lexical(a, &words)?,
+        let words = match a.mode {
+            wire::Mode::Semantic => vec![],
+            _ => engine::words_of(&a.q),
         };
+        let lexical = if words.is_empty() { vec![] } else { self.lexical(a, &engine::any_of(&words))? };
         // the meaning leg runs on a question of this index's space
         let mut semantic = None;
         if let (false, Some(b64), Some(space)) = (a.mode == wire::Mode::Lexical, &a.vector, &a.space) {
@@ -744,11 +854,52 @@ impl Parts {
             }
         }
         let fused = engine::fuse(&lexical, semantic.as_deref().unwrap_or_default(), a.limit);
-        Ok(Answer { results: self.shown(&fused, &a.q)?, semantic: semantic.is_some() })
+        let stats = if a.words && !words.is_empty() { Some(self.word_stats(words)?) } else { None };
+        let scores = match &stats {
+            Some(s) => self.word_scores(&fused, &s.words)?,
+            None => vec![],
+        };
+        Ok(Answer { results: self.shown(&fused, &a.q, &scores)?, semantic: semantic.is_some(), words: stats })
     }
 
-    /// Each fused section as a hit, shown by its chunk.
-    fn shown(&self, fused: &[Fused], q: &str) -> CellResult<Vec<wire::Hit>> {
+    /// What it knows of `words`: its chunks, and how many hold each
+    /// (FTS5's own counts, as its BM25 weighs them).
+    fn word_stats(&self, words: Vec<String>) -> CellResult<wire::WordStats> {
+        let mut with = Vec::with_capacity(words.len());
+        for w in &words {
+            let n = self.ids("SELECT count(*) FROM chunk_words WHERE chunk_words MATCH ?", vec![text(&engine::phrase(w))])?;
+            with.push(n.first().and_then(|&n| u64::try_from(n).ok()).ok_or_else(|| CellError::host("a count answered no number"))?);
+        }
+        Ok(wire::WordStats { words, chunks: self.chunks()?, with })
+    }
+
+    /// The chunk of each section the words leg found (`Fused::chunk`, its
+    /// best), its score for each of `words`: FTS5's BM25 of the word alone
+    /// (0: not in it), which the question's sums.
+    fn word_scores(&self, fused: &[Fused], words: &[String]) -> CellResult<Vec<(i64, Vec<f64>)>> {
+        let by_words: Vec<i64> = fused.iter().filter(|f| f.lexical.is_some()).map(|f| f.chunk).collect();
+        // at most `RESULTS_MAX`: a look along is cheaper than a map's code
+        let mut scores: Vec<(i64, Vec<f64>)> = by_words.iter().map(|&c| (c, vec![0.0; words.len()])).collect();
+        for (i, w) in words.iter().enumerate() {
+            for part in by_words.chunks(BINDS_MAX - 1) {
+                let marks = vec!["?"; part.len()].join(", ");
+                let q = format!("SELECT rowid, -bm25(chunk_words, 4.0, 3.0, 2.0, 1.0) FROM chunk_words WHERE chunk_words MATCH ? AND rowid IN ({marks})");
+                let binds: Vec<SqlStorageValue> = std::iter::once(text(&engine::phrase(w))).chain(part.iter().map(|&c| SqlStorageValue::Integer(c))).collect();
+                for row in self.sql.exec(&q, binds)?.raw() {
+                    if let [SqlStorageValue::Integer(chunk), score] = row?.as_slice() {
+                        if let Some((_, s)) = scores.iter_mut().find(|(c, _)| c == chunk) {
+                            s[i] = bm25(score)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(scores)
+    }
+
+    /// Each fused section as a hit, shown by its chunk, with its `words`
+    /// scores if the words leg found it.
+    fn shown(&self, fused: &[Fused], q: &str, words: &[(i64, Vec<f64>)]) -> CellResult<Vec<wire::Hit>> {
         if fused.is_empty() {
             return Ok(vec![]);
         }
@@ -774,14 +925,15 @@ impl Parts {
                 revision: string(r, "revision"),
                 title: string(r, "title"),
                 heading: some(r, "heading"),
-                context: serde_json::from_str(r["context"].as_str().unwrap_or("[]")).unwrap_or_default(),
+                context: crate::json_text(r["context"].as_str().unwrap_or("[]")).unwrap_or_default(),
                 at: some(r, "at"),
-                location: r["location"].as_str().and_then(|l| serde_json::from_str(l).ok()),
+                location: r["location"].as_str().and_then(|l| crate::json_text(l).ok()),
                 snippet: engine::snippet(r["body"].as_str().unwrap_or_default(), q),
                 score: f.score,
                 signals: [f.lexical.map(|_| "lexical"), f.semantic.map(|_| "semantic")].into_iter().flatten().map(str::to_string).collect(),
                 lexical: f.lexical.map(|p| wire::Lexical { rank: p.rank, bm25: p.score }),
                 semantic: f.semantic.map(|p| wire::Semantic { rank: p.rank, cosine: p.score }),
+                words: f.lexical.and_then(|_| words.iter().find(|(c, _)| *c == f.chunk)).map(|(_, s)| s.clone()),
             })
             .collect())
     }

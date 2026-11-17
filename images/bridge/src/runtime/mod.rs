@@ -60,6 +60,43 @@ pub fn named(agent_json: Option<&[u8]>) -> Option<String> {
     }
 }
 
+/// What an agent's `agent.json` asks of Claude Code (`"claude": {"model",
+/// "effort"}`; Paul, 2026-11-02): each none, Claude Code's own, and each
+/// passed to its sessions as is (`--model`, `--effort`), so its own names
+/// (`opus`, `sonnet`, `haiku`, `fable`, or a model's full name; `low` to
+/// `max`) track Anthropic's latest with no release of ours.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClaudeSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+/// Claude Code's effort levels (`claude --help`, 2.1.316: `--effort
+/// <level>`).
+pub const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+impl ClaudeSettings {
+    pub fn is_default(&self) -> bool {
+        *self == ClaudeSettings::default()
+    }
+
+    /// From an agent's `agent.json` bytes (none: there is no file): its
+    /// `claude` object's `model`, when it can be a model's name (an alias or
+    /// a full name: `^[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,63}$`, never a flag),
+    /// and its `effort`, when it is one of `CLAUDE_EFFORTS`. Anything else
+    /// is none: Claude Code's own.
+    pub fn of(agent_json: Option<&[u8]>) -> ClaudeSettings {
+        let Some(v) = agent_json.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) else { return ClaudeSettings::default() };
+        let model = v["claude"]["model"].as_str().filter(|m| {
+            (1..=64).contains(&m.len()) && m.as_bytes()[0].is_ascii_alphanumeric() && m.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-[]".contains(&b))
+        });
+        let effort = v["claude"]["effort"].as_str().filter(|e| CLAUDE_EFFORTS.contains(e));
+        ClaudeSettings { model: model.map(str::to_string), effort: effort.map(str::to_string) }
+    }
+}
+
 /// The runtimes a bridge runs, each with the name agents give it, in the
 /// order they start: at most `limits::RUNTIMES_MAX`, each name once.
 pub struct Runtimes(Vec<(String, Box<dyn Runtime>)>);
@@ -125,6 +162,10 @@ pub struct Agent {
     /// `DEFAULT`. Never the platform's: the driver reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// What its `agent.json` asks of Claude Code (`ClaudeSettings::of`),
+    /// read with its runtime. Never the platform's.
+    #[serde(default, skip_serializing_if = "ClaudeSettings::is_default")]
+    pub claude: ClaudeSettings,
 }
 
 /// One credential of an agent's (`GET /api/computer`'s `agents[].credentials`).
@@ -158,7 +199,25 @@ pub struct LocalFile {
     pub media_type: String,
     pub name: String,
     pub size: u64,
+    /// What keeps it in its scratch while any copy of it lives (a reply's
+    /// file, from the relay taking it until its post is done or given up:
+    /// through the event, the open reply, the post's job and a SimpleX
+    /// copy alike). None where no scratch bounds it.
+    pub pin: Kept,
 }
+
+/// A file kept in use (scratch.rs, `InUse`) while any clone of it lives.
+/// Not part of what the file is: any two are equal.
+#[derive(Debug, Clone, Default)]
+pub struct Kept(pub Option<std::sync::Arc<crate::scratch::InUse>>);
+
+impl PartialEq for Kept {
+    fn eq(&self, _: &Kept) -> bool {
+        true
+    }
+}
+
+impl Eq for Kept {}
 
 /// Files a person sent with an answer (`Command::Tell`, `Command::Answer`),
 /// as their message names them. The driver downloads them as a turn's
@@ -266,6 +325,12 @@ pub struct TurnStart {
     pub text: String,
     /// The message's attachments, as the record names them.
     pub attachments: Vec<crate::records::AttachmentRef>,
+    /// The fragment whose blobs they are, when not the turn's chat: an
+    /// answer's are the chat its question was asked in.
+    pub attachments_in: Option<String>,
+    /// A card's answer read after its turn was gone, this turn its own
+    /// (`LateCard`): none for any other turn.
+    pub late: Option<LateCard>,
     /// The same attachments on disk (the driver downloads them before the
     /// runtime hears of the turn).
     pub files: Vec<LocalFile>,
@@ -286,6 +351,11 @@ pub struct TurnStart {
     /// echoes it. It also says what the agent no longer remembers of this
     /// chat (`forgotten`).
     pub note: Option<String>,
+    /// How old its message is, in plain words, when it is handed long after
+    /// it was said (crate::note, `age`): the driver puts it first in
+    /// `note`, before a card's or a cut turn's. Its own field, as `note`
+    /// set by the engine means a card's, in the cut note's place.
+    pub age: Option<String>,
     /// The agent's turns in this chat that another life ran since the
     /// `/data` this life restored (their claims answered 409: a rollback
     /// sent the cursor back), the newest at most `NOTE_FORGOTTEN_MAX`, and
@@ -346,9 +416,9 @@ pub enum Command {
     Aside { agent: String, fragment: String, chat_name: String, simplex: bool, turn: Option<String>, id: String, by: String, by_name: String, text: String },
 }
 
-/// What a runtime tells the bridge. Every event but `Connected`, `Say` and
-/// `Notice` names its turn; one for a turn the bridge no longer holds is
-/// dropped.
+/// What a runtime tells the bridge. Every event but `Connected`, `Say`,
+/// `Notice` and a helper's end names its turn; one for a turn the bridge no
+/// longer holds is dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// The runtime has work outside a chat turn (delegated children).
@@ -395,6 +465,18 @@ pub enum Event {
     /// updated its memory): the agent's turn running there, or, with none,
     /// the last that ran there in this life, posts it (`turn.notice`).
     Notice { agent: String, fragment: String, category: crate::records::NoticeCategory, text: String },
+    /// A helper (a child the runtime delegated work to), by the runtime's
+    /// own id for it: started by a running turn, with its task, or ended
+    /// (its chat's set, `turn.helpers`). Its end names no turn: it may come
+    /// long after its turn's.
+    Child { child: String, change: ChildChange },
+}
+
+/// What became of a helper (`Event::Child`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChildChange {
+    Started { turn: String, goal: String },
+    Ended,
 }
 
 /// Why a runtime stopped.
@@ -415,11 +497,33 @@ impl std::fmt::Display for RuntimeError {
     }
 }
 
-/// A runtime's two queues, and the bridge's shutdown signal.
+/// A card answered after the turn that asked it was gone (a sleep, a
+/// restart: cards.rs), as the fresh turn of that answer carries it: which
+/// card (`prompt`, its id as its runtime asked it), which of its options,
+/// and what the asking turn was asked (its cause's words, if any). A
+/// runtime that acts on its own cards' answers reads this, never the
+/// fresh turn's words (Alex on #901).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LateCard {
+    pub prompt: String,
+    pub option: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+}
+
+/// A runtime's two queues, the bridge's shutdown signal, and the hold.
 pub struct RuntimeIo {
     pub commands: mpsc::Receiver<Command>,
     pub events: mpsc::Sender<Event>,
     pub shutdown: watch::Receiver<bool>,
+    /// Whether the platform holds the computer now, for a save
+    /// (docs/computers.md, "The hold"): a runtime quiets what of its own
+    /// runs outside its turns (a turn already running may run on).
+    pub held: watch::Receiver<bool>,
+    /// How many things of the runtimes' own the hold's answer waits on, each
+    /// counted while it runs outside a turn under a hold or not: the bridge
+    /// answers only at none. One with nothing outside its turns counts none.
+    pub unquiet: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub type RuntimeFuture = Pin<Box<dyn Future<Output = Result<(), RuntimeError>> + Send>>;
@@ -442,7 +546,7 @@ mod tests {
     use super::*;
 
     fn file(name: &str, at: &str) -> LocalFile {
-        LocalFile { path: PathBuf::from(at), media_type: "image/png".into(), name: name.into(), size: 1 }
+        LocalFile { path: PathBuf::from(at), media_type: "image/png".into(), name: name.into(), size: 1, pin: Default::default() }
     }
 
     /// Goal: an agent's runtime is its `agent.json`'s `runtime`. Absent (no
@@ -459,6 +563,20 @@ mod tests {
         assert_eq!(named(Some(b"{\"runtime\":7}")).as_deref(), Some("7"));
         let long = format!("{{\"runtime\":\"{}\"}}", "x".repeat(100));
         assert_eq!(named(Some(long.as_bytes())).map(|n| n.len()), Some(64));
+        // what it asks of Claude Code: its own names, else Claude Code's own
+        let of = |j: &str| ClaudeSettings::of(Some(j.as_bytes()));
+        assert_eq!(of(r#"{"runtime":"claude","claude":{"model":"sonnet","effort":"high"}}"#), ClaudeSettings { model: Some("sonnet".into()), effort: Some("high".into()) });
+        assert_eq!(of(r#"{"claude":{"model":"claude-haiku-5-5"}}"#).model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(of(r#"{"claude":{"model":"sonnet[1m]"}}"#).model.as_deref(), Some("sonnet[1m]"));
+        for e in CLAUDE_EFFORTS {
+            assert_eq!(of(&format!(r#"{{"claude":{{"effort":"{e}"}}}}"#)).effort.as_deref(), Some(e));
+        }
+        assert!(ClaudeSettings::of(None).is_default() && of("not json").is_default() && of(r#"{"tier":"cheap","model":"x"}"#).is_default(), "none: Claude Code's own");
+        // invalid: a flag, a space, too long, not a string, an effort of no level
+        for bad in [r#"{"claude":{"model":"--dangerously-skip-permissions"}}"#, r#"{"claude":{"model":"so net"}}"#, r#"{"claude":{"model":7}}"#, r#"{"claude":{"model":""}}"#, r#"{"claude":{"effort":"extreme"}}"#, r#"{"claude":{"effort":"HIGH"}}"#, r#"{"claude":"sonnet"}"#] {
+            assert!(of(bad).is_default(), "{bad}");
+        }
+        assert!(of(&format!(r#"{{"claude":{{"model":"{}"}}}}"#, "a".repeat(65))).is_default());
         assert!(valid_name(DEFAULT) && valid_name("codex") && !valid_name("Claude") && !valid_name("") && !valid_name(&"a".repeat(33)));
     }
 

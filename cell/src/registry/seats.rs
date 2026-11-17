@@ -398,7 +398,7 @@ impl RegistryCell {
         let (Some(id), Some(status), Some(items), Some(customer)) = (&sub.subscription, &sub.status, &sub.items, &sub.customer) else {
             return Ok(None);
         };
-        let items: Vec<(SeatKind, String, u64)> = serde_json::from_str(items).map_err(|e| CellError::host(format!("orgs.items: {e}")))?;
+        let items: Vec<(SeatKind, String, u64)> = crate::json_text(items).map_err(|e| CellError::host(format!("orgs.items: {e}")))?;
         let Some((_, item, seats)) = items.into_iter().find(|(k, _, _)| *k == SeatKind::SOLD) else {
             return Err(CellError::host(format!("{id} has no item of the seat sold")));
         };

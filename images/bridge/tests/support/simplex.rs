@@ -18,6 +18,9 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 /// Hub), the version the lab runs (tests/simplex.rs).
 pub const SMP_IMAGE: &str = "simplexchat/smp-server:v7.0.1@sha256:7d825822839a9d5ee9e9a99563d77a319816c7a8e0b4b7bf4dcebe448897af54";
 pub const LAB_IMAGE: &str = "fragment-simplex-lab:7.0.3";
+/// The core finite.computer's agents ran (`tests/simplex/old.Dockerfile`):
+/// an old agent whose conversation a new one adopts (FIN-463).
+pub const OLD_IMAGE: &str = "fragment-simplex-lab-old:7.0.2";
 /// The SMP server's name on the lab's network: a domain, as its image's
 /// entrypoint wants one with a dot.
 pub const SMP_HOST: &str = "smp.lab.test";
@@ -113,6 +116,33 @@ impl Lab {
     /// `--user-display-name`.
     pub async fn start(&mut self, name: &str, bot: bool) -> Api {
         self.start_client(name, bot, false).await
+    }
+
+    /// An old finite.computer agent's core (v7.0.2), as its runtime ran it:
+    /// its database `identity` in `/data`, named FiniteAgent, muted.
+    pub async fn start_old(&mut self, name: &str) -> Api {
+        let context = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/simplex");
+        if docker(&["image", "inspect", "--format", "{{.Id}}", OLD_IMAGE]).is_err() || std::env::var("FRAGMENT_DOCKER_SKIP_BUILD").is_err() {
+            docker(&["build", "--platform", "linux/amd64", "-q", "-f", &context.join("old.Dockerfile").to_string_lossy(), "-t", OLD_IMAGE, &context.to_string_lossy()]).expect("the old core's image builds");
+        }
+        let data = self.db_dir(name);
+        for sub in ["files", "tmp"] {
+            std::fs::create_dir_all(data.join(sub)).expect("its folders");
+        }
+        let ctr = self.container(name);
+        let _ = docker(&["rm", "-f", &ctr]);
+        let (vol, net, ids) = (format!("{}:/data", data.display()), format!("{}-net", self.prefix), uid_gid());
+        let args = [
+            "run", "-d", "--name", &ctr, "--network", &net, "--user", &ids, "-e", "HOME=/data", "-e", "LAB_API_PORT=5226", "-p", "127.0.0.1::5226", "-v", &vol, OLD_IMAGE,
+            "-d", "/data/identity", "-p", "5225", "--mute", "--user-display-name", "FiniteAgent", "--files-folder", "/data/files", "--temp-folder", "/data/tmp", "-s", &self.server,
+        ];
+        docker(&args).expect("the old core starts");
+        if !self.clients.iter().any(|c| c == name) {
+            self.clients.push(name.into());
+        }
+        let port = docker(&["port", &ctr, "5226/tcp"]).expect("its port");
+        let addr = port.lines().next().expect("a port").to_string();
+        Api::connect(&format!("ws://{addr}"), name, &self.dir).await.unwrap_or_else(|e| panic!("{ctr}'s bot API: {e}\n{}", logs(&ctr)))
     }
 
     /// A person's client on SimpleX's preset servers, the internet's, not

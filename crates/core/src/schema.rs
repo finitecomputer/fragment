@@ -244,7 +244,7 @@ fn unique_key(v: &Value, out: &mut String) {
     match v {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
+            keys.sort_unstable();
             out.push('{');
             for (i, k) in keys.iter().enumerate() {
                 if i > 0 {

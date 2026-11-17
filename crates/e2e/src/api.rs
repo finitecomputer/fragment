@@ -3,7 +3,7 @@
 //! sending the node the right `Host` header; a hosted run's, at their own
 //! names over https (`Target::Hosted`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -252,6 +252,9 @@ pub struct Run {
     levers_sign_in: bool,
     /// Lanes call from threads of their own (site.rs): shared under locks.
     people: Mutex<Vec<String>>,
+    /// The emails they signed in by (the levers'), oldest first: all a
+    /// sweep of this run signs in again (hosted/sweep.rs `Who::These`).
+    emails: Mutex<Vec<String>>,
     /// The people a lane wiped (docs/api.md, Operators): their ledgers went
     /// with them, so the run's spend counts them apart.
     wiped: Mutex<Vec<String>>,
@@ -279,12 +282,17 @@ impl Run {
 
     fn make(secret: String, levers_sign_in: bool, paid_calls: u64) -> Arc<Run> {
         assert!(secret.len() >= fragment_core::levers::SECRET_BYTES_MIN, "a test secret is long");
-        Arc::new(Run { secret, levers_sign_in, people: Mutex::new(vec![]), wiped: Mutex::new(vec![]), budget: Mutex::new(Budget { left: paid_calls, lent: 0 }) })
+        Arc::new(Run { secret, levers_sign_in, people: Mutex::new(vec![]), emails: Mutex::new(vec![]), wiped: Mutex::new(vec![]), budget: Mutex::new(Budget { left: paid_calls, lent: 0 }) })
     }
 
     /// The people this run signed in (hosted), oldest first.
     pub fn people(&self) -> Vec<String> {
         self.people.lock().expect("the people's lock").clone()
+    }
+
+    /// The emails the run's people signed in by (the levers'), oldest first.
+    pub fn emails(&self) -> Vec<String> {
+        self.emails.lock().expect("the emails' lock").clone()
     }
 
     /// The people a lane wiped, oldest first.
@@ -313,10 +321,14 @@ impl Run {
     }
 
     /// Notes a person this run signed in, once.
-    fn signed_in(&self, identity: &str) {
+    fn signed_in(&self, identity: &str, email: &str) {
         let mut people = self.people.lock().expect("the people's lock");
         if !people.iter().any(|p| p == identity) {
             people.push(identity.to_string());
+        }
+        let mut emails = self.emails.lock().expect("the emails' lock");
+        if !emails.iter().any(|e| e == email) {
+            emails.push(email.to_string());
         }
     }
 }
@@ -348,8 +360,23 @@ impl Api {
 
     /// A preview's API, at its own hosts over https.
     pub fn hosted(preview: &Preview, run: &Arc<Run>) -> Api {
+        Api::hosted_with(preview, run, client(Pool::Idle(POOL_IDLE)))
+    }
+
+    /// `hosted` for a dry run's plan, which sends nothing: every plan's
+    /// lanes share one client. A client reads its TLS roots as it is built,
+    /// the system's too where the CLI's `rustls-tls-native-roots` joins
+    /// this crate's reqwest (a workspace build: `cargo xtask check`'s),
+    /// about 40 ms in debug; one per lane made each plan cost 1.7 s, and
+    /// the plan's tests 10 s of the check (FIN-452).
+    pub fn planned(preview: &Preview, run: &Arc<Run>) -> Api {
+        static UNSENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+        Api::hosted_with(preview, run, UNSENT.get_or_init(|| client(Pool::Fresh)).clone())
+    }
+
+    fn hosted_with(preview: &Preview, run: &Arc<Run>, http: reqwest::blocking::Client) -> Api {
         let (base, label_suffix) = (preview.platform(), String::new());
-        Api { http: client(Pool::Idle(POOL_IDLE)), base, port: preview.port.unwrap_or(443), suffix: preview.zone.clone(), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
+        Api { http, base, port: preview.port.unwrap_or(443), suffix: preview.zone.clone(), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
     }
 
     /// `hosted`, each of `hosts` resolved to `at`: the client's own tests,
@@ -416,6 +443,11 @@ impl Api {
         self.run.levers_sign_in
     }
 
+    /// The emails this run's people signed in by (`Run::emails`).
+    pub fn run_emails(&self) -> Vec<String> {
+        self.run.emails()
+    }
+
     /// The mark a branch deployment's fragments' hosts carry
     /// (`--<branch>`), or nothing: the end of their host label.
     pub fn host_mark(&self) -> String {
@@ -453,9 +485,46 @@ impl Api {
         self.send(c, false)
     }
 
+    /// `signed`'s POST of `body`, read to its first event (a blank line)
+    /// and then hung up, as a client that goes away mid-answer: its status
+    /// and what it read.
+    pub fn signed_hung_up(&self, keys: &Keys, path: &str, body: &Value) -> Result<(u16, String)> {
+        use std::io::Read;
+        let body = body.to_string().into_bytes();
+        let c = Call { method: "POST", url: format!("{}{path}", self.base), content_type: Some("application/json"), keys: Some(keys), ..Call::default() };
+        let mut resp = self.builder(&c, &body, true)?.send().with_context(|| format!("POST {path}"))?;
+        let status = resp.status().as_u16();
+        let (mut read, mut buf) = (Vec::new(), [0u8; 4096]);
+        // bounded by the answer: each pass reads some of it, or its end
+        while !read.windows(2).any(|w| w == b"\n\n") {
+            match resp.read(&mut buf).with_context(|| format!("POST {path}: its first event"))? {
+                0 => break,
+                n => read.extend_from_slice(&buf[..n]),
+            }
+        }
+        drop(resp);
+        Ok((status, String::from_utf8_lossy(&read).into_owned()))
+    }
+
     fn send(&self, c: Call<'_>, secret: bool) -> Result<Reply> {
+        let body = c.body.clone().unwrap_or_default();
+        let req = self.builder(&c, &body, secret)?;
+        // when it went and how long it waited, so a failure tells a refused
+        // or dropped connection (at once) from a request that hung
+        let (sent, t0) = (clock(), Instant::now());
+        let failed = || format!("{} {} (sent {sent}, failed after {:.1?})", c.method, c.url, t0.elapsed());
+        let resp = req.send().with_context(failed)?;
+        let status = resp.status().as_u16();
+        let headers = resp.headers().clone();
+        let bytes = resp.bytes().with_context(failed)?.to_vec();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let body = serde_json::from_str(&text).unwrap_or(Value::Null);
+        Ok(Reply { status, body, text, bytes, headers })
+    }
+
+    /// The request `c` makes, `body` its body.
+    fn builder(&self, c: &Call<'_>, body: &[u8], secret: bool) -> Result<reqwest::blocking::RequestBuilder> {
         let url = reqwest::Url::parse(&c.url)?;
-        let body = c.body.unwrap_or_default();
         let mut req = match &self.target {
             // Everything goes to the node; the Host header names the site.
             Target::Local => {
@@ -468,11 +537,11 @@ impl Api {
             // A deployment's hosts are its own, over https.
             Target::Hosted(_) => self.http.request(c.method.parse()?, url.clone()),
         };
-        req = with_body(req, c.method, &body);
+        req = with_body(req, c.method, body);
         if let Some(ct) = c.content_type {
             req = req.header("content-type", ct);
         }
-        if let Some(cookie) = c.cookie {
+        if let Some(cookie) = c.cookie.clone() {
             let cookie = match url.scheme() {
                 "https" => https_cookies(&cookie),
                 _ => cookie,
@@ -480,27 +549,17 @@ impl Api {
             req = req.header("cookie", cookie);
         }
         if let Some(keys) = c.keys {
-            req = req.header("authorization", keys.header(c.method, &c.url, &body, now_s()));
+            req = req.header("authorization", keys.header(c.method, &c.url, body, now_s()));
         }
         // the secret goes to the platform's levers, never to a fragment's
         // host, where an app's code reads the request's headers
         if secret && self.is_lever(&c.url) {
             req = req.header(fragment_core::levers::SECRET_HEADER, self.run.secret.as_str());
         }
-        for (k, v) in c.extra {
-            req = req.header(k, v);
+        for (k, v) in &c.extra {
+            req = req.header(*k, v);
         }
-        // when it went and how long it waited, so a failure tells a refused
-        // or dropped connection (at once) from a request that hung
-        let (sent, t0) = (clock(), Instant::now());
-        let failed = || format!("{} {} (sent {sent}, failed after {:.1?})", c.method, c.url, t0.elapsed());
-        let resp = req.send().with_context(failed)?;
-        let status = resp.status().as_u16();
-        let headers = resp.headers().clone();
-        let bytes = resp.bytes().with_context(failed)?.to_vec();
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        let body = serde_json::from_str(&text).unwrap_or(Value::Null);
-        Ok(Reply { status, body, text, bytes, headers })
+        Ok(req)
     }
 
     /// The control API, signed by `keys`.
@@ -573,7 +632,7 @@ impl Api {
         if let Some(n) = paid_calls {
             anyhow::ensure!(r.body["paidCalls"] == n, "the e2e sign-in capped {email} at {}, not {n}", r.body["paidCalls"]);
         }
-        self.run.signed_in(&identity);
+        self.run.signed_in(&identity, email);
         Ok((session, identity))
     }
 
@@ -732,6 +791,17 @@ impl Api {
 
     /// The email `person` signs in with: a lane connects that WorkOS
     /// user's accounts (Pipes) by it.
+    /// A new agent of `owner`'s, and its identity: the one kind of member a
+    /// fragment with reach takes besides its owner (FIN-352).
+    pub fn own_agent(&self, owner: &Keys) -> Result<(Keys, String)> {
+        let keys = Keys::generate();
+        let reg = "/api/identities";
+        let r = self.signed(owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": self.proof(&keys, "POST", reg, owner) })))?;
+        anyhow::ensure!(r.status == 200, "registering an agent: {r}");
+        let id = r.body["id"].as_str().unwrap_or("").to_string();
+        Ok((keys, id))
+    }
+
     pub fn email_of(keys: &Keys) -> String {
         format!("p-{}@e2e.test", &keys.pubkey_hex()[..12])
     }
@@ -824,6 +894,11 @@ pub fn watch(api: &Api, name: &str, query: &str, keys: Option<&Keys>) -> Result<
 /// A socket to a fragment's `__watch` or `__live`, read as JSON frames.
 pub struct Socket(tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>);
 
+/// The parts a `Server-Timing` value names (`<part>;dur=<ms>, …`), in order.
+pub fn timing_parts(value: &str) -> Vec<String> {
+    value.split(',').filter_map(|p| p.split(';').next()).map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+}
+
 impl Socket {
     /// Opens `/f/<name>/<path>` (reachable in place on every fleet);
     /// `keys` signs the upgrade, `cookie` rides along like a browser's.
@@ -849,6 +924,20 @@ impl Socket {
     /// A socket to `http`, whichever host it names, opened as a page on
     /// `origin` opens one.
     pub fn connect(api: &Api, http: &str, keys: Option<&Keys>, cookie: Option<&str>, origin: Option<&str>) -> Result<(Socket, Vec<String>)> {
+        let (socket, answer) = Socket::handshake(api, http, keys, cookie, origin)?;
+        let cookies = answer.headers().get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).map(str::to_string).collect();
+        Ok((socket, cookies))
+    }
+
+    /// What `/f/<name>/<path>`'s accept said it waited on (its upgrade's
+    /// `Server-Timing`), the socket closed after.
+    pub fn accepted_timing(api: &Api, name: &str, path: &str, keys: Option<&Keys>) -> Result<String> {
+        let (socket, answer) = Socket::handshake(api, &format!("{}/f/{name}/{path}", api.base), keys, None, None)?;
+        socket.close();
+        Ok(answer.headers().get("server-timing").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string())
+    }
+
+    fn handshake(api: &Api, http: &str, keys: Option<&Keys>, cookie: Option<&str>, origin: Option<&str>) -> Result<(Socket, tungstenite::handshake::client::Response)> {
         use tungstenite::client::IntoClientRequest;
         let url = reqwest::Url::parse(http)?;
         let mut to = url.clone();
@@ -882,8 +971,7 @@ impl Socket {
         if let Some(s) = tcp(socket.get_ref()) {
             s.set_read_timeout(Some(Duration::from_secs(5)))?;
         }
-        let cookies = answer.headers().get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).map(str::to_string).collect();
-        Ok((Socket(socket), cookies))
+        Ok((Socket(socket), answer))
     }
 
     pub fn send(&mut self, v: &Value) -> Result<()> {

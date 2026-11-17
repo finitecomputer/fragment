@@ -211,6 +211,7 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
     heard(s, api, &owner, &stranger)?;
     posters_kind(s, api, &owner)?;
     listed(s, api, &owner)?;
+    newest(s, api, &owner)?;
     retention(s, api, &owner)
 }
 
@@ -235,9 +236,29 @@ pub(super) fn listed_of(api: &Api, keys: &Keys, name: &str) -> Vec<(String, Stri
 }
 
 /// `json` committed as the fragment's manifest, and deployed.
-fn redeploy(s: &Suite, c: &Value, json: &str) {
+/// Deploys `json` as `name`'s fragment.json, then waits for the deploy's
+/// card shot to land: the `cards` lever read, its state there, with
+/// `wanted` none. The shot runs in the fragment's alarm, which sends the
+/// listed rows that wait for their gap: a shot out (the first ones wait on
+/// the browser's cold start, 20 to 35 s on a busy runner) holds those
+/// sends, and the checks below time them. A read that fails is read again
+/// within the bound; a shot that never lands fails here, saying its state.
+fn redeploy(s: &Suite, api: &Api, c: &Value, name: &str, json: &str) -> Result<()> {
     s.commit(c, &[("fragment.json", Some(json.as_bytes()))]);
     s.deploy(c);
+    let mut last = Value::Null;
+    let landed = s.eventually(Duration::from_secs(120), || {
+        let read = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "cards" })));
+        let (shown, landed) = match read {
+            Ok(r) if r.status == 200 && r.body["cards"].is_object() => (r.body["cards"].clone(), r.body["cards"].get("wanted") == Some(&Value::Null)),
+            Ok(r) => (json!({ "status": r.status, "body": r.body }), false),
+            Err(e) => (json!({ "error": e.to_string() }), false),
+        };
+        last = shown;
+        landed
+    });
+    anyhow::ensure!(landed, "{name}'s deploy's card shot did not land within 120 s: {last}");
+    Ok(())
 }
 
 /// The next frame a list's socket is told within `wait`, or none.
@@ -270,7 +291,7 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         let r = set_role(who, role)?;
         anyhow::ensure!(r.status == 200, "adding {who} as {role}: {r}");
     }
-    redeploy(s, &c, LISTED_JSON);
+    redeploy(s, api, &c, &name, LISTED_JSON)?;
     let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
     let declared = r.body["channels"].as_array().and_then(|l| l.iter().find(|c| c["name"] == "work").map(|c| c["listed"].clone())).unwrap_or_default();
     s.ok(
@@ -320,22 +341,38 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     // a burst of moves is a send or two, the last with the newest record
     let t0 = std::time::Instant::now();
     let kinds = ["turn.start", "turn.end", "turn.start", "turn.end", "turn.start", "turn.end"];
+    let mut final_at = Value::Null;
     for (i, kind) in kinds.iter().enumerate() {
         let r = work(&format!("b{i}"), json!({ "kind": kind, "turn": format!("b{i}") }))?;
         anyhow::ensure!(r.status == 200, "the burst's post {i}: {r}");
+        final_at = r.body["record"]["at"].clone();
     }
     let burst = t0.elapsed();
-    let mut frames = 0;
-    while told_within(&mut tab, Duration::from_millis(limits::LISTED_MIN_GAP_MS as u64 + 2000)).is_some() {
+    // the send that waits for the gap's end goes when the fragment's alarm
+    // runs, however late a loaded runner runs it (a fixed window after the
+    // gap failed while the alarm ran seconds late): the row ending on the
+    // burst's last record (its own time: b1 and b3 end turns too), each
+    // frame counted as it comes
+    let (mut frames, mut last) = (0, Value::Null);
+    let ended = s.eventually(Duration::from_secs(60), || {
+        while told_within(&mut tab, Duration::from_millis(250)).is_some() {
+            frames += 1;
+        }
+        last = row_of(api, &viewer, &name)["listed"][0].clone();
+        last["kind"] == "turn.end" && last["at"] == final_at
+    });
+    // and the frame that told the page of that row: sent as the row was
+    // applied, before the read that saw it was answered, so it is on its
+    // way or here; read now, so none is left for the checks after
+    while told_within(&mut tab, Duration::from_secs(2)).is_some() {
         frames += 1;
     }
     // a burst that outlasts a gap may take one send more a gap
     let allowed = 2 + burst.as_millis() as i64 / limits::LISTED_MIN_GAP_MS;
-    let last = listed_of(api, &viewer, &name);
     s.ok(
         &format!("a burst of {} moves within a gap is told at most twice, not once a record, and the row ends on the newest", kinds.len()),
-        frames >= 1 && frames <= allowed && last.first().is_some_and(|r| r.2 == "turn.end"),
-        json!({ "frames": frames, "allowed": allowed, "burstMs": burst.as_millis() as u64, "listed": last }),
+        ended && frames >= 1 && frames <= allowed,
+        json!({ "frames": frames, "allowed": allowed, "burstMs": burst.as_millis() as u64, "newest": last, "lastAt": final_at }),
     );
 
     // the desk is the editors': the viewer's row never carries it
@@ -370,7 +407,7 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 
     // a deploy that tightens a channel's read takes it from the rows that may no longer read it
     let tightened = LISTED_JSON.replacen(r#""work":{"read":"viewer""#, r#""work":{"read":"editor""#, 1);
-    redeploy(s, &c, &tightened);
+    redeploy(s, api, &c, &name, &tightened)?;
     let gone = s.eventually(Duration::from_secs(20), || listed_of(api, &editor, &name).is_empty());
     let (kept, owners) = (listed_of(api, &viewer, &name), listed_of(api, owner, &name));
     s.ok(
@@ -381,7 +418,7 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 
     // an invalid listed is refused at deploy, and what was installed stands
     let bad = tightened.replacen(r#""kinds":["note"]"#, r#""kinds":["a note"]"#, 1);
-    redeploy(s, &c, &bad);
+    redeploy(s, api, &c, &name, &bad)?;
     let status = api.status(owner, &name)?;
     s.ok(
         "a listed kind that is no kind is refused at deploy, saying why, and the rows keep what they carried",
@@ -402,9 +439,9 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     // fragment keeps: listed again, it starts from its next record, never
     // the old one (which only the drop keeps from coming back)
     let ends = |json: &str| json.replacen(r#""kinds":["turn.start","turn.asked","turn.end"]"#, r#""kinds":["turn.start","turn.asked"]"#, 1);
-    redeploy(s, &c, &ends(&tightened));
+    redeploy(s, api, &c, &name, &ends(&tightened))?;
     let dropped = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).iter().all(|r| r.0 != "work"));
-    redeploy(s, &c, &tightened);
+    redeploy(s, api, &c, &name, &tightened)?;
     let relisted = s.eventually(Duration::from_secs(20), || {
         let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None).ok();
         r.is_some_and(|r| r.body["channels"].as_array().is_some_and(|l| l.iter().any(|c| c["name"] == "work" && c["listed"]["kinds"].as_array().is_some_and(|k| k.len() == 3))))
@@ -425,10 +462,10 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let noted = s.eventually(Duration::from_secs(10), || listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
     anyhow::ensure!(mine.status == 200 && noted, "the owner's note: {mine}");
     let without_desk = r#"{"channels":{"work":{"read":"editor","post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.asked","turn.end"],"fields":["asks"]}}}}"#;
-    redeploy(s, &c, without_desk);
+    redeploy(s, api, &c, &name, without_desk)?;
     let no_desk = s.eventually(Duration::from_secs(20), || !listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
     s.ok("a deploy that removes a listed channel takes its records from every row", no_desk && listed_of(api, owner, &name).iter().any(|r| r.0 == "work"), json!(listed_of(api, owner, &name)));
-    redeploy(s, &c, r#"{"channels":{"work":{"read":"editor","post":"editor","from":"agent"}}}"#);
+    redeploy(s, api, &c, &name, r#"{"channels":{"work":{"read":"editor","post":"editor","from":"agent"}}}"#)?;
     let none = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).is_empty() && listed_of(api, &viewer, &name).is_empty());
     s.ok("one that drops a channel's listed (the channel kept) takes its records from every row", none, json!([listed_of(api, owner, &name), listed_of(api, &viewer, &name)]));
     listed_posters(s, api)
@@ -467,6 +504,159 @@ fn listed_posters(s: &mut Suite, api: &Api) -> Result<()> {
         again.status == 200 && last.status == 200 && full && shown.len() == limits::LISTED_POSTERS_MAX && shown.contains(&posters[0].1) && !shown.contains(&posters[1].1),
         json!({ "shown": shown.len(), "first": shown.contains(&posters[0].1), "second": shown.contains(&posters[1].1) }),
     );
+    Ok(())
+}
+
+/// A fragment whose public wall keeps each poster's newest `mood` (and
+/// fills 64 records a call, `fill`), whose desk only editors read keeps
+/// each one's newest `note`, a channel that keeps four kinds, and one
+/// that keeps none.
+fn newest_json(wall_keeps: bool) -> String {
+    let keeps = if wall_keeps { r#","newest":["mood"]"# } else { "" };
+    format!(
+        r#"{{"operations":{{"fill":{{"kind":"mutation","input":{{"type":"object","required":["n"],"properties":{{"n":{{"type":"integer","minimum":1,"maximum":64}}}}}}}}}},
+  "channels":{{"wall":{{"read":"public","post":"editor"{keeps}}},"desk":{{"read":"editor","post":"editor","newest":["note"]}},
+  "many":{{"read":"viewer","post":"editor","newest":["k0","k1","k2","k3"]}},"quiet":{{"read":"viewer","post":"editor"}}}}}}"#
+    )
+}
+
+/// A channel's `newest` (docs/api.md, Newest records): each poster's
+/// newest record of a kind it keeps, in one read, however far back it was
+/// posted. Goal: a page asks for the latest state each poster said (a
+/// chat's agents' helpers working) instead of reading history back, and
+/// learns nothing its role may not read. Method: a public fragment
+/// (`newest_json`); two editors post on the wall, a fill puts 1,024
+/// records past them, then a viewer reads by the API and a visitor by the
+/// page's door; nine editors fill the bound; a deploy stops and starts
+/// keeping, and a lowered retention drops what the newest held.
+fn newest(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "newest")?;
+    let c = s.create(api, owner, &name)?;
+    api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    let viewer = api.person()?;
+    let mut posters = vec![];
+    for _ in 0..9 {
+        let keys = api.person()?;
+        let r = api.share(&name, &api.identity(&keys)?, "editor")?;
+        anyhow::ensure!(r.status == 200, "adding an editor: {r}");
+        posters.push(keys);
+    }
+    let r = api.share(&name, &api.identity(&viewer)?, "viewer")?;
+    anyhow::ensure!(r.status == 200, "adding the viewer: {r}");
+    ship(s, &c, WALL_APP, newest_json(true).as_bytes());
+    let (ada, bo) = (&posters[0], &posters[1]);
+    let (ada_id, bo_id) = (api.identity(ada)?, api.identity(bo)?);
+    // the deploy lands: the first post again until it has
+    s.eventually(Duration::from_secs(15), || post(api, ada, &name, "wall", "m1", json!({ "kind": "mood", "n": 1 })).is_ok_and(|r| r.status == 200));
+    let read = |keys: &Keys, channel: &str| api.signed(keys, "GET", &format!("/api/f/{name}/channels/{channel}/newest"), None);
+    // each record's (poster, n), newest first
+    let said = |r: &Reply| -> Vec<(String, i64)> {
+        r.body["records"].as_array().map(|l| l.iter().map(|x| (x["principal"].as_str().unwrap_or_default().to_string(), x["body"]["n"].as_i64().unwrap_or(-1))).collect()).unwrap_or_default()
+    };
+
+    let chatter = post(api, ada, &name, "wall", "x1", json!({ "kind": "chatter", "n": 9 }))?;
+    let b1 = post(api, bo, &name, "wall", "m1", json!({ "kind": "mood", "n": 2 }))?;
+    let a2 = post(api, ada, &name, "wall", "m2", json!({ "kind": "mood", "n": 3 }))?;
+    let fill = |id: &str| api.op(owner, &name, "fill", id, json!({ "n": 64 }));
+    let mut filled = 0;
+    for i in 0..16 {
+        filled += i64::from(fill(&format!("f{i}"))?.status == 200) * 64;
+    }
+    let past = s.eventually(Duration::from_secs(60), || {
+        let page = api.signed(owner, "GET", &format!("/api/f/{name}/channels/wall?before=1000000&limit=1000"), None);
+        page.is_ok_and(|p| p.body["records"][0]["seq"].as_i64().is_some_and(|first| first > a2.body["record"]["seq"].as_i64().unwrap_or(i64::MAX)))
+    });
+    let r = read(&viewer, "wall")?;
+    s.ok(
+        "a channel's newest are each poster's newest record of a kind it keeps, the newest first, found past a page of others (a viewer, by the API)",
+        chatter.status == 200 && b1.status == 200 && a2.status == 200 && filled == 1024 && past && r.status == 200
+            && said(&r) == vec![(ada_id.clone(), 3), (bo_id.clone(), 2)]
+            && r.body["records"][0]["seq"] == a2.body["record"]["seq"] && r.body["records"][0]["kind"] == "message",
+        &r,
+    );
+    let door = api.call(Call { method: "GET", url: api.site_url(&name, "__channel/wall/newest"), ..Call::default() })?;
+    s.ok("a visitor's page reads the same through its door (`__channel/wall/newest`), as the wall's public read allows", door.status == 200 && said(&door) == said(&r), &door);
+
+    let again = post(api, ada, &name, "wall", "m2", json!({ "kind": "mood", "n": 3 }))?;
+    let older = post(api, ada, &name, "wall", "m1", json!({ "kind": "mood", "n": 1 }))?;
+    let r = read(&viewer, "wall")?;
+    s.ok(
+        "a post replayed moves nothing: neither its newest again nor an older one",
+        again.body["replayed"] == true && older.body["replayed"] == true && said(&r) == vec![(ada_id.clone(), 3), (bo_id.clone(), 2)],
+        &r,
+    );
+
+    let note = post(api, ada, &name, "desk", "n1", json!({ "kind": "note", "n": 4 }))?;
+    let (desk_viewer, desk_editor) = (read(&viewer, "desk")?, read(bo, "desk")?);
+    let quiet = post(api, ada, &name, "quiet", "q1", json!({ "kind": "mood", "n": 5 }))?;
+    let (none, missing, bad) = (read(&viewer, "quiet")?, read(&viewer, "nowhere")?, read(&viewer, "Bad%20Name")?);
+    let door_desk = api.call(Call { method: "GET", url: api.site_url(&name, "__channel/desk/newest"), ..Call::default() })?;
+    s.ok(
+        "its read is the channel's: a viewer may not read an editors' desk's (403, its door 401 or 403 to a visitor) while an editor does; a channel that keeps none answers none; no such channel is 404, a bad name 400",
+        note.status == 200 && desk_viewer.status == 403 && desk_editor.status == 200 && said(&desk_editor) == vec![(ada_id.clone(), 4)]
+            && (door_desk.status == 401 || door_desk.status == 403)
+            && quiet.status == 200 && none.status == 200 && said(&none).is_empty()
+            && missing.status == 404 && bad.status == 400,
+        format!("{desk_viewer} {desk_editor} {door_desk} {none} {missing} {bad}"),
+    );
+
+    // nine posters, four kinds: 36 newest, past the bound
+    for (i, keys) in posters.iter().enumerate() {
+        for k in 0..4 {
+            let r = post(api, keys, &name, "many", &format!("k{k}"), json!({ "kind": format!("k{k}"), "n": i * 4 + k }))?;
+            anyhow::ensure!(r.status == 200, "poster {i} kind {k}: {r}");
+        }
+    }
+    let r = read(&viewer, "many")?;
+    let ns: Vec<i64> = said(&r).into_iter().map(|(_, n)| n).collect();
+    s.ok(
+        &format!("a channel keeps its {} newest across posters and kinds: the oldest go", limits::NEWEST_KEPT_MAX),
+        ns == (4..36).rev().collect::<Vec<i64>>(),
+        json!(ns),
+    );
+
+    // a deploy that stops keeping a kind drops it; one that keeps it again starts from its next record
+    s.commit(&c, &[("fragment.json", Some(newest_json(false).as_bytes()))]);
+    s.deploy(&c);
+    let dropped = s.eventually(Duration::from_secs(30), || read(&viewer, "wall").is_ok_and(|r| r.status == 200 && said(&r).is_empty()));
+    let kept_desk = read(bo, "desk")?;
+    s.commit(&c, &[("fragment.json", Some(newest_json(true).as_bytes()))]);
+    s.deploy(&c);
+    // each try a new record: one posted before the install landed is not kept, and a replay moves nothing
+    let mut tries = 0;
+    let again = s.eventually(Duration::from_secs(30), || {
+        tries += 1;
+        post(api, bo, &name, "wall", &format!("m2-{tries}"), json!({ "kind": "mood", "n": 6 })).is_ok_and(|p| p.status == 200)
+            && read(&viewer, "wall").is_ok_and(|r| !said(&r).is_empty())
+    });
+    let r = read(&viewer, "wall")?;
+    s.ok(
+        "a deploy that stops keeping a kind drops what was kept (others stay), and keeping it again starts from its next record",
+        dropped && said(&kept_desk) == vec![(ada_id.clone(), 4)] && again && said(&r) == vec![(bo_id.clone(), 6)],
+        format!("{kept_desk} {r}"),
+    );
+
+    // what retention drops is none
+    let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-kept", "n": 2 })))?;
+    let a3 = post(api, ada, &name, "wall", "m3", json!({ "kind": "mood", "n": 7 }))?;
+    let x2 = post(api, ada, &name, "wall", "x2", json!({ "kind": "chatter" }))?;
+    let r = read(&viewer, "wall")?;
+    s.ok(
+        "a newest record the channel's retention dropped is none: the wall keeps 2, so bo's mood is gone and ada's stays",
+        lever.status == 200 && a3.status == 200 && x2.status == 200 && said(&r) == vec![(ada_id, 7)],
+        &r,
+    );
+
+    // live deleted (no code: no channel keeps anything), then deployed again
+    // as it was: keeping starts from its next record (Codex on this read)
+    if !s.hosted() {
+        s.undeploy(&c);
+        let gone = s.eventually(Duration::from_secs(30), || read(&viewer, "wall").is_ok_and(|r| r.status == 404));
+        s.deploy(&c);
+        let back = s.eventually(Duration::from_secs(30), || read(&viewer, "wall").is_ok_and(|r| r.status == 200));
+        let r = read(&viewer, "wall")?;
+        s.ok("with live deleted and deployed again, what was kept before is gone: keeping starts from the next record", gone && back && said(&r).is_empty(), &r);
+    }
     Ok(())
 }
 
@@ -571,7 +761,10 @@ fn posters_kind(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// A channel people may post to keeps its newest `limits::POSTED_KEPT`
 /// records (the oldest go, whoever appended them), as `events` does: a
 /// public chat would otherwise grow for good. Filled by a mutation, 64
-/// records a call, then one post more.
+/// records a call. The trim is reached through the `posted-kept` lever
+/// (100,000 posts would take this lane most of an hour): a lower cap, as
+/// an older release's after a rollback, trims everything past it at the
+/// next append, then one record a post.
 fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let name = s.named(api, owner, "wall")?;
     let c = s.create(api, owner, &name)?;
@@ -579,8 +772,7 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let fill = |id: &str, n: i64| api.op(owner, &name, "fill", id, json!({ "n": n }));
     // the deploy lands: the first fill again until it has
     s.eventually(Duration::from_secs(15), || fill("f0", 64).is_ok_and(|r| r.status == 200));
-    let kept = limits::POSTED_KEPT;
-    let calls = kept / 64 + 1;
+    let calls = 11;
     let mut failed = None;
     for i in 1..calls {
         let r = fill(&format!("f{i}"), 64)?;
@@ -590,29 +782,89 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         }
     }
     let appended = calls * 64;
+    assert!(appended < limits::POSTED_KEPT, "the fill stays under the real cap");
     let first = |api: &Api| records(api, owner, &name, "wall").first().and_then(|r| r["seq"].as_i64());
     let newest = || -> Option<i64> {
         let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None).ok()?;
         r.body["channels"].as_array()?.iter().find(|c| c["name"] == "wall")?["seq"].as_i64()
     };
-    // the oldest go as the fragment trims, as each post past them is applied:
-    // the fills' effects (10 048 records) are applied after their commits,
-    // which takes over a minute on a slow runner
-    // and the channel's listing names the newest, read in the same wait (a
-    // read of it once, after, saw a moment before the last fill had landed)
-    let trimmed = s.eventually(Duration::from_secs(180), || first(api) == Some(appended - kept + 1) && newest() == Some(appended));
+    // the fills' effects are applied after their commits; the channel's
+    // listing names the newest, read in the same wait (a read of it once,
+    // after, saw a moment before the last fill had landed)
+    let all = s.eventually(Duration::from_secs(60), || newest() == Some(appended) && first(api) == Some(1));
     s.ok(
-        &format!("a postable channel keeps its newest {kept} records: past them, the oldest go"),
-        failed.is_none() && trimmed,
+        &format!("under its cap ({}) a postable channel keeps every record", limits::POSTED_KEPT),
+        failed.is_none() && all,
         format!("{failed:?}; newest {:?}, oldest kept {:?}", newest(), first(api)),
     );
-    let r = post(api, owner, &name, "wall", "last", json!({ "text": "one more" }))?;
-    let trimmed = s.eventually(Duration::from_secs(60), || first(api) == Some(appended - kept + 2));
+    let kept = 640;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-kept", "n": kept })))?;
+    s.ok("(a test lever lowers the cap, as an older release's)", r.status == 200 && r.body["kept"] == kept, &r);
+    let r = post(api, owner, &name, "wall", "past", json!({ "text": "past the cap" }))?;
+    let trimmed = s.eventually(Duration::from_secs(30), || first(api) == Some(appended + 1 - kept + 1));
     s.ok(
-        "a post past them drops one more of the oldest",
+        &format!("a lower cap trims every record past its newest {kept} at the next append"),
         r.status == 200 && r.body["record"]["seq"] == appended + 1 && trimmed,
         format!("{} oldest kept {:?}", r.status, first(api)),
     );
+    let r = post(api, owner, &name, "wall", "last", json!({ "text": "one more" }))?;
+    let trimmed = s.eventually(Duration::from_secs(30), || first(api) == Some(appended + 2 - kept + 1));
+    s.ok(
+        "a post past them drops one more of the oldest",
+        r.status == 200 && r.body["record"]["seq"] == appended + 2 && trimmed,
+        format!("{} oldest kept {:?}", r.status, first(api)),
+    );
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-kept", "n": 0 })))?;
+    s.ok("(a cap of none is refused)", r.status == 400, &r);
+    retention_bytes(s, api, owner)
+}
+
+/// Such a channel keeps its newest records by bytes too, whichever bound
+/// comes first (`limits::POSTED_BYTES_MAX`, a safety bound under a Durable
+/// Object's storage): an append past it first lets the oldest go, so it
+/// always makes room, and a record that nearly fills the bound alone is
+/// kept alone. Reached through the `posted-bytes` lever (100,000 bytes),
+/// with posts of known sizes: after each, the channel holds the newest
+/// records whose bodies fit, numbered on (one that empties the channel to
+/// fit is not numbered from 1 again).
+fn retention_bytes(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "wall-bytes")?;
+    let c = s.create(api, owner, &name)?;
+    ship(s, &c, WALL_APP, WALL_JSON);
+    let cap = 100_000usize;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-bytes", "n": cap })))?;
+    s.ok("(a test lever lowers the byte bound)", r.status == 200 && r.body["bytes"] == cap, &r);
+    // each body `{"text":"x…"}`, `n` bytes in all
+    let body = |n: usize| json!({ "text": "x".repeat(n - r#"{"text":""}"#.len()) });
+    let sizes = [20_000, 20_000, 20_000, 20_000, 20_000, 20_000, 60_000, 60_000];
+    // the deploy lands: the first post again until it has
+    s.eventually(Duration::from_secs(15), || post(api, owner, &name, "wall", "b0", body(sizes[0])).is_ok_and(|r| r.status == 200));
+    let mut steps = vec![];
+    for (i, n) in sizes.iter().enumerate() {
+        let r = post(api, owner, &name, "wall", &format!("b{i}"), body(*n))?;
+        let held: Vec<(i64, usize)> = records(api, owner, &name, "wall").iter().map(|r| (r["seq"].as_i64().unwrap_or(0), r["body"].to_string().len())).collect();
+        // the newest that fit, newest first, as the bound keeps them
+        let (mut want, mut sum) = (vec![], 0);
+        for (j, m) in sizes[..=i].iter().enumerate().rev() {
+            if sum + m > cap {
+                break;
+            }
+            sum += m;
+            want.insert(0, (j as i64 + 1, *m));
+        }
+        steps.push(json!({ "status": r.status, "held": held, "want": want }));
+        if r.status != 200 || held != want {
+            break;
+        }
+    }
+    let kept_alone = steps.last().is_some_and(|l| l["held"].as_array().map(Vec::len) == Some(1));
+    s.ok(
+        &format!("past {cap} bytes of bodies, the oldest go before each append (whichever bound comes first): the newest that fit are kept, and one that nearly fills the bound alone is kept alone"),
+        steps.len() == sizes.len() && steps.iter().all(|x| x["status"] == 200 && x["held"] == x["want"]) && kept_alone,
+        json!(steps),
+    );
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-bytes", "n": 0 })))?;
+    s.ok("(a byte bound of none is refused)", r.status == 400, &r);
     Ok(())
 }
 

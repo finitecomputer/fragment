@@ -27,10 +27,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -42,7 +40,15 @@ use crate::net::Backoff;
 use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Cause, Record};
-use crate::runtime::{Agent, Command, Event, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
+use crate::runtime::{Agent, Command, Event, Kept, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
+use crate::scratch::Scratch;
+
+/// Each running turn's files (its message's, its answers'), by turn: their
+/// pins (`LocalFile::pin`) held until the engine ends the turn (`act`), so
+/// no other download makes room with them while its runtime may still read
+/// them by path. Any other copy of the file (a reply that sends it on)
+/// holds the same pin, as long as it lives.
+type TurnFiles = Arc<Mutex<HashMap<String, Vec<Kept>>>>;
 use crate::screen::{self, Named, ScreenConfig};
 
 /// What the bridge is given.
@@ -54,6 +60,8 @@ pub struct Config {
     pub state_dir: PathBuf,
     /// Scratch for attachments, never kept across a sleep.
     pub media_dir: PathBuf,
+    /// Its bytes, at most (`limits::SCRATCH_MAX_BYTES`; a test's fewer).
+    pub media_max_bytes: u64,
     /// `RESTORE_PENDING=1`: wait for `restored` before reading `/data`.
     pub restore_pending: bool,
     pub restored: PathBuf,
@@ -234,6 +242,9 @@ struct Shared {
     /// Each linked agent's SimpleX chat, as the engine is told it
     /// (`Input::Relaying`): the one a routine at home runs in.
     mirrors: Mutex<BTreeMap<String, Option<String>>>,
+    /// The image's SimpleX, when it names a core: a move's routine waits
+    /// for it (`feed`).
+    simplex: Option<crate::simplex::run::Handle>,
 }
 
 impl Shared {
@@ -275,10 +286,15 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // touched before the restore.
     let (screen_agents, screen_rx) = watch::channel::<Option<Vec<Named>>>(None);
     let simplex_page = crate::simplex::http::Simplex { configured: cfg.simplex.is_some(), ..Default::default() };
+    // answers for the computer (answer.rs), each stepped as it comes, its
+    // post told whether it was taken (`Effect::ComputerAnswered`)
+    let (answers_tx, mut answers_rx) = mpsc::channel::<crate::answer::Ask>(16);
+    let taken: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<(), String>>>> = Mutex::new(HashMap::new());
+    let mut next_answer = 0u64;
     if let Some(sc) = cfg.screen.clone() {
         let (stop, simplex_page) = (stop.clone(), simplex_page.clone());
         tokio::spawn(async move {
-            if let Err(e) = screen::serve(sc, screen_rx, simplex_page, stop).await {
+            if let Err(e) = screen::serve(sc, screen_rx, simplex_page, Some(answers_tx), stop).await {
                 crate::ev!("screen.failed", { "error": e });
             }
         });
@@ -293,17 +309,22 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // never before: a restore swaps `/data` into place.
     std::fs::create_dir_all(&cfg.state_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.state_dir.display())))?;
     let api = Api::new(&cfg.api).map_err(BridgeError::Runtime)?;
-    std::fs::create_dir_all(&cfg.media_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?;
+    let scratch = Arc::new(Scratch::new(cfg.media_dir.clone(), cfg.media_max_bytes).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?);
+    // each running turn's files, in use until the engine ends it (scratch.rs)
+    let turn_files: TurnFiles = Arc::new(Mutex::new(HashMap::new()));
     // its answer to the platform's holds, for its whole life (none claims
     // yet, and no SimpleX core runs: `quiet` is false only while one does)
     let claims_in_flight = Arc::new(AtomicUsize::new(0));
     let quiet = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    // the hold as the runtimes see it, and what of theirs it waits on
+    let (held_tx, held_rx) = watch::channel(false);
+    let runtimes_unquiet = Arc::new(AtomicUsize::new(0));
     let answer: String = cfg.left_out.iter().map(|p| format!("{p}\n")).collect();
     // a core a bridge before this one left running is gone before any hold is answered
     if let Some(sc) = &cfg.simplex {
         crate::simplex::run::kill_strays(sc).await;
     }
-    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), stop.clone()));
+    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), held_tx, runtimes_unquiet.clone(), stop.clone()));
     // SimpleX, when the image names its core: told of the computer at each
     // read; it says which agents' links are bound (`relaying`), whose
     // relayed records alone the engine honors, each with its SimpleX chat
@@ -320,7 +341,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
 
     let (inbox_tx, mut inbox) = mpsc::channel::<Msg>(limits::INBOX_MAX);
     let (keep_tx, keep_rx) = watch::channel(false);
-    let shared = Arc::new(Shared::default());
+    let shared = Arc::new(Shared { simplex: simplex.clone(), ..Shared::default() });
 
     // Each runtime starts at once (Hermes dials it while the bridge reads
     // the platform), and its events go to the inbox, named by it. The
@@ -334,7 +355,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
         let (event_tx, mut event_rx) = mpsc::channel::<Event>(1024);
         let name = runtime.name();
         runs.push(json!({ "serves": serves, "runtime": name }));
-        let task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone() }));
+        let task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone(), held: held_rx.clone(), unquiet: runtimes_unquiet.clone() }));
         runtime_tasks.push(Box::pin(async move { (name, task.await) }));
         to_runtime.insert(serves.clone(), cmd_tx);
         let inbox_tx = inbox_tx.clone();
@@ -375,13 +396,33 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtimes": runs, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
-    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, cfg.media_dir.clone()))).collect();
+    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, scratch.clone(), turn_files.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
+    // what each agent linked to SimpleX works on in its SimpleX chat, as its
+    // link was told last: told again whenever it changes, so its owner's app
+    // shows it working (simplex/link.rs, `Link::react`)
+    let shown: Mutex<BTreeMap<String, BTreeSet<u64>>> = Default::default();
     let act = |engine: &Engine, step: engine::Step| -> Result<(), BridgeError> {
+        if let (true, Some(h)) = (step.dirty, &simplex) {
+            let mut shown = shown.lock().expect("shown");
+            for a in engine.agents() {
+                let working = engine.working(&a.fragment);
+                if shown.get(&a.fragment) != Some(&working) {
+                    // not taken (the manager busy): said again at the next step
+                    if h.working(&a.fragment, working.clone()) {
+                        shown.insert(a.fragment.clone(), working);
+                    } else {
+                        shown.remove(&a.fragment);
+                    }
+                }
+            }
+        }
         if step.dirty {
             save(&cfg.state_dir, engine.state())?;
+            // a turn over lets its files go (bounded: the turns open)
+            turn_files.lock().expect("turn files").retain(|t, _| engine.state().turns.get(t).is_some_and(|t| t.phase != engine::Phase::Ended));
             *shared.cursors.lock().expect("cursors") = engine.state().cursors.clone();
             *shared.held.lock().expect("held") = engine.held();
         }
@@ -392,16 +433,37 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     // their phone too, once posted, whatever started its turn
                     let mirrored = simplex.is_some() && engine.mirror(&agent) == Some(fragment.as_str());
                     let relay = mirrored.then(|| for_simplex(channel, &body, files.len())).flatten();
-                    lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay })
+                    // an asked turn's files go with its answer too (#721)
+                    let answers = !files.is_empty() && body["turn"].as_str().and_then(|t| engine.state().turns.get(t)).is_some_and(|t| t.ret.is_some());
+                    lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay, answers })
                 }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
                 Effect::Fence { agent, fragment, turn, prompt, id, body } => lanes.push(&fragment, Job::Fence { agent, turn, prompt, id, body }),
-                Effect::Owed { agent, fragment, channel, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, channel, turn, id, body }),
+                Effect::Owed { agent, fragment, channel, turn, id, body } => match engine.state().turns.get(&turn).map(|t| t.fragment.clone()) {
+                    // an answer goes from its question's chat's lane, after
+                    // the turn's replies, with their files (#721)
+                    Some(asked) if channel == records::TASKS && asked != fragment => lanes.push(&asked, Job::Answer { agent, to: fragment, turn, id, body }),
+                    _ => lanes.push(&fragment, Job::Owed { agent, channel, turn, id, body }),
+                },
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
+                Effect::ComputerAnswered { reply, taken: t } => {
+                    if let Some(post) = taken.lock().expect("answers").remove(&reply) {
+                        let _ = post.send(t);
+                    }
+                }
                 Effect::Runtime { runtime, command } => runtime_lanes.get(&runtime).expect("the engine names only the runtimes it was given").push(command),
                 Effect::Keepalive(on) => {
                     crate::ev!("keepalive", { "hold": on });
                     let _ = keep_tx.send(on);
+                }
+                Effect::ReadCut { agent, identity, fragment, turn } => {
+                    // a task of its own, bounded: no claim waits on it, and
+                    // one that does not read in time continues the turn
+                    let (api, inbox) = (api.clone(), inbox_tx.clone());
+                    tokio::spawn(async move {
+                        let waited = cut_waited(&api, &fragment, &agent, &identity, &turn).await;
+                        let _ = inbox.send(Msg::Input(Input::CutRead { turn, waited })).await;
+                    });
                 }
                 Effect::Discover { agent, joined } => {
                     if let Some(fragment) = joined {
@@ -452,6 +514,16 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
         tokio::select! {
             biased;
             _ = crate::net::stopped(&mut stop_rx) => break Ok(()),
+            Some(ask) = answers_rx.recv() => {
+                // an answer for the computer: its value the runtime's alone
+                next_answer += 1;
+                taken.lock().expect("answers").insert(next_answer, ask.taken);
+                let input = Input::ComputerAnswer { agent: ask.agent, turn: ask.turn, prompt: ask.prompt, option: ask.option, words: ask.words, reply: next_answer };
+                let s = engine.step(input, crate::log::now_ms());
+                if let Err(e) = act(&engine, s) {
+                    break Err(e);
+                }
+            }
             m = inbox.recv() => {
                 let Some(m) = m else { break Ok(()) };
                 let step = match m {
@@ -520,49 +592,58 @@ fn runtime_result(r: Result<Result<(), crate::runtime::RuntimeError>, tokio::tas
 fn reread(api: &Api, simplex: bool, names: &RuntimeNames, inbox: &mpsc::Sender<Msg>) {
     let (api, names, inbox) = (api.clone(), names.clone(), inbox.clone());
     tokio::spawn(async move {
-        if let Some(c) = ask_once(&api, simplex).await {
-            let (c, _) = with_runtimes(&api, c, &names).await;
+        if let Some(mut c) = ask_once(&api, simplex).await {
+            (c.agents, _) = with_runtimes(&api, c.agents, &names, true).await;
             let _ = inbox.send(Msg::Computer(c)).await;
         }
     });
 }
 
 /// Each agent's runtime as its `agent.json` named it last (`None`: it names
-/// none), by agent fragment: at most the agents the computer lists.
-type RuntimeNames = Arc<Mutex<HashMap<String, Option<String>>>>;
+/// none), and what it asked of Claude Code, by agent fragment: at most the
+/// agents the computer lists.
+pub type RuntimeNames = Arc<Mutex<HashMap<String, (Option<String>, crate::runtime::ClaudeSettings)>>>;
 
 /// The computer's agents, each with the runtime its `agent.json` names
-/// (`runtime::named`; no file names none), read as the computer is: at
-/// start, every minute, and as the ready file changes. One whose file does
-/// not read keeps what it named last; one never read is left out (counted
-/// in the second value), as an agent not ready is, so no turn of it goes to
-/// a runtime it does not name. An agent's runtime changes within a minute.
-async fn with_runtimes(api: &Api, mut c: api::Computer, names: &RuntimeNames) -> (api::Computer, usize) {
-    let reads = c.agents.iter().map(|a| async move { (a.fragment.clone(), api.file(&a.fragment, &a.fragment, "agent.json", api::AGENT_JSON_MAX_BYTES).await) });
+/// (`runtime::named`; no file names none): every agent's file read again
+/// when `again`, else only one never read. The bridge reads them as it
+/// reads the computer (at start, every minute, and as the ready file
+/// changes), and a Hermes image's boot as it reads its agents, which runs
+/// a Hermes profile only for an agent of Hermes'. One whose file does not
+/// read keeps what it named last; one never read is left out (counted in
+/// the second value), as an agent not ready is, so no turn of it goes to a
+/// runtime it does not name. An agent's runtime changes within a minute.
+pub async fn with_runtimes(api: &Api, mut agents: Vec<Agent>, names: &RuntimeNames, again: bool) -> (Vec<Agent>, usize) {
+    let known: Vec<String> = if again { Vec::new() } else { names.lock().expect("runtime names").keys().cloned().collect() };
+    let reads = agents.iter().filter(|a| !known.contains(&a.fragment)).map(|a| async move { (a.fragment.clone(), api.file(&a.fragment, &a.fragment, "agent.json", api::AGENT_JSON_MAX_BYTES).await) });
     let read = futures_util::future::join_all(reads).await;
     let mut named = names.lock().expect("runtime names");
     for (agent, r) in read {
         let now = match r {
-            Ok(b) => crate::runtime::named(Some(&b)),
-            Err(e) if e.status() == Some(404) => None,
+            Ok(b) => (crate::runtime::named(Some(&b)), crate::runtime::ClaudeSettings::of(Some(&b))),
+            Err(e) if e.status() == Some(404) => (None, Default::default()),
             Err(e) => {
                 crate::ev!("runtime.unread", { "agent": agent, "error": e.to_string() });
                 continue;
             }
         };
-        if named.get(&agent) != Some(&now) {
-            crate::ev!("agent.runtime", { "agent": agent, "runtime": now.as_deref().unwrap_or(crate::runtime::DEFAULT) });
+        let was = named.get(&agent);
+        if was.map(|w| &w.0) != Some(&now.0) {
+            crate::ev!("agent.runtime", { "agent": agent, "runtime": now.0.as_deref().unwrap_or(crate::runtime::DEFAULT) });
+        }
+        if was.map(|w| &w.1) != Some(&now.1) {
+            crate::ev!("agent.claude", { "agent": agent, "model": now.1.model, "effort": now.1.effort });
         }
         named.insert(agent, now);
     }
-    named.retain(|agent, _| c.agents.iter().any(|a| &a.fragment == agent));
-    let listed = c.agents.len();
-    c.agents.retain(|a| named.contains_key(&a.fragment));
-    for a in &mut c.agents {
-        a.runtime = named[&a.fragment].clone();
+    named.retain(|agent, _| agents.iter().any(|a| &a.fragment == agent));
+    let listed = agents.len();
+    agents.retain(|a| named.contains_key(&a.fragment));
+    for a in &mut agents {
+        (a.runtime, a.claude) = named[&a.fragment].clone();
     }
-    let unread = listed - c.agents.len();
-    (c, unread)
+    let unread = listed - agents.len();
+    (agents, unread)
 }
 
 async fn ask_once(api: &Api, simplex: bool) -> Option<api::Computer> {
@@ -582,8 +663,9 @@ async fn ask_until(api: &Api, simplex: bool, names: &RuntimeNames, stop: watch::
     let mut backoff = Backoff::default();
     // bounded by the platform's answer, or `stop`
     loop {
-        if let Some(c) = ask_once(api, simplex).await {
-            let (c, unread) = with_runtimes(api, c, names).await;
+        if let Some(mut c) = ask_once(api, simplex).await {
+            let unread;
+            (c.agents, unread) = with_runtimes(api, c.agents, names, true).await;
             if unread == 0 {
                 return Some(c);
             }
@@ -985,6 +1067,18 @@ async fn follow_once(
 /// ends the follow, if anything: `Stopped` when the engine is gone.
 #[allow(clippy::too_many_arguments)]
 async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &mpsc::Sender<Msg>, shared: &Shared, view: &mut ViewCache, tasks: bool) -> Option<Ended> {
+    // The move's routine (FIN-463), the platform's on the agent's own
+    // `tasks`, as the agent: its stage's SimpleX files are set aside (or
+    // given up on) before the routine reaches the engine, so the import it
+    // starts, and the `done` that ends the stage, come after by
+    // construction (docs/migrations.md, "SimpleX in a stage"). Bounded
+    // (`SET_ASIDE_WAIT_MS`); a replay of it waits for nothing.
+    if let (true, Some(h)) = (tasks && fragment == agent.fragment && record.principal == agent.identity, &shared.simplex) {
+        let routine = record.body.get("kind").and_then(Value::as_str) == Some("routine");
+        if let Some(stage) = record.body.get("text").and_then(Value::as_str).filter(|_| routine).and_then(crate::simplex::stage::of_routine) {
+            h.set_aside_first(&agent.fragment, &stage).await;
+        }
+    }
     let (input_view, since) = if tasks {
         // A routine that fired while the computer was gone longer than this
         // is skipped, as cron skips a missed run; an answer never is (its
@@ -1105,7 +1199,9 @@ fn for_simplex(channel: &str, body: &Value, files: usize) -> Option<String> {
 enum Job {
     /// `relay`: what of it goes to the owner's SimpleX app once posted, for
     /// a post in its owner's SimpleX chat (`for_simplex`), with its files.
-    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String> },
+    /// `answers`: its turn answers an ask, and its files go with that
+    /// answer (`Answer`).
+    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String>, answers: bool },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
     /// A live card answer's closure on `work`, whose answer the engine
@@ -1114,6 +1210,11 @@ enum Job {
     /// One of a turn's last records (on `work`, or an answer on `tasks`):
     /// the engine hears when the lane is done with it.
     Owed { agent: String, channel: &'static str, turn: String, id: String, body: Value },
+    /// An asked turn's answer, in its question's chat's lane, so it goes
+    /// after the turn's replies there: it takes their files (the blobs this
+    /// lane uploaded for them, which its asker reads from this chat), then
+    /// goes to its asker's lane (`to`) as the turn's last record, `Owed`.
+    Answer { agent: String, to: String, turn: String, id: String, body: Value },
     Draft { agent: String, turn: String, text: Option<String> },
 }
 
@@ -1122,7 +1223,7 @@ impl Job {
     fn turn(&self) -> Option<&str> {
         match self {
             Job::Post { body, .. } => body["turn"].as_str(),
-            Job::Claim { turn, .. } | Job::Fence { turn, .. } | Job::Owed { turn, .. } | Job::Draft { turn, .. } => Some(turn),
+            Job::Claim { turn, .. } | Job::Fence { turn, .. } | Job::Owed { turn, .. } | Job::Answer { turn, .. } | Job::Draft { turn, .. } => Some(turn),
         }
     }
 }
@@ -1184,7 +1285,7 @@ impl Lanes {
                 None => {
                     let l = Arc::new(Lane { queue: Mutex::new(VecDeque::new()), ready: Notify::new() });
                     lanes.insert(fragment.to_string(), l.clone());
-                    tokio::spawn(work(self.api.clone(), fragment.to_string(), l.clone(), self.claims.clone(), self.stop.clone()));
+                    tokio::spawn(work(self.clone(), fragment.to_string(), l.clone()));
                     l
                 }
             }
@@ -1207,8 +1308,13 @@ impl Lanes {
 
 /// A fragment's lane: its jobs in order, each post retried until the
 /// platform takes it (its id makes a retry the same record).
-async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut stop: watch::Receiver<bool>) {
+async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
+    let (api, claims, mut stop) = (lanes.api.clone(), lanes.claims.clone(), lanes.stop.clone());
     let mut drafted: HashMap<String, Instant> = HashMap::new();
+    // the files this lane attached to asked turns' replies, by turn, until
+    // their answer takes them (`Job::Answer`); at most as many turns as are
+    // open, the oldest let go
+    let mut answer_files: VecDeque<(String, Vec<AttachmentRef>)> = VecDeque::new();
     // bounded by the bridge's life: one job per pass
     loop {
         let job = {
@@ -1262,12 +1368,35 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                     Err(e) => crate::ev!("draft.failed", { "fragment": fragment, "turn": turn, "error": e.to_string() }),
                 }
             }
-            Job::Post { agent, channel, id, body, files, relay } => {
+            Job::Post { agent, channel, id, body, files, relay, answers } => {
+                let turn = body["turn"].as_str().map(str::to_string);
                 // what goes back over SimpleX goes only once it is on the chat
-                let sent = post(&api, &fragment, &agent, channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
+                let (sent, refs, _) = post_attached(&api, &fragment, &agent, channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
                 if let (Some(text), true, Some(sx)) = (relay, sent.on_chat(), claims.simplex.as_ref()) {
                     sx.reply(&agent, &text, &files).await;
                 }
+                if let (true, true, Some(turn)) = (answers, sent == Sent::Posted && !refs.is_empty(), turn) {
+                    match answer_files.iter_mut().find(|(t, _)| *t == turn) {
+                        Some((_, kept)) => kept.extend(refs),
+                        None => {
+                            if answer_files.len() >= limits::TURNS_OPEN_MAX {
+                                answer_files.pop_front();
+                            }
+                            answer_files.push_back((turn, refs));
+                        }
+                    }
+                }
+            }
+            Job::Answer { agent, to, turn, id, mut body } => {
+                // the files of its turn's replies, all posted before it in
+                // this lane: its asker reads them from this chat, as itself
+                if let Some(i) = answer_files.iter().position(|(t, _)| *t == turn) {
+                    let (_, mut refs) = answer_files.remove(i).expect("found");
+                    refs.truncate(limits::ATTACHMENTS_MAX);
+                    crate::ev!("answer.files", { "turn": turn, "files": refs.len() });
+                    body["files"] = json!(refs);
+                }
+                lanes.push(&to, Job::Owed { agent, channel: records::TASKS, turn, id, body });
             }
             Job::Owed { agent, channel, turn, id, body } => {
                 // Done (answered, or given up after its tries) unless the
@@ -1347,6 +1476,36 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
     unreachable!("the last try returns")
 }
 
+/// Whether another life's cut turn `turn` waited on its person as that
+/// life left it (`note::waited`), from `fragment`'s `work` back from its
+/// tail to the turn's start: at most one `Budget`, within
+/// `NOTE_READ_MS_MAX` (a note's bound). One that does not read, or not in
+/// time, is taken as not waiting, and its turn is continued as before.
+async fn cut_waited(api: &Api, fragment: &str, agent: &str, me: &str, turn: &str) -> bool {
+    let read = async {
+        let mut budget = Budget::default();
+        budget.request()?;
+        let tail = api.channels(agent, fragment).await?.into_iter().find(|c| c.name == records::WORK).map_or(0, |c| c.seq);
+        let started = |rs: &[Record]| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == turn);
+        read_back(api, agent, fragment, records::WORK, tail.saturating_add(1), started, &mut budget).await
+    };
+    match tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), read).await {
+        Ok(Ok((work, _))) => {
+            let waited = note::waited(&work, me, turn);
+            crate::ev!("cut.read", { "fragment": fragment, "turn": turn, "waited": waited });
+            waited
+        }
+        Ok(Err(e)) => {
+            crate::ev!("cut.unread", { "fragment": fragment, "turn": turn, "error": e.why() });
+            false
+        }
+        Err(_) => {
+            crate::ev!("cut.unread", { "fragment": fragment, "turn": turn, "error": format!("no answer in {} ms", limits::NOTE_READ_MS_MAX) });
+            false
+        }
+    }
+}
+
 /// How a post ended: on the chat (this try's, or an earlier life's under
 /// its id), refused for good (out of tries, or no longer the agent's to
 /// post in), or not ended, the bridge stopping first.
@@ -1377,16 +1536,70 @@ impl Sent {
 /// refused at once. A relayed record is signed by its `door` at each try,
 /// its files' refs in it (simplex/door.rs).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
+pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
+    post_seq(api, fragment, agent, channel, id, body, files, door, tries, stop).await.0
+}
+
+/// `post`, and the record's seq on its channel when `Posted`: what a
+/// SimpleX link shows its agent working on is named by it (simplex/link.rs).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn post_seq(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> (Sent, Option<u64>) {
+    let (sent, _, seq) = post_attached(api, fragment, agent, channel, id, body, files, door, tries, stop).await;
+    (sent, seq)
+}
+
+/// `post`, the refs its files went as on the record posted (none when it
+/// was not posted, or they were refused), and its seq (when `Posted`).
+#[allow(clippy::too_many_arguments)]
+async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> (Sent, Vec<AttachmentRef>, Option<u64>) {
     assert!(tries >= 1, "a post is tried");
     let mut backoff = Backoff::default();
+    // its files refused here (an agent that is a viewer of a connector's
+    // chat may post there, not upload; a file past what the platform takes
+    // through the egress, 413): its words go alone, saying so
+    let mut files_refused = false;
+    // its files, once uploaded: a retried post sends their refs again,
+    // never the bytes (a file may be 256 MiB)
+    // (the files stay in their scratch while `files` lives: `LocalFile::pin`)
+    let mut done: Option<Vec<AttachmentRef>> = None;
     for attempt in 1..=tries {
-        let uploaded = upload(api, fragment, agent, files).await;
+        let uploading = match &done {
+            _ if files_refused => Ok(Vec::new()),
+            Some(refs) => Ok(refs.clone()),
+            None => match upload(api, fragment, agent, files).await {
+                // a file that could not be read goes unattached, never
+                // unsaid (once: a retry sends the same record)
+                Ok((refs, unread)) => {
+                    if unread > 0 {
+                        let which = match (unread, files.len()) {
+                            (1, 1) => "Its file".to_string(),
+                            (n, all) if n == all => "Its files".to_string(),
+                            (n, _) => format!("{n} of its files"),
+                        };
+                        say_unattached(&mut body, &format!("{which} could not be attached."));
+                    }
+                    Ok(refs)
+                }
+                Err(e) => Err(e),
+            },
+        };
+        let uploaded = match uploading {
+            Err(e) if matches!(e.status(), Some(403 | 413)) && !files.is_empty() => {
+                crate::ev!("upload.refused", { "fragment": fragment, "channel": channel, "id": id, "files": files.len(), "status": e.status() });
+                files_refused = true;
+                say_unattached(&mut body, &format!("{} could not be attached here.", if files.len() == 1 { "Its file" } else { "Its files" }));
+                Ok(Vec::new())
+            }
+            other => other,
+        };
+        let mut attached = Vec::new();
         let result = match uploaded {
             Ok(refs) => {
+                done = Some(refs.clone());
                 if !refs.is_empty() {
                     body["attachments"] = json!(refs);
                 }
+                attached = refs;
                 if let Some(door) = door {
                     door.seal(&mut body, fragment, channel, id, crate::log::now_ms() as i64);
                 }
@@ -1397,12 +1610,12 @@ pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, 
         match result {
             Ok(posted) => {
                 crate::ev!("posted", { "fragment": fragment, "channel": channel, "id": id, "replayed": posted.replayed, "attempt": attempt });
-                return Sent::Posted;
+                return (Sent::Posted, attached, posted.seq);
             }
             Err(e) if e.retryable() && attempt < tries => {
                 crate::ev!("post.retry", { "fragment": fragment, "id": id, "attempt": attempt, "error": e.to_string() });
                 if !backoff.wait(stop.clone()).await {
-                    return Sent::Stopped;
+                    return (Sent::Stopped, Vec::new(), None);
                 }
             }
             Err(e) if e.status() == Some(409) => {
@@ -1410,40 +1623,44 @@ pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, 
                 // turn that life ended, or the records of one it claimed
                 // (one life per turn). Never retried.
                 crate::ev!("post.taken", { "fragment": fragment, "channel": channel, "id": id });
-                return Sent::Taken;
+                return (Sent::Taken, Vec::new(), None);
             }
             Err(e) => {
                 // Out of tries, or a 403/404: it is no longer the agent's to
                 // post in.
                 crate::ev!("post.failed", { "fragment": fragment, "channel": channel, "id": id, "error": e.to_string() });
-                return Sent::Refused;
+                return (Sent::Refused, Vec::new(), None);
             }
         }
     }
     unreachable!("the last try returns")
 }
 
-/// Uploads a reply's files as the fragment's blobs: their refs.
-async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> Result<Vec<AttachmentRef>, ApiError> {
-    let mut refs = Vec::new();
+/// A reply's words, and a line in parentheses after them saying why it
+/// carries fewer files than it was sent with.
+fn say_unattached(body: &mut Value, why: &str) {
+    let said = body["text"].as_str().unwrap_or("").trim_end().to_string();
+    body["text"] = json!(format!("{said}{}({why})", if said.is_empty() { "" } else { "\n\n" }));
+}
+
+/// Uploads a reply's files as the fragment's blobs, each streamed from
+/// disk (transfer.rs): their refs, and how many could not be read (gone,
+/// empty, or past the bound), which its post says.
+async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> Result<(Vec<AttachmentRef>, usize), ApiError> {
+    let (mut refs, mut unread) = (Vec::new(), 0);
     for f in files.iter().take(limits::ATTACHMENTS_MAX) {
-        let bytes = match tokio::fs::read(&f.path).await {
-            Ok(b) if !b.is_empty() && b.len() as u64 <= limits::ATTACHMENT_MAX_BYTES => Bytes::from(b),
-            Ok(_) => {
-                crate::ev!("attachment.skipped", { "name": f.name, "why": "empty, or past the bound" });
-                continue;
-            }
+        let (sha, size) = match crate::transfer::hash_file(&f.path).await {
+            Ok(hashed) => hashed,
             Err(e) => {
-                crate::ev!("attachment.skipped", { "name": f.name, "why": e.to_string() });
+                crate::ev!("attachment.unattached", { "name": f.name, "why": e.to_string() });
+                unread += 1;
                 continue;
             }
         };
-        let sha = records::hex(&Sha256::digest(&bytes));
-        let size = bytes.len() as u64;
-        api.put_blob(agent, fragment, &sha, &f.media_type, bytes).await?;
+        api.put_blob_file(agent, fragment, &sha, &f.media_type, &f.path, size).await?;
         refs.push(AttachmentRef { sha256: sha, size, media_type: f.media_type.clone(), name: f.name.clone() });
     }
-    Ok(refs)
+    Ok((refs, unread))
 }
 
 // ---- the runtime's commands ----
@@ -1459,23 +1676,26 @@ impl RuntimeLane {
     /// One runtime's lane: a turn's commands all go to one runtime, so they
     /// keep the engine's order, and a runtime slow to read its commands
     /// holds no other's.
-    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, media_dir: PathBuf) -> RuntimeLane {
+    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, scratch: Arc<Scratch>, turn_files: TurnFiles) -> RuntimeLane {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
             while let Some(mut c) = rx.recv().await {
                 // an answer's files, downloaded as a turn's are, then named
                 // in its words with where each is (`with_files`)
+                let keep = |turn: &str, files: &[LocalFile]| turn_files.lock().expect("turn files").entry(turn.to_string()).or_default().extend(files.iter().map(|f| f.pin.clone()));
                 match &mut c {
-                    Command::Tell { text, attached, .. } => {
+                    Command::Tell { turn, text, attached, .. } => {
                         if let Some(a) = attached.take() {
-                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
+                            keep(turn, &files);
                             *text = crate::runtime::with_files(text, &a.by_name, a.refs.len(), &files);
                         }
                     }
-                    Command::Answer { words, attached, .. } => {
+                    Command::Answer { turn, words, attached, .. } => {
                         if let Some(a) = attached.take() {
-                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
+                            keep(turn, &files);
                             *words = Some(crate::runtime::with_files(words.as_deref().unwrap_or(""), &a.by_name, a.refs.len(), &files));
                         }
                     }
@@ -1497,13 +1717,15 @@ impl RuntimeLane {
                             None
                         })
                     };
-                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, &ts.fragment, &ts.attachments, &media_dir), note, quote);
+                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
+                    keep(&ts.turn, &files);
                     ts.files = files;
-                    // a late card answer's turn's own note first (engine.rs `hand`)
-                    let notes: Vec<String> = [ts.note.take(), note].into_iter().flatten().collect();
+                    // its age first (a late message's), then a late card
+                    // answer's turn's own note (engine.rs `hand`)
+                    let notes: Vec<String> = [ts.age.take(), ts.note.take(), note].into_iter().flatten().collect();
                     ts.note = (!notes.is_empty()).then(|| notes.join("\n\n"));
                     // (its own, a card's turn, in the cut note's place: `note_for`)
-                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 4), "a turn's notes are bounded");
+                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 6), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
                 if to_runtime.send(c).await.is_err() {
@@ -1551,31 +1773,17 @@ fn own_words(principal: &str, body: &Value, agent: &crate::runtime::Agent) -> bo
     principal == agent.identity && records::relayed(body).is_none_or(|r| r.for_ != agent.owner)
 }
 
-/// A message's attachments, from the chat's blobs to scratch files.
-async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef], dir: &Path) -> Vec<LocalFile> {
+/// A message's attachments, from the chat's blobs to scratch files, each
+/// streamed (transfer.rs), and each pinned while any copy of it lives (so
+/// one downloaded never goes for the next); one that does not download is
+/// left out, and the runtime is told how many (`with_files`).
+async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef], scratch: &Scratch) -> Vec<LocalFile> {
     let mut out = Vec::new();
     for r in refs.iter().take(limits::ATTACHMENTS_MAX) {
-        let path = dir.join(&r.sha256);
-        let have = tokio::fs::metadata(&path).await.is_ok_and(|m| m.len() == r.size);
-        if !have {
-            match api.get_blob(agent, fragment, &r.sha256).await {
-                Ok(bytes) if records::hex(&Sha256::digest(&bytes)) == r.sha256 => {
-                    if let Err(e) = tokio::fs::write(&path, &bytes).await {
-                        crate::ev!("attachment.unsaved", { "sha256": r.sha256, "error": e.to_string() });
-                        continue;
-                    }
-                }
-                Ok(_) => {
-                    crate::ev!("attachment.refused", { "sha256": r.sha256, "why": "its bytes are not its hash" });
-                    continue;
-                }
-                Err(e) => {
-                    crate::ev!("attachment.unread", { "sha256": r.sha256, "error": e.to_string() });
-                    continue;
-                }
-            }
+        match crate::transfer::download(api, agent, fragment, r, scratch).await {
+            Ok((path, used)) => out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size, pin: Kept(Some(Arc::new(used))) }),
+            Err(e) => crate::ev!("attachment.unread", { "sha256": r.sha256, "size": r.size, "error": e.to_string() }),
         }
-        out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size });
     }
     out
 }
@@ -1794,16 +2002,21 @@ async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
 /// looks at the hold before each try, so none starts once it holds), and no
 /// SimpleX core runs (`cores_quiet`: SimpleX stops them all as it sees the
 /// hold, and starts none while it lasts; always true with no SimpleX), and
+/// nothing of a runtime's own runs outside its turns (`runtimes_unquiet`:
+/// each runtime is told the hold, `runtimes_held`, and quiets its own), and
 /// not otherwise. The platform clears `held` before each hold, so an
 /// answer is always to the hold it finds. The answer is `answer`: what the
 /// save may leave out, one per line (none, empty). Looked at every
 /// `HOLD_POLL_MS`, for the bridge's life.
-async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, mut stop: watch::Receiver<bool>) {
+#[allow(clippy::too_many_arguments)]
+async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, runtimes_held: watch::Sender<bool>, runtimes_unquiet: Arc<AtomicUsize>, mut stop: watch::Receiver<bool>) {
     assert!(hold != held, "a hold and its answer are two files");
     assert!(answer.len() <= limits::HELD_ANSWER_MAX_BYTES, "an answer the platform reads whole");
     // bounded by the bridge's life: one look per `HOLD_POLL_MS`, ended by `stop`
     loop {
-        let quiet = hold.exists() && in_flight.load(Ordering::SeqCst) == 0 && cores_quiet.load(Ordering::SeqCst);
+        let holding = hold.exists();
+        runtimes_held.send_if_modified(|was| std::mem::replace(was, holding) != holding);
+        let quiet = holding && in_flight.load(Ordering::SeqCst) == 0 && cores_quiet.load(Ordering::SeqCst) && runtimes_unquiet.load(Ordering::SeqCst) == 0;
         match (quiet, held.exists()) {
             // written whole, then renamed: the platform never reads half
             (true, false) => match write_whole(&held, answer.as_bytes()) {
@@ -1920,9 +2133,9 @@ mod tests {
         assert_eq!(for_simplex(records::CHAT, &reply(true), 0), None, "interim: the chat's alone");
         assert_eq!(for_simplex(records::CHAT, &records::reply("", "t1", &[], 0, false), 1).as_deref(), Some(""), "a file alone goes");
         assert_eq!(for_simplex(records::CHAT, &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
-        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
         assert_eq!(for_simplex(records::CHAT, &records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]), 0), None, "its owner's own, from the phone");
-        let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words };
+        let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words, computer: false };
         let card = records::turn_prompt("t1", "c-1", "What should I plant?", &[option("c0", "Basil", false), option("c1", "Mint", false), option("other", "Something else", true)], "npub1paul", 1);
         assert_eq!(for_simplex(records::WORK, &card, 0).as_deref(), Some("What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)"));
         let buttons = records::turn_prompt("t1", "p-1", "Run it?", &[option("once", "Allow once", false)], "npub1paul", 1);
@@ -1959,7 +2172,7 @@ mod tests {
     /// own; anything else the agent posted is its own.
     #[test]
     fn a_relayed_message_quoted_is_its_owners() {
-        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None };
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() };
         let relayed = records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]);
         assert!(!own_words("npub1juniper", &relayed, &agent), "its owner's, relayed");
         assert!(own_words("npub1juniper", &json!({ "text": "a reply", "turn": "t1" }), &agent));

@@ -54,6 +54,9 @@ NUL and the cut turn's id; it has the cut turn's `cause` and asker, and
 a `turn.notice` (part `continued`) as it starts (docs/bridge.md, "A cut
 turn is continued once").
 
+A reader ignores a `work` kind it does not know: it starts, ends or moves
+no turn, and answers no question. Later bridges add kinds.
+
 One turn of an agent runs in a chat at a time; the rest wait in order, at
 most 16. A turn's records are its `turn.start` on `work` (its claim), any
 number of steps, replies, cards and their closings, `turn.asked` and
@@ -102,7 +105,9 @@ until a reply of that turn replaces it.
   including its words before a tool call, which are posted before that
   call's step.
 - `interim: true` marks words its turn went on working after: words
-  before a tool call that does more than update memory. The push leaves
+  before a tool call that does more than update memory. Words before a
+  call that only updates memory wait: they are the turn's answer if it
+  ends next, else interim, so a turn never answers twice (#729). The push leaves
   an interim reply out; a page shows it as any reply. A turn posts at
   most 64 replies that are not interim and, counted apart, 200 interim
   ones, so narration never costs the answer.
@@ -209,33 +214,40 @@ page's id is `pr:<first 32 hex digits of SHA-256 of "<agent>
   turn is a message of its own. A command the menu refuses for a word of
   its `args` still gets both its records, its end an `error` saying why.
 
-**History**, a chat continued from its person's Session Archive
-(templates/sessions/README.md):
+**History**, a chat continued from a conversation its person had (one of
+their Session Archive, templates/sessions/README.md, or an archived chat
+of theirs), with an agent of their choosing:
 
 ```json
 { "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-20261001_090000_ab12cd",
-  "started_at": "2026-10-01T09:00:00.000Z", "ended_at": "2026-10-04T09:00:00.000Z",
+  "agent": "Juniper", "started_at": "2026-10-01T09:00:00.000Z", "ended_at": "2026-10-04T09:00:00.000Z",
   "summary": "…", "messages": [{ "role": "user", "at": "…", "text": "…" }], "earlier": 12 }
 ```
 
-- Posted by the chat's owner (the shell's Continue) with the id
-  `history`, before the agent joins: the chat's first record. It holds
-  the conversation's last summary and the newest messages said after it
-  (the summary covers what came before), oldest first, with how many
-  others the conversation holds (`earlier`), bounded to fit one record
-  (cell/shell/session-archive.js, `historyOf`). `archive` and `key` name
-  the whole conversation's file.
-- Only its owner's counts. The page shows it above the chat. The bridge
-  hands it to the agent once, as its first turn's note there
-  (`note::history`); it starts no turn.
+- Posted by the chat's owner (the shell's Continue, cell/shell/continue.js)
+  with the id `history`, before the agent joins: the chat's first record.
+  It holds the conversation's last summary and the newest messages said
+  after it (the summary covers what came before), oldest first, with how
+  many others the conversation holds (`earlier`), bounded to fit one
+  record (`historyOf`, `historyOfChat`). `archive` and `key` name an
+  import's file, or `chat` the archived chat it was made of. `agent`:
+  whose the agent's words were, when not the agent continuing it.
+- One chat a (source, agent): its name is made from both, so Continue
+  asked again, in any tab, opens it, and a Continue cut short is finished
+  in the same chat.
+- Only its owner's counts. The page shows it above the chat, with whom it
+  was (`agent`). The bridge hands it to the agent once, as its first
+  turn's note there (`note::history`, another agent's words by its name);
+  it starts no turn.
 
 Any other `kind` on `chat` is a page's own, never a message. Search finds
 messages and replies alone, by their `text` (docs/api.md, Search).
 
 ## `work`
 
-The agent posts each record with the id `wk:<turn>:<part>`, so a step
-posted again is the same record.
+The agent posts each record of a turn with the id `wk:<turn>:<part>`, so
+a step posted again is the same record. A chat's helpers set
+(`turn.helpers`) is no turn's.
 
 **`turn.start`**, part `start`:
 
@@ -291,8 +303,12 @@ and only a `turn.step` of the same `response` says it ended, the one with
 its `tool_call_id`, else (its runtime renamed the call) the one with its
 `tool` and `args`. The provider's `tool_call_id` is no call's identity:
 some name every response's first call `call_0`. A call no step ended is
-named in the cut turn's note as one that may or may not have run. Pages
-show none yet; older bridges post none.
+named in the cut turn's note as one that may or may not have run. A page
+shows a call no step ended (#725): while its turn runs and waits on no
+one, one of the turn's latest response is running, its card's last line,
+with how long since its record; any other, and every one once the turn
+ended, "May have run", where it was asked for. Its step takes its place.
+Older bridges post none.
 
 **`turn.prompt`**, part `p:<prompt>`: a card, a question in plain words.
 
@@ -308,7 +324,12 @@ show none yet; older bridges post none.
 `prompt` matches `^[A-Za-z0-9._-]{1,64}$`, and option ids the same with
 at most 32 characters. A card has 1 to 8 options; `style` is optional
 (`primary`, `danger`). An option with `"words": true` is answered in
-words on the card (the answer's `text`, above). Only `asks` answers, and
+words on the card (the answer's `text`, above). One with `"computer":
+true` too is answered on the agent's computer, never in a record (a
+sign-in's code): the chat's page hands what is typed to the shell, which
+hands it to that computer (docs/bridge.md, "An answer for the
+computer"); a `prompt_response` naming it is ignored, and its card closes
+answered with no `text`. Only `asks` answers, and
 only until `expiresAt` (ms). A card outlives a restart of its turn: an
 answer whose turn is gone starts a fresh turn (docs/bridge.md, "A card
 outlives its turn").
@@ -336,8 +357,9 @@ The turn asks `asks` (its asker) something to answer in words, reply
 `<part>` being the question, and waits, running, for their next message
 to the agent. It is posted once per question. Nothing records the answer:
 a page takes the turn as waiting until `asks` posts a message on `chat`
-at or after the record's `at`, or a later record of the turn's on `work`
-says it went on.
+at or after the record's `at`, or a later step, call or end of the turn's
+on `work` says it went on. Any other record (a notice, a card's closing,
+a kind the page does not know) leaves it waiting.
 
 **`turn.notice`**, part `n<k>`, from 1:
 
@@ -352,6 +374,50 @@ A notice from the runtime, neither a step nor a reply. `category` is
 notice the runtime sends after the turn's end still belongs to that turn,
 and is posted after its `turn.end`. If the agent has run no turn in that
 chat in this life, the notice is not posted. A notice is never pushed.
+
+**`turn.helpers`**, id `hs:<life>:<n>`: the helpers (children the agent's
+runtime delegated work to) the agent has working in this chat, all of
+them, as its computer's bridge holds them now.
+
+```json
+{ "kind": "turn.helpers", "until": 1790000900000,
+  "helpers": [{ "child": "<child>", "parent": "…", "since": 1790000000000,
+                "goal": "Find three venues near Lisbon for a team offsite" }] }
+```
+
+The bridge posts the whole set each time a helper starts or ends, and
+again 5 minutes before `until` while it names any. A restart of the
+computer's bridge posts an empty set to each chat its helpers ran in,
+since they died with the process. `<life>` is the bridge process's
+(`turn.start`'s), and `n` numbers its sets from 1. A helper
+outlives the turn that started it. Helpers the agent grouped (Hermes'
+task `group`) end together, when their group reports.
+
+- `until` (ms): the set holds until then, 15 minutes after it was posted.
+  A set that lapsed says nothing, so a computer that crashed and sleeps
+  shows no helpers 15 minutes after its last set.
+- `child`: the first 24 hex digits of SHA-256 of the runtime's id for the
+  helper (Hermes' child session id).
+- `parent`: the turn that started it. The record names no `turn`: a
+  reader from before `turn.helpers` passes over a `work` record without
+  one, so no page or app already out there takes it for a turn going on.
+- `since` (ms): when the bridge saw it start.
+- `goal`: its task, one line of at most 140 characters. It is the chat's
+  content, read by whoever reads the turn's steps: its whitespace made
+  single spaces and cut, never scrubbed.
+
+A set names at most 32 helpers; a computer's bridge keeps at most 1,024,
+and our image's plugin records at most 256 running or waiting to say their
+end. A helper past a bound holds the computer and is named nowhere. Only
+our Hermes image's helpers are recorded; older bridges post none.
+
+**A reader** asks for each poster's newest set as a chat opens (`work`
+keeps it: docs/api.md, Newest records), then takes each set `work`
+brings live, the newest of each poster winning. It shows a poster's
+newest set while `until` is ahead of its clock, and a set is its
+poster's, whatever a body names. A page shows the helpers in a bar above
+the composer, with how long each has run (`since`); a helper's result
+comes back as a reply of the agent's own.
 
 **`turn.end`**, part `end`:
 
@@ -390,7 +456,10 @@ what it missed, from these records alone (docs/bridge.md, "Restarts").
 
 A file is one of the chat fragment's blobs (docs/api.md, Blobs). Its
 poster uploads it first, then posts the record naming it, which keeps the
-blob. A record has at most 8 files, each at most 25 MiB. The agent's
+blob. A record has at most `FILES_PER_MESSAGE` files (proto `limits`): a
+person's each at most the deployment's `uploadMaxBytes`, which clients read
+(docs/api.md, `GET /api/fragments`; a page's hello), and a computer's each at
+most `BLOB_MAX_BYTES`. The agent's
 runtime gets each as a local file, named by its `name` and `type`
 (docs/bridge.md, "Hermes' Relay").
 
@@ -407,6 +476,9 @@ above, it relies on:
 - **The window it reads**: the last `CHAT_LAST` records of `chat` and,
   for a viewer, the last `WORK_LAST` of `work` (the reason a menu is
   posted again each life).
+- **The helpers working** (`turn.helpers`): each agent's newest set,
+  read once as it opens (`fragment.newest("work")`, past any window), then
+  each set `work` brings live; shown while its `until` is ahead.
 - **The launcher's chat**: `?sent=1` shows no new chat's start, only the
   message just sent and its waiting line.
 - **The first run**: `?setup=1` shows the making as the shell reports
@@ -453,7 +525,8 @@ id `hello`, asking the agent to say hello. So the agent speaks first.
 ```json
 { "kind": "answer", "chat": "<chat it asked from>", "text": "Rowan answered your question in <chat> (\"…\"):\n\n…",
   "by": "npub1<asked>", "name": "Rowan", "asked": { "fragment": "<chat>", "seq": 12 }, "turn": "<asked turn>",
-  "outcome": "idle", "error": "…", "hop": 2, "refused": true }
+  "outcome": "idle", "error": "…", "hop": 2, "refused": true,
+  "files": [{ "sha256": "<64 hex>", "size": 22, "type": "text/plain", "name": "drawing.txt" }] }
 ```
 
 - Posted by the asking agent's own bridge, as that agent, with the id
@@ -462,11 +535,21 @@ id `hello`, asking the agent to say hello. So the agent speaks first.
 - The agent takes it as a turn in `chat`, asked as the agent that
   answered (`by`, called `name`), and its owner's to stop as a routine
   is. `text` names the question and carries what the asked turn said
-  (its replies but interim ones, bounded); `outcome` and `error` are its
-  end's.
+  (its replies but interim ones, bounded; its interim ones when it said
+  nothing else, as a turn that answered and then worked: #720);
+  `outcome` and `error` are its end's.
 - The turn is `hop` hand-offs deep, one past the turn that answered, and
   spends `chat`'s budget. `refused`: the question was never taken, and
   this turn is recorded refused, never run.
+- `files` (#721): what the asked turn sent with its replies, as their
+  `attachments` name them: blobs of the chat it was asked in
+  (`asked.fragment`), which the asking agent's turn reads as that agent
+  (the platform's rule on who reads that chat) and has on its computer,
+  as a message's attachments. The bridge names them as it posts the
+  answer after the turn's replies, from the files it uploaded for them
+  in this life: an answer a later life posts names none, its text still
+  saying how many were sent. Any one it cannot read, and none are taken;
+  the answer is kept.
 - An answer is taken however late it is first read: the hour that skips
   a routine never skips an answer.
 

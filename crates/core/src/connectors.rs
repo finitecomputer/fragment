@@ -23,7 +23,8 @@ pub struct Connector {
 }
 
 /// The deployment's connectors, checked (`new`). Absent from a config, it
-/// is `default()`: SimpleX, with `relay::HOSTS` on 443. `[]` allows none.
+/// is `default()`: SimpleX, with `relay::HOSTS` on 443, and Telegram (a
+/// hosted connector: templates/telegram, no relay). `[]` allows none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy(Vec<Connector>);
 
@@ -45,7 +46,7 @@ pub enum Action {
 impl Default for Policy {
     fn default() -> Self {
         let targets = crate::relay::HOSTS.iter().map(|h| RelayTarget { host: (*h).into(), port: crate::relay::PORT }).collect();
-        Policy::new(vec![Connector { id: "simplex".into(), relay_targets: targets }]).expect("the default policy is valid")
+        Policy::new(vec![Connector { id: "simplex".into(), relay_targets: targets }, Connector { id: "telegram".into(), relay_targets: vec![] }]).expect("the default policy is valid")
     }
 }
 
@@ -67,7 +68,7 @@ impl Policy {
             }
             let mut targets = std::collections::BTreeSet::new();
             for t in &row.relay_targets {
-                let public = crate::egress::check(&format!("https://{}", t.host), false).is_ok_and(|u| matches!(u.host(), Some(url::Host::Domain(_))));
+                let public = crate::egress::check(&format!("https://{}", t.host), false, &crate::egress::Allow::NONE).is_ok_and(|u| matches!(u.host(), Some(url::Host::Domain(_))));
                 if t.port == 0 || !crate::catalog::valid_host(&t.host) || !public || !targets.insert((&t.host, t.port)) {
                     return Err(format!("{}: {}:{} is no exact public DNS name on a nonzero port, or is named twice", row.id, t.host, t.port));
                 }
@@ -78,7 +79,7 @@ impl Policy {
 
     /// `FRAGMENT_CONNECTORS`, as a deploy writes it.
     pub fn parse(raw: &str) -> Result<Self, String> {
-        Policy::new(serde_json::from_str(raw).map_err(|e| e.to_string())?)
+        Policy::new(serde_json::from_slice(raw.as_bytes()).map_err(|e| e.to_string())?)
     }
 
     pub fn entries(&self) -> &[Connector] {
@@ -121,8 +122,9 @@ pub fn id_ok(id: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Goal: the default is today's SimpleX relay; `[]` allows nothing but
-    /// an unlink; an id the policy lacks is refused; bad ids are refused.
+    /// Goal: the default is today's SimpleX relay and Telegram; `[]` allows
+    /// nothing but an unlink; an id the policy lacks is refused; bad ids are
+    /// refused.
     #[test]
     fn the_default_is_simplex_and_an_empty_policy_allows_only_unlink() {
         let p = Policy::default();
@@ -131,8 +133,9 @@ mod tests {
         let none = Policy::parse("[]").expect("[] is a policy");
         for a in [Action::Link, Action::Redeem, Action::Check, Action::Relay] {
             assert_eq!(p.authorize("npub1paul", "juniper--abcd", "simplex", a), Ok(()), "{a:?}");
+            assert_eq!(p.authorize("npub1paul", "juniper--abcd", "telegram", a), Ok(()), "{a:?}");
             assert!(none.authorize("npub1paul", "juniper--abcd", "simplex", a).is_err(), "{a:?}");
-            assert!(p.authorize("npub1paul", "juniper--abcd", "telegram", a).is_err(), "{a:?}");
+            assert!(p.authorize("npub1paul", "juniper--abcd", "signal", a).is_err(), "{a:?}");
         }
         assert_eq!(none.authorize("npub1paul", "juniper--abcd", "simplex", Action::Unlink), Ok(()));
         assert!(p.authorize("", "juniper--abcd", "simplex", Action::Link).is_err());
