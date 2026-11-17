@@ -340,9 +340,13 @@ unfinished design, not debt.
   written (it writes them every 30 s) were lost; and Hermes' janitor
   closes a browser browser_exec started once its tool goes unused,
   counting a Take over but not a person watching. So hermes-boot's idle
-  stop sends the browser alone a SIGTERM first, Chromium's own clean
-  shutdown (images/hermes/boot/src/desktop.rs `close_browser`), and the
-  managed overlay gives the janitor a day (`BROWSER_IDLE_S`).
+  stop is the only one: Hermes' own idle stops (its gateway's and its
+  desktop launcher's `idle_watch`) are off, `idle_stop_minutes: 0`. It
+  closes the browser first with CDP's `Browser.close`, Chromium's normal
+  shutdown, once CDP names that agent's own browser (its profile resolves
+  to its work's), else with a SIGTERM
+  (images/hermes/boot/src/desktop.rs `close_browser`). And the managed
+  overlay gives the janitor a day (`BROWSER_IDLE_S`).
 - **Risk:** a desktop stopped another way (`hermes computer-use screen
   stop`, which nothing of ours runs but tests) still loses a page's last
   30 s of cookies; a browser that will not close in 10 s is stopped with

@@ -8,11 +8,11 @@
 //!
 //! The screen (the bridge's) shows each agent's own desktop, named in the
 //! screens file (`screens_file`). And a desktop no one uses is stopped: its
-//! Xvnc and Xfce hold about 220 MiB, a browser left open far more, and
-//! Hermes stops an idle one only from its TUI's gateway, which this image
-//! does not run. So the boot does, as Hermes' own watcher would
-//! (`runtime.stop_if_idle`): a desktop up and unused for `IDLE_STOP_MS` is
-//! stopped with Hermes' own `hermes computer-use screen stop`, which
+//! Xvnc and Xfce hold about 220 MiB, a browser left open far more. The boot
+//! does that alone (Hermes' own watchers are off: hermes.rs,
+//! `managed_config`): a desktop up and unused for `IDLE_STOP_MS` has its
+//! browser closed first, as a person would close it (`close_browser`), then
+//! is stopped with Hermes' own `hermes computer-use screen stop`, which
 //! refuses while a person holds its lease. The next use starts it again
 //! (an agent's call, `bot_desktop.auto_start`; a viewer, `screen-start`),
 //! and what it kept (its browser's profile, in the agent's work) is there.
@@ -72,14 +72,23 @@ pub fn front_tabs(root: &Path) -> Result<(), String> {
 /// all the same.
 pub const CLOSE_MS_MAX: u64 = 10_000;
 
-/// The browser on `profile`'s desktop (its Chromium's own `SingletonLock`,
-/// `<host>-<pid>`, in `hermes::BROWSER_PROFILE`), as `proc` (`/proc`) has
-/// it: a live process, no zombie, whose command line names that browser
-/// profile and is not one of its helpers (`--type=`). A pid the lock names
-/// that is now another process's is none.
-pub fn browser_pid(profile: &Path, proc: &Path) -> Option<u32> {
-    let browser = profile.join(hermes::BROWSER_PROFILE);
-    let lock = std::fs::read_link(browser.join("SingletonLock")).ok()?;
+/// The browser on `profile`'s desktop, the agent's own: its browser
+/// profile (`hermes::BROWSER_PROFILE`) must resolve to exactly `own`, the
+/// agent's work's (`hermes::browser_dir`, as the boot links it), or be that
+/// path itself, unlinked (an older profile's own directory). The agents
+/// share one user, so one could point its link at another's profile; the
+/// boot, as root, never acts on that. Then Chromium's own `SingletonLock`
+/// there (`<host>-<pid>`) names it, as `proc` (`/proc`) has it: a live
+/// process, no zombie, whose command line names that browser profile and is
+/// not one of its helpers (`--type=`). A pid the lock names that is now
+/// another process's is none.
+pub fn browser_pid(profile: &Path, own: &Path, proc: &Path) -> Option<u32> {
+    let link = profile.join(hermes::BROWSER_PROFILE);
+    let real = std::fs::canonicalize(&link).ok()?;
+    if real != own && real != link {
+        return None;
+    }
+    let lock = std::fs::read_link(real.join("SingletonLock")).ok()?;
     let pid: u32 = lock.to_string_lossy().rsplit_once('-')?.1.parse().ok()?;
     let at = proc.join(pid.to_string());
     let stat = std::fs::read_to_string(at.join("stat")).ok()?;
@@ -93,8 +102,8 @@ pub fn browser_pid(profile: &Path, proc: &Path) -> Option<u32> {
     if let [title] = args.as_slice() {
         args = title.split(' ').map(str::to_string).collect();
     }
-    let named = |dir: &str| Path::new(dir) == browser || std::fs::canonicalize(dir).ok().zip(std::fs::canonicalize(&browser).ok()).is_some_and(|(a, b)| a == b);
-    let ours = args.iter().any(|a| a.strip_prefix("--user-data-dir=").is_some_and(named));
+    // named as given, never by resolving a path the agent can link
+    let ours = args.iter().any(|a| a.strip_prefix("--user-data-dir=").is_some_and(|dir| Path::new(dir) == link || Path::new(dir) == real));
     (ours && !args.iter().any(|a| a.starts_with("--type="))).then_some(pid)
 }
 
@@ -109,16 +118,16 @@ pub fn browser_pid(profile: &Path, proc: &Path) -> Option<u32> {
 /// so it is used only once CDP itself names this browser's process; else
 /// a SIGTERM. Waits at most `CLOSE_MS_MAX`. Whether a browser was there,
 /// and whether it had gone.
-pub async fn close_browser(profile: &Path, proc: &Path) -> Option<bool> {
-    let pid = browser_pid(profile, proc)?;
-    if ask_to_close(profile, pid).await.is_err() {
+pub async fn close_browser(profile: &Path, own: &Path, proc: &Path) -> Option<bool> {
+    let pid = browser_pid(profile, own, proc)?;
+    if ask_to_close(own, pid).await.is_err() {
         // SAFETY: kill(2) with a pid read and checked just now; no memory is shared.
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
     }
     let t = std::time::Instant::now();
     // bounded by CLOSE_MS_MAX
     while t.elapsed() < Duration::from_millis(CLOSE_MS_MAX) {
-        if browser_pid(profile, proc) != Some(pid) {
+        if browser_pid(profile, own, proc) != Some(pid) {
             return Some(true);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -130,14 +139,14 @@ pub async fn close_browser(profile: &Path, proc: &Path) -> Option<bool> {
 const CDP_REPLY_BYTES: usize = 64 * 1024;
 const CDP_REPLIES_MAX: usize = 16;
 
-/// Sends `Browser.close` to the browser `pid` on `profile`, once CDP's
-/// `SystemInfo.getProcessInfo` names `pid` as the browser behind the
-/// socket its `DevToolsActivePort` names (a port reused, or a file written
-/// to point elsewhere, closes nothing).
-async fn ask_to_close(profile: &Path, pid: u32) -> Result<(), String> {
+/// Sends `Browser.close` to the browser `pid` on the browser profile
+/// `browser`, once CDP's `SystemInfo.getProcessInfo` names `pid` as the
+/// browser behind the socket its `DevToolsActivePort` names (a port reused,
+/// or a file written to point elsewhere, closes nothing).
+async fn ask_to_close(browser: &Path, pid: u32) -> Result<(), String> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
-    let file = std::fs::read_to_string(profile.join(hermes::BROWSER_PROFILE).join("DevToolsActivePort")).map_err(|e| e.to_string())?;
+    let file = std::fs::read_to_string(browser.join("DevToolsActivePort")).map_err(|e| e.to_string())?;
     let mut lines = file.lines();
     let port: u16 = lines.next().and_then(|p| p.trim().parse().ok()).filter(|p| *p > 0).ok_or("no DevTools port")?;
     let path = lines.next().map(str::trim).filter(|p| p.strip_prefix("/devtools/browser/").is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))).ok_or("no DevTools browser path")?;
@@ -251,9 +260,13 @@ mod tests {
     #[tokio::test]
     async fn the_desktops_browser_is_closed_alone_and_waited_for() {
         let root = std::env::temp_dir().join(format!("close-browser-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
         let profile = root.join("profile");
+        let own = root.join("work/browser-profile");
         let browser = profile.join(hermes::BROWSER_PROFILE);
-        std::fs::create_dir_all(&browser).unwrap();
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(browser.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&own, &browser).unwrap();
         let fake = root.join("proc");
         let process = |pid: u32, state: char, args: &[&str]| {
             let at = fake.join(pid.to_string());
@@ -263,45 +276,57 @@ mod tests {
         };
         let ours = format!("--user-data-dir={}", browser.display());
         let lock = |pid: u32| {
-            let _ = std::fs::remove_file(browser.join("SingletonLock"));
-            std::os::unix::fs::symlink(format!("box-{pid}"), browser.join("SingletonLock")).unwrap();
+            let _ = std::fs::remove_file(own.join("SingletonLock"));
+            std::os::unix::fs::symlink(format!("box-{pid}"), own.join("SingletonLock")).unwrap();
         };
-        assert_eq!(browser_pid(&profile, &fake), None, "no lock, no browser");
+        assert_eq!(browser_pid(&profile, &own, &fake), None, "no lock, no browser");
         process(41, 'S', &["/usr/lib/chromium/chromium", "--no-sandbox", &ours]);
         lock(41);
-        assert_eq!(browser_pid(&profile, &fake), Some(41));
+        assert_eq!(browser_pid(&profile, &own, &fake), Some(41));
         // Chromium's own process title: its arguments in one, by spaces
         process(40, 'S', &[&format!("/usr/lib/chromium/chromium --no-sandbox {ours} about:blank")]);
         lock(40);
-        assert_eq!(browser_pid(&profile, &fake), Some(40), "a rewritten title");
+        assert_eq!(browser_pid(&profile, &own, &fake), Some(40), "a rewritten title");
         process(39, 'S', &[&format!("/usr/lib/chromium/chromium --type=renderer {ours}")]);
         lock(39);
-        assert_eq!(browser_pid(&profile, &fake), None, "a helper's rewritten title");
+        assert_eq!(browser_pid(&profile, &own, &fake), None, "a helper's rewritten title");
         process(42, 'S', &["/usr/lib/chromium/chromium", "--type=renderer", &ours]);
         lock(42);
-        assert_eq!(browser_pid(&profile, &fake), None, "a helper");
+        assert_eq!(browser_pid(&profile, &own, &fake), None, "a helper");
         process(43, 'S', &["/usr/lib/chromium/chromium", "--user-data-dir=/data/work/fred--k3x9/browser-profile"]);
         lock(43);
-        assert_eq!(browser_pid(&profile, &fake), None, "another profile's");
+        assert_eq!(browser_pid(&profile, &own, &fake), None, "another profile's");
         process(44, 'Z', &[]);
         lock(44);
-        assert_eq!(browser_pid(&profile, &fake), None, "a zombie");
+        assert_eq!(browser_pid(&profile, &own, &fake), None, "a zombie");
         lock(45);
-        assert_eq!(browser_pid(&profile, &fake), None, "a pid no process has");
+        assert_eq!(browser_pid(&profile, &own, &fake), None, "a pid no process has");
+        // its link pointed at another agent's browser profile: never acted on
+        let other = root.join("other/browser-profile");
+        std::fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink("box-41", other.join("SingletonLock")).unwrap();
+        process(41, 'S', &["/usr/lib/chromium/chromium", &format!("--user-data-dir={}", other.display())]);
+        std::fs::remove_file(&browser).unwrap();
+        std::os::unix::fs::symlink(&other, &browser).unwrap();
+        assert_eq!(browser_pid(&profile, &own, &fake), None, "a link to another agent's profile");
+        process(41, 'S', &["/usr/lib/chromium/chromium", &ours]);
+        assert_eq!(browser_pid(&profile, &own, &fake), None, "nor its browser named through that link");
+        std::fs::remove_file(&browser).unwrap();
+        std::os::unix::fs::symlink(&own, &browser).unwrap();
         // a real process holding the profile (its argv names it), closed
         let mut child = std::process::Command::new("sh").args(["-c", "sleep 30; :", &ours]).spawn().unwrap();
         lock(child.id());
         let proc = Path::new("/proc");
         // bounded: 2 s for the child's exec to show its arguments
         let t = std::time::Instant::now();
-        while browser_pid(&profile, proc).is_none() && t.elapsed() < Duration::from_secs(2) {
+        while browser_pid(&profile, &own, proc).is_none() && t.elapsed() < Duration::from_secs(2) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(browser_pid(&profile, proc), Some(child.id()));
+        assert_eq!(browser_pid(&profile, &own, proc), Some(child.id()));
         let waited = tokio::spawn(async move { child.wait().unwrap() });
-        assert_eq!(close_browser(&profile, proc).await, Some(true), "with no DevTools socket of its own: closed by its signal, and waited for");
+        assert_eq!(close_browser(&profile, &own, proc).await, Some(true), "with no DevTools socket of its own: closed by its signal, and waited for");
         assert_eq!(std::os::unix::process::ExitStatusExt::signal(&waited.await.unwrap()), Some(libc::SIGTERM));
-        assert_eq!(close_browser(&profile, proc).await, None, "replay: none left to close");
+        assert_eq!(close_browser(&profile, &own, proc).await, None, "replay: none left to close");
         let _ = std::fs::remove_dir_all(&root);
     }
 

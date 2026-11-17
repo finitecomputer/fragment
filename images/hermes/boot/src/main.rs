@@ -623,7 +623,7 @@ fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
 /// browser profile that is a directory already stays where it is.
 fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
     let work = hermes::work_dir(&a.fragment);
-    let browser = work.join("browser-profile");
+    let browser = hermes::browser_dir(&a.fragment);
     if let Err(e) = std::fs::create_dir_all(&browser) {
         ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() });
         return;
@@ -935,7 +935,7 @@ fn stop_idle_desktops(agents: &[Agent], home: &Path, idle_ms: u64, stopping: &St
             // written), unless a person holds the desktop: Hermes' stop then
             // refuses, and the browser is theirs.
             if !desktop::held_by_a_person(&profile) {
-                if let Some(closed) = desktop::close_browser(&profile, Path::new("/proc")).await {
+                if let Some(closed) = desktop::close_browser(&profile, &hermes::browser_dir(&agent), Path::new("/proc")).await {
                     ev!("screen.browser_closed", { "agent": agent, "closed": closed, "ms": t.elapsed().as_millis() as u64 });
                 }
             }
@@ -1317,7 +1317,7 @@ async fn boot_main() {
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
     // each agent's route, in the gateway's config (bots.rs, `profile_routes`)
     let routes = bots::profile_routes(&hermes_agents, &route_chats(&api, &hermes_agents).await);
-    let managed = hermes::managed_config(&lean, card_timeout_s, screen_idle_ms) + &routes;
+    let managed = hermes::managed_config(&lean, card_timeout_s) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));

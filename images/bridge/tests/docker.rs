@@ -2123,6 +2123,10 @@ async fn the_agents_browser_lives_as_long_as_its_desktop() {
     let c = Container::run_on(Runtime::Hosted, &tag, fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SCREEN_IDLE_MS", "15000")]);
     within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     let profile = "juniper--k3x9";
+    // the idle stop is the boot's alone: Hermes' own watchers, its gateway's
+    // and its desktop launcher's, which stop it with no close, are off
+    let hermes_idle = hermes_python(&c, &["HERMES_HOME=/data/hermes/profiles/juniper--k3x9"], "import json\nfrom tools.bot_desktop import runtime\nprint(json.dumps({'idle': runtime.idle_stop_seconds()}))");
+    assert_eq!(hermes_idle["idle"], json!(0.0), "Hermes' idle stop is off: {hermes_idle}");
     assert!(c.exec(&["sh", "-c", &format!("cat > /tmp/cookie_server.py <<'SERVER'\n{COOKIE_SERVER}SERVER\nsetsid python3 /tmp/cookie_server.py > /tmp/cookie_server.log 2>&1 < /dev/null &")]));
     async fn gone(c: &Container, profile: &str, what: &str) {
         let t = Instant::now();

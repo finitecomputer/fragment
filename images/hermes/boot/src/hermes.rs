@@ -393,10 +393,10 @@ pub fn relay_hint() -> String {
 pub const BROWSER_IDLE_S: u64 = 86_400;
 
 /// The managed overlay: how every profile streams, shows progress, asks
-/// (nothing technical; a card waits `card_timeout_s`), when its desktop is
-/// idle (`screen_idle_ms`), how long its browser is left (`BROWSER_IDLE_S`),
-/// and what it never runs.
-pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_idle_ms: u64) -> String {
+/// (nothing technical; a card waits `card_timeout_s`), that its desktop's
+/// idle stop is the boot's, how long its browser is left
+/// (`BROWSER_IDLE_S`), and what it never runs.
+pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64) -> String {
     let mut y = String::new();
     y.push_str("# Written by hermes-boot at every boot (images/hermes): Hermes' managed overlay,\n");
     y.push_str("# merged over each profile's own config. Hand edits are lost.\n");
@@ -467,11 +467,14 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     // bridge's `screen-start`), or at the agent's first computer_use or
     // browser call, never at boot (measured: about 300 MiB more once it
     // runs). Its browser, on that desktop, is each profile's own config's
-    // (`profile_config`). Its idle stop is the boot's (desktop.rs: Hermes
-    // stops an idle desktop only from its TUI's gateway), said here too so
-    // Hermes' own watcher, were it to run, would agree.
-    let minutes = screen_idle_ms as f64 / 60_000.0;
-    y.push_str(&format!("bot_desktop:\n  auto_start: true\n  idle_stop_minutes: {minutes}\n"));
+    // (`profile_config`). Its idle stop is the boot's alone (desktop.rs),
+    // which closes its browser first, its cookies written: Hermes' own
+    // watchers (its gateway's, and since v0.23 its desktop launcher's
+    // `idle_watch`) stop it with no such close, so they are off (0, Hermes'
+    // "never"). A person's Take over ends with their socket, and no lease
+    // outlives the bridge (images/bridge/src/screen.rs), so none is left
+    // for Hermes' abandoned-lease rule to stop.
+    y.push_str("bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 0\n");
     // The browser browser_exec starts on that desktop stays up as long as
     // the desktop does, as the screen shows it: its idle stop, which counts
     // a person watching, closes it first (desktop.rs, `close_browser`).
@@ -1030,6 +1033,12 @@ pub fn link_into_work(profile: &Path, at: &str, to: &Path) -> std::io::Result<Wo
 /// cookies and history its tools make are its work, saved with it.
 pub const BROWSER_PROFILE: &str = "bot-desktop/browser-profile";
 
+/// An agent's browser profile in its work directory, where its profile's
+/// `BROWSER_PROFILE` links to: its cookies and history are its work.
+pub fn browser_dir(agent_fragment: &str) -> PathBuf {
+    work_dir(agent_fragment).join("browser-profile")
+}
+
 /// What a profile's terminal knows of the agent it runs (cli/GUIDE.md, "As
 /// an agent"): the agent fragment its computer signs as, and the person it
 /// acts for, its owner. Hermes passes these from the profile's `.env` to its
@@ -1408,7 +1417,7 @@ mod tests {
         }
         let fresh = profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::of(None, false).into(), Reasoning::of(None), &route("http://m"), &[], creds);
         assert!(fresh.contains("\n  reasoning_effort: \"high\"\n"), "a new agent, with no agent.json, thinks hard: {fresh}");
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(!m.contains("reasoning"), "a profile's own, never the overlay's, which would win over it: {m}");
     }
 
@@ -1503,7 +1512,7 @@ mod tests {
         assert!(matches!(own_main, MainModel::Own { .. }) && p.contains("  default: \"z-ai/glm-5.3\"\n"), "{p}");
         assert!(p.contains(&format!("\nagent:\n  system_prompt: {}\n", q(&told("Juniper", None, "juniper--k3x9", Home::Chat, &[])))) && p.matches("\nagent:\n").count() == 1, "its name alone in its `agent` mapping: {p}");
         assert!(!p.contains("tool_use_enforcement") && !p.contains("execution_guidance"), "an owner's own model's guidance is Hermes' to choose: {p}");
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(!m.contains("tool_use_enforcement") && !m.contains("execution_guidance"), "a profile's own, never the overlay's: {m}");
     }
 
@@ -1545,14 +1554,15 @@ mod tests {
 
     #[test]
     fn configs_say_what_hermes_needs() {
-        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], CARD_TIMEOUT_S);
         for want in [
             "transport: \"draft\"",
             "busy_input_mode: \"queue\"",
             "group_sessions_per_user: false",
             "disabled_toolsets: [\"cronjob\"]",
             "    - \"platforms/discord\"",
-            "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 10\n",
+            // the desktop's idle stop is the boot's alone: Hermes' watchers off
+            "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 0\n",
             // the agent's browser is the desktop's idle stop's to close
             "\nbrowser:\n  inactivity_timeout: 86400\n",
             "\nmodel_catalog:\n  enabled: false\n",
@@ -1578,10 +1588,9 @@ mod tests {
         assert_eq!(card_timeout_s(Some("20")), 20);
         assert_eq!(card_timeout_s(Some("1")), 10, "no shorter than the bridge's shortest prompt");
         assert_eq!(card_timeout_s(Some("not a number")), CARD_TIMEOUT_S);
-        let short = managed_config(&[], 20, crate::desktop::IDLE_STOP_MS);
+        let short = managed_config(&[], 20);
         assert!(short.contains("\napprovals:\n  mode: \"off\"\n  timeout: 20\n") && short.contains("\nagent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: 20\n"), "{short}");
-        assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
-        assert!(managed_config(&[], 20, 30_000).contains("\nbrowser:\n  inactivity_timeout: 86400\n"), "its browser left to the desktop's idle stop, whatever its bound");
+        assert!(short.contains("\nbrowser:\n  inactivity_timeout: 86400\n"), "its browser left to the desktop's idle stop");
         const _: () = assert!(BROWSER_IDLE_S >= 100 * crate::desktop::IDLE_STOP_MS / 1000, "Hermes' janitor never beats the desktop's idle stop");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
         let p = profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Medium.into(), DEFAULT_REASONING, &route("http://model.fragment.internal/"), &[], creds);
@@ -1667,7 +1676,7 @@ mod tests {
     /// after `ASKING`, its words, and the page's section.
     #[test]
     fn every_agent_is_told_its_chat_files_are_on_its_computer() {
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}"));
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
         for said in ["already on your computer", "each file, its type and its local path under /tmp/bridge-media", "tools to copy or edit the original", "copy it into your app or work", "across a sleep", "browser_exec's upload_file(selector, full path)", "check the page shows it", "With no file input", "desktop's file dialog with computer_use"] {
@@ -1692,7 +1701,7 @@ mod tests {
     /// and the page's section.
     #[test]
     fn every_agent_is_told_it_attaches_files_in_its_chat() {
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(relay_hint().contains(&format!("{FILES}\n\n{SENDING}\n\n")), "after the files it is sent: {}", relay_hint());
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
         for said in ["a file (a PDF, an image", "put MEDIA: and its absolute path on a line of its own", "outside code and quotes", "MEDIA:/data/work/report.pdf", "arrives in this chat as an attachment", "rather than emailing it or naming a path"] {
@@ -1715,7 +1724,7 @@ mod tests {
     /// (the bridge's), never this line's.
     #[test]
     fn every_agent_is_told_simplex_is_the_platforms() {
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(relay_hint().contains(&format!("{SENDING}\n\n{SIMPLEX}\n\n")), "after sending: {}", relay_hint());
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
         for said in ["Fragment carries your owner's SimpleX", "never install, run or set up SimpleX"] {
@@ -1758,7 +1767,7 @@ mod tests {
     /// `nothing_technical_asks_its_owner`: each with no card.)
     #[test]
     fn nothing_technical_asks_its_owner() {
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(m.contains("\napprovals:\n  mode: \"off\"\n  timeout: 3600\n  destructive_slash_confirm: false\n"), "{m}");
         assert!(m.contains("\nsecurity:\n  allow_lazy_installs: false\n  protected_instruction_files: false\n"), "{m}");
         assert!(!m.contains("smart") && !m.contains("yolo") && !m.contains("command_allowlist"), "{m}");
@@ -1847,7 +1856,7 @@ mod tests {
         assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
         assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
+        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S), default_config("http://m"), profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
         for (name, _) in RUNTIME_ENV {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
             assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");
