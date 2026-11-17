@@ -110,10 +110,12 @@ fragment call <its name> search --input '{"q": "<a word from one of its pages>"}
 ```
 
 A big brain's index takes a while to take in the sync. If the answer
-says `"indexing": true`, or `index_status` listed pages `pending`, don't
-wait or ask again: the index finishes by itself from the synced files.
-Say in the report that this brain's search is still catching up, and go
-on. If it isn't indexing and still finds nothing, say that in the report.
+says `"indexing": true`, don't wait or ask again: its `changed` job
+finishes the index by itself from the synced files. Look once at
+`fragment runs <its name>`. If a `changed` run there is `held` or
+`blocked`, the index stopped: say so in the report. Otherwise say this
+brain's search is still catching up, and go on. If it isn't indexing and
+still finds nothing, say that in the report.
 
 The old brain's folder permissions don't carry over: everyone the brain
 is shared with reads all of it. Invite no one. Your owner reinvites their
