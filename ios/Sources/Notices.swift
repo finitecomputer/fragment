@@ -205,11 +205,12 @@ private struct NoticePress: ButtonStyle {
 }
 
 /// Every notice fanned out over the whole app, as Notification Center shows
-/// them: each with all its words and actions, scrolling, each card having
-/// grown from its place in the band's stack (`NoticesBand`), never faded.
-/// The wallpaper beneath (`NoticesFanBackdrop`) and the title and X above
-/// (`NoticesFanHeader`) fade in and out around them. The X folds them back;
-/// so does a stack of one.
+/// them: each with all its words and actions, scrolling. From Home's band
+/// each card grows from its place in the stack (`NoticesBand`), never faded;
+/// from Settings' bell they fade in. The wallpaper beneath
+/// (`NoticesFanBackdrop`) and the title and X above (`NoticesFanHeader`)
+/// fade in and out around them. The X folds them back; so does the last
+/// one's going.
 struct NoticesFan: View {
     let library: Library
     let api: FragmentAPI
@@ -237,7 +238,8 @@ struct NoticesFan: View {
             // under the header's title and X
             .contentMargins(.top, NoticesFanHeader.height, for: .scrollContent)
             .onChange(of: items.count) { _, count in
-                if count <= 1 { withAnimation(reduceMotion ? nil : NoticesFanHeader.folding, close) }
+                // none left: it folds; one stays, "1 Notice" (Settings' bell opens even one)
+                if count == 0 { withAnimation(reduceMotion ? nil : NoticesFanHeader.folding, close) }
             }
         }
         .accessibilityAddTraits(.isModal)
@@ -277,6 +279,12 @@ struct NoticesFanHeader: View {
         .padding(.horizontal, 20).padding(.top, 8)
         .frame(maxHeight: .infinity, alignment: .top)
     }
+}
+
+extension Library {
+    /// How many things the band tells at `now` (ms): its notices, a failed
+    /// read, refusals (`NoticeItem.all`).
+    func noticeCount(at now: Int64) -> Int { NoticeItem.all(self, now: now).count }
 }
 
 /// One thing the band tells: a failed read, a notice, or the refusal of an

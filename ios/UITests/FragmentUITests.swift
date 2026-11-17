@@ -182,8 +182,9 @@ final class FragmentUITests: XCTestCase {
     /// that person by a key it approved ahead. Its notices stack over Home;
     /// a tap fans them out, in the server's words, the warning saying when it
     /// stops and the platform's own words, each with its actions, and the X
-    /// folds them back. Later is the update's, and the update goes; one left,
-    /// the fan folds itself. Named by `TEST_RUNNER_FRAGMENT_UITEST_SERVER` and
+    /// folds them back. They're Home's alone: Your Apps has none, and Settings
+    /// has a bell counting them that opens them too. Later is the update's,
+    /// and the update goes; one left, the fan stays, "1 Notice". Named by `TEST_RUNNER_FRAGMENT_UITEST_SERVER` and
     /// `TEST_RUNNER_FRAGMENT_UITEST_KEY` (the key's 64 hex); skipped without.
     func testTheComputersNoticesShowAndTheirActionsWork() throws {
         let env = ProcessInfo.processInfo.environment
@@ -219,20 +220,28 @@ final class FragmentUITests: XCTestCase {
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "light, drawn")], timeout: 2)
         close.tap()
         XCTAssertTrue(close.waitForNonExistence(timeout: 5), "the X folds them back")
-        // over a page pushed on Home too (Codex on #1151): Your Apps
+        // Home's alone: none over a page pushed on it (Your Apps)
         app.buttons["yourApps"].tap()
         XCTAssertTrue(app.navigationBars["Your Apps"].waitForExistence(timeout: 5))
-        XCTAssertTrue(stack.waitForExistence(timeout: 5), "the notices stay over a pushed page")
-        screenshot(app, "Over Your Apps")
+        XCTAssertFalse(stack.exists, "no band over Your Apps")
         app.navigationBars["Your Apps"].buttons.element(boundBy: 0).tap()
         XCTAssertTrue(stack.waitForExistence(timeout: 5), "and back on Home")
-        fan()
+        // Settings: a bell, counting them, opens them
+        app.buttons["homeSettings"].tap()
+        let bell = app.buttons["noticesButton"]
+        XCTAssertTrue(bell.waitForExistence(timeout: 5), "Settings' bell")
+        XCTAssertFalse(stack.exists, "no band over Settings")
+        screenshot(app, "Settings' bell")
+        bell.tap()
+        XCTAssertTrue(app.staticTexts["2 Notices"].waitForExistence(timeout: 5), "counted in the title")
         XCTAssertTrue(update.buttons["Later"].waitForExistence(timeout: 5))
         update.buttons["Later"].tap()
         XCTAssertTrue(update.waitForNonExistence(timeout: 20), "Later: the update is told no more")
-        XCTAssertTrue(close.waitForNonExistence(timeout: 5), "one left: the fan folds itself")
-        XCTAssertTrue(unsaved.waitForExistence(timeout: 5), "the other stays, alone in the band")
+        XCTAssertTrue(app.staticTexts["1 Notice"].waitForExistence(timeout: 5), "one left: the fan stays, counting it")
+        XCTAssertTrue(unsaved.exists, "the other stays")
         screenshot(app, "After Later")
+        close.tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 5))
     }
 
     /// An invite (FIN-458), against a real platform as above: someone shared
