@@ -41,13 +41,13 @@ const TRIGGERS_JSON: &[u8] = br#"{
   "channels": { "pings": { "read": "viewer", "post": "editor" } },
   "triggers": [{ "cron": "0 0 1 1 *", "run": "tick" }, { "files": "notes/**", "run": "filed" }]
 }"#;
-/// GLM-5.3 Flash: the cheap tier's model and the route's vision model
+/// DeepSeek V4.1 Flash: the cheap tier's model and the route's vision model
 /// (fragment_core::models::CHEAP_MODEL, VISION_MODEL_DEFAULT).
-const CHEAP: &str = "@cf/zai-org/glm-5.3-flash";
+const CHEAP: &str = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 const VISION: &str = CHEAP;
-/// The route's fallback, DeepSeek V4 Flash
+/// The route's fallback, Inkling 2 Small
 /// (fragment_core::models::FALLBACK_MODEL_DEFAULT).
-const FALLBACK: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
+const FALLBACK: &str = "@cf/thinkingmachines/inkling-2-small";
 /// The model route, as an agent calls it (its computer's model intercept).
 const MODEL_ROUTE: &str = "/api/models/v1/chat/completions";
 /// The ids the model route takes (`fragment_core::models::Models::listed`).
@@ -133,10 +133,10 @@ pub(super) fn ids_masked(text: &str) -> String {
 /// (prompt 40, cached 10, completion 30), ids masked: usage dropped from
 /// each chunk with choices, its last line OpenAI's last chunk.
 const STREAMED_WORKERS_AI: &str = "\
-    data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
-    data: {\"choices\":[{\"delta\":{\"content\":\"echo: hello\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
-    data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
-    data: {\"choices\":[],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":0,\"prompt_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":0}}\n\n\
+    data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/deepseek-ai/deepseek-v4.1-flash-1017\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{\"content\":\"echo: hello\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/deepseek-ai/deepseek-v4.1-flash-1017\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/deepseek-ai/deepseek-v4.1-flash-1017\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/deepseek-ai/deepseek-v4.1-flash-1017\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":0,\"prompt_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":0}}\n\n\
     data: {\"choices\":[],\"id\":\"fake#\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":30,\"neurons\":1.8,\"prompt_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":10},\"total_tokens\":70}}\n\n\
     data: [DONE]\n\n";
 
@@ -1100,7 +1100,7 @@ fn cap_mid_stream(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
 /// The route's fallback (Paul, 2026-10-08): a call whose model fails before
 /// answering (Workers AI's 502 "could not route request to AI model", as
 /// GLM-5.3 Flash answered every call for five minutes on 2026-10-09) is
-/// made once more, the same, on the fallback model, DeepSeek V4 Flash, and
+/// made once more, the same, on the fallback model, Inkling 2 Small, and
 /// charged once at the fallback's prices; when the fallback fails too, its
 /// failure is the call's, after two tries and no more, and nothing is
 /// charged; a refusal of the request is never tried again.
@@ -1119,7 +1119,7 @@ fn fallback(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str, wait: Duratio
         new.len() == before + 1 && new.iter().filter(|e| charged(e) == Some(fell)).count() == 1
     });
     s.ok(
-        "a call whose model is down is made once more, the same, on the fallback model (DeepSeek V4 Flash), which answers it",
+        "a call whose model is down is made once more, the same, on the fallback model (Inkling 2 Small), which answers it",
         r.status == 200
             && r.body["choices"][0]["message"]["content"] == "echo: hello"
             && tried(s, calls) == [CHEAP, FALLBACK]
@@ -1189,7 +1189,7 @@ fn png_url(bytes: usize) -> String {
 }
 
 /// The model route's `vision` (Paul, 2026-10-05): the deployment's vision
-/// model, GLM-5.3 Flash unless its config names another, for a runtime's
+/// model, DeepSeek V4.1 Flash unless its config names another, for a runtime's
 /// calls about an image (Hermes' screenshots: the hermes lane drives one),
 /// metered on the payer's ledger as any call; and a call as large as
 /// Hermes' shrunk screenshot fits the route, one past its cap refused
@@ -1215,7 +1215,7 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let priced = charge(&tokens(VISION, 1_200, 0, 40));
     let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(priced)));
     s.ok(
-        "`vision` runs the deployment's vision model (GLM-5.3 Flash by default), the image as it was sent, and is charged on its payer's ledger",
+        "`vision` runs the deployment's vision model (DeepSeek V4.1 Flash by default), the image as it was sent, and is charged on its payer's ledger",
         r.status == 200 && shown && settled,
         json!({ "status": r.status, "model": call.as_ref().map(|c| c.model.clone()), "entries": aig().len() - before }),
     );

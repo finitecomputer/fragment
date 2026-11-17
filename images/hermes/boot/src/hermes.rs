@@ -1303,7 +1303,7 @@ mod tests {
     /// its own, so each slot's id is seen where it goes.
     const CHEAP_ID: &str = "z-ai/glm-5.3-flash";
     const MEDIUM_ID: &str = "@cf/zai-org/glm-5.3";
-    const FALLBACK_ID: &str = "@cf/zai-org/glm-5.3-flash";
+    const FALLBACK_ID: &str = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
     fn ids() -> ModelIds {
         ModelIds { cheap: CHEAP_ID.into(), medium: MEDIUM_ID.into(), fallback: FALLBACK_ID.into(), vision: FALLBACK_ID.into(), routes: None, images: None }
@@ -1595,7 +1595,7 @@ mod tests {
         }
         assert!(!m.contains("api_key") && !m.contains("openai"), "the overlay names no agent, so a call outside a profile names none either: {m}");
         // a text tier's stall: Hermes' own stale detector, one retry, then the route's `fallback` as the agent
-        let fallback = "fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"@cf/zai-org/glm-5.3-flash\"\n    api_key: \"agent:juniper--k3x9\"\n";
+        let fallback = "fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"@cf/deepseek-ai/deepseek-v4.1-flash-1017\"\n    api_key: \"agent:juniper--k3x9\"\n";
         let c = profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], creds);
         for (tier, id, config) in [("cheap", CHEAP_ID, &c), ("medium", MEDIUM_ID, &p)] {
             assert!(config.contains(fallback), "the {tier} tier falls back to the route's fallback model, by its id: {config}");

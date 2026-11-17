@@ -969,5 +969,12 @@ gates it.
 
 Awake time, operator keys' calls and model calls are metered to the
 computer's owner, and its saves are not (docs/ledger.md, "Who pays").
+Awake time is time the computer was shown up: from its start's `Ready`
+(or, for a start put to sleep before it, that sleep), in the intervals
+the DO hears, each alarm's at least every five minutes and each step of
+a sleep's. An event that comes when nothing was heard of a running
+computer for `ALARM_LATE_MS` (twenty minutes: its alarms went unheard)
+meters it only to the last moment it was shown up, never the silence
+(FIN-511).
 At zero credit no wake starts, and a computer already awake runs on
 until it sleeps (decision 27).
