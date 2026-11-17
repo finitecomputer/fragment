@@ -11,10 +11,10 @@
 //! the registry only when its answer depends on who is asking.
 //!
 //! Calls from inside the platform (a run's Workflow, the app's `Files`
-//! capability, the delivery consumer, the router's test hooks) are not
+//! capability, the other objects' typed calls: fragment/calls.rs) are not
 //! routed requests: they carry no caller and no URL, and the supervisor
 //! answers them before it decodes a `Routed`. `internal_request` builds
-//! them, for Rust and for `entry.mjs`.
+//! the untyped ones, for Rust and for `entry.mjs`.
 //!
 //! Every call into a platform object goes out through `send` (or
 //! `send_again`), here alone (xtask's guard), stamped with this release,
@@ -189,8 +189,8 @@ impl Routed {
 
 /// The marker an internal route's caller carries, and its value: the router
 /// never passes these headers, so a request with one came from inside.
-/// `None`: the route needs none (the router's test hooks, which fleets
-/// without them do not answer).
+/// `None`: the route needs none. A fragment's typed calls carry their own
+/// (fragment/calls.rs).
 fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
     if path.starts_with("job/") {
         Ok(Some((crate::jobs::JOB_HEADER, "1")))
@@ -198,23 +198,15 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::files::CAP_HEADER, "files")))
     } else if path.starts_with("cap/search/") {
         Ok(Some((crate::files::CAP_HEADER, "search")))
-    } else if path == "deliver/report" {
-        Ok(Some((crate::deliveries::REPORT_HEADER, "1")))
+    } else if path.starts_with("call/") {
+        Ok(Some((crate::fragment::calls::HEADER, "1")))
     } else if path.starts_with("computer/") {
         Ok(Some((crate::computer::INTERNAL_HEADER, "1")))
-    } else if path == "meter/acked" || path == "meter/whose" {
-        Ok(Some((crate::meter::METER_HEADER, "1")))
-    } else if path == "invites/claim" || path == "invites/decline" || path == "members/agent" {
-        Ok(Some((crate::members::CLAIM_HEADER, "1")))
-    } else if path == "signin/visibility" {
-        Ok(Some((crate::auth::SIGNIN_HEADER, "1")))
-    } else if path.starts_with("stage/routine/") {
-        Ok(Some((crate::migrations::ROUTINE_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
     } else if path.starts_with("vault/") {
         Ok(Some((crate::vault::VAULT_HEADER, "1")))
-    } else if path.starts_with("test/") || path.starts_with("index/") || path.starts_with("migrations/") {
+    } else if path.starts_with("index/") || path.starts_with("migrations/") {
         // a search index is called by its fragment's supervisor alone:
         // the router never names one; the move's object is the router's
         // alone (its routes check who asks before they call it)
@@ -224,10 +216,9 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
     }
 }
 
-/// A call into a fragment's supervisor from inside the platform: `path`
-/// (`job/advance`, `cap/files/read`, `deliver/report`, `test/keys`), or
-/// into its search index (`index/search`), with a JSON body, marked as
-/// that route expects.
+/// A call into a platform object from inside the platform: `path`
+/// (`job/advance`, `cap/files/read`, `index/search`), with a JSON body,
+/// marked as that route expects.
 pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
@@ -374,12 +365,6 @@ pub(crate) fn refusal(bytes: &[u8], what: impl FnOnce() -> String) -> CellError 
         Ok(e) => CellError { reason: e.reason, retry_after_ms: e.retry_after_ms, ..CellError::new(e.error, e.message) },
         Err(_) => CellError::host(what()),
     }
-}
-
-/// The internal call `path` on the Durable Object `name` of `binding`, its
-/// answer as it is (a picture's bytes, or its refusal).
-pub(crate) async fn fetch_object(env: &Env, binding: &str, name: &str, path: &str) -> CellResult<Response> {
-    send_again(env, binding, name, || internal_request(path, "{}")).await
 }
 
 /// The path a deploy's probe of an object asks (`probed`, `objects`), with
