@@ -56,7 +56,10 @@ fn fake(release: impl Fn(Status) -> Response + Send + 'static) -> String {
 #[test]
 fn an_unreachable_key_service_leaves_the_pod_locked_for_its_owner() {
     let (owner, pod) = locked();
-    let free = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+    // port 0, which nothing listens on: a port bound and dropped can still
+    // answer (a child a parallel test forks holds the socket until it execs,
+    // or another test takes the port)
+    let free = "127.0.0.1:0".to_string();
     assert!(matches!(ask::attempt(&pod.service, &free), Err(AskError::Unreachable(_))));
     let quick = Backoff { first: Duration::from_millis(1), max: Duration::from_millis(2) };
     assert!(matches!(ask::run(&pod.service, &free, quick, Some(3)), Err(AskError::Unreachable(_))));

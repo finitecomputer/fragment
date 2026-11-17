@@ -115,7 +115,9 @@ mod tests {
 
     #[test]
     fn an_address_nobody_listens_on_is_a_connect_error() {
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        assert!(matches!(request(&free.to_string(), "GET", "/nonce", b""), Err(FetchError::Connect(_))));
+        // port 0, which nothing listens on: a port bound and dropped can still
+        // answer (a child a parallel test forks holds the socket until it execs,
+        // or another test takes the port)
+        assert!(matches!(request("127.0.0.1:0", "GET", "/nonce", b""), Err(FetchError::Connect(_))));
     }
 }
