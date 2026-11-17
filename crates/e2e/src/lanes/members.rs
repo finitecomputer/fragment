@@ -1070,6 +1070,10 @@ fn first_row_names_its_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str
         s.skip(FIRST_ROW, "it holds the seed with the fakes' latency");
         return Ok(());
     }
+    if !s.store_levers() {
+        s.skip_lever(FIRST_ROW, "latency");
+        return Ok(());
+    }
     let name = s.named(api, owner, "members-first-row")?;
     let deadline = Instant::now() + Duration::from_secs(60);
     s.fake.set_latency(Duration::from_millis(250));
@@ -1156,8 +1160,8 @@ fn the_repo_is_its_members(s: &mut Suite, api: &Api, owner: &Keys, name: &str, r
         s.skip(READS_NOT_COMMITS, "it asks the code.storage fake, which the hosted lane does not reach");
     } else {
         let http = reqwest::blocking::Client::new();
-        let branch = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?.status().as_u16();
-        let commit = http.post(format!("{}/api/repos/{repo}/commit-pack", s.fake.url)).bearer_auth(&token).body("{}").send()?.status().as_u16();
+        let branch = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.store_url())).bearer_auth(&token).send()?.status().as_u16();
+        let commit = http.post(format!("{}/api/repos/{repo}/commit-pack", s.store_url())).bearer_auth(&token).body("{}").send()?.status().as_u16();
         s.ok(READS_NOT_COMMITS, branch == 404 && commit == 403, json!({ "branch": branch, "commit": commit }));
     }
     let bad = api.signed(viewer, "GET", &path("storage-token?access=write"), None)?;

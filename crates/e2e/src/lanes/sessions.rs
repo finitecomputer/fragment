@@ -329,11 +329,11 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
 
     // replay: the same import again adds nothing and commits nothing
     let repo = status.body["repo"].as_str().unwrap_or("").to_string();
-    let packs = s.fake.requests(&repo, "POST commit-pack");
+    let packs = s.mark(&repo);
     let again = s.cli_json(api, &home, &["session", "import", &path(&root.join("chats")), "--json"])?;
     s.ok(
         "the same import again adds nothing twice and commits nothing",
-        again["archive"] == name.as_str() && again["made"] == false && again["added"] == 0 && again["unchanged"] == 3 && s.fake.requests(&repo, "POST commit-pack") == packs,
+        again["archive"] == name.as_str() && again["made"] == false && again["added"] == 0 && again["unchanged"] == 3 && s.commits_since(&repo, &packs) == 0,
         &again,
     );
 

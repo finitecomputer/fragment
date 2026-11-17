@@ -184,15 +184,20 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     // nothing (before, each asked for both). The poll backstop still reads
     // them every couple of seconds, far fewer than the views.
     let repo = c["repo"].as_str().unwrap_or("").to_string();
-    let reads = s.fake.requests(&repo, "GET branch");
+    let reads = s.requests(&repo, "GET branch");
     let views = 20;
     let answered = (0..views).filter(|_| api.page(&name, &format!("?view={view}"), None).is_ok_and(|r| r.status == 404)).count();
-    let asked = s.fake.requests(&repo, "GET branch") - reads;
-    s.ok(
-        "while nothing is deployed, page views do not ask code.storage for the branches",
-        answered == views && (asked as usize) < views,
-        format!("{answered} of {views} views answered 404; {asked} branch reads"),
-    );
+    let label = "while nothing is deployed, page views do not ask code.storage for the branches";
+    match reads.zip(s.requests(&repo, "GET branch")) {
+        Some((reads, now)) => {
+            let asked = now - reads;
+            s.ok(label, answered == views && (asked as usize) < views, format!("{answered} of {views} views answered 404; {asked} branch reads"));
+        }
+        None => {
+            s.ok("(while nothing is deployed, every page view answers 404)", answered == views, format!("{answered} of {views}"));
+            s.skip_lever(label, "request counts");
+        }
+    }
     s.commit(
         &c,
         &[
@@ -315,12 +320,15 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     let tag = |path: &str| api.page(&name, path, Some(&cookie)).map(|r| r.header("etag")).unwrap_or_default();
     let (css, hashed, page) = (tag("style.css"), tag("app.3f9a1c2e.js"), tag(""));
     s.ok("site files carry strong ETags, a page with Open Graph tags a weak one", css.starts_with('"') && hashed.starts_with('"') && page.starts_with("W/\""), format!("{css} {hashed} {page}"));
-    let reads = s.fake.requests(&repo, "GET file");
+    let reads = s.requests(&repo, "GET file");
     let r = conditional("style.css", &css)?;
     s.ok("a conditional GET naming a file's ETag is 304, without a body", r.status == 304 && r.text.is_empty() && r.header("etag") == css, &r);
     let r = conditional("", &format!("\"other\", {page}"))?;
     s.ok("a page revalidates too, by any tag in the list", r.status == 304 && r.header("cache-control") == "private, no-cache", &r);
-    s.ok("revalidating asks code.storage for nothing", s.fake.requests(&repo, "GET file") == reads, s.fake.requests(&repo, "GET file") - reads);
+    match reads.zip(s.requests(&repo, "GET file")) {
+        Some((reads, now)) => s.ok("revalidating asks code.storage for nothing", now == reads, now - reads),
+        None => s.skip_lever("revalidating asks code.storage for nothing", "request counts"),
+    }
     for (path, file, mime) in [
         ("__fragment.js", &fragment_templates::CLIENT_JS, "text/javascript; charset=utf-8"),
         ("__fragment.css", &fragment_templates::CLIENT_CSS, "text/css; charset=utf-8"),

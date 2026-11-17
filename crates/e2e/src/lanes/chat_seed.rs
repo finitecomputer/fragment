@@ -32,6 +32,12 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("chat-seed", &[Need::Fakes, Need::Node, Need::Levers]) {
         return Ok(());
     }
+    // every check here is made through code.storage's outages, latency
+    // and request counts: the fake's
+    if !s.store_levers() {
+        s.skip_lever("chat-seed: a chat made and seeded through code.storage's outages and latency", "outages, latency and request counts");
+        return Ok(());
+    }
     let wait = Duration::from_secs(30);
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
@@ -93,14 +99,14 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
     });
     let st = status(&name);
     let repo = st["repo"].as_str().unwrap_or("").to_string();
-    let manifest: Value = s.fake.file_at(&repo, "main", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    let manifest: Value = s.file_at(&repo, "main", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
     let said = api.signed(&owner, "GET", &format!("/api/f/{name}/channels/chat?after=0&limit=10"), None)?;
     s.ok(
         "code.storage back, the alarm's pass makes its repo (its owner's name) and lands its template: main and live at its one commit, the code installed from live, the messages said before kept",
         landed
-            && s.fake.repo_url(&repo_name(&name)).as_deref() == Some(repo.as_str())
+            && s.repo_url(&repo_name(&name)).as_deref() == Some(repo.as_str())
             && manifest == json!({ "template": "chat", "meta": { "title": "Seeded" } })
-            && s.fake.paths(&repo, "main") == ["fragment.json"]
+            && s.paths(&repo, "main") == ["fragment.json"]
             && st["code"]["sha"] == st["pins"]["live"]
             && said.body["records"].as_array().is_some_and(|r| r.len() == 2),
         format!("{st} {manifest} {said}"),
@@ -140,7 +146,7 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "a writer as the create answers (a storage token) waits for the seed it races: its token names the repo made once, with the template's one commit under it",
         token.status == 200 && !repo.is_empty() && token.body["repo"] == repo.as_str() && st["pins"]["live"].is_string()
-            && s.fake.requests(&repo, "POST commit-pack") == 1 && s.fake.paths(&repo, "main") == ["fragment.json"],
+            && s.fake.requests(&repo, "POST commit-pack") == 1 && s.paths(&repo, "main") == ["fragment.json"],
         format!("{token} {st}"),
     );
 
@@ -158,11 +164,11 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
     poll_now(&gone)?;
     let landed = s.eventually(wait, || status(&gone)["pins"]["live"].is_string());
     let st = status(&gone);
-    let manifest: Value = s.fake.file_at(st["repo"].as_str().unwrap_or(""), "main", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    let manifest: Value = s.file_at(st["repo"].as_str().unwrap_or(""), "main", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
     s.ok(
         "a chat deleted as its seed runs is gone at once (404), and the same name made again lands in the repo its owner's name finds, its own template on main",
         first.status == 200 && deleted.status == 200 && missing == 404 && again.status == 200 && landed
-            && s.fake.repo_url(&repo_name(&gone)).as_deref() == st["repo"].as_str()
+            && s.repo_url(&repo_name(&gone)).as_deref() == st["repo"].as_str()
             && manifest == json!({ "template": "chat", "meta": { "title": "Seeded again" } }),
         format!("{deleted} {missing} {again} {st} {manifest}"),
     );
@@ -179,7 +185,7 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
 fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str) -> Result<()> {
     let wait = Duration::from_secs(30);
     let owner_id = api.identity(owner)?;
-    let repo_url = |s: &Suite, name: &str| s.fake.repo_url(&fragment_core::codestorage::repo_name("", name, &owner_id).unwrap_or_default());
+    let repo_url = |s: &Suite, name: &str| s.repo_url(&fragment_core::codestorage::repo_name("", name, &owner_id).unwrap_or_default());
     let status = |name: &str| api.status(owner, name).map(|r| r.body).unwrap_or(Value::Null);
     let poll_now = |name: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "poll-now" })));
     let events = |name: &str, kind: &str| -> Vec<i64> {
@@ -192,7 +198,7 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
         s.owned(&r.body, owner);
         Ok(r.body["name"].as_str().unwrap_or("").to_string())
     };
-    let manifest_at = |s: &Suite, repo: &str| -> Value { s.fake.file_at(repo, "main", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null) };
+    let manifest_at = |s: &Suite, repo: &str| -> Value { s.file_at(repo, "main", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null) };
 
     // ---- its repo made, its first commit failed (Alex, #1042: 1 and 3)
     s.fake.fail_commit_packs(true);
@@ -228,7 +234,7 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     let early = write("half-early")?;
     s.ok(
         "its repo made, its template not landed: a storage token, a deploy and a manifest write each fail as code.storage fails its commits (502), none minted, deployed (no \"nothing to deploy\") or committed",
-        [&token, &deploy, &early].iter().all(|r| r.status == 502) && s.fake.branch(&url, "main").is_none() && events(&half, "storage-token.minted").is_empty(),
+        [&token, &deploy, &early].iter().all(|r| r.status == 502) && s.head(&url, "main").is_none() && events(&half, "storage-token.minted").is_empty(),
         format!("{token} / {deploy} / {early}"),
     );
     // commits back: the first writer lands the template, then its own write on top
@@ -257,7 +263,7 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     s.ok(
         "a storage token asked once its repo is made and its first commit is in flight waits for its template: minted after it, on its one commit",
         committing && token.status == 200 && matches!((landed.first(), minted.first()), (Some(l), Some(m)) if l < m)
-            && repo_url(s, &flight).is_some_and(|url| s.fake.paths(&url, "main") == ["fragment.json"]),
+            && repo_url(s, &flight).is_some_and(|url| s.paths(&url, "main") == ["fragment.json"]),
         format!("{token} {landed:?} {minted:?}"),
     );
 
@@ -274,7 +280,7 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     let gone = first.body["name"].as_str().unwrap_or("").to_string();
     // its deploy made live, and its refresh listed live's files: its read
     // of the manifest as a possible pointer is on its way
-    let live_made = s.eventually(wait, || repo_url(s, &gone).is_some_and(|url| s.fake.branch(&url, "live").is_some()));
+    let live_made = s.eventually(wait, || repo_url(s, &gone).is_some_and(|url| s.head(&url, "live").is_some()));
     let url = repo_url(s, &gone).unwrap_or_default();
     let listed = s.fake.requests(&url, "GET files/metadata");
     let deploying = live_made && s.eventually(wait, || s.fake.requests(&url, "GET files/metadata") > listed);

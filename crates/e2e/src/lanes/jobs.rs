@@ -785,20 +785,27 @@ fn installed_trigger(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
 
     // an install cut short (code.storage down after live moved) starts
     // nothing; the next refresh installs it whole, and runs it once
-    s.fake.fail_file_reads(true);
-    s.commit(&c, &[("README.md", Some(b"v2"))]);
-    let during = s.deploy(&c);
-    let cut = (installs().len(), api.status(&owner, &name)?.body["code"]["sha"].clone());
-    s.fake.fail_file_reads(false);
-    refresh()?;
-    refresh()?;
-    let after = installs();
-    let newest = run(api, &owner, &name, after[0]["id"].as_i64().unwrap_or(0))?;
-    s.ok(
-        "an install cut short starts nothing; done once reads come back, it runs once",
-        cut == (1, code["sha"].clone()) && after.len() == 2 && newest.body["input"]["commit"] == during.as_str(),
-        format!("cut short: {cut:?}; after: {} {newest}", json!(after)),
-    );
+    let cut_short = "an install cut short starts nothing; done once reads come back, it runs once";
+    let during = if s.store_levers() {
+        s.fake.fail_file_reads(true);
+        s.commit(&c, &[("README.md", Some(b"v2"))]);
+        let during = s.deploy(&c);
+        let cut = (installs().len(), api.status(&owner, &name)?.body["code"]["sha"].clone());
+        s.fake.fail_file_reads(false);
+        refresh()?;
+        refresh()?;
+        let after = installs();
+        let newest = run(api, &owner, &name, after[0]["id"].as_i64().unwrap_or(0))?;
+        s.ok(cut_short, cut == (1, code["sha"].clone()) && after.len() == 2 && newest.body["input"]["commit"] == during.as_str(), format!("cut short: {cut:?}; after: {} {newest}", json!(after)));
+        during
+    } else {
+        s.skip_lever(cut_short, "file-read outage");
+        s.commit(&c, &[("README.md", Some(b"v2"))]);
+        let during = s.deploy(&c);
+        let installed = s.eventually(Duration::from_secs(20), || installs().len() == 2);
+        s.ok("(with no outage, the deploy installs it and runs it once)", installed, json!(installs()));
+        during
+    };
 
     // a bad shape is refused at deploy: the last good code stays, nothing runs
     let mut bad: Value = serde_json::from_slice(JOBS_JSON)?;

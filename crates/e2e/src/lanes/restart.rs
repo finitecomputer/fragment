@@ -122,6 +122,17 @@ fn other_asset(api: &Api, b: &Blobbed) -> Result<Value> {
     Ok(json!([r.status, r.text]))
 }
 
+/// What `blobs_never_kept` and the crash after it check, each a skip where
+/// the fake's levers are not the lanes'.
+const BLOBBED_CHECKS: [&str; 6] = [
+    "a declared asset stored as a blob is served its bytes, revalidated, and so is its version: never kept for good",
+    "a refresh held between its two pointer reads serves the commit before it whole: its pin, and both assets' bytes, the first commit's (FIN-407)",
+    "released, the refresh publishes the next commit whole: its pin and both assets' bytes",
+    "a refresh cut between its two pointer reads publishes nothing: live still the commit before, both assets' bytes its own, neither kept for good",
+    "after a crash, a refresh cut between its pointer reads kept nothing of it: live the commit before, both assets' bytes its own, revalidated, never kept for good",
+    "its refresh replayed lands the next commit whole, its pin and both assets' bytes; replayed again, the same",
+];
+
 /// FIN-391 and FIN-407: a blob's bytes come by the pointer table, which a
 /// refresh publishes with the tree and its pin, all or none, after every
 /// pointer is read: so a refresh mid-read serves the commit before it,
@@ -597,7 +608,16 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // with none of the last one's, before a crash and after it
     let unkept = kept_then_refused(s, &api, &owner, "restart-unkept", br#"{"operations":3}"#, "site/assets/new-B4k9Qz2m.js")?;
     let moved = kept_then_refused(s, &api, &owner, "restart-moved", br#"{"immutable":["fonts/**"],"operations":3}"#, "site/fonts/new.woff2")?;
-    let blobbed = blobs_never_kept(s, &api, &owner)?;
+    // the race is held and cut by the code.storage fake's levers
+    let blobbed = match s.store_levers() {
+        true => Some(blobs_never_kept(s, &api, &owner)?),
+        false => {
+            for label in BLOBBED_CHECKS {
+                s.skip_lever(label, "held and failed file reads");
+            }
+            None
+        }
+    };
     // the nap starts last, just before the crash: running, its sleep under
     // way and its record not yet written when the node dies
     let nap = match napper {
@@ -618,22 +638,24 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         let naps = jobs::records(&api, &owner, &jobs, "feed").iter().filter(|r| r["kind"] == "nap").count();
         s.ok("a job sleeping through a crash wakes and finishes, once", woke["status"] == "succeeded" && naps == 1, format!("{woke} ({naps} nap records)"));
     }
-    let seen = json!({ "pins": api.status(&owner, &blobbed.name)?.body["pins"], "a": blob_caching(&api, &blobbed)?, "b": other_asset(&api, &blobbed)? });
-    s.ok(
-        "after a crash, a refresh cut between its pointer reads kept nothing of it: live the commit before, both assets' bytes its own, revalidated, never kept for good",
-        seen["pins"]["live"] == blobbed.commit.as_str() && seen["a"]["asset"][2] == "console.log('a, second')" && seen["b"] == json!([200, "console.log('b, second')"]) && seen["a"]["kept"] == false && seen["a"]["version"][0] == 200,
-        &seen,
-    );
-    // its replay, the read answering again: the next commit whole; and again, the same
-    s.fake.fail_file_read(None);
-    let refresh = |api: &Api| api.signed(&owner, "POST", &format!("/api/f/{}/refresh", blobbed.name), Some(&json!({})));
-    let (once, twice) = (refresh(&api)?, refresh(&api)?);
-    let replayed = json!({ "once": once.status, "twice": twice.status, "pins": api.status(&owner, &blobbed.name)?.body["pins"], "a": blob_caching(&api, &blobbed)?, "b": other_asset(&api, &blobbed)? });
-    s.ok(
-        "its refresh replayed lands the next commit whole, its pin and both assets' bytes; replayed again, the same",
-        once.status == 200 && twice.status == 200 && replayed["pins"]["live"] == blobbed.next.as_str() && replayed["a"]["asset"][2] == "console.log('a, third')" && replayed["b"] == json!([200, "console.log('b, third')"]),
-        &replayed,
-    );
+    if let Some(blobbed) = blobbed {
+        let seen = json!({ "pins": api.status(&owner, &blobbed.name)?.body["pins"], "a": blob_caching(&api, &blobbed)?, "b": other_asset(&api, &blobbed)? });
+        s.ok(
+            "after a crash, a refresh cut between its pointer reads kept nothing of it: live the commit before, both assets' bytes its own, revalidated, never kept for good",
+            seen["pins"]["live"] == blobbed.commit.as_str() && seen["a"]["asset"][2] == "console.log('a, second')" && seen["b"] == json!([200, "console.log('b, second')"]) && seen["a"]["kept"] == false && seen["a"]["version"][0] == 200,
+            &seen,
+        );
+        // its replay, the read answering again: the next commit whole; and again, the same
+        s.fake.fail_file_read(None);
+        let refresh = |api: &Api| api.signed(&owner, "POST", &format!("/api/f/{}/refresh", blobbed.name), Some(&json!({})));
+        let (once, twice) = (refresh(&api)?, refresh(&api)?);
+        let replayed = json!({ "once": once.status, "twice": twice.status, "pins": api.status(&owner, &blobbed.name)?.body["pins"], "a": blob_caching(&api, &blobbed)?, "b": other_asset(&api, &blobbed)? });
+        s.ok(
+            "its refresh replayed lands the next commit whole, its pin and both assets' bytes; replayed again, the same",
+            once.status == 200 && twice.status == 200 && replayed["pins"]["live"] == blobbed.next.as_str() && replayed["a"]["asset"][2] == "console.log('a, third')" && replayed["b"] == json!([200, "console.log('b, third')"]),
+            &replayed,
+        );
+    }
     let after: Vec<Value> = [&unkept, &moved].iter().map(|(name, added)| revalidated(&api, name, &["assets/a-Ikq0sZO3.js", added])).collect::<Result<_>>()?;
     s.ok(
         "after a crash a refused deploy's tree is still served with none of the last install's kept paths: its files revalidated, the new ones too",

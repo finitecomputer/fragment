@@ -234,7 +234,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
         // the repo a fragment made before 2026-10-07 kept: named as the
         // fragment's host was, without its owner
         let old = app_name.clone();
-        s.fake.seed_repo(&old, &[("index.html", b"<p>the old app</p>\n")]);
+        s.seed_repo(&old, &[("index.html", b"<p>the old app</p>\n")]);
         let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "repo", "repo": old })))?;
         s.ok("their app's repo is one named as before repos were their owner's (a lever)", r.status == 200 && r.body["repo"] == old.as_str(), &r);
         repos[2] = old;
@@ -276,14 +276,25 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     // right): the cleanup holds each at its first refusal, and the report
     // names each fragment, what it has left, and why, never an endless
     // "still cleaning"
-    if scripted {
+    const REFUSED_DELETES: [&str; 2] = [
+        "a repo delete code.storage refuses holds the cleanup, and the report says so: each fragment held, its repo left, the 403",
+        "the ended life says the same (the `ended` lever): its repo held, its lists told or never waited on",
+    ];
+    // the refusals and the outage are the code.storage fake's levers
+    let refusals = scripted && s.store_levers();
+    if scripted && !refusals {
+        for label in REFUSED_DELETES {
+            s.skip_lever(label, "refused and failed repo deletes");
+        }
+    }
+    if refusals {
         s.fake.refuse_repo_deletes(true);
         let r = wipe_call(api, &wiper, &email, &json!({ "confirm": paul_id }))?;
         let cleanup = r.body["ran"].as_array().and_then(|l| l.iter().find(|x| x["step"] == "cleanup")).cloned().unwrap_or(Value::Null);
         let cleaning = cleanup["cleaning"].as_array().cloned().unwrap_or_default();
         let named: Vec<&str> = cleaning.iter().filter_map(|c| c["fragment"].as_str()).collect();
         s.ok(
-            "a repo delete code.storage refuses holds the cleanup, and the report says so: each fragment held, its repo left, the 403",
+            REFUSED_DELETES[0],
             r.status == 200
                 && r.body["next"] == "cleanup"
                 && cleanup["done"] == false
@@ -295,7 +306,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
         let ended = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "ended" })))?;
         let life = &ended.body["ended"][0];
         s.ok(
-            "the ended life says the same (the `ended` lever): its repo held, its lists told or never waited on",
+            REFUSED_DELETES[1],
             life["repos"] == 1 && life["lists"] == 0 && life["held"] == true && life["error"].as_str().is_some_and(|e| e.contains("403")),
             &ended,
         );
@@ -308,7 +319,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let w = wiped.as_ref().map(Value::clone).unwrap_or(Value::Null);
     // locally the outage holds one repo's delete back a call or more: the
     // cleanup waits for it, and the CLI calls until it is done
-    let calls_min = if scripted { 2 } else { 1 };
+    let calls_min = if refusals { 2 } else { 1 };
     s.ok(
         "the CLI's wipe goes on where it stopped (through a crash, a refusal and an outage, locally; their lists from before `searched` hold nothing), and finishes with nothing left",
         w["report"]["done"] == true && w["report"]["state"] == "wiped" && w["report"]["identity"] == paul_id.as_str() && w["calls"].as_u64().is_some_and(|c| c >= calls_min),
@@ -344,7 +355,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let cleaned: Vec<(bool, String)> = ours.iter().map(|n| s.ended_cleaned(api, n)).collect();
     s.ok("each of their fragments is gone, cleaned up (members' lists, app database, blobs, repo)", cleaned.iter().all(|c| c.0), json!(cleaned.iter().map(|c| c.1.clone()).collect::<Vec<_>>()));
     if scripted {
-        s.ok("each of their repos is deleted at code.storage", repos.iter().all(|r| s.fake.repo_deleted(r)), json!(repos));
+        s.ok("each of their repos is deleted at code.storage", repos.iter().all(|r| s.repo_deleted(r)), json!(repos));
     } else {
         s.skip("each of their repos is deleted at code.storage", "it reads code.storage's own record, the fake's: the hosted lane holds no key to it");
     }
@@ -398,7 +409,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     );
     if scripted {
         let named = fragment_core::codestorage::repo_name("", &agent_name, &fresh_id).unwrap_or_default();
-        s.ok("its repo is named for its new owner", s.fake.repo_url(&named).as_deref() == Some(fresh_repo.as_str()), &named);
+        s.ok("its repo is named for its new owner", s.repo_url(&named).as_deref() == Some(fresh_repo.as_str()), &named);
     } else {
         s.skip("its repo is named for its new owner", "it reads code.storage's own record, the fake's");
     }

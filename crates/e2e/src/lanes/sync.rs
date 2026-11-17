@@ -59,11 +59,11 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
         std::fs::write(dir.join(f), format!("new {f}"))?;
     }
     std::fs::remove_file(dir.join("gone.md"))?;
-    let packs = s.fake.requests(&repo, "POST commit-pack");
+    let packs = s.mark(&repo);
     let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--mode", "push"]);
-    let at = |f: &str| s.fake.file_at(&repo, "main", f);
+    let at = |f: &str| s.file_at(&repo, "main", f);
     let landed = files.iter().all(|f| at(f) == Some(format!("new {f}").into_bytes())) && at("gone.md").is_none();
-    let one = s.fake.requests(&repo, "POST commit-pack") - packs == 1;
+    let one = s.commits_since(&repo, &packs) == 1;
     s.ok("a push of three changed files and one deletion lands as one commit", code(&out) == 0 && landed && one, String::from_utf8_lossy(&out.stderr));
 
     // a viewer syncs read-only (its token only reads): its mirror pulls,
@@ -79,7 +79,7 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "adding the CLI's viewer: {r}");
     let dir = s.dir("sync-viewer");
     let pulled = s.cli(api, &reader, &["sync", &name, "--dir", &dir_of(&dir)]);
-    let packs = s.fake.requests(&repo, "POST commit-pack");
+    let packs = s.mark(&repo);
     std::fs::write(dir.join("doc.md"), "mine")?;
     std::fs::write(dir.join("new.md"), "new")?;
     let held = s.cli(api, &reader, &["sync", &name, "--dir", &dir_of(&dir)]);
@@ -93,8 +93,8 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
             && said.contains("NOT SENT (2)")
             && std::fs::read_to_string(dir.join("doc.md")).is_ok_and(|t| t == "mine")
             && dir.join("new.md").is_file()
-            && s.fake.file_at(&repo, "main", "doc.md").as_deref() == Some(&b"theirs"[..])
-            && s.fake.requests(&repo, "POST commit-pack") == packs
+            && s.file_at(&repo, "main", "doc.md").as_deref() == Some(&b"theirs"[..])
+            && s.commits_since(&repo, &packs) == 0
             && code(&pushed) != 0
             && refused.contains("editor"),
         json!({ "pulled": String::from_utf8_lossy(&pulled.stderr), "held": said, "pushed": refused }),
@@ -125,20 +125,29 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("continuous sync pulls a remote write within seconds", first_pass && pulled, std::fs::read_to_string(&log_path).unwrap_or_default());
     std::fs::write(dir.join("local.md"), "from the client")?;
     let repo = c["repo"].as_str().unwrap_or("").to_string();
-    let pushed = s.eventually(Duration::from_secs(15), || s.fake.file_at(&repo, "main", "local.md").as_deref() == Some(&b"from the client"[..]));
+    let pushed = s.eventually(Duration::from_secs(15), || s.file_at(&repo, "main", "local.md").as_deref() == Some(&b"from the client"[..]));
     s.ok("continuous sync pushes a local edit", pushed, "");
     // a save is one pass by the watcher (one head read, one listing, one
     // commit), and the feed's echo of its commit starts none: two saves,
     // each waited for, so the first's echo has come before the second
-    s.fake.take_requests("");
+    let counted = s.store_levers();
+    if counted {
+        s.fake.take_requests("");
+    }
     let mut saved = true;
     for (file, text) in [("second.md", "two"), ("third.md", "three")] {
         std::fs::write(dir.join(file), text)?;
-        saved &= s.eventually(Duration::from_secs(15), || s.fake.file_at(&repo, "main", file).as_deref() == Some(text.as_bytes()));
+        saved &= s.eventually(Duration::from_secs(15), || s.file_at(&repo, "main", file).as_deref() == Some(text.as_bytes()));
     }
-    let asked = s.fake.take_requests("editor:");
-    let expected: std::collections::BTreeMap<String, u32> = [("GET branch", 2), ("GET files/metadata", 2), ("POST commit-pack", 2)].iter().map(|(r, n)| (r.to_string(), *n)).collect();
-    s.ok("two saves are two passes of one head read, one listing, and one commit each", saved && asked == expected, format!("{asked:?}"));
+    const TWO_PASSES: &str = "two saves are two passes of one head read, one listing, and one commit each";
+    if counted {
+        let asked = s.fake.take_requests("editor:");
+        let expected: std::collections::BTreeMap<String, u32> = [("GET branch", 2), ("GET files/metadata", 2), ("POST commit-pack", 2)].iter().map(|(r, n)| (r.to_string(), *n)).collect();
+        s.ok(TWO_PASSES, saved && asked == expected, format!("{asked:?}"));
+    } else {
+        s.ok("(two saves, each pushed by the watcher)", saved, "");
+        s.skip_lever(TWO_PASSES, "request counts");
+    }
     let err = s.scratch.join(format!("sync-watch-second-{name}.log"));
     let mut second = s.bare_cli()
         .args(["sync", &name, "--dir", &dir_of(&dir), "--watch"])
@@ -242,24 +251,30 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
         quiet && closed.status == 200 && idle,
         &alarm,
     );
-    let reads = s.fake.requests(&repo, "GET branch");
-    s.fake.external_commit(&repo, "main", &[("quiet.md", Some(b"unannounced"))], "unannounced");
+    // macrofiche's reads are not counted (`Suite::requests`): there the
+    // checks below see only that the commit waits
+    let reads = s.requests(&repo, "GET branch");
+    let asked = |s: &Suite| s.requests(&repo, "GET branch").zip(reads).map(|(now, before)| now - before);
+    s.unannounced_commit(&repo, &[("quiet.md", Some(b"unannounced"))], "unannounced");
     std::thread::sleep(interval * 4);
-    let asked = s.fake.requests(&repo, "GET branch") - reads;
+    let quiet_asked = asked(s);
     s.ok(
         "and asks code.storage nothing for four poll intervals: a commit no one announced waits",
-        asked == 0 && !read("quiet.md"),
-        format!("{asked} branch reads"),
+        quiet_asked.is_none_or(|n| n == 0) && !read("quiet.md"),
+        format!("{quiet_asked:?} branch reads"),
     );
     // its daily pass, brought in by the lever
     let pass = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "poll-now" })))?;
     let passed = s.eventually(interval * 5, || ahead(&hook("alarm", None), "pollAt") > day_ms - 60_000);
-    let asked = s.fake.requests(&repo, "GET branch") - reads;
+    let daily_asked = asked(s);
     s.ok(
         "its daily pass asks code.storage nothing either",
-        pass.status == 200 && passed && asked == 0 && !read("quiet.md"),
-        format!("{asked} branch reads, {}", hook("alarm", None)),
+        pass.status == 200 && passed && daily_asked.is_none_or(|n| n == 0) && !read("quiet.md"),
+        format!("{daily_asked:?} branch reads, {}", hook("alarm", None)),
     );
+    if reads.is_none() {
+        s.skip_lever("its branch reads counted, none in four poll intervals nor in its daily pass", "request counts");
+    }
 
     // an editor who may push through code.storage: a storage token
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/storage-token"), None)?;
@@ -270,9 +285,11 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && found && ahead(&alarm, "pollAt") <= interval_ms,
         &alarm,
     );
-    let reads = s.fake.requests(&repo, "GET branch");
+    let reads = s.requests(&repo, "GET branch");
     std::thread::sleep(interval * 4);
-    println!("      busy, {} branch reads in four poll intervals; quiet, none", s.fake.requests(&repo, "GET branch") - reads);
+    if let Some((now, before)) = s.requests(&repo, "GET branch").zip(reads) {
+        println!("      busy, {} branch reads in four poll intervals; quiet, none", now - before);
+    }
     hook("age-outside", Some(day_ms));
     let quiet = s.eventually(interval * 5, || ahead(&hook("alarm", None), "pollAt") > day_ms - 60_000);
     s.ok("a day after the token, its next pass is a day away again", quiet, hook("alarm", None));

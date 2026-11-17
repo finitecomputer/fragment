@@ -27,12 +27,18 @@
 //! Rendering), each saying why. Its secrets are read by celld from OpenBao,
 //! its node's secrets backend (docs/self-host.md, seam 12), unless
 //! `FRAGMENT_E2E_SECRETS=vars` puts them in its node's secrets file.
+//!
+//! `FRAGMENT_E2E_CODESTORE=macrofiche` keeps the node's git in macrofiche
+//! (`MACROFICHE_BIN`; docs/self-host.md, seam 5), started for the run
+//! (store.rs): the lanes read it through its REST API, and a check that
+//! pulls one of the code.storage fake's levers is a skip that says which.
 
 mod api;
 mod browser;
 mod hosted;
 mod lanes;
 mod needs;
+mod store;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -360,9 +366,21 @@ impl<T> Deref for Fake<T> {
     fn deref(&self) -> &T {
         match (&self.fake, self.lanes) {
             (Some(fake), true) => fake,
+            (None, false) if self.what == "code.storage" => {
+                panic!("the code.storage fake is not this run's (a hosted run, or git in macrofiche): a section that uses it declares Need::Fakes, a check that pulls one of its levers asks Suite::store_levers first, and reads go through Suite::file_at, head and repo_url")
+            }
             _ => panic!("the {} fake on the hosted lane: a section that uses it declares Need::Fakes", self.what),
         }
     }
+}
+
+/// Where a repo's main stood, to count the commits it took after
+/// (`Suite::commits_since`).
+pub enum Mark {
+    /// The commit packs the fake was sent for the repo.
+    Packs(u32),
+    /// main's head on macrofiche (`None`: no main yet).
+    Head(Option<String>),
 }
 
 /// One section as a dry run plans it: what it needs, and why it would be
@@ -441,6 +459,10 @@ pub struct Suite {
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
     pub fake: Fake<CodeStorage>,
+    /// macrofiche, when the node's git lives there (`FRAGMENT_E2E_CODESTORE`,
+    /// store.rs): its REST API, and the process, stopped at the run's end.
+    store: Option<store::External>,
+    macrofiche: Option<devstack::codestore::Macrofiche>,
     /// The model route's vendor boundary, text and images: Workers AI, scripted.
     pub ai: Fake<fragment_fakes::workers_ai::WorkersAi>,
     pub push: Fake<fragment_fakes::push::PushService>,
@@ -845,7 +867,7 @@ impl Suite {
             host_secret: self.host_secret.clone(),
             codestorage_org: ORG.into(),
             codestorage_key_pem: self.org_key.clone(),
-            codestorage_url: self.fake.node().url.clone(),
+            codestorage_url: self.store_url(),
             host_suffix: self.suffix().to_string(),
             // a rehearsal's node is shaped as a branch deployment, whose
             // levers are scoped as a preview's are
@@ -1073,13 +1095,14 @@ impl Suite {
         Ok(r.body)
     }
 
-    /// A commit on main by another writer: a push through the fake, then
-    /// its owner's `refresh`, as the CLI pushes and refreshes. Hosted, its
-    /// owner's commit through the files route (`POST /api/f/{name}/files`:
-    /// one commit, main moved at once), since a preview's git is real.
+    /// A commit on main by another writer: a push through the fake (or a
+    /// commit pack to macrofiche), then its owner's `refresh`, as the CLI
+    /// pushes and refreshes. Hosted, its owner's commit through the files
+    /// route (`POST /api/f/{name}/files`: one commit, main moved at once),
+    /// since a preview's git is real.
     pub fn commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
         if !self.hosted() {
-            let sha = self.fake.external_commit(&self.repo_of(created), "main", changes, "e2e commit");
+            let sha = self.unannounced_commit(&self.repo_of(created), changes, "e2e commit");
             self.refresh(created);
             return sha;
         }
@@ -1095,14 +1118,21 @@ impl Suite {
         r["commit"].as_str().unwrap_or_else(|| panic!("a commit answers its sha: {r}")).to_string()
     }
 
-    /// Moves live to main's tip through the fake, then refreshes (a ref
-    /// move as `fragment rollback` makes one). Hosted, its owner's deploy
-    /// (`POST /api/f/{name}/deploy`), which installs the app at once.
+    /// Moves live to main's tip through the fake (on macrofiche, live
+    /// created there or merged to it), then refreshes (a ref move as
+    /// `fragment rollback` makes one). Hosted, its owner's deploy (`POST
+    /// /api/f/{name}/deploy`), which installs the app at once.
     pub fn deploy(&self, created: &Value) -> String {
         if !self.hosted() {
             let repo = self.repo_of(created);
-            let tip = self.fake.branch(&repo, "main").expect("main has a commit");
-            self.fake.set_branch(&repo, "live", &tip);
+            let tip = match &self.store {
+                None => {
+                    let tip = self.fake.branch(&repo, "main").expect("main has a commit");
+                    self.fake.set_branch(&repo, "live", &tip);
+                    tip
+                }
+                Some(store) => store.go_live(&repo, "e2e deploy").unwrap_or_else(|e| panic!("a deploy of {repo}: {e:#}")),
+            };
             self.refresh(created);
             return tip;
         }
@@ -1111,11 +1141,150 @@ impl Suite {
     }
 
     /// Deletes live through the fake, then refreshes: the fragment runs no
-    /// code. Local only.
+    /// code. Local, on the fake only: the contract deletes no branch
+    /// (`store_levers`).
     pub fn undeploy(&self, created: &Value) {
         assert!(!self.hosted(), "live is deleted through the fake");
         self.fake.delete_branch(&self.repo_of(created), "live");
         self.refresh(created);
+    }
+
+    /// A commit on main of `repo` that nothing announces: only a refresh or
+    /// the poll finds it. Local only.
+    pub fn unannounced_commit(&self, repo: &str, changes: &[(&str, Option<&[u8]>)], message: &str) -> String {
+        match &self.store {
+            None => self.fake.external_commit(repo, "main", changes, message),
+            Some(store) => store.commit(repo, "main", changes, message).unwrap_or_else(|e| panic!("a commit on {repo}: {e:#}")).1,
+        }
+    }
+
+    /// Whether the code.storage fake's levers are the lanes': a local run
+    /// whose git is the fake in this process. Its levers are an outage, a
+    /// held, failed or sabotaged call, latency, a branch deleted or moved
+    /// anywhere, and counts of the requests it answered; on macrofiche a
+    /// check that pulls one is a skip that says which (`skip_lever`).
+    pub fn store_levers(&self) -> bool {
+        self.store.is_none()
+    }
+
+    /// A check that pulls the fake's `lever`, on macrofiche: a skip.
+    pub fn skip_lever(&mut self, label: &str, lever: &str) {
+        let store = self.store.as_ref().map_or("the code store", |s| s.label.as_str()).to_string();
+        self.skip(label, &format!("it pulls the code.storage fake's {lever}, and the node's git is in {store} ({}; docs/self-host.md, seam 5)", store::CODESTORE_VAR));
+    }
+
+    /// The code store's API base, as the node and the CLI reach it.
+    pub fn store_url(&self) -> String {
+        match &self.store {
+            Some(store) => store.url.clone(),
+            None => self.fake.node().url.clone(),
+        }
+    }
+
+    /// macrofiche's REST API, on a run whose git lives there.
+    pub fn external_store(&self) -> Option<&store::External> {
+        self.store.as_ref()
+    }
+
+    /// A file's bytes on a branch (or at a commit) of `repo`, as the store
+    /// holds them.
+    pub fn file_at(&self, repo: &str, at: &str, path: &str) -> Option<Vec<u8>> {
+        match &self.store {
+            None => self.fake.file_at(repo, at, path),
+            Some(store) => store.file(repo, at, path).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// A branch's head in `repo`, as the store holds it.
+    pub fn head(&self, repo: &str, branch: &str) -> Option<String> {
+        match &self.store {
+            None => self.fake.branch(repo, branch),
+            Some(store) => store.head(repo, branch).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// Every path on a branch of `repo`, as the store holds it (none when
+    /// the branch is absent).
+    pub fn paths(&self, repo: &str, branch: &str) -> Vec<String> {
+        match &self.store {
+            None => self.fake.paths(repo, branch),
+            Some(store) => store.paths(repo, branch).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// The url form of the repo named `name`, as the store lists it.
+    pub fn repo_url(&self, name: &str) -> Option<String> {
+        match &self.store {
+            None => self.fake.repo_url(name),
+            Some(store) => store.repo_url(name).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// Whether `repo` was deleted at the store.
+    pub fn repo_deleted(&self, repo: &str) -> bool {
+        match &self.store {
+            None => self.fake.repo_deleted(repo),
+            Some(store) => store.deleted(repo).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// A repo whose url form is its name, `name`, with `files` committed on
+    /// main: one made before the platform named repos as it does now. The
+    /// fake makes it by its lever; macrofiche's url form is its name, so it
+    /// is made through the API, as any writer makes one.
+    pub fn seed_repo(&self, name: &str, files: &[(&str, &[u8])]) {
+        let Some(store) = &self.store else { return self.fake.seed_repo(name, files) };
+        let url = store.create_repo(name).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(url, name, "macrofiche's url form is a repo's name");
+        let changes: Vec<(&str, Option<&[u8]>)> = files.iter().map(|(p, b)| (*p, Some(*b))).collect();
+        store.commit(name, "main", &changes, "seed").unwrap_or_else(|e| panic!("{e:#}"));
+    }
+
+    /// `n` empty repos made after every existing one (a busy org, so a
+    /// lookup by name must page). On macrofiche, made as the cell makes
+    /// one, named for the run.
+    pub fn seed_filler(&self, n: usize) {
+        let Some(store) = &self.store else { return self.fake.seed_filler(n) };
+        for i in 0..n {
+            store.create_repo(&format!("filler-{}-{i}", self.run)).unwrap_or_else(|e| panic!("{e:#}"));
+        }
+    }
+
+    /// The requests to `repo` on one route (`"GET branch"`) the store has
+    /// answered, from every caller: the fake counts them; macrofiche's are
+    /// not counted here (`None`: a check of a count is a skip).
+    pub fn requests(&self, repo: &str, route: &str) -> Option<u32> {
+        self.store.is_none().then(|| self.fake.requests(repo, route))
+    }
+
+    /// Where `repo`'s main stands now, to count the commits after it
+    /// (`commits_since`).
+    pub fn mark(&self, repo: &str) -> Mark {
+        match &self.store {
+            None => Mark::Packs(self.fake.requests(repo, "POST commit-pack")),
+            Some(_) => Mark::Head(self.head(repo, "main")),
+        }
+    }
+
+    /// The commits `repo` took since `mark`: the commit packs it was sent
+    /// (the fake, which counts each one landed), or the commits on main
+    /// past the marked head (macrofiche, which counts no requests).
+    pub fn commits_since(&self, repo: &str, mark: &Mark) -> u64 {
+        match (mark, &self.store) {
+            (Mark::Packs(n), None) => u64::from(self.fake.requests(repo, "POST commit-pack") - n),
+            (Mark::Head(marked), Some(store)) => {
+                if self.head(repo, "main").is_none() {
+                    return 0;
+                }
+                let history = store.history(repo, "main").unwrap_or_else(|e| panic!("{e:#}"));
+                let at = match marked {
+                    None => Some(history.len()),
+                    Some(sha) => history.iter().position(|c| c == sha),
+                };
+                at.unwrap_or_else(|| panic!("{repo}'s main moved more than {} commits past {marked:?}", store::HISTORY_MAX)) as u64
+            }
+            _ => unreachable!("a mark is the store's that made it"),
+        }
     }
 
     /// The repo `created` names; a chat's, made after its create answers
@@ -1371,10 +1540,26 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let cli = cli_binary()?;
     let tools = devstack::Tools::locate()?;
     let org_key = fake::generate_org_key_pem();
-    let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
     let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
     make_scratch(&scratch)?;
+    // the node's git: the fake in this process, or macrofiche started for
+    // the run on its scratch (docs/self-host.md, seam 5)
+    let choice = store::Choice::from_env()?;
+    if choice == store::Choice::Macrofiche && rehearse.is_some() {
+        bail!("a rehearsal keeps a preview's rules, its git hidden from the lanes: drop {}=macrofiche", store::CODESTORE_VAR);
+    }
+    let (fake, store, macrofiche) = match choice {
+        store::Choice::Fake => (Some(CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?), None, None),
+        store::Choice::Macrofiche => {
+            let bin = devstack::codestore::macrofiche_bin()?;
+            let opts = devstack::codestore::MacroficheOptions { dir: scratch.join("macrofiche"), port: devstack::free_port()?, org: ORG.into(), key_pem: org_key.clone(), log_dir: scratch.clone() };
+            let (m, took) = devstack::codestore::Macrofiche::start(&bin, &opts)?;
+            println!("code store: macrofiche {} at {} (ready in {took:.1?}; its log {})", bin.display(), m.url, m.log.display());
+            let store = store::External::new(&m.url, ORG, &org_key, "macrofiche".into())?;
+            (None, Some(store), Some(m))
+        }
+    };
     let project = devstack::stage_project(&scratch.join("cell"))?;
     // the runtime: wrangler dev's workerd, or celld (docs/self-host.md, seam 1)
     let celld = match std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() {
@@ -1449,7 +1634,12 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         port: listener.local_addr()?.port(),
         listener: Some(listener),
         run,
-        fake: Fake::of(hidden, "code.storage", fake),
+        fake: match fake {
+            Some(fake) => Fake::of(hidden, "code.storage", fake),
+            None => Fake::absent("code.storage"),
+        },
+        store,
+        macrofiche,
         ai: Fake::of(hidden, "Workers AI", fragment_fakes::workers_ai::WorkersAi::start(0)?),
         push: Fake::of(hidden, "push service", fragment_fakes::push::PushService::start()?),
         mail: Fake::of(hidden, "mail", fragment_fakes::mail::Mailer::start(0, false)?),
@@ -1550,7 +1740,19 @@ fn finish(s: &mut Suite) -> Result<()> {
             s.fail("OpenBao stops at the end of the run", format!("{e:#}"));
         }
     }
-    let skipped = match s.hosted() || s.on_celld() {
+    // the node's git, when macrofiche held it: alive through the whole
+    // run, then stopped as an operator stops it
+    if let Some(mut m) = s.macrofiche.take() {
+        match m.exited() {
+            Some(status) => s.fail("macrofiche runs through the whole run", format!("it exited ({status}); its log, {}", m.log.display())),
+            None => {
+                if let Err(e) = m.stop() {
+                    s.fail("macrofiche stops at the end of the run", format!("{e:#}"));
+                }
+            }
+        }
+    }
+    let skipped = match s.hosted() || s.on_celld() || s.store.is_some() {
         true => "skipped (each says why)",
         false => "skipped (the hosted lane's)",
     };

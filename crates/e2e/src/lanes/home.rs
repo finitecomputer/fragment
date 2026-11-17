@@ -63,9 +63,9 @@ pub fn home(s: &mut Suite, api: &Api) -> Result<()> {
     // replay: the same again sends nothing and lands no commit
     let status = api.status(&keys, &name)?;
     let repo = status.body["repo"].as_str().unwrap_or("").to_string();
-    let head = s.fake.branch(&repo, "main");
+    let head = s.head(&repo, "main");
     let again = s.cli_json(api, &home, &["home", "files", &zip, "--layout", &layout, "--into", &name, "--json"])?;
-    s.ok("the same again sends nothing twice", again["files"] == 0 && again["already"] == 8 && head.is_some() && s.fake.branch(&repo, "main") == head, &again);
+    s.ok("the same again sends nothing twice", again["files"] == 0 && again["already"] == 8 && head.is_some() && s.head(&repo, "main") == head, &again);
 
     // a home holding files that may hold secrets (by the layout's path, by
     // a name) reads whole less those: skipped unread, and named; the

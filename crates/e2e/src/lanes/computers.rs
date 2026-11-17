@@ -1442,7 +1442,10 @@ fn codestorage_through_egress(s: &mut Suite, api: &Api, owner: &crate::Keys, age
     let said = fetched(s, 83, &format!("fetch {branch} with {token}"))?;
     s.ok("the guest reaches a local fleet's code.storage through its egress, with its token", said.starts_with("fetched 200") && said.contains("head_sha"), &said);
     let said = fetched(s, 84, &format!("fetch {branch} with not-a-token"))?;
-    s.ok("and with no token of its own, the egress adds none: code.storage refuses it", said.starts_with("fetched 401"), &said);
+    // a token that does not verify: the fake's 401, the service's (and
+    // macrofiche's) 403 (macrofiche's contract, section 3)
+    let refused = if s.store_levers() { "fetched 401" } else { "fetched 403" };
+    s.ok("and with no token of its own, the egress adds none: code.storage refuses it", said.starts_with(refused), &said);
     // A channel and an application's route may both be named storage-token.
     // They must keep their own response bodies through the guest's egress.
     let manifest = br#"{"channels":{"tasks":{"read":"editor","post":"editor"},"storage-token":{"read":"editor","post":"editor"}}}"#;

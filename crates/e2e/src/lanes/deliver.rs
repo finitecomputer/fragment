@@ -224,7 +224,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     let r = run("i1", "draw", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.jpg" }))?;
     s.ok(
         "an image step writes the model's JPEG to main",
-        r["output"]["path"] == "art/lighthouse.jpg" && r["output"]["mediaType"] == "image/jpeg" && s.fake.file_at(&repo, "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse")),
+        r["output"]["path"] == "art/lighthouse.jpg" && r["output"]["mediaType"] == "image/jpeg" && s.file_at(&repo, "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse")),
         &r,
     );
     let call = images(s).last().cloned();
@@ -237,12 +237,12 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     let r = run("i-mid", "draw", json!({ "prompt": "a mid harbour", "path": "art/harbour.jpg", "steps": 8 }))?;
     s.ok(
         "a 300 KiB image, past an app's write limit and under a blob's size, is kept in git (bug 1), drawn at the steps the job named",
-        r["status"] == "succeeded" && s.fake.file_at(&repo, "main", "art/harbour.jpg") == Some(mid) && images(s).last().is_some_and(|c| c.body["steps"] == 8),
+        r["status"] == "succeeded" && s.file_at(&repo, "main", "art/harbour.jpg") == Some(mid) && images(s).last().is_some_and(|c| c.body["steps"] == 8),
         &r,
     );
     let big = image_bytes("a large mural");
     let r = run("i2", "draw", json!({ "prompt": "a large mural", "path": "art/mural.jpg" }))?;
-    let pointer = fragment_core::blob::parse(&s.fake.file_at(&repo, "main", "art/mural.jpg").unwrap_or_default());
+    let pointer = fragment_core::blob::parse(&s.file_at(&repo, "main", "art/mural.jpg").unwrap_or_default());
     s.ok(
         "a large image is a blob, its pointer in git",
         r["status"] == "succeeded" && pointer.as_ref().is_some_and(|p| p.sha256 == fragment_core::blob::sha256_hex(&big) && p.size == big.len() as u64),
@@ -278,7 +278,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     );
     s.ai.fail_next(&[503]);
     let r = run("i3", "draw", json!({ "prompt": "a harbour at dusk", "path": "art/dusk.jpg" }))?;
-    s.ok("the image model's 503 is retried", r["status"] == "succeeded" && s.fake.file_at(&repo, "main", "art/dusk.jpg") == Some(image_bytes("a harbour at dusk")), &r);
+    s.ok("the image model's 503 is retried", r["status"] == "succeeded" && s.file_at(&repo, "main", "art/dusk.jpg") == Some(image_bytes("a harbour at dusk")), &r);
     s.ai.fail_next(&[400]);
     let r = run("i4", "draw", json!({ "prompt": "refused", "path": "art/none.jpg" }))?;
     s.ok("its refusal holds the run, saying so, and charges nothing", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("the model answered 400")) && cost(&r) == 0, &r);
@@ -287,7 +287,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     let loud = s.eventually(wait, || super::ledger::logged(s, "ledger.unknown-usage") > said);
     s.ok(
         "an answer that is no JPEG is refused, saying why, and nothing is written; what it drew is unknown, so it is charged nothing, said aloud",
-        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.fake.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) == 0 && loud,
+        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) == 0 && loud,
         &r,
     );
     decisions(s, api, &owner, &name, wait)?;
@@ -318,7 +318,7 @@ fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, re
 
     let waves = video_bytes("waves", 6);
     let r = run("v1", json!({ "prompt": "waves", "path": "video/waves.mp4" }))?;
-    let pointer = fragment_core::blob::parse(&s.fake.file_at(repo, "main", "video/waves.mp4").unwrap_or_default());
+    let pointer = fragment_core::blob::parse(&s.file_at(repo, "main", "video/waves.mp4").unwrap_or_default());
     // its version (FIN-340): the commit that wrote it, main's tip
     let mut output = r["output"].clone();
     let commit = output.as_object_mut().and_then(|o| o.remove("commit")).and_then(|c| c.as_str().map(str::to_string)).unwrap_or_default();
@@ -326,7 +326,7 @@ fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, re
         "a video step in meatproxy's shape (a prompt, a path, six seconds) writes the model's MP4 to main as a blob, its pointer in git, and answers its path, size, hash, version, type and length",
         r["status"] == "succeeded"
             && output == json!({ "path": "video/waves.mp4", "size": waves.len(), "sha256": fragment_core::blob::sha256_hex(&waves), "mediaType": "video/mp4", "lengthMs": 6_000 })
-            && s.fake.branch(repo, "main").as_deref() == Some(commit.as_str())
+            && s.head(repo, "main").as_deref() == Some(commit.as_str())
             && pointer.as_ref().is_some_and(|p| p.sha256 == fragment_core::blob::sha256_hex(&waves) && p.size == waves.len() as u64),
         &r,
     );
@@ -351,7 +351,7 @@ fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, re
     s.ok(
         "a small video at 1080p and 9:16 is kept in git, made at what the job named, and charged at 1080P's price ($0.28 a second)",
         r["status"] == "succeeded"
-            && s.fake.file_at(repo, "main", "video/boat.mp4") == Some(boat)
+            && s.file_at(repo, "main", "video/boat.mp4") == Some(boat)
             && made(s).last().is_some_and(|c| c.body["resolution"] == "1080P" && c.body["ratio"] == "9:16")
             && cost(&r) == price("1080P", 6_000),
         &r,
@@ -366,7 +366,7 @@ fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, re
         "a step that fails after its paid call is tried again, reads the video at the URL it kept, and never makes it again nor charges it again",
         r["status"] == "succeeded"
             && made(s).len() == before + 1
-            && s.fake.file_at(repo, "main", "video/tide.mp4").is_some()
+            && s.file_at(repo, "main", "video/tide.mp4").is_some()
             && receipts.len() == 1
             && cost(&r) == price("720P", 6_000),
         json!({ "run": r, "made": made(s).len() - before, "receipts": receipts }),
@@ -386,7 +386,7 @@ fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, re
             && cost(&lost) == 0
             && paid(&lost).is_empty()
             && loud
-            && s.fake.file_at(repo, "main", "video/lost.mp4").is_none(),
+            && s.file_at(repo, "main", "video/lost.mp4").is_none(),
         json!({ "run": lost, "made": made(s).len() - before }),
     );
     let id = lost["id"].as_i64().unwrap_or(0);
@@ -398,7 +398,7 @@ fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, re
         "its replay asks the model once more, writes the video, and is charged for it once",
         again["status"] == "succeeded"
             && made(s).len() == before + 2
-            && s.fake.file_at(repo, "main", "video/lost.mp4").is_some()
+            && s.file_at(repo, "main", "video/lost.mp4").is_some()
             && receipts.len() == 1
             && cost(&again) == price("720P", 6_000),
         json!({ "run": again, "made": made(s).len() - before, "receipts": receipts }),
@@ -431,7 +431,7 @@ fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, re
     let loud = s.eventually(wait, || logged(s, "ledger.unknown-usage") > said);
     s.ok(
         "a video that did not complete is refused, saying why, nothing written, and charged nothing, said aloud",
-        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("no completed video")) && cost(&r) == 0 && loud && s.fake.file_at(repo, "main", "video/failed.mp4").is_none(),
+        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("no completed video")) && cost(&r) == 0 && loud && s.file_at(repo, "main", "video/failed.mp4").is_none(),
         &r,
     );
     let gone = run("v-gone", json!({ "prompt": "gone", "path": "video/gone.mp4" }))?;
@@ -441,7 +441,7 @@ fn videos(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, re
         gone["status"] == "held" && gone["error"].as_str().is_some_and(|e| e.contains("gone from its URL"))
             && png["status"] == "held" && png["error"].as_str().is_some_and(|e| e.contains("not an MP4"))
             && [&gone, &png].iter().all(|r| cost(r) == price("720P", 6_000))
-            && s.fake.file_at(repo, "main", "video/gone.mp4").is_none() && s.fake.file_at(repo, "main", "video/png.mp4").is_none(),
+            && s.file_at(repo, "main", "video/gone.mp4").is_none() && s.file_at(repo, "main", "video/png.mp4").is_none(),
         json!([gone, png]),
     );
     Ok(())

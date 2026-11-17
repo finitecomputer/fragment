@@ -13,6 +13,7 @@ mod board;
 mod brain;
 mod chat;
 mod chat_seed;
+mod codestore;
 mod author;
 mod billing;
 mod checkout;
@@ -82,6 +83,7 @@ type Lane = fn(&mut Suite, &Api) -> Result<()>;
 const LANES: &[Lane] = &[
     control::auth,
     control::create,
+    codestore::codestore,
     chat_seed::chat_seed,
     control::lockdown,
     keys::keys,
@@ -211,7 +213,7 @@ pub const SHARDS: [&[&str]; 5] = [
         "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
         "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "transcribe",
     ],
-    &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
+    &["auth", "create", "codestore", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
         "identities", "signin", "door", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
         "members", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp",

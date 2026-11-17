@@ -321,7 +321,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // an asset: its bytes a blob, named by its source note, served
-    let pointer = s.fake.file_at(&repo, "main", ASSET).unwrap_or_default();
+    let pointer = s.file_at(&repo, "main", ASSET).unwrap_or_default();
     s.ok(
         "an asset of 1 MiB or more is a blob: a pointer in git",
         blob::parse(&pointer).is_some_and(|p| p.sha256 == asset_sha && p.size == asset.len() as u64),

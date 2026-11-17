@@ -291,11 +291,13 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let label = s.name("tskills");
     // code.storage as far as a preview has it: the create's calls take
     // long enough for the alarm it arms to run beside it, as they do there
-    if !s.hosted() {
+    // (macrofiche answers as it answers: no latency is added there)
+    let slowed = !s.hosted() && s.store_levers();
+    if slowed {
         s.fake.set_latency(std::time::Duration::from_millis(CODE_STORAGE_LATENCY_MS));
     }
     let r = api.create_with(owner, json!({ "label": label, "template": "skills" }));
-    if !s.hosted() {
+    if slowed {
         s.fake.set_latency(std::time::Duration::ZERO);
     }
     let r = r?;

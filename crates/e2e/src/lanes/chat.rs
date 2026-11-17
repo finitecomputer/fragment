@@ -1356,6 +1356,12 @@ fn made_with_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str, identity
         }
         return Ok(());
     }
+    if !s.store_levers() {
+        for label in MADE_WITH_AGENT_CHECKS {
+            s.skip_lever(label, "commit outage");
+        }
+        return Ok(());
+    }
     let events = |name: &str, kind: &str| -> Vec<i64> {
         let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None);
         r.map(|r| r.body["events"].as_array().into_iter().flatten().filter(|e| e["kind"] == kind).filter_map(|e| e["id"].as_i64()).collect()).unwrap_or_default()
