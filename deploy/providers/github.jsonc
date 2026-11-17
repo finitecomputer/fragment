@@ -7,8 +7,14 @@
 //    token never expires and has none, so its grant is refused here).
 // 2. A GitHub App's user token takes no scopes: what an agent may do is the
 //    app's permissions on the repositories the person installed it on. So
-//    `repo` below is what the row must ask for and GitHub ignores, the
-//    answer names no scope, and the connection offers read and write alone.
+//    `repo` below is what the row must ask for and GitHub ignores, and the
+//    connection offers read and write alone. GitHub's answer then names an
+//    empty scope (`"scope": ""`, as its documentation has it), which
+//    `connection_signin::tokens_of` refuses today as no grant at all. So
+//    THIS ROW CANNOT CONNECT AS WRITTEN: the platform first needs to know
+//    a connection whose permissions are its app's and not scopes (its row
+//    saying so, and an empty answer read as that for such a row alone,
+//    never for a provider with scopes, where it is a grant of nothing).
 // 3. Git over HTTPS sends the token as a bearer header
 //    (`http.extraHeader`), since a row names the authorization header or
 //    basic auth, never both, and the API takes a bearer token.
@@ -19,9 +25,8 @@
   "hosts": ["api.github.com", "uploads.github.com", "github.com"],
   "placements": [{ "header": "authorization", "format": "Bearer {}" }],
   "note": "Your agents can do what the app may on the repositories you install it on. Choose those repositories as you connect, or later in your GitHub settings.",
-  "key": "<the client secret's store name>",
   "connection_oauth": { "authorize": "https://github.com/login/oauth/authorize",
     "exchange": "https://github.com/login/oauth/access_token",
-    "client_id": "<the app's client id>", "access": { "write": { "scopes": ["repo"] } } },
+    "access": { "write": { "scopes": ["repo"] } } },
   "scope_names": { "repo": "The repositories you chose" },
   "env": ["GH_TOKEN", "GITHUB_TOKEN"] }

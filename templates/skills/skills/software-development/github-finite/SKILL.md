@@ -31,21 +31,22 @@ GH="fragment api github"
 $GH GET https://api.github.com/user
 ```
 
-- `{"login": …}`: connected, as that account. Go on.
-- `not_connected`: your owner has not connected GitHub, or must authorize
-  it again. Ask them to connect it in Settings, under Connections.
-- `forbidden`: your owner narrowed your connections and left GitHub out.
-  Say so, and stop.
-- 401 `Bad credentials`: GitHub refused the token (the person revoked the
-  app). Ask them to reconnect GitHub in Settings.
+`{"login": …}`: connected, as that account. The connection reaches
+`api.github.com`, `uploads.github.com` and `github.com` only.
 
 The answer is GitHub's JSON on stdout. A refusal is one line of JSON on
-stderr, `{error, status, message, hint}`, and exit 1. The connection
-reaches `api.github.com`, `uploads.github.com` and `github.com` only.
+stderr and exit 1. Do what its `hint` says; its `body` is GitHub's own
+answer: `message`, and for a 422 `errors`, which name the field refused.
 
 A 404 on a repository you were told exists usually means your owner did
 not choose it when they connected: tell them they can add it in their
 GitHub settings (Applications), and do not guess another name.
+
+On an older computer: `fragment api` came with an image newer than a
+computer awake since before it. If the command is `unrecognized`, your
+computer takes that image when it next restarts. Until then, send the same
+calls with `curl -H "Authorization: Bearer $GH_TOKEN"`: the computer swaps
+that the same way.
 
 ## Reading
 
@@ -76,10 +77,10 @@ $GH GET https://api.github.com/repos/OWNER/REPO/actions/runs/RUN_ID/jobs --param
   page you need, not every page.
 - Many things in one call: GraphQL, `$GH POST https://api.github.com/graphql
   --query '…' --variables '{…}'`.
-- A job's log (`…/actions/jobs/JOB_ID/logs`) answers a redirect to a signed
-  address on another host. `fragment api` never follows it: its refusal's
-  message names the address, which you fetch with a plain download tool,
-  without the token.
+- A job's log (`…/actions/jobs/JOB_ID/logs`) and a repository's archive
+  (`…/tarball/REF`) answer a redirect to a signed address on another host:
+  `--out FILE` follows it there, without the token, and saves it whole or
+  not at all.
 
 ## Changing
 
@@ -119,12 +120,9 @@ anywhere but on this computer, on its way to GitHub.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| GitHub's answer | Fix |
 |---------|-----|
-| `not_connected` | Your owner connects GitHub in Settings → Connections |
-| `forbidden` | Your owner left GitHub off this agent's connections |
-| 401 `Bad credentials` | Your owner reconnects GitHub in Settings → Connections |
+| 401 `Bad credentials` | GitHub refused the token (the person revoked the app): your owner reconnects GitHub in Settings → Connections |
 | 404 on a repository | Your owner did not choose it as they connected: they add it in GitHub's settings |
 | 403 `Resource not accessible by integration` | The connection may not do this on that repository: say so, and stop |
-| 422 `Validation Failed` | Read `message`: a field is wrong or missing |
-| `redirected` | A signed address on another host (a log, an archive): fetch it without the token |
+| 422 `Validation Failed` | `body`'s `errors` name the resource, the field and what is wrong with it |
