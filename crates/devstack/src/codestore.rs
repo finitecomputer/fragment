@@ -6,8 +6,9 @@
 //!
 //! The cell needs nothing of this: it calls whatever `CODESTORAGE_API_URL`
 //! names, with tokens signed by the org's key. macrofiche is given the
-//! key's public half alone (`macrofiche pubkey`), in a config file of its
-//! own (its docs/design.md, Config and command line). It takes no
+//! key's public half alone, derived here (`public_half`), in a config file
+//! of its own (its docs/design.md, Config and command line): no macrofiche
+//! process ever reads the private key. It takes no
 //! per-fragment webhook, and the platform registers none with any store:
 //! a fragment's pins move by its writers' refreshes and the poll, as on
 //! the fake.
@@ -158,18 +159,13 @@ fn macrofiche_config(opts: &MacroficheOptions) -> serde_json::Value {
     })
 }
 
-/// The org key's public half (SPKI PEM), from macrofiche itself
-/// (`macrofiche pubkey`), the private key on its stdin: never in a file
-/// of macrofiche's, nor on a command line.
-fn public_half(bin: &Path, key_pem: &str) -> Result<String> {
-    let mut child = Command::new(bin).args(["pubkey", "/dev/stdin"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().with_context(|| format!("start {}", bin.display()))?;
-    child.stdin.take().context("macrofiche's stdin")?.write_all(key_pem.as_bytes())?;
-    let out = child.wait_with_output()?;
-    let public = String::from_utf8_lossy(&out.stdout).into_owned();
-    if !out.status.success() || !public.starts_with("-----BEGIN PUBLIC KEY-----") {
-        bail!("macrofiche pubkey: {} {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(public)
+/// The org key's public half, SPKI PEM: what macrofiche verifies the
+/// cell's tokens with. Derived here, so the private key stays with the
+/// stack and the cell.
+fn public_half(key_pem: &str) -> Result<String> {
+    use p256::pkcs8::{DecodePrivateKey as _, EncodePublicKey as _, LineEnding};
+    let key = p256::SecretKey::from_pkcs8_pem(key_pem.replace("\\n", "\n").trim()).map_err(|e| anyhow::anyhow!("the org key: {e}"))?;
+    key.public_key().to_public_key_pem(LineEnding::LF).map_err(|e| anyhow::anyhow!("the org key's public half: {e}"))
 }
 
 /// One macrofiche process, this process's child: stopped (`stop`, or when
@@ -187,7 +183,7 @@ impl Macrofiche {
     pub fn start(bin: &Path, opts: &MacroficheOptions) -> Result<(Macrofiche, Duration)> {
         fs::create_dir_all(&opts.dir).with_context(|| format!("create {}", opts.dir.display()))?;
         fs::create_dir_all(&opts.log_dir)?;
-        fs::write(opts.public_key(), public_half(bin, &opts.key_pem)?)?;
+        fs::write(opts.public_key(), public_half(&opts.key_pem)?)?;
         fs::write(opts.config(), serde_json::to_string_pretty(&macrofiche_config(opts))?)?;
         let log = opts.log_dir.join(format!("macrofiche-{}.log", opts.port));
         let mut out = fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&log).with_context(|| format!("open {}", log.display()))?;
@@ -299,6 +295,25 @@ mod tests {
             })
         );
         assert!(!config.to_string().contains("PRIVATE"), "{config}");
+    }
+
+    /// Goal: macrofiche's key is the org key's public half, which verifies
+    /// what the private half signs, and holds nothing private. Method: a
+    /// token the cell's own signer makes, verified with the half alone.
+    #[test]
+    fn the_public_half_verifies_the_cells_tokens() {
+        use base64::Engine as _;
+        use p256::ecdsa::signature::Verifier as _;
+        use p256::pkcs8::DecodePublicKey as _;
+        let key = key();
+        let public = public_half(&key).unwrap();
+        assert!(public.starts_with("-----BEGIN PUBLIC KEY-----") && !public.contains("PRIVATE"), "{public}");
+        let token = OrgKey::from_pem(&key).unwrap().token(&fragment_core::codestorage::Claims { iss: "o", sub: "s", repo: "r", scopes: &["git:read"], iat: 1, exp: 2 });
+        let (signed, sig) = token.rsplit_once('.').unwrap();
+        let sig = p256::ecdsa::Signature::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig).unwrap()).unwrap();
+        let verifying = p256::ecdsa::VerifyingKey::from_public_key_pem(&public).unwrap();
+        assert!(verifying.verify(signed.as_bytes(), &sig).is_ok(), "the half verifies the cell's token");
+        assert!(public_half("not a key").is_err());
     }
 
     /// Goal: a store's kind is one of three names, and nothing else.

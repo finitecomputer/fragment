@@ -670,12 +670,14 @@ name = "fragment-devstack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "flate2",
  "fragment-core",
  "fragment-fakes",
  "fragment-proto",
  "httparse",
  "libc",
+ "p256",
  "reqwest",
  "rusqlite",
  "serde_json",
