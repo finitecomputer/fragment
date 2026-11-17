@@ -34,6 +34,10 @@ The survey's `parts` lists them: `brains` (each a folder under
 step 4 (personality). Load `brain-finite` before the brains, and
 `apps-finite` before the sites.
 
+Then, in every import, do "Sites on finite.site" (below), even when
+`parts` lists no sites: the old agent's sites are there, and a move's
+stage never holds `sites/`.
+
 **Run each block below as one command, as written.** Your terminal
 starts every command in your work folder, and a variable or a `cd` never
 carries over to the next: each block sets what it needs and names every
@@ -244,13 +248,17 @@ Write each old address (`sites/<site>.json`'s `url`, else
 The old agent's sites are also on finite.site, each a git repository it
 owned. From there, bring over each site the zip didn't, and send a site's
 old address on to its new one once your owner makes it public. Do this
-after the zip's sites, or alone when your owner asks for their old sites
-later (`SKILL.md`, step 0).
+in every import, after the zip's sites, and when the zip has none: a
+move's stage never does, so in a move every site comes from here. Do it
+alone when your owner asks later for their old sites, or to point an
+old address (`SKILL.md`, step 0).
 
 **The key.** finite.site knows the old agent by its Nostr key. A move
 puts that key in your owner's Vault for you, and it never comes to you:
 each request you send to finite.site carries its placeholder, and your
-computer has the Vault sign it on the way. Find the placeholder:
+computer has the Vault sign it on the way. You never need the key
+itself, nor the old `fsite` tool: every step here, pointing an old
+address too, works with the placeholder alone. Find the placeholder:
 
 ```sh
 curl -fsS http://api.fragment.internal/api/computer | jq -r --arg a "$FRAGMENT_AS_AGENT" '.agents[] | select(.fragment == $a) | .credentials[] | select((.provider | startswith("nostr-")) and (.hosts | index("finite.site"))) | "\(.provider) \(.placeholder)"'
@@ -364,7 +372,8 @@ A 200 answers `redirect_to`, the new address. Check it: `curl -sS -o
 and the new address. Every page of the old address now goes to the
 same page at the new one. A site kept private gets no redirect: its old
 address keeps serving as it did, to those it was shared with. In a move,
-every site stays private, so none is pointed. With no key (above),
+every site stays private, so none is pointed until your owner makes one
+public here and asks you to point it. With no key (above),
 nothing is pointed: say so, and that the old address still serves.
 
 ## The old platform, and this one
@@ -414,4 +423,6 @@ Tell your owner, in the report:
   ("Whose it is").
 - **Old sites:** one made public here sends its old address's visitors
   to its new one. The others keep serving at their old addresses until
-  they are turned off. Give them the new addresses.
+  they are turned off. Give them the new addresses. For one kept private
+  (in a move, every one), their next step: make it public here, then ask
+  you to point its old address at the new one.
