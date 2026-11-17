@@ -52,8 +52,8 @@
 //! another (`(async () => {}).constructor`); a `Worker` or `importScripts` of
 //! a `blob:` URL; a `<script>` or an event handler a page makes
 //! (html_sinks.rs refuses those); and what this repo does not write: Hermes'
-//! own browser tools drive a browser on a computer (images/hermes/Dockerfile
-//! installs the agent-browser they run), as Hermes' code.
+//! own browser tool (browser_exec) drives a browser on a computer, as
+//! Hermes' code.
 //!
 //! An exception is a place that must run a string as script: `ALLOWED`, each
 //! with why, empty today. Like html_sinks' list, an entry that no longer

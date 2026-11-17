@@ -33,16 +33,17 @@
 # what changes a version). That holds while the deploying machine's build
 # cache keeps the layers: a cold cache rebuilds them, stamped anew.
 
-# Hermes v0.21.7 (git tag v0.21.7, commit 71d34bad1045, 2026-10-12; its
-# install stamp says 0.21.7 at that commit), pinned by digest. Upstream
+# Hermes v0.23.2 (git tag v0.23.2, commit ae2a81ccc00e, 2026-11-16; its
+# install stamp says 0.23.2 at that commit), pinned by digest. Upstream
 # publishes a release as its last attempt's versioned tag
 # (`rc.<N>-vX.Y.Z-desktop`) and moves `stable-desktop` and `latest-desktop`
-# to it; v0.21.7's is rc.15, and no tag `v0.21.7-desktop` exists. A bare
+# to it; v0.23.2's is rc.13 (`v0.23.2-desktop` is the same digest). A bare
 # version tag is not always the release: `v0.21.6-desktop` was an earlier
 # attempt's build, not v0.21.6. A next release is pinned the same way: its
 # attempt's tag and digest, checked against its install stamp's commit and
-# version (`/opt/hermes/install-stamp.json`).
-ARG HERMES=nousresearch/hermes-agent:rc.15-v0.21.7-desktop@sha256:04c1a71a37da7d143202454234cf6952000e827e8ae47b36f7c26f1372a9c138
+# version (`/opt/hermes/install-stamp.json`). The digest is the release's
+# index, for linux/amd64 and linux/arm64 alike.
+ARG HERMES=nousresearch/hermes-agent:rc.13-v0.23.2-desktop@sha256:87f24ae4be14980a3f2334bfe6516695253cb36dee5e9113b4348feea304c2ca
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
@@ -146,20 +147,6 @@ RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.
       'exec /opt/gws/gws "$@"' > /usr/local/bin/gws \
  && chmod 0755 /usr/local/bin/gws \
  && /usr/local/bin/gws --version | grep -q '0\.22\.5'
-# agent-browser, the CLI Hermes' built-in browser tools drive (each
-# profile's `browser.backend: "off"`: boot/src/hermes.rs). Hermes' image
-# carries none (its default browser is Browser Use's browser_exec), and its
-# browser tools look for it only in its PM's store or on PATH, never
-# installing it to see whether to offer themselves: without it an agent has
-# no browser_* tool. Fetched by Hermes' own PM, at the version and hash its
-# lock pins, and put on PATH: PM writes beside a sealed store (the image's)
-# only into its home's (HERMES_HOME/tools, which /data would replace), so it
-# fetches into a scratch home, and its one binary (a native one) is
-# installed from there.
-RUN HERMES_HOME=/tmp/pm-agent-browser /opt/hermes/.venv/bin/python -c 'from pm import ensure, installed_package; ensure("agent-browser", explicit=True); print(installed_package("agent-browser").binary)' > /tmp/agent-browser.path \
- && install -m 0755 "$(tail -n 1 /tmp/agent-browser.path)" /usr/local/bin/agent-browser \
- && rm -rf /tmp/pm-agent-browser /tmp/agent-browser.path \
- && /usr/local/bin/agent-browser --version | grep -q '^agent-browser [0-9]'
 
 # Root for the session (Paul, 2026-10-05: "hermes needs to be able to
 # install binaries (not persisted)"). Hermes stays its unprivileged user, as
@@ -207,10 +194,31 @@ RUN mv /opt/hermes/skills /opt/fragment/bundled-skills \
 
 # The gateway is hermes-boot's main program (preloaded): no s6 gateway
 # service, which upstream's reconciler starts from a restored
-# gateway_state.json, a second gateway (S3b, cut b). The build fails if no
-# script of that name is there to remove, or another still runs it.
+# gateway_state.json, a second gateway (S3b, cut b). Nor upstream's
+# `profile-gateways` service (v0.23): an s6-svscan, as Hermes' user, over
+# the per-profile gateways `hermes gateway start` registers in
+# /run/hermes-service, which only that reconciler makes; without it the
+# scan fails and s6 restarts it every second. The build fails if no script
+# or service of those names is there to remove, or another still runs or
+# scans them.
 RUN rm /etc/cont-init.d/02-reconcile-profiles \
- && ! grep -rqs container_boot /etc/cont-init.d
+ && rm /etc/s6-overlay/s6-rc.d/user/contents.d/profile-gateways \
+ && rm -r /etc/s6-overlay/s6-rc.d/profile-gateways \
+ && ! grep -rqs container_boot /etc/cont-init.d \
+ && ! grep -rqs 'exec .*s6-svscan' /etc/s6-overlay/s6-rc.d
+
+# A login shell's PATH is Debian's with the computer's Python environment
+# first (fragment-python.sh, below), as each command of an agent's terminal
+# runs in one: `python` and `pip` are that environment's, and `hermes` is
+# the image's shim (/usr/local/bin/hermes, which refuses `cron`). Upstream's
+# hermes.sh (v0.23) would put Hermes' venv and its own bin ahead of both,
+# and its home's .local/bin (/opt/data, not ours). Hermes' terminal already
+# appends the gateway's PATH directories a login profile dropped, after the
+# login PATH (`tools/environments/local.py`, `_append_dropped_path_entries`),
+# so nothing it needs is lost. The build fails if it is not there to remove,
+# or another login script still names Hermes' directories.
+RUN rm /etc/profile.d/hermes.sh \
+ && ! grep -rqs /opt/hermes /etc/profile.d /etc/profile /etc/environment
 
 # What our agents use is in the image, never installed at run time (lazy
 # installs are off: boot/src/hermes.rs, `managed_config`). Hermes'
@@ -272,6 +280,25 @@ RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(
  && rm -rf /tmp/uv-cache /tmp/npm-cache /tmp/playwright-requirements.txt /opt/fragment/python/playwright/driver/node \
  && /usr/local/bin/python3 -m compileall -q --invalidation-mode unchecked-hash /opt/fragment/python > /dev/null \
  && test "$(PYTHONPATH=/opt/fragment/python /usr/local/bin/python3 -c 'from importlib.metadata import version; print(version("playwright"))')" = "$(/usr/local/bin/playwright --version | sed 's/^Version //')"
+# Hermes' own Chrome for Testing (its PM's `chromium`, 405 MB) goes: no
+# browser here runs it. Each profile names the system Chromium to Hermes
+# (`browser.executable_path`: boot/src/hermes.rs), the desktop's Browser
+# icon runs it, and Chrome for Testing fails Cloudflare's bot check where
+# the system Chromium passes (Paul's prod agent, 2026-10-28). Its PM names
+# the store's directory after the Playwright release Hermes pins, which
+# since v0.23.2 is the image's own (`chromium-1248`), so it would also
+# stand where Playwright looks for its Chromium (the final stage's links).
+# The path upstream baked for it (`/etc/hermes/chromium-executable-path`,
+# under `chrome-linux64` or `chrome-linux-arm64`) goes with it, and its PM
+# then reports chromium `outdated`, as for any package not in the store.
+RUN for d in /opt/hermes/tools/chromium-*; do \
+      [ -e "$d" ] || continue; \
+      exe="$(cat /etc/hermes/chromium-executable-path)" \
+      && case "$exe" in "$d"/*) ;; *) exit 1 ;; esac \
+      && "$exe" --version | grep -q '^Google Chrome for Testing ' && rm -r "$d" || exit 1; \
+    done \
+ && rm -f /etc/hermes/chromium-executable-path \
+ && ! ls -d /opt/hermes/tools/chromium* 2>/dev/null
 
 # Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
 # sealed, so nothing can make a .pyc stale.
@@ -393,8 +420,8 @@ fi
 exec /usr/local/bin/node "$@"
 EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
-COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/tool_threads.py /opt/fragment/tool_threads.py
+COPY images/hermes/relay_stop.py /opt/fragment/relay_stop.py
 COPY images/hermes/deploy_wait.py /opt/fragment/deploy_wait.py
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 COPY --from=plugin /opt/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-deploy-wait
@@ -497,20 +524,31 @@ RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(
 # What the boot reads instead of finding it each time: the lean plugin list;
 # the image's Chromium, /opt/fragment/bin/chromium
 # (regular /usr/bin/chromium from the pinned desktop base, always with the
-# flags a container needs: boot/src/hermes.rs); and the platform skill every profile
-# has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs).
-# The adapter extends the pinned Bot Desktop's start, attach and stop paths;
-# the boot refuses upstream source changes before it installs those hooks.
-COPY images/hermes/desktop_browser.py /opt/hermes/tools/bot_desktop/fragment_browser.py
+# flags a container needs and `navigator.webdriver` false: boot/src/hermes.rs);
+# and the platform skill every profile has, from the fragment CLI above
+# (`fragment skill`: boot/src/skills.rs).
 # A link opened on an agent's desktop (a terminal's `claude auth login`
 # sign-in, xdg-open) opens in that agent's own Chromium: the desktop's
 # default web browser, as Xfce's helper (exo-open reads it), in place of
 # Debian's sensible-browser, which names none here, so Xfce asked its person
-# which browser to use (FIN-351).
+# which browser to use (FIN-351). It runs what the desktop's Browser icon
+# runs (Hermes' `dock_argv`) with the link: a browser already on the
+# agent's profile takes it (Chromium's own profile singleton), and
+# browser_exec attaches to one it starts.
 COPY --chmod=755 <<'EOF' /opt/fragment/bin/desktop-browser
 #!/bin/sh
 # The desktop's web browser (images/hermes/Dockerfile): the agent's own.
-exec /opt/hermes/.venv/bin/python /opt/hermes/tools/bot_desktop/fragment_browser.py --open "${1:-about:blank}"
+exec /opt/hermes/.venv/bin/python -c '
+import os, sys
+sys.path.insert(0, "/opt/hermes")
+if not os.environ.get("DISPLAY"):
+    sys.exit("desktop browser: the desktop is not running; open the link on it")
+from tools.bot_desktop import browser
+launch = browser.dock_launch()
+if launch is None:
+    sys.exit("desktop browser: this computer has no Chromium")
+os.execv(launch[0], [*browser.dock_argv(*launch), sys.argv[1]])
+' "${1:-about:blank}"
 EOF
 COPY <<'EOF' /usr/share/xfce4/helpers/fragment-browser.desktop
 [Desktop Entry]
@@ -526,10 +564,11 @@ X-XFCE-CommandsWithParameter=%B "%s";
 EOF
 RUN sed -i 's/^WebBrowser=.*/WebBrowser=fragment-browser/' /etc/xdg/xfce4/helpers.rc \
  && grep -qx 'WebBrowser=fragment-browser' /etc/xdg/xfce4/helpers.rc
+# It also changes one line of Hermes' browser_exec: the agent's tab on its
+# Bot Desktop comes to the front (boot/src/desktop.rs, `front_tabs`), its
+# bytecode compiled again here.
 RUN /opt/fragment/bin/hermes-boot build-info \
- && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash \
-    /opt/hermes/tools/browser_tool_session.py /opt/hermes/tools/bot_desktop/browser.py \
-    /opt/hermes/tools/bot_desktop/runtime.py /opt/hermes/tools/bot_desktop/fragment_browser.py
+ && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/tools/browser_use_cli.py
 # Playwright launches the system Chromium, the one the desktop and Hermes'
 # browser run (/opt/fragment/bin/chromium: /usr/bin/chromium with a
 # container's flags), never a browser of its own: Chrome for Testing fails
