@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+# Local models on a Linux box (docs/self-host.md, "Local models on the
+# box's Mac"): whisper.cpp's server on the CPU, built from its pinned,
+# checksummed source release on a pinned base (the multi-arch index digest,
+# so amd64 and arm64 share it), with ffmpeg for --convert. Run it on the
+# box's loopback, the models mounted read-only:
+#   docker run -d --restart unless-stopped --read-only --tmpfs /tmp \
+#     --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:8178:8080 \
+#     -v ~/local-models/models:/models:ro <image> --host 0.0.0.0 --port 8080 \
+#     -m /models/ggml-small.bin -t 4 -l auto --convert --tmp-dir /tmp \
+#     --vad-model /models/ggml-silero-v6.2.0.bin -nlp
+ARG BASE=debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+
+FROM ${BASE} AS build
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+# v1.9.5 (tag object d2a764c6, commit d1be6fde), GitHub's source archive
+ADD --checksum=sha256:ff1a9053feb509ff9d7729703355541ae9690073a6b1c40eb692c962e0dc1720 \
+    https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v1.9.5.tar.gz /src/whisper.cpp.tar.gz
+RUN tar -C /src -xzf /src/whisper.cpp.tar.gz
+WORKDIR /src/whisper.cpp-1.9.5
+# NATIVE=ON tunes to the building machine's CPU; OFF for an image that moves
+ARG NATIVE=OFF
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=${NATIVE} \
+      -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_SERVER=ON -DWHISPER_SDL2=OFF -DWHISPER_CURL=OFF \
+ && cmake --build build -j"$(nproc)" --target whisper-server
+
+FROM ${BASE}
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/whisper.cpp-1.9.5/build/bin/whisper-server /usr/local/bin/
+USER 65532:65532
+WORKDIR /tmp
+EXPOSE 8080
+ENTRYPOINT ["whisper-server"]

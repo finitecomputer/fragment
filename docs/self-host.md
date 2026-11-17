@@ -32,6 +32,7 @@ in the cell: a self-host change to master does not touch `cell/`,
 | 1 | The runtime: celld | dev and the e2e (below) |
 | 2 | Computers on the box's microVM engine | dev and the e2e, on celld's krun engine (`CELLD_CONTAINER_ENGINE=krun:<socket>`) |
 | 3 | Models from a file | dev's `FRAGMENT_MODELS_FILE` |
+| 3a | Local models on the box's Mac: Whisper through celld's `AI` | dev and the e2e on celld: `CELLD_AI_FILE` (below) |
 | 4 | Sign-in: the identity door, an OpenID Connect relying party behind WorkOS's endpoints | dev on celld and the e2e's `door` section, against the OpenID Connect fake (below) |
 | 9 | LAN mode | not yet |
 | 5 | Files: macrofiche, the code-store contract | not yet: the code.storage fake |
@@ -74,7 +75,7 @@ Every binding and runtime API master's cell uses, against the fork's
 | `r2_buckets` (`BLOBS`) | yes, `R2Bucket` | works | |
 | `assets` (`ASSETS`, `run_worker_first`, `html_handling`, `not_found_handling`) | yes, `Fetcher` | works | |
 | `secrets_store_secrets` | yes, `Fetcher`: read from the node's secrets backend | works | seam 12; people's secrets stay in the Vault object |
-| `ai` (`AI`: Workers AI) | bound (`Ai`); every call rejects, "this node has no Workers AI" | degraded | text tiers on an OpenAI-compatible API (seam 3); a slot left on Workers AI, image steps, transcription and embeddings fail. Dev and the e2e keep the fake (`FRAGMENT_AI_URL`), and their local config drops `ai` on either runtime |
+| `ai` (`AI`: Workers AI) | bound (`Ai`); a model the node's `CELLD_AI_FILE` names is answered from the box's own endpoint, in the catalog's shapes (Whisper so far), and every other rejects, "this node has no Workers AI model …" | degraded | transcription on the box's own Whisper (Local models on the box's Mac, below); text tiers on an OpenAI-compatible API (seam 3); a slot left on Workers AI, image steps and embeddings fail. Dev and the e2e keep the fake (`FRAGMENT_AI_URL`), and their local config drops `ai`, unless a celld node has `CELLD_AI_FILE`: then the cell calls the binding, and the rest of its models reach the fake through the file's `"*"` |
 | `send_email` (`EMAIL`) | bound (`SendEmail`); every send rejects, `E_NO_MAILER` | degraded | a failed send: Mail, below. Dev and the e2e keep the mail fake (`FRAGMENT_MAIL_URL`) |
 | `browser` (`BROWSER`) | bound (`Fetcher`); every fetch rejects, "this node has no Browser Rendering" | degraded | a card's shot fails, as one Browser Rendering fails. Seam 7 brings a renderer |
 | `images` (`IMAGES`) | bound (`ImagesBindingImpl`); every output rejects, "this node has no Images" | degraded | an icon's making offers no candidate, and an upload that needs fitting fails (`host_failed`); a PNG at the icon's size is kept as it is |
@@ -191,6 +192,142 @@ self-hosted model names its price in its slot, zero for the box's own:
 ```sh
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model-key cargo xtask dev
 ```
+
+## Local models on the box's Mac
+
+A box can run models installed on its own machine, with no cloud call.
+Voice memos are the first: Paul, 2026-11-17, "STT using some small (like
+under 1gb) voice model … a nice proof of concept for if someone has other
+models installed locally".
+
+**How it works.** The cell is unchanged: it transcribes through Workers AI's
+Whisper (`@cf/openai/whisper-large-v3-turbo`, `crates/core/src/transcribe.rs`)
+on its `AI` binding, as on Cloudflare. On celld that binding answers a model
+the node's operator names in `CELLD_AI_FILE` from an endpoint of the box's,
+translating Cloudflare's shapes in and out (celld's docs/services/
+workers-ai.md). The cell holds no celld code, and celld holds no fragment
+code. A deployment then names an `ai_gateway` of any name (the binding
+takes the option and lets it go), or the route says it has none.
+
+```json
+{ "models": {
+    "@cf/openai/whisper-large-v3-turbo": { "engine": "whisper.cpp", "origin": "http://host.lima.internal:8178" },
+    "*": { "engine": "workers-ai", "origin": "http://127.0.0.1:8796" } } }
+```
+
+An entry's engine is how celld speaks to the endpoint: `whisper.cpp`
+(whisper.cpp's server), `openai` (an OpenAI-compatible
+`<base_url>/audio/transcriptions` and its `model`: speaches, LocalAI), or
+`workers-ai` (`POST <origin>/run/<model>`, answered as the binding answers;
+the dev fake is one). `"*"` is where every model the file does not name
+goes; without it they reject, as before. Another kind of model plugs in the
+same way: a catalog id, its translation, an entry.
+
+**The model.** On the spike's numbers (2026-11-17), whisper.cpp v1.9.5 with
+`large-v3-turbo` quantized to q5_0 (547 MiB, about 0.95 GB in use), on Metal.
+
+**Word error rate (%)** on LibriSpeech test-clean (CC BY 4.0), with VAD on and
+language auto, as the cell asks:
+
+| Model | Clean, 101 clips | Phone, 30 clips (8 kHz, Opus 12 kbps, about 11 dB pink noise) | Café, 30 clips (babble about 8 dB down) |
+|---|---|---|---|
+| large-v3-turbo-q5_0 | 2.9 | 6.4 | 7.2 |
+| small | 3.7 | 9.8 | 12.7 |
+| base | 5.6 | 14.7 | 17.9 |
+| tiny | 8.0 | 22.0 | 36.4 |
+
+**Speed of turbo-q5** for a 1-minute and a 5-minute memo:
+
+| Where | 1 min | 5 min |
+|---|---|---|
+| A fanless M5 MacBook Air, Metal | 2.3 s | 13.8 s |
+| x86, 8 threads | 16 s | 66 s |
+| The Mac's Lima VM, CPU | about real time | about real time |
+
+So the model runs on the Mac itself, not in the box's VM, which has no GPU.
+On a CPU-only box, `small` takes 3.5 s and 18 s on x86.
+
+**On the Mac** (Command Line Tools alone, no Xcode or Homebrew):
+`deploy/local-models/build-mac.sh` builds whisper.cpp with Metal and an
+audio-only ffmpeg (for what browsers, phones and chat apps record: WebM and
+Ogg Opus, MP4 AAC), and CMake when there is none. It builds each from its
+source release and fetches the models, each pinned by sha256, into
+`~/local-models`. `deploy/local-models/install-mac.sh` then runs the server
+under launchd (`chat.finite.local-whisper`, a LaunchAgent: up at login, back
+after a crash).
+
+The server listens on the Mac's loopback alone (`127.0.0.1:8178`), so
+nothing off the Mac reaches it. It runs in a `sandbox-exec` profile: no
+connection out, writes only in its own tmp, and nothing of the rest of the
+home read. At every start it checks its binaries and models against their
+pins. The box's Lima VM (vz, user-mode network) reaches the Mac's loopback
+as `host.lima.internal` (192.168.5.2). celld calls it from the host side,
+outside every isolate, so a Worker's fetch never can. A computer's egress
+refuses private addresses (sandcastle's rule; not probed against this
+port), so an agent can't call it directly either.
+
+```sh
+deploy/local-models/build-mac.sh      # about 10 min the first time
+deploy/local-models/install-mac.sh    # prints {"status":"ok"} and the 127.0.0.1 listener
+```
+
+**In the VM**, name it for the node, then run as before:
+
+```sh
+echo '{"models":{"@cf/openai/whisper-large-v3-turbo":{"engine":"whisper.cpp","origin":"http://host.lima.internal:8178"}}}' > ~/ai.json
+CELLD_AI_FILE=$HOME/ai.json cargo xtask dev --runtime celld
+```
+
+Dev and the e2e take it on celld (`devstack::celld::CelldTools::ai_file`):
+- the cell calls the node's binding (no `FRAGMENT_AI_URL`, `AI_GATEWAY_ID`
+  `box`), and its local config keeps `ai`;
+- the node's file is the box's file plus a `"*"` to the Workers AI fake, so
+  every other model answers as before;
+- the e2e's `transcribe` section then hears a real voice
+  (`fixtures/speech-jfk.ogg`), and the checks that read the fake's Whisper
+  calls skip, saying why.
+
+A Linux box runs the same server in a container
+(`deploy/local-models/Dockerfile.whisper-server`), published on its
+loopback.
+
+**The ledger** charges a transcription as on Cloudflare: 46.63 neurons a
+minute of audio, which with the 5% fee and the 50% margin is about $0.0008 a
+minute, though no neuron is spent. That is unchanged here. Pricing a box's
+own model is seam 10's.
+
+**Text and embeddings from Ollama, LM Studio, llama.cpp or MLX** need no
+binding: seam 3's models file names an OpenAI-compatible endpoint per slot.
+A dev models file takes `http://127.0.0.1:<port>` alone, and in the box's VM
+the Mac is `host.lima.internal`. So forward a loopback port in the VM to the
+Mac's (Ollama listens on the Mac's loopback, `11434`, by default):
+
+```sh
+# in the VM, as a systemd unit
+socat TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr TCP:host.lima.internal:11434
+```
+
+```jsonc
+// FRAGMENT_MODELS_FILE (the key file holds any word: Ollama takes none)
+{
+  "cheap":  { "provider": "openai", "base_url": "http://127.0.0.1:11434/v1", "key": "local", "model": "qwen3:8b", "price": { "input": 0, "output": 0 } },
+  "medium": { "provider": "openai", "base_url": "http://127.0.0.1:11434/v1", "key": "local", "model": "qwen3:8b", "price": { "input": 0, "output": 0 } },
+  "embeddings": { "provider": "openai", "base_url": "http://127.0.0.1:11434/v1", "key": "local", "model": "nomic-embed-text",
+                  "dimensions": 768, "document_prefix": "search_document: ", "query_prefix": "search_query: ", "price": { "input": 0, "output": 0 } }
+}
+```
+
+That is read against the code and the e2e's coverage of OpenAI-compatible
+slots on loopback, not run against a real Ollama. A new embeddings model
+re-embeds each fragment's index. Slots left out stay on Workers AI, which
+celld lacks.
+
+**Not yet.**
+- whisper.cpp's server runs one call at a time. Past `concurrency`
+  (default 4), celld answers 429 and the caller tries again.
+- A LaunchAgent runs while its user is logged in, as the box's VM does.
+- `small` with VAD on dropped two words of the 11 s JFK clip, where turbo
+  did not.
 
 ## 4. Sign-in: the identity door
 
@@ -566,7 +703,8 @@ app's own trust and tailnet).
 | Sign-in | Finite's WorkOS AuthKit | the identity door (seam 4) in front of an OpenID Connect provider: tsidp on a tailnet, the org's own IdP on an intranet; the door's client registered there, the logins' domains vouched for where the provider sends no `email_verified` |
 | Fragment files (git) | Finite's code.storage org | its own code.storage org and PEM key (`codestorage.*`); its files then live at that vendor, off the box, so macrofiche (seam 5) matters |
 | Text models | OpenRouter on Finite's key, or Finite Private | an OpenAI-compatible endpoint and key for every slot (`cheap`, `medium`, `fallback`, `vision`, Deep), each priced; a slot left out falls back to Workers AI, which celld lacks. A deployment's `base_url` is https on a host name, no port; dev's models file takes this machine's `http://127.0.0.1:<port>` (seam 3) |
-| Semantic search (embeddings) | Workers AI bge-m3 | an OpenAI-compatible `/embeddings` endpoint, such as TEI (`models.embeddings`) |
+| Semantic search (embeddings) | Workers AI bge-m3 | an OpenAI-compatible `/embeddings` endpoint, such as TEI or Ollama (`models.embeddings`; Local models on the box's Mac) |
+| Voice transcription (iOS voice memos too) | Whisper on Workers AI | a Whisper on the box's own machine, named in celld's `CELLD_AI_FILE`, and an `ai_gateway` of any name (Local models on the box's Mac) |
 | Agents' paid tools (X, Firecrawl, fal, Browser Use, Perplexity, Places, xAI, ElevenLabs) | Finite's operator keys | its own key per row, or the row dropped |
 | Google connections | Finite's WorkOS Pipes and OAuth clients | its own OAuth client per provider in its own Pipes; redirect `https://<platform>/api/connections/<provider>/callback`; for Google, an internal Workspace app |
 | Usage and credit | every call charged; guests and zero balances refused | no Stripe; `default_plan` `seat` or `seat_always_on`; `operators` grant credit; own keys still priced by the book |
@@ -593,8 +731,7 @@ browser, so the tailnet is enough.
 
 | Feature | Why | On celld today |
 |---|---|---|
-| Voice transcription (iOS voice memos too) | Whisper on Workers AI | fails: celld's `AI` rejects ("this node has no Workers AI"); a later seam moves it to OpenRouter |
-| Job steps `ai.image`, `ai.video`, `ai.decide`; embeddings | Workers AI (video through AI Gateway too) | fails, as above; a later seam |
+| Job steps `ai.image`, `ai.video`, `ai.decide`; embeddings | Workers AI (video through AI Gateway too) | fails: celld's `AI` rejects a model the box serves none of ("this node has no Workers AI model …"); a later seam |
 | Drawn icons, and fitting uploaded ones | Workers AI and Cloudflare Images | a making offers no candidate, a fitting fails (`host_failed`): celld's `AI` and `IMAGES` reject; a 256×256 PNG is kept as it is |
 | Preview cards | Browser Rendering | a shot fails: celld's `BROWSER` rejects; seam 7's renderer |
 | Platform email | Email Sending | a failed send: celld's `EMAIL` rejects (`E_NO_MAILER`); an invite to someone new is refused (debt) |

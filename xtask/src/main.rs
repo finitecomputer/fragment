@@ -353,6 +353,10 @@ fn dev(args: &[String]) -> Result<()> {
         // --real-agent puts the text tiers on real models
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
+        // on celld with CELLD_AI_FILE (docs/self-host.md, "Local models on
+        // the box's Mac"): those models from the box's own endpoints, through
+        // the node's binding, and the rest from the fake as before
+        ai_file: celld.as_ref().and_then(|c| c.ai_file.clone()),
         models: named.map(|(models, _, _)| models.clone()),
         // its slots on an OpenAI-compatible API, each on the one key dev binds
         model_keys: named
@@ -441,6 +445,9 @@ fn dev(args: &[String]) -> Result<()> {
             Some(f) => println!("  models:       {} on {}'s models (its key: {}); the rest on the Workers AI fake at {}", f.slots.join(", "), f.from.display(), dev_agent::MODEL_KEY_FILE_ENV, ai.url),
             None => println!("  models:       {} (the Workers AI fake: echoes, never a real model; --real-agent for real ones)", ai.url),
         },
+    }
+    if let Some(f) = celld.as_ref().and_then(|c| c.ai_file.as_ref()) {
+        println!("  box models:   {} from the box's own endpoints ({}), through the node's AI binding", devstack::celld::ai_file_models(f)?.join(", "), f.display());
     }
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
     match &openbao {

@@ -884,16 +884,23 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
     let sent = s.ai.calls().get(calls).cloned();
     let metered = s.eventually(Duration::from_secs(20), || entries(api, owner_id, "aig:").len() == before + 1);
     let aig = entries(api, owner_id, "aig:");
+    // the box's own Whisper (CELLD_AI_FILE) hears the stub's memo as what
+    // it is, no words the fake would read from it
+    let boxs = s.whisper_is_the_boxs();
     s.ok(
         "a voice memo through the intercept, its agent named by its key (agent:<name>), is transcribed by Whisper and charged to the agent's owner",
-        said == "heard: hello from a voice memo" && metered && aig.iter().all(|e| charged(e).is_some()),
+        (if boxs { said.starts_with("heard:") } else { said == "heard: hello from a voice memo" }) && metered && aig.iter().all(|e| charged(e).is_some()),
         json!({ "said": said, "aig": aig }),
     );
-    s.ok(
-        "the guest's key goes no further than the computer: the vendor sees no authorization and no agent: in its input",
-        sent.as_ref().is_some_and(|c| c.model == TRANSCRIBE_MODEL && c.authorization.is_none() && !c.body.to_string().contains("agent:") && !c.metadata.to_string().contains(agent)),
-        json!(sent.map(|c| json!({ "model": c.model, "authorization": c.authorization, "metadata": c.metadata }))),
-    );
+    let label = "the guest's key goes no further than the computer: the vendor sees no authorization and no agent: in its input";
+    match boxs {
+        true => s.skip(label, "Whisper is the box's own model here (CELLD_AI_FILE), so the fake that would show its input hears none"),
+        false => s.ok(
+            label,
+            sent.as_ref().is_some_and(|c| c.model == TRANSCRIBE_MODEL && c.authorization.is_none() && !c.body.to_string().contains("agent:") && !c.metadata.to_string().contains(agent)),
+            json!(sent.map(|c| json!({ "model": c.model, "authorization": c.authorization, "metadata": c.metadata }))),
+        ),
+    }
     let said = fetched(s, 71, &format!("think as agent:{agent} hello by key"))?;
     s.ok("a chat call names its agent the same way, by its key alone", said == "thought: echo: hello by key", &said);
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));

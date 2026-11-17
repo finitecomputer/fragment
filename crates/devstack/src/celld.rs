@@ -243,12 +243,54 @@ fn unchunk(mut b: &[u8]) -> Result<Vec<u8>> {
 
 /// What a celld stack runs on: celld itself (`CELLD_BIN`), the esbuild it
 /// bundles the cell's entry with (`CELLD_ESBUILD`, else the newest in
-/// worker-build's cache), and the engine its computers run on (`Engine`).
+/// worker-build's cache), the engine its computers run on (`Engine`), and
+/// the box's own models (`CELLD_AI_FILE`, celld's setting: `ai_file`).
 #[derive(Debug, Clone)]
 pub struct CelldTools {
     pub celld: PathBuf,
     pub esbuild: PathBuf,
     pub engine: Engine,
+    /// The box's own models (docs/self-host.md, "Local models on the box's
+    /// Mac"): celld's AI file, each catalog id its node answers from an
+    /// endpoint of the box's (a Whisper on the Mac the box's VM runs on).
+    /// With one, the cell's Workers AI calls go to the node's `ai` binding,
+    /// and every model the file does not name to the Workers AI fake, as
+    /// before (`Fleet::ai_file`, `node_ai_file`).
+    pub ai_file: Option<PathBuf>,
+}
+
+/// The variable naming celld's AI file (celld's docs/services/workers-ai.md).
+pub const AI_FILE_VAR: &str = "CELLD_AI_FILE";
+
+/// The catalog ids an AI file names (`{"models": {"<id>": {…}}}`), read
+/// as a node reads it; celld checks the rest when it starts.
+pub fn ai_file_models(path: &Path) -> Result<Vec<String>> {
+    anyhow::ensure!(path.is_absolute(), "{AI_FILE_VAR} is an absolute path, not {}", path.display());
+    let text = fs::read(path).with_context(|| format!("read {AI_FILE_VAR} {}", path.display()))?;
+    anyhow::ensure!(text.len() <= 64 * 1024, "{AI_FILE_VAR} {} is over 64 KiB", path.display());
+    let v: serde_json::Value = serde_json::from_slice(&text).with_context(|| format!("{AI_FILE_VAR} {} is not JSON", path.display()))?;
+    let models = v["models"].as_object().with_context(|| format!("{AI_FILE_VAR} {} names its models: {{\"models\": {{\"<catalog id>\": {{\"engine\", …}}}}}}", path.display()))?;
+    Ok(models.keys().cloned().collect())
+}
+
+/// The node's AI file (its `CELLD_AI_FILE`), beside the project's
+/// `.dev.vars`: the box's file (`CelldTools::ai_file`), and, unless it names
+/// one, a `"*"` that sends every other model to `rest` (the Workers AI
+/// fake), as the cell's calls went before.
+pub fn node_ai_file(project: &Path) -> PathBuf {
+    project.join(".celld.ai.json")
+}
+
+/// Writes `node_ai_file` from the box's `file`, its other models to `rest`.
+pub fn write_node_ai_file(project: &Path, file: &Path, rest: Option<&str>) -> Result<()> {
+    ai_file_models(file)?;
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(file)?)?;
+    let models = v["models"].as_object_mut().context("an AI file's models")?;
+    if let (false, Some(origin)) = (models.contains_key("*"), rest) {
+        models.insert("*".into(), serde_json::json!({ "engine": "workers-ai", "origin": origin }));
+    }
+    fs::write(node_ai_file(project), serde_json::to_string_pretty(&v)?)?;
+    Ok(())
 }
 
 impl CelldTools {
@@ -268,7 +310,11 @@ impl CelldTools {
         if !esbuild.is_file() {
             bail!("no esbuild at {} (CELLD_ESBUILD)", esbuild.display());
         }
-        Ok(CelldTools { celld, esbuild, engine })
+        let ai_file = std::env::var_os(AI_FILE_VAR).filter(|v| !v.is_empty()).map(PathBuf::from);
+        if let Some(f) = &ai_file {
+            ai_file_models(f)?;
+        }
+        Ok(CelldTools { celld, esbuild, engine, ai_file })
     }
 }
 
@@ -337,8 +383,16 @@ pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)>
         // the node's own settings: its secrets backend, and its computers'
         // engine (seam 2): with none, its deploy builds no image
         .env("CELLD_SECRETS_FILE", &secrets)
+        .env_remove(AI_FILE_VAR)
         .env(Engine::VAR, tools.engine.value())
         .env("NO_COLOR", "1");
+    // the box's own models: the file `Fleet::configure` wrote from
+    // CELLD_AI_FILE's, its other models to the fake
+    if tools.ai_file.is_some() {
+        let ai = node_ai_file(&opts.project);
+        anyhow::ensure!(ai.is_file(), "no AI file for the celld node at {} (Fleet::configure writes it from {AI_FILE_VAR})", ai.display());
+        cmd.env(AI_FILE_VAR, ai);
+    }
     cmd.current_dir(&opts.project);
     let t0 = Instant::now();
     let child = spawn_node(cmd, opts, out, heard.clone())?;
@@ -458,7 +512,7 @@ mod tests {
         fs::write(dir.join("wrangler.jsonc"), config.to_string()).unwrap();
         let e = celld_config(&dir).unwrap_err().to_string();
         assert!(e.contains("wrangler.local.jsonc"), "{e}");
-        crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[]).unwrap();
+        crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[], false).unwrap();
         let local = json(&crate::local_config(&dir));
         for _ in 0..2 {
             let v = json(&celld_config(&dir).unwrap());
