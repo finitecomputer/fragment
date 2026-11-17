@@ -4,7 +4,7 @@
 use fragment_proto::computer::LifeEnd;
 use serde::{Deserialize, Serialize};
 
-use crate::computer::limits::{IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, WONT_WAKE_RETRY_MS};
+use crate::computer::limits::{ALARM_LATE_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, WONT_WAKE_RETRY_MS};
 
 mod event;
 mod legacy;
@@ -311,19 +311,35 @@ impl Lifecycle {
     /// before the window and after it).
     fn meter(&mut self, now_ms: i64, step: &mut Step) {
         if now_ms > self.metered_to_ms {
-            if !self.always_on {
-                let (from, to) = (self.metered_to_ms, now_ms);
-                let (free_from, free_to) = self.unmetered.unwrap_or((to, to));
-                assert!(free_from <= free_to, "a window runs forward");
-                if from < free_from.min(to) {
-                    step.actions.push(Action::Meter { from_ms: from, to_ms: free_from.min(to) });
-                }
-                if free_to.max(from) < to && self.unmetered.is_some() {
-                    step.actions.push(Action::Meter { from_ms: free_to.max(from), to_ms: to });
-                }
-            }
+            self.meter_span(self.metered_to_ms, now_ms, step);
             self.metered_to_ms = now_ms;
         }
+    }
+
+    /// Awake time `[from, to)`, but what falls in the unsaved window, and
+    /// none while always on.
+    fn meter_span(&self, from: i64, to: i64, step: &mut Step) {
+        if from < to && !self.always_on {
+            let (free_from, free_to) = self.unmetered.unwrap_or((to, to));
+            assert!(free_from <= free_to, "a window runs forward");
+            if from < free_from.min(to) {
+                step.actions.push(Action::Meter { from_ms: from, to_ms: free_from.min(to) });
+            }
+            if free_to.max(from) < to && self.unmetered.is_some() {
+                step.actions.push(Action::Meter { from_ms: free_to.max(from), to_ms: to });
+            }
+        }
+    }
+
+    /// The last moment its running container was shown up: its last meter,
+    /// its phase's beginning or its sleep's step's, or work done on it.
+    fn shown_up_ms(&self) -> i64 {
+        let phase = match self.phase {
+            Phase::Awake { since_ms, .. } | Phase::Sleeping { since_ms, .. } => since_ms,
+            Phase::Asleep { .. } | Phase::Starting { .. } | Phase::Failed { .. } => i64::MIN,
+        };
+        let step = self.saving.map_or(i64::MIN, Saving::since_ms);
+        self.metered_to_ms.max(phase).max(step).max(self.worked_ms)
     }
 
     fn next_alarm(&self) -> Option<i64> {
@@ -363,6 +379,23 @@ impl Lifecycle {
     pub fn apply_with(&mut self, event: Event, now_ms: i64, rules: &Rules) -> Step {
         assert!(rules.unsaved_max_ms >= 0, "a bound is a span of time");
         let mut step = Step::default();
+        // what was metered, or passed over as silence, as this event came
+        let metered_before = self.metered_to_ms;
+        // heard late (`ALARM_LATE_MS`): metered to the last moment it was
+        // shown up, and none of the time since (FIN-511); a sleep's try
+        // under way, which this event may fail (its whole time free:
+        // `begin_unsaved`), no further than its start
+        if matches!(self.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) {
+            let shown = self.shown_up_ms();
+            if now_ms > shown + ALARM_LATE_MS {
+                let tried = match (&self.phase, self.saving) {
+                    (Phase::Sleeping { .. }, Some(Saving::Hold { .. } | Saving::Save { .. })) => self.save_asked_ms,
+                    _ => i64::MAX,
+                };
+                self.meter(shown.min(tried), &mut step);
+                self.metered_to_ms = now_ms;
+            }
+        }
         match (self.phase.clone(), event) {
             (phase, Event::Wake { why }) => {
                 // a message for its agents, or a fragment to follow: work
@@ -543,6 +576,19 @@ impl Lifecycle {
                 step.actions.push(Action::Unhold { generation });
             }
             (Phase::Sleeping { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
+                // its try heard late (its meter passed over the time since,
+                // stopping at its start) and saved: what it was shown
+                // running for up to its save's start is its owner's, from
+                // its sleep or what was metered or passed over before this
+                // event, whichever is later, so never a silence passed over
+                // before it (a hold asked again after one). One passed over
+                // by a late event before its outcome keeps what it showed
+                // before that silence unbilled: never charged falsely
+                if let Some(Saving::Save { since_ms, .. }) = self.saving {
+                    if self.metered_to_ms > since_ms {
+                        self.meter_span(self.save_asked_ms.max(metered_before), since_ms, &mut step);
+                    }
+                }
                 self.saved(now_ms, &mut step);
                 self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
                 step.actions.push(Action::Stop { generation, saved: true });
@@ -619,6 +665,11 @@ impl Lifecycle {
                 }
             }
             (Phase::Starting { generation, .. } | Phase::Awake { generation, .. }, Event::Sleep) => {
+                // a start that never came up was never metered: its sleep is
+                // metered from here, as a life is from its `Ready` (FIN-511)
+                if matches!(self.phase, Phase::Starting { .. }) {
+                    self.metered_to_ms = now_ms;
+                }
                 self.held_until_ms = now_ms;
                 self.keepalives = 0;
                 self.tabs = 0;

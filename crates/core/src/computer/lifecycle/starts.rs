@@ -485,8 +485,9 @@ mod tests {
         let mut l = Lifecycle::new();
         let g = started(&mut l, T);
         l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
-        // a long turn: the record's hold ran out long ago
-        let late = T + 3 * IDLE_MS;
+        // a long turn: the record's hold ran out (its alarm heard within
+        // `ALARM_LATE_MS` of the turn's start, as one on time is)
+        let late = T + IDLE_MS + 1_000;
         // busy, it stays awake: it is metered, and (a keepalive open past
         // SAVE_EVERY_MS) saved, never put to sleep
         assert_eq!(l.apply(Event::Alarm, late - 1).actions, vec![Action::Meter { from_ms: T + 3_000, to_ms: late - 1 }, Action::Hold { generation: g }], "busy, it stays awake");
