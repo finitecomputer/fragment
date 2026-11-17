@@ -273,6 +273,52 @@ fn a_sleep_heard_late_is_metered_to_its_last_step() {
     assert_eq!(owed(&mut l, &s, late).actions, vec![Action::Start { generation: g + 1 }], "and its start is owed");
 }
 
+/// Its owner's sleep at T + 10 s, its hold answered at T + 11 s: its save
+/// under way (`seq`), as #1302's review traced it.
+fn saving_sleep() -> (Lifecycle, u64, u64) {
+    let mut l = Lifecycle::new();
+    let g = started(&mut l, T);
+    l.apply(Event::Sleep, T + 10_000);
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 11_000));
+    (l, g, seq)
+}
+
+/// Goal (FIN-511, #1302's review): a sleep whose save's report was lost,
+/// failed by its deadline's alarm heard days on, is metered to the start
+/// of its try (its sleep), as a failed try heard on time is: none of the
+/// try (its hold, its save: free) and none of the silence, nor after it.
+/// Method: the review's trace.
+#[test]
+fn a_sleep_failed_by_a_late_alarm_meters_none_of_its_try() {
+    let (mut l, g, _) = saving_sleep();
+    let s = l.apply(Event::Alarm, T + DAYS);
+    assert_eq!(meters(&s), vec![(T + 3_000, T + 10_000)], "to its sleep: {s:?}");
+    assert!(s.actions.contains(&Action::Unhold { generation: g }) && l.unsaved_since_ms() == Some(T + DAYS), "its try failed, its window open: {s:?}");
+    assert_eq!(meters(&l.apply(Event::Alarm, T + DAYS + 60_000)), vec![], "and nothing after it: its window, free");
+}
+
+/// Goal (FIN-511, #1302's review): a sleep whose save's failure is heard
+/// days on is metered to the start of its try, as one heard on time is.
+/// Method: the review's trace, its `SaveFailed` late.
+#[test]
+fn a_sleep_failed_late_meters_none_of_its_try() {
+    let (mut l, g, seq) = saving_sleep();
+    let s = l.apply(Event::SaveFailed { generation: g, seq, why: "R2 is down".into() }, T + DAYS);
+    assert_eq!(meters(&s), vec![(T + 3_000, T + 10_000)], "to its sleep: {s:?}");
+    assert_eq!(meters(&l.apply(Event::Alarm, T + DAYS + 60_000)), vec![], "and nothing after it: its window, free");
+}
+
+/// Goal (FIN-511, the other side): an ordinary sleep that saves is
+/// metered as ever, its hold, save and stop to its end. Method: the
+/// review's trace, its save reported and its stop done on time.
+#[test]
+fn a_sleep_that_saves_is_metered_to_its_end() {
+    let (mut l, g, seq) = saving_sleep();
+    let mut m = meters(&l.apply(Event::Saved { generation: g, seq }, T + 12_000));
+    m.extend(meters(&l.apply(Event::Asleep { generation: g }, T + 13_000)));
+    assert_eq!(m, vec![(T + 3_000, T + 13_000)]);
+}
+
 /// Goal (FIN-511, path 3): a start its owner puts to sleep before it comes up
 /// meters only its sleep's steps, never the time before the start was
 /// made: on a computer's first start (none metered before it) or one

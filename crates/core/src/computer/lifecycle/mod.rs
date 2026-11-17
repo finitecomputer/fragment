@@ -375,11 +375,17 @@ impl Lifecycle {
         assert!(rules.unsaved_max_ms >= 0, "a bound is a span of time");
         let mut step = Step::default();
         // heard late (`ALARM_LATE_MS`): metered to the last moment it was
-        // shown up, and none of the time since (FIN-511)
+        // shown up, and none of the time since (FIN-511); a sleep's try
+        // under way, which this event may fail (its whole time free:
+        // `begin_unsaved`), no further than its start
         if matches!(self.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) {
             let shown = self.shown_up_ms();
             if now_ms > shown + ALARM_LATE_MS {
-                self.meter(shown, &mut step);
+                let tried = match (&self.phase, self.saving) {
+                    (Phase::Sleeping { .. }, Some(Saving::Hold { .. } | Saving::Save { .. })) => self.save_asked_ms,
+                    _ => i64::MAX,
+                };
+                self.meter(shown.min(tried), &mut step);
                 self.metered_to_ms = now_ms;
             }
         }
