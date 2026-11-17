@@ -138,9 +138,14 @@ the cut request. Two parts close this:
   Built from the chat's journal alone, it is the same in every life and
   said once. A journal that does not answer in time gives no note: a turn
   is never held back for one. Relay hands it as the inbound's `context`.
-- Before the gateway starts, our image's `hermes-boot` closes each cut
-  turn in its Hermes session (`hermes::CLOSE_CUT_TURNS`), so the next
-  message is a user message of its own.
+- Before the gateway starts, our image's `hermes-boot` settles each cut
+  turn in its Hermes session as Hermes' own `/discard` does
+  (`hermes::SETTLE_CUT_TURNS`): never run again, with Hermes' failed-turn
+  boundary in the same transaction. Hermes (since v0.22) admits each
+  relayed message durably and, left alone, pauses a chat behind a turn a
+  restart cut until its sender sends `/discard`, which a person's chat
+  never sends. So the next message is a user message of its own, and the
+  chat is never paused.
 
 ### A cut turn is continued once
 
@@ -578,8 +583,12 @@ reaches it (`withheld`).
 
 Relay is the connector protocol of Hermes' gateway (decision 21); the
 bridge is its connector (`runtime/relay/`). Hermes' side, as read from
-v0.21.7's `gateway/relay/` (its code wins over its contract document;
-the wire is v0.21.5's), contract version 1. Relay is marked
+v0.23.2's `gateway/relay/` (its code wins over its contract document;
+the wire is v0.21.5's), contract version 1. Since v0.22 the gateway
+admits a relayed message durably (its session authority) and ACKs its
+frame once that admission commits; a reply to the chat's live turn (a
+clarify's typed answer) is offered to that turn first (v0.23,
+`gateway/session_ingress_live_turn.py`). Relay is marked
 experimental: a Hermes upgrade reads it again, and the real-Hermes lane
 (`tests/docker.rs`) runs against it.
 

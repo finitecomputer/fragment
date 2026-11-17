@@ -33,16 +33,17 @@
 # what changes a version). That holds while the deploying machine's build
 # cache keeps the layers: a cold cache rebuilds them, stamped anew.
 
-# Hermes v0.21.7 (git tag v0.21.7, commit 71d34bad1045, 2026-10-12; its
-# install stamp says 0.21.7 at that commit), pinned by digest. Upstream
+# Hermes v0.23.2 (git tag v0.23.2, commit ae2a81ccc00e, 2026-11-16; its
+# install stamp says 0.23.2 at that commit), pinned by digest. Upstream
 # publishes a release as its last attempt's versioned tag
 # (`rc.<N>-vX.Y.Z-desktop`) and moves `stable-desktop` and `latest-desktop`
-# to it; v0.21.7's is rc.15, and no tag `v0.21.7-desktop` exists. A bare
+# to it; v0.23.2's is rc.13 (`v0.23.2-desktop` is the same digest). A bare
 # version tag is not always the release: `v0.21.6-desktop` was an earlier
 # attempt's build, not v0.21.6. A next release is pinned the same way: its
 # attempt's tag and digest, checked against its install stamp's commit and
-# version (`/opt/hermes/install-stamp.json`).
-ARG HERMES=nousresearch/hermes-agent:rc.15-v0.21.7-desktop@sha256:04c1a71a37da7d143202454234cf6952000e827e8ae47b36f7c26f1372a9c138
+# version (`/opt/hermes/install-stamp.json`). The digest is the release's
+# index, for linux/amd64 and linux/arm64 alike.
+ARG HERMES=nousresearch/hermes-agent:rc.13-v0.23.2-desktop@sha256:87f24ae4be14980a3f2334bfe6516695253cb36dee5e9113b4348feea304c2ca
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
@@ -146,20 +147,6 @@ RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.
       'exec /opt/gws/gws "$@"' > /usr/local/bin/gws \
  && chmod 0755 /usr/local/bin/gws \
  && /usr/local/bin/gws --version | grep -q '0\.22\.5'
-# agent-browser, the CLI Hermes' built-in browser tools drive (each
-# profile's `browser.backend: "off"`: boot/src/hermes.rs). Hermes' image
-# carries none (its default browser is Browser Use's browser_exec), and its
-# browser tools look for it only in its PM's store or on PATH, never
-# installing it to see whether to offer themselves: without it an agent has
-# no browser_* tool. Fetched by Hermes' own PM, at the version and hash its
-# lock pins, and put on PATH: PM writes beside a sealed store (the image's)
-# only into its home's (HERMES_HOME/tools, which /data would replace), so it
-# fetches into a scratch home, and its one binary (a native one) is
-# installed from there.
-RUN HERMES_HOME=/tmp/pm-agent-browser /opt/hermes/.venv/bin/python -c 'from pm import ensure, installed_package; ensure("agent-browser", explicit=True); print(installed_package("agent-browser").binary)' > /tmp/agent-browser.path \
- && install -m 0755 "$(tail -n 1 /tmp/agent-browser.path)" /usr/local/bin/agent-browser \
- && rm -rf /tmp/pm-agent-browser /tmp/agent-browser.path \
- && /usr/local/bin/agent-browser --version | grep -q '^agent-browser [0-9]'
 
 # Root for the session (Paul, 2026-10-05: "hermes needs to be able to
 # install binaries (not persisted)"). Hermes stays its unprivileged user, as
@@ -272,6 +259,25 @@ RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(
  && rm -rf /tmp/uv-cache /tmp/npm-cache /tmp/playwright-requirements.txt /opt/fragment/python/playwright/driver/node \
  && /usr/local/bin/python3 -m compileall -q --invalidation-mode unchecked-hash /opt/fragment/python > /dev/null \
  && test "$(PYTHONPATH=/opt/fragment/python /usr/local/bin/python3 -c 'from importlib.metadata import version; print(version("playwright"))')" = "$(/usr/local/bin/playwright --version | sed 's/^Version //')"
+# Hermes' own Chrome for Testing (its PM's `chromium`, 405 MB) goes: no
+# browser here runs it. Each profile names the system Chromium to Hermes
+# (`browser.executable_path`: boot/src/hermes.rs), the desktop's Browser
+# icon runs it, and Chrome for Testing fails Cloudflare's bot check where
+# the system Chromium passes (Paul's prod agent, 2026-10-28). Its PM names
+# the store's directory after the Playwright release Hermes pins, which
+# since v0.23.2 is the image's own (`chromium-1248`), so it would also
+# stand where Playwright looks for its Chromium (the final stage's links).
+# The path upstream baked for it (`/etc/hermes/chromium-executable-path`,
+# under `chrome-linux64` or `chrome-linux-arm64`) goes with it, and its PM
+# then reports chromium `outdated`, as for any package not in the store.
+RUN for d in /opt/hermes/tools/chromium-*; do \
+      [ -e "$d" ] || continue; \
+      exe="$(cat /etc/hermes/chromium-executable-path)" \
+      && case "$exe" in "$d"/*) ;; *) exit 1 ;; esac \
+      && "$exe" --version | grep -q '^Google Chrome for Testing ' && rm -r "$d" || exit 1; \
+    done \
+ && rm -f /etc/hermes/chromium-executable-path \
+ && ! ls -d /opt/hermes/tools/chromium* 2>/dev/null
 
 # Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
 # sealed, so nothing can make a .pyc stale.
@@ -393,7 +399,6 @@ fi
 exec /usr/local/bin/node "$@"
 EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
-COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/tool_threads.py /opt/fragment/tool_threads.py
 COPY images/hermes/deploy_wait.py /opt/fragment/deploy_wait.py
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
@@ -528,8 +533,8 @@ RUN sed -i 's/^WebBrowser=.*/WebBrowser=fragment-browser/' /etc/xdg/xfce4/helper
  && grep -qx 'WebBrowser=fragment-browser' /etc/xdg/xfce4/helpers.rc
 RUN /opt/fragment/bin/hermes-boot build-info \
  && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash \
-    /opt/hermes/tools/browser_tool_session.py /opt/hermes/tools/bot_desktop/browser.py \
-    /opt/hermes/tools/bot_desktop/runtime.py /opt/hermes/tools/bot_desktop/fragment_browser.py
+    /opt/hermes/tools/bot_desktop/browser.py /opt/hermes/tools/bot_desktop/runtime.py \
+    /opt/hermes/tools/bot_desktop/fragment_browser.py
 # Playwright launches the system Chromium, the one the desktop and Hermes'
 # browser run (/opt/fragment/bin/chromium: /usr/bin/chromium with a
 # container's flags), never a browser of its own: Chrome for Testing fails

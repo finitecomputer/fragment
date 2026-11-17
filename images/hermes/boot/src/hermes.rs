@@ -448,6 +448,12 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     // rewrote four caches in its home while the computer was held
     // (docs/computers.md, "What changes under the hold").
     y.push_str("model_catalog:\n  enabled: false\n");
+    // Every session is kept: an agent's chat is its history, read again in
+    // the Session Archive. Hermes keeps them by default too, but from v0.22,
+    // while nothing says so, a gateway posts a question about pruning them
+    // into a profile's home chat once the disk runs low
+    // (`hermes_cli/prune_advisor.py`); a managed value is its answer.
+    y.push_str("sessions:\n  auto_prune: false\n");
     // Each agent's desktop starts for its screen's first viewer (the
     // bridge's `screen-start`), or at the agent's first computer_use or
     // browser call, never at boot (measured: about 300 MiB more once it
@@ -730,18 +736,16 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
         y.push_str("tts:\n  provider: \"elevenlabs\"\n");
     }
     // XAI_API_KEY enables Hermes' separate x_search, not a web backend.
-    // Its browser: Hermes' built-in browser tools (browser_navigate, …),
-    // driving the image's own Chromium, headed, on the agent's desktop, so
-    // the screen shows it, through agent-browser (in the image: its
-    // Dockerfile). Left unset, Hermes picks Browser Use mode (one
-    // browser_exec tool, its harness a core dependency of Hermes). Hermes
-    // reads `browser` from the profile's own config file alone, never from
-    // the managed overlay.
-    y.push_str("browser:\n  headed: true\n  backend: \"off\"\n");
+    // Its browser: Hermes' browser_exec (v0.23: its built-in browser_*
+    // tools are gone, FIN-305), headed, on the agent's desktop, so the
+    // screen shows it, running the image's own Chromium (`CHROMIUM`, the
+    // one the desktop's Browser icon runs on the same profile), never
+    // Hermes' Chrome for Testing: one profile, one Chromium release.
+    y.push_str(&format!("browser:\n  headed: true\n  executable_path: {}\n", q(CHROMIUM)));
     if offered("BROWSER_USE_API_KEY") {
         // Without this Hermes auto-detects the offered key and sends the
-        // built-in browser tools to the cloud. Cloud browsing is opt-in
-        // through BU_NAME=remote browser-harness; the desktop stays local.
+        // agent's browser to the cloud. Cloud browsing is opt-in through
+        // BU_NAME=remote browser-harness; the desktop stays local.
         y.push_str("  cloud_provider: \"local\"\n");
     }
     // Its terminal acts as the agent: the fragment CLI and the skills' helpers
@@ -764,9 +768,10 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
     y
 }
 
-/// Hermes v0.21.7's `_HERMES_PROVIDER_ENV_BLOCKLIST` (v0.21.6's alike), read
-/// from the pinned image's `tools/environments/local_env_policy.py`, plus its dynamic
-/// `_is_hermes_internal_secret` rule (GHSA-rhgp-j443-p4rf). The Docker lane
+/// Hermes v0.23.2's `_HERMES_PROVIDER_ENV_BLOCKLIST`, read from the pinned
+/// image's `tools/environments/local_env_policy.py`, plus its dynamic
+/// `_is_hermes_internal_secret` rule (GHSA-rhgp-j443-p4rf; its `HERMES_*`
+/// names are refused as every `HERMES_*` name is, `env_name_ok`). The Docker lane
 /// checks the snapshot against the image, so a new pin cannot silently
 /// change the policy. Only sandbox registration is filtered: native tools
 /// still read the profile's `.env` through Hermes' secret scope, and the
@@ -780,7 +785,7 @@ fn provider_env_blocked(name: &str) -> bool {
 }
 
 /// The flags Chromium needs in a container: Hermes' own
-/// (`CHROMIUM_SANDBOX_BYPASS_ARGS`, its `tools/browser_tool_session.py`),
+/// (`CHROMIUM_SANDBOX_BYPASS_ARGS`, its `tools/browser_launcher.py`),
 /// which it gives its browser and its desktop's Browser icon only as root
 /// or where it sees Docker's marker (`/.dockerenv`). Cloudflare Containers
 /// has neither that marker nor a `/dev/shm`, and Chromium without these
@@ -789,9 +794,10 @@ fn provider_env_blocked(name: &str) -> bool {
 pub const CHROMIUM_FLAGS: [&str; 2] = ["--no-sandbox", "--disable-dev-shm-usage"];
 
 /// The image's Chromium: a script that starts regular Chromium from its pinned base
-/// with `CHROMIUM_FLAGS` whatever the runtime. Hermes is pointed at it
-/// (`AGENT_BROWSER_EXECUTABLE_PATH`), so its browser and its desktop's
-/// Browser icon (Hermes' `bot_desktop.browser.executable()`) both run it.
+/// with `CHROMIUM_FLAGS` whatever the runtime. Each profile names it to
+/// Hermes (`browser.executable_path`, `profile_config`), so its browser and
+/// its desktop's Browser icon (Hermes' `bot_desktop.browser.executable()`)
+/// both run it.
 pub const CHROMIUM: &str = "/opt/fragment/bin/chromium";
 /// Regular Chromium, already in the pinned upstream desktop base.
 pub const SYSTEM_CHROMIUM: &str = "/usr/bin/chromium";
@@ -1082,8 +1088,8 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     // HERMES_AUTO_CONTINUE_FRESHNESS: one second, so no message after a
     // restart is wrapped in Hermes' recovery notes (the boot's clean-exit
     // receipt already discards the turns a restart cut short, which the
-    // bridge ends: docs/chat-records.md; the boot closes them in their
-    // sessions, CLOSE_CUT_TURNS, and the bridge tells the next turn what was
+    // bridge ends: docs/chat-records.md; the boot settles them in their
+    // sessions, SETTLE_CUT_TURNS, and the bridge tells the next turn what was
     // cut instead, from the journal).
     // HERMES_GATEWAY_MAX_STARTS: 0, so Hermes' respawn-storm breaker is off.
     // It counts gateway starts in the home, which a save keeps, so six wakes
@@ -1099,69 +1105,81 @@ pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
     home.join("profiles").join(wire::profile(agent_fragment))
 }
 
-/// Closes each turn a restart cut, in Hermes' own sessions, before the
+/// Settles each turn a restart cut, in Hermes' own sessions, before the
 /// gateway starts (docs/computers.md, Durability, P5), run by Hermes' Python as
 /// the hermes user with each `state.db` to look in as its arguments.
 ///
-/// Why: Hermes persists a turn's message as the turn starts and the rest as
-/// it goes, so a turn the container's end cut leaves its session's tail open
-/// (its message, or its tool calls, with no answer). v0.21.5 then joins the
-/// next message to the open request (two user messages in a row are one:
-/// `agent/agent_runtime_helpers.py`, `_merge_consecutive_users`; and
-/// `get_messages_as_conversation(repair_alternation=True)` as the gateway
-/// loads a transcript), and its model redoes the cut request (F10: seen on
-/// the real image, `[paul] do the risky thing\n\n[paul] good morning`). The
-/// bridge has already ended that turn as lost (P1), and tells the next turn
-/// what was cut, from the journal.
+/// Why: Hermes admits each relayed message durably (its session authority,
+/// v0.22: a row in `session_admissions`, `started` once its turn runs), and
+/// a turn the container's end cut is, to the next gateway, a lost turn
+/// (`unknown`) that only its sender may resolve. Until someone does, that
+/// chat's queue is paused: the next message is saved but never run, and
+/// Hermes answers it with a pause notice that asks for `/discard`, which a
+/// person's chat never sends (the bridge keeps a leading `/` from reading as
+/// a command). The bridge has already ended that turn as lost (P1) and
+/// tells the next turn what was cut, from the journal; nothing of it is
+/// ever run again. Left open, its transcript's tail would also be joined to
+/// the next message (consecutive-user repair), and the model would redo the
+/// cut request (F10).
 ///
-/// How, through Hermes' own code and nothing else: the row Hermes itself
-/// writes when a turn ends without an answer, its failed-turn boundary
-/// (`agent/turn_failure_copy.py`: an assistant row, `display_kind`
-/// `failed_turn`, its copy chosen by `failed_turn_notice` from the turn's
-/// rows: "Some actions may already have run" when a tool call is among
-/// them). Hermes writes it for a turn that fails in its process
-/// (`agent/conversation_loop.py`, `_close_durable_failed_turn`;
-/// `gateway/run_turn.py`, `_hmwa_close_failed_turn`, keyed on the durable
-/// tail); a process that was killed never does, and neither its clean-exit
-/// path (it only discards turn markers) nor its unclean one (it resumes the
-/// turn under its old message id, the auto-continue kept off above) closes
-/// it. No Relay frame does either: an inbound's fields (text, media,
-/// context, reply, prompt response) never change how the session's tail is
-/// read. So the boot writes the same row for the turns a restart cut:
-/// every gateway session of the relay platform (`SessionDB.
-/// list_gateway_sessions`, the newest session per chat) whose last message
-/// is a user row, a tool result or a tool call, appended with
-/// `SessionDB.append_message`. At boot every such tail is a cut turn: the
-/// gateway that ran it is gone, and the bridge ended it. Idempotent: a
-/// closed tail is an assistant row. Prints `{"sessions": n, "closed": n}`.
-pub const CLOSE_CUT_TURNS: &str = r#"import json, sys
+/// How, through Hermes' own code and nothing else, as its `/discard` does:
+/// a runtime epoch of the boot's own (nothing else holds the profile yet),
+/// then the gateway's own boot recovery (`recover_session_inputs`: every
+/// turn a previous owner started is `unknown`, never replayed), then each
+/// relayed lost turn resolved as its sender's `/discard` resolves it
+/// (`resolve_unknown_session_input`, terminal `interrupted`) with Hermes'
+/// failed-turn boundary written in the same transaction
+/// (`close_discarded_turn`: "Some actions may already have run"). A message
+/// Hermes took and had not started is a turn the bridge ended lost too, so
+/// it is cancelled, never run (`cancel_session_input`). Turns no person
+/// sent (a background delegation's delivery) are the gateway's, which
+/// settles or runs them as it does on any restart. Then a tail left open
+/// with no admission naming it, as a release before admissions (v0.21)
+/// left a cut turn, is closed with the same boundary, so the first boot of
+/// an upgrade closes what the last of the old image cut. Idempotent: a
+/// settled turn and a closed tail are passed over. Prints `{"lost": n,
+/// "dropped": n, "closed": n}`.
+pub const SETTLE_CUT_TURNS: &str = r#"import json, sys
 from pathlib import Path
 from hermes_state import SessionDB
-from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, failed_turn_notice
-sessions = closed = 0
+from hermes_state_runtime import begin_runtime_epoch, cancel_session_input, list_session_admissions, recover_session_inputs, resolve_unknown_session_input
+from gateway.session_ingress_media import release_admission_media
+from gateway.session_results import close_discarded_turn
+from gateway.session_unattended_unknown import is_unattended
+lost = dropped = closed = 0
 for p in sys.argv[1:]:
     db = SessionDB(Path(p))
     try:
-        for s in db.list_gateway_sessions(platform="relay"):
-            sessions += 1
-            rows = [m for m in db.get_messages_as_conversation(s["id"]) if m.get("role") in ("user", "assistant", "tool")]
-            if not rows or (rows[-1]["role"] == "assistant" and not rows[-1].get("tool_calls")):
-                continue
-            asked = max((i for i, m in enumerate(rows) if m["role"] == "user"), default=0)
-            db.append_message(s["id"], "assistant", failed_turn_notice(rows[asked:]), display_kind=FAILED_TURN_DISPLAY_KIND)
-            closed += 1
+        epoch = begin_runtime_epoch(db, instance_id="fragment-boot")
+        recover_session_inputs(db, epoch=epoch)
+        for s in db.list_gateway_sessions(platform="relay", active_only=False):
+            for row in list_session_admissions(db, session_id=s["id"]):
+                if is_unattended(row):
+                    continue
+                if row["status"] == "unknown":
+                    resolve_unknown_session_input(db, epoch=epoch, admission_id=row["admission_id"], generation=row["generation"], _terminal_write=lambda conn, cut: close_discarded_turn(db, conn, cut))
+                    lost += 1
+                elif row["status"] == "queued":
+                    cancel_session_input(db, epoch=epoch, admission_id=row["admission_id"])
+                    dropped += 1
+                else:
+                    continue
+                release_admission_media(db, row["admission_id"])
+            if db._execute_write(lambda conn: close_discarded_turn(db, conn, {"target_session_id": s["id"]})):
+                closed += 1
     finally:
         db.close()
-print(json.dumps({"sessions": sessions, "closed": closed}))
+print(json.dumps({"lost": lost, "dropped": dropped, "closed": closed}))
 "#;
 
-/// What `CLOSE_CUT_TURNS` printed: the sessions it looked at and those it
-/// closed (its last line), or why that is not its answer.
-pub fn cut_turns_closed(out: &str) -> Result<(u64, u64), String> {
+/// What `SETTLE_CUT_TURNS` printed: the lost turns it settled, the
+/// messages it dropped unrun, and the tails it closed with no admission
+/// (its last line), or why that is not its answer.
+pub fn cut_turns_settled(out: &str) -> Result<(u64, u64, u64), String> {
     let line = out.lines().rev().find(|l| !l.trim().is_empty()).ok_or("it printed nothing")?;
     let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("{line:?}: {e}"))?;
-    match (v["sessions"].as_u64(), v["closed"].as_u64()) {
-        (Some(sessions), Some(closed)) if closed <= sessions => Ok((sessions, closed)),
+    match (v["lost"].as_u64(), v["dropped"].as_u64(), v["closed"].as_u64()) {
+        (Some(lost), Some(dropped), Some(closed)) => Ok((lost, dropped, closed)),
         _ => Err(format!("not its answer: {line}")),
     }
 }
@@ -1219,23 +1237,22 @@ pub fn lean_plugins(plugins_root: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// The closer's answer is its last line, and nothing else is: a line
-    /// Hermes logged before it is passed over, a missing or impossible count
-    /// is no answer. (Run against the real Hermes in the bridge's
-    /// tests/docker.rs.)
+    /// The settler's answer is its last line, and nothing else is: a line
+    /// Hermes logged before it is passed over, a missing count is no answer.
+    /// (Run against the real Hermes in the bridge's tests/docker.rs.)
     #[test]
-    fn the_closers_answer() {
-        assert_eq!(cut_turns_closed("{\"sessions\": 2, \"closed\": 1}\n"), Ok((2, 1)));
-        assert_eq!(cut_turns_closed("a warning Hermes logged\n{\"sessions\": 0, \"closed\": 0}\n\n"), Ok((0, 0)));
-        for bad in ["", "\n", "Traceback (most recent call last):", "{\"sessions\": 1}", "{\"sessions\": 1, \"closed\": 2}", "{\"sessions\": -1, \"closed\": 0}"] {
-            assert!(cut_turns_closed(bad).is_err(), "{bad:?}");
+    fn the_settlers_answer() {
+        assert_eq!(cut_turns_settled("{\"lost\": 1, \"dropped\": 0, \"closed\": 2}\n"), Ok((1, 0, 2)));
+        assert_eq!(cut_turns_settled("a warning Hermes logged\n{\"lost\": 0, \"dropped\": 0, \"closed\": 0}\n\n"), Ok((0, 0, 0)));
+        for bad in ["", "\n", "Traceback (most recent call last):", "{\"lost\": 1}", "{\"lost\": -1, \"dropped\": 0, \"closed\": 0}"] {
+            assert!(cut_turns_settled(bad).is_err(), "{bad:?}");
         }
-        // only Hermes' own session code writes: its boundary row, through its API
-        for uses in ["from hermes_state import SessionDB", "list_gateway_sessions(platform=\"relay\")", "failed_turn_notice(", "display_kind=FAILED_TURN_DISPLAY_KIND", "db.append_message("] {
-            assert!(CLOSE_CUT_TURNS.contains(uses), "{uses}");
+        // only Hermes' own runtime and session code writes, as its /discard does
+        for uses in ["from hermes_state import SessionDB", "begin_runtime_epoch(", "recover_session_inputs(", "resolve_unknown_session_input(", "close_discarded_turn(", "cancel_session_input(", "is_unattended(row)", "list_gateway_sessions(platform=\"relay\""] {
+            assert!(SETTLE_CUT_TURNS.contains(uses), "{uses}");
         }
-        for never in ["sqlite3", "execute(", "DELETE", "UPDATE", "INSERT"] {
-            assert!(!CLOSE_CUT_TURNS.contains(never), "no SQL of ours: {never}");
+        for never in ["sqlite3", "execute(", "SELECT", "DELETE", "UPDATE", "INSERT"] {
+            assert!(!SETTLE_CUT_TURNS.contains(never), "no SQL of ours: {never}");
         }
     }
 
@@ -1489,6 +1506,7 @@ mod tests {
             "    - \"platforms/discord\"",
             "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 10\n",
             "\nmodel_catalog:\n  enabled: false\n",
+            "\nsessions:\n  auto_prune: false\n",
             "\nsecurity:\n  allow_lazy_installs: false\n",
             "\nstt:\n  echo_transcripts: false\n",
             // Hermes' Bot Mode protocol off for every profile: no roster, no
@@ -1565,7 +1583,7 @@ mod tests {
         assert!(!h.contains("fallback_providers") && !h.contains("stale_timeout_seconds") && !h.contains("api_max_retries"), "the high tier has none: {h}");
         assert!(!m.contains("fallback_providers") && !m.contains("stale_timeout_seconds") && !m.contains("api_max_retries"), "a profile's own, never the overlay's: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n"), "the managed skills and the platform skill's view, after its own: {p}");
-        assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
+        assert!(p.contains("browser:\n  headed: true\n  executable_path: \"/opt/fragment/bin/chromium\"\n"), "Hermes' browser, headed, on the image's Chromium, in the profile's own config: {p}");
         assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
         assert!(p.contains("\n  cwd: \"/data/work/juniper--k3x9\"\n"), "its terminal works in its work directory: {p}");
@@ -1870,7 +1888,7 @@ mod tests {
             a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
             let present = write(&a);
             assert!(present.contains(selection), "offered {provider}: {present}");
-            assert!(present.contains("browser:\n  headed: true\n  backend: \"off\"\n"));
+            assert!(present.contains("browser:\n  headed: true\n  executable_path: \"/opt/fragment/bin/chromium\"\n"));
             a.credentials.clear();
             assert_eq!(write(&a), absent, "revocation restores {provider}'s defaults");
         }

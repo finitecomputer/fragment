@@ -230,11 +230,13 @@ unfinished design, not debt.
 
 ## The Hermes image adapts Bot Desktop's browser ownership
 
-- **Shortcut:** upstream's dock and tools launch Chromium on CDP port 0,
-  which sets `navigator.webdriver`, and cannot find one on another port,
-  so images/hermes/desktop_browser.py and source replacements guarded by
-  images/hermes/boot/src/desktop.rs run the base's Chromium on a nonzero
-  port through Hermes' start, dock and stop paths.
+- **Shortcut:** upstream's dock and browser_exec launch Chromium on CDP
+  port 0, which sets `navigator.webdriver`, so images/hermes/desktop_browser.py
+  and source replacements guarded by images/hermes/boot/src/desktop.rs run
+  the base's Chromium on a nonzero port through Hermes' dock and stop
+  paths; browser_exec attaches to it on the same profile. Since v0.23
+  (FIN-305) an agent's own browser_exec launch is upstream's, port 0: the
+  choice of what replaces Hermes' removed built-in browser tools is open.
 - **Risk:** private upstream code changes (the build fails); rolling
   back past it needs the pre-upgrade save.
 - **Delete when:** a pinned upstream desktop supports regular Chromium
@@ -243,21 +245,6 @@ unfinished design, not debt.
   adapter and replacements go together once
   `a_regular_browser_is_shared_by_the_desktop_and_tools` and
   `two_agents_two_desktops` pass against it.
-
-## The Hermes image carries two Chromiums
-
-- **Shortcut:** Hermes v0.21.7's browser tools bring Chrome for Testing
-  r1208 (`/opt/hermes/tools/chromium-1208`, 364 MB) beside the system
-  Chromium (`/usr/bin/chromium`, 376 MB), which the desktop, Hermes'
-  browser (desktop_browser.py) and an agent's own Playwright run
-  (images/hermes/Dockerfile). r1208 fails Cloudflare's bot check where
-  the system Chromium passes (Paul's prod agent, 2026-10-28).
-- **Risk:** 364 MB of every image, and a browser an agent could still
-  reach by its path.
-- **Delete when:** the image moves to Hermes v0.22, which drops the
-  browser tools (FIN-305): then the image removes r1208, and the
-  build's Playwright check (both runtimes print a page with the system
-  Chromium) still passes.
 
 ## Each agent's Hermes profile config is rewritten at every boot
 
@@ -268,16 +255,6 @@ unfinished design, not debt.
 - **Delete when:** an agent's settings live in its `agent.json` and the
   boot merges them into the profile's config, proven by a setting that
   survives a wake.
-
-## Hermes' direct FAL client reads process credentials, not profile scope
-
-- **Shortcut:** Hermes' `_submit_fal_request` uses the SDK's global
-  client, keyed from the process, so the image's `tool_keys.py` gives it
-  an explicit-key client per request
-  (`tool_profiles_select_offered_operator_keys`).
-- **Risk:** a change to that private function bypasses it.
-- **Delete when:** Hermes' direct native image path uses an explicit SDK
-  client from its active profile scope, including the result worker.
 
 ## Hermes' tool workers can take an ended thread's interrupt
 

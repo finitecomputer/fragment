@@ -1,7 +1,8 @@
-"""Regular Chromium on Hermes v0.21.7's Bot Desktop.
+"""Regular Chromium on Hermes v0.23.2's Bot Desktop.
 
-Hermes' local browser sessions retain their lease fence and attach to this
-browser. agent-browser owns its CDP connection, not the desktop's process.
+The desktop's Browser icon and a link opened on the desktop start it on a
+nonzero CDP port; Hermes' browser_exec attaches to it on the same profile
+(its browser_launcher reads DevToolsActivePort) and keeps its lease fence.
 This is runtime integration with Hermes' Python helpers, not a provisioner
 or another browser daemon. See the debt ledger's deletion condition.
 """
@@ -109,7 +110,7 @@ def _stop(process):
     try:
         # Signal a normal browser shutdown before touching the process group:
         # SIGTERM of the whole group can kill the cookie writer before it
-        # flushes. agent-browser does this too for browsers it owns.
+        # flushes.
         _, endpoint = _connection(process)
         with connect(endpoint, open_timeout=0.5, close_timeout=0.1, max_size=REPLY_BYTES, proxy=None) as ws:
             ws.send(json.dumps({'id': 2, 'method': 'Browser.close'}))
@@ -185,13 +186,6 @@ def _start(profile, env):
             from tools.bot_desktop import runtime
             runtime._kill_group_then_wait(child.pid, child.pid, grace=5.0)
             raise
-
-
-def ensure_started():
-    from tools.bot_desktop import browser
-    from tools.browser_tool import _build_browser_env
-    port, _ = _start(browser.profile_dir(), _build_browser_env())
-    return port
 
 
 def stop():
