@@ -99,6 +99,7 @@ fn hint(code: &str, status: u16, provider: &str) -> String {
     match (code, status) {
         ("not_connected", _) => format!("your owner has not connected {provider} (or must again), or left it out of what you may use: ask them to connect it in Settings, under Connections"),
         ("forbidden", _) => format!("your owner narrowed your connections and left {provider} out, connected it read only (a change refused while reads work: they allow changes in Settings, under Connections), or the call went to a host that is not {provider}'s"),
+        ("redirected", _) => "the address answered a redirect that is not followed: more than ten in a row, or one to plain http, which a token that is no placeholder never goes over".into(),
         ("insufficient_scope", _) => format!("the connection lacks this permission: your owner connected {provider} read only, or left this part out (they allow it in Settings, under Connections)"),
         (_, 401) => format!("{provider} refused the connection's token: ask your owner to reconnect {provider} in Settings, under Connections"),
         (_, 403) => format!("{provider} refused it: the connected account may not do this, or your owner left this permission out (they add it in Settings, under Connections, with a reconnect)"),
@@ -239,6 +240,23 @@ fn short(bytes: u64, stated: Option<u64>) -> String {
     format!("the answer is {bytes} bytes of the {} it states (or over {ANSWER_MAX_BYTES}): nothing was kept", stated.map(|n| n.to_string()).unwrap_or_else(|| "?".into()))
 }
 
+/// The client one call is made with. It follows a redirect, and the token
+/// goes to the host it was sent to alone:
+///
+/// - reqwest drops Authorization when a redirect leaves the host or the
+///   port (redirect.rs, `remove_sensitive_headers`), so a download that
+///   answers a signed address on a storage host is fetched there without it;
+/// - but it keeps it while both stay the same, whatever the scheme. So a
+///   token that is no placeholder is sent by a client that makes no plain
+///   HTTP request at all (`https_only`): not its first, which `address`
+///   refuses with better words, and not a redirect's, where the same host
+///   and port over http would carry it in the clear. A placeholder may go
+///   over http (the computer's intercept takes it either way), and is worth
+///   nothing off this computer's egress.
+fn client(placeholder: bool, timeout: u64) -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder().user_agent(concat!("fragment-cli/", env!("CARGO_PKG_VERSION"))).redirect(reqwest::redirect::Policy::limited(REDIRECTS_MAX)).https_only(!placeholder).timeout(std::time::Duration::from_secs(timeout)).build()
+}
+
 /// Sends the call and takes its answer whole. A good answer short enough
 /// to print is held; a longer one, or one a file was asked for, goes to its
 /// file as it comes (`save`), held nowhere. A body cut short of its stated
@@ -262,12 +280,7 @@ pub fn send(call: &Call, vars: &[(String, String)], stdin: &mut dyn Read, spill:
     if !(1..=TIMEOUT_MAX_S).contains(&timeout) {
         return Err(anyhow!("--timeout is 1 to {TIMEOUT_MAX_S} seconds"));
     }
-    // A redirect is followed, and the token is not sent on: reqwest drops
-    // Authorization when a redirect leaves the host or the port
-    // (redirect.rs, `remove_sensitive_headers`). So a download that answers
-    // a signed address on a storage host is fetched there without it, and a
-    // placeholder is worth nothing off this computer's egress in any case.
-    let client = reqwest::blocking::Client::builder().user_agent(concat!("fragment-cli/", env!("CARGO_PKG_VERSION"))).redirect(reqwest::redirect::Policy::limited(REDIRECTS_MAX)).timeout(std::time::Duration::from_secs(timeout)).build()?;
+    let client = client(placeholder, timeout)?;
     let mut request = client.request(method, url).bearer_auth(&token);
     // JSON is asked for unless the call says what it takes (a download)
     if !more.iter().any(|(name, _)| name.eq_ignore_ascii_case("accept")) {
@@ -289,7 +302,9 @@ pub fn send(call: &Call, vars: &[(String, String)], stdin: &mut dyn Read, spill:
             } else {
                 "unreachable"
             };
-            return Ok(Err(Refused::new(0, code, format!("{}", e.without_url()))));
+            // and why, where reqwest says (a redirect it would not follow)
+            let why = std::error::Error::source(&e).map(|s| format!(": {s}")).unwrap_or_default();
+            return Ok(Err(Refused::new(0, code, format!("{}{why}", e.without_url()))));
         }
     };
     let status = response.status().as_u16();
@@ -612,6 +627,22 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!((seen[2].path.as_str(), seen[2].header("authorization")), ("/here", Some(bearer.as_str())), "its own host is asked with it");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A token that is no placeholder never goes over plain HTTP, at any
+    /// hop: its client makes no such request, its first or a redirect's
+    /// (reqwest keeps Authorization on a redirect while the host and the
+    /// port stay the same, so `https://host:port` answering a redirect to
+    /// `http://host:port` would carry it in the clear). A placeholder's
+    /// client may.
+    #[test]
+    fn a_real_tokens_client_makes_no_plain_http_request() {
+        let (server, seen) = provider(|_| Response::json(200, &json!({})));
+        let refused = client(false, 5).unwrap().get(&server.url).bearer_auth("real-token").send().unwrap_err();
+        assert!(refused.is_builder(), "refused before any request is made: {refused:?}");
+        assert!(seen.lock().unwrap().is_empty(), "and the token reached no one");
+        assert_eq!(client(true, 5).unwrap().get(&server.url).bearer_auth(format!("fcx_linear_{TAG}")).send().unwrap().status(), 200, "a placeholder is no secret off this computer");
+        assert_eq!(Refused::new(0, "redirected", "x").said("linear")["hint"].as_str().map(|h| h.contains("plain http")), Some(true));
     }
 
     /// Each refusal is said one way. The computer's own and OAuth's are
