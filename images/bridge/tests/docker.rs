@@ -4241,6 +4241,57 @@ async fn a_voice_memo_is_transcribed_through_the_route() {
     assert_eq!(c.exec_out(&["sh", "-c", "find /data -iname '*faster_whisper*' -o -iname 'ctranslate2*' | head -3"]).trim(), "", "no local Whisper installed for it");
 }
 
+/// Goal (Austin, 2026-11-17: `VOICE` would reach only new chats, as every
+/// hint before it did): a chat open before an image whose relay hint
+/// changed gets the new hint at its next turn after the computer starts on
+/// it, its conversation kept; a plain restart asks nothing again. Method:
+/// a turn, then the session's stored system prompt made an older image's
+/// (no VOICE) and the boot's stamp that image's hint, a restart, the next
+/// turn's model call; then a second restart, and the boot's events.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_open_chat_gets_a_changed_hint_after_a_restart() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let turn_of = |said: serde_json::Value| fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let before = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "remember the green gate" })));
+    fake.until(180_000, "the turn before the restart", |w| ended(w, &before)).await;
+    // the older image's: its stored prompts without VOICE, its stamp its hint
+    // (Hermes keeps a session's prompt in `system_prompts`, by its SHA-256,
+    // which the session's `system_prompt_hash` names)
+    const OLDER: &str = r#"import hashlib, re, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+old = lambda s: re.sub(r"\n\nA voice memo arrives already transcribed:.*?type it\.", "", s, flags=re.S)
+stored = "SELECT s.id, COALESCE(sp.prompt, s.system_prompt) FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash WHERE COALESCE(sp.prompt, s.system_prompt) LIKE '%A voice memo arrives already transcribed%'"
+rows = db.execute(stored).fetchall()
+for i, p in rows:
+    o = old(p)
+    h = hashlib.sha256(o.encode("utf-8")).hexdigest()
+    db.execute("INSERT OR IGNORE INTO system_prompts (hash, prompt) VALUES (?, ?)", (h, o))
+    db.execute("UPDATE sessions SET system_prompt_hash = ?, system_prompt = CASE WHEN system_prompt IS NULL THEN NULL ELSE ? END WHERE id = ?", (h, o, i))
+db.commit()
+print(len(rows), len(db.execute(stored).fetchall()))
+open(sys.argv[2], "w").write(old(open(sys.argv[2]).read()))
+"#;
+    let older = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", OLDER, "/data/hermes/profiles/juniper--k3x9/state.db", "/data/hermes/.fragment_relay_hint"]);
+    let counts: Vec<u64> = older.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+    assert!(matches!(counts[..], [made, 0] if made > 0), "the chat's stored prompt made the older image's: {older}");
+    c.restart();
+    let after = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "what gate was it" })));
+    fake.until(180_000, "the turn after the restart", |w| ended(w, &after)).await;
+    let call = handed(&model, "juniper--k3x9", "what gate was it").into_iter().next().expect("the turn's model call");
+    let messages = call.body["messages"].as_array().cloned().unwrap_or_default();
+    let system = messages.first().filter(|m| m["role"] == "system").map(content_text).unwrap_or_default();
+    assert!(system.contains("A voice memo arrives already transcribed"), "the open chat's prompt rebuilt with today's hint: {}", system.chars().take(2000).collect::<String>());
+    assert!(messages.iter().any(|m| m["role"] == "user" && content_text(m).contains("remember the green gate")), "its conversation kept: {messages:#?}");
+    // a restart on the same hint asks nothing: one refresh in both starts
+    c.restart();
+    let again = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "and again" })));
+    fake.until(180_000, "the turn after the second restart", |w| ended(w, &again)).await;
+    let refreshed = c.logs().matches("boot.prompts_refreshed").count();
+    assert_eq!(refreshed, 1, "one refresh, at the first start on the changed hint: {}", c.logs().lines().filter(|l| l.contains("prompts_")).collect::<Vec<_>>().join("\n"));
+}
+
 // ---- teammates asking each other (route A: images/hermes/plugins/fragment-ask) ----
 
 /// The model calls made as `agent` whose messages hold `text`.

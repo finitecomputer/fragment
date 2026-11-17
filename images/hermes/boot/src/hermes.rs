@@ -1271,6 +1271,51 @@ pub fn cut_turns_settled(out: &str) -> Result<(u64, u64, u64), String> {
     }
 }
 
+/// Where the boot keeps the relay hint (`relay_hint`) the computer last
+/// booted with, under the gateway's home: the hint its sessions' stored
+/// system prompts hold (`REFRESH_PROMPTS`).
+pub const HINT_STAMP: &str = ".fragment_relay_hint";
+
+/// Whether the sessions' stored system prompts may hold another relay hint
+/// than `hint`: the stamp the last boot left (`HINT_STAMP`) is not it, or
+/// there is none (a computer that booted before the stamp, whose prompts
+/// hold whatever hint it had then).
+pub fn hint_changed(stamp: Option<&str>, hint: &str) -> bool {
+    stamp != Some(hint)
+}
+
+/// Every session of each `state.db` asked to rebuild its stored system
+/// prompt once, on its next turn, as Hermes' own `hermes sessions
+/// refresh-prompts` asks (a refresh epoch in the profile's state.db,
+/// `request_prompt_refresh`): history, session ids and the tools pin kept,
+/// one prompt-cache miss each. Hermes replays a session's stored prompt on
+/// every later turn, rebuilding it only at a compression, a model change
+/// or `/new`, so a changed hint (`relay_hint`) would otherwise reach only
+/// new chats (Austin, 2026-11-17: `VOICE`, which an open chat's agent never
+/// saw). Run as the hermes user with each `state.db` as its arguments,
+/// before the gateway starts. Prints `{"asked": n}`, n the databases.
+pub const REFRESH_PROMPTS: &str = r#"import json, sys
+from pathlib import Path
+from hermes_state import SessionDB
+asked = 0
+for p in sys.argv[1:]:
+    db = SessionDB(Path(p))
+    try:
+        db.request_prompt_refresh(None)
+        asked += 1
+    finally:
+        db.close()
+print(json.dumps({"asked": asked}))
+"#;
+
+/// What `REFRESH_PROMPTS` printed: the databases it asked (its last line),
+/// or why that is not its answer.
+pub fn prompts_refreshed(out: &str) -> Result<u64, String> {
+    let line = out.lines().rev().find(|l| !l.trim().is_empty()).ok_or("it printed nothing")?;
+    let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("{line:?}: {e}"))?;
+    v["asked"].as_u64().ok_or_else(|| format!("not its answer: {line}"))
+}
+
 /// The gateway's control socket (Hermes' `gateway/control_socket.py`):
 /// `$HERMES_HOME/gateway.sock`, or the path its pointer file names when the
 /// home's is too long for a socket. One JSON line in, one out, per
@@ -1323,6 +1368,27 @@ pub fn lean_plugins(plugins_root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (Austin, 2026-11-17: `VOICE` never reached an open chat):
+    /// a boot asks the sessions to rebuild their stored prompts exactly when
+    /// the hint they may hold is not today's: no stamp yet, or another
+    /// hint's; the same hint asks nothing (no cache miss on a plain
+    /// restart). The refresher's answer is its last line, as the settler's,
+    /// and it writes only through Hermes' own refresh request. (Run against
+    /// the real Hermes in the bridge's tests/docker.rs.)
+    #[test]
+    fn a_changed_hint_refreshes_the_stored_prompts() {
+        let hint = relay_hint();
+        assert!(hint_changed(None, &hint), "a computer that booted before the stamp");
+        assert!(hint_changed(Some(&hint.replace(&format!("{VOICE}\n\n"), "")), &hint), "the hint before VOICE");
+        assert!(!hint_changed(Some(&hint), &hint), "a restart on the same image");
+        assert_eq!(prompts_refreshed("{\"asked\": 2}\n"), Ok(2));
+        assert_eq!(prompts_refreshed("a warning Hermes logged\n{\"asked\": 0}\n\n"), Ok(0));
+        for bad in ["", "\n", "Traceback (most recent call last):", "{\"dbs\": 1}", "{\"asked\": -1}"] {
+            assert!(prompts_refreshed(bad).is_err(), "{bad:?}");
+        }
+        assert!(REFRESH_PROMPTS.contains("from hermes_state import SessionDB") && REFRESH_PROMPTS.contains("db.request_prompt_refresh(None)"), "{REFRESH_PROMPTS}");
+    }
 
     /// The settler's answer is its last line, and nothing else is: a line
     /// Hermes logged before it is passed over, a missing count is no answer.
