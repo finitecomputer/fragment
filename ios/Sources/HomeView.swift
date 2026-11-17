@@ -82,23 +82,24 @@ private extension View {
     /// The launcher's primary action, the top bar's size. Glass doesn't refract
     /// glass, so on the card the system's goes flat: this one draws what light
     /// does in a glass bead, a tight gloss above and light pooled at the foot
-    /// behind the icon, and a rim and shadow around it.
-    func launcherGlass(tint: Color = Color(uiColor: .label)) -> some View {
-        foregroundStyle(Color(uiColor: .systemBackground)).fontWeight(.semibold)
-            .frame(width: 44, height: 44).contentShape(.circle)
+    /// behind the icon, and a rim and shadow around it. Its light scales with
+    /// `size`, so a smaller bead (the chat's Send) is the same glass.
+    func launcherGlass(tint: Color = Color(uiColor: .label), size: CGFloat = 44) -> some View {
+        let scale = size / 44
+        return foregroundStyle(Color(uiColor: .systemBackground)).fontWeight(.semibold)
+            .frame(width: size, height: size).contentShape(.circle)
             .background {
                 ZStack {
-                    Circle().fill(RadialGradient(colors: [.white.opacity(0.42), .clear], center: .bottom, startRadius: 0, endRadius: 26))
+                    Circle().fill(RadialGradient(colors: [.white.opacity(0.42), .clear], center: .bottom, startRadius: 0, endRadius: 26 * scale))
                     Ellipse().fill(LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.03)], startPoint: .top, endPoint: .bottom))
-                        .frame(width: 30, height: 15).offset(y: -12.5)
+                        .frame(width: 30 * scale, height: 15 * scale).offset(y: -12.5 * scale)
+                    // the rim inside the glass, so it swells with it on a press
+                    // rather than staying behind as a ring
+                    Circle().strokeBorder(LinearGradient(colors: [.white.opacity(0.7), .white.opacity(0.05), .white.opacity(0.5)],
+                                                         startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
                 }.clipShape(.circle)
             }
             .glassEffect(.regular.tint(tint.opacity(0.85)).interactive(), in: .circle)
-            .overlay {
-                Circle().strokeBorder(LinearGradient(colors: [.white.opacity(0.7), .white.opacity(0.05), .white.opacity(0.5)],
-                                                     startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
-                    .allowsHitTesting(false)
-            }
             .shadow(color: .black.opacity(0.28), radius: 8, y: 4)
     }
 }
@@ -118,19 +119,19 @@ private struct AgentSegments: View {
                         withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { library.selectedAgent = agent.name }
                     } label: {
                         HStack(spacing: 7) {
-                            AgentAvatar(agent: agent, size: 26)
+                            AgentAvatar(agent: agent, size: 26, round: true)
                             if selected { Text(agent.displayTitle).font(.subheadline.weight(.medium)).lineLimit(1).padding(.trailing, 7) }
                         }
                         .padding(5)
                         .background {
                             if selected {
-                                // concentric with the avatar's corners, 5 inside it
-                                RoundedRectangle(cornerRadius: 12).fill(Color(uiColor: .systemBackground).opacity(0.8))
+                                // a pill round the round avatar, 5 out from it
+                                Capsule().fill(Color(uiColor: .systemBackground).opacity(0.8))
                                     .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
                                     .matchedGeometryEffect(id: "pill", in: pill)
                             }
                         }
-                        .contentShape(.rect(cornerRadius: 12))
+                        .contentShape(.capsule)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(agent.displayTitle)
@@ -139,7 +140,9 @@ private struct AgentSegments: View {
                 }
             }
             // room for the tile's shadow inside the scroll view's clip
-            .padding(.vertical, 3).padding(.horizontal, 16)
+            // the first face centered under the composer's +, 38 in: the +
+            // is 10 + 6 + half its 44; the face 20 + its tile's 5 + half its 26
+            .padding(.vertical, 3).padding(.leading, 20).padding(.trailing, 16)
         }
         .scrollIndicators(.hidden).scrollBounceBehavior(.basedOnSize)
     }
@@ -187,7 +190,9 @@ struct HomeView: View {
                                 attach: { home.hold($0, $1) }, room: home.room, memo: { launchMemo($0) },
                                 send: { await launch() }, editable: !home.launching, recordingChanged: recordingChanged,
                                 chrome: false, recordFirst: true, canRecord: library.agent != nil, focused: $focused)
-                        .padding(.horizontal, 4).padding(.top, 10).padding(.bottom, library.agent == nil ? 4 : -1) // 8 with the agents' own 3
+                        // 16 to the card's edge with the composer's own 6: its round
+                        // action as far from the card's right as from its top
+                        .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, library.agent == nil ? 4 : -1) // 8 with the agents' own 3
                     if let error = home.error { Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 6) }
                     if library.agent != nil {
                         AgentSegments(library: library).padding(.bottom, 13)
@@ -400,6 +405,8 @@ struct ComposerBar: View {
             _ = attach(items.count) { try await ComposerFiles.read(items) }
         }
         .onChange(of: voice.recording, initial: true) { _, now in recordingChanged(now) }
+        // a voice memo felt as it starts and as it ends, wherever it is recorded
+        .sensoryFeedback(trigger: voice.recording) { _, now in now ? .start : .stop }
         .onChange(of: scenePhase) { _, phase in if phase != .active { voice.cancel() } }
         .onDisappear { voice.cancel() }
     }
@@ -518,6 +525,7 @@ struct ComposerView: View {
     var canRecord = true
     var focused: Binding<Bool>? = nil
     @Environment(\.dynamicTypeSize) private var type
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var typed: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments || recording }
     private var stops: Bool { working && !typed }
     private var valid: Bool { (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments) && text.utf8.count <= 32_768 }
@@ -561,6 +569,7 @@ struct ComposerView: View {
             // Send queues the words for the turn after; Steer tells this one now
             Button {
                 submitting = true
+                putKeyboardAway()
                 Task { await steer(); submitting = false }
             } label: {
                 Text("Steer").font(.subheadline.weight(.semibold))
@@ -573,28 +582,48 @@ struct ComposerView: View {
             .accessibilityIdentifier("steer")
         }
         if recordFirst { launcherAction } else { Button {
+            guard canSend else { return }
             submitting = true
-            Task { await (stops ? stop() : send()); submitting = false }
+            if !stops { putKeyboardAway() }
+            Task {
+                let pressed = ContinuousClock.now
+                await (stops ? stop() : send())
+                // a send is often done at once: its spinner holds a moment on
+                // the dark bead rather than flickering as the bead lightens
+                try? await Task.sleep(until: pressed + .milliseconds(600))
+                submitting = false
+            }
         } label: {
+            // the launcher's glass bead at the chat's size, so the two send
+            // alike: one bead whose glass and glyph change, never dimmed;
+            // with nothing to send it's a lighter bead
+            let sending = busy || submitting, off = !canSend && !sending
             ZStack {
-                // The adaptive label color keeps the filled control high-contrast;
-                // the glass foreground style is softened by vibrancy.
-                Circle().fill(canSend ? Color(uiColor: .label) : Color(uiColor: .tertiarySystemFill))
-                if busy || submitting {
-                    ProgressView().tint(.secondary)
+                if sending {
+                    ProgressView().tint(Color(uiColor: .systemBackground)).transition(.opacity.combined(with: .scale(scale: 0.6)))
                 } else {
-                    Image(systemName: stops ? "stop.fill" : "arrow.up")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(canSend ? Color(uiColor: .systemBackground) : Color.secondary)
+                    Image(systemName: stops ? "stop.fill" : "arrow.up").font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(off ? Color.white : Color(uiColor: .systemBackground))
+                        .contentTransition(.symbolEffect(.replace))
+                        .transition(.opacity.combined(with: .scale(scale: 0.6)))
                 }
             }
-            .frame(width: 34, height: 34)
-            .frame(width: 44, height: 44)
-            .contentShape(Circle())
+            .launcherGlass(tint: off ? Color(uiColor: .systemGray3) : Color(uiColor: .label), size: 34)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: off)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: sending)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: stops)
+            .frame(width: 44, height: 44).contentShape(Circle())
         }
-        .disabled(!canSend)
+        // not `disabled`: never dimmed as it sends or waits for words
+        .allowsHitTesting(canSend)
         .accessibilityLabel(stops ? "Stop response" : "Send message")
         .accessibilityIdentifier(stops ? "stop" : "send") }
+    }
+    /// The keyboard goes as a message does, so the reply has the room: the
+    /// focus given (else the field would take it back) and the responder.
+    private func putKeyboardAway() {
+        focused?.wrappedValue = false
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
     @ViewBuilder private var launcherAction: some View {
         if recording {
@@ -661,11 +690,14 @@ struct ComposerLayout: Layout {
     }
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let at = arrange(ProposedViewSize(width: bounds.width, height: bounds.height), subviews)
-        // the buttons at the bottom either way, as a bottom-aligned row has them
-        subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.maxY - at.lead.height), proposal: ProposedViewSize(at.lead))
-        subviews[2].place(at: CGPoint(x: bounds.maxX - at.trail.width, y: bounds.maxY - at.trail.height), proposal: ProposedViewSize(at.trail))
+        // In one row the buttons and the words share a center line, whatever
+        // the text size makes the field's height; stacked, the buttons sit
+        // at the bottom, under the words.
+        func top(_ height: CGFloat) -> CGFloat { at.stacked ? bounds.maxY - height : bounds.midY - height / 2 }
+        subviews[0].place(at: CGPoint(x: bounds.minX, y: top(at.lead.height)), proposal: ProposedViewSize(at.lead))
+        subviews[2].place(at: CGPoint(x: bounds.maxX - at.trail.width, y: top(at.trail.height)), proposal: ProposedViewSize(at.trail))
         let origin = at.stacked ? CGPoint(x: bounds.minX + Self.inset, y: bounds.minY)
-            : CGPoint(x: bounds.minX + at.lead.width, y: bounds.maxY - at.field.height)
+            : CGPoint(x: bounds.minX + at.lead.width, y: top(at.field.height))
         subviews[1].place(at: origin, proposal: ProposedViewSize(at.field))
     }
 }

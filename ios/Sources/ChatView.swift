@@ -183,6 +183,9 @@ struct ChatView: View {
                     quote: session.replyTo.map { quoted in (quoted.text, { session.replyTo = nil }) })
             }.background(FragmentStyle.background)
         }
+        // under the keyboard too: its rounded top corners show the chat's own
+        // color, not the window's white or black
+        .background(FragmentStyle.background.ignoresSafeArea())
         // Seen only once its newest messages are on screen: read, the window
         // the chat's own (not paged back), following its end; and again on
         // coming back there. Caught up on the socket is not seen.
