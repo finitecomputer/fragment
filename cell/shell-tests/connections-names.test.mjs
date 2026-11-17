@@ -78,3 +78,22 @@ test("this release's rows: each card says the platform's name", () => {
   const rows = { providers: [{ provider: "openrouter", name: "OpenRouter", kind: "key", state: "unset" }] };
   assert.deepEqual(names(connectionsSection(rows, null)), ["OpenRouter"]);
 });
+
+// A connected account's chips, as drawn: each `.provider-chips` child.
+const chips = (s) => walk(s).filter((n) => n.className === "provider-chips").flatMap((n) => n.children.map((c) => c.textContent));
+
+test("a connection's chips are the granted scopes its row names, and no other: the shell knows no scope (FIN-509)", () => {
+  const { connectionsSection } = connections();
+  const row = {
+    provider: "google",
+    name: "Google",
+    kind: "connection",
+    state: "connected",
+    granted: ["openid", "https://www.googleapis.com/auth/userinfo.email", "offline_access", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/drive", "https://example.test/unnamed"],
+    scopeNames: { "https://www.googleapis.com/auth/gmail.readonly": "Gmail (read)", "https://www.googleapis.com/auth/drive": "Drive", "https://www.googleapis.com/auth/calendar": "Calendar" },
+  };
+  assert.deepEqual(chips(connectionsSection({ providers: [row] }, null)), ["Gmail (read)", "Drive"]);
+  // a row that names none (an older release's, or a config without them) draws no chip, and still draws
+  const { scopeNames: _, ...unnamed } = row;
+  assert.deepEqual(chips(connectionsSection({ providers: [unnamed] }, null)), []);
+});

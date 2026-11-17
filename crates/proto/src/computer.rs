@@ -268,8 +268,9 @@ pub struct ProviderView {
     pub note: Option<String>,
     /// A connection's scopes for people (its catalog row's `scope_names`):
     /// each scope as `granted` and `missing` spell it, and what settings
-    /// calls it. A client shows a scope it does not name by its last path
-    /// segment. Add-only: none where its row names none.
+    /// calls it. A granted scope it does not name is not shown (a sign-in's
+    /// never is); a missing one is, by its last path segment. Add-only: none
+    /// where its row names none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_names: Option<std::collections::BTreeMap<String, String>>,
     /// A connection the person may connect several accounts at (its row's

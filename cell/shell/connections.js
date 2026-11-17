@@ -23,9 +23,9 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     not_set: "No key yet",
   };
   // a connection's scope for people: the name its provider's row gives it
-  // (`scopeNames`), else its last path segment (Google's
-  // https://www.googleapis.com/auth/<name>); the list never names a
-  // sign-in scope as missing
+  // (`scopeNames`). The shell knows no scope of its own: one a row leaves
+  // unnamed is no chip (a sign-in's is never named), and a missing one,
+  // which is never a sign-in's, shows by its last path segment
   // what a connection's account lets its agents do, picked as the person
   // connects it (`access`): its name for people, on a button and as said
   const ACCESS = { read: "read only", write: "read and write" };
@@ -330,10 +330,10 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     top.append(tile(true), titled, close);
     const inner = el("div", "provider-sheet-body");
     if (p.note) inner.append(el("p", "provider-about", p.note));
-    // what a connection's account allows, in words
+    // what a connection's account allows, in words: each granted scope its
+    // row names for people
     const granted = !several && p.kind === "connection" && p.state === "connected" ? p.granted ?? [] : [];
-    // (never its sign-in's: openid, email, profile)
-    const scopes = [...new Set(granted.filter((g) => !/^(openid|email|profile|userinfo\.\w+)$/.test(g.split("/").pop())).map((g) => scopeName(p, g)))];
+    const scopes = [...new Set(granted.map((g) => p.scopeNames?.[g]).filter(Boolean))];
     if (scopes.length) {
       const chips = el("div", "provider-chips");
       chips.append(...scopes.map((g) => el("span", null, g)));
