@@ -38,16 +38,14 @@ What every brain answers:
 
   answers ranked sections, best first, found by their words and by their
   meaning: `{"results": [{rank, path, wiki, title, heading, ancestry,
-  snippet, signals}], "semantic", "pending", "indexing", "waiting_ms",
-  "hint"?}`. `q` is plain words or a question, 1 to 256 characters;
-  search syntax means nothing. `limit` is 1 to 50 (10 unless you ask);
-  `wiki` narrows it to one wiki. A hit's `signals` say what found it (its
-  words, its meaning, or both). `semantic` is `off` when only words
-  answered (the deployment embeds nothing, or the question wasn't
-  embedded): ask with the words a page would use. `indexing: true` means
-  the index is still taking in a change and results may be incomplete;
-  `hint` says what finishes it, and `waiting_ms` above 0 that it is
-  sitting out a pause the search service asked for. Ask again in a moment.
+  snippet, signals}], "semantic", "indexing", "waiting_ms", "hint"?}`.
+  `q` is plain words or a question, 1 to 256 characters; search syntax
+  means nothing. `limit` is 1 to 50 (10 unless you ask); `wiki` narrows
+  it to one wiki. A hit's `signals` say what found it (its words, its
+  meaning, or both); `semantic` `off` means words alone answered: ask with
+  the words a page would use. `indexing: true` means results may be
+  incomplete, and `hint` says what finishes it. Ask again in a moment, or
+  after `waiting_ms` when it is above 0.
 - **`guide`**: the brain's own AGENTS.md, how to ingest into it and keep
   it. Read it before you write:
 
