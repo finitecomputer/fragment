@@ -672,11 +672,18 @@ fn read_test_secret(file: &Path) -> Result<String> {
 }
 
 fn load(config: &Path) -> Result<Deployment> {
-    let v = read_json(config)?;
+    let mut v = read_json(config)?;
     for (field, now) in FIELDS_GONE {
         if v.get(field).is_some() {
             bail!("{}: {field} is gone; name it as {now}", config.display());
         }
+    }
+    // a connection named by its row (`{"row": …}`) is that row, read from
+    // this checkout: the release's own, never a deployment's copy
+    // (devstack::rows)
+    if let Some(named) = v.get("providers").and_then(Value::as_array) {
+        let rows = devstack::rows::resolved(named, &devstack::repo_root()).with_context(|| format!("check {}", config.display()))?;
+        v["providers"] = Value::Array(rows);
     }
     let d: Deployment = serde_json::from_value(v).with_context(|| format!("parse {}", config.display()))?;
     checked(d).with_context(|| format!("check {}", config.display()))
@@ -2026,6 +2033,86 @@ mod tests {
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
         assert_eq!(offered[0], offered[1], "the example and the hosted e2e offer the same providers, in one order");
+    }
+
+    /// Every connection's row, by shape and never by name (FIN-509): each
+    /// file of deploy/providers is one row, named as its file, which a
+    /// deployment names (`{"row": …}`, `devstack::rows`) and so never
+    /// copies. It holds none of a deployment's facts. Named with them (its
+    /// client's id, and its secret's store name, which is bound) it loads
+    /// and connects through the browser; named alone it loads without that
+    /// connect. It says what people call it, and names for people every
+    /// scope it asks for but signing in, and no other. A skill of the
+    /// managed set is for it, and what that skill tells an agent of its
+    /// access (`references/*-access.json`) is the row's own. So a
+    /// connection is added as one row file and one skill folder, and no
+    /// list is edited. And each skill's connection has a row.
+    #[test]
+    fn each_connection_row_loads_names_its_scopes_and_has_a_skill() {
+        let root = devstack::repo_root();
+        let example = read_json(&root.join("deploy/example.jsonc")).unwrap();
+        // the managed set's skills: each connection's folders, by its name
+        // (a connection may have several: two services of one account)
+        let mut skills: std::collections::BTreeMap<String, Vec<PathBuf>> = Default::default();
+        let mut dirs = vec![root.join("templates/skills/skills")];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()) {
+                if entry.is_dir() {
+                    dirs.push(entry);
+                } else if entry.file_name().is_some_and(|n| n == "SKILL.md") {
+                    let text = fs::read_to_string(&entry).unwrap();
+                    if let Some(connection) = fragment_templates::blessed::skill_connection(&text) {
+                        skills.entry(connection.to_string()).or_default().push(dir.clone());
+                    }
+                }
+            }
+        }
+        let out = root.join("target/xtask-tests/connection-rows");
+        fs::create_dir_all(&out).unwrap();
+        let mut files: Vec<PathBuf> = fs::read_dir(root.join(devstack::rows::DIR)).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "jsonc")).collect();
+        files.sort();
+        assert!(!files.is_empty(), "deploy/providers holds the connections' rows");
+        let mut rows = vec![];
+        for path in &files {
+            let said = path.display();
+            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or_else(|| panic!("{said} is named for its row")).to_string();
+            let written = read_json(path).unwrap();
+            assert!(written.get("key").is_none() && written["connection_oauth"].get("client_id").is_none(), "{said}: a row holds no deployment's facts: its secret's store name and its client's id are given where a deployment names it");
+            // as a deployment names it: the example's providers, and this row
+            let deployed = |reference: Value| {
+                let mut config = example.clone();
+                let providers = config["providers"].as_array_mut().unwrap();
+                providers.retain(|p| p["row"] != name.as_str());
+                providers.push(reference);
+                let file = out.join(format!("{name}.jsonc"));
+                fs::write(&file, config.to_string()).unwrap();
+                load(&file).unwrap_or_else(|e| panic!("{said} loads in a deployment: {e:#}"))
+            };
+            let alone = deployed(json!({ "row": name }));
+            assert!(catalog_of(&alone).unwrap().0.get(&name).is_some_and(|p| p.connection_oauth.is_none()), "{said}: named alone, it is offered without its browser-bound connect");
+            let secret = format!("fragment-{name}-oauth-secret");
+            let d = deployed(json!({ "row": name, "key": secret, "client_id": format!("{name}-client") }));
+            let (catalog, _) = catalog_of(&d).unwrap();
+            let p = catalog.get(&name).unwrap();
+            let o = p.connection_oauth.as_ref().unwrap_or_else(|| panic!("{said}: a connection, connected through the browser"));
+            assert!(p.kind == fragment_core::catalog::Kind::Connection && p.title.is_some(), "{said}: a connection, with what people call it (title)");
+            assert!(bound(&d).unwrap().cell().iter().any(|(_, named)| *named == secret), "{said}: its client secret is bound from the store");
+            let asked: Vec<&String> = o.access.read.iter().flat_map(|g| &g.scopes).chain(&o.access.write.scopes).collect();
+            for scope in &asked {
+                assert!(fragment_core::connection_signin::IDENTITY_SCOPES.contains(&scope.as_str()) || p.scope_names.contains_key(*scope), "{said}: scope_names names {scope} for people");
+            }
+            for named in p.scope_names.keys() {
+                assert!(asked.contains(&named), "{said}: scope_names names {named}, which no access asks for");
+            }
+            let folders = skills.get(&name).unwrap_or_else(|| panic!("{said}: no skill of the managed set is for it (its SKILL.md's metadata: fragment: connection: {name})"));
+            for told in folders.iter().flat_map(|folder| fs::read_dir(folder.join("references")).into_iter().flatten()).map(|e| e.unwrap().path()).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("-access.json"))) {
+                assert_eq!(read_json(&told).unwrap(), written["connection_oauth"]["access"], "{}: the access {said} asks for", told.display());
+            }
+            rows.push(name);
+        }
+        for (connection, folders) in &skills {
+            assert!(rows.contains(connection), "{} is for {connection}, which has no row ({}/{connection}.jsonc)", folders[0].display(), devstack::rows::DIR);
+        }
     }
 
     /// A provider's note: the example's (its google row's, commented out)

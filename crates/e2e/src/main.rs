@@ -306,7 +306,9 @@ pub const SWAP_ROUTER_ENV: &str = "OPENROUTER_API_KEY";
 pub fn swap_providers(router_oauth: Option<Value>) -> Result<Value> {
     let text = std::fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc"))?;
     let config: Value = serde_json::from_str(&devstack::strip_comments(&text))?;
-    let mut rows = config["providers"].as_array().cloned().context("deploy/e2e.jsonc names its providers")?;
+    let named = config["providers"].as_array().context("deploy/e2e.jsonc names its providers")?;
+    // a connection named by its row is that row (devstack::rows), as a deploy reads it
+    let mut rows = devstack::rows::resolved(named, &devstack::repo_root())?;
     for r in &mut rows {
         r.as_object_mut().context("a provider is an object")?.remove("key");
         if let (Some(o), true) = (&router_oauth, r["name"] == SWAP_ROUTER) {
