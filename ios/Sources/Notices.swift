@@ -114,8 +114,8 @@ struct NoticesBand: View {
                                 withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { opened.toggle() }
                             }
                         } else {
-                            // fanned: its place kept, empty, while the cards are in the fan
-                            stacked(items, now: now).opacity(fanned ? 0 : 1)
+                            // fanned: its place kept, empty (and unread), while the cards are in the fan
+                            stacked(items, now: now).opacity(fanned ? 0 : 1).accessibilityHidden(fanned)
                         }
                     }
                     // nothing below: the toolbar's own margin is the gap above its buttons

@@ -179,10 +179,11 @@ final class FragmentUITests: XCTestCase {
     /// What the person is told (FIN-458), against a real platform: a dev
     /// stack (`cargo xtask dev`, its port forwarded to this Mac) whose
     /// person's computer has an update ready and saves that fail, signed as
-    /// that person by a key it approved ahead. Its notices show over Home in
-    /// the server's words, the warning saying when it stops and the platform's
-    /// own words, each with its actions; Later is the update's, and the
-    /// update goes. Named by `TEST_RUNNER_FRAGMENT_UITEST_SERVER` and
+    /// that person by a key it approved ahead. Its notices stack over Home;
+    /// a tap fans them out, in the server's words, the warning saying when it
+    /// stops and the platform's own words, each with its actions, and the X
+    /// folds them back. Later is the update's, and the update goes; one left,
+    /// the fan folds itself. Named by `TEST_RUNNER_FRAGMENT_UITEST_SERVER` and
     /// `TEST_RUNNER_FRAGMENT_UITEST_KEY` (the key's 64 hex); skipped without.
     func testTheComputersNoticesShowAndTheirActionsWork() throws {
         let env = ProcessInfo.processInfo.environment
@@ -197,7 +198,12 @@ final class FragmentUITests: XCTestCase {
         if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
         let notice = { (id: String) in app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:\(id)")).firstMatch }
         let update = notice("update:"), unsaved = notice("unsaved")
-        XCTAssertTrue(update.waitForExistence(timeout: 30), "the update ready is told")
+        let stack = app.descendants(matching: .any)["noticesStack"], close = app.buttons["noticesClose"]
+        let fan = { stack.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.4)).tap() }
+        XCTAssertTrue(stack.waitForExistence(timeout: 30), "the two told, stacked")
+        screenshot(app, "Notices stacked")
+        fan()
+        XCTAssertTrue(update.waitForExistence(timeout: 10), "fanned: the update ready")
         XCTAssertTrue(unsaved.waitForExistence(timeout: 10), "and the saves failing")
         XCTAssertTrue(app.staticTexts["An update is ready for your computer"].exists)
         XCTAssertTrue(app.staticTexts["Your computer can't save right now"].exists)
@@ -211,16 +217,21 @@ final class FragmentUITests: XCTestCase {
         screenshot(app, "Notices, dark")
         XCUIDevice.shared.appearance = .light
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "light, drawn")], timeout: 2)
+        close.tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 5), "the X folds them back")
         // over a page pushed on Home too (Codex on #1151): Your Apps
         app.buttons["yourApps"].tap()
         XCTAssertTrue(app.navigationBars["Your Apps"].waitForExistence(timeout: 5))
-        XCTAssertTrue(unsaved.waitForExistence(timeout: 5), "the notices stay over a pushed page")
+        XCTAssertTrue(stack.waitForExistence(timeout: 5), "the notices stay over a pushed page")
         screenshot(app, "Over Your Apps")
         app.navigationBars["Your Apps"].buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(update.waitForExistence(timeout: 5), "and back on Home")
+        XCTAssertTrue(stack.waitForExistence(timeout: 5), "and back on Home")
+        fan()
+        XCTAssertTrue(update.buttons["Later"].waitForExistence(timeout: 5))
         update.buttons["Later"].tap()
         XCTAssertTrue(update.waitForNonExistence(timeout: 20), "Later: the update is told no more")
-        XCTAssertTrue(unsaved.exists, "the other stays")
+        XCTAssertTrue(close.waitForNonExistence(timeout: 5), "one left: the fan folds itself")
+        XCTAssertTrue(unsaved.waitForExistence(timeout: 5), "the other stays, alone in the band")
         screenshot(app, "After Later")
     }
 
@@ -240,6 +251,9 @@ final class FragmentUITests: XCTestCase {
         if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
         let invite = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:invite:")).firstMatch
         XCTAssertTrue(invite.waitForExistence(timeout: 30), "the invite is told")
+        // one notice, one line: a tap opens its words and its other answers
+        invite.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).tap()
+        XCTAssertTrue(invite.buttons["Decline"].waitForExistence(timeout: 5), "opened")
         XCTAssertTrue(app.staticTexts[title].exists, "titled as it was sent")
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label ENDSWITH %@", "invited you to edit it.")).firstMatch.exists, "from whom, and as what")
         XCTAssertTrue(invite.buttons["Accept"].exists && invite.buttons["Decline"].exists)
