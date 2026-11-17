@@ -403,9 +403,11 @@ pub enum Command {
     /// them something to answer in words (`Event::Asked`): the answer,
     /// handed to the running turn at once, never a turn of its own. `seq`
     /// is the message's record (a fresh message id). Its words, its files
-    /// or both: `attached`, which the driver puts in its words and takes off
-    /// (`Attached`): a runtime never sees them here.
-    Tell { turn: String, seq: u64, by: String, by_name: String, text: String, attached: Option<Attached> },
+    /// or both: `attached`, which the driver downloads, names in its words
+    /// and takes off (`Attached`): a runtime never sees them here, but gets
+    /// the downloaded files as `files`, as a turn's start does
+    /// (`TurnStart::files`), so one that hears audio can (the relay's).
+    Tell { turn: String, seq: u64, by: String, by_name: String, text: String, attached: Option<Attached>, files: Vec<LocalFile> },
     /// A command of the menu said in the agent's chat at once, beside
     /// whatever turn runs there, no turn of its own (`How::Steer` into the
     /// running turn `turn`, `How::Aside`): `/<name> <args>`, its id the

@@ -1335,7 +1335,7 @@ fn a_question_is_answered_by_the_next_message() {
 
     // valid: the asker's next message is the answer
     let told = said(&mut e, &a, &v, 5, "npub1paul", json!({ "text": "Tomatoes, at dawn" }), T0 + 6);
-    assert_eq!(commands(&told), vec![Command::Tell { turn: turn.clone(), seq: 5, by: "npub1paul".into(), by_name: "paul".into(), text: "Tomatoes, at dawn".into(), attached: None }]);
+    assert_eq!(commands(&told), vec![Command::Tell { turn: turn.clone(), seq: 5, by: "npub1paul".into(), by_name: "paul".into(), text: "Tomatoes, at dawn".into(), attached: None, files: vec![] }]);
     assert!(posts(&told).is_empty(), "no turn of its own");
     assert!(told.dirty && !e.state().turns[&turn].asking);
     // replay: behind the cursor, nothing
@@ -1419,12 +1419,12 @@ fn a_question_is_answered_with_files() {
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "which photo?" }), T0)).expect("started").turn;
     ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 1);
     let only = said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [photo("a.png"), photo("b.png")] }), T0 + 2);
-    assert_eq!(commands(&only), vec![Command::Tell { turn: turn.clone(), seq: 2, by: "npub1paul".into(), by_name: "paul".into(), text: String::new(), attached: attached(&a, &["a.png", "b.png"]) }], "files alone answer it");
+    assert_eq!(commands(&only), vec![Command::Tell { turn: turn.clone(), seq: 2, by: "npub1paul".into(), by_name: "paul".into(), text: String::new(), attached: attached(&a, &["a.png", "b.png"]), files: vec![] }], "files alone answer it");
     assert!(posts(&only).is_empty() && only.dirty && !e.state().turns[&turn].asking, "no turn of its own");
     assert_eq!(said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [photo("a.png"), photo("b.png")] }), T0 + 3), Step::default(), "replay: nothing");
     ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 4);
     let both = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "this one", "attachments": [photo("c.png")] }), T0 + 5);
-    assert_eq!(commands(&both), vec![Command::Tell { turn: turn.clone(), seq: 3, by: "npub1paul".into(), by_name: "paul".into(), text: "this one".into(), attached: attached(&a, &["c.png"]) }], "words and files");
+    assert_eq!(commands(&both), vec![Command::Tell { turn: turn.clone(), seq: 3, by: "npub1paul".into(), by_name: "paul".into(), text: "this one".into(), attached: attached(&a, &["c.png"]), files: vec![] }], "words and files");
     let next = said(&mut e, &a, &v, 4, "npub1paul", json!({ "attachments": [photo("d.png")] }), T0 + 6);
     assert!(commands(&next).is_empty() && started(&next).is_none(), "asked no longer: queued");
     let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 7);
@@ -2399,7 +2399,7 @@ fn an_asks_turn_that_asks_back_is_told_to_go_on() {
     let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Which garden?"), Some(&talk), T0)).expect("rowan's turn");
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 1, text: "Which one do you mean?".into() }, T0 + 1);
     let s = ev(&mut e, Event::Asked { turn: t.turn.clone() }, T0 + 2);
-    assert_eq!(commands(&s), vec![Command::Tell { turn: t.turn.clone(), seq: ASKED_BACK_SEQ, by: "npub1juniper".into(), by_name: "Juniper".into(), text: ASKED_BACK.into(), attached: None }], "told to go on, in words");
+    assert_eq!(commands(&s), vec![Command::Tell { turn: t.turn.clone(), seq: ASKED_BACK_SEQ, by: "npub1juniper".into(), by_name: "Juniper".into(), text: ASKED_BACK.into(), attached: None, files: vec![] }], "told to go on, in words");
     assert!(!kinds(&s).contains(&"turn.asked".to_string()), "waiting for no one: {:?}", s.effects);
     assert!(e.state().turns[&t.turn].active() && !e.state().turns[&t.turn].asking, "still running");
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 2, text: "The back one, I think.".into() }, T0 + 3);

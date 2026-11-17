@@ -421,8 +421,47 @@ async fn a_card_answered_by_a_message_through_the_relay() {
     fake.until(WAIT, "the second turn's end", |w| !work_of(w, &chat, &again, "turn.end").is_empty()).await;
     let told = format!("[paul sent a file: 'basil.png' (image/png). It is on your computer at: {}]", dir.join("media").join(&sha).display());
     hermes.with(|s| assert_eq!(s.heard.last().map(|e| e["text"].clone()), Some(json!(told)), "where the file is, in its answer's words: {:?}", s.heard));
+    hermes.with(|s| assert!(s.heard.last().is_some_and(|e| e.get("media").is_none()), "a picture is its words alone, as the clarify takes words: {:?}", s.heard.last()));
     fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the answer started no turn"));
     assert_eq!(std::fs::read(dir.join("media").join(&sha)).expect("the file"), b"a photo of basil");
+    bridge.stop().await;
+}
+
+/// Goal (Austin, 2026-11-17: a voice memo sent as the answer to a question
+/// in words reached Hermes as its file's line alone, so Hermes never
+/// transcribed it and the agent did, itself): an answer in words that is a
+/// voice memo comes to Hermes with its audio as its media, as a turn's
+/// start's does, which Hermes transcribes and answers its clarify with;
+/// its words still name where the file is. Method: the scripted gateway's
+/// card, "Other" pressed with no words, a WAV said as the answer; what
+/// Hermes heard last, and its media fetched as Hermes fetches it.
+#[tokio::test]
+async fn a_voice_memo_answer_brings_hermes_its_audio() {
+    let (fake, bridge, hermes, dir) = setup("relay-voice-answer", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let bytes = bytes::Bytes::from_static(b"RIFF a voice memo saying blue");
+    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("audio/wav".into(), bytes.clone())));
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "clarify a color" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the clarify's card", |w| !work_of(w, &chat, &turn, "turn.prompt").is_empty()).await;
+    let p = fake.with(|w| work_of(w, &chat, &turn, "turn.prompt")[0].clone());
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    fake.until(WAIT, "the chat told whose answer it waits for", |w| !work_of(w, &chat, &turn, "turn.asked").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+    let heard = hermes.with(|s| s.heard.last().cloned()).expect("Hermes heard the answer");
+    let told = format!("[paul sent a file: 'voice-memo.wav' (audio/wav). It is on your computer at: {}]", dir.join("media").join(&sha).display());
+    assert_eq!(heard["text"], json!(told), "its words still name the file: {heard}");
+    let media = heard["media"].as_array().cloned().unwrap_or_default();
+    assert_eq!(media.len(), 1, "its audio is its media: {heard}");
+    assert_eq!(media[0]["mime"], "audio/wav", "{heard}");
+    let url = media[0]["url"].as_str().unwrap_or("");
+    assert_eq!(heard["media_urls"], json!([url]), "{heard}");
+    let addr: std::net::SocketAddr = url.strip_prefix("http://").and_then(|r| r.split_once('/')).and_then(|(a, _)| a.parse().ok()).expect("the relay's own address");
+    assert_eq!(support::hermes::download_from(addr, "computer-test", SECRET, url).await.as_deref(), Some(&bytes[..]), "the memo itself, at {url}");
+    fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 1, "the answer started no turn"));
     bridge.stop().await;
 }
 

@@ -743,6 +743,13 @@ pub async fn upload_to(addr: std::net::SocketAddr, id: &str, secret: &str, bytes
     http_to(addr, id, secret, "POST", "/relay/media", Some("image/png"), bytes).await.is_some()
 }
 
+/// A file the relay hosts at `url` (`/relay/media/<id>`), fetched as Hermes
+/// fetches an inbound's media, its token that of `id` and `secret`.
+pub async fn download_from(addr: std::net::SocketAddr, id: &str, secret: &str, url: &str) -> Option<Vec<u8>> {
+    let path = url.split_once("/relay/media/").map(|(_, m)| format!("/relay/media/{m}"))?;
+    http_to(addr, id, secret, "GET", &path, None, &[]).await
+}
+
 async fn http_to(addr: std::net::SocketAddr, id: &str, secret: &str, method: &str, path: &str, content_type: Option<&str>, body: &[u8]) -> Option<Vec<u8>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut s = tokio::net::TcpStream::connect(addr).await.ok()?;

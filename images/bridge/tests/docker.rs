@@ -3013,6 +3013,40 @@ async fn a_question_in_words_says_whose_answer_it_waits_for() {
     });
 }
 
+/// Goal (Austin, 2026-11-17: a voice memo sent as the answer to a question
+/// in words was never transcribed, so the agent transcribed it itself):
+/// real Hermes' open clarify answered with a voice memo is answered with
+/// what the memo says, transcribed once through the route, and the answer
+/// starts no turn of its own. Method: the question, then a memo (a WAV that
+/// says its words, as the scripted model reads them) said as the answer;
+/// the route's transcriptions, and the turn's reply after, which quotes
+/// the clarify's answer.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_question_in_words_is_answered_by_a_voice_memo() {
+    use sha2::Digest;
+    let (fake, model, chat, c) = hermes_running().await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "clarify: What should I call the plant?" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let asked = |w: &support::fake::World| w.bodies(&chat, "work", "turn.asked").into_iter().filter(|a| a["turn"] == turn).collect::<Vec<_>>();
+    within(&fake, &chat, &c, 120_000, "the question, and whose answer it waits for", |w| !asked(w).is_empty()).await;
+    let words = "call it fernando the fern";
+    let audio = support::model::memo(words);
+    let sha = fragment_bridge::records::hex(&sha2::Sha256::digest(&audio));
+    fake.with(|w| w.fragments.get_mut(&chat).expect("the chat").blobs.insert(sha.clone(), ("audio/wav".into(), bytes::Bytes::from(audio.clone()))));
+    let heard_before = model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/audio/transcriptions")).count();
+    fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": audio.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    within(&fake, &chat, &c, 120_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    let heard = model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/audio/transcriptions")).count() - heard_before;
+    assert_eq!(heard, 1, "the memo transcribed once, through the route");
+    fake.with(|w| {
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.last().is_some_and(|r| r.contains(words)), "the memo's words answered the clarify: {replies:?}");
+        assert_eq!(asked(w).len(), 1, "asked once");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the answer started no turn of its own (hello, then this one)");
+    });
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: a step read as its raw
 /// tool name and its arguments cut at 40 characters): real Hermes' steps
 /// say what they do. Its terminal, write_file and execute_code calls are

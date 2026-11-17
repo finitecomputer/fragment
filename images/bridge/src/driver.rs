@@ -1688,11 +1688,12 @@ impl RuntimeLane {
                 // in its words with where each is (`with_files`)
                 let keep = |turn: &str, files: &[LocalFile]| turn_files.lock().expect("turn files").entry(turn.to_string()).or_default().extend(files.iter().map(|f| f.pin.clone()));
                 match &mut c {
-                    Command::Tell { turn, text, attached, .. } => {
+                    Command::Tell { turn, text, attached, files: told, .. } => {
                         if let Some(a) = attached.take() {
                             let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
                             keep(turn, &files);
                             *text = crate::runtime::with_files(text, &a.by_name, a.refs.len(), &files);
+                            *told = files;
                         }
                     }
                     Command::Answer { turn, words, attached, .. } => {

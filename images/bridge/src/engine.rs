@@ -1944,7 +1944,7 @@ impl Engine {
             t.last_ms = self.now;
             self.dirty = true;
             crate::ev!("turn.told", { "turn": id, "seq": seq, "files": m.attachments.len() });
-            self.tell_runtime(&id, Command::Tell { turn: id.clone(), seq, by: principal.to_string(), by_name, text, attached });
+            self.tell_runtime(&id, Command::Tell { turn: id.clone(), seq, by: principal.to_string(), by_name, text, attached, files: Vec::new() });
             return true;
         }
         // its card that takes words, the oldest open one: its owner's alone
@@ -2307,7 +2307,7 @@ impl Engine {
                 if t.ret.is_some() {
                     crate::ev!("turn.asked_back", { "turn": turn });
                     let (by, by_name) = (t.asker.clone(), t.asker_name.clone());
-                    self.tell_runtime(&turn, Command::Tell { turn: turn.clone(), seq: ASKED_BACK_SEQ, by, by_name, text: ASKED_BACK.into(), attached: None });
+                    self.tell_runtime(&turn, Command::Tell { turn: turn.clone(), seq: ASKED_BACK_SEQ, by, by_name, text: ASKED_BACK.into(), attached: None, files: Vec::new() });
                     return;
                 }
                 let t = self.state.turns.get_mut(&turn).expect("checked");

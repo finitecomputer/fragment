@@ -38,7 +38,10 @@
 //!   an inbound in the same chat at once (`Command::Tell`), which Hermes'
 //!   clarify intercept takes as the answer mid-turn; files sent with it
 //!   come as lines of its words (the driver's), as the clarify takes words
-//!   alone. A clarify card's owner's message is its "Other" with those
+//!   alone, and its audio as its media too, which Hermes transcribes and
+//!   answers the clarify with (its `_prepare_clarify_reply_text`: a voice
+//!   memo's words are the answer, and one it hears nothing in leaves the
+//!   question open). A clarify card's owner's message is its "Other" with those
 //!   words (`Command::Answer`): the answer, then the words. A Stop while it asks,
 //!   or while a clarify's card of choices is open, interrupts, then answers
 //!   `skip` (`wire::STOP_WORDS`) so the waiting clarify lets go;
@@ -649,7 +652,7 @@ impl Loop {
                     crate::ev!("relay.interrupt", { "turn": turn });
                     self.send(frame);
                     if let Some((by, by_name)) = asking {
-                        self.tell(&turn, 0, &by, &by_name, wire::STOP_WORDS);
+                        self.tell(&turn, 0, &by, &by_name, wire::STOP_WORDS, &[]);
                     }
                 } else {
                     // Never sent: it never starts.
@@ -679,11 +682,11 @@ impl Loop {
                 let _ = self.send(frame.clone());
                 self.answers.push(PendingAnswer { buffer, frame });
                 if let Some(words) = words {
-                    self.tell(&turn, seq, &by, "owner", &words);
+                    self.tell(&turn, seq, &by, "owner", &words, &[]);
                 }
             }
             Command::Forget { turn } => self.forget(&turn),
-            Command::Tell { turn, seq, by, by_name, text, .. } => self.tell(&turn, seq, &by, &by_name, &text),
+            Command::Tell { turn, seq, by, by_name, text, files, .. } => self.tell(&turn, seq, &by, &by_name, &text, &files),
             Command::Aside { agent, fragment, chat_name, simplex, turn, id, by, by_name, text } => {
                 // in the agent's chat, as it is, kept until Hermes acks it:
                 // Hermes takes a command mid-turn (`/steer` lands in the
@@ -705,15 +708,35 @@ impl Loop {
     }
 
     /// The asker's words for a turn that asked them (`Command::Tell`): an
-    /// inbound in the turn's chat, kept until Hermes acks it.
-    fn tell(&mut self, turn: &str, seq: u64, by: &str, by_name: &str, text: &str) {
+    /// inbound in the turn's chat, kept until Hermes acks it. Its audio
+    /// (`files`, within Hermes' media cap) is hosted as its media, as a
+    /// turn's start hosts its files, so Hermes transcribes a voice memo
+    /// sent as the answer and answers with its words (Austin, 2026-11-17:
+    /// the clarify got only its file's line, and the agent transcribed it
+    /// itself). Its other files stay lines of its words alone: the clarify
+    /// takes words.
+    fn tell(&mut self, turn: &str, seq: u64, by: &str, by_name: &str, text: &str, files: &[LocalFile]) {
+        if !self.inflight.contains_key(turn) {
+            return;
+        }
+        let mut hosted = Vec::new();
+        {
+            let mut t = self.media.lock().expect("the media table");
+            for (i, f) in files.iter().enumerate().filter(|(_, f)| f.media_type.starts_with("audio/") && f.size <= limits::HERMES_MEDIA_MAX_BYTES) {
+                let id = format!("told-{turn}-{seq}-{i}");
+                let url = format!("http://{}/relay/media/{id}", self.cfg.listen);
+                // unpinned, as a turn's start's: the turn keeps its files
+                t.insert(id, Media { file: LocalFile { pin: Kept::default(), ..f.clone() } });
+                hosted.push((url, f.media_type.clone()));
+            }
+        }
         let Some(f) = self.inflight.get_mut(turn) else { return };
         f.asking = false;
         let message_id = format!("{turn}-t{seq}");
-        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None, command: false, quote: None, topic: wire::topic(f.start.simplex) };
+        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &hosted, context: None, command: false, quote: None, topic: wire::topic(f.start.simplex) };
         let buffer = format!("t-{turn}-{seq}");
         let frame = wire::inbound(&m, &buffer);
-        crate::ev!("relay.told", { "turn": turn, "seq": seq });
+        crate::ev!("relay.told", { "turn": turn, "seq": seq, "media": hosted.len() });
         let _ = self.send(frame.clone());
         self.answers.push(PendingAnswer { buffer, frame });
     }
