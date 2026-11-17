@@ -324,6 +324,26 @@ async fn the_hermes_image() {
     }
     eprintln!("hermes: first message to reply: {} ms ({} ms since the marker)", asked.elapsed().as_millis(), gate.elapsed().as_millis());
     fake.until(30_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t1)).await;
+    // No supervised service of upstream's starts over (its `profile-gateways`,
+    // left in, restarted every second: images/hermes/Dockerfile): every slot
+    // s6 wants up has stayed up between two looks 3 s apart, and the
+    // gateway is the boot's own, not a service's.
+    let slots = || c.exec_out(&["sh", "-c", "for s in /run/service/*; do printf '%s ' \"${s##*/}\"; /command/s6-svstat -o wantedup,up,updownfor \"$s\"; done"]);
+    let (first, _) = (slots(), tokio::time::sleep(Duration::from_secs(3)).await);
+    let second = slots();
+    let read = |text: &str| -> BTreeMap<String, (String, String, u64)> {
+        text.lines().filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            Some((f.first()?.to_string(), (f.get(1)?.to_string(), f.get(2)?.to_string(), f.get(3)?.parse().ok()?)))
+        }).collect()
+    };
+    let (before, after) = (read(&first), read(&second));
+    assert!(!after.is_empty() && !after.contains_key("profile-gateways"), "upstream's slots, no profile-gateways: {second}");
+    for (slot, (wanted, up, since)) in &after {
+        if wanted == "true" {
+            assert!(up == "true" && before.get(slot).is_some_and(|b| *since >= b.2 + 2), "{slot} stays up, never restarting: {first} then {second}");
+        }
+    }
     fake.with(|w| {
         let reply = answered(w, &t1).unwrap();
         assert!(reply["text"].as_str().unwrap().contains("hello hermes"), "the scripted model's answer: {reply}");
@@ -1673,17 +1693,14 @@ fn settle(took: Duration) -> Duration {
 /// h]`, as its X server has it (`xwininfo`, as the hermes user).
 fn window(c: &Container, profile: &str, title: &str) -> Option<[usize; 4]> {
     let env = format!("/data/hermes/profiles/{profile}/bot-desktop/env");
-    let script = format!("set -a; . {env}; xwininfo -root -tree");
-    let tree = c.exec_out(&["/command/s6-setuidgid", "hermes", "bash", "-c", &script]);
-    // `0x200003 "Example Domain - …": ("chromium-browser" "Chromium-browser")  1004x748+10+10  +10+10`
-    let line = tree.lines().find(|l| l.contains(&format!("\"{title}")))?;
-    let mut fields = line.split_whitespace().rev();
-    let at = fields.next()?.trim_start_matches('+');
-    let size = fields.next()?;
-    let (x, y) = at.split_once('+')?;
-    let (w, rest) = size.split_once('x')?;
-    let h = rest.split('+').next()?;
-    Some([x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?])
+    // By its UTF-8 name (_NET_WM_NAME): browser_exec marks the tab it
+    // drives (`🐴 Example Domain - Chromium`), a name WM_NAME, which
+    // xwininfo prints, cannot carry
+    let script = format!("set -a; . {env}; for w in $(xprop -root _NET_CLIENT_LIST | grep -o '0x[0-9a-f]*'); do case \"$(xprop -id $w _NET_WM_NAME)\" in *\"$1\"*) xwininfo -id $w; break;; esac; done");
+    let info = c.exec_out(&["/command/s6-setuidgid", "hermes", "bash", "-c", &script, "window", title]);
+    // `Absolute upper-left X:  10`, `… Y:  10`, `Width: 1004`, `Height: 748`
+    let field = |name: &str| info.lines().find_map(|l| l.trim().strip_prefix(name)).and_then(|v| v.trim().parse::<usize>().ok());
+    Some([field("Absolute upper-left X:")?, field("Absolute upper-left Y:")?, field("Width:")?, field("Height:")?])
 }
 
 /// The share of `rect`'s pixels in `frame` (`width` wide) that are
@@ -1986,7 +2003,8 @@ async fn the_hermes_desktop() {
 }
 
 /// Goal: the agent's first browser_exec starts regular Chromium on its own
-/// screen, and the page sees `navigator.webdriver` false; the Browser icon
+/// screen, and the page sees `navigator.webdriver` false; each page it
+/// opens comes to the front of that screen; the Browser icon
 /// shares that process and its cookies. A turn's end leaves it up;
 /// stopping its desktop closes it and keeps its cookies. A person's
 /// Browser icon first (`navigator.webdriver` false there too), a browser
@@ -2010,17 +2028,32 @@ async fn a_regular_browser_is_shared_by_the_desktop_and_tools() {
     for unwanted in ["--enable-automation", "--remote-debugging-pipe", "--headless"] {
         assert!(!argv.iter().any(|arg| arg.starts_with(unwanted)), "no {unwanted}: {argv:?}");
     }
+    // Hermes' janitor keeps the browser it started for as long as its
+    // desktop: the managed overlay's bound, read as the gateway reads it
+    let idle = hermes_python(&c, &[], "import json\nfrom tools.browser_session import BROWSER_SESSION_INACTIVITY_TIMEOUT as t\nprint(json.dumps({'idle': t}))");
+    assert_eq!(idle["idle"], json!(600), "the browser's idle bound is its desktop's ten minutes (hermes-boot's IDLE_STOP_MS): {idle}");
     let webdriver = "inspect browser: navigator.webdriver === false ? 'ordinary-browser' : 'automation-enabled'";
     let ordinary = tool_said(&fake, &chat, &c, webdriver).await;
     assert!(ordinary.contains("ordinary-browser"), "the page sees webdriver false: {ordinary}");
     let cookie = tool_said(&fake, &chat, &c, "inspect browser: document.cookie = 'fragment_browser_probe=kept; Max-Age=3600; SameSite=Lax'; document.cookie").await;
     assert!(cookie.contains("fragment_browser_probe=kept"), "a real persistent cookie: {cookie}");
+    // A second page opens in a tab of its own (browser_exec's `new_tab`),
+    // which comes to the front: its screen shows what the agent works on,
+    // and a file input it clicks there opens the desktop's file dialog.
+    tool_said(&fake, &chat, &c, "browse: https://example.com/?second").await;
+    let shown = tool_said(&fake, &chat, &c, "inspect browser: document.visibilityState + ' ' + location.search").await;
+    assert!(shown.contains("visible ?second"), "the agent's tab is the one its screen shows: {shown}");
 
     let base = fragment_bridge::net::Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
     let _viewer = Viewer::open(&base, "watcher", profile, Duration::from_secs(30)).await.unwrap();
     open_browser_icon(&c, profile);
     assert_eq!(desktop_browser(&c, profile)["pid"], first["pid"], "the icon reuses the tool's browser, which outlived the turns that used it");
 
+    // A desktop stops after `IDLE_STOP_MS` unused, long after Chromium has
+    // written a cookie to disk (it commits its store every 30 s); the
+    // computer's own stop has Hermes close its browser first. This stop
+    // comes at once, so it waits for that write as an idle stop would.
+    cookie_on_disk(&c, profile, "fragment_browser_probe").await;
     let stopped = c.exec_code(&["env", "HERMES_HOME=/data/hermes", "/command/s6-setuidgid", "hermes", "hermes", "-p", profile, "computer-use", "screen", "stop"]);
     assert_eq!(stopped.0, 0, "desktop stop: {stopped:?}");
     let t = Instant::now();
@@ -2049,6 +2082,24 @@ async fn a_regular_browser_is_shared_by_the_desktop_and_tools() {
     let navigated = tool_said(&fake, &chat, &c, "browse: https://example.com").await;
     let cookie = tool_said(&fake, &chat, &c, read_cookie).await;
     assert!(cookie.contains("cookie-kept"), "the cookie survives a computer restart: {cookie}; {navigated}");
+}
+
+/// Waits (at most 60 s) until `profile`'s desktop browser has written its
+/// cookie `name` to its profile on disk, read without its lock
+/// (`immutable`), as a running Chromium holds it.
+async fn cookie_on_disk(c: &Container, profile: &str, name: &str) {
+    let jar = format!("/data/work/{profile}/browser-profile/Default");
+    let count = format!("for f in {jar}/Network/Cookies {jar}/Cookies; do [ -f \"$f\" ] && sqlite3 \"file:$f?immutable=1\" \"select count(*) from cookies where name = '{name}'\"; done");
+    let t = Instant::now();
+    // bounded: two of Chromium's commits
+    loop {
+        let found = c.exec_out(&["/command/s6-setuidgid", "hermes", "sh", "-c", &count]);
+        if found.lines().any(|l| l.trim().parse::<u32>().is_ok_and(|n| n > 0)) {
+            return;
+        }
+        assert!(t.elapsed() < Duration::from_secs(60), "{name} never reached {jar}'s cookies: {found:?}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 /// Hermes' own reading of `profile`'s Bot Desktop lease, as its

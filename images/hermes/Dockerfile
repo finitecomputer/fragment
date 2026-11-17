@@ -564,7 +564,11 @@ X-XFCE-CommandsWithParameter=%B "%s";
 EOF
 RUN sed -i 's/^WebBrowser=.*/WebBrowser=fragment-browser/' /etc/xdg/xfce4/helpers.rc \
  && grep -qx 'WebBrowser=fragment-browser' /etc/xdg/xfce4/helpers.rc
-RUN /opt/fragment/bin/hermes-boot build-info
+# It also changes one line of Hermes' browser_exec: the agent's tab on its
+# Bot Desktop comes to the front (boot/src/desktop.rs, `front_tabs`), its
+# bytecode compiled again here.
+RUN /opt/fragment/bin/hermes-boot build-info \
+ && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/tools/browser_use_cli.py
 # Playwright launches the system Chromium, the one the desktop and Hermes'
 # browser run (/opt/fragment/bin/chromium: /usr/bin/chromium with a
 # container's flags), never a browser of its own: Chrome for Testing fails

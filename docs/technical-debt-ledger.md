@@ -196,13 +196,58 @@ unfinished design, not debt.
 ## The Hermes image patches Hermes' own boot
 
 - **Shortcut:** hermes-boot runs the gateway itself, so the image removes
-  upstream's `/etc/cont-init.d/02-reconcile-profiles`
-  (images/hermes/Dockerfile), failing the build if another script names
-  `container_boot`.
-- **Risk:** a Hermes that starts a gateway some other way runs two.
+  upstream's `/etc/cont-init.d/02-reconcile-profiles` and, since v0.23,
+  its `profile-gateways` s6 service: an `s6-svscan` over the per-profile
+  gateways only that reconciler registers, which without it fails and
+  restarts every second (images/hermes/Dockerfile). The build fails if
+  either is not there to remove, if another script names
+  `container_boot`, or if another service runs `s6-svscan`.
+- **Risk:** a Hermes that starts a gateway some other way runs two; one
+  that moves the per-profile scan elsewhere restarts it in a loop.
 - **Delete when:** upstream lets a container whose main program is the
-  gateway skip its reconciler (or ships a preloadable, unsupervised
-  gateway main program), proven by the real-Hermes lane without it.
+  gateway skip its reconciler and its per-profile gateways (or ships a
+  preloadable, unsupervised gateway main program), proven by
+  `the_hermes_image` (no s6 slot starts over) and the real-Hermes lane
+  with both left in.
+
+## The Hermes image removes Hermes' login script
+
+- **Shortcut:** upstream's `/etc/profile.d/hermes.sh` (v0.23) puts Hermes'
+  venv and its `bin` ahead of a login shell's PATH. An agent's terminal
+  runs every command in one, so `python` and `pip` were Hermes' own, not
+  the computer's Python environment, and `hermes` bypassed the image's
+  shim that refuses `hermes cron`. The image deletes the script
+  (images/hermes/Dockerfile), failing the build if it is not there or
+  another login script names `/opt/hermes`. Hermes' terminal appends the
+  gateway's PATH entries a login profile dropped, so Hermes loses nothing.
+- **Risk:** a later Hermes that needs its login script for a tool of its
+  own finds it missing; its terminal's own PATH repair is all that stands
+  in.
+- **Delete when:** upstream's login script leaves an existing Python
+  environment and `/usr/local/bin` ahead of its own, proven by
+  `an_agent_runs_hermes_by_name` (the image's `hermes`, `hermes cron`
+  refused) and `the_computers_python_keeps_what_its_agents_install`
+  (`which python pip`) with the script left in.
+
+## The Hermes image removes Hermes' own Chrome for Testing
+
+- **Shortcut:** Hermes' package manager ships Chrome for Testing (its
+  `chromium`, `/opt/hermes/tools/chromium-1248`, 405 MB) and bakes its path
+  into `/etc/hermes/chromium-executable-path`. Nothing here runs it: each
+  profile names the image's Chromium (`browser.executable_path`), which
+  passes Cloudflare's bot check where Chrome for Testing fails, and its
+  directory stands where Playwright looks for its own Chromium. The image
+  deletes both (images/hermes/Dockerfile), failing the build unless the
+  directory held Chrome for Testing at that path; Hermes' package manager
+  then reports `chromium` outdated.
+- **Risk:** a Hermes path that falls back to its packaged Chromium (a
+  profile without `browser.executable_path`) finds none, and an agent's
+  `hermes` repair could download all 405 MB again into Hermes' store.
+- **Delete when:** upstream's image ships no browser of its own beside a
+  configured one, or its store stops sharing Playwright's directory names,
+  proven by `playwright_runs_the_system_chromium_and_the_small_tools_run`
+  and `a_regular_browser_is_shared_by_the_desktop_and_tools` without the
+  deletion.
 
 ## Hermes' Relay carries no structure for a turn's end or a routine's silence
 
@@ -245,6 +290,27 @@ unfinished design, not debt.
   port, or Chromium stops marking a port-0 browser, proven by
   `a_regular_browser_is_shared_by_the_desktop_and_tools` with the flag
   gone.
+
+## The image brings the agent's browser tab to the front
+
+- **Shortcut:** Hermes' browser_exec opens each page after the first in a
+  background tab and brings tabs to the front only on a cloud browser, so
+  as not to switch the tab a person looks at in their own Chrome. On the
+  Bot Desktop that hid the page the agent worked on from the person
+  watching its screen, and a file input clicked there opened no file
+  dialog. hermes-boot changes that one line of
+  `tools/browser_use_cli.py` at the image's build
+  (images/hermes/boot/src/desktop.rs `front_tabs`): on the agent's own
+  desktop browser, tabs come to the front. An exact match: an upstream
+  change fails the build.
+- **Risk:** a capture of a hidden tab brings it to the front, which can
+  switch the tab a person was looking at while they watched without
+  taking over (a person who takes over holds the lease, and browser_exec
+  is refused).
+- **Delete when:** a pinned Hermes brings the Bot Desktop browser's tabs
+  to the front itself, proven by
+  `a_regular_browser_is_shared_by_the_desktop_and_tools` (its second page
+  `visible`) without the change.
 
 ## Each agent's Hermes profile config is rewritten at every boot
 

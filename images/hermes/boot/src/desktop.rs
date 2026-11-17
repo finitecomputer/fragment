@@ -25,6 +25,49 @@ use serde_json::json;
 
 use crate::hermes;
 
+/// Where Hermes' browser_exec decides whether the agent's tabs come to the
+/// front (relative to Hermes' root), and the one line of it the image
+/// changes: on the agent's own Bot Desktop browser (`local_engine` is
+/// `local`), they do, as on a cloud browser. Upstream leaves every local
+/// tab in the background, so as not to switch the tab a person looks at in
+/// their own Chrome; on the Bot Desktop that hid the page the agent worked
+/// on from the person watching its screen, and a file input clicked there
+/// opened no file dialog (2026-11-17). An exact match: an upstream change
+/// fails the image's build, never skips this (docs/technical-debt-ledger.md,
+/// "The image brings the agent's browser tab to the front").
+pub const FRONT_TAB_FILE: &str = "tools/browser_use_cli.py";
+const FRONT_TAB_FROM: &str = "    from tools.browser_use_shot import ACTIVATE_NEVER, harness_command
+    cmd = harness_command(cmd, activate=env.pop(_CLOUD_BROWSER_SENTINEL, None) or ACTIVATE_NEVER)
+";
+const FRONT_TAB_TO: &str = "    from tools.browser_use_shot import ACTIVATE_ALWAYS, ACTIVATE_NEVER, harness_command
+    # Fragment's image (images/hermes/boot/src/desktop.rs): the Bot Desktop's tab in front.
+    cmd = harness_command(cmd, activate=env.pop(_CLOUD_BROWSER_SENTINEL, None) or (ACTIVATE_ALWAYS if local_engine == \"local\" else ACTIVATE_NEVER))
+";
+
+/// Makes `FRONT_TAB_FILE` under `root` bring the Bot Desktop's tab to the
+/// front, once, and drops its stale bytecode (the base's is unchecked-hash:
+/// editing a source does not invalidate it; the image's build compiles it
+/// again).
+pub fn front_tabs(root: &Path) -> Result<(), String> {
+    let path = root.join(FRONT_TAB_FILE);
+    let source = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if source.matches(FRONT_TAB_FROM).count() != 1 || !source.contains("local_engine = env.pop(_BOT_DESKTOP_BROWSER_SENTINEL, None)") {
+        return Err(format!("{}: Hermes' tab activation changed; check the Bot Desktop's tabs come to the front", path.display()));
+    }
+    std::fs::write(&path, source.replacen(FRONT_TAB_FROM, FRONT_TAB_TO, 1)).map_err(|e| format!("{}: {e}", path.display()))?;
+    let cache = path.parent().expect("a source's directory").join("__pycache__");
+    if cache.exists() {
+        let prefix = format!("{}.", path.file_stem().expect("a Python module").to_string_lossy());
+        for file in std::fs::read_dir(&cache).map_err(|e| e.to_string())? {
+            let file = file.map_err(|e| e.to_string())?;
+            if file.file_name().to_string_lossy().starts_with(&prefix) {
+                std::fs::remove_file(file.path()).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A desktop up and unused this long is stopped. Hermes' own default is
 /// 30 minutes; ten keeps a computer whose agents each opened a browser once
 /// from holding gigabytes for half an hour, and a person's pause while
@@ -94,6 +137,29 @@ pub fn screens_file(agents: &[Agent], home: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: the image's one change to Hermes' tab activation applies once
+    /// to the pinned source, its old bytecode dropped. Replay: a source
+    /// already changed is refused, as is an upstream that changed the line
+    /// (the build fails, never skips it).
+    #[test]
+    fn the_bot_desktops_tab_comes_to_the_front_once() {
+        let root = std::env::temp_dir().join(format!("front-tabs-{}", std::process::id()));
+        let tools = root.join("tools");
+        std::fs::create_dir_all(tools.join("__pycache__")).unwrap();
+        let pinned = format!("def browser_exec():\n    local_engine = env.pop(_BOT_DESKTOP_BROWSER_SENTINEL, None)\n{}    return cmd\n", super::FRONT_TAB_FROM);
+        std::fs::write(tools.join("browser_use_cli.py"), &pinned).unwrap();
+        std::fs::write(tools.join("__pycache__/browser_use_cli.cpython-314.pyc"), b"old").unwrap();
+        std::fs::write(tools.join("__pycache__/browser_use_shot.cpython-314.pyc"), b"other").unwrap();
+        super::front_tabs(&root).unwrap();
+        let patched = std::fs::read_to_string(tools.join("browser_use_cli.py")).unwrap();
+        assert!(patched.contains("or (ACTIVATE_ALWAYS if local_engine == \"local\" else ACTIVATE_NEVER))") && !patched.contains(super::FRONT_TAB_FROM), "{patched}");
+        assert!(!tools.join("__pycache__/browser_use_cli.cpython-314.pyc").exists() && tools.join("__pycache__/browser_use_shot.cpython-314.pyc").exists(), "its own stale bytecode only");
+        assert!(super::front_tabs(&root).is_err(), "replay: already changed");
+        std::fs::write(tools.join("browser_use_cli.py"), pinned.replace("or ACTIVATE_NEVER)", "or ACTIVATE_IF_CLOUD)")).unwrap();
+        assert!(super::front_tabs(&root).unwrap_err().contains("tab activation changed"), "an upstream change fails the build");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn agent(label: &str) -> Agent {
         Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: None, claude: Default::default() }

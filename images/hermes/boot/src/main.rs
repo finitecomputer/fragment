@@ -509,6 +509,7 @@ fn screen_start(agent: Option<&str>) -> ! {
 /// At image build: what the boot reads instead of finding it each time, and
 /// the platform skill (skills.rs), from the image's own `fragment` CLI.
 fn build_info() -> ! {
+    desktop::front_tabs(Path::new("/opt/hermes")).unwrap_or_else(|e| fail(&e));
     let plugins = hermes::lean_plugins(Path::new("/opt/hermes/plugins"));
     std::fs::write(format!("{OPT}/lean-plugins.txt"), plugins.join("\n")).unwrap_or_else(|e| fail(&e.to_string()));
     // The desktop image already contains regular distro Chromium. Its PM
