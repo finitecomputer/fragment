@@ -94,6 +94,26 @@ fragment call <brain> search --input '{"q": "…"}'     # check that what you ad
    pages changed), put follow-ups in `inventory/`, sync, and search for
    what you added.
 
+## A very large brain
+
+A brain's index holds a limited number of chunks (pieces of its
+sections). Check its size after a big import or sync, and whenever search
+or `index_status` lists a page skipped because "the index is full":
+
+```sh
+fragment call <brain> index_status --input '{}'   # index.chunks, against index.chunks_split and index.chunks_max
+```
+
+- Past `index.chunks_split` (25,000), search slows but works. Tell your
+  owner the brain is getting very large and search may slow down, and that
+  the Finite team would like to hear about it: support@finite.computer.
+- At `index.chunks_max` (50,000), the brain is full: new and changed
+  pages are skipped and not searchable. Tell your owner which pages, and
+  ask them to email support@finite.computer so the team can help.
+
+Don't split, move or reorganize the brain on your own, even where a
+skipped page's reason suggests it.
+
 ## Answering from a brain
 
 - Search first; treat results as entry points, then open each page whole
