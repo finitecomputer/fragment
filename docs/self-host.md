@@ -273,11 +273,15 @@ the node runs with `CELLD_EGRESS_PUBLIC_ONLY=1`, which refuses private
 addresses: probed 2026-11-17, a Worker's fetch is then refused, "egress
 refused: 192.168.5.2 is not a public address", while the binding answers.
 
-So run a box's node with it. A dev stack (and mac-a's testbed, a dev stack)
-runs without it, because the cell reaches its local fakes. There an app's
-job could transcribe on the Mac directly, unmetered. A computer's egress
-refuses private addresses (sandcastle's rule; not probed against this
-port).
+That is the isolation, but not every box can turn it on today. A box
+whose identity door runs beside celld can't: the cell's code exchange with
+the door is a Worker's fetch to the box's own network, which public-only
+egress refuses and `CELLD_EGRESS_ALLOW` can't open (Egress, under seam 4).
+Neither can a dev stack, such as mac-a's testbed, whose cell reaches its
+local fakes. Until celld opens one named local service to a Worker, such a
+box runs with egress open, and there an app's job could transcribe on the
+Mac directly, unmetered (FIN-525). A computer's egress refuses private
+addresses (sandcastle's rule; not probed against this port).
 
 ```sh
 deploy/local-models/build-mac.sh      # about 10 min the first time
