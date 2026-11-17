@@ -1039,13 +1039,15 @@ agent, or carrying code, keeps the last good code and says to fork it.
     `prefix` (optional, at most `inbox::PREFIX_MAX_BYTES`) and then the
     hex HMAC-SHA256, under the secret, of `signed` (at most
     `inbox::SIGNED_MAX_BYTES`) with `{body}` the delivery's raw bytes and
-    each `{<header>}` that header's value, compared in constant time.
-    `signed` names `{body}` once, and no `{` or `}` but its
-    placeholders'. With `fresh`, only while that header's Unix seconds
-    are at most `within_s` (1 to `inbox::WITHIN_MAX_S`) from now; the two
-    come together, and `signed` names that header, so its time is signed
-    (else a captured delivery, re-timed, would be taken again). A webhook signing its body alone is `"signed":
-    "{body}"` (GitHub's, with `"prefix": "sha256="`).
+    `{<fresh>}` that header's value, compared in constant time. With
+    `fresh`, only while that header's Unix seconds, in digits alone, are
+    at most `within_s` (1 to `inbox::WITHIN_MAX_S`) from now; the two come
+    together. `signed` is `<text>{body}`, or with `fresh`
+    `<text>{<fresh>}<text>{body}`, its text after the time starting with
+    no digit (the text before is optional): what is signed has one
+    reading, so no bytes can move between its pieces to make an old,
+    captured delivery's time new. A webhook signing its body alone is
+    `"signed": "{body}"` (GitHub's, with `"prefix": "sha256="`; Linear's).
 
   A header it names is lower case, never `x-fragment-*`, `cookie`,
   `host`, `authorization` or `content-type`. The inbox token then admits

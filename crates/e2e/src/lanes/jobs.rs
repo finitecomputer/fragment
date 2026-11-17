@@ -596,6 +596,7 @@ fn inbox_hmac(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         ("a bad signature", post(&event, HOOK.as_bytes(), now(), |e| e[1].1 = format!("v0={}", "0".repeat(64)))?, "does not match"),
         ("a stale time, signed well", post(&event, HOOK.as_bytes(), now() - 600, as_is)?, "too far from now"),
         ("a captured delivery, its time moved to now", post(&event, HOOK.as_bytes(), now() - 600, |e| e[0].1 = (e[0].1.parse::<i64>().unwrap_or(0) + 600).to_string())?, "does not match"),
+        ("a time not in digits alone", post(&event, HOOK.as_bytes(), now(), |e| e[0].1 = format!("+{}", e[0].1))?, "digits alone"),
         ("the wrong prefix", post(&event, HOOK.as_bytes(), now(), |e| e[1].1 = e[1].1.replacen("v0=", "v1=", 1))?, "prefix"),
         ("no signature header", post(&event, HOOK.as_bytes(), now(), |e| e.truncate(1))?, "no x-hook-signature header"),
         ("no time header", post(&event, HOOK.as_bytes(), now(), |e| drop(e.remove(0)))?, "no x-hook-time header"),

@@ -19,10 +19,14 @@ pub const WITHIN_MAX_S: u64 = 3600;
 
 /// `inbox.hmac`: a delivery is taken only when `header` holds `prefix`
 /// and then the hex HMAC-SHA256, under the fragment's secret `secret`, of
-/// `signed` with `{body}` the raw body and each `{<header>}` that header's
-/// value (Slack's `v0:{x-slack-request-timestamp}:{body}`), compared in
-/// constant time; with `fresh`, a header `signed` names, only while the
-/// Unix seconds in it are at most `within_s` from now.
+/// `signed` with `{body}` the raw body and `{<fresh>}` that header's value
+/// (Slack's `v0:{x-slack-request-timestamp}:{body}`), compared in constant
+/// time; with `fresh`, only while that header's Unix seconds are at most
+/// `within_s` from now. `signed` is `<text>{body}`, or with `fresh`
+/// `<text>{<fresh>}<text>{body}`, the text after the time starting with
+/// no digit, and a time is digits alone: what is signed has one reading,
+/// so no bytes can move between its pieces to make an old time new.
+/// Every signer it serves fits (Slack's, GitHub's and Linear's).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HmacDecl {
     pub secret: String,
@@ -41,7 +45,7 @@ enum Part<'a> {
     Body,
 }
 
-/// `signed`'s pieces: text, `{body}` once, and `{<header>}`s an inbox may
+/// `signed`'s pieces: text, `{body}`, and `{<header>}`s an inbox may
 /// read. A `{` or `}` is only ever a placeholder's.
 fn parts(signed: &str) -> Result<Vec<Part<'_>>, String> {
     let mut out = vec![];
@@ -64,9 +68,6 @@ fn parts(signed: &str) -> Result<Vec<Part<'_>>, String> {
     }
     if !rest.is_empty() {
         out.push(Part::Text(rest));
-    }
-    if out.iter().filter(|p| **p == Part::Body).count() != 1 {
-        return Err(format!("inbox.hmac.signed names {{body}} once ({signed:?})"));
     }
     Ok(out)
 }
@@ -102,15 +103,28 @@ impl HmacDecl {
                 if !inbox_header_ok(h) {
                     return Err(format!("inbox.hmac.fresh is a lower-case header name, not the platform's or a browser's ({h:?})"));
                 }
-                // an unsigned time is anyone's to set: a captured delivery, re-timed, would be new again
-                if !pieces.contains(&Part::Header(h)) {
-                    return Err(format!("inbox.hmac.signed names {{{h}}}, the time fresh reads, so its time is signed too"));
-                }
                 let w = w.as_u64().filter(|w| (1..=WITHIN_MAX_S).contains(w)).ok_or_else(|| format!("inbox.hmac.within_s is whole seconds, 1 to {WITHIN_MAX_S}"))?;
                 Some((h.to_string(), w))
             }
             _ => return Err("inbox.hmac.fresh and within_s come together: the header holding its time, and how far from now it may be".into()),
         };
+        // one reading (HmacDecl): no header but the signed time, then text
+        // that starts with no digit, then {body}, last
+        let after_text = match pieces.as_slice() {
+            [Part::Text(_), rest @ ..] => rest,
+            all => all,
+        };
+        let one_reading = match (after_text, &fresh) {
+            ([Part::Body], None) => true,
+            ([Part::Header(h), Part::Text(t), Part::Body], Some((f, _))) => h == f && !t.starts_with(|c: char| c.is_ascii_digit()),
+            _ => false,
+        };
+        if !one_reading {
+            let time = fresh.as_ref().map_or("<fresh>", |(f, _)| f.as_str());
+            return Err(format!(
+                "inbox.hmac.signed is <text>{{body}}, or with fresh <text>{{{time}}}<text>{{body}}, its text after the time starting with no digit, so what is signed has one reading (not {signed:?})"
+            ));
+        }
         Ok(HmacDecl { secret: secret.into(), header: header.into(), prefix: prefix.into(), signed: signed.into(), fresh })
     }
 
@@ -143,7 +157,11 @@ impl HmacDecl {
         let sig = given.strip_prefix(self.prefix.as_str()).ok_or(Refused::Malformed)?;
         let sig = hex::decode(sig).map_err(|_| Refused::Malformed)?;
         if let Some((h, within)) = &self.fresh {
-            let at: i64 = header(h).ok_or_else(|| Refused::Missing(h.clone()))?.trim().parse().map_err(|_| Refused::Malformed)?;
+            let at = header(h).ok_or_else(|| Refused::Missing(h.clone()))?;
+            if !at.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(Refused::Malformed);
+            }
+            let at: i64 = at.parse().map_err(|_| Refused::Malformed)?;
             if now_s.abs_diff(at) > *within {
                 return Err(Refused::Stale);
             }
@@ -163,7 +181,7 @@ impl HmacDecl {
 pub enum Refused {
     /// A header it names is not there.
     Missing(String),
-    /// The signature lacks its prefix or is not hex, or the time is not whole seconds.
+    /// The signature lacks its prefix or is not hex, or the time is not digits alone.
     Malformed,
     /// Its time is farther from now than `within_s`.
     Stale,
@@ -175,7 +193,7 @@ impl Refused {
     pub fn message(&self) -> String {
         match self {
             Refused::Missing(h) => format!("no {h} header"),
-            Refused::Malformed => "a signature is its prefix then hex, and a time whole Unix seconds".into(),
+            Refused::Malformed => "a signature is its prefix then hex, and a time its Unix seconds in digits alone".into(),
             Refused::Stale => "its time is too far from now".into(),
             Refused::Mismatch => "its signature does not match".into(),
         }
@@ -285,7 +303,7 @@ mod tests {
     /// what it reads it writes back the same.
     #[test]
     fn its_declaration_is_checked() {
-        let ok = json!({ "secret": "S", "header": "x-sig", "signed": "{x-time}.{body}" });
+        let ok = json!({ "secret": "S", "header": "x-sig", "signed": "v0:{body}" });
         let d = HmacDecl::read(&ok).unwrap();
         assert_eq!(d.prefix, "");
         assert_eq!(HmacDecl::read(&d.to_json()).unwrap(), d);
@@ -323,31 +341,74 @@ mod tests {
         for bad in [json!(0), json!(WITHIN_MAX_S + 1), json!(-1), json!(1.5), json!("300")] {
             assert!(fresh(bad.clone()).is_err(), "{bad}");
         }
-        // its time is signed, or a captured delivery is new again with a new time
-        for signed in ["{body}", "{x-other}.{body}"] {
-            let e = HmacDecl::read(&json!({ "secret": "S", "header": "x-sig", "signed": signed, "fresh": "x-time", "within_s": 300 })).unwrap_err();
-            assert!(e.contains("{x-time}") && e.contains("signed"), "{signed}: {e}");
+        // one reading of what is signed: no header but the time, which is
+        // signed, followed by text that starts with no digit, and {body} last
+        let shape = |signed: &str, fresh: bool| {
+            let mut o = json!({ "secret": "S", "header": "x-sig", "signed": signed });
+            if fresh {
+                (o["fresh"], o["within_s"]) = (json!("x-time"), json!(300));
+            }
+            HmacDecl::read(&o)
+        };
+        for (signed, fresh) in [("{body}", false), ("v0:{body}", false), ("{x-time}.{body}", true), ("v0:{x-time}:{body}", true)] {
+            assert!(shape(signed, fresh).is_ok(), "{signed}");
+        }
+        for (signed, fresh) in [
+            ("{x-a}:{body}", false),
+            ("{x-time}.{body}", false),
+            ("{body}", true),
+            ("{x-other}.{body}", true),
+            ("{x-time}{body}", true),
+            ("{x-time}1{body}", true),
+            ("{x-time}:{body}:", true),
+            ("v0:{body}:{x-time}", true),
+            ("{x-a}:{x-time}:{body}", true),
+            ("{x-before}:{x-time}:{x-after}:{body}", true),
+        ] {
+            let e = shape(signed, fresh).unwrap_err();
+            assert!(e.contains("one reading"), "{signed}: {e}");
         }
     }
 
-    /// Goal: a captured delivery, its time header set to now, is refused:
-    /// no declaration deploy takes leaves its time unsigned (valid,
-    /// replay). Method: one signed a day ago, re-timed, under Slack's
-    /// template and under one signing its body alone.
+    /// Goal: a captured delivery, its signed bytes kept and its time made
+    /// now, is refused under every declaration deploy takes (valid,
+    /// replay): re-timed under Slack's template; its time unsigned; and
+    /// Codex's shift on #1289, bytes moved between headers so the same
+    /// signed string reads a newer time. Deploy takes only the first.
     #[test]
     fn a_captured_delivery_retimed_is_refused() {
         let (then, now) = (1_790_000_000_i64, 1_790_000_000 + 86_400);
+        let (t, n) = (then.to_string(), now.to_string());
+        let (after, before) = (format!("{n}:z"), format!("a:{t}"));
         let body = br#"{"type":"event_callback"}"#.as_slice();
-        let mut deployed = 0;
-        for signed in ["v0:{x-time}:{body}", "{body}"] {
+        type Sent<'a> = Vec<(&'a str, &'a str)>;
+        let cases: [(&str, Sent, Sent); 3] = [
+            ("v0:{x-time}:{body}", vec![("x-time", &t)], vec![("x-time", &n)]),
+            ("{body}", vec![("x-time", &t)], vec![("x-time", &n)]),
+            ("{x-before}:{x-time}:{x-after}:{body}", vec![("x-before", "a"), ("x-time", &t), ("x-after", &after)], vec![("x-before", &before), ("x-time", &n), ("x-after", "z")]),
+        ];
+        let mut deployed = vec![];
+        for (signed, captured, replayed) in cases {
             let Ok(d) = HmacDecl::read(&json!({ "secret": "S", "header": "x-sig", "prefix": "v0=", "signed": signed, "fresh": "x-time", "within_s": 300 })) else { continue };
-            deployed += 1;
-            let sig = d.sign(KEY, &headers(&[("x-time", &then.to_string())]), body).unwrap();
-            assert_eq!(d.check(KEY, &headers(&[("x-time", &then.to_string()), ("x-sig", &sig)]), body, then), Ok(()), "{signed}: taken when it came");
-            let retimed = headers(&[("x-time", &now.to_string()), ("x-sig", &sig)]);
-            assert_eq!(d.check(KEY, &retimed, body, now), Err(Refused::Mismatch), "{signed}: replayed with a new time");
+            deployed.push(signed);
+            let sig = d.sign(KEY, &headers(&captured), body).unwrap();
+            let signed_with = |hs: &[(&str, &str)]| headers(&[hs, &[("x-sig", sig.as_str())]].concat());
+            assert_eq!(d.check(KEY, &signed_with(&captured), body, then), Ok(()), "{signed}: taken when it came");
+            assert_eq!(d.check(KEY, &signed_with(&replayed), body, now), Err(Refused::Mismatch), "{signed}: replayed with a new time");
         }
-        assert_eq!(deployed, 1, "Slack's template deploys, and one leaving its time unsigned does not");
+        assert_eq!(deployed, ["v0:{x-time}:{body}"], "deploy takes Slack's template only");
+    }
+
+    /// Goal: a time is Unix seconds in digits alone; signed well with a
+    /// sign, a space, or none, it is refused, never read loosely.
+    #[test]
+    fn a_time_not_in_digits_is_refused() {
+        let (d, now, body) = (slack(), 1_790_000_000_i64, b"{}".as_slice());
+        for at in [format!("+{now}"), format!(" {now}"), format!("{now} "), String::new()] {
+            let sig = d.sign(KEY, &headers(&[("x-slack-request-timestamp", &at)]), body).unwrap();
+            let h = headers(&[("x-slack-request-timestamp", &at), ("x-slack-signature", &sig)]);
+            assert_eq!(d.check(KEY, &h, body, now), Err(Refused::Malformed), "{at:?}");
+        }
     }
 
     /// Goal: an answer is null or `{body}`, its type its body's.
