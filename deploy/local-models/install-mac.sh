@@ -26,7 +26,9 @@ fi
 
 cd "$D"
 shasum -a 256 -c SHA256SUMS
+# the audio passes through tmp: its owner's alone
 mkdir -p tmp logs empty
+chmod 700 tmp logs
 
 cat > whisper.sh <<'EOF'
 #!/bin/bash
@@ -86,6 +88,11 @@ cat > "$PLIST" <<EOF
 EOF
 
 launchctl bootout "$domain/$LABEL" 2>/dev/null || true
+# a job booted out is gone only once its process has exited
+for _ in $(seq 1 50); do
+  launchctl print "$domain/$LABEL" > /dev/null 2>&1 || break
+  sleep 0.2
+done
 launchctl bootstrap "$domain" "$PLIST"
 for _ in $(seq 1 120); do
   curl -sf "http://127.0.0.1:$PORT/health" > /dev/null && break

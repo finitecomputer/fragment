@@ -282,11 +282,14 @@ pub fn node_ai_file(project: &Path) -> PathBuf {
 }
 
 /// Writes `node_ai_file` from the box's `file`, its other models to `rest`.
+/// A file that names its own `"*"` is refused: dev and the e2e send every
+/// other model to their own fake, on a port of their own.
 pub fn write_node_ai_file(project: &Path, file: &Path, rest: Option<&str>) -> Result<()> {
-    ai_file_models(file)?;
+    let ids = ai_file_models(file)?;
+    anyhow::ensure!(!ids.iter().any(|id| id == "*"), "{AI_FILE_VAR} {} names \"*\": dev and the e2e send every model it does not name to their own Workers AI fake, so name the box's models alone", file.display());
     let mut v: serde_json::Value = serde_json::from_slice(&fs::read(file)?)?;
     let models = v["models"].as_object_mut().context("an AI file's models")?;
-    if let (false, Some(origin)) = (models.contains_key("*"), rest) {
+    if let Some(origin) = rest {
         models.insert("*".into(), serde_json::json!({ "engine": "workers-ai", "origin": origin }));
     }
     fs::write(node_ai_file(project), serde_json::to_string_pretty(&v)?)?;

@@ -9,6 +9,7 @@
 #     -v ~/local-models/models:/models:ro <image> --host 0.0.0.0 --port 8080 \
 #     -m /models/ggml-small.bin -t 4 -l auto --convert --tmp-dir /tmp \
 #     --vad-model /models/ggml-silero-v6.2.0.bin -nlp
+# (build with this directory as the context: docker build -f Dockerfile.whisper-server .)
 ARG BASE=debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 FROM ${BASE} AS build
@@ -19,6 +20,9 @@ ADD --checksum=sha256:ff1a9053feb509ff9d7729703355541ae9690073a6b1c40eb692c962e0
     https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v1.9.5.tar.gz /src/whisper.cpp.tar.gz
 RUN tar -C /src -xzf /src/whisper.cpp.tar.gz
 WORKDIR /src/whisper.cpp-1.9.5
+# no /load (no caller swaps the model), no upload left when ffmpeg fails
+COPY whisper-server.patch /src/
+RUN patch -p1 < /src/whisper-server.patch
 # NATIVE=ON tunes to the building machine's CPU; OFF for an image that moves
 ARG NATIVE=OFF
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=${NATIVE} \

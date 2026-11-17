@@ -1,0 +1,22 @@
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -859,6 +859,9 @@
+             std::string error_resp = "{\"error\":\"Failed to execute ffmpeg command.\"}";
+             const bool is_converted = convert_to_wav(temp_filename, error_resp, params.diarize);
+             if (!is_converted) {
++                // fragment local-models: no upload, nor ffmpeg's partial output, is left behind
++                std::remove(temp_filename.c_str());
++                std::remove((temp_filename + "_temp.wav").c_str());
+                 res.status = 500;
+                 res.set_content(error_resp, "application/json");
+                 return;
+@@ -1172,7 +1175,8 @@
+                             "application/json");
+         }
+     });
+-    svr->Post(sparams.request_path + "/load", [&](const Request &req, Response &res){
++    // fragment local-models: no /load, so no caller swaps the pinned model
++    if (false) svr->Post(sparams.request_path + "/load", [&](const Request &req, Response &res){
+         std::lock_guard<std::mutex> lock(whisper_mutex);
+         state.store(SERVER_STATE_LOADING_MODEL);
+         if (!req.has_file("model"))

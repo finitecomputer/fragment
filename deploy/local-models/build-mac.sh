@@ -6,6 +6,7 @@
 # Homebrew): CMake is built from its source too when there is none.
 # Runs nothing it downloads before checking it. Then install-mac.sh.
 set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
 D="${LOCAL_MODELS_DIR:-$HOME/local-models}"
 mkdir -p "$D/src" "$D/bin" "$D/models" "$D/tools"
 cd "$D/src"
@@ -44,9 +45,12 @@ if [ -z "$cmake" ]; then
 fi
 
 # whisper.cpp's server: Metal, its shaders embedded and compiled at start
-# (so no Xcode `metal` tool), static
+# (so no Xcode `metal` tool), static; patched (whisper-server.patch) so it
+# serves no /load, which would let a caller swap the model, and leaves no
+# upload behind when ffmpeg cannot read it
 rm -rf whisper.cpp-1.9.5 && tar xzf whisper.cpp-v1.9.5.tar.gz
 (cd whisper.cpp-1.9.5 \
+  && patch -p1 < "$here/whisper-server.patch" \
   && "$cmake" -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON \
        -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_SERVER=ON -DWHISPER_SDL2=OFF -DWHISPER_CURL=OFF \
   && "$cmake" --build build -j"$jobs" --target whisper-server)

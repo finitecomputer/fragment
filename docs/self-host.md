@@ -211,17 +211,18 @@ takes the option and lets it go), or the route says it has none.
 
 ```json
 { "models": {
-    "@cf/openai/whisper-large-v3-turbo": { "engine": "whisper.cpp", "origin": "http://host.lima.internal:8178" },
-    "*": { "engine": "workers-ai", "origin": "http://127.0.0.1:8796" } } }
+    "@cf/openai/whisper-large-v3-turbo": { "engine": "whisper.cpp", "origin": "http://host.lima.internal:8178" } } }
 ```
 
 An entry's engine is how celld speaks to the endpoint: `whisper.cpp`
 (whisper.cpp's server), `openai` (an OpenAI-compatible
 `<base_url>/audio/transcriptions` and its `model`: speaches, LocalAI), or
-`workers-ai` (`POST <origin>/run/<model>`, answered as the binding answers;
-the dev fake is one). `"*"` is where every model the file does not name
-goes; without it they reject, as before. Another kind of model plugs in the
-same way: a catalog id, its translation, an entry.
+`workers-ai` (`POST <origin>/run/<model>`, answered as the binding answers,
+its body streamed; the dev fake is one). A model the file does not name
+rejects, as before, unless the file names a `"*"` entry (a `workers-ai`
+endpoint for every other model). Dev and the e2e add their own `"*"` to
+their fake, and refuse a file that names one. Another kind of model plugs
+in the same way: a catalog id, its translation, an entry.
 
 **The model.** On the spike's numbers (2026-11-17), whisper.cpp v1.9.5 with
 `large-v3-turbo` quantized to q5_0 (547 MiB, about 0.95 GB in use), on Metal.
@@ -257,14 +258,26 @@ under launchd (`chat.finite.local-whisper`, a LaunchAgent: up at login, back
 after a crash).
 
 The server listens on the Mac's loopback alone (`127.0.0.1:8178`), so
-nothing off the Mac reaches it. It runs in a `sandbox-exec` profile: no
-connection out, writes only in its own tmp, and nothing of the rest of the
-home read. At every start it checks its binaries and models against their
-pins. The box's Lima VM (vz, user-mode network) reaches the Mac's loopback
-as `host.lima.internal` (192.168.5.2). celld calls it from the host side,
-outside every isolate, so a Worker's fetch never can. A computer's egress
+nothing off the Mac reaches it (probed from the LAN, the tailnet and the
+other Mac: refused).
+- It runs in a `sandbox-exec` profile: no connection out, writes only in its
+  own owner-only tmp, and nothing of the rest of the home read.
+- At every start it checks its binaries and models against their pins.
+- Its build is patched (`whisper-server.patch`): no `/load`, so no caller
+  swaps the model, and no upload left behind when ffmpeg can't read it.
+
+The box's Lima VM (vz, user-mode network) reaches the Mac's loopback as
+`host.lima.internal` (192.168.5.2), and so does everything in the VM. celld
+calls it from the host side. A Worker's own `fetch` reaches it too unless
+the node runs with `CELLD_EGRESS_PUBLIC_ONLY=1`, which refuses private
+addresses: probed 2026-11-17, a Worker's fetch is then refused, "egress
+refused: 192.168.5.2 is not a public address", while the binding answers.
+
+So run a box's node with it. A dev stack (and mac-a's testbed, a dev stack)
+runs without it, because the cell reaches its local fakes. There an app's
+job could transcribe on the Mac directly, unmetered. A computer's egress
 refuses private addresses (sandcastle's rule; not probed against this
-port), so an agent can't call it directly either.
+port).
 
 ```sh
 deploy/local-models/build-mac.sh      # about 10 min the first time
@@ -325,6 +338,12 @@ celld lacks.
 **Not yet.**
 - whisper.cpp's server runs one call at a time. Past `concurrency`
   (default 4), celld answers 429 and the caller tries again.
+- With `CELLD_AI_FILE` in dev, every Workers AI call goes through the
+  node's binding. Icons (FLUX.2 takes a multipart form, which celld does not
+  forward) offer no candidate, as on any box.
+- A job's `ai.video` on the fake is charged, then fails: the fake's video is
+  an `http://` URL, which the cell reads only beside `FRAGMENT_AI_URL`. Dev
+  alone: a box has no video model.
 - A LaunchAgent runs while its user is logged in, as the box's VM does.
 - `small` with VAD on dropped two words of the 11 s JFK clip, where turbo
   did not.
