@@ -149,7 +149,8 @@ fn inbox(v: &Value) -> Result<InboxDecl, String> {
 impl InboxDecl {
     /// As the cell stores it (its `inbox_secret` meta): `<header> <SECRET>`
     /// for a header and no answer, as every release has; else its JSON,
-    /// which a release before it refuses to read, so admits nothing.
+    /// which the release before can't read, so Fragment step 9 makes this
+    /// release forward only (docs/MODEL.md).
     pub fn stored(&self) -> String {
         let mut v = match (&self.check, &self.answer) {
             (InboxCheck::Header { header, secret }, None) => return format!("{header} {secret}"),
@@ -737,6 +738,43 @@ mod tests {
             let e = parse(bad.as_bytes()).unwrap_err();
             assert!(e.contains(why), "{bad}: {e}");
         }
+    }
+
+    /// Goal: a row the release before can't read never reaches it
+    /// (docs/MODEL.md: such a value makes its release forward only). Both
+    /// new shapes, an HMAC and a header with an answer, are JSON that its
+    /// reader (`split_once(' ')`) reads as no `<header> <SECRET>`, while
+    /// Telegram's header-only row reads as it always has. An object that
+    /// took Fragment step 9 is refused by the code of eight steps before
+    /// it reads a row, so rollout's `eligible` never rolls back across it
+    /// (the schema changed); rolled forward, the row reads as written
+    /// (valid, rollback, restart). Method: each row written to this code's
+    /// object as the cell writes it (`inbox_secret`); started by the code
+    /// of eight steps; then by this code again.
+    #[test]
+    fn an_inbox_the_release_before_cannot_read_makes_it_forward_only() {
+        use crate::migrate::{self, host::Lite, Db, Ran, SchemaError, FRAGMENT};
+        // the release before's reader (cell/src/fragment.rs, 2c45cb5f7)
+        let before_reads = |row: &str| row.split_once(' ').is_some_and(|(h, s)| inbox_header_ok(h) && fragment_proto::valid_secret_name(s));
+        let telegram = InboxDecl { check: InboxCheck::Header { header: "x-telegram-bot-api-secret-token".into(), secret: "TELEGRAM_WEBHOOK_SECRET".into() }, answer: None };
+        assert!(before_reads(&telegram.stored()) && InboxDecl::from_stored(&telegram.stored()) == Ok(telegram.clone()), "Telegram's row reads as it always has");
+        let hmac = parse(br#"{"operations":{"hi":{"kind":"query"}},"inbox":{"hmac":{"secret":"S","header":"x-sig","prefix":"v0=",
+            "signed":"v0 at {x-time}: {body}","fresh":"x-time","within_s":300},"answer":"hi"}}"#);
+        let answered = parse(br#"{"operations":{"hi":{"kind":"query"}},"inbox":{"header":"x-secret","secret":"S","answer":"hi"}}"#);
+        let (newest, before) = (FRAGMENT.steps.len() as u32, migrate::Class { steps: &FRAGMENT.steps[..8], ..FRAGMENT });
+        for decl in [hmac, answered].map(|m| m.unwrap().inbox.unwrap()) {
+            let row = decl.stored();
+            assert!(!before_reads(&row), "the release before reads no header and secret in {row}");
+            let db = Lite::new();
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &FRAGMENT, 0)), Ok(Ran::Made { version: newest }));
+            db.exec(&format!("INSERT INTO meta (key, value) VALUES ('inbox_secret', '{}')", row.replace('\'', "''"))).expect("written as the cell writes it");
+            let refused = db.transaction(|db| migrate::migrate(db, &before, 100));
+            assert_eq!(refused, Err(SchemaError::Newer { class: "Fragment", held: newest, known: 8 }), "the release before refuses the object");
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &FRAGMENT, 200)), Ok(Ran::Current { version: newest }));
+            let back = db.rows("SELECT value FROM meta WHERE key = 'inbox_secret'").expect("its row");
+            assert_eq!(back[0]["value"].as_str().map(InboxDecl::from_stored), Some(Ok(decl)), "rolled forward, it reads as written");
+        }
+        assert_eq!((newest, FRAGMENT.steps[8].name), (9, "inbox_forward_only"));
     }
 
     #[test]
