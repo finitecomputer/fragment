@@ -2537,6 +2537,43 @@ async fn an_agents_home_is_the_same_on_either_runtime() {
     assert_eq!(docker.modes, hosted.modes, "Hermes leaves its home's modes alike on both");
 }
 
+/// Goal: an agent's terminal's `HOME` is its profile's own `home` where
+/// Hermes takes the computer for no container, as on Cloudflare Containers,
+/// production's runtime, and in a container alike. Since v0.23 Hermes reads
+/// a served profile's home mode from that profile's own terminal policy,
+/// which takes nothing from the environment (its `tools/terminal_scope.py`:
+/// an omitted key is its default, `auto`), so the image's environment pin
+/// (`hermes::RUNTIME_ENV`) reached no agent's turn: there, every agent's
+/// commands ran with the gateway's `HOME`, `/data/hermes`, one shared by
+/// all (master's CI, 2026-11-17). Method: Hermes' own decision for a turn
+/// of the profile's, its scope bound as the gateway binds it, with its
+/// container guess forced each way. Forced, because this box's Docker
+/// marks every container (the containerd snapshotter names the root
+/// mount), so its hosted rung shows only the container's way
+/// (`an_agents_home_is_the_same_on_either_runtime` shows both on a runner).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_agents_terminal_home_is_its_own_where_hermes_sees_no_container() {
+    let (_fake, _model, _chat, c) = hermes_running().await;
+    const SCRIPT: &str = r#"import json
+from hermes_platform.host import runtime as host
+from agent.runtime_scope import bind_profile_scope
+from hermes_constants import get_subprocess_home
+profile = '/data/hermes/profiles/juniper--k3x9'
+homes = {}
+for container in (True, False):
+    host._container_detected = container
+    with bind_profile_scope(profile, hydrate_secrets=False):
+        homes['container' if container else 'none'] = get_subprocess_home({'HERMES_HOME': profile, 'HOME': '/data/hermes'})
+print(json.dumps(homes))
+"#;
+    let homes = hermes_python(&c, &[], SCRIPT);
+    eprintln!("terminal home: {homes}");
+    for runtime in ["container", "none"] {
+        assert_eq!(homes[runtime], "/data/hermes/profiles/juniper--k3x9/home", "where Hermes sees {runtime}, an agent's terminal's HOME is its profile's own home, never the gateway's: {homes}");
+    }
+}
+
 /// The image's last `held` event: what its last hold copied, and kept hot.
 fn held_event(c: &Container) -> Option<serde_json::Value> {
     c.logs().lines().rev().filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok()).find(|v| v["event"] == "held")
