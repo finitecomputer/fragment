@@ -406,8 +406,11 @@ pub enum Command {
     /// or both: `attached`, which the driver downloads, names in its words
     /// and takes off (`Attached`): a runtime never sees them here, but gets
     /// the downloaded files as `files`, as a turn's start does
-    /// (`TurnStart::files`), so one that hears audio can (the relay's).
-    Tell { turn: String, seq: u64, by: String, by_name: String, text: String, attached: Option<Attached>, files: Vec<LocalFile> },
+    /// (`TurnStart::files`). `voice`: the answer is a voice memo alone (no
+    /// words, every file audio), which a runtime that hears audio answers
+    /// with what it hears (the relay's), its question open until the turn
+    /// goes on (`Turn::hearing`).
+    Tell { turn: String, seq: u64, by: String, by_name: String, text: String, attached: Option<Attached>, files: Vec<LocalFile>, voice: bool },
     /// A command of the menu said in the agent's chat at once, beside
     /// whatever turn runs there, no turn of its own (`How::Steer` into the
     /// running turn `turn`, `How::Aside`): `/<name> <args>`, its id the

@@ -3047,6 +3047,40 @@ async fn a_question_in_words_is_answered_by_a_voice_memo() {
     });
 }
 
+/// Goal (the council on this change, 2026-11-17): a voice memo Hermes hears
+/// no words in leaves its clarify open, and says nothing, so the bridge
+/// keeps the question open too: the asker's retry, in words, answers it,
+/// and no turn of its own is started. Method: the question, a memo that
+/// says nothing (the scripted model hears it so), then the words; the
+/// turn's reply quotes the clarify's answer.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_voice_memo_heard_as_nothing_leaves_the_question_to_answer_again() {
+    use sha2::Digest;
+    let (fake, _model, chat, c) = hermes_running().await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "clarify: What should I call the plant?" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let asked = |w: &support::fake::World| w.bodies(&chat, "work", "turn.asked").into_iter().filter(|a| a["turn"] == turn).collect::<Vec<_>>();
+    within(&fake, &chat, &c, 120_000, "the question, and whose answer it waits for", |w| !asked(w).is_empty()).await;
+    let audio = support::model::memo("");
+    let sha = fragment_bridge::records::hex(&sha2::Sha256::digest(&audio));
+    fake.with(|w| w.fragments.get_mut(&chat).expect("the chat").blobs.insert(sha.clone(), ("audio/wav".into(), bytes::Bytes::from(audio.clone()))));
+    fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": audio.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    // Hermes heard it as nothing, and keeps its clarify
+    let t = Instant::now();
+    while !c.logs().contains("voice transcription produced no usable text") && !c.exec_out(&["sh", "-c", "grep -rl 'voice transcription produced no usable text' /data/hermes/logs /data/hermes/profiles/*/logs 2>/dev/null | head -1"]).contains("log") {
+        assert!(t.elapsed() < Duration::from_secs(90), "Hermes never kept its clarify for a memo with no words");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    fake.say(&chat, &person("paul"), json!({ "text": "Fernando" }));
+    within(&fake, &chat, &c, 120_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    fake.with(|w| {
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.last().is_some_and(|r| r.contains("Fernando")), "the retry answered the clarify: {replies:?}");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the retry started no turn of its own (hello, then this one)");
+    });
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: a step read as its raw
 /// tool name and its arguments cut at 40 characters): real Hermes' steps
 /// say what they do. Its terminal, write_file and execute_code calls are

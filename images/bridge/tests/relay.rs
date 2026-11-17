@@ -462,6 +462,20 @@ async fn a_voice_memo_answer_brings_hermes_its_audio() {
     let addr: std::net::SocketAddr = url.strip_prefix("http://").and_then(|r| r.split_once('/')).and_then(|(a, _)| a.parse().ok()).expect("the relay's own address");
     assert_eq!(support::hermes::download_from(addr, "computer-test", SECRET, url).await.as_deref(), Some(&bytes[..]), "the memo itself, at {url}");
     fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 1, "the answer started no turn"));
+
+    // words typed with a memo are a written answer: Hermes would answer a
+    // clarify heard in audio with the audio's words alone
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "clarify again" }));
+    let again = records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the second card", |w| !work_of(w, &chat, &again, "turn.prompt").is_empty()).await;
+    let p = fake.with(|w| work_of(w, &chat, &again, "turn.prompt")[0].clone());
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    fake.until(WAIT, "the chat told whose answer it waits for", |w| !work_of(w, &chat, &again, "turn.asked").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "Basilio", "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    fake.until(WAIT, "the second turn's end", |w| !work_of(w, &chat, &again, "turn.end").is_empty()).await;
+    let heard = hermes.with(|s| s.heard.last().cloned()).expect("Hermes heard the answer");
+    assert_eq!(heard["text"], json!(format!("Basilio\n{told}")), "its words, then where the memo is: {heard}");
+    assert!(heard.get("media").is_none(), "words with it: no audio to answer with instead: {heard}");
     bridge.stop().await;
 }
 
