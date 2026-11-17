@@ -63,6 +63,37 @@ const DEPTH_MAX: usize = 8;
 /// about this.
 pub const ABSENT_EVERY_MS: u64 = 60_000;
 
+/// The skill files Hermes indexes into a system prompt under `dirs` (the
+/// SKILL.md and DESCRIPTION.md files its skills-index snapshot watches,
+/// links followed as it follows them), each its path and bytes, for
+/// `hermes::prompt_inputs`: at most `FILES_MAX` files of at most
+/// `FILE_MAX_BYTES` (a larger one counts as its size alone), `DEPTH_MAX`
+/// deep. A directory that cannot be read counts as empty.
+pub fn indexed(dirs: &[&Path]) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut pending: Vec<(PathBuf, usize)> = dirs.iter().map(|d| (d.to_path_buf(), 0)).collect();
+    while let Some((dir, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let mut entries: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        entries.sort();
+        for path in entries {
+            if out.len() >= FILES_MAX {
+                return out;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            if meta.is_dir() {
+                if depth < DEPTH_MAX {
+                    pending.push((path, depth + 1));
+                }
+            } else if path.file_name().is_some_and(|n| n == "SKILL.md" || n == "DESCRIPTION.md") {
+                let bytes = if meta.len() <= FILE_MAX_BYTES as u64 { std::fs::read(&path).unwrap_or_default() } else { meta.len().to_string().into_bytes() };
+                out.push((path.display().to_string(), bytes));
+            }
+        }
+    }
+    out
+}
+
 /// Where the platform skill is: in the image, read-only to the agents.
 pub const PLATFORM_DIR: &str = "/opt/fragment/skills";
 /// Hermes' skills, moved out of its sync source at the image's build.

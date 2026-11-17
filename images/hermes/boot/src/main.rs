@@ -77,9 +77,9 @@ const _: () = assert!(skills::ABSENT_EVERY_MS < SKILLS_EVERY_MS && skills::ABSEN
 /// SIGTERM: children are told, then the boot is gone within this.
 const STOP_MS_MAX: u64 = 2_500;
 /// Ending the previous start (`end_previous_life`: its leases cleared, its
-/// cut turns closed, its stored prompts asked to rebuild when the hint
-/// changed) is waited for at most this long before the gateway starts; it
-/// takes about half a second.
+/// cut turns closed), then the stored prompts' refresh when their inputs
+/// changed (`refresh_stored_prompts`), are each waited for at most this
+/// long before the gateway starts; each takes about half a second.
 const END_PREVIOUS_LIFE_MS_MAX: u64 = 30_000;
 /// Bot Mode's hook in a profile, as images before route A linked it (to
 /// `/opt/fragment/hooks/fragment-bot-chat`, which this image does not hold).
@@ -1069,7 +1069,10 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
         match done {
             Ok(d) => {
                 let platform = settle_platform();
-                ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "platform": platform, "ms": t.elapsed().as_millis() as u64 })
+                ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "platform": platform, "ms": t.elapsed().as_millis() as u64 });
+                // a skill added, changed or gone: the open chats list it at
+                // their next turn (nothing asked when the set is the same)
+                let _ = tokio::task::spawn_blocking(|| refresh_stored_prompts(&home(), "skills")).await;
             }
             Err(e) => ev!("skills.failed", { "error": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
         }
@@ -1126,9 +1129,6 @@ fn start_gateway(home: &Path) -> Option<u32> {
 ///   (`hermes::SETTLE_CUT_TURNS`, docs/computers.md, Durability, P5): left
 ///   alone, Hermes would pause the chat until its sender sent `/discard`,
 ///   or, before its admissions, join the next message to the cut request.
-/// - Every session's stored system prompt is asked to rebuild once when
-///   the relay hint is not the one the previous start booted with
-///   (`refresh_stored_prompts`): Hermes would replay the old one.
 ///
 /// As the `hermes` user, so the files keep their owner.
 fn end_previous_life(agents: &[Agent], home: &Path) {
@@ -1141,8 +1141,7 @@ fn end_previous_life(agents: &[Agent], home: &Path) {
     dbs.extend(agents.iter().map(|a| hermes::profile_dir(home, &a.fragment).join("state.db")));
     dbs.retain(|p| p.exists());
     if dbs.is_empty() {
-        // nothing stored yet: today's hint is stamped
-        return refresh_stored_prompts(&dbs, home);
+        return;
     }
     let t = Instant::now();
     let script = r#"import sqlite3, sys
@@ -1174,37 +1173,46 @@ for p in sys.argv[1:]:
         Ok(o) => ev!("boot.cut_turns_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>(), "ms": ms }),
         Err(e) => ev!("boot.cut_turns_failed", { "error": e.to_string(), "ms": ms }),
     }
-    // after the chats are unpaused: it needs no lease, and shares their wait
-    refresh_stored_prompts(&dbs, home);
 }
 
-/// When the relay hint (`hermes::relay_hint`) is not the one this home's
-/// last boot stamped (`hermes::HINT_STAMP`), every session in `dbs` is
-/// asked to rebuild its stored system prompt on its next turn
-/// (`hermes::REFRESH_PROMPTS`), then the hint is stamped. A failure is
-/// said and leaves the stamp, so the next boot asks again; the gateway
-/// starts either way, its chats on the prompts they had.
-fn refresh_stored_prompts(dbs: &[PathBuf], home: &Path) {
-    let stamp = home.join(hermes::HINT_STAMP);
-    let hint = hermes::relay_hint();
-    if !hermes::hint_changed(std::fs::read_to_string(&stamp).ok().as_deref(), &hint) {
+/// When what the sessions' system prompts are built from (the relay hint
+/// and the skill files Hermes indexes: `hermes::prompt_inputs`) is not what
+/// this home last stamped (`hermes::PROMPT_STAMP`), every session in its
+/// databases (the gateway's, each profile's) is asked to rebuild its stored
+/// prompt on its next turn (`hermes::REFRESH_PROMPTS`), then the inputs are
+/// stamped. `why` says which moment asks: the boot, its skills settled,
+/// before the gateway takes a turn, or an install of the managed skills
+/// while it runs (`spawn_skills`). A failure is said and leaves the stamp,
+/// so the next one asks again; the chats keep the prompts they had.
+fn refresh_stored_prompts(home: &Path, why: &str) {
+    let stamp = home.join(hermes::PROMPT_STAMP);
+    let indexed = skills::indexed(&[&skills::managed_dir(), Path::new(skills::PLATFORM_VIEW)]);
+    let inputs = hermes::prompt_inputs(&hermes::relay_hint(), &indexed);
+    if !hermes::inputs_changed(std::fs::read_to_string(&stamp).ok().as_deref(), &inputs) {
         return;
     }
+    let mut dbs: Vec<PathBuf> = vec![home.join("state.db")];
+    if let Ok(profiles) = std::fs::read_dir(home.join("profiles")) {
+        let mut found: Vec<PathBuf> = profiles.filter_map(|e| e.ok().map(|e| e.path().join("state.db"))).collect();
+        found.sort();
+        dbs.extend(found);
+    }
+    dbs.retain(|p| p.is_file());
     if !dbs.is_empty() {
         let t = Instant::now();
-        let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", hermes::REFRESH_PROMPTS]).args(dbs).env("HOME", home).env("HERMES_HOME", home).current_dir("/").output();
+        let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", hermes::REFRESH_PROMPTS]).args(&dbs).env("HOME", home).env("HERMES_HOME", home).current_dir("/").output();
         let ms = t.elapsed().as_millis() as u64;
         match out {
             Ok(o) if o.status.success() => match hermes::prompts_refreshed(&String::from_utf8_lossy(&o.stdout)) {
-                Ok(asked) => ev!("boot.prompts_refreshed", { "dbs": asked, "ms": ms }),
-                Err(why) => return ev!("boot.prompts_refresh_failed", { "error": why, "ms": ms }),
+                Ok(asked) => ev!("prompts.refreshed", { "why": why, "dbs": asked, "skill_files": indexed.len(), "ms": ms }),
+                Err(error) => return ev!("prompts.refresh_failed", { "why": why, "error": error, "ms": ms }),
             },
-            Ok(o) => return ev!("boot.prompts_refresh_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>(), "ms": ms }),
-            Err(e) => return ev!("boot.prompts_refresh_failed", { "error": e.to_string(), "ms": ms }),
+            Ok(o) => return ev!("prompts.refresh_failed", { "why": why, "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>(), "ms": ms }),
+            Err(e) => return ev!("prompts.refresh_failed", { "why": why, "error": e.to_string(), "ms": ms }),
         }
     }
-    if let Err(e) = std::fs::write(&stamp, &hint) {
-        ev!("boot.prompts_stamp_failed", { "error": e.to_string() });
+    if let Err(e) = std::fs::write(&stamp, &inputs) {
+        ev!("prompts.stamp_failed", { "why": why, "error": e.to_string() });
     }
     chown(&stamp, hermes_ids());
 }
@@ -1381,6 +1389,15 @@ async fn boot_main() {
         // SQLite's own waits make this a wedged database: the gateway starts
         // anyway, as it would find it
         Err(_) => ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
+    }
+    // the skills settled (`managed_dir`, above) and the cut turns too: a
+    // chat's stored prompt rebuilt from today's inputs at its next turn
+    let refreshing = {
+        let home = home.clone();
+        tokio::task::spawn_blocking(move || refresh_stored_prompts(&home, "boot"))
+    };
+    if tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await.is_err() {
+        ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX });
     }
     write_ready(&agents, &home);
     let mut bridge = spawn_bridge(card_timeout_s);
