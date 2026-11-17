@@ -144,6 +144,10 @@ struct Actor {
     by: String,
     /// The owner an agent shared for: the events' `for`.
     for_owner: Option<String>,
+    /// The earliest a row it adds is stamped (`added_at`): in an org's
+    /// fragment, since when its person is in the org, by the registry's
+    /// clock, which another object's may be behind (0: now).
+    since: i64,
 }
 
 impl Actor {
@@ -415,12 +419,12 @@ impl FragmentCell {
             // the registry answered for this request; never an agent
             (IdentityKind::Person, Some(org)) => {
                 assert!(signed.acting_for.is_none(), "a person acts as themselves (the router refuses `for` from one)");
-                Ok(Actor { admin: signed.administers(org), by: signed.id.clone(), for_owner: None })
+                Ok(Actor { admin: signed.administers(org), by: signed.id.clone(), for_owner: None, since: signed.org_place(org).map_or(0, |p| p.since) })
             }
             (IdentityKind::Agent, Some(_)) => Err(CellError::new(ErrorCode::Forbidden, "an org's fragment is shared by its content admins, each as themselves: no agent shares it")),
             (IdentityKind::Person, None) => {
                 assert!(signed.acting_for.is_none(), "a person acts as themselves (the router refuses `for` from one)");
-                Ok(Actor { admin: self.member_role(&signed.id)? == Some(Role::Owner), by: signed.id.clone(), for_owner: None })
+                Ok(Actor { admin: self.member_role(&signed.id)? == Some(Role::Owner), by: signed.id.clone(), for_owner: None, since: 0 })
             }
             (IdentityKind::Agent, None) => {
                 self.agents_share()?;
@@ -435,7 +439,7 @@ impl FragmentCell {
                     Ok(role) => {
                         assert_eq!(role, Role::Owner, "an agent shares with its owner's ownership");
                         let owner = owner.expect("an agent that shares acts for its owner").to_string();
-                        Ok(Actor { admin: true, by: signed.id.clone(), for_owner: Some(owner) })
+                        Ok(Actor { admin: true, by: signed.id.clone(), for_owner: Some(owner), since: 0 })
                     }
                     Err(refusal) => Err(CellError::new(ErrorCode::Forbidden, refusal.message())),
                 }
@@ -718,7 +722,8 @@ impl FragmentCell {
     /// `who` (an agent: its person) in `org`'s content as they come into
     /// this, one of its fragments: the registry enrolls one not in it yet,
     /// refused for an invite made before they last left (`invited_at`).
-    pub(crate) async fn enrolled(&self, org: &str, who: &Identity, invited_at: Option<i64>) -> CellResult<()> {
+    /// Answers since when they are in.
+    pub(crate) async fn enrolled(&self, org: &str, who: &Identity, invited_at: Option<i64>) -> CellResult<i64> {
         let person = match who.kind {
             IdentityKind::Person => who.id.clone(),
             IdentityKind::Agent => who.owner.clone().ok_or_else(|| CellError::host("an agent has its owner"))?,
@@ -763,7 +768,7 @@ impl FragmentCell {
         // its maker: a person's fragment's owner, or an org's content admin
         // making it (`own_agent` checked the agent is theirs)
         let by = target.owner.clone().ok_or_else(|| CellError::host("an agent has its owner"))?;
-        let actor = Actor { admin: true, by, for_owner: None };
+        let actor = Actor { admin: true, by, for_owner: None, since: 0 };
         self.write_member(&actor, target, SetRole { role: Role::Editor }, false)
     }
 
@@ -773,10 +778,11 @@ impl FragmentCell {
     pub(crate) async fn lever_member(&self, who: &str, role: Role) -> CellResult<Member> {
         let target = self.named(who).await?;
         // an org's: in its content first (a test's, named whole)
-        if let Some(org) = self.owner()?.org() {
-            self.enrolled(org, &target, None).await?;
-        }
-        let actor = Actor { admin: true, by: self.owner()?.name(), for_owner: None };
+        let since = match self.owner()?.org() {
+            Some(org) => self.enrolled(org, &target, None).await?,
+            None => 0,
+        };
+        let actor = Actor { admin: true, by: self.owner()?.name(), for_owner: None, since };
         self.put_member(&actor, &target, SetRole { role }, true, &mut crate::js::Laps::start()).await
     }
 
@@ -843,7 +849,7 @@ impl FragmentCell {
                 target.id.as_str().into(),
                 body.role.as_str().into(),
                 by.into(),
-                SqlStorageValue::Integer(now),
+                SqlStorageValue::Integer(now.max(actor.since)),
                 target.kind.as_str().into(),
                 opt(target.owner.as_deref()),
             ],
@@ -899,7 +905,7 @@ impl FragmentCell {
         let actor = match is_self {
             // its owner leaving is refused as theirs to ask (400), not as
             // someone who may not (an org's fragment has no owner member)
-            true => Actor { admin: self.member_role(&me)? == Some(Role::Owner), by: me.clone(), for_owner: None },
+            true => Actor { admin: self.member_role(&me)? == Some(Role::Owner), by: me.clone(), for_owner: None, since: 0 },
             false => self.sharer(caller)?,
         };
         let current = self.member_role(&target)?;
@@ -1129,14 +1135,16 @@ impl FragmentCell {
         self.drop_spent_invites().await?;
         // an org's: they come into its content as they come in here (an
         // invite from before they last left admits no one); asked first, so
-        // what follows is read after it
+        // what follows is read after it; their row is stamped no earlier
+        // than since when they are in
+        let mut since = 0;
         if let Some(org) = self.owner()?.org() {
             let invited = self.rows("SELECT created_at FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
             let Some(at) = invited.first().and_then(|r| r["created_at"].as_i64()) else {
                 return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
             };
             let person = Identity { id: claim.identity.clone(), kind: IdentityKind::Person, owner: None, held: None, orgs: vec![] };
-            self.enrolled(org, &person, Some(at)).await?;
+            since = self.enrolled(org, &person, Some(at)).await?;
         }
         let rows = self.rows("SELECT role, created_by FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
         let Some(row) = rows.first() else {
@@ -1161,7 +1169,7 @@ impl FragmentCell {
             self.exec(
                 "INSERT INTO members (principal, role, added_by, added_at, kind) VALUES (?, ?, ?, ?, 'person')
                  ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
-                vec![who.into(), role.as_str().into(), by.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+                vec![who.into(), role.as_str().into(), by.as_str().into(), SqlStorageValue::Integer(js::now_ms().max(since))],
             )?;
             self.index_change(who, Some(role))?;
             self.event("member.joined", &format!("{who} joined as {}, invited by email, with their agents", role.as_str()), json!({ "principal": who, "role": role, "by": by }));

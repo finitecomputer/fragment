@@ -113,7 +113,8 @@ impl Call for OffboardCall {
 /// come into one of its fragments (their yes to an invite of `invited_at`,
 /// or a content admin's own add), if not in it already. Platform code's
 /// alone (a fragment's). An invite made before they last left admits them
-/// no more.
+/// no more. Answers since when they are in, by this clock: the fragment
+/// stamps their row no earlier (another object's clock may be behind).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Enroll {
     pub org: String,
@@ -123,7 +124,7 @@ pub(crate) struct Enroll {
 
 impl Call for Enroll {
     const PATH: &'static str = "/content/enroll";
-    type Answer = ();
+    type Answer = i64;
 }
 
 /// `POST /content/places`: which of `people` are in `org`'s content now,
@@ -720,7 +721,7 @@ impl RegistryCell {
         })
     }
 
-    fn enroll_content(&self, b: Enroll) -> CellResult<()> {
+    fn enroll_content(&self, b: Enroll) -> CellResult<i64> {
         let org = self.content_org(&b.org)?;
         if !npub::is_identity(&b.person) {
             return Err(CellError::invalid("enroll names a person by identity"));
@@ -735,7 +736,7 @@ impl RegistryCell {
                     let request = format!("join:{}:{}", b.person, place.since);
                     tx.govern(&org, Logged { request: &request, actor: &b.person, action: "joined", subject: Some(&b.person), detail: json!({}) }, now)?;
                 }
-                Ok(())
+                Ok(place.since)
             }
         })
     }
