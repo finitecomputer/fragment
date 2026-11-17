@@ -10,8 +10,9 @@
 //!   it is: `verify` says whether it is whole.
 //! - `verify --state <codestorage.json> --url <macrofiche> --org <org>
 //!   --key-file <org key>`: against macrofiche serving, every branch's
-//!   every file read back byte for byte, and every fake commit id's tree
-//!   listed, as the cell will ask for them. Nothing is written.
+//!   every file, and every file at every fake commit id, read back byte
+//!   for byte, and each one's tree listed, as the cell will ask for them.
+//!   Nothing is written.
 //!
 //! The fake's state is read, never changed: it is the carry's rollback.
 
@@ -139,7 +140,7 @@ fn verify(state: &Path, url: &str, org: &str, key_file: &Path) -> Result<()> {
     let key = OrgKey::from_pem(&std::fs::read_to_string(key_file).with_context(|| format!("read {}", key_file.display()))?).map_err(|e| anyhow::anyhow!("{}: {e}", key_file.display()))?;
     let store = Store { url: url.trim_end_matches('/').into(), org: org.into(), key, http: reqwest::blocking::Client::builder().timeout(CALL_TIMEOUT).build()? };
     let repos = read_state(state)?;
-    let (mut files, mut bytes, mut ids, mut bad) = (0usize, 0u64, 0usize, Vec::<String>::new());
+    let (mut files, mut bytes, mut ids, mut id_files, mut bad) = (0usize, 0u64, 0usize, 0usize, Vec::<String>::new());
     for r in &repos {
         for (branch, fake_head) in &r.branches {
             let Some(head) = store.head(&r.url, branch)? else {
@@ -161,18 +162,35 @@ fn verify(state: &Path, url: &str, org: &str, key_file: &Path) -> Result<()> {
                 bytes += b.len() as u64;
             }
         }
-        // each fake id, as a cell's pin names it
+        // each fake id, as a cell's pin names it: its tree, and every
+        // file's bytes there (a commit no branch names now included)
         for id in r.trees.keys() {
             match store.tree(&r.url, id) {
-                Ok(t) if t == fake_tree(r, id) => ids += 1,
-                Ok(t) => bad.push(format!("{} at the fake's {id} lists {} files, not {}", r.url, t.len(), r.trees[id].len())),
-                Err(e) => bad.push(format!("{} at the fake's {id}: {e:#}", r.url)),
+                Ok(t) if t == fake_tree(r, id) => {}
+                Ok(t) => {
+                    bad.push(format!("{} at the fake's {id} lists {} files, not {}", r.url, t.len(), r.trees[id].len()));
+                    continue;
+                }
+                Err(e) => {
+                    bad.push(format!("{} at the fake's {id}: {e:#}", r.url));
+                    continue;
+                }
             }
+            let mut whole = true;
+            for (path, (blob, _)) in &r.trees[id] {
+                let (s, b) = store.get(&r.url, "file", &[("path", path), ("ref", id)])?;
+                if s != 200 || b != r.blobs[blob] {
+                    bad.push(format!("{} at the fake's {id}: {path} reads {s}, {} bytes, not the fake's {}", r.url, b.len(), r.blobs[blob].len()));
+                    whole = false;
+                }
+                id_files += 1;
+            }
+            ids += usize::from(whole);
         }
     }
     if !bad.is_empty() {
         bail!("{} mismatches between the fake and macrofiche:\n  {}", bad.len(), bad.join("\n  "));
     }
-    println!("verified {} repos: {files} files ({bytes} bytes) on their branches, byte for byte, and {ids} fake commit ids, each its tree", repos.len());
+    println!("verified {} repos: {files} files ({bytes} bytes) on their branches, and {ids} fake commit ids ({id_files} files at them), each its tree, byte for byte", repos.len());
     Ok(())
 }
