@@ -968,6 +968,15 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     let made = api.create_with(c.owner, json!({ "name": name, "template": "telegram" }))?;
     anyhow::ensure!(made.status == 200, "making the Telegram connector: {made}");
     s.owned(&made.body, c.owner);
+    if s.on_celld() {
+        // a self-hosted stack's connectors are SimpleX alone (devstack's
+        // `celld::connectors`: Telegram's webhook needs inbound internet):
+        // the policy refuses its door, saying so, and nothing after it runs
+        let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
+        s.ok("a self-hosted stack links no Telegram: its owner's binding of the connector as their agent's door is refused, 403, as a connector the deployment does not allow", r.status == 403 && r.text.contains("does not allow"), &r);
+        s.skip("the Telegram connector end to end (its setup, pairing, door, replies, a release later)", "a self-hosted stack does not allow Telegram, whose webhook needs inbound internet (docs/self-host.md); its asked replies are not asked for");
+        return Ok(0);
+    }
     // its secrets as its owner's page sets them (`__secrets`), toward the fake's host
     for (key, value) in [("TELEGRAM_BOT_TOKEN", TOKEN), ("TELEGRAM_WEBHOOK_SECRET", HOOK)] {
         let r = api.signed(c.owner, "PUT", &format!("/api/f/{name}/secrets/{key}"), Some(&json!({ "value": value, "hosts": ["127.0.0.1"] })))?;
@@ -1582,7 +1591,12 @@ fn made_while_its_seat_sync_fails(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&person, "PUT", "/api/seat", Some(&json!({ "sleeps": true })))?;
     let off = r.status == 200 && s.eventually(Duration::from_secs(20), || view(api)["alwaysOn"] == false);
     let slept = api.signed(&person, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
-    s.ok("it woke as an always-on computer does; let sleep, it sleeps at the end", awake && off && slept.body["phase"] == "asleep", json!([view(api), slept.body]));
+    // let sleep with nothing open, on celld it may be sleeping already as its
+    // owner asks (a sleep on celld's krun engine takes longer than one in
+    // local Docker): its owner's sleep then answers `sleeping`, and it
+    // sleeps. Elsewhere the sleep answers `asleep`, as before
+    let asleep = slept.body["phase"] == "asleep" || (s.on_celld() && slept.body["phase"] == "sleeping" && s.eventually(WAKE, || view(api)["phase"] == "asleep"));
+    s.ok("it woke as an always-on computer does; let sleep, it sleeps at the end", awake && off && asleep, json!([view(api), slept.body]));
     Ok(())
 }
 
@@ -2192,7 +2206,11 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     }
 
     // a turn's keepalive across a deploy; then a sleep, and a fresh container
-    if scripted && fakes {
+    if s.on_celld() {
+        for label in KEEPALIVE_CHECKS {
+            s.skip(label, "a reload of `celld dev` restarts its node, which reaps its VMs, where a deploy keeps a computer's container (as a running celld node's does: its generation swaps); the reload here is no deploy (docs/self-host.md, seam 2)");
+        }
+    } else if scripted && fakes {
         replies_so_far += keepalive_across_a_reload(s, api, &owner, &id, &|n, text| say(n, text), &|seq| {
             let turn = turn_of(&agent_name, &chat_name, "chat", seq);
             agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str())
@@ -2649,11 +2667,20 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // a second review: an event during that destroy acted as if it were
     // done). (A) a request takes it over, its destroy held while an alarm
     // comes: one strike, the container gone, its exit reported again nothing
-    let (ready, held) = last_start_destroying(s, api, &owner, &id)?;
-    let stall = lever_with(api, &id, json!({ "op": "stall-takeover", "ms": 10_000 }))?;
-    s.crash()?;
-    let fresh = s.start(false)?;
-    let api = &fresh;
+    let a_label = "a start's last strike, its isolate gone before it destroyed its container (the node crashed in that gap): a new isolate and host destroy that container, an alarm coming as they do waiting for it, and count the start failed once; its exit, reported again, counts nothing";
+    // on celld, (B) and (C) find the container gone too, and still count
+    let fresh = if s.on_celld() {
+        s.skip(a_label, "a celld node that starts again reaps the VMs it left (it cannot know which of its cells come back to it), so after a crash of the node no container is left to take over (docs/self-host.md, seam 2)");
+        None
+    } else {
+        let (ready, held) = last_start_destroying(s, api, &owner, &id)?;
+        let stall = lever_with(api, &id, json!({ "op": "stall-takeover", "ms": 10_000 }))?;
+        s.crash()?;
+        Some((s.start(false)?, ready, held, stall))
+    };
+    let api = fresh.as_ref().map_or(api, |(fresh, ..)| fresh);
+    if let Some((_, ready, held, stall)) = &fresh {
+    let (ready, held, stall) = (*ready, held, stall);
     let found = saves_of(api, &id);
     let generation = found["generation"].as_u64().unwrap_or(0);
     let soon = lever_with(api, &id, json!({ "op": "alarm-in", "ms": 3_000 }))?;
@@ -2662,7 +2689,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let replayed = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
     let again = saves_of(api, &id);
     s.ok(
-        "a start's last strike, its isolate gone before it destroyed its container (the node crashed in that gap): a new isolate and host destroy that container, an alarm coming as they do waiting for it, and count the start failed once; its exit, reported again, counts nothing",
+        a_label,
         ready
             && stall.status == 200
             && found["running"] == true
@@ -2676,6 +2703,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             && again["failures"] == 3,
         json!({ "held": held, "found": found, "first": first, "again": again }),
     );
+    }
     // (B) the same, its destroy failing: the alarm that waited for it takes
     // the computer over itself, at once, and counts that strike
     let (ready, _) = last_start_destroying(s, api, &owner, &id)?;
@@ -2738,8 +2766,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let api = s.start(false)?;
     // from here its computer's sidecar drops any query it would send public
     // DNS: a run must not need it (#1017, where public DNS did not answer
-    // after this crash and every save of the boot failed)
-    let dropping = s.drop_public_dns()?;
+    // after this crash and every save of the boot failed). celld's krun
+    // engine has no sidecar: it answers the intercepted names itself
+    let dropping = if s.on_celld() { vec![] } else { s.drop_public_dns()? };
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
     // its own turn's replies
@@ -2782,12 +2811,13 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its owner lets it sleep: it is awake only while something is open", off, view(&api));
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
-    let asked = s.public_dns_asked(&dropping)?;
-    s.ok(
-        "after the crash its computer asked public DNS nothing: the hosts the platform intercepts are answered at once, and its sleep's save went on with public DNS dropped",
-        !dropping.is_empty() && asked == 0 && r.body["phase"] == "asleep",
-        json!({ "sidecars": dropping.len(), "asked": asked }),
-    );
+    let dns = "after the crash its computer asked public DNS nothing: the hosts the platform intercepts are answered at once, and its sleep's save went on with public DNS dropped";
+    if s.on_celld() {
+        s.skip(dns, "celld's krun engine has no networking sidecar to watch: its egress answers the intercepted names itself, and with the internet off resolves no other (docs/self-host.md, seam 2)");
+    } else {
+        let asked = s.public_dns_asked(&dropping)?;
+        s.ok(dns, !dropping.is_empty() && asked == 0 && r.body["phase"] == "asleep", json!({ "sidecars": dropping.len(), "asked": asked }));
+    }
     made_while_its_seat_sync_fails(s, &api)?;
 
     // at zero credit agents stop, and no wake starts (decision 27): an
