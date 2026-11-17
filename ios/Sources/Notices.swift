@@ -193,6 +193,17 @@ private extension View {
     }
 }
 
+/// A notice's full-size button pressed: dimmed and a little smaller, as
+/// iOS's own are, never its colour changed.
+private struct NoticePress: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
 /// Every notice fanned out over the whole app, as Notification Center shows
 /// them: each with all its words and actions, scrolling, each card having
 /// grown from its place in the band's stack (`NoticesBand`), never faded.
@@ -350,7 +361,7 @@ private struct NoticeItemView: View {
                     // sharing the card's width; the band: the rest, small
                     let shown = full ? Array(notice.actions) : Array(notice.actions.dropFirst())
                     if !shown.isEmpty {
-                        HStack(spacing: 8) {
+                        HStack(spacing: full ? 12 : 8) {
                             ForEach(Array(shown.enumerated()), id: \.offset) { index, action in
                                 button(notice, action, main: full && index == 0, wide: full)
                             }
@@ -374,20 +385,21 @@ private struct NoticeItemView: View {
             else { Task { if let outside = await library.act(notice, action, api: api) { openURL(outside) } } }
         }
         if wide {
-            // the full screen's: a plain glass pill with a fine rim, the main one tinted
+            // the full screen's: a plain glass pill with a fine rim, the main one tinted.
+            // Pressed, it dims and gives a little, as iOS's buttons do (interactive
+            // glass lit a light pill dark, its words lost in dark mode)
             Button(action: tap) {
-                Text(action.label).fontWeight(.semibold).lineLimit(1)
+                Text(action.label).font(.subheadline.weight(.semibold)).lineLimit(1)
                     .foregroundStyle(main ? Color(.systemBackground) : Color.primary)
-                    .frame(maxWidth: .infinity).frame(height: 50)
-                    // the rim inside the glass, so it swells with it on a press
+                    .frame(maxWidth: .infinity).frame(height: 44)
                     .background {
                         Capsule().strokeBorder(LinearGradient(colors: [.white.opacity(0.6), .white.opacity(0.05), .white.opacity(0.35)],
                                                               startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
                     }
-                    .glassEffect(.regular.tint(main ? Color(.label).opacity(0.9) : .clear).interactive(), in: .capsule)
+                    .glassEffect(.regular.tint(main ? Color(.label).opacity(0.9) : .clear), in: .capsule)
                     .contentShape(.capsule)
             }
-            .buttonStyle(.plain).disabled(pressed).opacity(pressed ? 0.6 : 1)
+            .buttonStyle(NoticePress()).disabled(pressed).opacity(pressed ? 0.6 : 1)
         } else if main {
             // its words in the page's own colour, on the app's primary tint (dark: white on white otherwise);
             // on one line: the title gives way first
