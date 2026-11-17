@@ -60,13 +60,14 @@ use fragment_core::ended::{self as rules, Failure};
 use fragment_core::npub;
 use fragment_core::seed::Stage;
 use fragment_core::wipe::{LifeLeft, LIVES_SHOWN_MAX};
-use fragment_proto::{limits, ErrorCode, Identity, IdentityKind};
+use fragment_proto::{limits, ErrorCode, Identity};
 use futures_util::future::join_all;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{OwnedEnded, WipeMembership, WipeOwned};
 use crate::fragment::{missing, Caller, FragmentCell, MetaKey};
 use crate::js;
 use crate::members::INDEX_FLUSH_MAX;
@@ -109,24 +110,6 @@ const REPOS_PER_PASS: i64 = 4;
 /// Ended lives' agents one pass takes off their computers and out of the
 /// registry's names (two calls each, at most).
 const AGENTS_PER_PASS: i64 = 4;
-
-/// `wipe/end`'s body: the person a wipe ends this fragment for, and their
-/// agents (whose lists the wipe empties, as it empties theirs).
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WipeEnd {
-    owner: String,
-    #[serde(default)]
-    agents: Vec<String>,
-}
-
-/// `wipe/leave`'s body: a wiped person, or an agent of theirs, who leaves.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WipeLeave {
-    principal: String,
-    kind: IdentityKind,
-}
 
 /// A life a delete ended: whose list it tells first.
 pub(crate) struct Ended {
@@ -592,12 +575,11 @@ impl FragmentCell {
 
     /// A wipe empties the lists of the person it wipes and of their agents
     /// (its `lists` step, after its cleanup): this object's ended lives do
-    /// not wait to tell them, once tried. Answers how many rows went.
-    fn forget_wiped_lists(&self, owner: &str, agents: &[String]) -> CellResult<usize> {
+    /// not wait to tell them, once tried.
+    fn forget_wiped_lists(&self, owner: &str, agents: &[String]) -> CellResult<()> {
         let whom: Vec<&str> = std::iter::once(owner).chain(agents.iter().map(String::as_str)).collect();
         let whom = serde_json::to_string(&whom).map_err(|e| CellError::host(format!("the wiped principals: {e}")))?;
-        let gone = self.rows("DELETE FROM ended_index WHERE principal IN (SELECT value FROM json_each(?)) RETURNING incarnation", vec![whom.into()])?;
-        Ok(gone.len())
+        self.exec("DELETE FROM ended_index WHERE principal IN (SELECT value FROM json_each(?))", vec![whom.into()])
     }
 
     /// A wipe's call is the retry: every part of every ended life here is
@@ -610,95 +592,81 @@ impl FragmentCell {
         self.exec("UPDATE ended_agents SET next_at = ?1 WHERE next_at > ?1", vec![now])
     }
 
-    /// A wipe's calls (docs/api.md, Operators; the router's cell/src/wipe.rs),
-    /// only from inside the platform (`wipe::WIPE_HEADER`):
-    ///
-    /// - `end {owner, agents?}`: ends this fragment's life for the wiped
-    ///   person who owns it, its repo with it (`end_life_wiped`), and cleans
-    ///   up what one pass of its alarm would, every part due at once (a
-    ///   wipe's call is the retry); answers `{ended, left, lives}`, `left`
-    ///   the ended lives still to clean (0: done), `lives` what each has
-    ///   left (`fragment_core::wipe::LifeLeft`). The lists of `owner` and
-    ///   `agents` are not waited on: the wipe empties them. Again, with no
-    ///   life, it only cleans: a wipe asks until nothing is left. A
-    ///   fragment someone else owns is refused (403), and nothing of it
-    ///   changes.
-    /// - `leave {principal, kind}`: the wiped person, or an agent of theirs,
-    ///   leaves this fragment of someone else's, as a member leaves (their
-    ///   membership, subscriptions and the browsers' pushes they asked for
-    ///   go); `{left}`, false when they were no member (or it is gone).
-    pub(crate) async fn wipe_route(&self, route: &str, body: &[u8]) -> CellResult<Value> {
-        match route {
-            "end" => {
-                let b: WipeEnd = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("wipe/end: {e}")))?;
-                if !npub::is_identity(&b.owner) || !b.agents.iter().all(|a| npub::is_identity(a)) {
-                    return Err(CellError::invalid("wipe/end names the owner and their agents by identity"));
-                }
-                if b.agents.len() as u64 > limits::AGENTS_PER_OWNER_MAX {
-                    return Err(CellError::invalid(format!("wipe/end names at most {} agents", limits::AGENTS_PER_OWNER_MAX)));
-                }
-                // a life ends between the plane's steps, never inside one
-                // (fragment.rs `delete`): held until it has ended
-                let held = self.plane.lock().await;
-                let [created_at, name] = self.metas([MetaKey::CreatedAt, MetaKey::Name])?;
-                let owner = match created_at {
-                    Some(_) => Some(self.owner()?.name()),
-                    None => None,
-                };
-                let ended_now = match (created_at, owner) {
-                    (None, _) => None,
-                    (Some(_), Some(owner)) if owner == b.owner => Some((self.end_life_wiped()?, owner)),
-                    // an org's fragment too: a person's wipe never ends what an org owns
-                    (Some(_), _) => return Err(CellError::new(ErrorCode::Forbidden, format!("{} is someone else's: a wipe ends only its person's", name.unwrap_or_default()))),
-                };
-                drop(held);
-                let ended = ended_now.is_some();
-                if let Some((ended, owner)) = ended_now {
-                    console_log!("{}", json!({ "event": "wipe.fragment-ended", "fragment": name, "owner": owner }));
-                    self.tell_ended(Some(&ended.owner)).await;
-                    if let Some(name) = &name {
-                        self.forget_invites(name).await;
-                    }
-                }
-                // the lists the wipe empties itself: tried once (just now, or
-                // by an earlier call or pass), never waited on
-                let forgot = self.forget_wiped_lists(&b.owner, &b.agents)?;
-                if !ended {
-                    // a wipe's call is the retry: every part due now
-                    self.ended_due_now()?;
-                }
-                // what one pass of the alarm cleans, now; the rest is its
-                self.drain_ended().await;
-                self.schedule().await?;
-                let left = self.ended_left()?;
-                let lives = if left > 0 { self.ended_lives()? } else { vec![] };
-                assert!(!ended || self.meta(MetaKey::CreatedAt)?.is_none(), "an ended life leaves no fragment");
-                assert!(lives.len() as u64 <= left, "each life named is one left");
-                Ok(json!({ "ended": ended, "left": left, "lives": lives, "forgot": forgot }))
-            }
-            "leave" => {
-                let b: WipeLeave = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("wipe/leave: {e}")))?;
-                if !npub::is_identity(&b.principal) {
-                    return Err(CellError::invalid("wipe/leave names who leaves by identity"));
-                }
-                if self.meta(MetaKey::CreatedAt)?.is_none() {
-                    return Ok(json!({ "left": false }));
-                }
-                // the browsers they asked pushes for here, member or not
-                let pushes = self.rows("DELETE FROM push_subs WHERE principal = ? RETURNING id", vec![b.principal.as_str().into()])?.len();
-                // as themselves: leaving is any member's own (members.rs)
-                let identity = Identity { id: b.principal.clone(), kind: b.kind, owner: None, held: None, orgs: vec![] };
-                let url = url::Url::parse("https://fragment.internal/wipe/leave").expect("a constant URL parses");
-                let caller = Caller { signed: Some(Signed::new(identity, None)), unresolved: None, url, site: false };
-                let left = match self.remove_member(&caller, "me").await {
-                    Ok(_) => true,
-                    Err(e) if e.code == ErrorCode::NotFound => false,
-                    Err(e) => return Err(e),
-                };
-                assert!(self.member_role(&b.principal)?.is_none(), "who left is no member");
-                Ok(json!({ "left": left, "pushes": pushes }))
-            }
-            other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
+    /// A wipe's end of a fragment its person owns (`calls::WipeOwned`;
+    /// docs/api.md, Operators): its life ended for them (`end_life_wiped`),
+    /// and what one pass of its alarm would clean, cleaned now, every part
+    /// due at once (a wipe's call is the retry). Again, with no life, it
+    /// only cleans: a wipe asks until nothing is left. A fragment someone
+    /// else owns is refused (403), and nothing of it changes.
+    pub(crate) async fn wipe_owned(&self, b: WipeOwned) -> CellResult<OwnedEnded> {
+        if !npub::is_identity(&b.owner) || !b.agents.iter().all(|a| npub::is_identity(a)) {
+            return Err(CellError::invalid("a wipe names the owner and their agents by identity"));
         }
+        if b.agents.len() as u64 > limits::AGENTS_PER_OWNER_MAX {
+            return Err(CellError::invalid(format!("a wipe names at most {} agents", limits::AGENTS_PER_OWNER_MAX)));
+        }
+        // a life ends between the plane's steps, never inside one
+        // (fragment.rs `delete`): held until it has ended
+        let held = self.plane.lock().await;
+        let [created_at, name] = self.metas([MetaKey::CreatedAt, MetaKey::Name])?;
+        let owner = match created_at {
+            Some(_) => Some(self.owner()?.name()),
+            None => None,
+        };
+        let ended_now = match (created_at, owner) {
+            (None, _) => None,
+            (Some(_), Some(owner)) if owner == b.owner => Some((self.end_life_wiped()?, owner)),
+            // an org's fragment too: a person's wipe never ends what an org owns
+            (Some(_), _) => return Err(CellError::new(ErrorCode::Forbidden, format!("{} is someone else's: a wipe ends only its person's", name.unwrap_or_default()))),
+        };
+        drop(held);
+        let ended = ended_now.is_some();
+        if let Some((ended, owner)) = ended_now {
+            console_log!("{}", json!({ "event": "wipe.fragment-ended", "fragment": name, "owner": owner }));
+            self.tell_ended(Some(&ended.owner)).await;
+            if let Some(name) = &name {
+                self.forget_invites(name).await;
+            }
+        }
+        // the lists the wipe empties itself: tried once (just now, or
+        // by an earlier call or pass), never waited on
+        self.forget_wiped_lists(&b.owner, &b.agents)?;
+        if !ended {
+            // a wipe's call is the retry: every part due now
+            self.ended_due_now()?;
+        }
+        // what one pass of the alarm cleans, now; the rest is its
+        self.drain_ended().await;
+        self.schedule().await?;
+        let left = self.ended_left()?;
+        let lives = if left > 0 { self.ended_lives()? } else { vec![] };
+        assert!(!ended || self.meta(MetaKey::CreatedAt)?.is_none(), "an ended life leaves no fragment");
+        assert!(lives.len() as u64 <= left, "each life named is one left");
+        Ok(OwnedEnded { ended, left, lives })
+    }
+
+    /// A wipe's leave (`calls::WipeMembership`): who leaves, as a member
+    /// leaves (their membership, subscriptions and the browsers' pushes
+    /// they asked for go). Whether they were a member (false when it is gone).
+    pub(crate) async fn wipe_membership(&self, b: WipeMembership) -> CellResult<bool> {
+        if !npub::is_identity(&b.principal) {
+            return Err(CellError::invalid("a wipe's leave names who leaves by identity"));
+        }
+        if self.meta(MetaKey::CreatedAt)?.is_none() {
+            return Ok(false);
+        }
+        // the browsers they asked pushes for here, member or not
+        self.exec("DELETE FROM push_subs WHERE principal = ?", vec![b.principal.as_str().into()])?;
+        // as themselves: leaving is any member's own (members.rs)
+        let identity = Identity { id: b.principal.clone(), kind: b.kind, owner: None, held: None, orgs: vec![] };
+        let url = url::Url::parse("https://fragment.internal/wipe/leave").expect("a constant URL parses");
+        let caller = Caller { signed: Some(Signed::new(identity, None)), unresolved: None, url, site: false };
+        let left = match self.remove_member(&caller, "me").await {
+            Ok(_) => true,
+            Err(e) if e.code == ErrorCode::NotFound => false,
+            Err(e) => return Err(e),
+        };
+        assert!(self.member_role(&b.principal)?.is_none(), "who left is no member");
+        Ok(left)
     }
 }

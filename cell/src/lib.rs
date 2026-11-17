@@ -600,7 +600,7 @@ async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
         let named = ask_registry(env, &calls::Profiles { ids: vec![identity.to_string()], emails_of: vec![] }).await?;
         let agent = named.profiles.get(identity).filter(|p| p.kind == IdentityKind::Agent);
         let fragment = agent.and_then(|p| p.fragment.clone()).ok_or_else(none)?;
-        return routed::fetch_object(env, "FRAGMENT", &fragment, "computer/picture").await;
+        return fragment::pass(env, &fragment, &fragment::calls::Picture {}).await;
     };
     let blob = js::blob_get(env, js::BLOBS, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
     let headers = Headers::new();

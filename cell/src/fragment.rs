@@ -43,13 +43,9 @@
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /cap/search/upsert|delete|query|status  the app facet's `Search` capability (searchable.rs); never routed from outside
-//!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
-//!   POST   /deliver/authorize             the same, before an org's fragment's delivery is sent
-//!   POST   /signin/visibility             a frame's redemption: who may read it now (auth.rs `anyone_reads`); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /api/card  PUT /api/card       editor: a shot again; an upload as the card (card.rs)
-//!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
-//!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
+//!   POST   <calls.rs's paths>             the platform's typed calls (`calls::HEADER`); never routed from outside
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -76,6 +72,10 @@ use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
 use crate::js;
 use crate::routed::{Credential, Routed, Signed};
+
+pub(crate) mod calls;
+
+use calls::{AgentMade, Call, DoorActor, DoorCheck, FaceOf, FragmentLever, InviteAnswer, KeysLever, Picture, ReachOf, Report, Routine, VisibilityOf, WipeMembership, WipeOwned, Whose};
 
 /// The alarm fires no sooner than this after it is armed …
 pub(crate) const ALARM_SOON_MS: i64 = 50;
@@ -364,7 +364,7 @@ pub(crate) enum MetaKey {
     /// last sent.
     Face,
     /// An agent fragment's picture as live's install read it (`<sha256>
-    /// <type> <commit>`): what `computer/picture` answers.
+    /// <type> <commit>`): what `calls::Picture` answers.
     Picture,
     /// The channels that list records, their kinds, fields and read
     /// roles, as the rows last carried them (listed.rs `listed_fence`).
@@ -426,6 +426,11 @@ pub(crate) enum MetaKey {
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
     AgentIdentity,
+    /// What this agent may use of its owner's (`fragment_core::grants`):
+    /// set by its owner in person, through their computer (runs_on.rs), or
+    /// taken once from that computer's row from before the move. None:
+    /// every provider they have, each connection's default account.
+    Grants,
     /// Its door's public key (`<door> <64 hex>`), registered by a link its
     /// owner started, gone once they unlink (fragment_core::door).
     Door,
@@ -436,9 +441,10 @@ pub(crate) enum MetaKey {
     /// (`<door> <agent fragment>`), set and cleared by its owner in person
     /// (doors.rs; fragment_core::door::Hosted).
     DoorActor,
-    /// The installed code's inbox secret (`<header> <SECRET>`): its inbox
-    /// takes a delivery only with that header holding that secret, and its
-    /// inbox token admits nothing (fragment_core::manifest::InboxDecl).
+    /// The installed code's `inbox` (`InboxDecl::stored`: `<header>
+    /// <SECRET>`, else its JSON): its inbox takes a delivery only by that
+    /// secret, its inbox token admits nothing, and it may answer
+    /// (fragment_core::manifest::InboxDecl).
     InboxSecret,
     /// The blessed connector template it was made from (`blessed::
     /// CONNECTORS`), while it runs no other code: no one but its owner edits
@@ -474,7 +480,7 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more calls into its search index fail
     /// before they are sent (`fail-search-index`): the index out of reach.
     TestFailSearchIndex,
-    /// Test fleets only: how many more `/signin/visibility` reads fail
+    /// Test fleets only: how many more `calls::VisibilityOf` reads fail
     /// (`fail-signin-visibility`).
     TestFailSigninVisibility,
     /// Test fleets only: the connector policy its doors ask in place of the
@@ -543,6 +549,7 @@ impl MetaKey {
             MetaKey::TestWokeHeld => "test_woke_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
+            MetaKey::Grants => "grants",
             MetaKey::Door => "door",
             MetaKey::DoorTicket => "door_ticket",
             MetaKey::DoorActor => "door_actor",
@@ -675,6 +682,59 @@ pub(crate) async fn body_json<T: DeserializeOwned>(req: &mut Request) -> CellRes
 /// from a computer's routes and egress).
 pub(crate) async fn ask(env: &Env, name: &str, path: &str, body: &Value) -> CellResult<Value> {
     crate::routed::ask_object(env, "FRAGMENT", name, path, body).await
+}
+
+/// Asks fragment `name` `call` (calls.rs): its answer, read as the call's
+/// type, or its refusal as it named it.
+pub(crate) async fn call<C: Call>(env: &Env, name: &str, call: &C) -> CellResult<C::Answer>
+where
+    C::Answer: DeserializeOwned,
+{
+    let bytes = answered(env, name, C::PATH, call_body(call)).await?;
+    serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("{name}'s answer to {}: {e}", C::PATH)))
+}
+
+/// `call`'s round trip, one copy for every call: its 200's bytes, or its refusal.
+async fn answered(env: &Env, name: &str, path: &str, body: CellResult<String>) -> CellResult<Vec<u8>> {
+    let mut resp = sent(env, name, path, body).await?;
+    let status = resp.status_code();
+    let bytes = resp.bytes().await?;
+    if status == 200 {
+        return Ok(bytes);
+    }
+    Err(crate::routed::refusal(&bytes, || format!("{name} answered {status} to {path}")))
+}
+
+/// `call`, its answer passed on as the fragment made it, unread: its
+/// status, headers and body. Not an `async fn`: one future type (`sent`'s)
+/// serves every call.
+pub(crate) fn pass<'a, C: Call>(env: &'a Env, name: &'a str, call: &C) -> impl std::future::Future<Output = CellResult<Response>> + 'a {
+    sent(env, name, C::PATH, call_body(call))
+}
+
+fn call_body<C: Call>(call: &C) -> CellResult<String> {
+    serde_json::to_string(call).map_err(|e| CellError::host(format!("{}'s body: {e}", C::PATH)))
+}
+
+/// Every call to a fragment: its body posted to its route (`call/…`,
+/// which `routed::internal_request` marks with `calls::HEADER`), and asked
+/// again while the fragment refuses this release (it did nothing).
+async fn sent(env: &Env, name: &str, path: &str, body: CellResult<String>) -> CellResult<Response> {
+    let (body, path) = (body?, path.trim_start_matches('/'));
+    crate::routed::send_again(env, "FRAGMENT", name, || crate::routed::internal_request(path, &body)).await
+}
+
+/// A call's body as the fragment decodes it: one it cannot is the caller's fault.
+fn decode<C: Call + DeserializeOwned>(body: &[u8]) -> CellResult<C> {
+    serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("{}: {e}", C::PATH)))
+}
+
+/// A call's answer, as its type says.
+fn reply<C: Call>(answer: CellResult<C::Answer>) -> CellResult<Response>
+where
+    C::Answer: serde::Serialize,
+{
+    crate::json_answer(&answer?)
 }
 
 pub(crate) use crate::json_response::json_response;
@@ -986,10 +1046,22 @@ impl FragmentCell {
         caller.principal().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))
     }
 
-    async fn route(&self, mut req: Request) -> CellResult<Response> {
-        let path = req.path();
-        if path == "/test/fragment" && self.cfg.test_hooks {
-            let body: Value = body_json(&mut req).await?;
+    /// Its schema made current, else refused; and one from before
+    /// `Sharing.reach` tells its owner's row once (reach.rs), which fails
+    /// no request.
+    fn ready(&self) -> CellResult<()> {
+        self.schema.ready()?;
+        if let Err(e) = self.reach_told() {
+            worker::console_error!("its owner's row was not told its reach: {}", e.message);
+        }
+        Ok(())
+    }
+
+    /// A call from inside the platform (calls.rs), read as the type its
+    /// path names.
+    async fn called(&self, path: &str, body: &[u8]) -> CellResult<Response> {
+        if path == FragmentLever::PATH && self.cfg.test_hooks {
+            let FragmentLever(body) = decode(body)?;
             // its schema's levers answer on a fragment that refuses its
             // schema, as does the look at its ended lives' cleanup
             if let Some(op) = body["op"].as_str().filter(|op| op.starts_with("schema")) {
@@ -1001,27 +1073,62 @@ impl FragmentCell {
             }
             return json_response(&self.test_fragment(&body).await?);
         }
-        // a fragment that refuses its schema still ends: its owner's
-        // delete and a wipe's end remove everything (schema.rs)
-        let ends = path.starts_with("/wipe/") || (req.method() == Method::Delete && path == "/delete");
-        if !ends {
-            self.schema.ready()?;
-            // one from before `Sharing.reach` tells its owner's row once
-            // (reach.rs); a failure here fails no request
-            if let Err(e) = self.reach_told() {
-                worker::console_error!("its owner's row was not told its reach: {}", e.message);
-            }
+        // a fragment that refuses its schema still ends: a wipe's end
+        // removes everything (schema.rs)
+        match path {
+            WipeOwned::PATH => return reply::<WipeOwned>(self.wipe_owned(decode(body)?).await),
+            WipeMembership::PATH => return reply::<WipeMembership>(self.wipe_membership(decode(body)?).await),
+            _ => {}
         }
-        if path == "/test/keys" && self.cfg.test_hooks {
-            // this cell's own sealing: the e2e checks that what one
-            // fragment seals another cannot open
-            let body: Value = body_json(&mut req).await?;
-            let answer = match (body["op"].as_str(), body["plaintext"].as_str(), body["sealed"].as_str()) {
-                (Some("seal"), Some(text), _) => json!({ "sealed": crate::keys::seal(&self.env, &self.scope(), text.as_bytes()).await? }),
-                (Some("open"), _, Some(sealed)) => json!({ "plaintext": String::from_utf8_lossy(&crate::keys::open(&self.env, &self.scope(), sealed).await?.plaintext) }),
-                _ => return Err(CellError::invalid("op is seal {plaintext} or open {sealed}")),
-            };
-            return json_response(&answer);
+        self.ready()?;
+        match path {
+            KeysLever::PATH if self.cfg.test_hooks => {
+                // this cell's own sealing: the e2e checks that what one
+                // fragment seals another cannot open
+                let KeysLever(body) = decode(body)?;
+                let answer = match (body["op"].as_str(), body["plaintext"].as_str(), body["sealed"].as_str()) {
+                    (Some("seal"), Some(text), _) => json!({ "sealed": crate::keys::seal(&self.env, &self.scope(), text.as_bytes()).await? }),
+                    (Some("open"), _, Some(sealed)) => json!({ "plaintext": String::from_utf8_lossy(&crate::keys::open(&self.env, &self.scope(), sealed).await?.plaintext) }),
+                    _ => return Err(CellError::invalid("op is seal {plaintext} or open {sealed}")),
+                };
+                json_response(&answer)
+            }
+            VisibilityOf::PATH => {
+                self.test_countdown(MetaKey::TestFailSigninVisibility, "its visibility was not read")?;
+                reply::<VisibilityOf>(self.facts().map(|f| f.visibility))
+            }
+            Picture::PATH => self.picture().await,
+            DoorCheck::PATH => reply::<DoorCheck>(self.door_check(decode(body)?)),
+            DoorActor::PATH => reply::<DoorActor>(self.door_actor(decode(body)?)),
+            FaceOf::PATH => reply::<FaceOf>(self.face_of()),
+            ReachOf::PATH => reply::<ReachOf>(self.reach_of()),
+            AgentMade::PATH => reply::<AgentMade>(self.agent_with_person(decode(body)?).await),
+            InviteAnswer::PATH => {
+                let answer: InviteAnswer = decode(body)?;
+                reply::<InviteAnswer>(match answer.yes {
+                    true => self.claim_invite(&answer).await.map(Some),
+                    false => self.decline_invite(&answer).await.map(|()| None),
+                })
+            }
+            Report::PATH => reply::<Report>(self.delivery_report(&decode(body)?)),
+            calls::Authorize::PATH => reply::<calls::Authorize>(self.delivery_authorize(&decode(body)?).await),
+            calls::Acked::PATH => reply::<calls::Acked>(self.meter_acked(&decode(body)?).await),
+            Whose::PATH => reply::<Whose>(self.whose(&decode::<Whose>(body)?.principal)),
+            Routine::PATH => reply::<Routine>(self.move_routine(decode(body)?).await),
+            _ => Err(CellError::new(ErrorCode::NotFound, format!("no call {path}"))),
+        }
+    }
+
+    async fn route(&self, mut req: Request) -> CellResult<Response> {
+        let path = req.path();
+        if req.headers().has(calls::HEADER)? {
+            let body = req.bytes().await?;
+            return self.called(&path, &body).await;
+        }
+        // a fragment that refuses its schema still ends: its owner's
+        // delete removes everything (schema.rs)
+        if !(req.method() == Method::Delete && path == "/delete") {
+            self.ready()?;
         }
         if let Some(step) = path.strip_prefix("/job/") {
             // Only this script's Workflow sets the header; the router never passes it.
@@ -1032,65 +1139,17 @@ impl FragmentCell {
             let bytes = req.bytes().await?;
             return json_response(&self.job_callback(&step, &bytes).await?);
         }
-        if path == "/deliver/report" || path == "/deliver/authorize" {
-            // Only the delivery consumer sets the header; the router never passes it.
-            if req.headers().get(crate::deliveries::REPORT_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            if path == "/deliver/authorize" {
-                let ask = body_json(&mut req).await?;
-                return json_response(&self.delivery_authorize(&ask).await?);
-            }
-            let report = body_json(&mut req).await?;
-            return json_response(&self.delivery_report(&report)?);
-        }
-        if path == "/signin/visibility" {
-            // Only a frame's redemption sets the header; the router never passes it.
-            if req.headers().get(crate::auth::SIGNIN_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            self.test_countdown(MetaKey::TestFailSigninVisibility, "its visibility was not read")?;
-            return json_response(&crate::auth::SigninVisibility { visibility: self.facts()?.visibility });
-        }
-        if let Some(key) = path.strip_prefix("/stage/routine/") {
-            // Only the move's object sets the header (migrations.rs); the router never passes it.
-            if req.headers().get(crate::migrations::ROUTINE_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            let text = String::from_utf8(req.bytes().await?).map_err(|_| CellError::invalid("a routine's text is UTF-8"))?;
-            return json_response(&self.move_routine(key, &text).await?);
-        }
         if let Some(route) = path.strip_prefix("/computer/") {
             // Only a computer's routes and egress set the header; the router never passes it.
             if req.headers().get(crate::computer::INTERNAL_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
-            if route == "picture" {
-                return self.picture().await;
+            if route == "grants" {
+                return json_response(&self.grants(&req.bytes().await?)?);
             }
             let route = route.to_string();
             let body = req.bytes().await?;
             return json_response(&self.runs_on(&route, &body).await?);
-        }
-        if let Some(route) = path.strip_prefix("/meter/") {
-            // Only platform code sets the header; the router never passes it.
-            if req.headers().get(crate::meter::METER_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            let body = req.bytes().await?;
-            return match route {
-                "acked" => json_response(&self.meter_acked(&crate::json_body(&body)?).await?),
-                "whose" => {
-                    /// `meter/whose`: whose `principal` is.
-                    #[derive(serde::Deserialize)]
-                    struct Whose {
-                        principal: String,
-                    }
-                    let Whose { principal } = crate::json_body(&body)?;
-                    json_response(&self.whose(&principal)?)
-                }
-                _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
-            };
         }
         if let Some(op) = path.strip_prefix("/cap/files/") {
             // Only the `Files` capability sets the header; the router never passes it.
@@ -1111,31 +1170,6 @@ impl FragmentCell {
             let op = op.to_string();
             let body = req.bytes().await?;
             return self.cap_search(&op, &body).await;
-        }
-        if path == "/invites/claim" || path == "/invites/decline" || path == "/members/agent" {
-            // Only the platform sets the header (a person's yes or no; an
-            // agent of theirs made); the router never passes it.
-            if req.headers().get(crate::members::CLAIM_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            if path == "/members/agent" {
-                let body: Value = body_json(&mut req).await?;
-                return json_response(&self.agent_with_person(&body).await?);
-            }
-            let claim = body_json(&mut req).await?;
-            return json_response(&match path.as_str() {
-                "/invites/claim" => self.claim_invite(&claim).await?,
-                _ => self.decline_invite(&claim).await?,
-            });
-        }
-        if let Some(route) = path.strip_prefix("/wipe/") {
-            // Only a wipe's orchestrator sets the header; the router never passes it.
-            if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            let route = route.to_string();
-            let bytes = req.bytes().await?;
-            return json_response(&self.wipe_route(&route, &bytes).await?);
         }
         // Every route below is the router's: decoded once, from headers only it sets.
         let Routed { name: routed_name, url, signed, credential } = Routed::from_headers(req.headers())?;
@@ -1347,12 +1381,12 @@ impl FragmentCell {
             (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
             (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
             (Method::Post, ["api", "inbox"]) => {
-                // its code's inbox secret, else its inbox token
+                // its code's inbox, else its inbox token
                 let given = match self.meta(MetaKey::InboxSecret)? {
-                    Some(declared) => {
-                        let (header, secret) = declared.split_once(' ').ok_or_else(|| CellError::host(format!("its inbox secret {declared:?} is not `<header> <SECRET>`")))?;
-                        crate::jobs::Admits::Secret { header: header.into(), name: secret.into(), given: req.headers().get(header)?.unwrap_or_default() }
-                    }
+                    Some(stored) => crate::jobs::Admits::Code {
+                        inbox: fragment_core::manifest::InboxDecl::from_stored(&stored).map_err(CellError::host)?,
+                        headers: req.headers().clone(),
+                    },
                     None => crate::jobs::Admits::Token(match req.headers().get("x-fragment-inbox-token")? {
                         Some(t) => t,
                         None => query("t").unwrap_or_default(),

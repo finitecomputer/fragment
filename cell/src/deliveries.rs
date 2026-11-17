@@ -32,12 +32,11 @@ use worker::*;
 use crate::config::Config;
 use crate::cs::FetchFailed;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{Authorize, Outcome, Report};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 
 pub const DEAD_QUEUE: &str = "fragment-deliveries-dead";
-/// Set by the consumer on its reports; the router never sets or passes it.
-pub const REPORT_HEADER: &str = "x-fragment-delivery";
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Outbox rows one drain takes.
 const DRAIN_ROWS: i64 = 100;
@@ -391,20 +390,20 @@ impl FragmentCell {
         Ok(fenced)
     }
 
-    /// `POST /deliver/authorize` from the consumer, before it sends an org's
+    /// The consumer's ask (`calls::Authorize`), before it sends an org's
     /// fragment's queued delivery (`Delivery::fenced`), a retry too: whether
     /// its subscription is still this life's and its subscriber may still
     /// be sent it (`receivers`; Alex's review). One that may not is ended.
-    pub(crate) async fn delivery_authorize(&self, ask: &Authorize) -> CellResult<Value> {
+    pub(crate) async fn delivery_authorize(&self, ask: &Authorize) -> CellResult<bool> {
         if Some(ask.incarnation.as_str()) != self.meta(MetaKey::CreatedAt)?.as_deref() {
-            return Ok(json!({ "send": false }));
+            return Ok(false);
         }
-        let Some(sub) = ask.sub else { return Ok(json!({ "send": false })) };
+        let Some(sub) = ask.sub else { return Ok(false) };
         let (table, row) = match ask.kind {
             DeliveryKind::Record => ("subs", self.rows("SELECT principal, channel FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?),
             DeliveryKind::Push => ("push_subs", self.rows("SELECT principal FROM push_subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?),
         };
-        let Some(row) = row.first() else { return Ok(json!({ "send": false })) };
+        let Some(row) = row.first() else { return Ok(false) };
         let read = match row["channel"].as_str() {
             Some(channel) => self.channel_read_role(channel).unwrap_or(Role::Owner),
             None => Role::Public,
@@ -413,13 +412,13 @@ impl FragmentCell {
         let may = self.receivers(&[(principal, read)]).await?.first().copied().unwrap_or(false);
         // a revoke while the registry answered took the row and the subscription
         if self.rows(&format!("SELECT id FROM {table} WHERE id = ?"), vec![SqlStorageValue::Integer(sub)])?.is_empty() {
-            return Ok(json!({ "send": false }));
+            return Ok(false);
         }
         if !may {
             self.exec(&format!("DELETE FROM {table} WHERE id = ?"), vec![SqlStorageValue::Integer(sub)])?;
             self.event("subscription.fenced", &format!("a queued {} delivery's subscriber may read it no more: not sent, its subscription ended", ask.kind.as_str()), json!({ "kind": ask.kind.as_str(), "sub": sub }));
         }
-        Ok(json!({ "send": may }))
+        Ok(may)
     }
 
     /// A row the queue did not take: it waits, or after its last try it
@@ -446,11 +445,11 @@ impl FragmentCell {
         }
     }
 
-    /// `POST /deliver/report` from the consumer: a subscription is gone, or
+    /// The consumer's report (`calls::Report`): a subscription is gone, or
     /// a delivery failed for good.
-    pub(crate) fn delivery_report(&self, report: &Report) -> CellResult<Value> {
+    pub(crate) fn delivery_report(&self, report: &Report) -> CellResult<()> {
         if Some(report.incarnation.as_str()) != self.meta(MetaKey::CreatedAt)?.as_deref() {
-            return Ok(json!({ "ok": true }));
+            return Ok(());
         }
         let (kind, url) = (report.kind.as_str(), report.url.as_str());
         let host = url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
@@ -466,49 +465,14 @@ impl FragmentCell {
             }
             Outcome::Failed => self.event("delivery.failed", &format!("{kind} to {host}: {}", report.error), json!({ "kind": kind, "status": report.status })),
         }
-        Ok(json!({ "ok": true }))
+        Ok(())
     }
 }
 
-/// What the consumer asks a fragment before it sends one of its fenced
-/// deliveries (`POST /deliver/authorize`).
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Authorize {
-    incarnation: String,
-    kind: DeliveryKind,
-    sub: Option<i64>,
-}
-
-/// What the consumer tells a fragment about one of its deliveries
-/// (`POST /deliver/report`).
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Report {
-    incarnation: String,
-    kind: DeliveryKind,
-    url: String,
-    sub: Option<i64>,
-    outcome: Outcome,
-    /// The receiver's answer (0: none came).
-    status: u16,
-    error: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-enum Outcome {
-    /// The receiver dropped the subscription (404 or 410): the fragment drops it too.
-    Gone,
-    /// The delivery failed for good.
-    Failed,
-}
-
 async fn report(env: &Env, d: &Delivery, outcome: Outcome, status: u16, error: &str) -> Result<()> {
-    let body = Report { incarnation: d.incarnation.clone(), kind: d.kind, url: d.url.clone(), sub: d.sub, outcome, status, error: error.to_string() };
-    let body = serde_json::to_string(&body).map_err(|e| Error::RustError(e.to_string()))?;
-    // marked as the supervisor's `deliver/report` route expects (routed.rs)
-    let req = crate::routed::internal_request("deliver/report", &body).map_err(|e| Error::RustError(e.message))?;
+    let report = Report { incarnation: d.incarnation.clone(), kind: d.kind, url: d.url.clone(), sub: d.sub, outcome, status, error: error.to_string() };
     // a supervisor of another release refuses it unread: tried again with the message
-    crate::routed::send(env, "FRAGMENT", &d.fragment, req).await.map_err(|e| Error::RustError(e.message))?;
+    crate::fragment::pass(env, &d.fragment, &report).await.map_err(|e| Error::RustError(e.message))?;
     Ok(())
 }
 
@@ -604,14 +568,7 @@ async fn consume_one(raw: RawMessage, env: &Env, cfg: &Config, dead: bool) {
 }
 
 /// Whether the fragment says its fenced delivery `d` may be sent now
-/// (`POST /deliver/authorize`).
-async fn authorized(env: &Env, d: &Delivery) -> Result<bool> {
-    let body = serde_json::to_string(&Authorize { incarnation: d.incarnation.clone(), kind: d.kind, sub: d.sub }).map_err(|e| Error::RustError(e.to_string()))?;
-    let req = crate::routed::internal_request("deliver/authorize", &body).map_err(|e| Error::RustError(e.message))?;
-    let mut resp = crate::routed::send(env, "FRAGMENT", &d.fragment, req).await.map_err(|e| Error::RustError(e.message))?;
-    if resp.status_code() != 200 {
-        return Err(Error::RustError(format!("the fragment answered {}", resp.status_code())));
-    }
-    let answer: Value = crate::ReadJson::read_json(&mut resp).await?;
-    Ok(answer["send"] == true)
+/// (`calls::Authorize`).
+async fn authorized(env: &Env, d: &Delivery) -> CellResult<bool> {
+    crate::fragment::call(env, &d.fragment, &Authorize { incarnation: d.incarnation.clone(), kind: d.kind, sub: d.sub }).await
 }

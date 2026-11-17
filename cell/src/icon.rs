@@ -187,7 +187,7 @@ impl FragmentCell {
         Ok(Response::from_json(&json!({ "subject": subject, "candidates": candidates, "flaws": flaws }))?)
     }
 
-    /// The making's subject: GLM's (the object a hint names, when one
+    /// The making's subject: its model's (the object a hint names, when one
     /// does: `icon::HINTED_SYSTEM`), or, when it named none, the hint or
     /// the title (the checks then judge what was drawn of it).
     async fn icon_subject(&self, owner: &str, key: &str, op: &str, hint: Option<&str>) -> CellResult<String> {

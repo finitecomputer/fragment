@@ -1612,7 +1612,7 @@ pub struct MemberList {
 /// `model`, a fragment's `agent.model`, a job's `ai.text` `model`, and a
 /// model call's `model` name. The platform maps each to its model where
 /// the deployment runs it (`fragment_core::models::Models`): unnamed,
-/// `cheap` is GLM-5.3 Flash and `medium` GLM-5.3, both on Workers AI;
+/// `cheap` is DeepSeek V4.1 Flash and `medium` GLM-5.3, both on Workers AI;
 /// Finite's own runs both on Finite Private's GLM-5.3 Flash (decision 61).
 /// `high` (Opus) is a name the platform
 /// refuses, saying why, until Cloudflare raises Unified Billing's Opus

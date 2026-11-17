@@ -21,6 +21,7 @@
 //!   own. A row that fails for a passing reason is tried again from the
 //!   alarm; an agent that runs on no computer is told nothing.
 
+use fragment_core::grants::Grants;
 use fragment_core::{connectors::Action, door, npub};
 use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
@@ -28,6 +29,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{AgentIdentity, DoorActor, DoorCheck, Named, Reach, Routine};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 use crate::registry::calls::{self, By};
@@ -107,7 +109,7 @@ impl FragmentCell {
         policy.authorize(&owner, &agent, door, action).map_err(|why| CellError::new(ErrorCode::Forbidden, format!("door {door} {why}")))
     }
 
-    /// `computer/picture`: an agent fragment's picture, for `GET
+    /// `calls::Picture`: an agent fragment's picture, for `GET
     /// /api/identities/<npub>/picture`: its bytes from the commit live's
     /// install checked them at (`MetaKey::Picture`: `<sha256> <type>
     /// <commit>`), so a later commit never serves bytes no install checked.
@@ -125,9 +127,60 @@ impl FragmentCell {
         Ok(Response::from_body(body)?.with_headers(headers))
     }
 
+    /// `computer/grants`: what this agent may use of its owner's
+    /// (`fragment_core::grants`), asked by the computer it runs on at each
+    /// use (`{computer, identity}`): what it holds, or, holding none of its
+    /// own, that computer's row from before the move (`taken`), taken once;
+    /// then its owner's change, in person (`owner` with `connections`, or
+    /// with `provider` and `account`: their computer's routes, which a
+    /// signed person alone reaches). Read field by field, as this file's
+    /// other bodies are (the cell's Wasm budget).
+    pub(crate) fn grants(&self, body: &[u8]) -> CellResult<Grants> {
+        use fragment_core::grants::{answered, Change, Row};
+        self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
+        let body: Value = crate::json_body(body)?;
+        let text = |k: &str| body[k].as_str().unwrap_or("");
+        self.assigned_to(text("computer"))?;
+        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(text("identity")) {
+            return Err(CellError::new(ErrorCode::Forbidden, "that computer's row is another agent's: this fragment was made again since"));
+        }
+        let held = match self.meta(MetaKey::Grants)? {
+            Some(stored) => Some(Grants::read(&stored).map_err(|e| CellError::host(format!("its stored grants: {e}")))?),
+            None => None,
+        };
+        let taken = match &body["taken"] {
+            Value::Null => None,
+            v => Some(Row::of(v).ok_or_else(|| CellError::invalid("a row is its connections as stored and its accounts"))?),
+        };
+        let invalid = || CellError::invalid("grants name at most a catalog's providers, sorted and once, each account a Pipes id");
+        let change = match (body.get("connections"), body["provider"].as_str()) {
+            (None, None) => None,
+            (Some(Value::Null), _) => Some(Change::Connections(None)),
+            (Some(Value::Array(list)), _) => Some(Change::Connections(Some(list.iter().map(|p| p.as_str().map(str::to_string)).collect::<Option<Vec<_>>>().ok_or_else(invalid)?))),
+            (None, Some(provider)) => Some(Change::Account { provider: provider.to_string(), account: body["account"].as_str().map(str::to_string) }),
+            _ => return Err(invalid()),
+        };
+        let changed = change.is_some();
+        if changed && text("owner") != self.must(MetaKey::Owner)? {
+            return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner, in person, changes what it may use"));
+        }
+        let grants = answered(held.as_ref(), taken.as_ref(), change).map_err(|e| CellError::invalid(format!("{e}: {}", invalid().message)))?;
+        // a row taken is held from then on, the default too: none taken again
+        let keep = match &held {
+            Some(held) => *held != grants,
+            None => taken.is_some() || changed,
+        };
+        if keep {
+            self.set_meta(MetaKey::Grants, &grants.stored())?;
+            let by = if changed { "changed by its owner" } else { "taken from its computer's row" };
+            self.event("agent.grants", &format!("what it may use of its owner's, {by}"), json!({ "grants": grants, "moved": !changed }));
+        }
+        Ok(grants)
+    }
+
     /// `computer/…`: the internal calls a computer's routes and egress make.
     pub(crate) async fn runs_on(&self, route: &str, body: &[u8]) -> CellResult<Value> {
-        self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
+        self.created()?;
         match route {
             "assign" => {
                 let b: Assign = crate::json_body(body)?;
@@ -169,12 +222,6 @@ impl FragmentCell {
                 }
                 Ok(json!({ "ok": true }))
             }
-            // its face (kind, title, picture), for whatever names it: an
-            // agent shows by its fragment's (share.rs, `name_agents`)
-            "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| crate::json_text::<Value>(&f).ok()).unwrap_or(Value::Null)),
-            // its reach and whether its link opens it, for an operator's
-            // census (reach.rs): no names
-            "reach" => Ok(json!({ "kind": self.kind()?, "reach": self.reaches()?, "beyond": self.sharing_counts()?.beyond() })),
             "identity" => {
                 let body: Value = crate::json_body(body)?;
                 let computer = body["computer"].as_str().unwrap_or("");
@@ -187,10 +234,10 @@ impl FragmentCell {
                 let header = self.own_keys().await?.header_for_payload(&b.method, &b.url, b.payload.as_deref(), crate::js::now_ms() / 1000);
                 Ok(json!({ "header": header }))
             }
-            // an agent's door (fragment_core::door): its owner's ticket, the
-            // guest's redeeming of a link's, and a relayed record's check.
-            // Their bodies are read field by field, with no derive: the
-            // cell's wasm budget (xtask/src/build.rs)
+            // an agent's door (fragment_core::door): its owner's ticket, and
+            // the guest's redeeming of a link's (a relayed record's check is
+            // `door_check`). Their bodies are read field by field, with no
+            // derive: the cell's wasm budget (xtask/src/build.rs)
             "door-ticket" => {
                 let body: Value = crate::json_body(body)?;
                 let text = |k: &str| body[k].as_str().unwrap_or("");
@@ -254,39 +301,6 @@ impl FragmentCell {
                 self.event("door.opened", "its door opened by its owner", json!({ "door": door, "key": key }));
                 Ok(json!({ "door": door, "key": key }))
             }
-            "door-check" => {
-                let body: Value = crate::json_body(body)?;
-                let text = |k: &str| body[k].as_str().unwrap_or("");
-                let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("a relayed record {why}"));
-                if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(text("identity")) {
-                    return Err(refused("is posted by the agent whose door it came through"));
-                }
-                self.door_allowed(text("door"), Action::Check)?;
-                let open = self.meta(MetaKey::Door)?.unwrap_or_default();
-                let Some(key) = open.strip_prefix(text("door")).and_then(|k| k.strip_prefix(' ')) else {
-                    return Err(refused("came through a door its owner has not opened, or closed"));
-                };
-                let mut digest = [0u8; 32];
-                hex::decode_to_slice(text("digest"), &mut digest).map_err(|_| CellError::invalid("a digest is 64 hex"))?;
-                if !fragment_nip98::verify_digest(key, &digest, text("sig")) {
-                    return Err(refused("is signed by its door's key, and this one is not"));
-                }
-                Ok(json!({ "ok": true }))
-            }
-            // a connector fragment of its owner's, bound as one of its doors
-            // by them (doors.rs): it is theirs, and an agent, and says so
-            "door-actor" => {
-                let body: Value = crate::json_body(body)?;
-                let text = |k: &str| body[k].as_str().unwrap_or("");
-                if self.must(MetaKey::Owner)? != text("owner") {
-                    return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner binds a connector as its door"));
-                }
-                let identity = self.meta(MetaKey::AgentIdentity)?.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "that fragment is no agent that has run on a computer"))?;
-                self.door_allowed(text("door"), Action::Link)?;
-                let actor = text("actor");
-                self.event("door.hosted", &format!("its {} door is {actor}, bound by its owner", text("door")), json!({ "door": text("door"), "actor": actor }));
-                Ok(json!({ "identity": identity }))
-            }
             "subscribe" => {
                 let b: Subscribe = crate::json_body(body)?;
                 if !valid_channel_name(&b.channel) {
@@ -321,16 +335,63 @@ impl FragmentCell {
         }
     }
 
-    /// The finite.computer move's routine (migrations.rs): appended to this
-    /// agent fragment's own `tasks`, with no chat, once by its key, as a
-    /// join's notice is; nothing when it declares no postable `tasks`.
-    pub(crate) async fn move_routine(&self, key: &str, text: &str) -> CellResult<Value> {
-        if self.declared_channel(TASKS)?.is_none_or(|d| d.post.is_none()) {
-            return Ok(json!({ "posted": false, "why": "its fragment declares no postable tasks channel" }));
+    fn created(&self) -> CellResult<()> {
+        self.must(MetaKey::CreatedAt).map(drop).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))
+    }
+
+    /// A relayed record's check (`DoorCheck`).
+    pub(crate) fn door_check(&self, c: DoorCheck) -> CellResult<()> {
+        self.created()?;
+        let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("a relayed record {why}"));
+        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(c.identity.as_str()) {
+            return Err(refused("is posted by the agent whose door it came through"));
         }
-        let routine = json!({ "kind": "routine", "text": text });
-        let (record, appended) = self.append_own(TASKS, &routine, key).await?;
-        Ok(json!({ "posted": true, "seq": record.seq, "replayed": !appended }))
+        self.door_allowed(&c.door, Action::Check)?;
+        let open = self.meta(MetaKey::Door)?.unwrap_or_default();
+        let Some(key) = open.strip_prefix(c.door.as_str()).and_then(|k| k.strip_prefix(' ')) else {
+            return Err(refused("came through a door its owner has not opened, or closed"));
+        };
+        let mut digest = [0u8; 32];
+        hex::decode_to_slice(&c.digest, &mut digest).map_err(|_| CellError::invalid("a digest is 64 hex"))?;
+        if !fragment_nip98::verify_digest(key, &digest, &c.sig) {
+            return Err(refused("is signed by its door's key, and this one is not"));
+        }
+        Ok(())
+    }
+
+    /// A connector of its owner's bound as one of its doors (`DoorActor`).
+    pub(crate) fn door_actor(&self, a: DoorActor) -> CellResult<AgentIdentity> {
+        self.created()?;
+        if self.must(MetaKey::Owner)? != a.owner {
+            return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner binds a connector as its door"));
+        }
+        let identity = self.meta(MetaKey::AgentIdentity)?.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "that fragment is no agent that has run on a computer"))?;
+        self.door_allowed(&a.door, Action::Link)?;
+        self.event("door.hosted", &format!("its {} door is {}, bound by its owner", a.door, a.actor), json!({ "door": a.door, "actor": a.actor }));
+        Ok(AgentIdentity { identity })
+    }
+
+    /// Its face (fragment/calls.rs `FaceOf`).
+    pub(crate) fn face_of(&self) -> CellResult<Named> {
+        self.created()?;
+        Ok(self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok()).unwrap_or_default())
+    }
+
+    /// Its reach (fragment/calls.rs `ReachOf`).
+    pub(crate) fn reach_of(&self) -> CellResult<Reach> {
+        self.created()?;
+        Ok(Reach { kind: self.kind()?, reach: self.reaches()?, beyond: self.sharing_counts()?.beyond() })
+    }
+
+    /// The finite.computer move's routine (`Routine`), with no chat,
+    /// as a join's notice is; nothing when it declares no postable `tasks`.
+    pub(crate) async fn move_routine(&self, r: Routine) -> CellResult<()> {
+        if self.declared_channel(TASKS)?.is_none_or(|d| d.post.is_none()) {
+            return Ok(());
+        }
+        let routine = json!({ "kind": "routine", "text": r.text });
+        self.append_own(TASKS, &routine, &r.key).await?;
+        Ok(())
     }
 
     /// An agent became a member here (`set_member`, `join`): its computer
