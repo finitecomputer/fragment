@@ -1133,25 +1133,19 @@ impl FragmentCell {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
         self.drop_spent_invites().await?;
-        // an org's: they come into its content as they come in here (an
-        // invite from before they last left admits no one); asked first, so
-        // what follows is read after it; their row is stamped no earlier
-        // than since when they are in
-        let mut since = 0;
-        if let Some(org) = self.owner()?.org() {
-            let invited = self.rows("SELECT created_at FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
-            let Some(at) = invited.first().and_then(|r| r["created_at"].as_i64()) else {
-                return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
-            };
-            let person = Identity { id: claim.identity.clone(), kind: IdentityKind::Person, owner: None, held: None, orgs: vec![] };
-            since = self.enrolled(org, &person, Some(at)).await?;
-        }
-        let rows = self.rows("SELECT role, created_by FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
-        let Some(row) = rows.first() else {
-            return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
-        };
+        let waiting = || CellError::new(ErrorCode::NotFound, "no invite waits on that email");
+        let rows = self.rows("SELECT role, created_by, created_at FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
+        let row = rows.first().ok_or_else(waiting)?;
         let role = row["role"].as_str().and_then(Role::parse).ok_or_else(|| CellError::host("invites.role"))?;
         let by = row["created_by"].as_str().unwrap_or_default().to_string();
+        let invited_at = row["created_at"].as_i64().ok_or_else(|| CellError::host("invites.created_at"))?;
+        // an org's: they come into its content as they come in here (an
+        // invite from before they last left admits no one), their row
+        // stamped no earlier than since when they are in
+        let since = match self.owner()?.org() {
+            Some(org) => self.enrolled(org, &Identity { id: claim.identity.clone(), kind: IdentityKind::Person, owner: None, held: None, orgs: vec![] }, Some(invited_at)).await?,
+            None => 0,
+        };
         let who = claim.identity.as_str();
         // what they held from before an offboarding is no grant: they come in afresh
         self.revoke_stale(who).await?;
@@ -1161,7 +1155,10 @@ impl FragmentCell {
         let owner = current == Some(Role::Owner);
         let agents: &[String] = if owner { &[] } else { &claim.agents };
         self.room_for(u64::from(current.is_none()) + self.not_members(agents)?)?;
-        self.exec("DELETE FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
+        // the invite read above, unless revoked or made again while this waited
+        if self.rows("DELETE FROM invites WHERE email = ? AND created_at = ? RETURNING email", vec![claim.email.as_str().into(), SqlStorageValue::Integer(invited_at)])?.is_empty() {
+            return Err(waiting());
+        }
         // met, whatever it grants: the owner's list counts it no more
         self.sharing_changed()?;
         let now = if kept { current.expect("kept is a role held") } else { role };
