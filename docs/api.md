@@ -1601,7 +1601,9 @@ that person (decision 67). It is never an agent, a chat or skills.
   goes no further than `LIVE_IDENTITY_MS` (60 s) past its last check, as
   a sign-out does: one whose check is due is closed (4001) before a
   record, draft or presence reaches it, and the check decides the role
-  they (or an agent's membership) hold there now. Whatever admits them
+  they (or an agent's membership) hold there now. A row that counts no
+  more makes its agent no agent member for a `from: agent` channel's
+  post or trigger. Whatever admits them
   again takes their old rows away first, an ordinary member still by
   their own yes.
 - **No storage token**, to read or to write. A token reads the repo for

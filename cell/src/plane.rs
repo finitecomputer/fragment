@@ -1222,7 +1222,10 @@ impl FragmentCell {
     /// once (two triggers that run one operation start it once), in their
     /// first trigger's order. A trigger that names its posters' kind
     /// (`from`) starts one only for a member of that kind: one statement.
-    pub(crate) fn channel_triggers(&self, record: &ChannelRecord) -> CellResult<Vec<String>> {
+    /// `counts`: whether the poster's row counts now (an org's fragment's
+    /// row of someone offboarded since, or a rehire's from before, is no
+    /// member's of any kind: jobs.rs `fire_channel`).
+    pub(crate) fn channel_triggers(&self, record: &ChannelRecord, counts: bool) -> CellResult<Vec<String>> {
         #[derive(Deserialize)]
         struct Run {
             run: String,
@@ -1232,9 +1235,9 @@ impl FragmentCell {
         // its poster as stored (subscriptions.rs `outbox_record` says why)
         let rows: Vec<Run> = self.typed(
             "SELECT run FROM code_triggers WHERE kind = ? AND target = ?
-               AND (from_kind IS NULL OR from_kind = (SELECT kind FROM members WHERE principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?)))
+               AND (from_kind IS NULL OR (? AND from_kind = (SELECT kind FROM members WHERE principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?))))
              GROUP BY run ORDER BY MIN(idx)",
-            vec![kind.into(), target.into(), record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)],
+            vec![kind.into(), target.into(), SqlStorageValue::Integer(i64::from(counts)), record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)],
         )?;
         Ok(rows.into_iter().map(|r| r.run).collect())
     }

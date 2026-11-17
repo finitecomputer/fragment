@@ -395,11 +395,16 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
 
     // an offboarded agent's row from before posts as no agent (the audit):
     // a public org fragment, made with its maker's own agent, whose agents'
-    // channel anyone may post to but only its agent members as agents
+    // channel anyone may post to but only its agent members as agents, and
+    // whose open channel's trigger runs for its agent members' posts alone
     let ada_hand_id = api.identity(&ada_hand)?;
-    let made3 = api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgpub"), "visibility": "public", "agent": ada_hand_id })))?;
+    let made3 = api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgpub"), "template": "calories", "visibility": "public", "agent": ada_hand_id })))?;
     let name3 = made3.body["name"].as_str().context("the org's public fragment")?.to_string();
-    let files = json!([{ "path": "fragment.json", "text": r#"{"channels":{"work":{"read":"public","post":"public","from":"agent"}}}"# }]);
+    let mut manifest3: Value = serde_json::from_str(include_str!("../../../../templates/calories/fragment.json"))?;
+    manifest3["channels"]["work"] = json!({ "read": "public", "post": "public", "from": "agent" });
+    manifest3["channels"]["open"] = json!({ "read": "public", "post": "public" });
+    manifest3["triggers"].as_array_mut().context("calories has triggers")?.push(json!({ "channel": "open", "from": "agent", "run": "heard" }));
+    let files = json!([{ "path": "fragment.json", "text": serde_json::to_string_pretty(&manifest3)? }]);
     let wrote3 = api.signed(&ada, "POST", &format!("/api/f/{name3}/files"), Some(&json!({ "key": "agents-channel", "message": "an agents' channel", "files": files })))?;
     let deployed3 = api.signed(&ada, "POST", &format!("/api/f/{name3}/deploy"), Some(&json!({})))?;
     let gus = api.person()?;
@@ -410,15 +415,24 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     let gus_hand = Keys::generate();
     let gus_made = api.signed(&gus, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&gus_hand, "POST", reg, &gus) })))?;
     let step = |who: &Keys, id: &str| api.signed(who, "POST", &format!("/api/f/{name3}/channels/work"), Some(&json!({ "id": id, "body": { "kind": "turn.step", "turn": "t1", "text": "a step" } })));
+    let open = |who: &Keys, id: &str| api.signed(who, "POST", &format!("/api/f/{name3}/channels/open"), Some(&json!({ "id": id, "body": { "text": "two eggs" } })));
+    let opened = || super::jobs::runs(api, &ada, &name3, "").iter().filter(|r| r["trigger"] == "open").count();
     let gus_posts = step(&gus_hand, "g1")?;
+    let gus_opens = open(&gus_hand, "o1")?;
+    let ran_in = opened();
     let gus_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "gus-1", "person": gus_id })))?;
     let gus_after = step(&gus_hand, "g2")?;
+    let gus_opens_after = open(&gus_hand, "o2")?;
+    let ran_out = opened();
     let ada_agent_posts = step(&ada_hand, "a1")?;
+    let ada_opens = open(&ada_hand, "o3")?;
+    let ran_ada = opened();
     s.ok(
-        "an org's public fragment's agents' channel takes a member's agent's post while its person is in; offboarded, that agent's row from before makes it no agent member there (403), while its maker's own agent, made a member with it, still posts",
+        "an org's public fragment's agents' channel takes a member's agent's post, and its agent-only trigger runs for it, while its person is in; offboarded, that agent's row from before makes it no agent member there: its post is refused (403), and its open post (anyone's) runs no agent's trigger, while its maker's own agent, made a member with it, still does both",
         made3.status == 200 && wrote3.status == 200 && deployed3.status == 200 && gus_in.status == 200 && gus_listed && gus_made.status == 200
-            && gus_posts.status == 200 && gus_out.status == 200 && gus_after.status == 403 && gus_after.message().contains("agent members only") && ada_agent_posts.status == 200,
-        json!({ "made": made3.body, "gusPosts": gus_posts.body, "gusAfter": [gus_after.status, gus_after.body.clone()], "adaAgent": [ada_agent_posts.status, ada_agent_posts.body.clone()] }),
+            && gus_posts.status == 200 && gus_out.status == 200 && gus_after.status == 403 && gus_after.message().contains("agent members only") && ada_agent_posts.status == 200
+            && gus_opens.status == 200 && ran_in == 1 && gus_opens_after.status == 200 && ran_out == 1 && ada_opens.status == 200 && ran_ada == 2,
+        json!({ "made": made3.body, "gusPosts": gus_posts.body, "gusAfter": [gus_after.status, gus_after.body.clone()], "adaAgent": [ada_agent_posts.status, ada_agent_posts.body.clone()], "runs": [ran_in, ran_out, ran_ada] }),
     );
 
     // org_admin_cannot_bypass_cap: its budget stops its admin's AI steps too
