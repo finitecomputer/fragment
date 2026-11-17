@@ -1095,8 +1095,9 @@ impl FragmentCell {
         let read_only = self.read_only().await?;
         // a poster whose row counts no more is no member of the kind a
         // trigger's `from` names: asked only when one would run for them
-        // (a person's fragment asks no one)
-        let counts = self.channel_triggers(record, true)? == self.channel_triggers(record, false)? || {
+        // (a person's fragment asks no one); as sets, their order aside
+        let runs = |counts| self.channel_triggers(record, counts).map(|r| r.into_iter().collect::<std::collections::BTreeSet<_>>());
+        let counts = runs(true)? == runs(false)? || {
             let poster: Vec<String> = self
                 .rows("SELECT principal FROM records WHERE channel = ? AND seq = ?", vec![record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)])?
                 .iter()
