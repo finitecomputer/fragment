@@ -103,11 +103,17 @@ if ls "$W" | grep -vxF -e fragment.json -f <(ls "$H" | grep -vxF -e AGENTS.md -e
 ```
 
 If it says STOP, push nothing, and say in the report what it listed.
-Otherwise check that search finds it:
+Otherwise search it once:
 
 ```sh
 fragment call <its name> search --input '{"q": "<a word from one of its pages>"}'
 ```
+
+A big brain's index takes a while to take in the sync. If the answer
+says `"indexing": true`, or `index_status` listed pages `pending`, don't
+wait or ask again: the index finishes by itself from the synced files.
+Say in the report that this brain's search is still catching up, and go
+on. If it isn't indexing and still finds nothing, say that in the report.
 
 The old brain's folder permissions don't carry over: everyone the brain
 is shared with reads all of it. Invite no one. Your owner reinvites their
