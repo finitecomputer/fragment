@@ -275,7 +275,8 @@ impl FragmentCell {
     /// whatever its members; the alarm sends the rest, a batch a pass. A
     /// failure stays in the outbox with a backoff; the alarm retries it.
     pub(crate) async fn flush_index(&self) {
-        let (Ok(name), Ok(Some(incarnation)), Ok(owner)) = (self.must(MetaKey::Name), self.meta(MetaKey::CreatedAt), self.owner().map(|o| o.name())) else { return };
+        let (Ok(name), Ok(Some(incarnation)), Ok(owner)) = (self.must(MetaKey::Name), self.meta(MetaKey::CreatedAt), self.owner()) else { return };
+        let (org, owner) = (owner.org().is_some(), owner.name());
         if let Err(e) = self.search_fence() {
             console_error!("{name}: its search was not fenced to the channels searched now ({:?}): {}", e.code, e.message);
         }
@@ -340,7 +341,8 @@ impl FragmentCell {
             // channels its role reads, as they are now
             if let Some(role) = role {
                 change.searched = Some(searched.clone());
-                change.listed = fragment_core::listed::for_role(&listed, role);
+                // an org's own row, its inventory, lists none (decision 71)
+                change.listed = if org && principal == owner { vec![] } else { fragment_core::listed::for_role(&listed, role) };
                 // none stored yet (no template, one not blessed, a release
                 // read at its making that failed, nothing installed): the
                 // face a list reads a row without one as, an untitled app,
