@@ -396,7 +396,7 @@ mod tests {
                 assert!(front.lines().any(|l| l.starts_with("description:")), "{} says what it is for", f.path);
                 assert!(names.insert(name.to_string()), "{name} twice");
                 if let Some(connection) = skill_connection(text) {
-                    assert!(text.contains(&format!("fragment api {connection}")), "{}: a connection's skill calls it with `fragment api {connection}`", f.path);
+                    assert!(text.contains(&format!("fragment connection call {connection}")), "{}: a connection's skill calls it with `fragment connection call {connection}`", f.path);
                     connections.push((f.path.trim_end_matches("SKILL.md").to_string(), connection.to_string()));
                 }
             }
@@ -411,7 +411,7 @@ mod tests {
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
         assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
         // a connection's skill is its docs and its quirks, and no code: the
-        // one caller is `fragment api` (FIN-509)
+        // one caller is `fragment connection call` (FIN-509)
         assert!(connections.iter().any(|(_, c)| c == "google"), "Google's skill names its connection");
         for (dir, connection) in &connections {
             let code: Vec<&str> = files.iter().map(|f| f.path).filter(|p| p.starts_with(dir.as_str()) && (p.contains("/scripts/") || [".py", ".sh", ".js"].iter().any(|e| p.ends_with(e)))).collect();

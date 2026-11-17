@@ -12,6 +12,7 @@ step Fragment 5 ended_search aad1c18c55f08519
 step Fragment 6 installed_forward_only ca46b28bd2c487d0
 step Fragment 7 making df7c73337a08c512
 step Fragment 8 newest b439b2eb5ec07074
+step Fragment 9 inbox_forward_only ece226038ced1436
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -32,6 +33,7 @@ step Computer 1 baseline 0f429c07654198e6
 step Computer 2 agent_accounts 55b329a8b0da4bbd
 step Computer 3 key_hour 6c22fff2c2414701
 step Computer 4 key_caps 3a6f4f9976a3efe3
+step Computer 5 grants_forward_only 88b35e74ad3f41fe
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 step Vault 1 baseline ecff84048657043f

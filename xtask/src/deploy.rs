@@ -2646,7 +2646,7 @@ mod tests {
     /// key, which is bound for each slot (one secret, two bindings) and is
     /// nowhere in the cell's variable, and its provider routing, which is,
     /// under the ceiling the price book charges; its fallback and vision on
-    /// Workers AI's GLM-5.3 Flash. A preview's (deploy/e2e.jsonc) names
+    /// Workers AI's DeepSeek V4.1 Flash. A preview's (deploy/e2e.jsonc) names
     /// none: its tiers are on Workers AI, and it needs no OpenRouter key to
     /// deploy.
     #[test]
@@ -2660,7 +2660,7 @@ mod tests {
         let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
         let routing = json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } });
         let routed = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing });
-        let flash = json!({ "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" });
+        let flash = json!({ "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" });
         assert_eq!(models, json!({ "cheap": routed, "medium": routed, "fallback": flash, "vision": flash }), "no key in the cell's variable, the routing in it");
         let parsed = fragment_core::models::Models::parse(Some(&models.to_string()), &fragment_core::price::PriceBook::defaults(), false).unwrap();
         assert_eq!(parsed.cheap.model(), fragment_core::models::OPENROUTER_FLASH);
@@ -2721,7 +2721,7 @@ mod tests {
         refused(json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": "glm-5-3-flash" } }), "models.cheap: an OpenAI-compatible API names its key");
         refused(row(json!({ "key": 7 })), "models.cheap: its key is its secret's name in the store, a string");
         refused(row(json!({ "key": "~/.config/fragment/secrets/finite-private" })), "models.cheap.key is \"~/.config/fragment/secrets/finite-private\", which is no Secrets Store secret's name");
-        refused(json!({ "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash", "key": "fragment-finite-private-key" } }), "models.vision: only an OpenAI-compatible API (provider openai) names a key");
+        refused(json!({ "vision": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017", "key": "fragment-finite-private-key" } }), "models.vision: only an OpenAI-compatible API (provider openai) names a key");
         refused(row(json!({ "base_url": "http://finite-private.finite.containers.tinfoil.dev/v1" })), "models.cheap: base_url:");
         refused(row(json!({ "base_url": "http://127.0.0.1:4810/v1" })), "models.cheap: base_url:");
         refused(row(json!({ "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1/" })), "without a query or a trailing /");
@@ -2770,7 +2770,7 @@ mod tests {
         // a private tier whose fallback is not private is refused before anything is made (Paul, 2026-10-22)
         let mut private = row(json!({ "private": true }));
         private["vision"] = private["cheap"].clone();
-        private["fallback"] = json!({ "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" });
+        private["fallback"] = json!({ "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" });
         refused(private.clone(), "models.fallback: models.cheap is private, and its agents' failures and stalls reach fallback");
         private["fallback"] = tinfoil(listed.clone())["fallback"].clone();
         private["fallback"]["private"] = json!(true);
@@ -2778,7 +2778,7 @@ mod tests {
         // the fields it replaced
         for (field, now) in [("vision_model", "models.vision"), ("fallback_model", "models.fallback")] {
             let mut v = v.clone();
-            v[field] = json!("@cf/zai-org/glm-5.3-flash");
+            v[field] = json!("@cf/deepseek-ai/deepseek-v4.1-flash-1017");
             let refused = load(&config_file(field, &v)).err().map(|e| format!("{e:#}")).unwrap_or_default();
             assert!(refused.contains(&format!("{field} is gone; name it as {now}")), "{refused}");
         }

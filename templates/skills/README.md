@@ -52,7 +52,7 @@ Eight are Fragment platform contracts:
 A connection's skill (Linear, Salesforce, Google) is not listed here: the
 folder is the list. Each names its connection in its frontmatter
 (`metadata: fragment: connection: <name>`), is docs alone, and calls its
-service with `fragment api <name>`; its catalog row is
+service with `fragment connection call <name>`; its catalog row is
 `deploy/providers/<name>.jsonc`, which a deployment names and never
 copies (that folder's README says how one is added).
 
