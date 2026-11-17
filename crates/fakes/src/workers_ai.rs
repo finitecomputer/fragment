@@ -33,7 +33,7 @@
 //! `OPENAI_EMBEDDING_MODEL` the same vectors in OpenAI's shape, with usage.
 //!
 //! An icon (fragment_core::icon) is made of three calls here:
-//! - its subject, GLM-5.3 Flash asked with the icon's own system message
+//! - its subject, Gemma 4 26B asked with the icon's own system message
 //!   (`icon::subject_input`, with a hint or without): named as its maker's hint asked, else
 //!   `ICON_SUBJECT` (`icon_subject`), unstreamed with its usage;
 //! - its drawings, FLUX.2 [klein] 4B (`ICON_MODEL`), `{prompt, width,
@@ -95,7 +95,9 @@
 //! answered every call to GLM-5.3 Flash for five minutes on 2026-10-09, a
 //! 502 "could not route request to AI model" (its internal code 4002),
 //! until the test brings it up again. A hang is a delay past its caller's
-//! patience.
+//! patience. A model Workers AI has retired (`RETIRED`) answers every call
+//! as Workers AI does from its date, a 410 (its code 5028), from the start:
+//! a release that still names one fails here before it fails people.
 //!
 //! **Its OpenAI-compatible face**, Finite Private as the route calls it on
 //! Finite's own deployment (decision 61): `POST /v1/chat/completions`, the
@@ -175,12 +177,17 @@ const DRAWN_SIDE_DEFAULT: u32 = 1024;
 const DRAWN_SIDES: std::ops::RangeInclusive<u64> = 256..=1920;
 
 /// The chat models the platform calls that read images: those Workers AI's
-/// catalog marks "Vision: Yes" (GLM-5.3 Flash, the cheap tier's and the
-/// default vision model; DeepSeek V4 Flash, the fallback, and GLM-5.3, the
-/// medium tier's, have none); Finite Private's GLM-5.3 Flash, as
+/// catalog marks "Vision: Yes" (DeepSeek V4.1 Flash, the cheap tier's and
+/// the default vision model, and Inkling 2 Small, the fallback; GLM-5.3,
+/// the medium tier's, has none); Finite Private's GLM-5.3 Flash, as
 /// finite-agentd declares it (its images not qualified by a real call of
 /// ours); and Tinfoil's DeepSeek V4.1 Flash (its catalog's `multimodal`).
-pub const TAKES_IMAGES: [&str; 3] = [fragment_core::models::VISION_MODEL_DEFAULT, fragment_core::models::FINITE_PRIVATE_FLASH, TINFOIL_FLASH];
+pub const TAKES_IMAGES: [&str; 4] = [fragment_core::models::VISION_MODEL_DEFAULT, fragment_core::models::FALLBACK_MODEL_DEFAULT, fragment_core::models::FINITE_PRIVATE_FLASH, TINFOIL_FLASH];
+/// Workers AI's models retired since the platform named them, each with its
+/// date, from which every call to it is `410 Gone`, code 5028 (its changelog,
+/// 2026-11-05, "Planned model deprecations on Workers AI"; its errors page,
+/// developers.cloudflare.com/workers-ai/platform/errors/, read 2026-11-16).
+pub const RETIRED: [(&str, &str); 2] = [("@cf/zai-org/glm-5.3-flash", "2026-11-20"), ("@cf/deepseek-ai/deepseek-v4-flash-0731", "2026-11-20")];
 /// Tinfoil's DeepSeek V4.1 Flash, as its API names it
 /// (`https://inference.tinfoil.sh/v1`, `GET /v1/models`, read 2026-10-22):
 /// a model only a deployment's config names (deploy/example.jsonc), so its
@@ -381,6 +388,14 @@ fn unroutable(n: usize) -> Response {
         502,
         &json!({ "name": "AiError", "internalCode": 4002, "httpCode": 502, "message": format!("AiError: AiError: could not route request to AI model ({id})"), "description": "could not route request to AI model", "requestId": id }),
     )
+}
+
+/// Workers AI's answer to a call to a model retired `on` (`RETIRED`): its
+/// error table's 5028, in the shape it answers `unroutable`'s 4002 in.
+fn retired(model: &str, on: &str, n: usize) -> Response {
+    let id = format!("00000000-0000-4000-8000-{n:012}");
+    let description = format!("{model} was deprecated on {on}. See the model catalog (https://developers.cloudflare.com/workers-ai/models/) for alternatives.");
+    Response::json(410, &json!({ "name": "AiError", "internalCode": 5028, "httpCode": 410, "message": format!("AiError: {description} ({id})"), "description": description, "requestId": id }))
 }
 
 /// The images a chat's messages carry (`image_url` parts' URLs), or why a
@@ -1042,6 +1057,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     let affinity = req.header("x-session-affinity").map(str::to_string);
     let authorization = req.header("authorization").map(str::to_string);
     s.calls.push(AiCall { face: Face::WorkersAi, model: model.clone(), body: body.clone(), metadata, affinity, authorization });
+    if let Some((_, on)) = RETIRED.iter().find(|(id, _)| *id == model) {
+        return retired(&model, on, s.calls.len());
+    }
     if let Some(Some(status)) = s.failures.pop_front() {
         return failure(Face::WorkersAi, status);
     }
@@ -1481,7 +1499,7 @@ mod tests {
     #[test]
     fn a_stream_is_shaped_as_workers_ai_streams() {
         let used = Used { prompt: 23, cached: 0, completion: 15 };
-        let text = stream(Face::WorkersAi, "@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1, 0);
+        let text = stream(Face::WorkersAi, fragment_core::models::CHEAP_MODEL, &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1, 0);
         let lines: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
         let deltas: u64 = lines.iter().filter(|l| l.get("choices").is_some()).map(|l| l["usage"]["completion_tokens"].as_u64().unwrap()).sum();
         assert_eq!(deltas, 15, "the chunks' deltas add up to the completion");
@@ -1630,7 +1648,7 @@ mod tests {
     }
 
     /// Goal: an image reaches only a model that reads it (Workers AI's
-    /// catalog: GLM-5.3 Flash, not GLM-5.3), and a part that is no image
+    /// catalog: DeepSeek V4.1 Flash, not GLM-5.3), and a part that is no image
     /// is refused, as a model refuses it. Method: images, and parts that
     /// are not, to each model, by the refusal and over HTTP.
     #[test]
@@ -1670,17 +1688,42 @@ mod tests {
     #[test]
     fn a_model_that_is_down_cannot_be_routed_to() {
         let ai = WorkersAi::start(0).unwrap();
-        let (flash, deepseek) = ("@cf/zai-org/glm-5.3-flash", "@cf/deepseek-ai/deepseek-v4-flash-0731");
+        let (flash, inkling) = (fragment_core::models::DEEPSEEK_FLASH, fragment_core::models::INKLING_SMALL);
         let ask = json!({ "messages": [{ "role": "user", "content": "hi" }] });
         let post = |model: &str| crate::http::post(&format!("{}/run/{model}", ai.url), &[("content-type", "application/json")], ask.to_string().as_bytes()).unwrap();
         ai.down(&[flash]);
-        assert_eq!((post(flash), post(flash), post(deepseek)), (502, 502, 200));
+        assert_eq!((post(flash), post(flash), post(inkling)), (502, 502, 200));
         let answer = unroutable(7);
         let body: Value = serde_json::from_slice(&answer.body).unwrap();
         assert_eq!((answer.status, body["internalCode"].clone(), body["description"].clone()), (502, json!(4002), json!("could not route request to AI model")));
         ai.down(&[]);
         assert_eq!(post(flash), 200, "up again");
         assert_eq!(ai.calls().len(), 4, "each call recorded, the failed ones too");
+    }
+
+    /// Goal: a model Workers AI retired answers every call as Workers AI
+    /// does from its date (410, code 5028), whatever the call and the test's
+    /// levers, and none of the platform's models is one. Method: a chat and
+    /// an image to each retired model, a failure queued behind them, and
+    /// the platform's models and the price book's.
+    #[test]
+    fn a_retired_model_is_gone() {
+        let mut s = State::default();
+        s.failures.push_back(Some(429));
+        for (model, on) in RETIRED {
+            for body in [json!({ "messages": [{ "role": "user", "content": "hi" }] }), shown(&png_url())] {
+                let r = answer(&mut s, &Request::new("POST", &format!("/run/{model}"), &[], body.to_string().as_bytes()));
+                let v: Value = serde_json::from_slice(&r.body).unwrap();
+                assert_eq!((r.status, v["internalCode"].clone(), v["httpCode"].clone()), (410, json!(5028), json!(410)), "{model}: {v}");
+                assert!(v["description"].as_str().unwrap().starts_with(&format!("{model} was deprecated on {on}.")), "{v}");
+            }
+        }
+        assert_eq!((s.calls.len(), s.failures.len()), (4, 1), "each call recorded, the queued failure left for the next");
+        let models = fragment_core::models::Models::defaults();
+        let platform = [models.cheap.model(), models.medium.model(), models.fallback.model(), models.vision.model(), fragment_core::icon::SUBJECT_MODEL, fragment_core::icon::IMAGE_MODEL];
+        for id in platform {
+            assert!(!RETIRED.iter().any(|(r, _)| *r == id), "{id} is retired");
+        }
     }
 
     /// The data lines of a streamed answer, `[DONE]` left out.
@@ -1742,7 +1785,7 @@ mod tests {
         let refusal = |r: Response| (r.status, json_of(&r)["error"]["code"].as_str().unwrap_or_default().to_string());
         assert_eq!(refusal(answer(&mut s, &ask(&chat(false), None))), (401, "missing_authorization".into()));
         assert_eq!(refusal(answer(&mut s, &ask(&chat(false), Some("Bearer fpk_live_other")))), (401, "invalid_api_key".into()));
-        assert_eq!(refusal(answer(&mut s, &ask(&json!({ "model": "@cf/zai-org/glm-5.3-flash", "messages": [] }), key))), (400, "unsupported_model".into()));
+        assert_eq!(refusal(answer(&mut s, &ask(&json!({ "model": fragment_core::models::DEEPSEEK_FLASH, "messages": [] }), key))), (400, "unsupported_model".into()));
         let large = json!({ "model": "glm-5-3-flash", "messages": [{ "role": "user", "content": "x".repeat(OPENAI_BODY_MAX_BYTES) }] });
         assert_eq!(refusal(answer(&mut s, &ask(&large, key))), (413, "payload_too_large".into()));
         let image = json!({ "model": "glm-5-3-flash", "messages": [{ "role": "user", "content": [{ "type": "image_url", "image_url": { "url": png_url() } }] }] });
@@ -1763,7 +1806,7 @@ mod tests {
         s.down.clear();
         assert_eq!(answer(&mut s, &ask(&chat(false), key)).status, 200, "up again");
         // the Workers AI face is as it was, beside it
-        let flash = Request::new("POST", "/run/@cf/zai-org/glm-5.3-flash", &[], json!({ "messages": [{ "role": "user", "content": "hi" }] }).to_string().as_bytes());
+        let flash = Request::new("POST", &format!("/run/{}", fragment_core::models::DEEPSEEK_FLASH), &[], json!({ "messages": [{ "role": "user", "content": "hi" }] }).to_string().as_bytes());
         let r = answer(&mut s, &flash);
         assert!(r.status == 200 && r.headers.iter().any(|(k, _)| k == "cf-aig-log-id") && json_of(&r)["usage"]["neurons"].is_number());
         assert_eq!(s.calls.last().map(|c| c.face), Some(Face::WorkersAi));

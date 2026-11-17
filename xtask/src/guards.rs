@@ -120,17 +120,16 @@ mod tests {
     /// content, the facet's arguments and a step's answer (jobs.rs,
     /// files.rs); the queues' messages, whose JSON stays `to_value`'s, keys
     /// sorted, byte for byte across releases (meter.rs, deliveries.rs); and
-    /// the rare calls whose body is a `Value` so `fragment::ask` and
-    /// `computer::ask` stay one copy each (an invite's claim, an own key's
-    /// sign-in: a body type of their own is about 1.4 KB more of the Wasm
-    /// apiece; registry/invites.rs, computer.rs). clippy cannot hold this:
+    /// the rare calls whose body is a `Value` so `computer::ask` stays one
+    /// copy (an own key's sign-in: a body type of its own is about 1.4 KB
+    /// more of the Wasm; computer.rs). clippy cannot hold this:
     /// `json!` writes through `to_value`. A `from_value` is clippy's
     /// (cell/clippy.toml). Method: the cell's source, read.
     #[test]
     fn a_type_is_made_a_value_only_to_be_edited() {
         // the name alone: `to_value::<T>(…)` is one too
         let made = uses(&cell_sources(), "to_value");
-        let edited = BTreeMap::from([("computer.rs", 2), ("deliveries.rs", 1), ("files.rs", 1), ("jobs.rs", 2), ("meter.rs", 2), ("registry/invites.rs", 3)].map(|(f, n)| (f.to_string(), n)));
+        let edited = BTreeMap::from([("computer.rs", 2), ("deliveries.rs", 1), ("files.rs", 1), ("jobs.rs", 2), ("meter.rs", 2)].map(|(f, n)| (f.to_string(), n)));
         assert_eq!(made, edited, "write the type as JSON once (Response::from_json, routed::ask_object, js::to_js), not as a Value written out again");
     }
 

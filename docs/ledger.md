@@ -170,9 +170,9 @@ informational. The fee is AI Gateway's on credits, so it applies to
   name its model's list price (`price`), which takes the fee and margin
   as every token row does (`Upstream::own_price`).
 - **Finite Private's price** (decision 61; a decision for Paul): Workers
-  AI's GLM-5.3 Flash's, so the cheap tier costs the same whichever
-  answers. It reports no cached tokens, so its prompts are priced
-  uncached.
+  AI's GLM-5.3 Flash's ($0.15 in, $0.50 out a million tokens), kept after
+  Workers AI retired that model on 2026-11-20. It reports no cached
+  tokens, so its prompts are priced uncached.
 - **Deep's price** (decision 65): a slot like any. A delegate's calls
   bill its agent's owner, under no fragment's cap.
 

@@ -668,6 +668,17 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && status.body["reach"] == true && listed,
         json!({ "put": r.status, "status": status.body["reach"], "row": row(&name)["sharing"] }),
     );
+    // an operator's census of its owner's fragments (`fragment operator
+    // reach`): each fragment asked its reach, counts alone, no names
+    if s.runs("reach", &[crate::Need::Levers, crate::Need::Operator]) {
+        let owner_id = api.identity(&owner)?;
+        let census = api.signed(&s.operator, "GET", &format!("/api/admin/people/{owner_id}/reach"), None)?;
+        s.ok(
+            "an operator's census of its owner counts it: one app with reach, none open by its link, every fragment answered",
+            census.status == 200 && census.body["owned"].as_u64() >= Some(1) && census.body["reaching"] == json!({ "app": 1 }) && census.body["beyond"] == json!({}) && census.body["unanswered"] == 0,
+            &census,
+        );
+    }
     let (_, agent_id) = api.own_agent(&owner)?;
     let r = api.signed(&owner, "PUT", &at(&name, &format!("members/{agent_id}")), Some(&json!({ "role": "editor" })))?;
     s.ok("its owner's own agent joins it", r.status == 200, &r);

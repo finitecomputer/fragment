@@ -21,7 +21,7 @@ pub enum Saving {
 }
 
 impl Saving {
-    fn since_ms(self) -> i64 {
+    pub(super) fn since_ms(self) -> i64 {
         match self {
             Saving::Hold { since_ms } | Saving::Save { since_ms, .. } | Saving::Stop { since_ms, .. } => since_ms,
         }
@@ -214,7 +214,7 @@ mod tests {
         started(&mut l, T);
         l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
         let s = l.apply(Event::Closed { socket: Socket::Tab }, T + 20_000);
-        let mut l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap();
+        let mut l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap().0;
         assert_eq!(saves_until(&mut l, s.alarm_ms, until), vec![T + 20_000 + SAVE_SETTLE_MS]);
     }
 
@@ -303,7 +303,7 @@ mod tests {
         // its stop: its deadline asks for the stop, unsaved
         let mut v = serde_json::to_value(Lifecycle { phase: Phase::Sleeping { generation: 1, since_ms: T, owner: false, restarting: false, owes_start: false }, generation: 1, ..Lifecycle::new() }).unwrap();
         v.as_object_mut().unwrap().retain(|k, _| k != "saving");
-        let mut old = Lifecycle::read(&v.to_string()).unwrap();
+        let (mut old, _) = Lifecycle::read(&v.to_string()).unwrap();
         assert_eq!(old.apply(Event::Alarm, T + SLEEP_DEADLINE_MS).actions, vec![Action::Stop { generation: 1, saved: false }]);
     }
 
