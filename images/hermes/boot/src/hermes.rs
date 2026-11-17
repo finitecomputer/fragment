@@ -786,7 +786,11 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
             passed.push(e.clone());
         }
     }
-    y.push_str(&format!("terminal:\n  env_passthrough: [{}]\n", passed.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")));
+    // Its commands' `HOME` is its profile's own home (`HOME_MODE`): Hermes
+    // reads a served profile's home mode from its config alone since v0.23,
+    // and its default, `auto`, gave every agent the gateway's `HOME` where
+    // it sees no container, as on Cloudflare Containers.
+    y.push_str(&format!("terminal:\n  home_mode: {}\n  env_passthrough: [{}]\n", q(HOME_MODE), passed.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")));
     let init = ["~/.profile", "~/.bash_profile", "~/.bashrc"].iter().map(|f| q(f)).chain([q(&credentials_file.display().to_string())]);
     y.push_str(&format!("  shell_init_files: [{}]\n", init.collect::<Vec<_>>().join(", ")));
     // Its commands run in the agent's work directory, which the computer
@@ -906,12 +910,16 @@ pub fn chromium_ca_policy(pem: &str) -> Option<String> {
 /// act as on a host. Each pin is what Hermes does in a container, as the
 /// Docker rung has always run it:
 ///
-/// - `TERMINAL_HOME_MODE=profile`: each agent's terminal, `execute_code`
-///   and file tools' `~` have the agent's own `HOME`, its profile's `home`
-///   (one of `PROFILE_DIRS`), a link to its home in its work (`home_dir`).
-///   Taken for a host, every agent's would be the gateway's own,
-///   `/data/hermes`: one `~` for all the computer's agents, among Hermes'
-///   own files (its `.env`, `config.yaml`).
+/// - `TERMINAL_HOME_MODE=profile` (`HOME_MODE`): each agent's terminal,
+///   `execute_code` and file tools' `~` have the agent's own `HOME`, its
+///   profile's `home` (one of `PROFILE_DIRS`), a link to its home in its
+///   work (`home_dir`). Taken for a host, every agent's would be the
+///   gateway's own, `/data/hermes`: one `~` for all the computer's agents,
+///   among Hermes' own files (its `.env`, `config.yaml`). Since v0.23 a
+///   served profile's turn reads it from that profile's own terminal policy
+///   alone, never the environment, so each profile's config says it too
+///   (`profile_config`, `terminal.home_mode`); the environment's covers
+///   Hermes' processes outside a profile's turn.
 /// - `HERMES_SKIP_CHMOD=1`: Hermes leaves the modes of its home's
 ///   directories and files as the image and the boot make them. Taken for
 ///   a host, it makes them owner-only (0700, 0600) at each start; the
@@ -920,7 +928,11 @@ pub fn chromium_ca_policy(pem: &str) -> Option<String> {
 ///
 /// The third guess the image's paths reach, Chromium's flags, is pinned by
 /// the image's Chromium (`CHROMIUM`).
-pub const RUNTIME_ENV: [(&str, &str); 2] = [("TERMINAL_HOME_MODE", "profile"), ("HERMES_SKIP_CHMOD", "1")];
+pub const RUNTIME_ENV: [(&str, &str); 2] = [("TERMINAL_HOME_MODE", HOME_MODE), ("HERMES_SKIP_CHMOD", "1")];
+
+/// Hermes' home mode for every agent's commands: each its profile's own
+/// `home`, whatever Hermes guesses of a container (`RUNTIME_ENV`).
+pub const HOME_MODE: &str = "profile";
 
 /// What the computer keeps as its guest's tools' work, saved as a record
 /// of its own (docs/computers.md, "Data and the restore gate").
@@ -1647,7 +1659,7 @@ mod tests {
         assert!(p.contains("browser:\n  headed: true\n  executable_path: \"/opt/fragment/bin/chromium\"\n"), "Hermes' browser, headed, on the image's Chromium, in the profile's own config: {p}");
         let overlay_browser: Vec<&str> = m.lines().skip_while(|l| *l != "browser:").skip(1).take_while(|l| l.starts_with("  ")).collect();
         assert_eq!(overlay_browser, ["  inactivity_timeout: 86400"], "the overlay's browser setting is its idle bound alone; the rest is each profile's: {m}");
-        assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
+        assert!(p.contains("terminal:\n  home_mode: \"profile\"\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent, in its own home: {p}");
         assert!(p.contains("\n  cwd: \"/data/work/juniper--k3x9\"\n"), "its terminal works in its work directory: {p}");
         assert_eq!(work_dir("juniper--k3x9"), PathBuf::from("/data/work/juniper--k3x9"));
         assert!(
@@ -1845,9 +1857,11 @@ mod tests {
     }
 
     /// Hermes' container guesses, pinned: each named once, as Hermes reads
-    /// it, and nothing the boot writes names one again (Hermes' config
-    /// overrides its environment); `profile` needs each profile's `home`,
-    /// without which Hermes keeps the gateway's own `HOME`.
+    /// it. The home mode is also each profile's config's (Hermes reads a
+    /// served profile's from it alone), the same value, and nothing else the
+    /// boot writes names one again (Hermes' config overrides its
+    /// environment); `profile` needs each profile's `home`, without which
+    /// Hermes keeps the gateway's own `HOME`.
     #[test]
     fn hermes_container_guesses_are_pinned() {
         let pins: std::collections::BTreeMap<&str, &str> = RUNTIME_ENV.into_iter().collect();
@@ -1856,10 +1870,13 @@ mod tests {
         assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
         assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S), default_config("http://m"), profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
+        let profile = profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds);
+        let homed: Vec<&str> = profile.lines().filter(|l| l.trim_start().starts_with("home_mode:")).collect();
+        assert_eq!(homed, [format!("  home_mode: {}", q(HOME_MODE))], "every profile's terminal, its own home, as the environment says: {profile}");
+        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S), default_config("http://m"), profile.replace("  home_mode: \"profile\"\n", ""), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
         for (name, _) in RUNTIME_ENV {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
-            assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");
+            assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's, and the home mode each profile's terminal's, alone: {written:#?}");
         }
     }
 
