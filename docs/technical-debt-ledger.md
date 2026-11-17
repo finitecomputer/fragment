@@ -423,7 +423,9 @@ unfinished design, not debt.
 
 - **Shortcut:** a computer's `fragment sync`, `deploy`, `rollback` and
   `drafts` hold a 15-minute repo token
-  (`fragment_core::codestorage::guest_api`).
+  (`fragment_core::codestorage::guest_api`). On a box whose store is at a
+  loopback address (macrofiche, docs/self-host.md seam 5) the guest
+  reaches it through its egress, still with that token.
 - **Risk:** a credential in a guest that otherwise holds none (decision
   43).
 - **Delete when:** a computer's sync and deploy go through its API
@@ -916,20 +918,25 @@ unfinished design, not debt.
 - **Delete when:** someone needs old versions of large files, and a
   per-fragment policy keeps those the last N live commits name.
 
-## Files depend on code.storage, a hosted service with no self-hosted twin
+## The hosted fleet's files depend on code.storage, a hosted service
 
-- **Shortcut:** files live in code.storage through its REST API
-  (cell/src/cs.rs, cli/src/sync.rs); the only twin is the fake.
-- **Risk:** not self-hostable; one outage stops every fragment's files.
-- **Delete when:** a self-hostable service answers the same REST subset
-  with the fake's rules as its conformance suite and the e2e passing on
-  it, or files move to Cloudflare Artifacts once it has a commit API or
-  reaches GA (decision 1).
+- **Shortcut:** the hosted fleet's files live in code.storage through
+  its REST API (cell/src/cs.rs, cli/src/sync.rs). A self-hosted box has
+  its twin, macrofiche, which answers the same routes and passes the
+  e2e (docs/self-host.md, seam 5); the hosted fleet does not run it.
+- **Risk:** one outage of code.storage stops every hosted fragment's
+  files.
+- **Delete when:** the hosted fleet's files live in a store we run
+  (macrofiche on our own machines, proven by the whole e2e on it and a
+  carry of every repo with its history), or files move to Cloudflare
+  Artifacts once it has a commit API or reaches GA (decision 1).
 
 ## The cell signs code.storage tokens for any repo a fragment names
 
 - **Shortcut:** a repo's id is code.storage's, so `codestorage_token`
-  (cell/src/keys.rs) signs for any repo the supervisor names.
+  (cell/src/keys.rs) signs for any repo the supervisor names. macrofiche
+  takes the same tokens (one org key for every repo), so a self-hosted
+  box carries this as it is.
 - **Risk:** a tricked supervisor gets another fragment's repo.
 - **Delete when:** tokens are signed only for the repo the fragment's
   creation recorded, checked on every token, with a test.

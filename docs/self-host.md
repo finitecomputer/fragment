@@ -34,7 +34,7 @@ in the cell: a self-host change to master does not touch `cell/`,
 | 3 | Models from a file | dev's `FRAGMENT_MODELS_FILE` |
 | 4 | Sign-in: the identity door, an OpenID Connect relying party behind WorkOS's endpoints | dev on celld and the e2e's `door` section, against the OpenID Connect fake (below) |
 | 9 | LAN mode | not yet |
-| 5 | Files: macrofiche, the code-store contract | not yet: the code.storage fake |
+| 5 | Files: macrofiche, the code-store contract | dev (`--codestore macrofiche` or `external`) and the e2e (`FRAGMENT_E2E_CODESTORE=macrofiche`), on wrangler and on celld (below) |
 | 6 | Blobs | nothing to port: celld's R2, over `celld dev`'s disk |
 | 7 | Preview cards: a renderer | not yet: a card's shot fails (celld's `BROWSER` rejects) |
 | 10 | Money: own hardware in points | not yet |
@@ -376,6 +376,88 @@ may fetch.
   LocalAPI WhoIs of the connection's own address and port, the door
   reached directly over the tailnet and never through a proxy.
 
+## 5. Files: macrofiche
+
+A fragment's files are git, which the cell reaches through code.storage's
+REST API (`cell/src/cs.rs`, `cli/src/sync.rs`), named by
+`CODESTORAGE_API_URL` and `CODESTORAGE_ORG`, its tokens signed by the
+org's key. A self-hosted box keeps them on the box in macrofiche
+(github.com/futurepaul/macrofiche): a git store that answers the same
+routes as the service does, on git itself (a pinned 2.55.0) run as
+jailed processes, its repositories bare git on the box's disk. The cell
+is unchanged: it calls whatever `CODESTORAGE_API_URL` names.
+
+- **Dev:** `cargo xtask dev --codestore macrofiche` (with `MACROFICHE_BIN`)
+  starts it on :8792, the fake's port, its state under
+  `target/devstack/macrofiche` (`--clean` clears it), given the org key's
+  public half alone (`macrofiche pubkey`), and stops it with the stack.
+  `--codestore external` uses a store already running, named as the cell
+  names one (`CODESTORAGE_API_URL`, `CODESTORAGE_ORG`, the key's file
+  `CODESTORAGE_PRIVATE_KEY_FILE`): a box's own macrofiche, run as a
+  service of its own so that a stack's restart is not the store's. A cell
+  remembers each fragment's repo, so a stack switched between stores
+  takes `--clean`, or a carry (below).
+- **The e2e:** `FRAGMENT_E2E_CODESTORE=macrofiche` starts it on the run's
+  scratch. The lanes read it through its API; a check that pulls one of
+  the fake's levers (an outage, a held or failed call, latency, request
+  counts, a branch deleted) is a skip that says which, and the rest of
+  its lane runs without the lever. The `codestore` section probes
+  macrofiche against the contract (refusals, the compare-and-swap, a
+  file's identity headers, listings and last commits, branch, merge and
+  restore conflicts, history's order, the auth floor); on the fake it is
+  a skip, the fake being the contract's reference.
+- **Computers** reach it as they reach the fake: a store at a loopback
+  address is reached through the cell's egress at
+  `codestorage.fragment.internal` (`fragment_core::codestorage::guest_api`),
+  over REST with the storage token the guest was minted. No guest speaks
+  git's own protocol, so nothing else is opened to them.
+- **Where the service and the fake differ** (macrofiche's
+  docs/contract.md, section 10), macrofiche follows the service: a repo's
+  url form is its name, not a UUID; a token that does not verify is 403,
+  not 401. The lanes check each store's own answer.
+- **A box that ran the fake** (the dev stack's
+  `target/devstack/codestorage.json`) carries its repos in with `cargo
+  xtask codestore carry` while both are stopped: each repo imported
+  (`macrofiche import`) with the url form and id the cell holds, and each
+  commit at its fake id (`refs/macrofiche/legacy/<id>`), so the cell's
+  pins still name it; then `cargo xtask codestore verify` against
+  macrofiche serving reads every branch's every file back, byte for byte,
+  and every fake id's tree. The fake's state is only read: it is the
+  rollback, which loses what was written after the carry.
+
+### On a box's own hardware
+
+The client's shape is a Mac mini with a drive enclosure for storage.
+macrofiche is Linux-only (Landlock, seccomp and git's processes jailed),
+so it runs where the box's computers run: in the small Linux VM the Mac
+hosts (Lima on Virtualization.framework, Debian arm64; macrofiche and its
+git build natively there, `cargo xtask engine` then `cargo build
+--release -p macrofiche`):
+
+- Its `state_dir` on the enclosure, mounted into the VM as a disk image
+  of its own (a raw or ext4 image file on the enclosure attached as a
+  second virtio disk), not a shared folder: git's `fsync` and
+  `renameat2` must reach the disk, and virtiofs does not promise either.
+- One macrofiche per state directory (it holds a lock on it), plain HTTP
+  on the VM's loopback, a systemd unit restarting it, the stack pointed
+  at it with `--codestore external`.
+- **Backups while live:** a repository is changed only by its writes,
+  each `fsync`'d before it is answered, and every ref move is atomic, so
+  a copy of a repository taken file by file can catch a pack being
+  written. Take one of these instead, each consistent without stopping
+  anything:
+  - `git clone --mirror` (or `git fetch` into an existing mirror) of
+    each repository over its smart HTTP with an org token, from another
+    machine: git's own snapshot of every branch, the legacy ids aside
+    (hidden refs; a mirror of an imported repository keeps its history,
+    not the ids a cell's pins may still name);
+  - a filesystem snapshot (APFS on the enclosure from the Mac, or btrfs
+    or ZFS under the image) with macrofiche running: what a crash would
+    leave, which macrofiche recovers at boot (its crash rounds, its
+    docs/evidence/crash.json), copied off the box after.
+  A restore is the copy put back as the state directory while macrofiche
+  is stopped.
+
 ## 12. Secrets: the store's bindings, read from the node's backend
 
 The cell reads each deployment secret as `await env.<BINDING>.get()`
@@ -564,7 +646,7 @@ app's own trust and tailnet).
 | Feature | Finite's today | What the org brings |
 |---|---|---|
 | Sign-in | Finite's WorkOS AuthKit | the identity door (seam 4) in front of an OpenID Connect provider: tsidp on a tailnet, the org's own IdP on an intranet; the door's client registered there, the logins' domains vouched for where the provider sends no `email_verified` |
-| Fragment files (git) | Finite's code.storage org | its own code.storage org and PEM key (`codestorage.*`); its files then live at that vendor, off the box, so macrofiche (seam 5) matters |
+| Fragment files (git) | Finite's code.storage org | macrofiche on the box (seam 5), its org's public key in its config and the private key the cell's (`codestorage.*`); or its own code.storage org, its files then at that vendor, off the box |
 | Text models | OpenRouter on Finite's key, or Finite Private | an OpenAI-compatible endpoint and key for every slot (`cheap`, `medium`, `fallback`, `vision`, Deep), each priced; a slot left out falls back to Workers AI, which celld lacks. A deployment's `base_url` is https on a host name, no port; dev's models file takes this machine's `http://127.0.0.1:<port>` (seam 3) |
 | Semantic search (embeddings) | Workers AI bge-m3 | an OpenAI-compatible `/embeddings` endpoint, such as TEI (`models.embeddings`) |
 | Agents' paid tools (X, Firecrawl, fal, Browser Use, Perplexity, Places, xAI, ElevenLabs) | Finite's operator keys | its own key per row, or the row dropped |
@@ -616,7 +698,9 @@ browser, so the tailnet is enough.
    safe (a TPM, an HSM or a KMS once built); the host secret, 32 or more
    random bytes, among the platform's root secrets there (seam 12).
 5. Sign-in: the identity door and its provider (seam 4): tsidp's or the IdP's client for the door, the door's config and secrets, the platform bound to the door (`WORKOS_API_URL`, `WORKOS_CLIENT`, `WORKOS_KEY`).
-6. code.storage: its own org and key (or macrofiche, once ported).
+6. Files: macrofiche on the box (seam 5), the cell's `CODESTORAGE_API_URL`
+   pointed at it, its config holding the org key's public half; its
+   state on the box's storage, backed up as seam 5 says.
 7. Models: endpoints for every slot, and embeddings.
 8. Plans and operators: `fragment operator key`; `operators`;
    `default_plan`.
@@ -648,6 +732,11 @@ FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
 # with computers on the box's krun engine (seam 2)
 CELLD_CONTAINER_ENGINE=krun:/var/lib/sandcastle/engine.sock \
   FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only computers,…
+# git in macrofiche (seam 5): started by dev, or the box's own
+MACROFICHE_BIN=…/macrofiche cargo xtask dev --runtime celld --codestore macrofiche
+CODESTORAGE_API_URL=http://127.0.0.1:8792 CODESTORAGE_ORG=fragment-dev \
+  CODESTORAGE_PRIVATE_KEY_FILE=… cargo xtask dev --runtime celld --codestore external
+MACROFICHE_BIN=… FRAGMENT_E2E_CODESTORE=macrofiche cargo xtask e2e --only codestore,create,…
 ```
 
 ## Not yet
@@ -655,5 +744,7 @@ CELLD_CONTAINER_ENGINE=krun:/var/lib/sandcastle/engine.sock \
 - Computers (seam 2): the platform's own hosts from a computer (found
   40), and a real agent proven on the krun engine.
 - Sign-in: a real tsidp run, and a box whose celld runs public-only egress (seam 4, Egress); LAN mode (seam 9).
-- Own hardware in points (10), cards (7), macrofiche (5).
+- Own hardware in points (10), cards (7).
+- Files (seam 5): a box's macrofiche on a disk of its own and backed up,
+  run beside a real box's stack for weeks, not hours.
 - `celld deploy`: no xtask path yet; this is the dev stack and the e2e.
