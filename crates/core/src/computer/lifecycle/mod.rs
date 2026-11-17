@@ -66,6 +66,11 @@ pub enum Phase {
     },
 }
 
+/// For `skip_serializing_if`: a field at its default is not stored.
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
 impl Phase {
     /// Asleep with no start due.
     pub const ASLEEP: Phase = Phase::Asleep { retry: None };
@@ -173,6 +178,20 @@ pub struct Lifecycle {
     /// was kept: none of that life's work is counted kept (`Ended::quiet`).
     #[serde(default)]
     kept_ms: i64,
+    /// A record or a join for its agents was posted at this time
+    /// (`Event::Posted`) after its guest last opened a keepalive, with none
+    /// open: work its guest has not taken up, which no save holds. Cleared
+    /// when a keepalive opens, or at a sleep that owes no start. None in a
+    /// lifecycle stored before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owed_ms: Option<i64>,
+    /// When its guest last opened a keepalive (began work it was given): a
+    /// record posted before it was there for that work to take up. Its
+    /// opening, never a close: a close the object only infers (a socket a
+    /// deploy cut) says nothing of when its guest's work ended. 0 when none
+    /// has, or stored before it was kept.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    opened_ms: i64,
 }
 
 impl Default for Lifecycle {
@@ -212,6 +231,8 @@ impl Lifecycle {
             unmetered: None,
             worked_ms: 0,
             kept_ms: 0,
+            owed_ms: None,
+            opened_ms: 0,
         }
     }
 
@@ -393,6 +414,13 @@ impl Lifecycle {
             }
         }
         match (self.phase.clone(), event) {
+            (_, Event::Posted { at_ms }) => {
+                // a guest at work queues it; one whose last work began after
+                // it was posted took it up
+                if self.keepalives == 0 && at_ms > self.opened_ms {
+                    self.owed_ms = Some(self.owed_ms.map_or(at_ms, |owed| owed.min(at_ms)));
+                }
+            }
             (phase, Event::Wake { why }) => {
                 // a message for its agents, or a fragment to follow: work
                 if matches!(why, Wake::Record | Wake::Joined) {
@@ -507,7 +535,12 @@ impl Lifecycle {
             // a restore's or a snapshot's fallback no strike (#1004: as a
             // crash, one transient error was three strikes in three seconds)
             (Phase::Starting { generation, destroying: true, .. }, Event::Exited { generation: g }) if g == generation => {}
-            (Phase::Sleeping { generation, .. }, Event::Asleep { generation: g }) if g == generation => {
+            (Phase::Sleeping { generation, owes_start, .. }, Event::Asleep { generation: g }) if g == generation => {
+                // a sleep that owes no start let go of any wake it held: its
+                // hold ran out, or its owner put it to sleep
+                if !owes_start {
+                    self.owed_ms = None;
+                }
                 self.end_life(LifeEnd::Sleep, now_ms, &mut step);
                 self.gone(now_ms, &mut step);
             }
@@ -528,6 +561,8 @@ impl Lifecycle {
                 self.tabs = 0;
                 self.failed(format!("its container kept stopping: start {generation} stopped before it was ready"), now_ms);
             }
+            // stopped unasked while idle, all it did kept: a sleep
+            (Phase::Awake { generation, .. }, Event::Exited { generation: g }) if g == generation && self.idle_and_kept() => self.slept_unasked(now_ms, &mut step),
             (Phase::Awake { generation, .. }, Event::Exited { generation: g }) if g == generation => {
                 // a guest that died busy had turns open: its next life ends
                 // them, so it is held as a record holds it, and starts again
@@ -611,7 +646,12 @@ impl Lifecycle {
             ) => {}
             (_, Event::Opened { socket }) => {
                 match socket {
-                    Socket::Keepalive => self.keepalives += 1,
+                    Socket::Keepalive => {
+                        self.keepalives += 1;
+                        // its guest took up the work it was woken for
+                        self.owed_ms = None;
+                        self.opened_ms = self.opened_ms.max(now_ms);
+                    }
                     Socket::Tab => self.tabs += 1,
                 }
                 self.worked(now_ms);

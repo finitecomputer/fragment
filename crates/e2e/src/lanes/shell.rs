@@ -9077,8 +9077,22 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let ended = |w: &[Value], turn: &Value| w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == *turn);
     let before = work();
     let open: Vec<Value> = before.iter().filter(|r| r["principal"] == first_id.as_str() && r["body"]["kind"] == "turn.start" && !ended(&before, &r["body"]["turn"])).map(|r| r["body"]["turn"].clone()).collect();
+    let view = || shell(api, session, "GET", &format!("/api/computers/{computer}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let generation = view()["generation"].as_u64().unwrap_or(0);
     let killed = super::computers::lever(api, &computer, "kill")?;
-    let lost = killed.status == 200 && state_is(b, "lost");
+    // killed as its turn waits on a card, after the save its keepalive's
+    // close asked for, it has slept (docs/computers.md, "A stop nothing asked
+    // for, while idle, is a sleep"): its owner's wake starts it, whose next
+    // life ends what was cut, as a crash's start does
+    let mut after = Value::Null;
+    let heard = s.eventually(agent_wait, || {
+        after = view();
+        after["phase"] == "asleep" || after["generation"].as_u64().is_some_and(|g| g > generation)
+    });
+    if heard && after["phase"] == "asleep" {
+        shell(api, session, "POST", &format!("/api/computers/{computer}/wake"), Some(&json!({})), &[])?;
+    }
+    let lost = killed.status == 200 && heard && state_is(b, "lost");
     let _ = b.screenshot(page, &shots.join("desktop-thread-lost.png"));
     let cut = !open.is_empty() && s.eventually(agent_wait, || {
         let w = work();
@@ -9089,7 +9103,7 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     s.ok(
         "cut by a restart, its line says Lost (never dropped) until its asker has answered in the chat, then goes",
         needs && lost && cut && answered && then_gone,
-        json!({ "needs": needs, "killed": killed.status, "lost": lost, "cut": open, "ended": cut, "answered": answered, "gone": then_gone, "line": b.eval(page, line)? }),
+        json!({ "needs": needs, "killed": killed.status, "after": after["phase"], "lost": lost, "cut": open, "ended": cut, "answered": answered, "gone": then_gone, "line": b.eval(page, line)? }),
     );
     // the restart's own notice ("Your computer restarted…"), seen, so the checks after it start from none
     let told = notice_button("document.querySelector('#computer-notices .computer-notice[data-kind=went_back]')", "OK");

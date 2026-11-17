@@ -60,6 +60,19 @@ an image may rely on this:
   outside `/data`. That start is owed, made by its alarm (asleep or
   won't wake, the start alone), so the restart answers `starting` on
   every path, and its owner's page follows it to awake.
+- **A stop nothing asked for, while idle, is a sleep.** A host may stop
+  a container for its own reasons (its maintenance, a host short of
+  memory). One that stops while its computer is awake with nothing open
+  (no keepalive, no port tab), no save under way, all this life did in a
+  save it made since it came up, and no message or join it was woken for
+  that its guest has not taken up, has slept: no strike, no rollback,
+  nothing told, and nothing starts it again, though the hold after its
+  last work had not run out. Its next wake restores that save. A message
+  or a join's notice posted after its guest last opened a keepalive, with
+  none open then or since, is work not taken up (a record's wake carries
+  when it was posted; a guest at work queues what comes), and a
+  life with no save of its own may have been woken for work it has not
+  begun, so either stop is a crash (below), as is every other.
 - **A crash** (the container stopped on its own) starts it again while
   something wants it; a guest that died holding its keepalive is started
   again however long its turn ran, and its next life ends what was cut.

@@ -465,7 +465,8 @@ impl FragmentCell {
                     );
                     let env = self.env.clone();
                     worker::wasm_bindgen_futures::spawn_local(async move {
-                        if let Err(e) = crate::computer::ask(&env, &computer, "computer/wake", &json!({ "why": "joined" })).await {
+                        // its join's notice, posted just now on its agent's tasks
+                        if let Err(e) = crate::computer::ask(&env, &computer, "computer/wake", &json!({ "why": "joined", "at": crate::js::now_ms() })).await {
                             console_log!("{}", json!({ "fragment": "joined-wake", "computer": computer, "error": e.message }));
                         }
                     });

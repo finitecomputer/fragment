@@ -29,6 +29,10 @@
 //!   it was held, so it stays awake (docs/computers.md, Lifecycle).
 //!   A sleep whose save fails keeps its container and is tried again, for
 //!   at most `Rules::unsaved_max_ms`; then it sleeps unsaved, and says so.
+//!   A container its host stops unasked while it is idle, with all this
+//!   life did in a save of its own and no wake its guest has not taken up,
+//!   has slept too: no strike, no rollback, and nothing starts it again
+//!   until something wants it.
 //! - **Failing.** A start that fails, never reports ready, or whose
 //!   container stops before it is ready, is tried again with a growing
 //!   pause: one strike, however many ways its failure is heard. After

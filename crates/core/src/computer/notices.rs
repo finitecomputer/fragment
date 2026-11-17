@@ -210,8 +210,11 @@ mod tests {
         let mut c = Computer::new();
         c.wake();
         c.sleep(Some("b1"));
-        // a turn, its end saved, then only a page open: a crash loses nothing
+        // a turn, its end saved, then only a page's presence, its owner's
+        // port tab open since before that save: a crash loses nothing (with
+        // nothing open, the same exit is a sleep: `starts`' tests)
         let g = c.wake().generation;
+        c.apply(Event::Opened { socket: Socket::Tab });
         c.turn_saved("b2");
         c.apply(Event::Wake { why: Wake::Presence });
         let next = c.crash();
@@ -253,7 +256,8 @@ mod tests {
         c.come_up(next);
         let told = went_back(&c).expect("told once it came up");
         assert!(matches!(told, ComputerNotice::WentBack { life, pending: false, save: Some(4), .. } if life == g), "{told:?}");
-        // a quiet crash after it: the loss told before, unseen, is still told
+        // a quiet stop after it (idle and saved: a sleep): the loss told
+        // before, unseen, is still told
         c.turn_saved("b5");
         let next = c.crash();
         assert_eq!(went_back(&c), Some(told.clone()), "asleep after a stop that lost nothing");
@@ -284,7 +288,9 @@ mod tests {
         c.sleep(None);
         assert_eq!(went_back(&c), None, "slept unsaved, back to b6, which it came up from");
         assert!(c.wake().rollback && went_back(&c).is_none());
-        // restart: an end stored before `quiet` was kept is told
+        // restart: an end stored before `quiet` was kept is told (a crash:
+        // a tab open since before its save)
+        c.apply(Event::Opened { socket: Socket::Tab });
         c.turn_saved("b7");
         let next = c.crash();
         assert_eq!(went_back(&c), None);
