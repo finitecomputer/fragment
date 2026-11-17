@@ -262,11 +262,12 @@ unfinished design, not debt.
   bridge's Stop) only sets its adapter's busy-guard event, which nothing
   watches for a natively admitted turn (every relayed message since
   v0.22), so the turn ran on. The image's `relay_stop.py` (installed at
-  preload) also runs Hermes' own `_interrupt_running_turn` for that
-  session, as its `/stop` does.
+  preload) also stops that session's running turn through the authority
+  that admitted it (`SessionAuthority.interrupt`), as Hermes' own
+  controls stop a native turn.
 - **Risk:** it wraps a private method (`RelayAdapter.on_interrupt`) and
-  calls another (`_interrupt_running_turn`); an upstream change could
-  bypass it.
+  finds the session in the authorities' private state; an upstream change
+  could bypass it.
 - **Delete when:** upstream's relay Stop interrupts a natively admitted
   turn, proven by the Stop in `a_step_says_how_its_call_ended` and in
   `hermes_waits_out_model_preflight_deploying` without it.

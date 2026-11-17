@@ -3266,7 +3266,7 @@ async fn nothing_technical_asks_its_owner() {
 /// of choices waits ends the turn stopped, its card closed `stopped`, no
 /// choice made for its owner; the bridge's answer to the clarify (`skip`:
 /// Hermes' clarify never reads an interrupt) starts no turn of its own; and
-/// the chat's next message is answered.
+/// the chat's next message is answered, at once and after a restart.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_stop_lets_its_clarify_go() {
@@ -3278,6 +3278,11 @@ async fn a_stop_lets_its_clarify_go() {
     fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
     // well inside the card's hour
     within(&fake, &chat, &c, 60_000, "the stopped turn's end", |w| !of(w, &turn, "turn.end").is_empty()).await;
+    // and the chat answers on at once, no restart between (the hermes e2e
+    // lane, 2026-11-16: a Stop that also bumped Hermes' run generation left
+    // the chat waiting behind its stopped turn)
+    let after = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "and after the stop" })));
+    within(&fake, &chat, &c, 120_000, "the message after the stop", |w| !of(w, &after, "turn.end").is_empty()).await;
     let card = fake.with(|w| of(w, &turn, "turn.prompt")[0].clone());
     c.restart();
     // A stopped card cannot lend its answer to a fresh turn after restart.
@@ -3291,8 +3296,9 @@ async fn a_stop_lets_its_clarify_go() {
         // Hermes may answer once more, its model told the question was
         // skipped: never a choice made for the person
         assert!(replies(&turn).iter().all(|r| r.contains("\"status\": \"skipped\"") && !r.contains("\"user_response\": \"")), "no choice made: {:?}", replies(&turn));
+        assert!(replies(&after).iter().any(|r| r.contains("and after the stop")), "answered after the Stop: {:?}", replies(&after));
         assert!(replies(&next).iter().any(|r| r.contains("good morning")), "{:?}", replies(&next));
-        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 3, "hello, the stopped one and good morning: `skip` is no turn");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 4, "hello, the stopped one, the one after it and good morning: `skip` is no turn");
     });
 }
 
