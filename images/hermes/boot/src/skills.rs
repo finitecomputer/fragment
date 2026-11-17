@@ -228,17 +228,6 @@ pub fn skill_names(installed: &Installed) -> BTreeSet<String> {
     installed.keys().filter_map(|p| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).map(str::to_string).collect()
 }
 
-/// The connection a managed skill is for, as its frontmatter names it
-/// (`metadata: fragment: connection: <provider>`, templates/skills/README.md):
-/// none for a skill of no connection.
-pub fn skill_connection(text: &str) -> Option<String> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n");
-    let front = text.strip_prefix("---\n")?.split_once("\n---")?.0;
-    let mut metadata = front.lines().skip_while(|l| l.trim_end() != "metadata:").skip(1).take_while(|l| l.starts_with(' '));
-    metadata.by_ref().find(|l| l.trim_end() == "  fragment:")?;
-    metadata.take_while(|l| l.starts_with("    ")).find_map(|l| l.trim().strip_prefix("connection:")).map(|c| c.trim().to_string()).filter(|c| !c.is_empty())
-}
-
 /// The managed skills an agent is not shown: each connection's skill whose
 /// connection is none of `providers` (the providers of the credentials it
 /// may use now). So its prompt lists the skills of what its owner
@@ -249,7 +238,7 @@ pub fn withheld(dir: &Path, installed: &Installed, providers: &BTreeSet<String>)
     let mut names = BTreeSet::new();
     for rel in installed.keys().filter(|p| p.ends_with("/SKILL.md")) {
         let Ok(text) = std::fs::read_to_string(dir.join(rel)) else { continue };
-        let Some(connection) = skill_connection(&text) else { continue };
+        let Some(connection) = crate::skill_connection::of(&text) else { continue };
         let name = skill_name(&text, rel.trim_end_matches("/SKILL.md").rsplit('/').next().unwrap_or_default());
         let plain = !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
         if plain && !providers.contains(&connection) {
@@ -537,10 +526,6 @@ mod tests {
         assert_eq!(holding(&["google", "perplexity"]), ["confluence-finite", "jira-finite", "linear-finite"]);
         assert_eq!(holding(&["atlassian", "linear"]), ["google-workspace-finite"], "both of one connection's skills");
         assert!(holding(&["atlassian", "google", "linear"]).is_empty());
-        assert_eq!(skill_connection(&skill("a", Some("linear"))), Some("linear".into()));
-        for none in [skill("a", None), "---\nname: a\nconnection: linear\n---\n".into(), "---\nname: a\nmetadata:\n  hermes:\n    connection: linear\n---\n".into(), "no frontmatter".into()] {
-            assert_eq!(skill_connection(&none), None, "{none:?}");
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

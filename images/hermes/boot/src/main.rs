@@ -24,6 +24,7 @@ mod held;
 mod hermes;
 mod python;
 mod skills;
+mod skill_connection;
 mod skill_references;
 mod sync;
 
@@ -749,12 +750,12 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     let (main, deep_unused) = main.with_deep(a, answer.as_ref().ok().and_then(|b| hermes::OwnModel::deep_of(b)));
     let reasoning = main.reasoning(hermes::Reasoning::of(answer.as_ref().ok().map(|b| b.as_ref())), route);
     let home = fragment_bridge::api::Home::of(answer.as_ref().ok().map(|b| b.as_ref()));
-    let text = hermes::profile_config(a, name, role, home, team, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
     // a connection's skill is shown to an agent that holds the connection
     // (read again each time its config is, so it follows a connect, a
     // disconnect and a new skill within that cadence)
     let providers = a.credentials.iter().map(|c| c.provider.clone()).collect();
-    let text = hermes::disabling(text, &skills::withheld(&skills::managed_dir(), &skills::load_manifest(Path::new(skills::MANIFEST)), &providers));
+    let withheld = skills::withheld(&skills::managed_dir(), &skills::load_manifest(Path::new(skills::MANIFEST)), &providers);
+    let text = hermes::profile_config(a, name, role, home, team, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE), &withheld);
     if std::fs::read_to_string(&config).ok().as_deref() != Some(text.as_str()) {
         write_whole(&config, &text, ids);
         if let (Some(own), Some(why)) = (&own, &unused) {
