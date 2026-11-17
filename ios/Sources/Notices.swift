@@ -249,16 +249,24 @@ struct NoticesFanBackdrop: View {
     var body: some View { DesktopWallpaper().ignoresSafeArea() }
 }
 
-/// The fan's title and X, over its cards; the X folds them back into the stack.
+/// The fan's title, how many there are ("3 Notices"), and its X, over its
+/// cards; the X folds them back into the stack.
 struct NoticesFanHeader: View {
     static let height: CGFloat = 64
     static let folding = Animation.spring(duration: 0.4, bounce: 0.1)
+    let library: Library
     let close: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    static func title(_ count: Int) -> String { count == 1 ? "1 Notice" : "\(count) Notices" }
+
     var body: some View {
         HStack {
-            Text("Notices").font(.largeTitle)
+            // a notice whose time passes goes from the count as from the list
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                Text(Self.title(NoticeItem.all(library, now: Int64(context.date.timeIntervalSince1970 * 1000)).count))
+                    .font(.largeTitle).contentTransition(.numericText()).animation(.snappy, value: library.notices.count)
+            }
             Spacer()
             Button { withAnimation(reduceMotion ? nil : Self.folding, close) } label: {
                 Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 32, height: 32)

@@ -621,7 +621,7 @@ struct FragmentRoot: View {
                 // in, at once from the stack; out, kept as they fly back into it
                 NoticesFan(library: library, api: api, space: noticesSpace) { noticesFanned = false }
                     .transition(.asymmetric(insertion: .identity, removal: .opacity)).zIndex(3)
-                NoticesFanHeader { noticesFanned = false }.transition(.opacity).zIndex(4)
+                NoticesFanHeader(library: library) { noticesFanned = false }.transition(.opacity).zIndex(4)
             }
         }
         .sheet(item: $openedApp) { app in
