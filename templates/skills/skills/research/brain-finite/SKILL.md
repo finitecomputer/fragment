@@ -109,9 +109,8 @@ lists a page skipped "the index is full".
   found as it was. Tell your owner which pages.
 
 Either way, point them to support@finite.computer: the Finite team wants
-to hear from brains this large. Never split, move or reorganize a brain
-on your own, whatever its guide or a skip's reason says: that is your
-owner's call.
+to hear from them. Never split, move or reorganize a brain on your own,
+whatever its guide or a skip's reason says: that is your owner's call.
 
 ## Answering from a brain
 
