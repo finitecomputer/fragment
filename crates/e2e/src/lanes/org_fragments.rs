@@ -135,9 +135,13 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         "kind": "mutation", "role": "editor", "description": "Pushes a title to the browsers subscribed under a tag (`*`: all).",
         "input": { "type": "object", "required": ["title", "who"], "additionalProperties": false, "properties": { "title": { "type": "string", "maxLength": 100 }, "who": { "type": "string", "maxLength": 100 } } }
     });
+    manifest["operations"]["remember"] = json!({
+        "kind": "query", "role": "editor", "description": "Indexes a text in its own search, then asks for it by meaning.",
+        "input": { "type": "object", "required": ["source", "text"], "additionalProperties": false, "properties": { "source": { "type": "string", "maxLength": 20 }, "text": { "type": "string", "maxLength": 100 } } }
+    });
     let app = include_str!("../../../../templates/calories/app.mjs").replacen(
         "export class App extends DurableObject {\n",
-        "export class App extends DurableObject {\n  notify({ title, who }, call) {\n    call.push(who, { title });\n    return { ok: true };\n  }\n\n",
+        "export class App extends DurableObject {\n  notify({ title, who }, call) {\n    call.push(who, { title });\n    return { ok: true };\n  }\n\n  async remember({ source, text }) {\n    await this.searchIndex.upsert({ source, revision: \"1\", sections: [{ id: \"s\", text }] });\n    return this.searchIndex.query({ q: text, mode: \"semantic\" });\n  }\n\n",
         1,
     );
     let files = json!([{ "path": "fragment.json", "text": serde_json::to_string_pretty(&manifest)? }, { "path": "app.mjs", "text": app }]);
@@ -192,6 +196,25 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
             && s.push.hooked("cal-held").is_empty() && s.push.received("cal-tagged").is_empty() && s.push.received("cal-self").is_empty(),
         json!([wrote.body, deployed.body, noted.body, replies(s) - heard, browsers.iter().map(|r| r.status).collect::<Vec<_>>()]),
     );
+    // its inventory carries none of its content (Alex's review): its row
+    // is the org's, which reads every channel, and no admin's grant
+    let inventory = api.signed(&ada, "GET", &format!("{root}/fragments"), None)?;
+    let row = inventory.body["fragments"].as_array().and_then(|f| f.iter().find(|x| x["name"] == name.as_str()).cloned()).unwrap_or(Value::Null);
+    s.ok(
+        "its inventory names it to its content admins with none of its content: no listed note, though a member's row carries one",
+        listed_in && row["role"] == "owner" && row["listed"].is_null() && row["preview"].is_null(),
+        &row,
+    );
+    // its app's own search (Alex's review): what it embeds, its questions
+    // too, is the fragment's AI step on the org's ledger, never an agent's
+    // turn, which an org refuses; twice, as the gate learns a refusal beside
+    let remembered = [("m1", "panels on the shed roof"), ("m2", "a battery for the evening")].map(|(source, text)| api.op(&ada, &name, "remember", source, json!({ "source": source, "text": text })));
+    let by_meaning = |r: &Result<Reply>| r.as_ref().is_ok_and(|r| r.status == 200 && r.body["result"]["results"][0]["signals"].as_array().is_some_and(|s| s.iter().any(|x| x == "semantic")));
+    s.ok(
+        "its app indexes its own search and asks it by meaning, paid by the org, again and again",
+        remembered.iter().all(by_meaning),
+        json!(remembered.iter().map(|r| r.as_ref().map(|r| r.body.clone()).unwrap_or_else(|e| json!(format!("{e:#}")))).collect::<Vec<_>>()),
+    );
     // live sockets (the audit), each on its `talk`: a member's own; a
     // content admin's who is no member, reading through their agent's
     // membership alone; and an active member's
@@ -222,6 +245,20 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         hal_admin.status == 200 && hal_made.status == 200 && hal_agent_in.status == 200 && hal_reads.status == 200 && hal_reads.body["role"] == "viewer"
             && hal_hello["role"] == "viewer" && said_live.status == 200 && live_heard.iter().all(|h| *h),
         json!({ "halAgent": hal_agent_in.body, "halReads": hal_reads.body["role"], "heard": live_heard }),
+    );
+    // and a browser of theirs, subscribed through that membership alone, is
+    // pushed to (Alex's review), beside an active member's under its tag
+    let hal_subs = [(&hal, "hal-tagged", 26), (&ada, "ada-hal", 27)].map(|(who, id, seed)| {
+        let sub = s.push.subscribe(id, seed);
+        let body = json!({ "who": "hal", "endpoint": sub.endpoint, "p256dh": sub.p256dh, "auth": sub.auth });
+        api.call(Call { method: "POST", url: api.site_url(&name, "__push-sub"), body: Some(body.to_string().into_bytes()), content_type: Some("application/json"), keys: Some(who), ..Call::default() })
+    });
+    let pushed_hal = api.op(&ada, &name, "notify", "p-hal", json!({ "title": "to hal", "who": "hal" }))?;
+    let hal_pushed = s.eventually(WAIT, || ["hal-tagged", "ada-hal"].iter().all(|id| s.push.received(id).iter().any(|p| p["title"] == "to hal")));
+    s.ok(
+        "while in, a content admin's browser, subscribed through their agent's membership alone, hears a push, beside an active member's",
+        hal_subs.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200)) && pushed_hal.status == 200 && hal_pushed,
+        json!({ "subs": hal_subs.iter().map(|r| r.as_ref().map(|r| r.status).unwrap_or(0)).collect::<Vec<_>>(), "hal": s.push.received("hal-tagged") }),
     );
     // a second fragment of the org's, an invite to it waiting as they leave
     let made2 = api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgnotes"), "template": "calories" })))?;
@@ -275,6 +312,14 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
             && said_after.status == 200 && cal_closed.contains("4001") && !cal_frames.contains(&after) && !hal_frames.contains(&after)
             && ada_closed.contains("4001") && ada_back.as_ref().is_ok_and(|b| *b) && cal_back.contains("403"),
         json!({ "hal": [hal_closed, hal_frames], "cal": [cal_closed, cal_frames], "ada": ada_closed, "adaBack": format!("{ada_back:?}"), "calBack": cal_back }),
+    );
+    // nor is that browser pushed to: their agent's row counts no more
+    let pushed_out = api.op(&ada, &name, "notify", "p-hal-out", json!({ "title": "after hal left", "who": "hal" }))?;
+    let ada_pushed = s.eventually(WAIT, || s.push.received("ada-hal").iter().any(|p| p["title"] == "after hal left"));
+    s.ok(
+        "offboarded, a browser subscribed through their agent's membership alone is pushed to no more, though an active member's under its tag is",
+        pushed_out.status == 200 && ada_pushed && !s.push.received("hal-tagged").iter().any(|p| p["title"] == "after hal left"),
+        json!({ "hal": s.push.received("hal-tagged"), "ada": s.push.received("ada-hal") }),
     );
     // nor does their search take its new messages (a channel no list row
     // carries, so nothing else is sent them): its admin's search finds the

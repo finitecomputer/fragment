@@ -659,22 +659,30 @@ impl FragmentCell {
     /// Of `asks` (a subscriber and the role what they are sent reads at),
     /// whether each may still be sent it (Alex's review): in an org's
     /// fragment, as a request of theirs would be decided now, by their
-    /// membership as it counts (none when their row is stale or gone:
-    /// `stale_members`) or else by its visibility (a link's holder counts
-    /// on a link's: what they subscribed by is not revoked by an
-    /// offboarding). A person's fragment: each may, as before, and no
-    /// registry read. Bounded by the caller's batch.
+    /// membership as it counts, or an agent of theirs that is a member (none
+    /// when a row is stale or gone: `stale_members`), or else by its
+    /// visibility (a link's holder counts on a link's: what they subscribed
+    /// by is not revoked by an offboarding). A person's fragment: each may,
+    /// as before, and no registry read. Bounded by the caller's batch.
     pub(crate) async fn receivers(&self, asks: &[(String, Role)]) -> CellResult<Vec<bool>> {
         if self.owner()?.org().is_none() {
             return Ok(vec![true; asks.len()]);
         }
-        let principals: Vec<String> = asks.iter().map(|(p, _)| p.clone()).collect();
+        let mut principals: Vec<String> = asks.iter().map(|(p, _)| p.clone()).collect();
+        let owners = serde_json::to_string(&principals).expect("names serialize");
+        let agents: Vec<(String, String)> = self
+            .rows("SELECT principal, owner FROM members WHERE owner IN (SELECT value FROM json_each(?))", vec![owners.as_str().into()])?
+            .iter()
+            .filter_map(|r| Some((r["principal"].as_str()?.to_string(), r["owner"].as_str()?.to_string())))
+            .collect();
+        principals.extend(agents.iter().map(|(agent, _)| agent.clone()));
         let stale = self.stale_members(&principals).await?;
         let visibility = self.visibility()?;
         let mut may = Vec::with_capacity(asks.len());
         for (principal, read) in asks {
             let member = if stale.contains(principal) { None } else { self.member_role(principal)? };
-            let standing = access::Standing { member, owns_member_agent: false, link: visibility == Visibility::Link, signed: npub::is_identity(principal), cap: None, held: None };
+            let owns_member_agent = member.is_none() && agents.iter().any(|(agent, owner)| owner == principal && !stale.contains(agent));
+            let standing = access::Standing { member, owns_member_agent, link: visibility == Visibility::Link, signed: npub::is_identity(principal), cap: None, held: None };
             may.push(matches!(access::decide(visibility, standing, access::Purpose::Read, *read), access::Decision::Allow(_)));
         }
         Ok(may)

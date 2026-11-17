@@ -1613,7 +1613,7 @@ that person (decision 67). It is never an agent, a chat or skills.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/orgs/{org}/fragments` | its content admins, each as themselves | a create's body (Fragments, above; `members` unless named) → `Created`, `owner: org:<id>`: the org's, made only while its ledger takes writes (funded: 402 otherwise), its maker an editor |
-| `GET /api/orgs/{org}/fragments` | its content admins | → `FragmentList`: its inventory, the org's own list (a person's is theirs), each row its owner's, with its sharing |
+| `GET /api/orgs/{org}/fragments` | its content admins | → `FragmentList`: its inventory, the org's own list (a person's is theirs), each row its owner's, with its sharing and none of its content (`listed` empty, no `preview`): an admin reads that only by a grant (decision 71) |
 
 ### Billing (docs/billing.md, "Stripe" and "Trials")
 

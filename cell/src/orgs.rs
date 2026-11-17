@@ -202,14 +202,17 @@ pub(crate) async fn named(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             crate::create_fragment(env, cfg, url, create, maker, Some(org.to_string())).await
         }
         // its inventory: the list its fragments keep, as a person's keeps
-        // theirs (principal.rs), to its content admins
+        // theirs (principal.rs), to its content admins, with none of their
+        // content (a listed record, a chat's preview): an admin reads that
+        // only by a grant their events show (decision 71)
         (Method::Get, ["fragments"]) => {
             let who = crate::signer(env, &req, url, &bytes).await?;
             if !who.org_place(org).is_some_and(|p| p.admin) {
                 return Err(CellError::new(ErrorCode::Forbidden, "only an org's content admins list its fragments"));
             }
-            let list = crate::principal::calls::List::default();
-            crate::principal::pass(env, &fragment_core::ledger::org::Payer::Org(org.to_string()).name(), &list).await
+            let list = crate::principal::ask(env, &ledger, &crate::principal::calls::List::default()).await?;
+            let fragments = list.fragments.into_iter().map(|f| fragment_proto::ListedFragment { listed: vec![], preview: None, preview_at: None, ..f }).collect();
+            json_answer(&fragment_proto::FragmentList { fragments, limits: list.limits })
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/orgs/{org}/{}", m.as_ref(), rest.join("/")))),
     }

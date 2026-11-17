@@ -230,7 +230,9 @@ topped up waits up to a minute.
 
 - A model call (an agent's chat, vision, decision, transcription and
   embeddings, and a search's embeddings) asks `agent_turn` of its payer,
-  beside it; an operator key's call through the swap asks it first.
+  beside it; an operator key's call through the swap asks it first. One
+  an org pays (its fragment's app's embeddings) asks `ai_step`, capped
+  (decisions 67, 68).
 - A job's AI step asks `ai_step` of the fragment's owner, capped when
   the run's principal is neither the owner nor an agent of theirs.
 - A fragment's write asks `write` of its owner (402 past the overdraft).
