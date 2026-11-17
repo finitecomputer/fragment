@@ -19,9 +19,17 @@ struct WorkingIndicator: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var began = Date()
     @ScaledMetric(relativeTo: .caption) private var textSize = 13.0
+    /// Its one line (and Thinking): the size of the chat's secondary words, above its steps'.
+    @ScaledMetric(relativeTo: .subheadline) private var lineSize = 15.0
     @State private var expanded = false
+    /// How many of its steps are shown while it opens, one after another;
+    /// `.max` once they all are (new steps then show at once).
+    @State private var revealed = 0
+    @State private var revealing: Task<Void, Never>?
+    @State private var closed = 0
+    /// The steps that open one by one, each with a tick; past them, the rest at once.
+    static let staggered = 10
     @State private var openSteps = Set<String>()
-    @State private var advancedAt: Date?
     @State private var fittedArguments: [String: String] = [:]
     private struct ArgumentFit: Equatable {
         let width: CGFloat
@@ -63,7 +71,7 @@ struct WorkingIndicator: View {
         Group {
             if hints.isEmpty && cards.isEmpty {
                 EmptyView()
-            } else if cards.allSatisfy({ !$0.running }) && hints.allSatisfy({ if case .asked = $0.kind { true } else { false } }) {
+            } else if cards.allSatisfy({ !$0.running }) && hints.isEmpty {
                 content(now: Date(), elapsed: 0)
             } else if reduceMotion {
                 TimelineView(.periodic(from: .now, by: 1)) { frame in content(now: frame.date, elapsed: 0) }
@@ -76,11 +84,8 @@ struct WorkingIndicator: View {
         // A newly created web activity node starts its CSS clocks at zero.
         .onChange(of: hints) { _, _ in began = Date() }
         .onChange(of: cards.map(\.id)) { _, _ in began = Date(); expanded = false; openSteps = []; fittedArguments = [:] }
-        .onChange(of: reduceMotion) { _, _ in began = Date(); advancedAt = nil }
-        .onChange(of: cards.first?.steps) { old, new in
-            began = Date()
-            if (new?.count ?? 0) > (old?.count ?? 0) { advancedAt = Date() }
-        }
+        .onChange(of: reduceMotion) { _, _ in began = Date() }
+        .onChange(of: cards.first?.steps) { _, _ in began = Date() }
     }
 
     private func content(now: Date, elapsed: TimeInterval) -> some View {
@@ -100,39 +105,40 @@ struct WorkingIndicator: View {
     private func hintLine(_ agent: Agent, hint: WorkingHint, now: Date, elapsed: TimeInterval) -> some View {
         let milliseconds = Int64(now.timeIntervalSince1970 * 1000)
         let late: Bool = { if case .pending(let since) = hint.kind { return phase != "starting" && phase != "asleep" && milliseconds - since >= 90_000 }; return false }()
-        let text: String = {
+        // what it says, and how long it has waited (none for a word that isn't a wait)
+        let (text, since): (String, Int64?) = {
             switch hint.kind {
-            case .working(let asker): return "\(agent.name) is working" + (asker != nil && asker != principal ? " for \(name(asker!))" : "")
-            case .asked(let asks): return asks == principal ? "Waiting for your answer" : "Waiting for \(name(asks))'s answer"
-            case .pending:
-                if phase == "wont_wake" { return "\(agent.name)'s computer could not start. Open the computer settings to restart it." }
-                if late { return "\(agent.name) has not started a reply yet." }
-                if phase == "starting" || phase == "asleep" { return "\(agent.name) is starting up…" }
-                if phase == "sleeping" { return "\(agent.name)'s computer is going to sleep…" }
-                return present.contains(agent.id.agent) ? "Waiting for \(agent.name) to start a reply…" : "Waiting for \(agent.name)…"
+            case .working(let asker): return ("Thinking" + (asker != nil && asker != principal ? " for \(name(asker!))" : ""), nil)
+            case .asked(let asks): return (asks == principal ? "Waiting for you" : "Waiting for \(name(asks))", nil)
+            case .pending(let since):
+                if phase == "wont_wake" { return ("Couldn't start · restart it in Settings", nil) }
+                if late { return ("Taking a while", since) }
+                if phase == "starting" || phase == "asleep" { return ("Waking up", since) }
+                if phase == "sleeping" { return ("Going to sleep", nil) }
+                return ("Working", since)
+            }
+        }()
+        let asked: Bool = { if case .asked = hint.kind { true } else { false } }()
+        // a problem, or a wait on someone, never shimmers; everything else does
+        let moving: Bool = {
+            switch hint.kind {
+            case .working: return true
+            case .asked: return false
+            case .pending: return !late && phase != "wont_wake"
             }
         }()
         return HStack(spacing: 8) {
-            if case .asked = hint.kind {
-                glyph("asked", size: 15).foregroundStyle(Color(rgb: Self.colorRGB(agent.id.agent)))
-            } else if !late && phase != "wont_wake" {
-                dots(identity: agent.id.agent, elapsed: elapsed)
+            // a wait on someone breathes; work runs a wave; a problem holds still
+            LogoStripes(elapsed: moving || asked ? now.timeIntervalSinceReferenceDate : nil, size: lineSize, breathing: asked).foregroundStyle(secondary)
+            HStack(spacing: 6) {
+                if moving { shimmer(text, elapsed: elapsed, active: true) } else { Text(text).foregroundStyle(secondary) }
+                if let since { Text("· " + Self.duration(milliseconds - since)).monospacedDigit() }
             }
-            Text(text).font(.system(size: textSize, weight: .semibold)).foregroundStyle(secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            .font(.system(size: lineSize)).foregroundStyle(stepColor)
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(minHeight: textSize * 1.5)
+        .frame(minHeight: lineSize * 1.5)
         .accessibilityElement(children: .combine).accessibilityIdentifier("workingIndicator")
-    }
-
-    private func dots(identity: String, elapsed: TimeInterval) -> some View {
-        HStack(spacing: 3) {
-            ForEach(0..<3) { dot in
-                Circle().fill(Color(rgb: Self.colorRGB(identity)))
-                    .frame(width: 5, height: 5)
-                    .offset(y: Self.offset(elapsed: elapsed, dot: dot))
-            }
-        }.accessibilityHidden(true)
     }
 
     private func glyph(_ icon: String, size: CGFloat = 13) -> some View {
@@ -154,51 +160,58 @@ struct WorkingIndicator: View {
     }
 
     private func toolCard(_ card: ToolCard, now: Date, elapsed: TimeInterval) -> some View {
-        let rolling = card.running && !expanded
-        let advance = advancedAt.map { min(1, max(0, now.timeIntervalSince($0) / 0.32)) } ?? 1
-        let eased = reduceMotion ? 1 : UnitCurve.bezier(startControlPoint: UnitPoint(x: 0.25, y: 0.1), endControlPoint: UnitPoint(x: 0.25, y: 1)).value(at: advance)
-        let shown = expanded ? card.steps : Array(card.steps.suffix(card.running ? (eased < 1 ? 4 : 3) : 0))
+        // one line until it's opened: what it does now, never the steps rolling by
+        let shown = expanded ? Array(card.steps.prefix(revealed)) : []
         return VStack(alignment: .leading, spacing: 0) {
-            Button { expanded.toggle(); advancedAt = nil } label: {
-                HStack(spacing: 8) {
+            Button { toggle(steps: card.steps.count) } label: {
+                HStack(spacing: 6) {
+                    // gone once it's done: the line is then a summary, not a working one
+                    if card.running { LogoStripes(elapsed: now.timeIntervalSinceReferenceDate, size: lineSize).foregroundStyle(secondary).padding(.trailing, 2) }
                     if card.running {
-                        let progress = reduceMotion ? 0 : UnitCurve.easeOut.value(at: elapsed.truncatingRemainder(dividingBy: 1.8) / 1.8)
-                        Circle().fill(Color(rgb: Self.colorRGB(card.turn.agent)))
-                            .background {
-                                if !reduceMotion {
-                                    Circle().fill(Color(rgb: Self.colorRGB(card.turn.agent)).opacity(0.55 * (1 - progress)))
-                                        .frame(width: 7 + 14 * progress, height: 7 + 14 * progress)
-                                }
-                            }
-                            .frame(width: 7, height: 7).padding(.leading, 6).padding(.trailing, 3)
-                        shimmer("Working for " + Self.duration(Int64(now.timeIntervalSince1970 * 1000) - card.since), elapsed: elapsed, active: true)
+                        // a word for what it does now, held long enough to read
+                        HeldWord(word: card.nowWord) { shimmer($0, elapsed: elapsed, active: true) }
+                        Text("· " + Self.duration(Int64(now.timeIntervalSince1970 * 1000) - card.since)).monospacedDigit()
                     } else {
-                        HStack(spacing: -6) {
-                            ForEach(Self.icons(card.steps), id: \.self) { icon in
-                                glyph(icon, size: 11).foregroundStyle(secondary).frame(width: 20, height: 20)
-                                    .background(Color(rgb: colorScheme == .dark ? 0x262625 : 0xf0eee9), in: Circle())
-                                    .overlay(Circle().strokeBorder(FragmentStyle.background, lineWidth: 1.5))
-                            }
-                        }
-                        Text("Worked for " + Self.duration((card.until ?? card.since) - card.since))
+                        Text(card.doneWord + " for " + Self.duration((card.until ?? card.since) - card.since))
                     }
-                    Text("· \(card.steps.count) \(card.steps.count == 1 ? "step" : "steps")")
                     glyph("chevron", size: 14).rotationEffect(.degrees(expanded ? 90 : 0)).animation(.easeInOut(duration: 0.14), value: expanded)
-                }.frame(minHeight: 24).contentShape(Rectangle())
+                }.font(.system(size: lineSize)).frame(minHeight: 24).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityIdentifier("workingTools")
             if !shown.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(shown) { step in
-                        let age = card.steps.count - 1 - (card.steps.firstIndex { $0.id == step.id } ?? 0)
-                        let opacity = !rolling || age == 0 ? 1.0 : age == 1 ? 0.6 : age == 2 ? 0.3 : 0
-                        toolLine(step, agent: card.turn.agent, now: now, elapsed: elapsed, rolling: rolling, verticalPadding: rolling && eased < 1 && age == 3 ? 3 * (1 - eased) : 3)
-                            .opacity(rolling && eased < 1 ? (age == 0 ? eased : age == 1 ? 1 - 0.4 * eased : age == 2 ? 0.6 - 0.3 * eased : 0.3 * (1 - eased)) : opacity)
-                            .frame(height: rolling && eased < 1 && age == 0 ? max(6, min(textSize * 1.55 + 6, 3 * textSize * eased)) : rolling && eased < 1 && age == 3 ? min(textSize * 1.55 + 6 * (1 - eased), 3 * textSize * (1 - eased)) : nil, alignment: .top).clipped()
+                        toolLine(step, agent: card.turn.agent, now: now, elapsed: elapsed, rolling: false)
+                            .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: -6)), removal: .opacity))
                     }
                 }.padding(.top, 6)
             }
         }
         .font(.system(size: textSize)).foregroundStyle(stepColor)
+        // a tick as each step arrives, and a soft tap as they fold away
+        .sensoryFeedback(trigger: revealed) { old, new in new > old && new <= Self.staggered ? .selection : nil }
+        .sensoryFeedback(.impact(weight: .light), trigger: closed)
+    }
+
+    /// Opens its steps one after another (all at once with Reduce Motion),
+    /// or folds them away.
+    private func toggle(steps: Int) {
+        revealing?.cancel()
+        if expanded {
+            withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) { expanded = false; revealed = 0 }
+            closed += 1
+            return
+        }
+        expanded = true
+        guard !reduceMotion else { revealed = .max; return }
+        revealed = 0
+        revealing = Task {
+            for count in 1...max(1, min(steps, Self.staggered)) {
+                withAnimation(.snappy(duration: 0.28)) { revealed = count }
+                try? await Task.sleep(for: .milliseconds(55))
+                if Task.isCancelled { return }
+            }
+            withAnimation(.snappy(duration: 0.28)) { revealed = .max }
+        }
     }
 
     private func toolLine(_ step: ToolStep, agent: String, now: Date, elapsed: TimeInterval, rolling: Bool, verticalPadding: Double = 3) -> some View {
@@ -341,4 +354,81 @@ private extension Color {
 #Preview {
     WorkingIndicator(agents: [.init(id: TurnKey(agent: "npub1preview", id: "preview"), name: "Juniper")])
         .padding(20)
+}
+
+/// A word that changes as the work does, each held at least a moment so a
+/// quick step never flickers past, and changed with a fade; drawn by
+/// `content` (the working line's shimmer).
+private struct HeldWord<Content: View>: View {
+    let word: String
+    @ViewBuilder let content: (String) -> Content
+    @State private var shown: String?
+    @State private var since = Date.distantPast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    static var hold: TimeInterval { 1.5 }
+
+    var body: some View {
+        content(shown ?? word)
+            .id(shown ?? word)
+            .transition(.opacity)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: shown)
+            .task(id: word) {
+                let wait = Self.hold - Date().timeIntervalSince(since)
+                if shown != nil, wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+                guard !Task.isCancelled else { return }
+                shown = word; since = Date()
+            }
+    }
+}
+
+/// The working line's mark, after the logo's bars: a circle made of
+/// rounded lines, each as wide as the circle where it sits, in the line's own
+/// color. While something is under way (`elapsed`, the
+/// line's clock) they light in a wave running up and down; while it waits on
+/// someone they breathe, all together; otherwise (nil, or Reduce Motion) they
+/// hold still. Each line sits on whole pixels. Its clock is the time of day,
+/// never the line's own (which restarts with each step): it flows on unbroken
+/// as the word changes, and from Thinking into the working line.
+private struct LogoStripes: View {
+    /// Seconds on a clock that never restarts (`timeIntervalSinceReferenceDate`).
+    let elapsed: TimeInterval?
+    let size: CGFloat
+    /// All its lines lit together, slowly up and down, rather than in a wave.
+    var breathing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.displayScale) private var scale
+    static let lines = 5
+
+    var body: some View {
+        let lit: Double? = reduceMotion ? nil : elapsed
+        // a whole number of points, so its pixel grid starts where the view does
+        let side = (size * 0.95).rounded()
+        let scale = self.scale
+        Canvas { context, box in
+            // one whole-pixel pitch for every line: each gap the same, each edge sharp
+            let height = (box.height * scale).rounded(.down)
+            let pitch = (height / CGFloat(Self.lines)).rounded(.down)
+            let thick = max(1, (pitch * 0.5).rounded())
+            let first = ((height - (CGFloat(Self.lines) * pitch - (pitch - thick))) / 2).rounded(.down)
+            // the lit line, sweeping from top to bottom and back
+            let at = breathing ? nil : lit.map { (1 - cos($0 * 2.2)) / 2 * Double(Self.lines - 1) }
+            // breathing: every line together, in and out about every four seconds
+            let breath = breathing ? lit.map { (1 - cos($0 * 1.6)) / 2 } : nil
+            for index in 0..<Self.lines {
+                let glow = breath ?? at.map { max(0, 1 - abs(Double(index) - $0) / 1.3) } ?? 0.6
+                var line = context
+                line.opacity = 0.3 + 0.7 * glow
+                // each line as wide as the circle is where it sits, a capsule
+                // centered on whole pixels: together, the lines make the circle
+                let top = first + CGFloat(index) * pitch
+                let across = (box.width * scale) / 2, middle = top + thick / 2 - height / 2
+                let half = (sqrt(max(0, across * across - middle * middle))).rounded(.down)
+                let width = max(thick, 2 * half)
+                let rect = CGRect(x: ((box.width * scale - width) / 2).rounded() / scale, y: top / scale, width: width / scale, height: thick / scale)
+                line.fill(Path(roundedRect: rect, cornerRadius: rect.height / 2), with: .foreground)
+            }
+        }
+        .frame(width: side, height: side)
+        .accessibilityHidden(true)
+    }
 }
