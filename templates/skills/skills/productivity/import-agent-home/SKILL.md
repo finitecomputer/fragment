@@ -349,8 +349,18 @@ keep the old ones (`fragment agent --name "<name>"`, and
 
 ## 5. Memories
 
-Copy out the `memories` files. Entries are separated by lines holding
-only `§`. If there is a `memory_store`, read its facts with `sqlite3` too.
+Copy out the `memories` files, and the `memory_store` if there is one.
+**Keep them whole first, always**, before you weigh anything: copy each
+as it is into one folder of your own, which no cleanup deletes:
+
+```sh
+mkdir -p "$HOME/old-agent/memories" && cp -R -- "$HOME/home-import/home/<its path>" "$HOME/old-agent/memories/"
+```
+
+Then save one memory: the old agent's memories are kept whole in
+`~/old-agent/memories/`, to read when they help. Weigh the rest from that
+copy. Entries are separated by lines holding only `§`. Read a
+`memory_store`'s facts with `sqlite3`.
 
 Weigh each entry:
 - **Still true and useful:** save it with your `memory` tool, rewritten
@@ -359,8 +369,8 @@ Weigh each entry:
 - **About how the old platform worked:** drop it.
 - **Stale or duplicated:** drop it.
 
-Your memory is small. Keep what matters most, and put long knowledge in a
-brain if your owner has one.
+Your memory is small. Keep what matters most: the rest stays in the
+copy. Long knowledge can go in a brain too, if your owner has one.
 
 ## 6. Skills
 
@@ -442,7 +452,9 @@ Finish with one message, in plain words. In a move, its first line says
 you're upgraded and here, then the rest:
 - **Where things are**, each with its link: the files app and whatever
   the profile made. The old chats are in their History (how many, as
-  the import printed), where search finds them by what was said.
+  the import printed), where search finds them by what was said. The old
+  memories are kept whole on your computer, in its `old-agent` folder
+  (`report.md` names the path).
 - **What came over:** your personality, how many memories, the skills (by
   name), and the routines (when they run, in your owner's time).
 - **What didn't, and why**, a sentence each:
@@ -464,4 +476,4 @@ delete `~/home-import/home.zip`, `~/home-import/home/` and
 `~/home-import/skills/`, and in a move your stage's own
 `/tmp/home-import-<the stage>/` (never another folder in `/tmp`): everything is in its place now, and your
 computer saves your whole home each time it sleeps. Keep `report.md`,
-`progress.md` and `stage.json`.
+`progress.md`, `stage.json` and `~/old-agent/`.
