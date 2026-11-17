@@ -66,8 +66,8 @@ pub enum Event {
     /// A record its agents follow, or the notice of one's join, was posted
     /// at `at_ms` (the poster's clock), ahead of the wake it brings: work its
     /// guest has not taken up (`Lifecycle`'s `owed_ms`), unless a keepalive
-    /// was open then (a guest at work queues what comes) or closed after it
-    /// (its last work came after it), until a keepalive opens.
+    /// is open (a guest at work queues what comes) or opened after it (that
+    /// work took it up), until a keepalive opens.
     Posted { at_ms: i64 },
     /// The start `generation` finished: running, its intercepts set, its
     /// data restored.
