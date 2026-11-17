@@ -17,6 +17,9 @@ use crate::{Need, Suite};
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
+/// The offer's words under its title, as the server says them
+/// (`fragment_core::migrations::offer`).
+const OFFER_TEXT: &str = "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key. You'll get a month free.";
 
 fn agent(old: &str) -> RosterAgent {
     RosterAgent {
@@ -558,14 +561,14 @@ fn offer(s: &mut Suite, api: &Api, mover: &Mover, run: &str, later_by: &dyn Fn(i
     let o = first.first().cloned().unwrap_or_default();
     let labels: Vec<&str> = o["actions"].as_array().map(|a| a.iter().filter_map(|x| x["label"].as_str()).collect()).unwrap_or_default();
     s.ok(
-        "a person's first notices read binds them by their WorkOS user: each old agent of theirs is offered, oldest first, a notice that must be answered in the server's words, Yes opening /move, Not now and Never their own routes",
+        "a person's first notices read binds them by their WorkOS user: each old agent of theirs is offered, oldest first, a notice that must be answered in the server's words, as its upgrade: Upgrade opening /move, Not now and Never their own routes",
         unbound == ("listed".into(), "listed".into())
             && ids(&first) == [format!("move:{f1}"), format!("move:{f2}")]
             && state(&f1) == "open"
             && o["mustAnswer"] == true
-            && o["title"] == format!("Bring Old {f1} over from finite.computer?")
-            && o["text"] == "You'll get a month free."
-            && labels == ["Yes", "Not now", "Never"]
+            && o["title"] == format!("Old {f1}'s upgrade is ready")
+            && o["text"] == OFFER_TEXT
+            && labels == [format!("Upgrade Old {f1}").as_str(), "Not now", "Never"]
             && o["actions"][0]["open"].as_str().is_some_and(|u| u.ends_with("/move"))
             && o["actions"][1]["post"] == format!("/api/migrations/offers/{f1}/later")
             && o["image"] == format!("/api/migrations/offers/{f1}/picture")
@@ -866,9 +869,9 @@ pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
                 let seen = b.eval(&page, crate::lanes::shell::MUST_ANSWER_SEEN)?;
                 let yes = b.eval(&page, "(() => { const a = document.querySelector('#must-answer a'); return { text: a?.textContent, href: a?.getAttribute('href'), target: a?.target ?? '', main: a?.classList.contains('primary') }; })()")?;
                 s.ok(
-                    "a person on the roster is asked as their page opens, over everything: the old agent's name, picture and words, Yes the main answer opening /move here, then Not now and Never",
-                    asked && seen["covers"] == true && seen["words"].as_str().is_some_and(|w| w.contains("Bring Juniper over from finite.computer?") && w.contains("You'll get a month free.") && w.contains("Not now") && w.contains("Never"))
-                        && yes["text"] == "Yes" && yes["href"].as_str().is_some_and(|h| h.ends_with("/move")) && yes["target"] == "" && yes["main"] == true,
+                    "a person on the roster is asked as their page opens, over everything: the old agent's name, picture and words, its upgrade, Upgrade Juniper the main answer opening /move here, then Not now and Never",
+                    asked && seen["covers"] == true && seen["words"].as_str().is_some_and(|w| w.contains("Juniper's upgrade is ready") && w.contains(OFFER_TEXT) && w.contains("Not now") && w.contains("Never"))
+                        && yes["text"] == "Upgrade Juniper" && yes["href"].as_str().is_some_and(|h| h.ends_with("/move")) && yes["target"] == "" && yes["main"] == true,
                     json!([seen, yes]),
                 );
             }
@@ -991,8 +994,8 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     let opened = b.until(&page, &format!("location.pathname === '/move' && !!{row} && !document.getElementById('must-answer').open"), wait);
     let seen = b.eval(&page, &format!("(() => {{ const r = {row}; return {{ words: r?.innerText, picked: r?.querySelector('input[type=checkbox]')?.checked, bring: !!document.querySelector('#move-page button.primary'), cover: document.getElementById('must-answer').open }}; }})()"))?;
     s.ok(
-        "Yes opens /move here: the old agent, its words, and whether to bring it (chosen); the offer's cover stands aside on the page that answers it",
-        opened && seen["words"].as_str().is_some_and(|w| w.contains("Juniper is on finite.computer.")) && seen["picked"] == true && seen["bring"] == true && seen["cover"] == false,
+        "Upgrade Juniper opens /move here: the old agent, its words, and whether to upgrade it (chosen); the offer's cover stands aside on the page that answers it",
+        opened && seen["words"].as_str().is_some_and(|w| w.contains("Juniper's upgrade is ready.")) && seen["picked"] == true && seen["bring"] == true && seen["cover"] == false,
         &seen,
     );
     let _ = b.screenshot(&page, &shots.join("move-1280-light.png"));
@@ -1011,14 +1014,14 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
         c["drawn"] == "none" && c["off"] == json!({ "checked": false, "focused": true, "ring": true, "bring": false }) && c["on"] == json!({ "checked": true, "focused": true, "ring": true, "bring": true }) && c["fill"] != c["empty"]
     };
     s.ok(
-        "at 1280 and 390 px, light and dark, the box is the platform's check, not the browser's: reached by Tab, Space unchecks it and checks it again, its focus ring kept, Bring over following each",
+        "at 1280 and 390 px, light and dark, the box is the platform's check, not the browser's: reached by Tab, Space unchecks it and checks it again, its focus ring kept, Upgrade following each",
         picked.len() == 4 && picked.iter().all(held),
         json!(picked),
     );
 
-    // Bring over
+    // Upgrade
     b.eval(&page, "(document.querySelector('#move-page button.primary').click(), true)")?;
-    let making = b.until(&page, &format!("/^Making Juniper/.test({said})"), agent_wait);
+    let making = b.until(&page, &format!("/^Preparing Juniper's upgrade/.test({said})"), agent_wait);
     let _ = b.screenshot(&page, &shots.join("move-making-1280-light.png"));
     let asked = b.until(&page, &format!("{row}?.dataset.state === 'asked'"), agent_wait);
     let moves = api.signed(&s.operator, "GET", "/api/admin/migrations", None)?;
@@ -1036,8 +1039,8 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     );
     let _ = b.screenshot(&page, &shots.join("move-asked-1280-light.png"));
     s.ok(
-        "Bring over: the guest is given the comp (a comped seat, $25), one new agent is made, with its one chat, not opened (the page stays), and its Yes starts the move: stopping, in the server's words",
-        making && asked && still == "/move" && one_each && b.eval(&page, &said)?.as_str().is_some_and(|w| w == "Stopping Juniper on finite.computer…") && m["state"] == "asked" && m["agent"].is_string()
+        "Upgrade: the guest is given the comp (a comped seat, $25), one new agent is made, with its one chat, not opened (the page stays), and its Yes starts the move: pausing it, in the server's words",
+        making && asked && still == "/move" && one_each && b.eval(&page, &said)?.as_str().is_some_and(|w| w == "Pausing Juniper for its upgrade…") && m["state"] == "asked" && m["agent"].is_string()
             && ledger.body["purchasedMicros"] == 25_000_000 && seat.body["seat"]["comped"] == true,
         json!({ "move": m, "ledger": ledger.body["purchasedMicros"], "seat": seat.body["seat"], "path": still, "kinds": kinds }),
     );
@@ -1058,12 +1061,12 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
         let p = b.open(&format!("{}/move", api.base))?;
         b.viewport(&p, width, height, phone)?;
         b.color_scheme(&p, scheme)?;
-        let importing = b.until(&p, &format!("{said} === 'Bringing Juniper over…' && {open_chat}.includes('Open chat')"), wait);
+        let importing = b.until(&p, &format!("{said} === 'Upgrading Juniper…' && {open_chat}.includes('Open chat')"), wait);
         std::thread::sleep(Duration::from_millis(300));
         let _ = b.screenshot(&p, &shots.join(format!("move-importing-{width}-{scheme}.png")));
         if (width, scheme) == (1280, "light") {
             s.ok(
-                "come back to the page as it imports: it stays, says it is being brought over, and its row opens the new agent's chat",
+                "come back to the page as it imports: it stays, says it is being upgraded, and its row opens the new agent's chat",
                 importing && b.eval(&p, "location.pathname")? == "/move",
                 json!({ "said": b.eval(&p, &said)?, "buttons": b.eval(&p, &open_chat)? }),
             );

@@ -90,7 +90,8 @@ Every change is checked against this table.
 | A person's wipe | the registry's `wipes` (docs/api.md, "Operators: wiping a person") | a wiped person's ledger, list and computer each keep one row saying so |
 | Secrets | the object that owns each, sealed; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
 | A person's secrets for their agents (FIN-466) | their `Vault` object, each value sealed for it (docs/secrets.md, "A person's Vault") | none: no answer, list, log or export names a value |
-| A person's connections | WorkOS Pipes (one account a provider, or several: `accounts_max`); one being made, the registry's `connection_signins` (docs/pipes-browser-binding.md) | which account each agent uses, its computer's `agent_accounts`; a guest holds placeholders only |
+| A person's connections | WorkOS Pipes (one account a provider, or several: `accounts_max`); one being made, the registry's `connection_signins` (docs/pipes-browser-binding.md) | a guest holds placeholders only |
+| What an agent may use of its owner's: the providers it is narrowed to, and which account it uses at each connection of several | the agent fragment's `meta` `grants` (`fragment_core::grants`), written only by its owner in person, through their computer's routes | none: its computer asks at each swap and each view; the row a computer kept before the move is taken once, by a fragment holding none of its own, and marked `grants::MOVED` (the release is forward only: Computer step 5) |
 | Orgs, their admins and seats | the registry (docs/billing.md) | each holder's plan and standing pushed to their ledger in the registry's order (`SetSeat.seq`); the registry is the seat's one writer |
 | An org's credit and monthly budget (decisions 66 to 68) | its ledger (`org:<id>`) | none: operators grant and set them; its billing admins read them |
 | An org's content: its people, content admins, offers and governance log (decisions 69 to 71) | the registry (`org_content`, `org_content_offers`, `org_governance`; rules in `fragment_core::governance`), apart from its billing | none: each change is written with its log entry in one transaction; an offer is taken only while its grounds hold |
@@ -188,7 +189,8 @@ release was deployed (`release::DEPLOYED`), which no release reads now
   starts nothing. A value an older release cannot read makes its release
   forward only, by a schema step (Fragment step 6, FIN-328; Migrations
   step 7, a move waiting for staff; Fragment step 9, an inbox's JSON
-  `inbox_secret`, FIN-508).
+  `inbox_secret`, FIN-508; Computer step 5, an agent's grants taken by
+  its fragment, #1309).
 
 A deploy is all at once (a gradual deployment would refuse between its
 two versions), and done when every object class answers it within 90 s
