@@ -8,7 +8,10 @@
 //! `cargo xtask secret` sets them), and the config names each by its store
 //! name: the deploy reads no secret's value. It first lists the store
 //! (read-only) and refuses, before anything is built or made, when a
-//! secret the config names is not there; then it waits for every image
+//! secret the config names is not there. One case goes on: a provider whose
+//! secret is not set yet, and which the live deployment does not offer, is
+//! left out of this deploy, loudly, so a config may land before its setup
+//! (`not_offered_yet`, FIN-509). Then it waits for every image
 //! the config pins to be ready on Cloudflare's network (prepare.rs), and
 //! refuses, having changed nothing, when one is not. From the config and the
 //! checked-in config (`cell/wrangler.jsonc`) it renders the Worker's own
@@ -487,17 +490,70 @@ pub(crate) fn set_commands<S: AsRef<str>>(config: &Path, missing: &[(String, S)]
     missing.iter().map(|(field, name)| format!("  {field:width$}  cargo xtask secret set {} --config {}", name.as_ref(), config.display())).collect()
 }
 
+/// Of the secrets the store lacks (`missing`), the providers they leave
+/// not offered yet, each with its secret's name: a config may name a
+/// provider before its setup is done, and deploy without it (FIN-509).
+///
+/// None, and the deploy is refused as it always was, when a secret missing
+/// is the deployment's own (its host secret, a model's key: one no provider
+/// names alone), or is a provider's that the live Worker offers now
+/// (`live`, its catalog's names). A secret gone from under a working
+/// provider is a mistake to stop at, never a provider to drop.
+fn not_offered_yet(bound: &devstack::store::Bound, missing: &[(String, &str)], live: &[String]) -> Option<Vec<(String, String)>> {
+    let lacks = |name: &str| missing.iter().any(|(_, m)| *m == name);
+    let own = devstack::store::Bound { operator_keys: vec![], connection_secrets: vec![], ..bound.clone() };
+    if named_secrets(&own).iter().any(|(_, name)| lacks(name)) {
+        return None;
+    }
+    let waiting: Vec<(String, String)> = bound.operator_keys.iter().chain(&bound.connection_secrets).filter(|(_, secret)| lacks(secret)).cloned().collect();
+    (!waiting.is_empty() && !waiting.iter().any(|(provider, _)| live.contains(provider))).then_some(waiting)
+}
+
+/// What a deploy says of the providers it leaves out (`not_offered_yet`):
+/// each one, and the command that sets the secret it waits on.
+fn left_out(config: &Path, waiting: &[(String, String)]) -> String {
+    let names: Vec<&str> = waiting.iter().map(|(provider, _)| provider.as_str()).collect();
+    let fields: Vec<(String, &str)> = waiting.iter().map(|(provider, secret)| (format!("providers: {provider}"), secret.as_str())).collect();
+    format!(
+        "WARNING: NOT OFFERED YET: {}. The account's Secrets Store lacks the secret each names, and the live deployment does not offer them, so this deploy leaves them out of its catalog and changes nothing else. Set each, then deploy again to offer it:\n{}",
+        names.join(", "),
+        set_commands(config, &fields).join("\n")
+    )
+}
+
+/// `d` without the providers `waiting` names: what a deploy that leaves
+/// them out renders its catalog and its bindings from.
+fn leave_out(d: &mut Deployment, waiting: &[(String, String)]) {
+    d.providers.retain(|row| !waiting.iter().any(|(provider, _)| row["name"] == provider.as_str()));
+}
+
+/// The providers the live Worker `script` offers now, by name: its
+/// version's `FRAGMENT_PROVIDERS`. No Worker, or none offered: none.
+fn live_providers(api: &crate::cloudflare::Api, script: &str) -> Result<Vec<String>> {
+    let Some(id) = deployed(api, script)? else { return Ok(vec![]) };
+    let Some(catalog) = variable(&read_version(api, script, &id)?, "FRAGMENT_PROVIDERS") else { return Ok(vec![]) };
+    let rows: Vec<Value> = serde_json::from_str(&catalog).with_context(|| format!("the live Worker {script}'s FRAGMENT_PROVIDERS"))?;
+    rows.iter().map(|row| row["name"].as_str().map(str::to_string).with_context(|| format!("the live Worker {script}'s FRAGMENT_PROVIDERS: a row with no name"))).collect()
+}
+
 /// The account's store, holding every secret `bound` names: read-only,
-/// before anything is built or made. Refused (`refusal`) otherwise.
-fn preflight(tools: &devstack::Tools, d: &Deployment, config: &Path, bound: &devstack::store::Bound) -> Result<devstack::store::AccountStore> {
+/// before anything is built or made. Refused (`refusal`) otherwise, but
+/// for providers not offered yet (`not_offered_yet`): those are answered,
+/// each with the secret it waits on, for the deploy to leave out. The live
+/// Worker (`script`) is read only when a secret is missing, and a deploy
+/// in any doubt (it cannot be read) is refused as before.
+fn preflight(tools: &devstack::Tools, api: &crate::cloudflare::Api, d: &Deployment, config: &Path, bound: &devstack::store::Bound, script: &str) -> Result<(devstack::store::AccountStore, Vec<(String, String)>)> {
     let named = named_secrets(bound);
     let Some(store) = devstack::store::account_store(tools, &d.account_id)? else { bail!("{}", refusal(config, None, &named)) };
     let listed = devstack::store::list(tools, &devstack::store::Store::Account { account_id: &d.account_id, store_id: &store.id })?;
     let missing = devstack::store::missing(&named, &listed);
-    if !missing.is_empty() {
-        bail!("{}", refusal(config, Some(&store), &missing));
+    if missing.is_empty() {
+        return Ok((store, vec![]));
     }
-    Ok(store)
+    match live_providers(api, script).ok().and_then(|live| not_offered_yet(bound, &missing, &live)) {
+        Some(waiting) => Ok((store, waiting)),
+        None => bail!("{}", refusal(config, Some(&store), &missing)),
+    }
 }
 
 use devstack::valid_branch;
@@ -914,30 +970,39 @@ struct Cloudflare<'a> {
     http: reqwest::blocking::Client,
 }
 
+/// The version the newest deployment of the Worker `script` serves (one at
+/// 100%, as every deploy of ours is), or `None`: no Worker.
+fn deployed(api: &crate::cloudflare::Api, script: &str) -> Result<Option<String>> {
+    let (status, body) = api.call(reqwest::Method::GET, &format!("/workers/scripts/{script}/deployments"), None).map_err(anyhow::Error::msg)?;
+    if status == 404 {
+        return Ok(None);
+    }
+    anyhow::ensure!(status == 200 && body["success"] == true, "the Worker {script}'s deployments: {}", crate::cloudflare::errors(status, &body));
+    let mut deployments: Vec<&Value> = body["result"]["deployments"].as_array().into_iter().flatten().collect();
+    deployments.sort_by_key(|d| std::cmp::Reverse(d["created_on"].as_str().unwrap_or_default().to_string()));
+    let Some(newest) = deployments.first() else { return Ok(None) };
+    match newest["versions"].as_array().map(Vec::as_slice) {
+        Some([one]) if one["percentage"].as_f64() == Some(100.0) => Ok(one["version_id"].as_str().map(str::to_string)),
+        _ => bail!("the Worker {script}'s newest deployment is split between versions ({}): a gradual deployment is no deploy of ours; deploy it whole by hand first", newest["versions"]),
+    }
+}
+
+/// The Worker `script`'s version `id`, as Cloudflare answers it: not ready
+/// yet, just uploaded, is an error (code 100146, what wrangler met on
+/// 2026-10-24).
+fn read_version(api: &crate::cloudflare::Api, script: &str, id: &str) -> Result<Value> {
+    let (status, body) = api.call(reqwest::Method::GET, &format!("/workers/scripts/{script}/versions/{id}"), None).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(status == 200 && body["success"] == true, "the Worker {script}'s version {id}: {}", crate::cloudflare::errors(status, &body));
+    Ok(body["result"].clone())
+}
+
 impl Cloudflare<'_> {
-    /// The version the newest deployment serves (one at 100%, as every
-    /// deploy of ours is), or `None`: no Worker.
     fn deployed(&self) -> Result<Option<String>> {
-        let (status, body) = self.api.call(reqwest::Method::GET, &format!("/workers/scripts/{}/deployments", self.script), None).map_err(anyhow::Error::msg)?;
-        if status == 404 {
-            return Ok(None);
-        }
-        anyhow::ensure!(status == 200 && body["success"] == true, "the Worker {}'s deployments: {}", self.script, crate::cloudflare::errors(status, &body));
-        let mut deployments: Vec<&Value> = body["result"]["deployments"].as_array().into_iter().flatten().collect();
-        deployments.sort_by_key(|d| std::cmp::Reverse(d["created_on"].as_str().unwrap_or_default().to_string()));
-        let Some(newest) = deployments.first() else { return Ok(None) };
-        match newest["versions"].as_array().map(Vec::as_slice) {
-            Some([one]) if one["percentage"].as_f64() == Some(100.0) => Ok(one["version_id"].as_str().map(str::to_string)),
-            _ => bail!("the Worker {}'s newest deployment is split between versions ({}): a gradual deployment is no deploy of ours; deploy it whole by hand first", self.script, newest["versions"]),
-        }
+        deployed(&self.api, &self.script)
     }
 
-    /// The version `id`, as Cloudflare answers it: not ready yet, just
-    /// uploaded, is an error (code 100146, what wrangler met on 2026-10-24).
     fn read_version(&self, id: &str) -> Result<Value> {
-        let (status, body) = self.api.call(reqwest::Method::GET, &format!("/workers/scripts/{}/versions/{id}", self.script), None).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(status == 200 && body["success"] == true, "the Worker {}'s version {id}: {}", self.script, crate::cloudflare::errors(status, &body));
-        Ok(body["result"].clone())
+        read_version(&self.api, &self.script, id)
     }
 
     /// wrangler with `args` on the rendered config, its output passed
@@ -1206,9 +1271,17 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     // Cloudflare's API beside wrangler, with its token: the images, the
     // Worker's deployments (rollout.rs)
     let mut api = crate::cloudflare::Api::from_env(&d.account_id)?;
-    // and every store secret the Worker is bound to is there (read-only)
-    let store = preflight(&tools, &d, &config, &bound)?;
-    println!("secrets: the {} the config names are in the account's Secrets Store {} ({})", named_secrets(&bound).len(), store.name, store.id);
+    // and every store secret the Worker is bound to is there (read-only),
+    // but a provider's that is not offered yet: that provider is left out
+    // of this deploy, before anything is rendered from the config
+    let (store, waiting) = preflight(&tools, &api, &d, &config, &bound, &n.cell)?;
+    let warned = (!waiting.is_empty()).then(|| left_out(&config, &waiting));
+    if let Some(warning) = &warned {
+        println!("{warning}");
+        leave_out(&mut d, &waiting);
+    }
+    let bound = bound_for(&d, branch.as_deref())?;
+    println!("secrets: the {} this deploy binds are in the account's Secrets Store {} ({})", named_secrets(&bound).len(), store.name, store.id);
     // and every image it pins ready on Cloudflare's network, before anything
     // is built or changed: wrangler waits 15 minutes and no longer
     // (prepare.rs)
@@ -1313,6 +1386,13 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     }
     println!("  fragments     https://<name>{}.{}/", n.label_suffix.as_deref().unwrap_or(""), n.suffix);
     println!("  objects       curl -s {platform_url}/healthz/objects");
+    // said again where a deploy's log ends, and on the run's page
+    if let Some(warning) = &warned {
+        println!("{warning}");
+        if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            println!("::warning title=Providers not offered yet::{}", waiting.iter().map(|(provider, secret)| format!("{provider} (set {secret})")).collect::<Vec<_>>().join(", "));
+        }
+    }
     Ok(())
 }
 
@@ -2210,6 +2290,52 @@ mod tests {
         let said = refusal(config, None, &named);
         assert!(said.starts_with("the account has no Secrets Store yet"), "{said}");
         assert_eq!(said.matches("cargo xtask secret set ").count(), named.len(), "{said}");
+    }
+
+    /// A provider whose secret is not set yet is not offered yet, never a
+    /// deploy refused (FIN-509): the deploy leaves it out, by name, and says
+    /// the command that sets its secret, so a config may land before its
+    /// setup. A secret of the deployment's own that is missing, or one of a
+    /// provider the live Worker offers now, refuses the deploy as it always
+    /// did: a secret gone from under a working provider is a mistake.
+    #[test]
+    fn a_provider_whose_secret_is_not_set_is_not_offered_yet() {
+        let mut d = deployment(None, None);
+        d.providers = vec![
+            json!({ "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"], "key": "fragment-xai-api-key" }),
+            json!({ "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"],
+                "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "access": { "read": { "scopes": ["scope.readonly"] }, "write": { "scopes": ["scope"] } } },
+                "key": "fragment-google-oauth-secret" }),
+        ];
+        let mut d = checked(d).unwrap();
+        let b = bound(&d).unwrap();
+        let named = named_secrets(&b);
+        let lacking = |gone: &[&str]| named.iter().filter(|(_, name)| gone.contains(name)).cloned().collect::<Vec<_>>();
+        let live = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let waiting = |gone: &[&str], offered: &[&str]| not_offered_yet(&b, &lacking(gone), &live(offered));
+        let google = ("google".to_string(), "fragment-google-oauth-secret".to_string());
+        let xai = ("xai".to_string(), "fragment-xai-api-key".to_string());
+
+        // not set, and not offered now: it waits, whichever kind it is
+        assert_eq!(waiting(&["fragment-google-oauth-secret"], &["xai"]), Some(vec![google.clone()]));
+        assert_eq!(waiting(&["fragment-xai-api-key", "fragment-google-oauth-secret"], &[]), Some(vec![xai.clone(), google.clone()]), "a first deploy: no Worker offers anything");
+        // offered now: its secret is gone from under it, and the deploy stops
+        assert_eq!(waiting(&["fragment-google-oauth-secret"], &["xai", "google"]), None);
+        assert_eq!(waiting(&["fragment-xai-api-key", "fragment-google-oauth-secret"], &["xai"]), None, "one of two offered now refuses both");
+        // the deployment's own secret missing refuses it, with a provider's or without
+        assert_eq!(waiting(&["fragment-host-secret"], &[]), None);
+        assert_eq!(waiting(&["fragment-host-secret", "fragment-google-oauth-secret"], &[]), None);
+        assert_eq!(waiting(&[], &[]), None, "nothing missing is nothing to leave out");
+
+        // what it says, and what it then deploys: the catalog and the bindings without it
+        let said = left_out(Path::new("/home/p/preview.jsonc"), std::slice::from_ref(&google));
+        assert!(said.starts_with("WARNING: NOT OFFERED YET: google."), "{said}");
+        assert!(said.contains("providers: google  cargo xtask secret set fragment-google-oauth-secret --config /home/p/preview.jsonc"), "{said}");
+        leave_out(&mut d, &[google]);
+        let (catalog, _) = catalog_of(&d).unwrap();
+        assert!(catalog.get("google").is_none() && catalog.get("xai").is_some(), "only what waits is left out");
+        let rebound = bound(&d).unwrap();
+        assert!(named_secrets(&rebound).iter().all(|(_, name)| *name != "fragment-google-oauth-secret") && rebound.operator_keys == [xai], "and its secret is not bound");
     }
 
     /// Goal: a config without `connectors` leaves the cell its default; one

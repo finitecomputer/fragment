@@ -17,6 +17,10 @@ with is the row it deploys, and a fix here reaches every deployment
   browser-bound connect.
 - Any other field beside `row` replaces the row's: a deployment's own
   `note`, or its `accounts_max`. Never its `name` or `kind`.
+- A config may name a row before its setup is done. While the store lacks
+  its secret, and the live deployment does not offer it, a deploy leaves
+  it out with a warning and offers it on the first deploy after the secret
+  is set (docs/secrets.md, The Secrets Store).
 
 A row holds none of a deployment's facts. A connection is added here as two
 things, and nothing else is edited (FIN-509):

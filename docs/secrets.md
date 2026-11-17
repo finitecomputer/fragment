@@ -129,8 +129,15 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
 The deployment's config names each secret by its store name. `cargo
 xtask deploy` binds it under a name fixed in `fragment_core::secrets_store`,
 reads no value, and refuses before building when the store lacks one the
-config names. The only Worker secrets a deploy uploads are a branch's
-test secret and its own Stripe webhook secret (decision 58).
+config names. One case deploys: a provider whose secret is not set yet,
+and which the live deployment does not offer, is left out of that deploy's
+catalog with a warning (at the store's check, at the deploy's end, and on
+a CI run's page), so a config may name a provider before its setup is
+done; the next deploy after its secret is set offers it. A provider the
+live deployment offers is never left out: its secret missing refuses the
+deploy, as the deployment's own do. The only Worker secrets a deploy
+uploads are a branch's test secret and its own Stripe webhook secret
+(decision 58).
 
 Values go in only through `cargo xtask secret set|gen|list`
 (xtask/src/secret.rs): from wrangler's hidden prompt, standard input, or
