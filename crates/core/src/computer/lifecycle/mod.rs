@@ -614,9 +614,13 @@ impl Lifecycle {
                 if matches!(self.phase, Phase::Starting { .. } | Phase::Awake { .. }) {
                     self.hold(now_ms + IDLE_MS);
                 }
-                if socket == Socket::Keepalive && was == 1 && matches!(self.phase, Phase::Awake { .. }) {
-                    // work ended: it is saved once it settles
-                    self.busy_since_ms = None;
+                if was == 1 && matches!(self.phase, Phase::Awake { .. }) {
+                    // work ended, its turns' or what its owner did through its
+                    // ports: it is saved once it settles (a close within it
+                    // puts that off, so a burst of them saves once)
+                    if socket == Socket::Keepalive {
+                        self.busy_since_ms = None;
+                    }
                     self.save_due_ms = Some(now_ms + SAVE_SETTLE_MS);
                 }
             }

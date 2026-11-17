@@ -17,8 +17,9 @@
 //!   (twenty minutes after a record or the last socket closed, a minute
 //!   after a pre-wake). An always-on computer never sleeps.
 //! - **Saving** (docs/computers.md, Durability, step 1). `/data` is saved when
-//!   work ends (the guest's last keepalive closes, and `SAVE_SETTLE_MS`
-//!   pass with none opened again, so turns back to back save once), every
+//!   work ends (the guest's last keepalive or its owner's last port tab
+//!   closes, and `SAVE_SETTLE_MS` pass with no keepalive opened again, so
+//!   turns back to back, or tabs, save once), every
 //!   `SAVE_EVERY_MS` while a keepalive stays open, and at every sleep. A
 //!   save is a hold (the DO touches `/run/computer/hold` and waits for the
 //!   guest's `/run/computer/held`), the save, and, awake, the hold let go.
