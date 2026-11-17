@@ -516,7 +516,8 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     // a link-visible org fragment (the review's): its share link's floor is
     // a link holder's alone, so a viewer who never held it, offboarded, is
     // stopped as on a members-only one: their webhook hears no more and
-    // ends, their browser is pushed to no more, their pinging socket
+    // ends, their browser is pushed to no more (invited back first, so
+    // their row is gone and none decides it), their pinging socket
     // closes; a browser of someone who holds only the link still hears
     let made4 = api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orglink"), "template": "calories", "visibility": "link" })))?;
     let name4 = made4.body["name"].as_str().context("the org's link fragment")?.to_string();
@@ -553,17 +554,19 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
             Err(e) => break e.to_string(),
         }
     };
+    // invited back before the next push: that invite takes their row from before
+    let ivy_asked = api.signed(&ada, "POST", &format!("/api/f/{name4}/invites"), Some(&json!({ "email": Api::email_of(&ivy), "role": "viewer" })))?;
     let said_out = say4("l2", "after ivy left")?;
     let pushed_out = pushed4("out")?;
     let heard_out = s.eventually(WAIT, || s.push.hooked("ada4").len() == 2 && hears("holder4", "out"));
     let ivy_subs = api.signed(&ada, "GET", &format!("/api/f/{name4}/subscriptions"), None)?;
     let ivy_sub_kept = ivy_subs.body["subscriptions"].as_array().is_some_and(|subs| subs.iter().any(|x| x["principal"] == ivy_id.as_str()));
     s.ok(
-        "a link-visible org fragment: offboarded, a viewer who never held its link hears no more by webhook (its subscription ends) or push, and their pinging socket closes (4001), while a browser of someone who holds only its link is still pushed to",
+        "a link-visible org fragment: offboarded, a viewer who never held its link hears no more by webhook (its subscription ends) or push, though invited back since (their row gone), and their pinging socket closes (4001), while a browser of someone who holds only its link is still pushed to",
         made4.status == 200 && wrote4.status == 200 && deployed4.status == 200 && ivy_in.status == 200 && ivy_hello["role"] == "viewer"
             && hooks4.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200)) && browsers4.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200))
             && said_in.status == 200 && pushed_in.status == 200 && heard_in
-            && ivy_out.status == 200 && aged4.status == 200 && ivy_closed.contains("4001")
+            && ivy_out.status == 200 && aged4.status == 200 && ivy_closed.contains("4001") && ivy_asked.status == 200
             && said_out.status == 200 && pushed_out.status == 200 && heard_out
             && s.push.hooked("ivy4").len() == 1 && !hears("ivy4", "out") && ivy_subs.status == 200 && !ivy_sub_kept,
         json!({ "ivyHooks": s.push.hooked("ivy4").len(), "ivyPushed": s.push.received("ivy4"), "ivyClosed": ivy_closed, "ivySubKept": ivy_sub_kept, "holder": s.push.received("holder4") }),

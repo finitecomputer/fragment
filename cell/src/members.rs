@@ -592,15 +592,21 @@ impl FragmentCell {
     /// `gone`'s memberships taken away, each as a removal takes it: its
     /// row, its listed records, its subscriptions, its computer's place,
     /// its list's row and its sockets (an agent's owner's too, who has no
-    /// standing of their own left). Bounded: one person and their agents.
+    /// standing of their own left); an org's, its browsers' pushes too,
+    /// which a link's floor would otherwise reach (`receivers`). Bounded:
+    /// one person and their agents.
     fn revoke(&self, gone: &[String]) -> CellResult<()> {
         assert!(gone.len() as u64 <= 1 + limits::AGENTS_PER_OWNER_MAX, "one person and their agents");
+        let org = self.owner()?.org().is_some();
         let mut agents_left = false;
         for who in gone {
             let removed = self.rows("DELETE FROM members WHERE principal = ? RETURNING owner, kind", vec![who.as_str().into()])?;
             agents_left |= removed.first().is_some_and(|r| r["kind"] == "agent");
             self.listed_left(who)?;
             self.drop_subscriptions(who)?;
+            if org {
+                self.exec("DELETE FROM push_subs WHERE principal = ?", vec![who.as_str().into()])?;
+            }
             self.agent_removed(who)?;
             self.index_change(who, None)?;
             self.close_sockets(&format!("p:{who}"), "membership revoked");
@@ -608,6 +614,9 @@ impl FragmentCell {
             if let Some(owner) = removed.first().and_then(|r| r["owner"].as_str()) {
                 let still = self.member_role(owner)?.is_some() || !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![owner.into()])?.is_empty();
                 if !still {
+                    if org {
+                        self.exec("DELETE FROM push_subs WHERE principal = ?", vec![owner.into()])?;
+                    }
                     self.close_sockets(&format!("p:{owner}"), "their agent's membership was revoked");
                 }
             }
