@@ -424,6 +424,11 @@ pub(crate) enum MetaKey {
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
     AgentIdentity,
+    /// What this agent may use of its owner's (`fragment_core::grants`):
+    /// set by its owner in person, through their computer (runs_on.rs), or
+    /// taken once from that computer's row from before the move. None:
+    /// every provider they have, each connection's default account.
+    Grants,
     /// Its door's public key (`<door> <64 hex>`), registered by a link its
     /// owner started, gone once they unlink (fragment_core::door).
     Door,
@@ -542,6 +547,7 @@ impl MetaKey {
             MetaKey::TestWokeHeld => "test_woke_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
+            MetaKey::Grants => "grants",
             MetaKey::Door => "door",
             MetaKey::DoorTicket => "door_ticket",
             MetaKey::DoorActor => "door_actor",
@@ -1064,6 +1070,9 @@ impl FragmentCell {
             // Only a computer's routes and egress set the header; the router never passes it.
             if req.headers().get(crate::computer::INTERNAL_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            if route == "grants" {
+                return json_response(&self.grants(&req.bytes().await?)?);
             }
             let route = route.to_string();
             let body = req.bytes().await?;

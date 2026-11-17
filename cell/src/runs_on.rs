@@ -21,6 +21,7 @@
 //!   own. A row that fails for a passing reason is tried again from the
 //!   alarm; an agent that runs on no computer is told nothing.
 
+use fragment_core::grants::Grants;
 use fragment_core::{connectors::Action, door, npub};
 use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
@@ -124,6 +125,57 @@ impl FragmentCell {
         headers.set("x-content-type-options", "nosniff")?;
         let (_, body) = upstream.into_parts();
         Ok(Response::from_body(body)?.with_headers(headers))
+    }
+
+    /// `computer/grants`: what this agent may use of its owner's
+    /// (`fragment_core::grants`), asked by the computer it runs on at each
+    /// use (`{computer, identity}`): what it holds, or, holding none of its
+    /// own, that computer's row from before the move (`taken`), taken once;
+    /// then its owner's change, in person (`owner` with `connections`, or
+    /// with `provider` and `account`: their computer's routes, which a
+    /// signed person alone reaches). Read field by field, as this file's
+    /// other bodies are (the cell's Wasm budget).
+    pub(crate) fn grants(&self, body: &[u8]) -> CellResult<Grants> {
+        use fragment_core::grants::{answered, Change, Row};
+        self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
+        let body: Value = crate::json_body(body)?;
+        let text = |k: &str| body[k].as_str().unwrap_or("");
+        self.assigned_to(text("computer"))?;
+        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(text("identity")) {
+            return Err(CellError::new(ErrorCode::Forbidden, "that computer's row is another agent's: this fragment was made again since"));
+        }
+        let held = match self.meta(MetaKey::Grants)? {
+            Some(stored) => Some(Grants::read(&stored).map_err(|e| CellError::host(format!("its stored grants: {e}")))?),
+            None => None,
+        };
+        let taken = match &body["taken"] {
+            Value::Null => None,
+            v => Some(Row::of(v).ok_or_else(|| CellError::invalid("a row is its connections as stored and its accounts"))?),
+        };
+        let invalid = || CellError::invalid("grants name at most a catalog's providers, sorted and once, each account a Pipes id");
+        let change = match (body.get("connections"), body["provider"].as_str()) {
+            (None, None) => None,
+            (Some(Value::Null), _) => Some(Change::Connections(None)),
+            (Some(Value::Array(list)), _) => Some(Change::Connections(Some(list.iter().map(|p| p.as_str().map(str::to_string)).collect::<Option<Vec<_>>>().ok_or_else(invalid)?))),
+            (None, Some(provider)) => Some(Change::Account { provider: provider.to_string(), account: body["account"].as_str().map(str::to_string) }),
+            _ => return Err(invalid()),
+        };
+        let changed = change.is_some();
+        if changed && text("owner") != self.must(MetaKey::Owner)? {
+            return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner, in person, changes what it may use"));
+        }
+        let grants = answered(held.as_ref(), taken.as_ref(), change).map_err(|e| CellError::invalid(format!("{e}: {}", invalid().message)))?;
+        // a row taken is held from then on, the default too: none taken again
+        let keep = match &held {
+            Some(held) => *held != grants,
+            None => taken.is_some() || changed,
+        };
+        if keep {
+            self.set_meta(MetaKey::Grants, &grants.stored())?;
+            let by = if changed { "changed by its owner" } else { "taken from its computer's row" };
+            self.event("agent.grants", &format!("what it may use of its owner's, {by}"), json!({ "grants": grants, "moved": !changed }));
+        }
+        Ok(grants)
     }
 
     /// `computer/…`: the internal calls a computer's routes and egress make.
