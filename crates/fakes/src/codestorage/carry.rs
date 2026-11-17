@@ -182,8 +182,7 @@ impl StateRepo {
 mod tests {
     use super::*;
 
-    /// A state of one repo: three commits, main a merge of a side commit,
-    /// live at the first.
+    /// A state of one repo: two commits on main, live at the first.
     fn state() -> super::super::State {
         let cs = super::super::CodeStorage::start(super::super::Options::default()).unwrap();
         cs.seed_repo("todo--abc", &[("index.html", b"<p>one</p>"), ("a dir/q\"uote.txt", b"q")]);
@@ -192,6 +191,31 @@ mod tests {
         cs.external_commit("todo--abc", "main", &[("index.html", Some(b"<p>two</p>")), ("a dir/q\"uote.txt", None)], "two");
         let st = cs.with(|st| serde_json::to_vec(st).unwrap());
         serde_json::from_slice(&st).unwrap()
+    }
+
+    // Goal: a merge commit keeps both its parents, its first as `from`
+    // and its second as `merge`, each written before it. Method: a merge
+    // of live's tip and main's added to the state (the fake makes one as a
+    // deploy's merge does), then its stream read back.
+    #[test]
+    fn a_merge_keeps_both_parents() {
+        let mut st = state();
+        let repo = st.repos.values_mut().next().unwrap();
+        let (main, live) = (repo.branches["main"].clone(), repo.branches["live"].clone());
+        let mut merged = repo.commits[&main].clone();
+        merged.parents = vec![live.clone(), main.clone()];
+        merged.message = "merge".into();
+        merged.at_ms += 1000;
+        let id = "c".repeat(40);
+        repo.commits.insert(id.clone(), merged);
+        repo.branches.insert("live".into(), id.clone());
+        let r = state_repo(st.repos.into_values().next().unwrap()).unwrap();
+        assert_eq!(r.order.last(), Some(&id), "after both its parents");
+        let text = String::from_utf8(r.carried().stream).unwrap();
+        let block = &text[text.find(&format!("commit {LEGACY_PREFIX}{id}\n")).unwrap()..];
+        let block = &block[..block.find("\n\n").unwrap()];
+        let mark = |c: &str| text[text.find(&format!("commit {LEGACY_PREFIX}{c}\n")).unwrap()..].lines().nth(1).unwrap().trim_start_matches("mark ").to_string();
+        assert!(block.contains(&format!("from {}\nmerge {}\n", mark(&live), mark(&main))), "{block}");
     }
 
     // Goal: a carried repo's stream holds every blob once, every commit

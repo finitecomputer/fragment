@@ -56,7 +56,7 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
 
     // another folder pulls the real bytes; a folder that has them adopts them
     let other = s.dir("blobs-pull");
-    let before = s.mark(&repo);
+    let before = s.mark_global(&repo);
     s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&other)]);
     s.ok("a pull writes the pointer's bytes", std::fs::read(other.join("site/clip.bin")).is_ok_and(|b| b == video), "");
     let out = s.cli(api, &home, &["verify", &name, "--dir", &dir_of(&other), "--json"]);
