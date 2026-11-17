@@ -68,6 +68,11 @@ pub enum Phase {
     },
 }
 
+/// For `skip_serializing_if`: a field at its default is not stored.
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
 impl Phase {
     /// Asleep with no start due.
     pub const ASLEEP: Phase = Phase::Asleep { retry: None };
@@ -175,6 +180,18 @@ pub struct Lifecycle {
     /// was kept: none of that life's work is counted kept (`Ended::quiet`).
     #[serde(default)]
     kept_ms: i64,
+    /// A record or a join for its agents was posted at this time
+    /// (`Event::Posted`) after its guest's last work ended, and no keepalive
+    /// has opened since: work its guest has not taken up, which no save
+    /// holds. Cleared when a keepalive opens, or at a sleep that owes no
+    /// start. None in a lifecycle stored before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owed_ms: Option<i64>,
+    /// When its guest's last keepalive closed (its last work ended): a
+    /// record posted before it was there while its guest worked, which
+    /// queues what comes. 0 when none has, or stored before it was kept.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    closed_ms: i64,
     /// The previous release's fields (`Legacy`), by its names, kept equal
     /// to the phase (`Legacy::of`) at every step and stored with it for one
     /// release. Plain fields, never `#[serde(flatten)]`: its buffering
@@ -228,6 +245,8 @@ impl Lifecycle {
             unmetered: None,
             worked_ms: 0,
             kept_ms: 0,
+            owed_ms: None,
+            closed_ms: 0,
             wake_after_sleep: false,
             retry_at_ms: None,
             failed_ms: 0,
@@ -364,6 +383,13 @@ impl Lifecycle {
         assert!(rules.unsaved_max_ms >= 0, "a bound is a span of time");
         let mut step = Step::default();
         match (self.phase.clone(), event) {
+            (_, Event::Posted { at_ms }) => {
+                // a guest at work queues it; one whose work ended after it
+                // was there while it was posted
+                if self.keepalives == 0 && at_ms > self.closed_ms {
+                    self.owed_ms = Some(self.owed_ms.map_or(at_ms, |owed| owed.min(at_ms)));
+                }
+            }
             (phase, Event::Wake { why }) => {
                 // a message for its agents, or a fragment to follow: work
                 if matches!(why, Wake::Record | Wake::Joined) {
@@ -478,7 +504,12 @@ impl Lifecycle {
             // a restore's or a snapshot's fallback no strike (#1004: as a
             // crash, one transient error was three strikes in three seconds)
             (Phase::Starting { generation, destroying: true, .. }, Event::Exited { generation: g }) if g == generation => {}
-            (Phase::Sleeping { generation, .. }, Event::Asleep { generation: g }) if g == generation => {
+            (Phase::Sleeping { generation, owes_start, .. }, Event::Asleep { generation: g }) if g == generation => {
+                // a sleep that owes no start let go of any wake it held: its
+                // hold ran out, or its owner put it to sleep
+                if !owes_start {
+                    self.owed_ms = None;
+                }
                 self.end_life(LifeEnd::Sleep, now_ms, &mut step);
                 self.gone(now_ms, &mut step);
             }
@@ -571,7 +602,11 @@ impl Lifecycle {
             ) => {}
             (_, Event::Opened { socket }) => {
                 match socket {
-                    Socket::Keepalive => self.keepalives += 1,
+                    Socket::Keepalive => {
+                        self.keepalives += 1;
+                        // its guest took up the work it was woken for
+                        self.owed_ms = None;
+                    }
                     Socket::Tab => self.tabs += 1,
                 }
                 self.worked(now_ms);
@@ -605,6 +640,9 @@ impl Lifecycle {
                 };
                 let was = *count;
                 *count = count.saturating_sub(1);
+                if socket == Socket::Keepalive && was == 1 {
+                    self.closed_ms = self.closed_ms.max(now_ms);
+                }
                 // one it counted (none after its owner's sleep let go of them)
                 if was > 0 {
                     self.worked(now_ms);

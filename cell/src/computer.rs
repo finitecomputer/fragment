@@ -542,6 +542,9 @@ fn wiped_computer() -> CellError {
 #[derive(Deserialize)]
 struct WakeBody {
     why: Wake,
+    /// When the record (or the join's notice) that brings it was posted.
+    #[serde(default)]
+    at: Option<i64>,
 }
 
 /// `computer/export`: its owner's export asks for the save it copies.
@@ -2680,6 +2683,10 @@ impl ComputerCell {
             "computer/wake" => {
                 let b: WakeBody = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
+                // work for its guest, unless taken up already (docs/computers.md, Lifecycle)
+                if let Some(at_ms) = b.at.filter(|_| matches!(b.why, Wake::Record | Wake::Joined)) {
+                    self.drive(Event::Posted { at_ms }).await?;
+                }
                 self.wake(b.why).await?;
                 json_response(&self.view()?)
             }
