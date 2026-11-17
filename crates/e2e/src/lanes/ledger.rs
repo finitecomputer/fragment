@@ -486,11 +486,20 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "before": before, "after": after, "charge": paid }),
     );
     let call = s.ai.calls().last().cloned();
-    s.ok(
-        "the gateway's metadata names the payer by an opaque id, never a name",
-        call.as_ref().is_some_and(|c| c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16 && u.bytes().all(|b| b.is_ascii_hexdigit()) && !owner_id.contains(u)) && c.body["reasoning_effort"] == "low"),
-        format!("{:?}", call.map(|c| c.metadata)),
-    );
+    match s.ai_through_the_node() {
+        // the box's node has no AI Gateway: its binding takes the metadata
+        // and lets it go, so no endpoint hears a payer at all
+        true => s.ok(
+            "on the box's node the gateway's metadata reaches no endpoint, and the call's own fields do",
+            call.as_ref().is_some_and(|c| c.metadata.is_null() && c.body["reasoning_effort"] == "low"),
+            format!("{:?}", call.map(|c| (c.metadata, c.body["reasoning_effort"].clone()))),
+        ),
+        false => s.ok(
+            "the gateway's metadata names the payer by an opaque id, never a name",
+            call.as_ref().is_some_and(|c| c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16 && u.bytes().all(|b| b.is_ascii_hexdigit()) && !owner_id.contains(u)) && c.body["reasoning_effort"] == "low"),
+            format!("{:?}", call.map(|c| c.metadata)),
+        ),
+    }
 
     // ---- a call that fails for good is charged nothing (nothing was held)
     s.ai.fail_next(&[400]);

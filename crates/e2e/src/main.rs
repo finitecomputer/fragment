@@ -553,6 +553,13 @@ impl Suite {
         self.celld.is_some()
     }
 
+    /// Whether the cell's Workers AI calls go through the node's own `ai`
+    /// binding (celld with `CELLD_AI_FILE`), the models the box does not
+    /// serve on to the fake through its `"*"`.
+    pub fn ai_through_the_node(&self) -> bool {
+        self.celld.as_ref().is_some_and(|c| c.ai_file.is_some())
+    }
+
     /// Whether Whisper is the box's own model here (celld with a
     /// `CELLD_AI_FILE` naming it: docs/self-host.md, "Local models on the
     /// box's Mac"), not the fake's: it hears the audio itself.
