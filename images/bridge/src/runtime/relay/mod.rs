@@ -224,7 +224,7 @@ struct Inflight {
     asking: bool,
     /// Its question was answered by a voice memo alone (`Command::Tell`'s
     /// `voice`), which Hermes hears or not: it is `asking` still (a Stop
-    /// says `skip` to the clarify) until the turn speaks or steps
+    /// says `skip` to the clarify) until the turn speaks, calls or steps
     /// (`went_on`).
     hearing: bool,
     /// A clarify's card of choices is open, not yet answered.
@@ -817,7 +817,13 @@ impl Loop {
 
     async fn wire(&mut self, w: Wire) {
         match w {
-            Wire::Call { turn, call } => self.emit(Event::Called { turn, call }).await,
+            Wire::Call { turn, call } => {
+                // a call is the turn going on, past a voice answer heard
+                if let Some(f) = self.inflight.get_mut(&turn) {
+                    f.went_on();
+                }
+                self.emit(Event::Called { turn, call }).await
+            }
             Wire::Tool { turn, step } => self.step(&turn, step).await,
             Wire::Activity { conn, working, child } => {
                 // a helper's end goes before the hold it leaves lets go
@@ -1297,7 +1303,7 @@ impl Loop {
     /// once (a file still coming is then too late for its reply).
     async fn out(&mut self, turn: &str, e: Event) {
         let Some(f) = self.inflight.get_mut(turn) else { return };
-        if matches!(e, Event::Called { .. } | Event::Step { .. }) {
+        if matches!(e, Event::Step { .. }) {
             f.went_on();
         }
         if !f.waits() && f.queue.is_empty() {

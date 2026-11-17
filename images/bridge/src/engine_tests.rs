@@ -1453,6 +1453,11 @@ fn a_question_is_answered_with_a_voice_memo() {
     ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 11);
     let mixed = said(&mut e, &a, &v, 7, "npub1paul", json!({ "attachments": [memo("voice-memo.webm"), photo("plant.png")] }), T0 + 12);
     assert!(matches!(&commands(&mixed)[..], [Command::Tell { voice: false, .. }]), "a photo with it: {:?}", commands(&mixed));
+    // a memo past Hermes' media cap is never hosted: its file's line, a written answer
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 13);
+    let big = json!({ "sha256": "e".repeat(64), "size": limits::HERMES_MEDIA_MAX_BYTES + 1, "type": "audio/wav", "name": "long.wav" });
+    let large = said(&mut e, &a, &v, 8, "npub1paul", json!({ "attachments": [big] }), T0 + 14);
+    assert!(matches!(&commands(&large)[..], [Command::Tell { voice: false, .. }]) && !e.state().turns[&turn].asking, "too large to hear: {:?}", commands(&large));
 }
 
 /// Goal: a question in words is answered with files too (photos sent as

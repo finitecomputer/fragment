@@ -1461,3 +1461,51 @@ async fn progress_without_observations_is_no_step() {
     });
     bridge.stop().await;
 }
+
+/// A clarify answered (by a voice memo, or in words), then the model's next
+/// response a tool call alone (its intent, `Called`, on the activity
+/// socket), then a Stop while the tool runs: what Hermes heard. A voice
+/// answer's question is open until the turn goes on (`Inflight::hearing`),
+/// and a call is the turn going on, so the Stop says no `skip` to a clarify
+/// no longer waiting (Hermes would take it as a message: the council on
+/// this change, 2026-11-17).
+async fn stop_while_a_call_runs_after_an_answer(answer_by_voice: bool) -> Vec<Value> {
+    let (fake, bridge, hermes, _dir) = setup(if answer_by_voice { "relay-call-voice" } else { "relay-call-words" }, &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let bytes = bytes::Bytes::from_static(b"RIFF a voice memo saying blue");
+    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("audio/wav".into(), bytes.clone())));
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "clarify a color then call" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the clarify's card", |w| !work_of(w, &chat, &turn, "turn.prompt").is_empty()).await;
+    let p = fake.with(|w| work_of(w, &chat, &turn, "turn.prompt")[0].clone());
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    fake.until(WAIT, "the chat told whose answer it waits for", |w| !work_of(w, &chat, &turn, "turn.asked").is_empty()).await;
+    if answer_by_voice {
+        fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    } else {
+        fake.say(&chat, &person("paul"), json!({ "text": "blue" }));
+    }
+    fake.until(WAIT, "the call's intent posted", |w| !work_of(w, &chat, &turn, "turn.call").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
+    fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let heard = hermes.with(|s| s.heard.clone());
+    bridge.stop().await;
+    heard
+}
+
+/// Goal: a Stop while a tool runs after a written answer says no `skip`.
+#[tokio::test]
+async fn a_stop_after_a_written_answer_and_a_call_says_no_skip() {
+    let heard = stop_while_a_call_runs_after_an_answer(false).await;
+    assert!(!heard.iter().any(|e| e["text"] == wire::STOP_WORDS), "no stray skip: {heard:?}");
+}
+
+/// Goal: as after a written answer, after a voice answer Hermes heard.
+#[tokio::test]
+async fn a_stop_after_a_voice_answer_and_a_call_says_no_skip() {
+    let heard = stop_while_a_call_runs_after_an_answer(true).await;
+    assert!(!heard.iter().any(|e| e["text"] == wire::STOP_WORDS), "a stray `skip` reached Hermes after its clarify was answered: {:?}", heard.iter().map(|e| e["text"].clone()).collect::<Vec<_>>());
+}

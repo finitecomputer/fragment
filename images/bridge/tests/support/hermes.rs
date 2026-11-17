@@ -664,6 +664,31 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
             gw.act(react("👀", true)).await;
             return;
         }
+        if text.contains("then call") {
+            // `… then call`: the clarify answered, the model's next response
+            // is a tool call alone: its intent on the activity socket (as
+            // Hermes' post_api_request says it), then the tool runs until an
+            // interrupt stops it
+            let base = Base { host: gw.addr.ip().to_string(), port: gw.addr.port(), prefix: String::new() };
+            let mut activity = net::connect_ws(&base, "/relay/activity", &[("authorization", bearer(&gw.id, &gw.secret))]).await.unwrap();
+            activity.next().await.unwrap().unwrap();
+            let frame = json!({ "turn": mid, "response": "r1", "call": { "position": 0, "tool_call_id": "call1", "tool": "terminal", "args": "{}" } });
+            activity.send(Message::text(frame.to_string())).await.unwrap();
+            assert_eq!(activity.next().await.unwrap().unwrap().into_text().unwrap(), "called");
+            activity.close(None).await.unwrap();
+            gw.seen.lock().unwrap().ops.push("called".into());
+            // the tool runs: an interrupt stops it
+            loop {
+                match rx.recv().await {
+                    Some(Heard::Interrupt) | None => break,
+                    _ => {}
+                }
+            }
+            gw.seen.lock().unwrap().interrupted += 1;
+            done();
+            gw.act(react("👀", true)).await;
+            return;
+        }
         reply = format!("{reply} (chose: {})", chose.unwrap_or_default());
     }
     if gw.seen.lock().unwrap().dead {

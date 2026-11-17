@@ -1953,7 +1953,9 @@ impl Engine {
             // 2026-11-17: words typed with a memo are a written answer, as
             // they were, since Hermes answers a clarify heard in audio with
             // the audio's words alone)
-            let voice = text.trim().is_empty() && !m.attachments.is_empty() && m.attachments.iter().all(|a| a.media_type.starts_with("audio/"));
+            // within Hermes' media cap, as the relay hosts it: a larger one
+            // is its file's line, a written answer
+            let voice = text.trim().is_empty() && !m.attachments.is_empty() && m.attachments.iter().all(|a| a.media_type.starts_with("audio/") && a.size <= limits::HERMES_MEDIA_MAX_BYTES);
             let t = self.state.turns.get_mut(&id).expect("found");
             t.asking = voice;
             t.hearing = voice;
