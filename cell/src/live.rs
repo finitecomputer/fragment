@@ -181,11 +181,8 @@ fn state_of(ws: &WebSocket) -> Option<LiveState> {
 struct Follows {
     id: String,
     subs: Vec<String>,
-    /// Who it is, and when the registry last said so (`may_tell`); an
-    /// attachment without them reads as a check long due.
-    #[serde(default)]
+    /// Who it is, and when the registry last said so (`may_tell`).
     principal: String,
-    #[serde(default)]
     checked_at: i64,
 }
 
@@ -286,7 +283,8 @@ impl FragmentCell {
     }
 
     /// One socket's presence changed, to every socket (its own too): one
-    /// frame, encoded once, and no attachment read.
+    /// frame, encoded once, and no attachment read but an org's
+    /// (`may_tell`).
     fn broadcast_presence(&self, change: Present) {
         let frame = LiveOut::Presence(change).encode();
         let (org, now) = (self.org_owned(), js::now_ms());
@@ -503,14 +501,9 @@ impl FragmentCell {
         Ok(self.require(&caller, link, Role::Public).map_or(true, |now| now < role))
     }
 
-    /// In an org's fragment, whether a socket's word may go to `st` now:
-    /// one signed in whose identity check is due (`LIVE_IDENTITY_MS`) is
-    /// closed instead, to reconnect and be decided again. A socket that
-    /// never sends a frame is never asked about again (`still_who` runs at
-    /// a frame), so an offboarding reaches it here, at the latest
-    /// `LIVE_IDENTITY_MS` after its last check, before any record, draft
-    /// or presence goes to it. A person's fragment, and an anonymous
-    /// socket: always.
+    /// Whether a record, draft or presence may go to `st` now, or it is
+    /// closed for its due check instead (the module doc). A person's
+    /// fragment, and an anonymous socket: always.
     fn may_tell(&self, org: bool, ws: &WebSocket, st: &Follows, now: i64) -> bool {
         if !org || st.principal.starts_with(npub::ANON_PREFIX) || now - st.checked_at < limits::LIVE_IDENTITY_MS {
             return true;

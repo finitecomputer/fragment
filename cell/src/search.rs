@@ -169,11 +169,8 @@ impl FragmentCell {
             Err(e) => return console_error!("{name}: the search outbox did not read ({:?}): {}", e.code, e.message),
         };
         assert!(due.len() as i64 <= FLUSH_PEOPLE_MAX, "a flush sends a bounded set of cursors");
-        // an org's: a member offboarded since (or a rehire's row from
-        // before) is sent no more of its messages, and their row is taken
-        // from their list, which drops what it held of them (members.rs
-        // `flush_index` does the same for a row it sends); not knowing who
-        // is in, it sends nothing now, and the claims lapse for a later pass
+        // an org's (the module doc); not knowing who is in, it sends
+        // nothing now, and the claims lapse for a later pass
         let people: Vec<String> = due.iter().map(|c| c.principal.clone()).collect();
         let stale = match self.stale_members(&people).await {
             Ok(stale) => stale,
