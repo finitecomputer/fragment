@@ -366,12 +366,17 @@ pub fn send(call: &Call, vars: &[(String, String)], stdin: &mut dyn Read, spill:
 /// is never left for one. Its bytes; or, where the body was cut short, why.
 /// An error is the file's own (a folder that is not there): the caller's
 /// mistake.
+///
+/// The file beside it is this call's own: a name no other call has, made
+/// anew, as `home::extract` makes its own. A file or a link already there
+/// under a name one could guess is never opened, so nothing is written
+/// through it; and only what this call made is removed.
 fn save(path: &Path, head: &[u8], rest: &mut dyn Read, stated: Option<u64>) -> Result<Result<u64, String>> {
     let name = path.file_name().ok_or_else(|| anyhow!("--out names a file, not {}", path.display()))?;
-    let part = path.with_file_name(format!(".{}.part", name.to_string_lossy()));
+    let part = path.with_file_name(format!(".{}.fragment-{:016x}", name.to_string_lossy(), rand::random::<u64>()));
     let failed = |e: std::io::Error| anyhow!("{}: {e}", path.display());
+    let mut file = std::fs::File::options().write(true).create_new(true).open(&part).map_err(failed)?;
     let written = (|| -> Result<Result<u64, String>> {
-        let mut file = std::fs::File::create(&part).map_err(failed)?;
         file.write_all(head).map_err(failed)?;
         let mut bytes = head.len() as u64;
         let mut buffer = vec![0u8; 64 << 10];
@@ -506,6 +511,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fragment-api-test-{what}-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The names in a folder, sorted: what a save left there.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
     }
 
     /// The token is the provider's own placeholder, found by its shape: a
@@ -702,7 +714,7 @@ mod tests {
         let said: Value = serde_json::from_slice(&deliver(&answer)).unwrap();
         assert_eq!(said, json!({ "status": 200, "saved": out.display().to_string(), "bytes": 1000, "contentType": "application/pdf" }));
         assert_eq!(std::fs::read(&out).unwrap(), vec![7u8; 1000]);
-        assert!(!dir.join(".report.pdf.part").exists(), "nothing left beside it");
+        assert_eq!(names(&dir), ["report.pdf"], "nothing left beside it");
         // the most printed is printed; a byte more is saved beside, and said
         assert_eq!(printed(&asked(&call(&format!("{}/most", server.url))).unwrap()).len(), PRINT_MAX_BYTES);
         let spill = dir.join("spill");
@@ -734,7 +746,31 @@ mod tests {
             served.join().unwrap();
         }
         assert_eq!(std::fs::read(&out).unwrap(), b"the one before", "the file already there is kept");
-        assert!(!dir.join(".report.pdf.part").exists(), "and nothing is left beside it");
+        assert_eq!(names(&dir), ["empty", "report.pdf", "spill"], "and nothing is left beside it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save writes through nothing that is already beside its file: a
+    /// link left there under a name a save might be guessed to use (an
+    /// untrusted folder's) still points at what it did, untouched, and a
+    /// link at the file's own path is replaced, never written into.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_writes_through_no_link_left_beside_it() {
+        let dir = folder("links");
+        let (server, _) = provider(|_| Response::bytes(200, "application/pdf", b"downloaded bytes".to_vec()));
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"keep this unrelated file").unwrap();
+        let out = dir.join("report.pdf");
+        for beside in [".report.pdf.part", ".report.pdf.fragment-0000000000000000"] {
+            std::os::unix::fs::symlink(&victim, dir.join(beside)).unwrap();
+        }
+        std::os::unix::fs::symlink(&victim, &out).unwrap();
+        asked(&Call { out: Some(out.clone()), ..call(&format!("{}/file", server.url)) }).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this unrelated file", "nothing was written through a link");
+        assert!(!std::fs::symlink_metadata(&out).unwrap().file_type().is_symlink(), "the link at its path is replaced by the file");
+        assert_eq!(std::fs::read(&out).unwrap(), b"downloaded bytes");
+        assert_eq!(names(&dir), [".report.pdf.fragment-0000000000000000", ".report.pdf.part", "report.pdf", "victim"], "and what was beside it is as it was");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
