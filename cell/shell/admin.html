@@ -36,6 +36,15 @@
     <form id="comp"><input name="email" type="email" placeholder="email" required>
       <select name="kind"><option value="seat_always_on">always-on seat</option><option value="seat">seat that sleeps (comps only)</option></select>
       <button>Comp a seat</button></form>
+    <div id="reset">
+      <button id="reset-all" type="button">Reset this month's usage for everyone</button>
+      <div id="reset-confirm" class="confirm" hidden>
+        <p>Every person's and org's usage this month goes back to zero. Bought credit stays.</p>
+        <button id="reset-yes" type="button">Reset</button>
+        <button id="reset-no" type="button">Cancel</button>
+      </div>
+      <div id="reset-run" role="status"></div>
+    </div>
     <table><thead><tr><th>Email</th><th>Seat</th><th>Org</th><th>Joined</th><th>Last sign-in</th></tr></thead><tbody id="people-rows"></tbody></table>
     <button id="people-more" hidden>More</button>
     <aside id="person" hidden></aside>

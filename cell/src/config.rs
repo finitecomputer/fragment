@@ -471,7 +471,16 @@ impl Config {
         match &self.operators {
             None => Ok(false),
             Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_OPERATORS: {e}"))),
-            Some(Ok(listed)) => Ok(listed.iter().any(|l| Some(l.as_str()) == key || fragment_core::npub::identity_of(l) == identity)),
+            Some(Ok(listed)) => Ok(fragment_core::registry::lists_operator(listed, key, identity)),
+        }
+    }
+
+    /// The deployment's operators' keys, 64 hex each (none unset).
+    pub fn operators(&self) -> CellResult<&[String]> {
+        match &self.operators {
+            None => Ok(&[]),
+            Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_OPERATORS: {e}"))),
+            Some(Ok(listed)) => Ok(listed),
         }
     }
 

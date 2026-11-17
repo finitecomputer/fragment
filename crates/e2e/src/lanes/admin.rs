@@ -2,12 +2,18 @@
 //! orgs a page at a time, searched by email; a person's page with their
 //! ledger and computer; their computer pinned to another image and back
 //! (docs/computers.md, "Preview and production"); billing's health; a
-//! trial mailed; and the log of what operators did. An operator key no person holds reaches it, as a
+//! trial mailed; a reset of this month's usage (docs/ledger.md, "A month's
+//! usage reset"); and the log of what operators did. An operator key no person holds reaches it, as a
 //! wipe's does; no one else. Its page, `/admin`, is an operator's session's
 //! alone: to anyone else it is the 404 of a path that is not there. Valid
 //! and invalid.
 
+use std::path::Path;
+use std::time::Duration;
+
 use anyhow::Result;
+use fragment_core::price::USD;
+use fragment_fakes::workers_ai::Used;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -176,6 +182,7 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
             json!({ "cli": format!("{back:?}"), "pins": pins }),
         );
     }
+    usage_reset(s, api, &operator, &home, &path)?;
     let stranger = api.person()?;
     let refused = [
         get(&stranger, "/people")?,
@@ -212,6 +219,169 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
             && theirs.header("content-security-policy").contains("frame-ancestors 'none'")
             && theirs.header("x-frame-options") == "DENY",
         &theirs,
+    );
+    Ok(())
+}
+
+/// The checks of an operator's reset of this month's usage, in order.
+const RESET_CHECKS: [&str; 7] = [
+    "anyone but an operator is refused (403), and an id that is not one (400) or a payer that is not there (404) starts nothing",
+    "an operator starts a reset of everyone's usage: every person and org queued, the same id again the same run, another while it goes refused (409)",
+    "a ledger whose answer was lost is tried again, and the run finishes with every payer reset and none failed",
+    "what the month drew of a person's included credit comes back, once, though their ledger was asked twice; the credit they bought stays",
+    "an org's ledger, which has no included credit, is reset and changes nothing",
+    "the operators' log holds who started it, and its counts once done; the same run again changes nothing",
+    "one person's reset, from the CLI with the operator key's file (--yes), gives back nothing more: their credit is whole",
+];
+
+/// An operator's reset of this month's usage (docs/ledger.md, "A month's
+/// usage reset"): everyone's, a run the registry resets a batch at a time
+/// on its alarm; one person's, from the CLI. Valid (what the month drew of
+/// included credit comes back; bought credit stays; an org's ledger
+/// changes nothing), a run cut off (a ledger's answer lost: asked again,
+/// counted once), replayed (the same run again) and invalid (anyone else, a
+/// bad id, no such payer, a second run while one goes). A local run's alone:
+/// a hosted run's would reset every person on the preview.
+fn usage_reset(s: &mut Suite, api: &Api, operator: &Keys, cli_home: &Path, key_file: &str) -> Result<()> {
+    if s.hosted() {
+        for label in RESET_CHECKS {
+            s.skip(label, "it resets every person and org on the deployment, a preview's people too: a local run makes it");
+        }
+        return Ok(());
+    }
+    let wait = Duration::from_secs(90);
+    let op_id = api.identity(operator)?;
+    let m = |v: &Value, k: &str| v[k].as_i64().unwrap_or(i64::MIN);
+    let ledger_of = |keys: &Keys| super::ledger::ledger(api, keys);
+    let totals = |identity: &str| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "totals" }))).map(|r| r.body).unwrap_or(Value::Null);
+    // una: a person who bought credit, and whose agent spent some of the
+    // month's included credit (a model call, charged after its answer)
+    let una = api.person()?;
+    let una_id = api.identity(&una)?;
+    let bought = api.signed(operator, "POST", &format!("/api/ledger/{una_id}/grant"), Some(&json!({ "id": "reset-bought", "micros": 5 * USD, "by": op_id, "why": "a pack" })))?;
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let agent = api.signed(&una, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &una) })))?;
+    s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: super::ledger::tokens_costing("@cf/zai-org/glm-5.3-flash", 10, 3 * USD) }]);
+    let called = api.signed(&hand, "POST", "/api/models/v1/chat/completions", Some(&json!({ "model": "cheap", "messages": [{ "role": "user", "content": "hello" }] })))?;
+    let drew = s.eventually(wait, || {
+        let v = ledger_of(&una);
+        m(&v, "includedMicros") < m(&v, "includedGrantedMicros")
+    });
+    anyhow::ensure!(bought.status == 200 && agent.status == 200 && called.status == 200 && drew, "una spends some of the month's credit: {bought} {agent} {called}");
+    let before = ledger_of(&una);
+    let drawn = m(&before, "includedGrantedMicros") - m(&before, "includedMicros");
+    let included_before = m(&totals(&una_id), "included");
+    // an org with credit of its own, an operator's (it has no included credit)
+    let vic = api.person()?;
+    let comp = api.signed(operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&vic), "kind": "seat" })))?;
+    let org = comp.body["org"]["id"].as_str().unwrap_or("").to_string();
+    let credited = api.signed(operator, "POST", &format!("/api/ledger/org:{org}/grant"), Some(&json!({ "id": "reset-org", "micros": 3 * USD, "by": op_id, "why": "an invoice" })))?;
+    anyhow::ensure!(comp.status == 200 && credited.status == 200, "an org with credit: {comp} {credited}");
+    let org_ledger = || api.signed(operator, "GET", &format!("/api/admin/orgs/{org}/ledger"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let org_before = org_ledger();
+
+    // ---- refused, starting nothing
+    let start = |keys: &Keys, body: Value| api.signed(keys, "POST", "/api/admin/usage-resets", Some(&body));
+    let runs = || api.signed(operator, "GET", "/api/admin/usage-resets", None).map(|r| r.body["runs"].clone()).unwrap_or(Value::Null);
+    let stranger = api.person()?;
+    let refused = [
+        start(&stranger, json!({ "id": "reset-stranger" }))?,
+        api.signed(&stranger, "GET", "/api/admin/usage-resets", None)?,
+        start(operator, json!({ "id": "a/b" }))?,
+        start(operator, json!({ "id": "reset-nobody", "payer": "org:org-0000000000000000" }))?,
+        start(operator, json!({ "id": "reset-someone", "payer": "someone" }))?,
+    ];
+    let listed = runs();
+    let named = |id: &str| listed.as_array().into_iter().flatten().any(|r| r["id"] == id);
+    s.ok(
+        RESET_CHECKS[0],
+        refused.iter().map(|r| r.status).collect::<Vec<_>>() == [403, 403, 400, 404, 400] && !["reset-stranger", "reset-nobody", "reset-someone"].iter().any(|id| named(id)),
+        json!({ "statuses": refused.iter().map(|r| r.status).collect::<Vec<_>>(), "runs": listed }),
+    );
+
+    // ---- everyone's, una's ledger answering its first ask as a failure
+    // after it took the reset: a call cut off on its way back
+    let lose = |times: u32| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": una_id, "op": "fail-resets", "times": times })));
+    let lost = lose(1)?;
+    anyhow::ensure!(lost.status == 200 && lost.body["lost"] == 0, "una's ledger loses its next reset's answer: {lost}");
+    let id = format!("reset-e2e-{}", crate::api::now_ms());
+    let first = start(operator, json!({ "id": id }))?;
+    let again = start(operator, json!({ "id": id }))?;
+    let other = start(operator, json!({ "id": format!("{id}-other") }))?;
+    let r = &first.body;
+    s.ok(
+        RESET_CHECKS[1],
+        first.status == 200
+            && r["id"] == id.as_str()
+            && r["operator"] == op_id.as_str()
+            && r["payer"].is_null()
+            && m(r, "people") >= 3
+            && m(r, "orgs") >= 1
+            && again.status == 200
+            && again.body["id"] == r["id"]
+            && again.body["startedAt"] == r["startedAt"]
+            && again.body["people"] == r["people"]
+            && other.status == 409,
+        json!({ "first": first.body, "again": again.body, "other": other.body }),
+    );
+    let of = || api.signed(operator, "GET", &format!("/api/admin/usage-resets/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let finished = s.eventually(Duration::from_secs(180), || !of()["finishedAt"].is_null());
+    let done = of();
+    // una's ledger lost one answer, and she is reset: only an answer marks a
+    // payer done, so the run asked her again (the ledger's own count, not a
+    // window of time the run's progress may be read in)
+    let asked_again = lose(0)?;
+    s.ok(
+        RESET_CHECKS[2],
+        finished
+            && asked_again.body["lost"] == 1
+            && m(&done, "reset") == m(&done, "people") + m(&done, "orgs")
+            && m(&done, "pending") == 0
+            && m(&done, "failedCount") == 0
+            && done["failed"] == json!([])
+            && m(&done, "restoredMicros") >= drawn,
+        json!({ "run": done, "lever": asked_again.body }),
+    );
+    let after = ledger_of(&una);
+    let included_after = m(&totals(&una_id), "included");
+    s.ok(
+        RESET_CHECKS[3],
+        drawn > 0
+            && m(&after, "includedMicros") == m(&after, "includedGrantedMicros")
+            && m(&after, "purchasedMicros") == m(&before, "purchasedMicros")
+            && m(&after, "balanceMicros") == m(&before, "balanceMicros") + drawn
+            && included_after - included_before == drawn,
+        json!({ "before": before, "after": after, "drawn": drawn, "included": [included_before, included_after] }),
+    );
+    let org_after = org_ledger();
+    s.ok(RESET_CHECKS[4], org_before["balanceMicros"] == json!(3 * USD) && org_after == org_before, json!({ "before": org_before, "after": org_after }));
+    let log = api.signed(operator, "GET", "/api/admin/log", None)?;
+    let lines: Vec<&Value> = log.body["entries"].as_array().into_iter().flatten().filter(|e| e["action"] == "usage-reset" && e["detail"].as_str().is_some_and(|d| d.starts_with(&format!("{id} ")))).collect();
+    let total = m(&done, "people") + m(&done, "orgs");
+    let counts = format!("{id} done: {total} of {total} reset ({} people, {} orgs), ", m(&done, "people"), m(&done, "orgs"));
+    let replayed = start(operator, json!({ "id": id }))?;
+    s.ok(
+        RESET_CHECKS[5],
+        lines.len() == 2
+            && lines.iter().all(|e| e["operator"] == op_id.as_str() && e["target"] == "everyone")
+            && lines[0]["detail"].as_str().is_some_and(|d| d.starts_with(&counts) && d.ends_with(", 0 failed"))
+            && lines[1]["detail"] == format!("{id} started: {} people, {} orgs", m(&done, "people"), m(&done, "orgs")).as_str()
+            && replayed.status == 200
+            && replayed.body == done
+            && ledger_of(&una) == after,
+        json!({ "log": lines, "replayed": replayed.body }),
+    );
+
+    // ---- one person's, from the CLI: nothing more to give back
+    let unasked = s.cli(api, cli_home, &["operator", "reset-usage", "--payer", &una_id, "--key-file", key_file]);
+    let one = s.cli_json(api, cli_home, &["operator", "reset-usage", "--payer", &una_id, "--id", &format!("{id}-una"), "--yes", "--key-file", key_file, "--json"]);
+    s.ok(
+        RESET_CHECKS[6],
+        unasked.status.code() == Some(2)
+            && one.as_ref().is_ok_and(|v| v["payer"] == una_id.as_str() && v["people"] == 1 && v["orgs"] == 0 && v["reset"] == 1 && v["restoredMicros"] == 0 && !v["finishedAt"].is_null())
+            && ledger_of(&una) == after,
+        format!("{one:?} / {}", String::from_utf8_lossy(&unasked.stderr)),
     );
     Ok(())
 }
@@ -282,6 +452,7 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     b.click(&page, "#tabs button[data-tab=people]")?;
     let listed = b.until(&page, "document.querySelectorAll('#people-rows tr').length > 0 && /people/.test(document.getElementById('status').textContent)", wait);
     s.ok("its People tab lists people", listed, b.eval(&page, "document.getElementById('status').textContent")?);
+    reset_page(s, &mut b, &page, api)?;
 
     let email = format!("admin-page-{}@e2e.test", &Keys::generate().pubkey_hex()[..10]);
     b.eval(&page, &format!("(() => {{ const f = document.getElementById('comp'); f.email.value = {email:?}; f.kind.value = 'seat_always_on'; f.requestSubmit(); }})()"))?;
@@ -326,6 +497,73 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     let theirs = b.open(&format!("{}/admin", api.base))?;
     let missing = b.until(&theirs, "document.readyState === 'complete' && !document.getElementById('status') && document.body.innerText.includes('no route /admin')", wait);
     s.ok("to anyone else it is the 404 of a path that is not there: nothing of the page", missing, b.eval(&theirs, "document.body.innerText")?);
+    Ok(())
+}
+
+/// The People tab's button that resets this month's usage for everyone
+/// (docs/ledger.md, "A month's usage reset"): one confirmation, saying
+/// plainly what it does; then the run as it goes (a payer's ledger made to
+/// lose its first answer, so the run is caught going, a payer to try
+/// again) and its result, read from the registry. Each shot at 1280 and
+/// 390 px, light and dark. A local run's alone, as the API's checks are.
+fn reset_page(s: &mut Suite, b: &mut crate::browser::Browser, page: &crate::browser::Page, api: &Api) -> Result<()> {
+    const PRESSED: &str = "its reset of this month's usage: one button, one plain confirmation, then the run as it goes, the button held while it does, and its result, as the registry has it";
+    if s.hosted() {
+        s.skip(PRESSED, "it resets every person and org on the deployment, a preview's people too: a local run makes it");
+        return Ok(());
+    }
+    let wait = Duration::from_secs(30);
+    let shots = s.dir("admin-page");
+    let shoot = |b: &mut crate::browser::Browser, name: &str| -> Result<()> {
+        for (width, height, mobile) in [(1280, 800, false), (390, 844, true)] {
+            for scheme in ["light", "dark"] {
+                b.viewport(page, width, height, mobile)?;
+                b.color_scheme(page, scheme)?;
+                b.screenshot(page, &shots.join(format!("reset-{name}-{width}-{scheme}.png")))?;
+            }
+        }
+        b.viewport(page, 1280, 800, false)?;
+        b.color_scheme(page, "light")
+    };
+    let text = |b: &mut crate::browser::Browser| b.eval(page, "document.getElementById('reset-run').textContent").unwrap_or(Value::Null);
+    // what is drawn, not the attribute alone: a stylesheet can show what `hidden` names
+    let shown = b.until(page, "document.getElementById('reset-all').checkVisibility() && !document.getElementById('reset-all').disabled && !document.getElementById('reset-confirm').checkVisibility()", wait);
+    shoot(b, "button")?;
+    b.click(page, "#reset-all")?;
+    let asked = b.until(
+        page,
+        "document.getElementById('reset-confirm').checkVisibility() && !document.getElementById('reset-all').checkVisibility() && document.querySelector('#reset-confirm p').textContent === \"Every person's and org's usage this month goes back to zero. Bought credit stays.\"",
+        wait,
+    );
+    shoot(b, "confirm")?;
+    // a person whose ledger loses its first two answers: tried again ten,
+    // then twenty, seconds on, so the run goes on for half a minute
+    let held = api.person()?;
+    let lost = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": api.identity(&held)?, "op": "fail-resets", "times": 2 })))?;
+    anyhow::ensure!(lost.status == 200, "a ledger loses its next reset's answer: {lost}");
+    b.click(page, "#reset-yes")?;
+    let going = b.until(page, "!document.getElementById('reset-confirm').checkVisibility() && document.getElementById('reset-all').checkVisibility() && document.getElementById('reset-all').disabled && /^Resetting: \\d+ of \\d+, 1 to try again$/.test(document.getElementById('reset-run').textContent)", wait);
+    let progress = text(b);
+    shoot(b, "progress")?;
+    let finished = b.until(page, "document.getElementById('reset-run').textContent.startsWith('Last reset ') && !document.getElementById('reset-all').disabled && !document.getElementById('reset-confirm').checkVisibility()", Duration::from_secs(120));
+    let said = text(b);
+    shoot(b, "result")?;
+    let newest = api.signed(&s.operator, "GET", "/api/admin/usage-resets", None)?.body["runs"][0].clone();
+    let n = |k: &str| newest[k].as_u64().unwrap_or(0);
+    let counts = format!("{} of {} reset ({} people, {} orgs), ", n("reset"), n("people") + n("orgs"), n("people"), n("orgs"));
+    s.ok(
+        PRESSED,
+        shown
+            && asked
+            && going
+            && finished
+            && newest["payer"].is_null()
+            && newest["operator"] == api.identity(&s.operator)?.as_str()
+            && !newest["finishedAt"].is_null()
+            && n("reset") == n("people") + n("orgs")
+            && said.as_str().is_some_and(|t| t.contains(&counts) && t.ends_with(", 0 failed")),
+        json!({ "progress": progress, "result": said, "run": newest }),
+    );
     Ok(())
 }
 

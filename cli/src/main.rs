@@ -652,6 +652,22 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Reset this month's usage for every person and org (--payer: one,
+    /// an npub or org:<org id>): what the month drew of each one's included
+    /// credit comes back; bought credit, plans, seats, caps and budgets
+    /// stay. Takes --yes. Follows the run to its end, and again with its
+    /// --id follows the same run
+    ResetUsage {
+        #[arg(long)]
+        payer: Option<String>,
+        /// The run's id (again: the same run)
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// Name the person an org's credit is invoiced to (an email, or an
     /// npub), in its governance log. Once by --id
     Payer {
@@ -1771,6 +1787,41 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "credited": body, "org": org }));
             println!("credited {org} {} ({id})", dollars(micros_of(usd)?));
             println!("{line}");
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::ResetUsage { payer, id, yes, key_file } } => {
+            if !yes {
+                let whose = payer.as_deref().map_or("every person's and org's".to_string(), |p| format!("{p}'s"));
+                return Err(usage(format!("{whose} usage this month goes back to zero (bought credit stays): --yes resets it")));
+            }
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let id = id.unwrap_or_else(|| format!("cli-{:016x}", rand::random::<u64>()));
+            let mut run = admin_answer(&c, c.post_json_by_id("/api/admin/usage-resets", &json!({ "id": id, "payer": payer }))?)?;
+            let n = |run: &Value, k: &str| run[k].as_u64().unwrap_or(0);
+            if !j {
+                eprintln!("reset {id}: {} people, {} orgs (again: --id {id})", n(&run, "people"), n(&run, "orgs"));
+            }
+            // bounded by the run, which ends: each payer is reset or given up on
+            while run["finishedAt"].is_null() {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                run = admin_answer(&c, c.get(&format!("/api/admin/usage-resets/{}", encode_q(&id)))?)?;
+                if !j {
+                    eprintln!("{} of {} done", n(&run, "reset") + n(&run, "failedCount"), n(&run, "people") + n(&run, "orgs"));
+                }
+            }
+            json_exit(j, &run);
+            println!(
+                "{} of {} reset ({} people, {} orgs), {} restored, {} failed",
+                n(&run, "reset"),
+                n(&run, "people") + n(&run, "orgs"),
+                n(&run, "people"),
+                n(&run, "orgs"),
+                dollars(run["restoredMicros"].as_i64().unwrap_or(0)),
+                n(&run, "failedCount")
+            );
+            for f in run["failed"].as_array().into_iter().flatten() {
+                println!("  {}: {}", f["payer"].as_str().unwrap_or("?"), f["why"].as_str().unwrap_or(""));
+            }
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::Budget { org, usd, id, key_file } } => {

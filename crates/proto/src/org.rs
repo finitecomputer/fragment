@@ -504,6 +504,61 @@ pub struct AdminLog {
     pub next: Option<u64>,
 }
 
+/// `POST /api/admin/usage-resets` (operators): a reset of this month's
+/// usage (docs/ledger.md, "A month's usage reset") on every person's and
+/// org's ledger, or on one payer's (`payer`: a person's identity, or
+/// `org:<org id>`). `id` names the run: the same id again answers it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartUsageReset {
+    pub id: String,
+    #[serde(default)]
+    pub payer: Option<String>,
+}
+
+/// A reset's run, as far as it has gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReset {
+    pub id: String,
+    /// Who started it: an operator's identity, or a key no one holds.
+    pub operator: String,
+    /// The one payer it resets (its ledger's name), or `None`: everyone.
+    pub payer: Option<String>,
+    pub started_at: i64,
+    /// When its last payer was reset or given up on; `None` while it runs.
+    pub finished_at: Option<i64>,
+    /// The payers it resets: people's ledgers, and orgs'.
+    pub people: u64,
+    pub orgs: u64,
+    /// Payers whose ledgers answered, and the included credit they gave
+    /// back, together.
+    pub reset: u64,
+    pub restored_micros: i64,
+    /// Payers not reset yet, and of those, how many a try failed for,
+    /// each to be tried again.
+    pub pending: u64,
+    pub retrying: u64,
+    /// Payers it gave up on, each with its last refusal (the first
+    /// `ledger::reset::FAILURES_SHOWN`), and how many.
+    pub failed: Vec<UsageResetFailure>,
+    pub failed_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageResetFailure {
+    pub payer: String,
+    pub why: String,
+}
+
+/// `GET /api/admin/usage-resets`: the runs kept, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageResets {
+    pub runs: Vec<UsageReset>,
+}
+
 /// A person in an org's content (decisions 69 to 71), apart from its
 /// seats: in by their own yes to an admin's place; one who stepped down is
 /// in it still, an admin no more.

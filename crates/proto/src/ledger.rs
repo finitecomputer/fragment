@@ -175,6 +175,30 @@ pub struct OrgBudget {
     pub micros: i64,
 }
 
+/// An operator's reset of this month's usage on one payer's ledger
+/// (docs/ledger.md, "A month's usage reset"): what the month drew of its
+/// included credit comes back. Once per `id`: the same id again answers
+/// as the first did and changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResetMonthUsage {
+    pub id: String,
+}
+
+/// What a reset did (`ResetMonthUsage`), kept with it by its id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MonthReset {
+    pub id: String,
+    /// The UTC month it reset, `YYYY-MM`.
+    pub month: String,
+    /// The included credit it gave back: what the month had drawn of it.
+    pub restored_micros: i64,
+    /// Of that, what paid a debt first, as included credit that arrives
+    /// while its person owes always does.
+    pub debt_paid_micros: i64,
+}
+
 /// An org's ledger now (`GET /api/orgs/<org>/ledger`; decision 66): the
 /// credit operators gave it, with no plan, seat, included credit or
 /// overdraft, and the month's budget beside what its fragments spent.

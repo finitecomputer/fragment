@@ -52,6 +52,7 @@ mod addresses;
 pub(crate) mod invites;
 pub(crate) mod offers;
 pub(crate) mod orgs;
+pub(crate) mod resets;
 pub(crate) mod seats;
 pub(crate) mod trials;
 mod signin;
@@ -164,8 +165,9 @@ impl DurableObject for RegistryCell {
     }
 
     /// Sign-in's sweep of expired rows (signin.rs), off every request, the
-    /// seat holders' plans pushed (orgs.rs), and the invite claims a
-    /// sign-in could not make tried again (invites.rs). A failed run of any
+    /// seat holders' plans pushed (orgs.rs), the invite claims a sign-in
+    /// could not make tried again (invites.rs), and operators' resets of
+    /// the month's usage, a batch of payers a run (resets.rs). A failed run of any
     /// is logged and arms its next itself; failing that too, the alarm
     /// fails and the node retries it.
     async fn alarm(&self) -> Result<Response> {
@@ -199,6 +201,10 @@ impl DurableObject for RegistryCell {
         if let Err(e) = self.claims_alarm().await {
             console_error!("the registry's kept invite claims failed ({:?}): {}", e.code, e.message);
             self.claims_later().await.map_err(|e| Error::RustError(e.message))?;
+        }
+        if let Err(e) = self.resets_alarm().await {
+            console_error!("the registry's usage resets failed ({:?}): {}", e.code, e.message);
+            self.sync_later().await.map_err(|e| Error::RustError(e.message))?;
         }
         Response::ok("")
     }
@@ -840,6 +846,9 @@ impl RegistryCell {
             return answer;
         }
         if let Some(answer) = self.admin_route(&path, &bytes) {
+            return answer;
+        }
+        if let Some(answer) = self.resets_route(&path, &bytes).await {
             return answer;
         }
         match path.as_str() {

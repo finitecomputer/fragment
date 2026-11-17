@@ -44,7 +44,7 @@ use std::rc::Rc;
 use fragment_core::ledger::gate::{Gate, Step};
 use fragment_core::ledger::org::Payer;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
-use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, MonthReset, OrgBudget, OrgLedgerStatus, Plan, ResetMonthUsage, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
 use fragment_proto::notice::NoticeList;
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
@@ -68,8 +68,14 @@ const TEST_ENTRIES_MAX: i64 = 500;
 /// Test fleets: the longest a slowed ledger waits before each answer
 /// (`TestHook::Slow`).
 const TEST_SLOW_MAX_MS: u64 = 30_000;
-/// The grants a test fails at once, at most (`fail-grants`).
+/// The grants a test fails at once, at most (`fail-grants`), and the
+/// resets whose answers it loses (`fail-resets`).
 const TEST_FAIL_GRANTS_MAX: u32 = 10;
+/// The meta keys of the resets whose answers a test fleet's ledger is to
+/// lose, and of how many it lost (`TestHook::FailResets`): kept, so a
+/// restart between the lever and the reset changes neither.
+const RESETS_TO_LOSE: &str = "test_resets_to_lose";
+const RESETS_LOST: &str = "test_resets_lost";
 /// The meta key of a capped ledger's paid calls (`TestHook::PaidCalls`).
 const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// How long a gate waits on a ledger it has no fresh answer from: a few
@@ -264,7 +270,11 @@ pub struct OrgStatus {}
 /// fail its next `times` grants
 /// before it takes them (`fail-grants {times}`, at most
 /// `TEST_FAIL_GRANTS_MAX`, 0 to end it: a ledger not reached once the
-/// router recorded an org's grant, which its retry completes).
+/// router recorded an org's grant, which its retry completes), or take its
+/// next `times` resets and answer each as a failure (`fail-resets {times}`,
+/// the same bounds, answering `{failResets, lost}`: those still to lose,
+/// and how many it lost: a reset's answer lost on its way back, which its
+/// run asks again and is answered as the first was).
 /// Read as its fields (`TestHookFields`), not as serde's internally tagged
 /// reading, which buffers each to find its `op`: about 17 KB of the cell's Wasm.
 #[derive(Debug, Serialize, Deserialize)]
@@ -286,6 +296,9 @@ pub enum TestHook {
     ForgetGate,
     GateHeard,
     FailGrants {
+        times: u32,
+    },
+    FailResets {
         times: u32,
     },
 }
@@ -324,6 +337,7 @@ enum TestOp {
     ForgetGate,
     GateHeard,
     FailGrants,
+    FailResets,
 }
 
 impl TryFrom<TestHookFields> for TestHook {
@@ -346,6 +360,7 @@ impl TryFrom<TestHookFields> for TestHook {
             TestOp::ForgetGate => TestHook::ForgetGate,
             TestOp::GateHeard => TestHook::GateHeard,
             TestOp::FailGrants => TestHook::FailGrants { times: need(f.times, "times")? },
+            TestOp::FailResets => TestHook::FailResets { times: need(f.times, "times")? },
         })
     }
 }
@@ -409,6 +424,13 @@ impl Route for OrgStatus {
 impl Route for OrgBudget {
     const PATH: &'static str = "/org-budget";
     type Answer = Done;
+}
+
+/// An operator's reset of this month's usage, from the registry's run
+/// (cell/src/registry/resets.rs), which checked the operator.
+impl Route for ResetMonthUsage {
+    const PATH: &'static str = "/reset-month";
+    type Answer = MonthReset;
 }
 
 impl Route for TestHook {
@@ -895,6 +917,20 @@ impl LedgerCell {
                 let c: OrgBudget = decode(&body)?;
                 reply(done(self.mutate(move |l, s, now| l.set_budget(s, &c, now)).await?))
             }
+            <ResetMonthUsage as Route>::PATH => {
+                let c: ResetMonthUsage = decode(&body)?;
+                let reset = self.mutate(move |l, s, now| l.reset_month(s, &c, now)).await?;
+                if self.cfg.test_hooks {
+                    let count = |key: &str| -> CellResult<u32> { Ok(self.meta(key)?.and_then(|v| v.parse().ok()).unwrap_or(0)) };
+                    let to_lose = count(RESETS_TO_LOSE)?;
+                    if to_lose > 0 {
+                        self.set_meta(RESETS_TO_LOSE, &(to_lose - 1).to_string())?;
+                        self.set_meta(RESETS_LOST, &(count(RESETS_LOST)? + 1).to_string())?;
+                        return Err(CellError::host("a test's lost answer (`fail-resets`): the reset was taken").into());
+                    }
+                }
+                reply(reset)
+            }
             TestHook::PATH if self.cfg.test_hooks => self.test_hook(decode(&body)?).await,
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}")).into()),
         }
@@ -982,6 +1018,12 @@ impl LedgerCell {
             TestHook::FailGrants { times } => {
                 self.fail_grants.set(times.min(TEST_FAIL_GRANTS_MAX));
                 reply(json!({ "failGrants": self.fail_grants.get() }))
+            }
+            TestHook::FailResets { times } => {
+                let times = times.min(TEST_FAIL_GRANTS_MAX);
+                self.set_meta(RESETS_TO_LOSE, &times.to_string())?;
+                let lost: u32 = self.meta(RESETS_LOST)?.and_then(|v| v.parse().ok()).unwrap_or(0);
+                reply(json!({ "failResets": times, "lost": lost }))
             }
             TestHook::PaidCalls { max } => {
                 let max = match max {
