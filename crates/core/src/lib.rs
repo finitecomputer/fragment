@@ -41,6 +41,7 @@ pub mod glance;
 pub mod glob;
 pub mod governance;
 pub mod icon;
+pub mod inbox;
 pub mod key_hour;
 pub mod ledger;
 pub mod levers;
