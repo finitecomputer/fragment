@@ -194,10 +194,31 @@ RUN mv /opt/hermes/skills /opt/fragment/bundled-skills \
 
 # The gateway is hermes-boot's main program (preloaded): no s6 gateway
 # service, which upstream's reconciler starts from a restored
-# gateway_state.json, a second gateway (S3b, cut b). The build fails if no
-# script of that name is there to remove, or another still runs it.
+# gateway_state.json, a second gateway (S3b, cut b). Nor upstream's
+# `profile-gateways` service (v0.23): an s6-svscan, as Hermes' user, over
+# the per-profile gateways `hermes gateway start` registers in
+# /run/hermes-service, which only that reconciler makes; without it the
+# scan fails and s6 restarts it every second. The build fails if no script
+# or service of those names is there to remove, or another still runs or
+# scans them.
 RUN rm /etc/cont-init.d/02-reconcile-profiles \
- && ! grep -rqs container_boot /etc/cont-init.d
+ && rm /etc/s6-overlay/s6-rc.d/user/contents.d/profile-gateways \
+ && rm -r /etc/s6-overlay/s6-rc.d/profile-gateways \
+ && ! grep -rqs container_boot /etc/cont-init.d \
+ && ! grep -rqs 'exec .*s6-svscan' /etc/s6-overlay/s6-rc.d
+
+# A login shell's PATH is Debian's with the computer's Python environment
+# first (fragment-python.sh, below), as each command of an agent's terminal
+# runs in one: `python` and `pip` are that environment's, and `hermes` is
+# the image's shim (/usr/local/bin/hermes, which refuses `cron`). Upstream's
+# hermes.sh (v0.23) would put Hermes' venv and its own bin ahead of both,
+# and its home's .local/bin (/opt/data, not ours). Hermes' terminal already
+# appends the gateway's PATH directories a login profile dropped, after the
+# login PATH (`tools/environments/local.py`, `_append_dropped_path_entries`),
+# so nothing it needs is lost. The build fails if it is not there to remove,
+# or another login script still names Hermes' directories.
+RUN rm /etc/profile.d/hermes.sh \
+ && ! grep -rqs /opt/hermes /etc/profile.d /etc/profile /etc/environment
 
 # What our agents use is in the image, never installed at run time (lazy
 # installs are off: boot/src/hermes.rs, `managed_config`). Hermes'
@@ -400,6 +421,7 @@ exec /usr/local/bin/node "$@"
 EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_threads.py /opt/fragment/tool_threads.py
+COPY images/hermes/relay_stop.py /opt/fragment/relay_stop.py
 COPY images/hermes/deploy_wait.py /opt/fragment/deploy_wait.py
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 COPY --from=plugin /opt/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-deploy-wait

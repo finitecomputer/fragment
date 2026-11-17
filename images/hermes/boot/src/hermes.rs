@@ -700,7 +700,12 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
     // subagent_stop, which takes it from its chat's set) and reports as it
     // finishes, not when the last of its batch does (Paul, 2026-11-07);
     // a `group` of tasks the model asks for ends and reports as one.
-    y.push_str("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n");
+    // gateway_mode background: a child runs after its parent's turn, as
+    // on v0.21, and its result comes back as a turn of its own. Hermes'
+    // `auto` (v0.23) would join it inside the parent's turn on a chat with
+    // interim messages off, ours: the turn, its keepalive and its card
+    // would wait out the whole child.
+    y.push_str("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n  gateway_mode: \"background\"\n");
     if let MainModel::Tier(tier) = main {
         if let Some(deep) = route.settings(*tier).and_then(|r| r.deep.as_ref()) {
             y.push_str(&format!("  model: {}\n  reasoning_effort: {}\n  request_overrides:\n    max_tokens: {DEEP_MAX_TOKENS}\n", q(&deep.id), q(deep.reasoning.unwrap_or(Reasoning::Max).name())));
@@ -1394,7 +1399,7 @@ mod tests {
         for (tier, deep, fallback) in [(Tier::Cheap, "deepseek-v4-1-flash", CHEAP_ID), (Tier::Medium, "deepseek/deepseek-v4.1-flash", FALLBACK_ID)] {
             let p = config(&ids, tier.into());
             let delegation = p.split("\ndelegation:\n").nth(1).unwrap().split("\nskills:").next().unwrap();
-            assert!(delegation.starts_with(&format!("  max_concurrent_children: 3\n  independent_completions: true\n  model: {}\n  reasoning_effort: \"max\"\n  request_overrides:\n    max_tokens: 32768\n", q(deep))), "{p}");
+            assert!(delegation.starts_with(&format!("  max_concurrent_children: 3\n  independent_completions: true\n  gateway_mode: \"background\"\n  model: {}\n  reasoning_effort: \"max\"\n  request_overrides:\n    max_tokens: 32768\n", q(deep))), "{p}");
             assert!(delegation.contains(&format!("      model: {}\n", q(fallback))), "{p}");
             assert!(p.contains(&format!("      {}:\n        stale_timeout_seconds: 180\n", q(deep))), "{p}");
             assert!(p.contains("  reasoning_effort: \"high\"\n"), "the old Low pick cannot lower Fast: {p}");
@@ -1405,7 +1410,7 @@ mod tests {
         }
         let own = MainModel::Own { fast: OwnRoute { provider: "openrouter".into(), base: "https://openrouter.ai/api/v1".into(), id: "someone/model".into(), placeholder: "fck_key".into() }, deep: None };
         let p = config(&ids, own);
-        assert!(p.contains("  reasoning_effort: \"low\"\n") && p.contains("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n"));
+        assert!(p.contains("  reasoning_effort: \"low\"\n") && p.contains("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n  gateway_mode: \"background\"\n"));
         assert!(p.contains("  model: \"someone/model\"\n") && p.contains("  fallback_providers: []\n"), "BYO inherits its own Fast, never the platform's Deep: {p}");
         let old = profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Cheap.into(), Reasoning::Low, &route("http://m"), &[], Path::new("/c.sh"));
         assert!(!old.contains("  request_overrides:"), "old cells retain parent inheritance: {old}");
@@ -1962,7 +1967,7 @@ mod tests {
         assert_eq!(unused, None);
         assert!(config.contains("  default: \"fast\"\n  api_key: \"fck_fast\"\n"));
         assert!(config.contains("reasoning_effort: \"low\"\n"));
-        assert!(config.contains("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n  provider: \"custom\"\n  base_url: \"https://models.example/v1\"\n  api_key: \"fck_deep\"\n  model: \"deep\"\n  reasoning_effort: \"max\"\n  fallback_providers: []\n  request_overrides:\n    max_tokens: 32768\n"));
+        assert!(config.contains("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n  gateway_mode: \"background\"\n  provider: \"custom\"\n  base_url: \"https://models.example/v1\"\n  api_key: \"fck_deep\"\n  model: \"deep\"\n  reasoning_effort: \"max\"\n  fallback_providers: []\n  request_overrides:\n    max_tokens: 32768\n"));
         assert!(config.contains("\"fast\":\n        stale_timeout_seconds: 20\n"));
         assert!(config.contains("\"deep\":\n        stale_timeout_seconds: 180\n"));
         assert_eq!(write(&a, json).0, config, "a restart replays both choices");

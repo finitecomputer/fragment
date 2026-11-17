@@ -256,6 +256,21 @@ unfinished design, not debt.
   boot merges them into the profile's config, proven by a setting that
   survives a wake.
 
+## A Stop over Hermes' Relay reaches its turn through the image
+
+- **Shortcut:** Hermes v0.23.2's Relay Stop (`interrupt_inbound`, the
+  bridge's Stop) only sets its adapter's busy-guard event, which nothing
+  watches for a natively admitted turn (every relayed message since
+  v0.22), so the turn ran on. The image's `relay_stop.py` (installed at
+  preload) also runs Hermes' own `_interrupt_running_turn` for that
+  session, as its `/stop` does.
+- **Risk:** it wraps a private method (`RelayAdapter.on_interrupt`) and
+  calls another (`_interrupt_running_turn`); an upstream change could
+  bypass it.
+- **Delete when:** upstream's relay Stop interrupts a natively admitted
+  turn, proven by the Stop in `a_step_says_how_its_call_ended` and in
+  `hermes_waits_out_model_preflight_deploying` without it.
+
 ## Hermes' tool workers can take an ended thread's interrupt
 
 - **Shortcut:** Hermes keys a tool's interrupt by thread id and clears a

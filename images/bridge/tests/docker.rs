@@ -417,11 +417,12 @@ async fn the_hermes_image() {
     // what Hermes itself finds for the profile: its own first, then the
     // managed set and the platform skill (the image's: its CLI's own)
     let hermes_finds = || {
-        let found = c.exec_out(&[
+        let (code, found) = c.exec_code(&[
             "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper--k3x9", "HOME=/data/hermes/profiles/juniper--k3x9/home",
-            "/opt/hermes/.venv/bin/python", "-c", "import json, os; os.chdir('/opt/hermes'); from tools.skills_tool import _find_all_skills; print(json.dumps({s['name']: s['description'] for s in _find_all_skills(skip_disabled=True)}))",
+            "/opt/hermes/.venv/bin/python", "-c", "import json, os; os.chdir('/opt/hermes'); from tools.skills_tool import find_all_skills; print(json.dumps({s['name']: s['description'] for s in find_all_skills(skip_disabled=True)}))",
         ]);
-        serde_json::from_str::<serde_json::Value>(found.trim().lines().last().unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"))
+        assert_eq!(code, 0, "Hermes' own skill listing ran: {found}");
+        serde_json::from_str::<serde_json::Value>(found.lines().rfind(|l| l.starts_with('{')).unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"))
     };
     let found = hermes_finds();
     assert!(c.exec(&[
@@ -447,7 +448,8 @@ async fn the_hermes_image() {
     for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
         assert!(found[name].is_string(), "the release's managed {name} is visible: {found}");
     }
-    for name in ["pdf", "docx", "powerpoint", "xlsx", "systematic-debugging", "test-driven-development", "arxiv"] {
+    // v0.23 bundles Word, PowerPoint and Excel as one skill, microsoft-office
+    for name in ["pdf", "microsoft-office", "systematic-debugging", "test-driven-development", "arxiv"] {
         assert!(found[name].is_string(), "Hermes' bundled {name} is visible to this agent profile: {found}");
     }
     assert!(found["systematic-debugging"].as_str().is_some_and(|d| d.contains("Juniper's own")), "agent-owned skills win over bundled names: {found}");
@@ -2954,10 +2956,13 @@ async fn words_before_a_tool_call_are_a_reply() {
 /// reply. Nor is its review's memory call a step (the review of #664: it
 /// was, when it ended before its turn did): Hermes runs the review as a
 /// fork sharing the turn's session and context, whose calls the image's
-/// plugin tells from the turn's own. Method: short turns until one is
-/// reviewed, the scripted model saving one thing when asked to review; each
-/// answer shows an image its provider serves slowly, so its turn ends only
-/// after the review saved (its notice comes first).
+/// plugin tells from the turn's own. Since v0.23 Hermes holds a review's
+/// message until its turn's response has landed (its gateway's
+/// `_make_bg_review_callbacks`), so the notice may follow that turn's end,
+/// and is that turn's either way. Method: short turns until one is reviewed, the
+/// scripted model saving one thing when asked to review; each answer shows
+/// an image its provider serves slowly, so the review saves while its turn
+/// is still delivering.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_memory_review_is_a_notice() {
@@ -2997,7 +3002,7 @@ async fn a_memory_review_is_a_notice() {
         assert!(turns.iter().any(|t| n["turn"] == t.as_str()), "the notice is a turn's it reviewed: {n}");
         let work: Vec<serde_json::Value> = w.records(&chat, "work").into_iter().map(|r| r["body"].clone()).collect();
         let at = |kind: &str| work.iter().position(|b| b["kind"] == kind && b["turn"] == n["turn"]);
-        assert!(matches!((at("turn.notice"), at("turn.end")), (Some(notice), Some(end)) if notice < end), "the review saved while its turn was still running: {work:?}");
+        assert!(at("turn.notice").is_some() && at("turn.end").is_some(), "the reviewed turn ended, and its notice was told: {work:?}");
         let steps = w.bodies(&chat, "work", "turn.step");
         assert!(steps.is_empty(), "no step: its turns call nothing, and the review's call is none of theirs: {steps:?}");
         let said = w.bodies(&chat, "chat", "reply");
@@ -5008,12 +5013,13 @@ async fn simplex_on_the_hermes_image() {
 
 /// Goal (#627; the review of #664): a step says how its call ended, as
 /// real Hermes observed it (its `post_tool_call`; its progress text is
-/// off): done, or failed with its exit code, blocked before it ran, timed
-/// out past Hermes' own deadline, stopped by its owner; each with Hermes'
-/// preview of the call, never its output. Method: a command
-/// each, in a computer whose Hermes gives a call 4 s
-/// (`HERMES_CONCURRENT_TOOL_TIMEOUT_S`, its own setting); a call carrying
-/// Hermes' context-compression marker is one it refuses to run. And the
+/// off): done, or failed with its exit code, blocked before it ran, past
+/// its time (the terminal's own timeout, its exit code 124: since v0.23
+/// Hermes' generic tool deadline never cuts a terminal call short of the
+/// terminal's own), stopped by its owner; each with Hermes' preview of the
+/// call, never its output. Method: a command each, the timed-out one given
+/// 4 s (the call's `timeout`); a call carrying Hermes' context-compression
+/// marker is one it refuses to run. And the
 /// image's plugin keeps a turn's steps however many runs start after it,
 /// while it calls tools.
 #[tokio::test]
@@ -5023,7 +5029,7 @@ async fn a_step_says_how_its_call_ended() {
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     let model = Model::start("0.0.0.0:0").await;
     let chat = fake.chat("talk", &["juniper"]);
-    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "4")]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
     within(&fake, &chat, &c, 120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     // the plugin's memory of the person's turns keeps one still calling
     // tools past many newer runs (tests/activity_turns.py)
@@ -5041,8 +5047,8 @@ async fn a_step_says_how_its_call_ended() {
     };
     let marked = "echo ⟪HERMES-CONTEXT-COMPRESSION: 12 of 40 chars";
     // Hermes' preview of a command of two: its first, and how many more
-    for (command, preview, status, excerpt) in [("echo done-$((40+2))", "echo done-$((40+2))", "completed", "Exit code: 0"), ("echo failed-$((40+2)); exit 7", "echo failed-$((40+2)) + 1 command", "failed", "Exit code: 7"), (marked, marked, "blocked", ""), ("sleep 9", "sleep 9", "timed_out", "")] {
-        let turn = asked(&fake, &chat, &c, &format!("run: {command}"), ended).await;
+    for (asked_as, preview, status, excerpt) in [("run: echo done-$((40+2))", "echo done-$((40+2))", "completed", "Exit code: 0"), ("run: echo failed-$((40+2)); exit 7", "echo failed-$((40+2)) + 1 command", "failed", "Exit code: 7"), (&format!("run: {marked}"), marked, "blocked", ""), ("run within 4s: sleep 9", "sleep 9", "failed", "Exit code: 124")] {
+        let turn = asked(&fake, &chat, &c, asked_as, ended).await;
         check(preview, &steps(&turn), status, excerpt);
     }
     // its owner's Stop while the first of two runs: that one is killed (as

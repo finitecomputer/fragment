@@ -386,6 +386,17 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         let call = json!({ "index": 0, "id": format!("call_{}", results + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
         return (String::new(), Some(call));
     }
+    // `run within <n>s: <command>`: that command, the terminal given its own
+    // timeout of n seconds (the call's `timeout`)
+    let within = last_user.lines().find_map(|l| {
+        let (_, rest) = l.split_once("run within ")?;
+        let (secs, command) = rest.split_once("s: ")?;
+        Some((secs.trim().parse::<u64>().ok()?, command.trim().to_string()))
+    });
+    if let (Some((secs, command)), true, None) = (within, has_terminal, &tool_result) {
+        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command, "timeout": secs }).to_string() } });
+        return (String::new(), Some(call));
+    }
     // `both: <a> | <b>`: both commands, two calls in the one response
     // (Hermes runs a terminal's one after the other)
     let both = last_user.lines().find_map(|l| l.split_once("both: ").map(|(_, c)| c.to_string()));
