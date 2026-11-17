@@ -42,28 +42,27 @@ unfinished design, not debt.
   provider and tells the provider a switch (Core 1.0's `prompt=login`),
   proven on preview as the self-host rule asks of a cell change.
 
-## A computer's lifecycle writes its old flags too
+## A computer's lifecycle reads its old flags
 
 - **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle
   phase into the phases that own it (`fragment_core::computer::Phase`:
   `Asleep`'s `retry`, `Sleeping`'s `owner`, `restarting` and
-  `owes_start`, `Failed`'s `since_ms`). The previous release reads only
-  the old fields (`wake_after_sleep`, `retry_at_ms`, `failed_ms`,
-  `owner_sleep`, `restarting`), so every stored lifecycle still carries
-  them too, written from the phase (`Legacy`), and `Lifecycle::read` fills
-  a phase stored by that release from them. Each step asserts the two
-  agree.
-- **Risk:** none while they agree. A rollback reads the same computer;
-  only `Starting`'s `destroying` is new to it, so a rolled-back release
-  counts a failing start's own destroy as a crash again (one more strike,
-  as before #1004's note in memory, which it still has).
-- **Delete when:** writing them, once no deployment can roll back to a
-  release before this one (production runs a release after it): step two
-  stops writing them (`Legacy::of`, the per-step assertion). Reading them
-  (`Legacy::fill`) goes too once every stored lifecycle has been written
-  by this release or a later one: a computer that has not woken since
-  keeps the old fields until its next event, so that last cut waits for
-  a sweep that touches every computer, or for no computer being older.
+  `owes_start`, `Failed`'s `since_ms`). A lifecycle a release before it
+  stored, and nothing has rewritten since, keeps those only in its old
+  flags (`wake_after_sleep`, `retry_at_ms`, `failed_ms`, `owner_sleep`,
+  `restarting`), so `Lifecycle::read` still fills its phase from them
+  (`computer/lifecycle/legacy.rs`), and the Computer DO logs
+  `lifecycle_old_flags` each time it does. Nothing writes them (#1284).
+- **Risk:** none while it reads them. Such a row can outlast its alarms:
+  before FIN-395 C a takeover that failed used up an alarm without a
+  write or another alarm, so a `Sleeping` row can wait until something
+  touches its computer. Read without its flags, its owner's restart or a
+  start its stop owed would be lost.
+- **Delete when:** a sweep has read every computer's lifecycle and found
+  none filled, or production has logged no `lifecycle_old_flags` line for
+  14 days. The log sees only computers something touched, so cutting on
+  it leaves one dormant since before FIN-395 C to lose that start, which
+  its owner can make again: say so when cutting.
 
 ## A chat wiped while its seed runs can keep its template's repo
 
@@ -602,6 +601,25 @@ unfinished design, not debt.
   label and its sidecars with them, or lets workerd drain at shutdown;
   then `scope_images` and `remove` go. Moving `WRANGLER_VERSION` checks
   it.
+
+## A killed celld node's VMs are found by celld's naming
+
+- **Shortcut:** a `celld dev` node reaps its krun engine's VMs when it
+  stops and when it starts again on its project, but a run killed outright
+  (a signal's `kill_started`) gives it no chance, and the engine keeps a VM
+  until told. crates/devstack/src/celld.rs (`Engine::remove`) destroys the
+  project's by the name celld gives them: its node is `dev-` and 12 hex of
+  the SHA-256 of the project's canonical path (the fork's dev.rs), each
+  container `celld-`, 6 hex of the SHA-256 of the node, `-` (its
+  container.rs `node_prefix`).
+- **Risk:** a celld that names them otherwise leaves a killed run's VMs on
+  the engine (its `vms_max` is 16), where its next start does not reap
+  them: each e2e run is a project of its own.
+- **Delete when:** celld reaps a dev node's containers by itself when its
+  supervisor dies, or names them by a label devstack sets; then `remove`
+  and its naming go. devstack's `a_projects_containers_are_named_as_celld_names_them`
+  pins the naming as the fork has it; a celld that moves it must move
+  that test too.
 
 ## A local node's port is a front door of ours, past wrangler's proxy
 

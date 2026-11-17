@@ -51,10 +51,10 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
-use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
+use fragment_core::ledger::{MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
@@ -274,6 +274,7 @@ const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep
 const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold and the disk's read after it fit the one alarm they run in");
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
+const _: () = assert!(ALARM_WALL_MS + ALARM_OTHER_MS < ALARM_LATE_MS, "an alarm held up behind one alarm's run is on time, metered as it was");
 /// The largest request body the egress signs and hands on (it is hashed
 /// for NIP-98 first, so it is read whole). A blob's upload is not read: it
 /// streams through (`egress_api`), at most the router's
@@ -765,9 +766,16 @@ impl ComputerCell {
 
     fn lifecycle(&self) -> CellResult<Lifecycle> {
         match self.meta(MetaKey::Lifecycle)? {
-            // this release's, or the previous one's (`Lifecycle::read`, which
-            // reads its bytes, as `crate::json_text` does)
-            Some(text) => Lifecycle::read(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
+            Some(text) => {
+                let (life, old) = Lifecycle::read(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}")))?;
+                // its phase filled from the flags a release before FIN-395 C
+                // kept: the debt goes once these lines stop
+                // (docs/technical-debt-ledger.md)
+                if old {
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lifecycle_old_flags": life.phase }));
+                }
+                Ok(life)
+            }
             None => Ok(Lifecycle::new()),
         }
     }
@@ -1292,27 +1300,21 @@ impl ComputerCell {
         let intervals: Vec<(i64, i64)> = rows.iter().filter_map(|r| Some((r["from_ms"].as_i64()?, r["to_ms"].as_i64()?))).collect();
         let Some((first, _)) = intervals.first().copied() else { return Ok(()) };
         let last = intervals.last().map_or(first, |(from, _)| *from);
-        let meter_rows = intervals
-            .iter()
-            .filter(|(from, to)| to > from)
-            .map(|(from, to)| MeterRow {
-                reference: format!("awake:{id}:{from}"),
-                usage: Usage::Awake { instance: fragment_core::price::INSTANCE.into(), ms: (to - from) as u64 },
-                fragment: None,
-                agent: None,
-                computer: Some(id.clone()),
-                at_ms: *to,
-            })
-            .collect::<Vec<_>>();
-        if !meter_rows.is_empty() {
-            let meter = Meter { batch: format!("awake:{id}:{first}-{last}"), rows: meter_rows };
+        let (meter, too_long) = awake_batch(&id, &intervals);
+        if let Some(meter) = meter {
             let metered = crate::ledger::ask(&self.env, &owner, &meter).await.map_err(CellError::from)?;
             for r in &metered.refused {
                 // a row the ledger refused changed nothing there: it is logged, not kept
                 console_error!("{}", json!({ "computer": id, "awake": meter.rows.get(r.index as usize).map(|m| &m.reference), "refused": r.why }));
             }
         }
-        self.exec("DELETE FROM awake WHERE from_ms >= ? AND from_ms <= ?", vec![first.into(), last.into()])
+        self.exec("DELETE FROM awake WHERE from_ms >= ? AND from_ms <= ?", vec![first.into(), last.into()])?;
+        // charged nothing (`AWAKE_ROW_MAX_MS`): logged once, as it was
+        // deleted with its batch, to find the path that metered it
+        for (from_ms, to_ms) in too_long {
+            console_error!("{}", json!({ "computer": id, "payer": owner, "awake_not_charged": { "from_ms": from_ms, "to_ms": to_ms } }));
+        }
+        Ok(())
     }
 
     /// The hosts the swap intercepts: every provider's in the catalog (an

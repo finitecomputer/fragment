@@ -457,8 +457,10 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     let _ = keep_tx.send(on);
                 }
                 Effect::ReadCut { agent, identity, fragment, turn } => {
-                    // a task of its own, bounded: no claim waits on it, and
-                    // one that does not read in time continues the turn
+                    // a task of its own, bounded: no lane waits on it, its
+                    // chat's claims only until it answers (engine.rs,
+                    // `settling`), and one that does not read in time
+                    // continues the turn
                     let (api, inbox) = (api.clone(), inbox_tx.clone());
                     tokio::spawn(async move {
                         let waited = cut_waited(&api, &fragment, &agent, &identity, &turn).await;
@@ -1479,8 +1481,9 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
 /// Whether another life's cut turn `turn` waited on its person as that
 /// life left it (`note::waited`), from `fragment`'s `work` back from its
 /// tail to the turn's start: at most one `Budget`, within
-/// `NOTE_READ_MS_MAX` (a note's bound). One that does not read, or not in
-/// time, is taken as not waiting, and its turn is continued as before.
+/// `NOTE_READ_MS_MAX` (a note's bound), which bounds how long its chat
+/// claims nothing (engine.rs, `settling`). One that does not read, or not
+/// in time, is taken as not waiting, and its turn is continued as before.
 async fn cut_waited(api: &Api, fragment: &str, agent: &str, me: &str, turn: &str) -> bool {
     let read = async {
         let mut budget = Budget::default();
