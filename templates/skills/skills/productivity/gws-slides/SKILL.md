@@ -10,6 +10,8 @@ metadata:
       bins:
         - gws
     cliHelp: "gws slides --help"
+  fragment:
+    connection: google
 ---
 
 # slides (v1)

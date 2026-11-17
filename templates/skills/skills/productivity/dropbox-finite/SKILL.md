@@ -34,32 +34,30 @@ CONTENT=https://content.dropboxapi.com/2  # a file's bytes, up and down
 fragment api dropbox POST $API/users/get_current_account
 ```
 
-- An answer with `email`: connected, go on.
-- `not_connected`: your owner has not connected Dropbox, or must authorize
-  it again. Ask them to connect it in Settings, under Connections, then try
-  again: your computer is given it within seconds.
-- `forbidden`: your owner narrowed your connections and left Dropbox out.
-  Say so, and stop.
-- A 401 that says `invalid_access_token` or `expired_access_token`: Dropbox
-  refused the token (the person removed the app in Dropbox, say). Ask them
-  to reconnect Dropbox in Settings.
+An answer with `email`: connected, go on.
 
 The answer is Dropbox's JSON on stdout. A refusal is one line of JSON on
-stderr, `{error, status, message, hint}`, and exit 1. Dropbox's own
-refusals come with `error` empty and Dropbox's JSON as `message`: go by how
-its `error_summary` starts (`path/not_found/…`, `to/conflict/file/…`).
+stderr and exit 1. Do what its `hint` says; its `body` is Dropbox's own
+answer: go by how its `error_summary` starts (`path/not_found/…`,
+`to/conflict/file/…`).
 
 The token goes to those two hosts only. An account whose `root_info` names
 a `root_namespace_id` unlike its `home_namespace_id` is in a team: paths
 start in the member's own folder unless a call adds
 `--header 'Dropbox-API-Path-Root: {".tag": "root", "root": "<root_namespace_id>"}'`.
 
+On an older computer: `fragment api` came with an image newer than a
+computer awake since before it. If the command is `unrecognized`, your
+computer takes that image when it next restarts. Until then, send the same
+calls with `curl -H "Authorization: Bearer $DROPBOX_OAUTH_ACCESS_TOKEN"`: the computer swaps
+that the same way.
+
 ## Read only
 
 Your owner picks, as they connect Dropbox, whether you may only read (list,
 search, download, links) or read and write. Connected read only, Dropbox
-refuses every change with `missing_scope`. It is a 401, so the hint says to
-reconnect: wrong for this one. Tell your owner, in plain words, that they
+refuses every change with `missing_scope` (its `error_summary`). It is a
+401, so the hint says to reconnect: wrong for this one. Tell your owner, in plain words, that they
 connected Dropbox read only, and can allow changes in Settings →
 Connections → Allow changes. Do not retry until they have; go on reading.
 
@@ -138,13 +136,10 @@ API is documented at https://docs.dropboxapi.com/dropbox-api.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| Dropbox's `error_summary` starts | Fix |
 |---------|-----|
-| `not_connected` | Your owner connects Dropbox in Settings → Connections |
-| `forbidden` | Your owner left Dropbox off this agent's connections |
-| `invalid_access_token`, `expired_access_token` | Your owner reconnects Dropbox in Settings → Connections |
+| `invalid_access_token`, `expired_access_token` | Dropbox refused the token (the person removed the app, say): your owner reconnects Dropbox in Settings → Connections |
 | `missing_scope` | Read only: they allow changes in Settings → Connections |
 | `path/not_found`, `path_lookup/not_found` | The path is wrong, or in a team folder: list its parent, or add `Dropbox-API-Path-Root` |
 | `path/conflict/…`, `to/conflict/…` | Something is there already: pick another name, or `"autorename": true` |
 | `too_many_requests` (429) | Wait the `retry_after` seconds it names, then try once more |
-| `redirected` | Dropbox answered a redirect, which is never followed with the token: say so, and stop |

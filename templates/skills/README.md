@@ -53,8 +53,8 @@ A connection's skill (Linear, Salesforce, Google) is not listed here: the
 folder is the list. Each names its connection in its frontmatter
 (`metadata: fragment: connection: <name>`), is docs alone, and calls its
 service with `fragment api <name>`; its catalog row is
-`deploy/providers/<name>.jsonc` (that folder's README says how one is
-added).
+`deploy/providers/<name>.jsonc`, which a deployment names and never
+copies (that folder's README says how one is added).
 
 And six are integrations Paul retains:
 
@@ -92,6 +92,10 @@ skill and CLI help, so it needs no local OAuth setup or additional skills.
 from Google Workspace CLI v0.22.5, adapted to `google-workspace-finite`
 authentication. The deployment allows `slides.googleapis.com` and enables
 the Slides API on its OAuth client's Cloud project.
+
+Both name Google as their connection in their frontmatter, as
+`google-workspace-finite` does, so our Hermes image shows the three to an
+agent together, once it holds Google (below).
 
 Our Hermes image exposes its own pinned bundled skills to every profile,
 read-only, with the agent's own skills and managed overrides winning by

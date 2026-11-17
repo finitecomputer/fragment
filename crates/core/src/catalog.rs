@@ -395,8 +395,9 @@ pub struct Provider {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// A connection's scopes for people: each scope, as its provider
-    /// spells it, and what settings calls it (`Gmail (read)`). A scope it
-    /// does not name is shown by its last path segment. The row's, so a
+    /// spells it, and what settings calls it (`Gmail (read)`). Settings
+    /// shows a granted scope by its name here and no other, so a row names
+    /// what people should see and leaves out its sign-in's. The row's, so a
     /// connection is added with no change to the shell (FIN-509).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub scope_names: std::collections::BTreeMap<String, String>,
@@ -407,7 +408,6 @@ impl Provider {
     pub fn title(&self) -> String {
         self.title.clone().unwrap_or_else(|| crate::notice::provider_name(&self.name))
     }
-
 
     /// How many accounts a person may connect at it (`accounts_max`; 1
     /// when the row names none).

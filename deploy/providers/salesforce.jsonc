@@ -15,9 +15,8 @@
   "account_host": { "metadata": "instance_url", "under": "my.salesforce.com" },
   "placements": [{ "header": "authorization", "format": "Bearer {}" }],
   "note": "Your agents can do anything the Salesforce user you sign in as can. To limit them, sign in as a dedicated integration user with only the permissions they need.",
-  "key": "<the client secret's store name>",
   "connection_oauth": { "authorize": "https://login.salesforce.com/services/oauth2/authorize?prompt=login%20consent",
     "exchange": "https://login.salesforce.com/services/oauth2/token", "revoke": "https://login.salesforce.com/services/oauth2/revoke",
-    "client_id": "<the app's client id>", "access": { "write": { "scopes": ["api", "refresh_token", "openid", "email"] } } },
+    "access": { "write": { "scopes": ["api", "refresh_token", "openid", "email"] } } },
   "scope_names": { "api": "Your org's data", "refresh_token": "Stay connected" },
   "env": ["SALESFORCE_ACCESS_TOKEN"] }

@@ -33,23 +33,25 @@ L="fragment api linear POST https://api.linear.app/graphql"
 $L --query 'query { viewer { name email } organization { name urlKey } }'
 ```
 
-The answer is Linear's JSON on stdout (`{"data": …}`). A refusal is one
-line of JSON on stderr, `{error, status, message, hint}`, and exit 1; a
-GraphQL answer that names errors is a refusal too. Pass values as
-`--variables '{…}'`, never pasted into the document.
+The answer is Linear's JSON on stdout (`{"data": …}`): a viewer means
+connected. Pass values as `--variables '{…}'`, never pasted into the
+document.
 
-- A viewer: connected, go on.
-- `not_connected`: your owner has not connected Linear, or must authorize
-  it again. Ask them to connect it in Settings, under Connections, then try
-  again: your computer is given it within seconds.
-- `forbidden`: your owner narrowed your connections and left Linear out.
-  Say so, and stop.
-- `authentication_error`: Linear refused the token (the person revoked the
-  app in Linear, say). Ask them to reconnect Linear in Settings.
+A refusal is one line of JSON on stderr and exit 1. Do what its `hint`
+says; its `body` is Linear's own answer. A GraphQL answer that names
+errors is a refusal too (`graphql_errors`): `message` is the first
+error's, and each error's `extensions` in `body` says more (`code`, and
+`userPresentableMessage`, written for a person).
 
 The connection reaches `api.linear.app` (the GraphQL API) and
 `uploads.linear.app` (files attached to issues) only. It is one Linear
 workspace: the one your owner picked when they connected it.
+
+On an older computer: `fragment api` came with an image newer than a
+computer awake since before it. If the command is `unrecognized`, your
+computer takes that image when it next restarts. Until then, send the same
+calls with `curl -H "Authorization: Bearer $LINEAR_OAUTH_ACCESS_TOKEN"`: the computer swaps
+that the same way.
 
 ## Read only
 
@@ -131,10 +133,8 @@ https://linear.app/developers, and the schema answers introspection.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| Linear's `extensions.code`, or its message | Fix |
 |---------|-----|
-| `not_connected` | Your owner connects Linear in Settings → Connections |
-| `forbidden` | Your owner left Linear off this agent's connections, or (a change refused while reads work) connected it read only: they allow changes in Settings → Connections |
-| `authentication_error` | Your owner reconnects Linear in Settings → Connections |
-| `invalid_input`, `Entity not found` | The identifier or id is wrong, or not in the connected workspace |
-| `redirected` | Linear answered a redirect, which is never followed with the token: say so, and stop |
+| `AUTHENTICATION_ERROR`, or a 401 | Linear refused the token (the person revoked the app, say): your owner reconnects Linear in Settings → Connections |
+| `INVALID_INPUT`, `Entity not found` | The identifier or id is wrong, or not in the connected workspace |
+| `RATELIMITED` | Wait, then ask for less in one query |

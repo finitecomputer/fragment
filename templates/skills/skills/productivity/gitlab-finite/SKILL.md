@@ -32,18 +32,19 @@ fragment api gitlab GET $G/user
 # → {"id": 1234567, "username": "ada", "name": …, "email": …, "web_url": …}
 ```
 
-- An answer with `username`: connected, go on. Its `id` is your owner's.
-- `not_connected`: your owner has not connected GitLab, or must authorize
-  it again. Ask them to, in Settings under Connections, then try again.
-- `forbidden`: your owner left GitLab out of your connections. Say so, and stop.
-- `invalid_token`, or status 401: GitLab refused the token (the person
-  revoked the app in GitLab, say). Ask them to reconnect GitLab in Settings.
+An answer with `username`: connected, go on. Its `id` is your owner's.
 
 The token goes to `gitlab.com` alone, and as a bearer token alone, which is
-how `fragment api` sends it. The answer is GitLab's JSON on stdout; a
-refusal is one line of JSON on stderr, `{error, status, message, hint}`,
-and exit 1. Beyond the two codes named here, GitLab's `error` is empty:
-tell its refusals apart by `status` and `message` (`404 Project Not Found`).
+how `fragment api` sends it. The answer is GitLab's JSON on stdout. A
+refusal is one line of JSON on stderr and exit 1. Do what its `hint` says;
+its `body` is GitLab's own answer: `message` (`404 Project Not Found`), or
+`error` and `error_description` (`invalid_token`, `insufficient_scope`).
+
+On an older computer: `fragment api` came with an image newer than a
+computer awake since before it. If the command is `unrecognized`, your
+computer takes that image when it next restarts. Until then, send the same
+calls with `curl -H "Authorization: Bearer $GITLAB_OAUTH_ACCESS_TOKEN"`: the computer swaps
+that the same way.
 
 ## Read only
 
@@ -91,6 +92,9 @@ fragment api gitlab GET $P/jobs/987654/trace --out job.log
 - Lists come a page at a time: `per_page` (20, at most 100) and `page`.
 - A note with `"system": true` is GitLab's own record of a change, not a
   comment. A job's log carries color codes and `section_start:` markers.
+- A job's artifacts (`$P/jobs/987654/artifacts`) answer a redirect to a
+  signed address on another host: `--out FILE` follows it there, without
+  the token.
 
 ## A repository's code
 
@@ -139,12 +143,9 @@ call with another path under `/api/v4`: https://docs.gitlab.com/api/rest/.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| GitLab's answer | Fix |
 |---------|-----|
-| `not_connected` | Your owner connects GitLab in Settings → Connections |
-| `forbidden` | Your owner left GitLab off this agent's connections, or the call went to a host other than `gitlab.com` |
-| `invalid_token`, status 401 | Your owner reconnects GitLab in Settings → Connections |
-| `insufficient_scope` | Connected read only: they allow changes in Settings → Connections |
+| `invalid_token` | GitLab refused the token (the person revoked the app, say): your owner reconnects GitLab in Settings → Connections |
+| 403, `insufficient_scope` | Connected read only: they allow changes in Settings → Connections |
 | Another 403 | Your owner's role in that project or group does not allow it |
-| Status 404 | The project, number or path is wrong (is it URL-encoded?), or your owner cannot see it: GitLab answers 404 for a private project they are not in |
-| `redirected` | GitLab answered a redirect, which is never followed with the token: its message names where. A signed download address on another host (a job's artifacts) is fetched without the token, by a plain download tool, never by `fragment api`. Anything else: say so, and stop |
+| 404 | The project, number or path is wrong (is it URL-encoded?), or your owner cannot see it: GitLab answers 404 for a private project they are not in |
