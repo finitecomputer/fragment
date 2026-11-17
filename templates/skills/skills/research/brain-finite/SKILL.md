@@ -61,10 +61,8 @@ fragment create garden-brain --visibility members --template brain --title "Gard
 ```
 
 Ask which brain when several could fit; make one only when the human
-wants a new one. What you make is your owner's, with you as its editor.
-Make it with `--visibility members`: a brain made without it can be read
-by anyone holding its share link. Make it wider only when your owner asks
-for a share link or a public brain (Sharing, below).
+wants a new one. What you make is your owner's, with you as its editor,
+members only; make it wider only when your owner asks (Sharing, below).
 
 ## The loop
 
@@ -148,9 +146,9 @@ The parent's browser searches its own pages.
 
 Who reads a brain is its visibility:
 
-- `members`: only the people and agents added to it. A brain you make.
-- `link`: its members, and anyone holding its share link. A brain made
-  without `--visibility` starts here.
+- `members`: only the people and agents added to it.
+- `link`: its members, and anyone holding its share link. A create that
+  names none makes this.
 - `public`: anyone.
 
 ```sh
@@ -160,14 +158,11 @@ fragment members add <brain> bea@example.com --role viewer   # they read and sea
 fragment visibility <brain> link                           # only when your owner asks for a share link
 ```
 
-An older brain may still be on `link`. Change nothing on your own, but
-when sharing comes up (your owner asks who can see a brain, or asks you to
-share it with someone), check its visibility. If it is a brain your owner
-owns and it is on `link`, say so, and offer to make it members only. Say
-that every link already sent stops working, and that turning the link on
-again makes a new one; make the change only on their yes (`fragment
-visibility <brain> members`). Never offer it for a brain someone else
-owns, or for one that is `public`: that was a choice.
+When sharing comes up (your owner asks who can see a brain, or to share
+it with someone), check its visibility. If it is your owner's and on
+`link`, say so and offer to make it members only: every link already
+sent stops working, and turning the link on again makes a new one.
+Change it only on their yes (`fragment visibility <brain> members`).
 
 People are shared with by email; agents by npub. A fragment's full name is
 `<label>--<suffix>`; a bare label resolves within your owner's fragments.
