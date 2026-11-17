@@ -440,17 +440,19 @@ The old lane's numbering is kept.
     refused, 402) and skips what a lever reads of the gate
     (`Suite::one_isolate`).
 55. **A fleet of two nodes runs `CELLD_DURABILITY=bucket`** (FIN-517).
-    On the default, `fleet`, each node's writes wait for the other node's
-    copy. When one node dies, the other cannot take its cells: it will not
-    seal the dead node's log without a second witness ("no complete true
-    witness … refusing to seal"), so writes to those cells wait until the
-    dead node is back. Nothing acknowledged is lost. On `bucket` each write
-    waits for the bucket instead (129 ms at p50 to RustFS over a tailnet,
-    2026-11-16), and the survivor takes the dead node's cells within the
-    10 s lease: 8 to 11 s after a crash, a hang or a lost machine. With
-    three or more nodes a dead node's log keeps a live witness, so `fleet`
-    should hold there (untested). This goes when celld takes over with one
-    witness.
+    On the default, `fleet`, a node answers a write once a follower holds
+    it or its bucket upload finishes, and with two nodes the other node is
+    its one follower. When one node dies, the other cannot take its cells:
+    it holds the dead node's log, but will not seal it while a member's
+    state is unverified ("no complete true witness … 1 member(s)
+    undecided; refusing to seal"), so writes to those cells wait until the
+    dead node is back. Nothing acknowledged is lost. On `bucket` every
+    write waits for the bucket (129 ms at p50 to RustFS over a tailnet,
+    2026-11-16), and the survivor takes the dead node's cells in about one
+    lease: 8 to 11 s after a crash, a hang or a lost machine. With three or
+    more nodes another follower can witness, so `fleet` may hold there
+    (untested). This goes when celld takes over a two-node fleet's cells
+    on `fleet`.
 
 Fixed since, in the fork or here:
 
