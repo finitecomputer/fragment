@@ -3531,6 +3531,55 @@ async fn a_turn_cut_while_its_tool_runs_is_continued_once() {
     }
 }
 
+/// Goal (Codex on #1305): a chat Hermes compressed answers on after a
+/// turn a crash cut, never paused. A compressed chat's admissions are its
+/// compression lineage's root's, while Hermes lists its newest session,
+/// the lineage's tip: the boot settles the root's lost turn
+/// (`hermes::SETTLE_CUT_TURNS`). Every chat v0.21 compressed is such a
+/// lineage. Method: a few turns, `/compress` rotating (its new session the
+/// old one's compression child, as v0.21 compressed), then a long command
+/// cut by a SIGKILL and a start; the next message is answered with no pause
+/// notice.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_compressed_chat_answers_on_after_a_cut_turn() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    // long turns, so Hermes' summary is shorter than what it replaces
+    let filler = "the garden's beds, their soil and what grows in each, noted at length; ".repeat(60);
+    for n in 0..3 {
+        let t = x.say(&format!("a fact to keep, number {n}: {filler}"));
+        within(fake, chat, &c, 120_000, "a turn before the compression", |w| !x.ends(w, &t).is_empty()).await;
+    }
+    // compressed as Hermes before v0.23 always did, and still does unless
+    // `compression.in_place`: into a child session, the old one its root
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "printf 'compression:\\n  in_place: false\\n' >> /data/hermes/profiles/juniper--k3x9/config.yaml"]));
+    let said = fake.say(chat, &person("paul"), json!({ "kind": "command", "command": "compress", "args": "" }));
+    let compress = fragment_bridge::records::turn_id("juniper--k3x9", chat, "chat", said["seq"].as_u64().unwrap());
+    within(fake, chat, &c, 180_000, "/compress's end", |w| !x.ends(w, &compress).is_empty()).await;
+    let children = || c.exec_out(&["/opt/hermes/.venv/bin/python", "-c", "import sqlite3; c = sqlite3.connect('file:/data/hermes/profiles/juniper--k3x9/state.db?mode=ro', uri=True); print(c.execute(\"SELECT COUNT(*) FROM sessions WHERE parent_session_id IS NOT NULL\").fetchone()[0])"]).trim().parse::<u64>().unwrap_or(0);
+    let rows = c.exec_out(&["/opt/hermes/.venv/bin/python", "-c", "import sqlite3; c = sqlite3.connect('file:/data/hermes/profiles/juniper--k3x9/state.db?mode=ro', uri=True); print(c.execute('SELECT id, parent_session_id, end_reason, session_key FROM sessions').fetchall())"]);
+    assert!(children() >= 1, "Hermes compressed the chat into a child session (else this proves nothing): {rows}");
+    let cut = x.say("run: sleep 300 # compressed");
+    within(fake, chat, &c, 120_000, "the long command runs", |_| c.exec(&["pgrep", "-f", "^sleep 300$"])).await;
+    assert!(Command::new(docker()).args(["kill", "--signal", "KILL", &c.id]).output().expect("docker runs").status.success());
+    let _ = Command::new(docker()).args(["wait", &c.id]).output();
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    c.start();
+    let next = x.say("good morning after the compression");
+    within(fake, chat, &c, 240_000, "the next message's turn to end", |w| !x.ends(w, &next).is_empty()).await;
+    let logs = c.logs();
+    let settled = logs.lines().rev().find(|l| l.contains("boot.cut_turns_settled") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's settler").to_string();
+    eprintln!("compressed: {settled}");
+    assert!(settled.contains("boot.cut_turns_settled") && settled.contains("\"lost\":1"), "the boot settled the root's lost turn: {settled}");
+    fake.with(|w| {
+        assert_eq!(x.ends(w, &cut).len(), 1, "the cut turn ends once");
+        let said: Vec<String> = w.bodies(chat, "chat", "reply").iter().map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(!said.iter().any(|t| t.contains("paused") || t.contains("/discard")), "no pause notice: {said:?}");
+        assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning after the compression")), "answered: {:?}", x.reply(w, &next));
+    });
+}
+
 /// The id of `card`'s option labelled `label` (Hermes may add "
 /// (Recommended)").
 fn option(card: &serde_json::Value, label: &str) -> serde_json::Value {

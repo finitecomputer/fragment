@@ -1134,7 +1134,11 @@ pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
 /// relayed lost turn resolved as its sender's `/discard` resolves it
 /// (`resolve_unknown_session_input`, terminal `interrupted`) with Hermes'
 /// failed-turn boundary written in the same transaction
-/// (`close_discarded_turn`: "Some actions may already have run"). A message
+/// (`close_discarded_turn`: "Some actions may already have run"). A chat's
+/// admissions are its compression lineage's root's, as Hermes' own
+/// `logical_owner` reads them (a chat Hermes compressed lists its newest
+/// session, the lineage's tip), and the boundary lands on the lineage's
+/// tip, its transcript now. A message
 /// Hermes took and had not started is a turn the bridge ended lost too, so
 /// it is cancelled, never run (`cancel_session_input`). Turns no person
 /// sent (a background delegation's delivery) are the gateway's, which
@@ -1157,8 +1161,14 @@ for p in sys.argv[1:]:
     try:
         epoch = begin_runtime_epoch(db, instance_id="fragment-boot")
         recover_session_inputs(db, epoch=epoch)
+        roots = []
         for s in db.list_gateway_sessions(platform="relay", active_only=False):
-            for row in list_session_admissions(db, session_id=s["id"]):
+            lineage = db.get_compression_lineage(s["id"])
+            root = lineage[0] if lineage else s["id"]
+            if root not in roots:
+                roots.append(root)
+        for root in roots:
+            for row in list_session_admissions(db, session_id=root):
                 if is_unattended(row):
                     continue
                 if row["status"] == "unknown":
@@ -1170,7 +1180,7 @@ for p in sys.argv[1:]:
                 else:
                     continue
                 release_admission_media(db, row["admission_id"])
-            if db._execute_write(lambda conn: close_discarded_turn(db, conn, {"target_session_id": s["id"]})):
+            if db._execute_write(lambda conn: close_discarded_turn(db, conn, {"target_session_id": root})):
                 closed += 1
     finally:
         db.close()
@@ -1253,7 +1263,7 @@ mod tests {
             assert!(cut_turns_settled(bad).is_err(), "{bad:?}");
         }
         // only Hermes' own runtime and session code writes, as its /discard does
-        for uses in ["from hermes_state import SessionDB", "begin_runtime_epoch(", "recover_session_inputs(", "resolve_unknown_session_input(", "close_discarded_turn(", "cancel_session_input(", "is_unattended(row)", "list_gateway_sessions(platform=\"relay\""] {
+        for uses in ["from hermes_state import SessionDB", "begin_runtime_epoch(", "recover_session_inputs(", "resolve_unknown_session_input(", "close_discarded_turn(", "cancel_session_input(", "is_unattended(row)", "list_gateway_sessions(platform=\"relay\"", "get_compression_lineage(", "list_session_admissions(db, session_id=root)", "{\"target_session_id\": root}"] {
             assert!(SETTLE_CUT_TURNS.contains(uses), "{uses}");
         }
         for never in ["sqlite3", "execute(", "SELECT", "DELETE", "UPDATE", "INSERT"] {
