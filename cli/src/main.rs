@@ -308,10 +308,11 @@ enum Cmd {
     /// service's placeholder is found in the environment and sent as a
     /// bearer token, which the computer swaps for a short-lived one on the
     /// way to that service's own hosts. Prints the answer's body; a refusal
-    /// is one line of JSON on stderr ({error, status, message, hint}) and
-    /// exit 1. A redirect is never followed with the token. `fragment api
-    /// linear POST https://api.linear.app/graphql --query 'query { viewer {
-    /// name } }'`
+    /// is one line of JSON on stderr ({error, status, message, hint, body},
+    /// `body` what the service answered, as it came) and exit 1. A redirect
+    /// is followed, the token never to another host. `fragment api linear
+    /// POST https://api.linear.app/graphql --query 'query { viewer { name }
+    /// }'`
     Api {
         /// The connection's name, as Settings' Connections lists it (linear, google)
         provider: String,
@@ -329,7 +330,7 @@ enum Cmd {
         #[arg(long)]
         content_type: Option<String>,
         /// A GraphQL document: sent as {query, variables}, and an answer
-        /// that names errors is a refusal
+        /// that names errors is a refusal (graphql_errors)
         #[arg(long)]
         query: Option<String>,
         /// The GraphQL document's variables, a JSON object
