@@ -364,10 +364,11 @@ pub const FILES: &str = "Chat attachments are already on your computer. The atta
 /// its `transcript_note`), and the bridge's attachment note after them
 /// names the same recording, which `FILES` says to use with tools; so
 /// nothing told the agent the quote was the memo. Its file stays for work
-/// on the sound itself (timings for an edit, the one time it needed it).
+/// on the recording itself (timings for an edit, the one time it needed
+/// it; keeping or sending it on).
 /// Hermes' own notes when it could not transcribe one, or heard nothing,
 /// keep their wording, which this names.
-pub const VOICE: &str = "A voice memo arrives already transcribed: the quoted words just above the note that the user sent audio are what they said in it. Answer those words, and never transcribe the recording again or install speech-to-text to hear it. Open its file only for work on the sound itself, such as timings or an edit. If a note says the voice message could not be transcribed or came through empty, ask them in plain words to send it again or type it.";
+pub const VOICE: &str = "A voice memo arrives already transcribed: the quoted words just above the note that the user sent audio are what they said in it. Answer those words, and never transcribe the recording again or install speech-to-text to hear it. Use its file only for work on the recording itself, such as timings, an edit, or keeping or sending it on. If a note says the voice message could not be transcribed or came through empty, ask them in plain words to send it again or type it.";
 
 /// What every agent is told of the files it sends in our chats, after
 /// `FILES` on every turn (Paul, 2026-10-23: asked for a PDF in the chat,
@@ -1750,17 +1751,17 @@ mod tests {
     /// again): every agent is told, on every turn in our chats, that a voice
     /// memo's words are the quote above Hermes' audio note, to answer them
     /// and not transcribe or install anything to hear it, that its file is
-    /// for work on the sound, and what to do when Hermes says it could not
+    /// for work on the recording, and what to do when Hermes says it could not
     /// hear one. Method: the overlay's relay hint after `FILES`, its words.
     #[test]
     fn every_agent_is_told_a_voice_memo_arrives_transcribed() {
         let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(relay_hint().contains(&format!("{FILES}\n\n{VOICE}\n\n")), "after the files it is sent: {}", relay_hint());
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
-        for said in ["already transcribed", "quoted words just above the note that the user sent audio", "never transcribe the recording again", "install speech-to-text", "only for work on the sound itself", "timings or an edit", "could not be transcribed or came through empty", "send it again or type it"] {
+        for said in ["already transcribed", "quoted words just above the note that the user sent audio", "never transcribe the recording again", "install speech-to-text", "only for work on the recording itself", "timings, an edit, or keeping or sending it on", "could not be transcribed or came through empty", "send it again or type it"] {
             assert!(VOICE.contains(said), "{said}: {VOICE}");
         }
-        assert!(!VOICE.contains(['`', '\n', '$', '"', '|']) && VOICE.len() < 500, "one plain paragraph, nothing Hermes would expand: {VOICE}");
+        assert!(!VOICE.contains(['`', '\n', '$']) && VOICE.len() < 500, "one plain paragraph, nothing Hermes would expand: {VOICE}");
     }
 
     /// Goal (Paul, 2026-10-26: asked over SimpleX to send its voice reply

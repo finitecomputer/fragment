@@ -4226,7 +4226,7 @@ async fn a_voice_memo_is_transcribed_through_the_route() {
     // describes, the words quoted just above Hermes' audio note, then the
     // bridge's note naming the same recording. A Hermes that moves the
     // quote makes VOICE false, and fails here.
-    let memo_call = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).find(|c| c.body["messages"].to_string().contains(words)).expect("the memo's model call");
+    let memo_call = handed(&model, "juniper--k3x9", words).into_iter().next().expect("the memo's turn's model call");
     let messages = memo_call.body["messages"].as_array().cloned().unwrap_or_default();
     let system = messages.first().filter(|m| m["role"] == "system").map(content_text).unwrap_or_default();
     assert!(system.contains("A voice memo arrives already transcribed: the quoted words just above the note that the user sent audio"), "its system prompt says a memo is already transcribed (hermes::VOICE): {}", system.chars().take(2000).collect::<String>());
