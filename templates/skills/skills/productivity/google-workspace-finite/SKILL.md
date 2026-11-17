@@ -45,8 +45,11 @@ connection and authentication.
 ## Connected?
 
 ```bash
-fragment api google GET https://www.googleapis.com/oauth2/v2/userinfo
+curl -sS -H "Authorization: Bearer $GOOGLE_OAUTH_ACCESS_TOKEN" https://www.googleapis.com/oauth2/v2/userinfo
 ```
+
+(`curl` here, and not `fragment api`: this check is the same on a computer
+of any age.)
 
 - `{"email": …}`: connected, as that account. Go on.
 - `not_connected`: your owner has not connected Google, or must authorize
@@ -139,6 +142,11 @@ freshness; do not echo the token. Ask the human only when mailbox access
 fails or the match is ambiguous.
 
 ## Without gws
+
+`gws` is in your computer's image, so this is for a computer without it.
+`fragment api` came with an image newer than a computer awake since before
+it: if the command is `unrecognized`, use `gws` (above), which every image
+has, or `curl -H "Authorization: Bearer $GOOGLE_OAUTH_ACCESS_TOKEN"`.
 
 Where `gws` is not on your PATH, the same APIs with `fragment api google
 <METHOD> <url>`: it sends the connection's placeholder for you, `--param`
