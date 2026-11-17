@@ -63,12 +63,16 @@ an image may rely on this:
 - **A stop nothing asked for, while idle, is a sleep.** A host may stop
   a container for its own reasons (its maintenance, a host short of
   memory). One that stops while its computer is awake with nothing open
-  (no keepalive, no port tab), no save under way, and all this life did
-  in a save it made since it came up, has slept: no strike, no rollback,
+  (no keepalive, no port tab), no save under way, all this life did in a
+  save it made since it came up, and no message or join it was woken for
+  that its guest has not taken up, has slept: no strike, no rollback,
   nothing told, and nothing starts it again, though the hold after its
-  last work had not run out. Its next wake restores that save. A life
-  with no save of its own may have been woken for work it has not begun,
-  so its stop is a crash (below), as is every other.
+  last work had not run out. Its next wake restores that save. A message
+  or a join's notice posted after its guest's last keepalive closed, with
+  none opened since, is work not taken up (a record's wake carries when it
+  was posted; one posted while its guest worked was queued by it), and a
+  life with no save of its own may have been woken for work it has not
+  begun, so either stop is a crash (below), as is every other.
 - **A crash** (the container stopped on its own) starts it again while
   something wants it; a guest that died holding its keepalive is started
   again however long its turn ran, and its next life ends what was cut.

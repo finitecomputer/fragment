@@ -83,6 +83,8 @@ fn simulated_interleavings_keep_the_invariants() {
                         Event::Restart { generation: g }
                     }
                     0 => Event::Wake { why: [Wake::Record, Wake::Presence, Wake::Tab, Wake::Owner, Wake::Joined][(rng(&mut seed) % 5) as usize] },
+                    // a record for its agents, posted a while before its wake comes
+                    15 => Event::Posted { at_ms: now - (rng(&mut seed) % 5_000) as i64 },
                     1 => Event::Ready { generation: g },
                     2 => Event::StartFailed { generation: g, why: "sim".into() },
                     3 => Event::Opened { socket: if rng(&mut seed).is_multiple_of(2) { Socket::Tab } else { Socket::Keepalive } },
