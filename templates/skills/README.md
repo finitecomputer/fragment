@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Eighteen skills. Eight are Fragment platform contracts:
+Eight are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|

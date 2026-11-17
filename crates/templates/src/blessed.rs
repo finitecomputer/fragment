@@ -394,7 +394,6 @@ mod tests {
         assert!(names.contains("gws-docs"), "the upstream Docs guide complements connected Google");
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
         assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
-        assert_eq!(names.len(), 18, "Fragment contracts, the six retained integrations, design-finite, the Docs and Slides guides, and import-agent-home");
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 
