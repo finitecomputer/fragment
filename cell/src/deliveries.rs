@@ -608,6 +608,6 @@ async fn authorized(env: &Env, d: &Delivery) -> Result<bool> {
     if resp.status_code() != 200 {
         return Err(Error::RustError(format!("the fragment answered {}", resp.status_code())));
     }
-    let answer: Value = resp.json().await?;
+    let answer: Value = crate::ReadJson::read_json(&mut resp).await?;
     Ok(answer["send"] == true)
 }

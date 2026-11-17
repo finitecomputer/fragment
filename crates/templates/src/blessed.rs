@@ -28,10 +28,12 @@ include!("blessed_names.rs");
 pub const CONNECTORS: &[&str] = &["telegram"];
 
 /// The blessed templates that stay a person's own (decisions 66 to 71): an
-/// org owns apps and brains, never an agent, a chat or skills. The cell
+/// org owns apps and brains, never an agent (a connector, `CONNECTORS`, is
+/// one: bound as its owner's agent's door, by them in person), a chat or
+/// skills. The cell
 /// refuses an org's fragment of one by its name, with no manifest to read;
 /// `every_blessed_template_runs` holds this to their kinds.
-pub const PERSONS_OWN: [&str; 3] = ["agent", "chat", "skills"];
+pub const PERSONS_OWN: [&str; 4] = ["agent", "chat", "skills", "telegram"];
 
 /// A blessed template, when `name` is one: named statics, never
 /// `crate::ALL`, so a binary links only the index of the templates it
