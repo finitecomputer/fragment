@@ -19,7 +19,7 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 /// The offer's words under its title, as the server says them
 /// (`fragment_core::migrations::offer`).
-const OFFER_TEXT: &str = "Its memories, files, chats and skills come with it, to a more secure home with a fresh key. You'll get a month free.";
+const OFFER_TEXT: &str = "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key. You'll get a month free.";
 
 fn agent(old: &str) -> RosterAgent {
     RosterAgent {

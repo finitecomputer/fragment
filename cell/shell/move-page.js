@@ -2,8 +2,8 @@
 // agents, each where its move is in the server's words
 // (`GET /api/migrations/offers`), and the one question the import needs:
 // which to upgrade. Each new agent takes its old one's name. Its words call
-// the move the agent's upgrade: the same agent, in a better home, with
-// nothing lost (the server's words say so too).
+// the move the agent's upgrade: the same agent, in a better home (the
+// server's words say so too, promising only what comes).
 //
 // Upgrade: the person opens the move (`POST /api/migrations/offers`,
 // which binds them and gives its comp once: a month's seat, so a guest

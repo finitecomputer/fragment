@@ -42,11 +42,13 @@ A person whose old agents' moves are `open` is asked about each, oldest
 first, in `GET /api/notices` (docs/api.md, Notices): a notice that must
 be answered, `move:<old>`, its words the server's
 (`fragment_core::migrations::offer`): "<name>'s upgrade is ready", "Its
-memories, files, chats and skills come with it, to a more secure home
-with a fresh key. You'll get a month free.", with the roster's picture
-through the platform. A person reads the move as their agent's upgrade:
-the same agent, in a better home, with nothing lost. Its key is new, and
-no words promise the same one. Its answers:
+memories, chats, and supported files and skills come with it, to a more
+secure home with a fresh key. You'll get a month free.", with the
+roster's picture through the platform. A person reads the move as their
+agent's upgrade: the same agent, in a better home. The words promise
+only what comes (files past the cap, and a skill that needs what this
+platform lacks, stay behind), and its key is new: no words promise the
+same one. Its answers:
 
 | Answer | Does |
 |---|---|
@@ -82,8 +84,8 @@ it, the offer's cover stands aside: it is answered there.
 - `GET /api/migrations/offers` (`Offers`): the person's old agents, each
   where its move is in the server's words (`fragment_core::migrations::said`):
   its upgrade ready, pausing, packing up, upgrading, upgraded, paused for
-  staff with nothing lost. The page reads it again every few seconds
-  while a move is under way.
+  staff (with nothing lost only while its stage is kept). The page reads
+  it again every few seconds while a move is under way.
 - The one question: which to upgrade. Each new agent takes its old
   one's name (the import brings who it is; it is renamed as any agent). A
   Never'd one has Ask again.
