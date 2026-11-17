@@ -411,6 +411,10 @@ impl FragmentCell {
         };
         let principal = row["principal"].as_str().unwrap_or("").to_string();
         let may = self.receivers(&[(principal, read)]).await?.first().copied().unwrap_or(false);
+        // a revoke while the registry answered took the row and the subscription
+        if self.rows(&format!("SELECT id FROM {table} WHERE id = ?"), vec![SqlStorageValue::Integer(sub)])?.is_empty() {
+            return Ok(json!({ "send": false }));
+        }
         if !may {
             self.exec(&format!("DELETE FROM {table} WHERE id = ?"), vec![SqlStorageValue::Integer(sub)])?;
             self.event("subscription.fenced", &format!("a queued {} delivery's subscriber may read it no more: not sent, its subscription ended", ask.kind.as_str()), json!({ "kind": ask.kind.as_str(), "sub": sub }));
