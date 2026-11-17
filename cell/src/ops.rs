@@ -631,9 +631,10 @@ impl FragmentCell {
             }
             Some("forget-grants") => {
                 // an agent fragment as before the grants' move: it holds
-                // none, so its computer's row is handed over whole
-                // (fragment_core::grants::handed_over)
+                // none and saw no row, so its computer's row is taken whole
+                // (fragment_core::grants::answered)
                 self.del_meta(MetaKey::Grants)?;
+                self.del_meta(MetaKey::GrantsSeen)?;
                 json!({ "forgot": true })
             }
             Some("posted-kept") => {

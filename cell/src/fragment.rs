@@ -427,6 +427,10 @@ pub(crate) enum MetaKey {
     /// set by its owner in person, through their computer (runs_on.rs).
     /// None: every provider they have, each connection's default account.
     Grants,
+    /// The row its computer kept for it before the grants' move, as it saw
+    /// it last (`fragment_core::grants::Row`): what a row changed since is
+    /// what the release before wrote. Goes with that row.
+    GrantsSeen,
     /// Its door's public key (`<door> <64 hex>`), registered by a link its
     /// owner started, gone once they unlink (fragment_core::door).
     Door,
@@ -545,6 +549,7 @@ impl MetaKey {
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
             MetaKey::Grants => "grants",
+            MetaKey::GrantsSeen => "grants_seen",
             MetaKey::Door => "door",
             MetaKey::DoorTicket => "door_ticket",
             MetaKey::DoorActor => "door_actor",

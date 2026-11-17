@@ -661,13 +661,14 @@ provider's own hosts.
   person through their computer's routes. The computer asks the agent's
   fragment for them at each request it swaps and each read of a view,
   and keeps none: a provider taken away is refused from the next request.
-  A computer from before held them itself; each hands its rows over
-  (`grants::legacy`) and marks them moved. The agent's fragment takes a
-  hand-over whole only while it holds none; one again (replayed after a
-  stop before the mark, or written by the release before during a
-  rollback) only narrows its providers and never changes its accounts
-  (`grants::handed_over`). The release before reads the mark as no
-  provider at all, so a rollback never widens an agent.
+  A computer from before held them itself (`agents.connections`,
+  `agent_accounts`). Each ask carries that row as it stands, marked
+  `MOVED` once answered; the agent's fragment keeps the row it saw last
+  and takes from a row only what changed since (`grants::answered`): all
+  of it the first time, then what the release before wrote during a
+  rollback (a list, an account picked or reset), while a row sent again
+  unchanged (a reply lost) changes nothing. The release before reads the
+  mark as no provider at all, so a rollback never widens a moved agent.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):

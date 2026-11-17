@@ -71,29 +71,31 @@ unfinished design, not debt.
   providers, its account at each connection of several) moved from its
   computer (`agents.connections`, `agent_accounts`) to its agent fragment
   (`meta` `grants`, `fragment_core::grants`). The release before reads
-  only the computer's rows, so the columns stay: a computer hands each
-  agent's row over at its first ask after the deploy, in a call of its own
-  (`ComputerCell::grants_of`, `move_row`), and marks it `MOVED`, which that
-  release reads as no provider at all (and never writes). The fragment
-  takes a hand-over whole only while it holds none; a row handed over
-  again only narrows its providers and never changes its accounts
-  (`grants::handed_over`). The test levers `legacy-grants` (a computer's)
-  and `forget-grants` (a fragment's) write a row as that release did, and
-  a fragment as before the move.
+  and writes only the computer's rows, so they stay: each ask carries an
+  agent's row as it stands (`ComputerCell::grants_of`), its `connections`
+  are marked `MOVED` once answered (that release reads the mark as no
+  provider, and never writes it), and its fragment keeps the row it saw
+  last (`grants_seen`) and takes only what changed since
+  (`grants::answered`). This release writes the old picks table only to
+  clear an ended or other life's rows. The test levers `legacy-grants` and
+  `skip-marks` (a computer's) and `forget-grants` (a fragment's) write a
+  row as that release did, leave rows unmarked as a lost answer would,
+  and make a fragment as before the move.
 - **Risk:** a rollback to the release before refuses every moved agent
   every provider (fail closed) until the next deploy. Its Settings show
   each such agent narrowed to none, refuse a switch (its list carries the
-  mark) and offer no account pick. What only a hand-made call can still
-  write there comes back narrowed or ignored: a list sent whole is kept
-  only as far as it narrows the agent; an account picked or reset, with
-  or without a list, changes nothing, the agent keeping the account its
-  owner picked before. Nothing widens and no account changes. A computer
-  that never runs this release keeps its rows unmoved.
+  mark) and offer no account pick. What it can still write (a list sent
+  whole, an account picked or reset by a hand-made call, an unassign and
+  assign) is taken at the next deploy, as its owner's newer word. A pick
+  made on this release lives only in the fragment, so that release cannot
+  see it to reset it. A computer that never runs this release keeps its
+  rows unmoved.
 - **Delete when:** production runs this release, so none rolls back past
   it: a Computer schema step drops `agents.connections` and
-  `agent_accounts`, first copying each unmoved row into the computer's
-  `meta` as one to hand over (a computer asleep through this release
-  included), and the move, the mark and both levers go with them.
+  `agent_accounts`, first copying each row not yet taken by its fragment
+  into the computer's `meta` as one to hand over (a computer asleep
+  through this release included); the row in each ask, `grants_seen`,
+  the mark and the three levers go with them.
 
 ## A chat wiped while its seed runs can keep its template's repo
 

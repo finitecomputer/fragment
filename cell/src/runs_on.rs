@@ -128,14 +128,15 @@ impl FragmentCell {
 
     /// `computer/grants`: what this agent may use of its owner's
     /// (`fragment_core::grants`), asked by the computer it runs on at each
-    /// use (`{computer, identity}`), as it holds it after either the
-    /// computer's row from before the move (`taken`, its stored text: taken
-    /// whole only while this holds none, `grants::handed_over`) or its
-    /// owner's change, in person (`owner` with `connections`, or with
-    /// `provider` and `account`: their computer's routes, which a signed
-    /// person alone reaches). Read field by field, as this file's other
-    /// bodies are (the cell's Wasm budget).
+    /// use (`{computer, identity, row}`): what it holds, with what that
+    /// computer's row from before the move (`row`) changed since the one
+    /// it saw last (`MetaKey::GrantsSeen`), then its owner's change, in
+    /// person (`owner` with `connections`, or with `provider` and
+    /// `account`: their computer's routes, which a signed person alone
+    /// reaches). Read field by field, as this file's other bodies are (the
+    /// cell's Wasm budget).
     pub(crate) fn grants(&self, body: &[u8]) -> CellResult<Grants> {
+        use fragment_core::grants::{answered, Change, Row};
         self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
         let body: Value = crate::json_body(body)?;
         let text = |k: &str| body[k].as_str().unwrap_or("");
@@ -147,42 +148,34 @@ impl FragmentCell {
             Some(stored) => Some(Grants::read(&stored).map_err(|e| CellError::host(format!("its stored grants: {e}")))?),
             None => None,
         };
-        let invalid = || CellError::invalid("grants name at most a catalog's providers, sorted and once, each account a Pipes id");
-        let changed = body.get("connections").is_some() || body.get("provider").is_some();
-        let grants = match (body["taken"].as_str(), changed) {
-            (Some(_), true) => return Err(CellError::invalid("a hand-over and its owner's change are separate calls")),
-            (Some(taken), false) => fragment_core::grants::handed_over(held.as_ref(), Grants::read(taken).map_err(|_| invalid())?),
-            (None, true) => {
-                if text("owner") != self.must(MetaKey::Owner)? {
-                    return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner, in person, changes what it may use"));
-                }
-                let mut grants = held.clone().unwrap_or_default();
-                match (body.get("connections"), body["provider"].as_str()) {
-                    (Some(Value::Null), _) => grants.connections = None,
-                    (Some(Value::Array(list)), _) => grants.connections = Some(list.iter().map(|p| p.as_str().map(str::to_string)).collect::<Option<Vec<_>>>().ok_or_else(invalid)?),
-                    (None, Some(provider)) => match body["account"].as_str() {
-                        Some(account) => {
-                            grants.accounts.insert(provider.to_string(), account.to_string());
-                        }
-                        None => {
-                            grants.accounts.remove(provider);
-                        }
-                    },
-                    _ => return Err(invalid()),
-                }
-                grants
-            }
-            (None, false) => held.clone().unwrap_or_default(),
+        let seen = match self.meta(MetaKey::GrantsSeen)? {
+            Some(stored) => Some(crate::json_text::<Value>(&stored).ok().as_ref().and_then(Row::of).ok_or_else(|| CellError::host("the row it saw last does not read"))?),
+            None => None,
         };
-        if !grants.valid() {
-            return Err(invalid());
+        let row = match &body["row"] {
+            Value::Null => None,
+            v => Some(Row::of(v).ok_or_else(|| CellError::invalid("a row is its connections as stored and its accounts"))?),
+        };
+        let invalid = || CellError::invalid("grants name at most a catalog's providers, sorted and once, each account a Pipes id");
+        let change = match (body.get("connections"), body["provider"].as_str()) {
+            (None, None) => None,
+            (Some(Value::Null), _) => Some(Change::Connections(None)),
+            (Some(Value::Array(list)), _) => Some(Change::Connections(Some(list.iter().map(|p| p.as_str().map(str::to_string)).collect::<Option<Vec<_>>>().ok_or_else(invalid)?))),
+            (None, Some(provider)) => Some(Change::Account { provider: provider.to_string(), account: body["account"].as_str().map(str::to_string) }),
+            _ => return Err(invalid()),
+        };
+        let changed = change.is_some();
+        if changed && text("owner") != self.must(MetaKey::Owner)? {
+            return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner, in person, changes what it may use"));
         }
-        // taken, it is held from now on, even as the default: a row handed
-        // over again only narrows it
-        if held.as_ref() != Some(&grants) && (body["taken"].is_string() || changed) {
+        let grants = answered(held.as_ref(), seen.as_ref(), row.as_ref(), change).map_err(|e| CellError::invalid(format!("{e}: {}", invalid().message)))?;
+        if held.clone().unwrap_or_default() != grants {
             self.set_meta(MetaKey::Grants, &grants.stored())?;
-            let by = if changed { "changed by its owner" } else { "moved from its computer" };
+            let by = if changed { "changed by its owner" } else { "taken from its computer's row" };
             self.event("agent.grants", &format!("what it may use of its owner's, {by}"), json!({ "grants": grants, "moved": !changed }));
+        }
+        if let Some(row) = row.filter(|r| seen.as_ref() != Some(r)) {
+            self.set_meta(MetaKey::GrantsSeen, &row.value().to_string())?;
         }
         Ok(grants)
     }
