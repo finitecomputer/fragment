@@ -183,7 +183,7 @@ final class FragmentUITests: XCTestCase {
     /// a tap fans them out, in the server's words, the warning saying when it
     /// stops and the platform's own words, each with its actions, and the X
     /// folds them back. They're Home's alone: Your Apps has none, and Settings
-    /// has a bell counting them that opens them too. Later is the update's,
+    /// has a Notices row counting them that opens them too. Later is the update's,
     /// and the update goes; one left, the fan stays, "1 Notice". Named by `TEST_RUNNER_FRAGMENT_UITEST_SERVER` and
     /// `TEST_RUNNER_FRAGMENT_UITEST_KEY` (the key's 64 hex); skipped without.
     func testTheComputersNoticesShowAndTheirActionsWork() throws {
@@ -226,13 +226,13 @@ final class FragmentUITests: XCTestCase {
         XCTAssertFalse(stack.exists, "no band over Your Apps")
         app.navigationBars["Your Apps"].buttons.element(boundBy: 0).tap()
         XCTAssertTrue(stack.waitForExistence(timeout: 5), "and back on Home")
-        // Settings: a bell, counting them, opens them
+        // Settings: a row, counting them, opens them
         app.buttons["homeSettings"].tap()
-        let bell = app.buttons["noticesButton"]
-        XCTAssertTrue(bell.waitForExistence(timeout: 5), "Settings' bell")
+        let row = app.buttons["noticesRow"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "Settings' Notices row")
         XCTAssertFalse(stack.exists, "no band over Settings")
-        screenshot(app, "Settings' bell")
-        bell.tap()
+        screenshot(app, "Settings' Notices row")
+        row.tap()
         XCTAssertTrue(app.staticTexts["2 Notices"].waitForExistence(timeout: 5), "counted in the title")
         XCTAssertTrue(update.buttons["Later"].waitForExistence(timeout: 5))
         update.buttons["Later"].tap()
