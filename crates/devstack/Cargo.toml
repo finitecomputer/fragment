@@ -29,3 +29,7 @@ libc = "0.2"
 # while no node runs) before dev's WorkOS fake starts (src/lib.rs
 # `signed_in_subjects`): the crate e2e and the CLI pin
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+
+[dev-dependencies]
+# a P-256 org key made for a test (src/codestore.rs), never one committed
+fragment-fakes = { path = "../fakes" }

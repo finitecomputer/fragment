@@ -21,6 +21,7 @@ use anyhow::{bail, Context, Result};
 
 pub mod built;
 pub mod celld;
+pub mod codestore;
 pub mod containers;
 mod framing;
 mod front;

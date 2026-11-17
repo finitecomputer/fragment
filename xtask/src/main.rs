@@ -5,6 +5,7 @@
 //!                    no fat LTO and no wasm-opt, so a change to a file of the
 //!                    release rebuilds in seconds; deploys and the e2e refuse it
 //!   dev [--clean] [--real-agent [--models <config>]] [--runtime wrangler|celld]
+//!       [--codestore fake|macrofiche|external]
 //!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <name>.fragment.localhost:8790), the
@@ -24,6 +25,11 @@
 //!                    from OpenBao on :8802, its audit log on, or with
 //!                    FRAGMENT_SECRETS_BACKEND=vars from its node's file
 //!                    of their values (seam 12)
+//!                    --codestore macrofiche keeps git in macrofiche
+//!                    (MACROFICHE_BIN) on :8792, its state under
+//!                    target/devstack/macrofiche; external, in a store
+//!                    already running (CODESTORAGE_API_URL, CODESTORAGE_ORG,
+//!                    CODESTORAGE_PRIVATE_KEY_FILE): docs/self-host.md, seam 5
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -223,16 +229,18 @@ fn build_cmd(args: &[String]) -> Result<()> {
 }
 
 /// What `cargo xtask dev` is asked for: `--clean`, `--real-agent`, and
-/// `--models <config>` with it; `--runtime celld` (docs/self-host.md, seam 1).
+/// `--models <config>` with it; `--runtime celld` (docs/self-host.md, seam
+/// 1); `--codestore` (seam 5).
 struct DevArgs {
     clean: bool,
     real_agent: bool,
     models: Option<std::path::PathBuf>,
     celld: bool,
+    codestore: devstack::codestore::Kind,
 }
 
 fn dev_args(args: &[String]) -> Result<DevArgs> {
-    let mut out = DevArgs { clean: false, real_agent: false, models: None, celld: false };
+    let mut out = DevArgs { clean: false, real_agent: false, models: None, celld: false, codestore: devstack::codestore::Kind::Fake };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -246,7 +254,8 @@ fn dev_args(args: &[String]) -> Result<DevArgs> {
                     other => bail!("--runtime is wrangler or celld, not {}", other.unwrap_or("nothing")),
                 }
             }
-            other => bail!("dev takes --clean, --real-agent, --models <config> and --runtime <wrangler|celld>, not {other:?}"),
+            "--codestore" => out.codestore = devstack::codestore::Kind::parse(it.next().map(String::as_str).unwrap_or_default())?,
+            other => bail!("dev takes --clean, --real-agent, --models <config>, --runtime <wrangler|celld> and --codestore <fake|macrofiche|external>, not {other:?}"),
         }
     }
     if out.models.is_some() && !out.real_agent {
@@ -279,21 +288,20 @@ fn dev(args: &[String]) -> Result<()> {
     build::cell_as(build::Profile::Dev)?;
     let clean = args.clean;
     let state = devstack::repo_root().join("target/devstack/codestorage.json");
+    let macrofiche_dir = devstack::repo_root().join("target/devstack/macrofiche");
     let workos_users = devstack::repo_root().join("target/devstack/workos.json");
     if clean {
         let _ = std::fs::remove_file(&state);
+        // dev's own macrofiche, never an external store: that is not dev's
+        // to clear
+        if macrofiche_dir.exists() {
+            std::fs::remove_dir_all(&macrofiche_dir).with_context(|| format!("clear {}", macrofiche_dir.display()))?;
+        }
         let _ = std::fs::remove_file(&workos_users);
         // the node's state too, before the fleet seeds its local store again
         devstack::clear_state(&devstack::cell_dir())?;
     }
-    let key = devstack::dev_secret("codestorage-org-key.pem", fragment_fakes::codestorage::generate_org_key_pem)?;
-    let fake = fragment_fakes::codestorage::CodeStorage::start(fragment_fakes::codestorage::Options {
-        org: DEV_ORG.into(),
-        org_key_pem: Some(key.clone()),
-        state_file: Some(state),
-        port: DEV_CODESTORAGE_PORT,
-        ..Default::default()
-    })?;
+    let store = dev_codestore(args.codestore)?;
     // sign-in: a real WorkOS environment when its files are named (its
     // redirect URI must include http://127.0.0.1:8790/auth/callback); else
     // on celld the identity door, as a self-hosted box signs people in;
@@ -338,9 +346,9 @@ fn dev(args: &[String]) -> Result<()> {
     };
     let fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
-        codestorage_org: DEV_ORG.into(),
-        codestorage_key_pem: key,
-        codestorage_url: fake.url.clone(),
+        codestorage_org: store.org.clone(),
+        codestorage_key_pem: store.key_pem.clone(),
+        codestorage_url: store.url.clone(),
         host_suffix: "fragment.localhost".into(),
         host_label_suffix: None,
         // A dev fragment's pins move by its own moves, the CLI's refresh, and this poll.
@@ -431,7 +439,7 @@ fn dev(args: &[String]) -> Result<()> {
     }
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
-    println!("  code.storage: {} (the fake)", fake.url);
+    println!("  code.storage: {}", store.said);
     match &real {
         Some(r) => {
             println!("  models:       {} on real models, {}'s (paid by {}'s key); the rest on the Workers AI fake at {}", r.slots.join(", "), r.from.display(), dev_agent::KEY_FILE_ENV, ai.url);
@@ -482,6 +490,12 @@ fn dev(args: &[String]) -> Result<()> {
     })?;
     let status = node.wait()?;
     println!("the node exited: {status}");
+    if let Some(mut m) = store.macrofiche {
+        match m.stop() {
+            Ok(()) => println!("stopped macrofiche"),
+            Err(e) => println!("macrofiche: {e:#}"),
+        }
+    }
     // the runtime's own containers: wrangler's in Docker, or celld's VMs on
     // its krun engine (a node that stops reaps its own)
     let removed = match &celld {
@@ -490,6 +504,61 @@ fn dev(args: &[String]) -> Result<()> {
     };
     println!("removed {removed} containers the dev node left");
     Ok(())
+}
+
+/// The dev stack's code store (docs/self-host.md, seam 5), started or
+/// found: the fake on :8792 with its state in target/devstack (the
+/// default), macrofiche on :8792 with its state in
+/// target/devstack/macrofiche, or a store already running. A cell
+/// remembers each fragment's repo, so switching stores takes `--clean`
+/// (or carrying the repos across).
+struct DevStore {
+    url: String,
+    org: String,
+    key_pem: String,
+    /// What the banner says it is.
+    said: String,
+    /// Held while the stack runs (each stops when dropped).
+    _fake: Option<fragment_fakes::codestorage::CodeStorage>,
+    macrofiche: Option<devstack::codestore::Macrofiche>,
+}
+
+fn dev_codestore(kind: devstack::codestore::Kind) -> Result<DevStore> {
+    use devstack::codestore::{ExternalStore, Kind, Macrofiche, MacroficheOptions};
+    let root = devstack::repo_root();
+    match kind {
+        Kind::Fake => {
+            let key = devstack::dev_secret("codestorage-org-key.pem", fragment_fakes::codestorage::generate_org_key_pem)?;
+            let fake = fragment_fakes::codestorage::CodeStorage::start(fragment_fakes::codestorage::Options {
+                org: DEV_ORG.into(),
+                org_key_pem: Some(key.clone()),
+                state_file: Some(root.join("target/devstack/codestorage.json")),
+                port: DEV_CODESTORAGE_PORT,
+                ..Default::default()
+            })?;
+            let said = format!("{} (the fake)", fake.url);
+            Ok(DevStore { url: fake.url.clone(), org: DEV_ORG.into(), key_pem: key, said, _fake: Some(fake), macrofiche: None })
+        }
+        Kind::Macrofiche => {
+            let bin = devstack::codestore::macrofiche_bin()?;
+            let key = devstack::dev_secret("codestorage-org-key.pem", fragment_fakes::codestorage::generate_org_key_pem)?;
+            let opts = MacroficheOptions {
+                dir: root.join("target/devstack/macrofiche"),
+                port: DEV_CODESTORAGE_PORT,
+                org: DEV_ORG.into(),
+                key_pem: key.clone(),
+                log_dir: root.join("target/devstack"),
+            };
+            let (m, took) = Macrofiche::start(&bin, &opts)?;
+            let said = format!("{} (macrofiche {}, ready in {took:.1?}; its state {}, its log {})", m.url, bin.display(), opts.state().display(), m.log.display());
+            Ok(DevStore { url: m.url.clone(), org: DEV_ORG.into(), key_pem: key, said, _fake: None, macrofiche: Some(m) })
+        }
+        Kind::External => {
+            let x = ExternalStore::from_env()?;
+            let said = format!("{} (a store already running, org {})", x.url, x.org);
+            Ok(DevStore { url: x.url, org: x.org, key_pem: x.key_pem, said, _fake: None, macrofiche: None })
+        }
+    }
 }
 
 /// The dev stack's OpenBao (docs/self-host.md, seam 12), where the cell's
