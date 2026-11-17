@@ -1,6 +1,6 @@
 ---
 name: hubspot-finite
-description: HubSpot CRM (contacts, companies, deals, tickets, their associations and notes, and owners) through the person's connected HubSpot account, with `fragment api hubspot` and HubSpot's API. No OAuth setup, no private app token on the computer.
+description: HubSpot CRM (contacts, companies, deals, tickets, their associations and notes, and owners) through the person's connected HubSpot account, with `fragment connection call hubspot` and HubSpot's API. No OAuth setup, no private app token on the computer.
 version: 2.0.0
 author: Finite
 license: MIT
@@ -16,10 +16,10 @@ metadata:
 Your owner's HubSpot account: its contacts, companies, deals and tickets,
 how they are associated, the notes on them, and the account's owners (who
 records are assigned to). Your computer holds no HubSpot credential:
-`fragment api hubspot` sends the connection's placeholder for you, and the
-computer swaps in a short-lived token for your owner's account. Never ask
-the person for a HubSpot password, a private app token or a personal access
-key, and never run `hs auth`.
+`fragment connection call hubspot` sends the connection's placeholder for
+you, and the computer swaps in a short-lived token for your owner's
+account. Never ask the person for a HubSpot password, a private app token
+or a personal access key, and never run `hs auth`.
 
 The account is your owner's team's: a record you create or change, or a note
 you add, is there for everyone in it to see. The connection reaches the
@@ -29,7 +29,7 @@ whole account, not only the records your owner's HubSpot user may see.
 
 ```bash
 H="https://api.hubapi.com"
-fragment api hubspot GET $H/account-info/2026-09/details
+fragment connection call hubspot GET $H/account-info/2026-09/details
 # → {"portalId": …, "timeZone": …, "companyCurrency": …, "uiDomain": "app.hubspot.com", …}
 ```
 
@@ -42,11 +42,12 @@ stderr and exit 1. Do what its `hint` says; its `body` is HubSpot's own
 answer: `category` (`VALIDATION_ERROR`, `MISSING_SCOPES`), `message`, and
 `errors`, which name the property refused.
 
-On an older computer: `fragment api` came with an image newer than a
-computer awake since before it. If the command is `unrecognized`, your
-computer takes that image when it next restarts. Until then, send the same
-calls with `curl -H "Authorization: Bearer $HUBSPOT_OAUTH_ACCESS_TOKEN"`: the computer swaps
-that the same way.
+On an older computer: `fragment connection call` came with an image newer
+than a computer awake since before it. If the command is `unrecognized`,
+your computer takes that image when it next restarts. Until then, send the
+same calls with
+`curl -H "Authorization: Bearer $HUBSPOT_OAUTH_ACCESS_TOKEN"`: the
+computer swaps that the same way.
 
 ## Read only
 
@@ -64,28 +65,28 @@ it until they say they have; go on reading.
 O="$H/crm/objects/2026-09"
 
 # search a type by text (names, emails, phones, domains), by filters, or both
-fragment api hubspot POST $O/contacts/search --body '{"query": "ada lovelace", "limit": 10, "properties": ["firstname", "lastname", "email", "company"]}'
-fragment api hubspot POST $O/deals/search --body '{"limit": 20, "properties": ["dealname", "amount", "dealstage", "closedate"],
+fragment connection call hubspot POST $O/contacts/search --body '{"query": "ada lovelace", "limit": 10, "properties": ["firstname", "lastname", "email", "company"]}'
+fragment connection call hubspot POST $O/deals/search --body '{"limit": 20, "properties": ["dealname", "amount", "dealstage", "closedate"],
   "filterGroups": [{"filters": [{"propertyName": "dealstage", "operator": "EQ", "value": "closedwon"}, {"propertyName": "amount", "operator": "GT", "value": "10000"}]}],
   "sorts": [{"propertyName": "closedate", "direction": "DESCENDING"}]}'
 
 # one record, and the ids of the records it is associated with
-fragment api hubspot GET $O/deals/123456 --param properties=dealname,amount,dealstage,hubspot_owner_id --param associations=contacts,companies
+fragment connection call hubspot GET $O/deals/123456 --param properties=dealname,amount,dealstage,hubspot_owner_id --param associations=contacts,companies
 
 # the companies a contact is associated with: here a type is its id
-fragment api hubspot GET $O/0-1/501/associations/0-2 --param limit=100
+fragment connection call hubspot GET $O/0-1/501/associations/0-2 --param limit=100
 
 # the notes on a deal, newest first (associations.contact, .company, .deal or .ticket)
-fragment api hubspot POST $O/notes/search --body '{"limit": 10, "properties": ["hs_note_body", "hs_timestamp", "hubspot_owner_id"],
+fragment connection call hubspot POST $O/notes/search --body '{"limit": 10, "properties": ["hs_note_body", "hs_timestamp", "hubspot_owner_id"],
   "filterGroups": [{"filters": [{"propertyName": "associations.deal", "operator": "EQ", "value": "123456"}]}],
   "sorts": [{"propertyName": "hs_timestamp", "direction": "DESCENDING"}]}'
 
 # owners: an owner's id, for hubspot_owner_id
-fragment api hubspot GET $H/crm/owners/2026-09 --param email=ada@example.com
+fragment connection call hubspot GET $H/crm/owners/2026-09 --param email=ada@example.com
 
 # a type's properties and their options; the deal pipelines and their stages
-fragment api hubspot GET $H/crm/properties/2026-09/0-1
-fragment api hubspot GET $H/crm/pipelines/2026-09/0-3
+fragment connection call hubspot GET $H/crm/properties/2026-09/0-1
+fragment connection call hubspot GET $H/crm/pipelines/2026-09/0-3
 ```
 
 - The types are `contacts`, `companies`, `deals` and `tickets`; their ids
@@ -106,14 +107,14 @@ fragment api hubspot GET $H/crm/pipelines/2026-09/0-3
 
 ```bash
 # create, and update: an empty value clears a property
-fragment api hubspot POST $O/contacts --body '{"properties": {"email": "ada@example.com", "firstname": "Ada", "lastname": "Lovelace"}}'
-fragment api hubspot PATCH $O/deals/123456 --body '{"properties": {"dealstage": "contractsent", "amount": "12000"}}'
+fragment connection call hubspot POST $O/contacts --body '{"properties": {"email": "ada@example.com", "firstname": "Ada", "lastname": "Lovelace"}}'
+fragment connection call hubspot PATCH $O/deals/123456 --body '{"properties": {"dealstage": "contractsent", "amount": "12000"}}'
 
 # associate contact 501 with deal 123456 (HubSpot's default association)
-fragment api hubspot PUT $O/0-1/501/associations/default/0-3/123456
+fragment connection call hubspot PUT $O/0-1/501/associations/default/0-3/123456
 
 # add a note to a deal
-fragment api hubspot POST $O/notes --body '{"properties": {"hs_timestamp": "2026-11-16T15:04:05Z", "hs_note_body": "Called Ada: they sign Friday."},
+fragment connection call hubspot POST $O/notes --body '{"properties": {"hs_timestamp": "2026-11-16T15:04:05Z", "hs_note_body": "Called Ada: they sign Friday."},
   "associations": [{"to": {"id": "123456"}, "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 214}]}]}'
 ```
 

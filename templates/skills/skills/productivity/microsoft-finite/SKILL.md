@@ -1,6 +1,6 @@
 ---
 name: microsoft-finite
-description: Microsoft 365 (Outlook mail and calendar, OneDrive files, contacts) through the person's connected Microsoft account, with `fragment api microsoft` and Microsoft Graph. No OAuth setup, no key on the computer.
+description: Microsoft 365 (Outlook mail and calendar, OneDrive files, contacts) through the person's connected Microsoft account, with `fragment connection call microsoft` and Microsoft Graph. No OAuth setup, no key on the computer.
 version: 2.0.0
 author: Finite
 license: MIT
@@ -13,13 +13,14 @@ metadata:
 
 # Microsoft 365
 
-Your owner's Microsoft account (work, school or personal): Outlook mail and
-calendar, OneDrive files and contacts, through Microsoft Graph. Your
-computer holds no Microsoft credential: `fragment api microsoft` sends the
-connection's placeholder for you, and the computer swaps in a short-lived
-token for your owner's account. There is no app to register and no key to
-paste: never ask the person for a Microsoft password, a client secret or a
-token, and never run `az login` or `m365 login`.
+Your owner's Microsoft account (work, school or personal): Outlook mail
+and calendar, OneDrive files and contacts, through Microsoft Graph. Your
+computer holds no Microsoft credential:
+`fragment connection call microsoft` sends the connection's placeholder
+for you, and the computer swaps in a short-lived token for your owner's
+account. There is no app to register and no key to paste: never ask the
+person for a Microsoft password, a client secret or a token, and never run
+`az login` or `m365 login`.
 
 What you do is done as your owner: mail you send comes from them, and an
 event you create is on their calendar.
@@ -28,7 +29,7 @@ event you create is on their calendar.
 
 ```bash
 G="https://graph.microsoft.com/v1.0"
-fragment api microsoft GET "$G/me" --param '$select=displayName,mail,userPrincipalName'
+fragment connection call microsoft GET "$G/me" --param '$select=displayName,mail,userPrincipalName'
 ```
 
 A `displayName`: connected, go on. The token goes to `graph.microsoft.com`
@@ -39,11 +40,12 @@ is one line of JSON on stderr and exit 1. Do what its `hint` says; its
 `body` is Graph's own answer: `error.code` (`ErrorItemNotFound`,
 `ErrorAccessDenied`) and `error.message`.
 
-On an older computer: `fragment api` came with an image newer than a
-computer awake since before it. If the command is `unrecognized`, your
-computer takes that image when it next restarts. Until then, send the same
-calls with `curl -H "Authorization: Bearer $MICROSOFT_OAUTH_ACCESS_TOKEN"`: the computer swaps
-that the same way.
+On an older computer: `fragment connection call` came with an image newer
+than a computer awake since before it. If the command is `unrecognized`,
+your computer takes that image when it next restarts. Until then, send the
+same calls with
+`curl -H "Authorization: Bearer $MICROSOFT_OAUTH_ACCESS_TOKEN"`: the
+computer swaps that the same way.
 
 ## Read only
 
@@ -63,20 +65,20 @@ Do not retry it until they say they have; go on reading.
 MSG='$select=id,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview,webLink'
 
 # a folder, newest first: inbox, sentitems, drafts, archive, deleteditems, or a folder's id
-fragment api microsoft GET "$G/me/mailFolders/inbox/messages" --param '$top=10' --param "$MSG" --param '$orderby=receivedDateTime desc'
+fragment connection call microsoft GET "$G/me/mailFolders/inbox/messages" --param '$top=10' --param "$MSG" --param '$orderby=receivedDateTime desc'
 
 # unread only: beside $orderby, a $filter names the ordered property first
-fragment api microsoft GET "$G/me/mailFolders/inbox/messages" --param '$top=10' --param "$MSG" --param '$orderby=receivedDateTime desc' \
+fragment connection call microsoft GET "$G/me/mailFolders/inbox/messages" --param '$top=10' --param "$MSG" --param '$orderby=receivedDateTime desc' \
   --param '$filter=receivedDateTime ge 1900-01-01T00:00:00Z and isRead eq false'
 
 # search every folder (no $orderby or $filter beside $search)
-fragment api microsoft GET "$G/me/messages" --param '$search="invoice from acme"' --param '$top=10' --param "$MSG"
+fragment connection call microsoft GET "$G/me/messages" --param '$search="invoice from acme"' --param '$top=10' --param "$MSG"
 
 # one message, with its body
-fragment api microsoft GET "$G/me/messages/<id>" --param '$select=subject,from,toRecipients,ccRecipients,receivedDateTime,body'
+fragment connection call microsoft GET "$G/me/messages/<id>" --param '$select=subject,from,toRecipients,ccRecipients,receivedDateTime,body'
 
 # send (contentType: Text or HTML): answers nothing (202) when it is accepted
-fragment api microsoft POST "$G/me/sendMail" --body '{"message": {"subject": "Notes", "body": {"contentType": "Text", "content": "Here are the notes."},
+fragment connection call microsoft POST "$G/me/sendMail" --body '{"message": {"subject": "Notes", "body": {"contentType": "Text", "content": "Here are the notes."},
   "toRecipients": [{"emailAddress": {"address": "ada@example.com"}}], "ccRecipients": []}, "saveToSentItems": true}'
 ```
 
@@ -84,11 +86,11 @@ fragment api microsoft POST "$G/me/sendMail" --body '{"message": {"subject": "No
 
 ```bash
 # the next 7 days, recurring events expanded; times answer in UTC
-fragment api microsoft GET "$G/me/calendarView" --param "startDateTime=$(date -u +%FT%TZ)" --param "endDateTime=$(date -u -d '+7 days' +%FT%TZ)" \
+fragment connection call microsoft GET "$G/me/calendarView" --param "startDateTime=$(date -u +%FT%TZ)" --param "endDateTime=$(date -u -d '+7 days' +%FT%TZ)" \
   --param '$top=50' --param '$select=id,subject,start,end,location,organizer,attendees,webLink' --param '$orderby=start/dateTime'
 
 # create: local times and their time zone (a Windows name, "Eastern Standard Time", or an IANA one)
-fragment api microsoft POST "$G/me/events" --body '{"subject": "Sync", "start": {"dateTime": "2026-11-12T15:00:00", "timeZone": "America/New_York"},
+fragment connection call microsoft POST "$G/me/events" --body '{"subject": "Sync", "start": {"dateTime": "2026-11-12T15:00:00", "timeZone": "America/New_York"},
   "end": {"dateTime": "2026-11-12T15:30:00", "timeZone": "America/New_York"}, "attendees": [{"emailAddress": {"address": "ada@example.com"}, "type": "required"}]}'
 ```
 
@@ -98,23 +100,24 @@ fragment api microsoft POST "$G/me/events" --body '{"subject": "Sync", "start": 
 FILE='$select=id,name,size,lastModifiedDateTime,webUrl,folder,file,parentReference'
 
 # OneDrive's root, or a folder by its path (between root:/ and :/)
-fragment api microsoft GET "$G/me/drive/root/children" --param '$top=50' --param "$FILE"
-fragment api microsoft GET "$G/me/drive/root:/Documents/Plans:/children" --param '$top=50' --param "$FILE"
+fragment connection call microsoft GET "$G/me/drive/root/children" --param '$top=50' --param "$FILE"
+fragment connection call microsoft GET "$G/me/drive/root:/Documents/Plans:/children" --param '$top=50' --param "$FILE"
 
 # search by name and content (a ' in the words is written twice), and one item
-fragment api microsoft GET "$G/me/drive/root/search(q='quarterly plan')" --param '$top=25' --param "$FILE"
-fragment api microsoft GET "$G/me/drive/items/<id>" --param "$FILE"
+fragment connection call microsoft GET "$G/me/drive/root/search(q='quarterly plan')" --param '$top=25' --param "$FILE"
+fragment connection call microsoft GET "$G/me/drive/items/<id>" --param "$FILE"
 
 # contacts
-fragment api microsoft GET "$G/me/contacts" --param '$top=50' --param '$select=id,displayName,emailAddresses,mobilePhone,companyName'
+fragment connection call microsoft GET "$G/me/contacts" --param '$top=50' --param '$select=id,displayName,emailAddresses,mobilePhone,companyName'
 ```
 
 A file's content is not on `graph.microsoft.com`: Graph answers a redirect
-to a signed, short-lived URL on another host. `fragment api` follows it
-there without the token, and `--out` saves the file whole or not at all:
+to a signed, short-lived URL on another host. `fragment connection call`
+follows it there without the token, and `--out` saves the file whole or
+not at all:
 
 ```bash
-fragment api microsoft GET "$G/me/drive/items/<id>/content" --header 'Accept: */*' --out plan.docx
+fragment connection call microsoft GET "$G/me/drive/items/<id>/content" --header 'Accept: */*' --out plan.docx
 ```
 
 - A list answers one page (`$top` of them). Where there are more, the
