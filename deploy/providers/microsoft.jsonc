@@ -13,10 +13,9 @@
   "hosts": ["graph.microsoft.com"],
   "placements": [{ "header": "authorization", "format": "Bearer {}" }],
   "note": "Some work accounts need an IT admin to approve Finite before you can connect.",
-  "key": "<the client secret's store name>",
   "connection_oauth": { "authorize": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?prompt=select_account",
     "exchange": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-    "client_id": "<the app's client id>", "access": {
+    "access": {
       "read": { "scopes": ["openid", "email", "profile", "offline_access",
         "https://graph.microsoft.com/User.Read", "https://graph.microsoft.com/Mail.Read",
         "https://graph.microsoft.com/Calendars.Read", "https://graph.microsoft.com/Files.Read",

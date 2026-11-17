@@ -31,28 +31,27 @@ G="https://graph.microsoft.com/v1.0"
 fragment api microsoft GET "$G/me" --param '$select=displayName,mail,userPrincipalName'
 ```
 
-- A `displayName`: connected, go on.
-- `not_connected`: your owner has not connected Microsoft, or must
-  authorize it again. Ask them to connect it in Settings, under
-  Connections, then try again: your computer is given it within seconds.
-- `forbidden`: your owner narrowed your connections and left Microsoft out.
-  Say so, and stop.
-- `invalidauthenticationtoken`: Microsoft refused the token (the person
-  removed the app's access, say). Ask them to reconnect Microsoft in
-  Settings.
+A `displayName`: connected, go on. The token goes to `graph.microsoft.com`
+only.
 
 The answer is Graph's JSON on stdout; a list is `{"value": […]}`. A refusal
-is one line of JSON on stderr, `{error, status, message, hint}`, and exit
-1; Graph's own codes come through lower case (`erroritemnotfound`,
-`erroraccessdenied`). The token goes to `graph.microsoft.com` only.
+is one line of JSON on stderr and exit 1. Do what its `hint` says; its
+`body` is Graph's own answer: `error.code` (`ErrorItemNotFound`,
+`ErrorAccessDenied`) and `error.message`.
+
+On an older computer: `fragment api` came with an image newer than a
+computer awake since before it. If the command is `unrecognized`, your
+computer takes that image when it next restarts. Until then, send the same
+calls with `curl -H "Authorization: Bearer $MICROSOFT_OAUTH_ACCESS_TOKEN"`: the computer swaps
+that the same way.
 
 ## Read only
 
 Your owner picks, as they connect Microsoft, whether you may only read
 (mail, calendar, files and contacts) or read and write (also send and
 change mail, create and change events, files and contacts). Connected read
-only, Microsoft refuses every change (`erroraccessdenied`, `accessdenied`,
-403). If a change is refused so while reads work, tell your owner, in plain
+only, Microsoft refuses every change (`ErrorAccessDenied` or
+`accessDenied`, 403). If a change is refused so while reads work, tell your owner, in plain
 words, that they may have connected Microsoft read only, and that they can
 allow changes in Settings → Connections → Allow changes. A work account's
 admin may also forbid it: say that it may be their organization's setting.
@@ -111,20 +110,12 @@ fragment api microsoft GET "$G/me/contacts" --param '$top=50' --param '$select=i
 ```
 
 A file's content is not on `graph.microsoft.com`: Graph answers a redirect
-to a signed, short-lived URL on another host, which needs no token and is
-never sent one. Learn the URL, then fetch it with an ordinary download
-tool:
+to a signed, short-lived URL on another host. `fragment api` follows it
+there without the token, and `--out` saves the file whole or not at all:
 
 ```bash
-# the item names it …
-fragment api microsoft GET "$G/me/drive/items/<id>" --param '$select=id,name,@microsoft.graph.downloadUrl'
-# … or the refusal does (exit 1, as meant): {"error": "redirected", "message": "the answer is a redirect to https://…"}
-fragment api microsoft GET "$G/me/drive/items/<id>/content"
-# then, without the token:
-wget -O plan.docx '<the signed URL>'
+fragment api microsoft GET "$G/me/drive/items/<id>/content" --header 'Accept: */*' --out plan.docx
 ```
-
-Never give the signed URL to `fragment api`.
 
 - A list answers one page (`$top` of them). Where there are more, the
   answer's `@odata.nextLink` is the next page's whole address: GET it as it
@@ -146,12 +137,9 @@ Never give the signed URL to `fragment api`.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| Graph's `error.code` | Fix |
 |---------|-----|
-| `not_connected` | Your owner connects Microsoft in Settings → Connections |
-| `forbidden` | Your owner left Microsoft off this agent's connections, or the call went to a host that is not `graph.microsoft.com` |
-| `invalidauthenticationtoken` | Your owner reconnects Microsoft in Settings → Connections |
-| `erroraccessdenied`, `accessdenied` | Read only (they allow changes in Settings → Connections), or their organization does not allow it |
-| `erroritemnotfound`, `itemnotfound` | The id or path is wrong, or not in this account |
-| `inefficientfilter` | Name the `$orderby` property first in the `$filter`, or drop the `$orderby` |
-| `redirected` | A file's content: fetch the URL it names without the token (Files, above). Anything else: say so, and stop |
+| `InvalidAuthenticationToken` | Microsoft refused the token (the person removed the app's access, say): your owner reconnects Microsoft in Settings → Connections |
+| `ErrorAccessDenied`, `accessDenied` | Read only (they allow changes in Settings → Connections), or their organization does not allow it |
+| `ErrorItemNotFound`, `itemNotFound` | The id or path is wrong, or not in this account |
+| `InefficientFilter` | Name the `$orderby` property first in the `$filter`, or drop the `$orderby` |

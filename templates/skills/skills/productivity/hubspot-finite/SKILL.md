@@ -33,27 +33,27 @@ fragment api hubspot GET $H/account-info/2026-09/details
 # → {"portalId": …, "timeZone": …, "companyCurrency": …, "uiDomain": "app.hubspot.com", …}
 ```
 
-- An answer with `portalId`: connected, go on.
-- `not_connected`: your owner has not connected HubSpot, or must authorize
-  it again. Ask them to, in Settings under Connections, then try again.
-- `forbidden`: your owner narrowed your connections and left HubSpot out.
-  Say so, and stop.
-- Status 401: HubSpot refused the token (someone uninstalled the app from
-  the HubSpot account, say). Ask them to reconnect HubSpot in Settings.
+An answer with `portalId`: connected, go on. The token goes to
+`api.hubapi.com` alone: never call `api.hubspot.com`, where the placeholder
+goes as it is and HubSpot refuses it.
 
-The token goes to `api.hubapi.com` alone: never call `api.hubspot.com`,
-where the placeholder goes as it is and HubSpot refuses it. The answer is
-HubSpot's JSON on stdout; a refusal is one line of JSON on stderr, `{error,
-status, message, hint}`, and exit 1. Tell HubSpot's own refusals apart by
-`status` and `message`: their `error` is often only `error`, or empty.
+The answer is HubSpot's JSON on stdout. A refusal is one line of JSON on
+stderr and exit 1. Do what its `hint` says; its `body` is HubSpot's own
+answer: `category` (`VALIDATION_ERROR`, `MISSING_SCOPES`), `message`, and
+`errors`, which name the property refused.
+
+On an older computer: `fragment api` came with an image newer than a
+computer awake since before it. If the command is `unrecognized`, your
+computer takes that image when it next restarts. Until then, send the same
+calls with `curl -H "Authorization: Bearer $HUBSPOT_OAUTH_ACCESS_TOKEN"`: the computer swaps
+that the same way.
 
 ## Read only
 
 Your owner picks, as they connect HubSpot, whether you may only read
 (contacts, companies, deals, tickets, notes and owners) or read and write
 (also create and change records, associate them and add notes). Connected
-read only, HubSpot refuses every change: status 403, its message about the
-scopes it requires. If a change is refused so while reads work, tell your
+read only, HubSpot refuses every change: status 403, `MISSING_SCOPES`. If a change is refused so while reads work, tell your
 owner, in plain words, that they may have connected HubSpot read only and
 can allow changes in Settings → Connections → Allow changes. Do not retry
 it until they say they have; go on reading.
@@ -138,13 +138,9 @@ at https://developers.hubspot.com/docs/api-reference name them.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| HubSpot's answer | Fix |
 |---------|-----|
-| `not_connected` | Your owner connects HubSpot in Settings → Connections |
-| `forbidden` | Your owner left HubSpot off this agent's connections, or the call went to a host other than `api.hubapi.com` |
-| Status 401 | Your owner reconnects HubSpot in Settings → Connections |
-| Status 403, scopes required | Read only (they allow changes in Settings → Connections), or a part of HubSpot the connection does not reach |
-| Status 400 | A property's name or value is wrong: list the type's properties |
-| Status 404 | The id is wrong, or not in this account |
-| Status 429 | Wait a few seconds, then ask for less at a time |
-| `redirected` | HubSpot answered a redirect, which is never followed with the token: say so, and stop |
+| 403, `MISSING_SCOPES` | Read only (they allow changes in Settings → Connections), or a part of HubSpot the connection does not reach |
+| 400, `VALIDATION_ERROR` | A property's name or value is wrong (`errors` says which): list the type's properties |
+| 404 | The id is wrong, or not in this account |
+| 429 | Wait a few seconds, then ask for less at a time |
