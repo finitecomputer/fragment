@@ -480,6 +480,62 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "made": made3.body, "gusPosts": gus_posts.body, "gusAfter": [gus_after.status, gus_after.body.clone()], "adaAgent": [ada_agent_posts.status, ada_agent_posts.body.clone()], "runs": [ran_in, ran_out, ran_ada] }),
     );
 
+    // a link-visible org fragment (the review's): its share link's floor is
+    // a link holder's alone, so a viewer who never held it, offboarded, is
+    // stopped as on a members-only one: their webhook hears no more and
+    // ends, their browser is pushed to no more, their pinging socket
+    // closes; a browser of someone who holds only the link still hears
+    let made4 = api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orglink"), "template": "calories", "visibility": "link" })))?;
+    let name4 = made4.body["name"].as_str().context("the org's link fragment")?.to_string();
+    let files = json!([{ "path": "fragment.json", "text": serde_json::to_string_pretty(&manifest)? }, { "path": "app.mjs", "text": app }]);
+    let wrote4 = api.signed(&ada, "POST", &format!("/api/f/{name4}/files"), Some(&json!({ "key": "link-app", "message": "notify, and a talk channel", "files": files })))?;
+    let deployed4 = api.signed(&ada, "POST", &format!("/api/f/{name4}/deploy"), Some(&json!({})))?;
+    let ivy = api.person()?;
+    let ivy_id = api.identity(&ivy)?;
+    api.signed(&ada, "POST", &format!("/api/f/{name4}/invites"), Some(&json!({ "email": Api::email_of(&ivy), "role": "viewer" })))?;
+    let ivy_in = accept(&name4, &ivy)?;
+    let holder = api.person()?;
+    let view = made4.body["viewToken"].as_str().unwrap_or("");
+    let hooks4 = [(&ivy, "ivy4"), (&ada, "ada4")].map(|(who, id)| api.signed(who, "POST", &format!("/api/f/{name4}/subscriptions"), Some(&json!({ "channel": "talk", "url": format!("{}/notify/{id}", s.push.url) }))));
+    let browsers4 = [(&ivy, "ivy4", "__push-sub".to_string(), 28), (&holder, "holder4", format!("__push-sub?view={view}"), 29)].map(|(who, id, path, seed)| {
+        let sub = s.push.subscribe(id, seed);
+        let body = json!({ "who": "link4", "endpoint": sub.endpoint, "p256dh": sub.p256dh, "auth": sub.auth });
+        api.call(Call { method: "POST", url: api.site_url(&name4, &path), body: Some(body.to_string().into_bytes()), content_type: Some("application/json"), keys: Some(who), ..Call::default() })
+    });
+    let mut ivy_live = Socket::open(api, &name4, "__live", Some(&ivy), None)?;
+    let ivy_hello = ivy_live.until("hello", 5)?;
+    ivy_live.patience(Duration::from_secs(15))?;
+    let say4 = |id: &str, text: &str| api.signed(&ada, "POST", &format!("/api/f/{name4}/channels/talk"), Some(&json!({ "id": id, "body": { "text": text } })));
+    let pushed4 = |title: &str| api.op(&ada, &name4, "notify", title, json!({ "title": title, "who": "link4" }));
+    let hears = |id: &str, title: &str| s.push.received(id).iter().any(|p| p["title"] == title);
+    let said_in = say4("l1", "while ivy is in")?;
+    let pushed_in = pushed4("in")?;
+    let heard_in = s.eventually(WAIT, || s.push.hooked("ivy4").len() == 1 && s.push.hooked("ada4").len() == 1 && hears("ivy4", "in") && hears("holder4", "in"));
+    let ivy_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "ivy-1", "person": ivy_id })))?;
+    let aged4 = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name4, "op": "age-live", "ms": fragment_proto::limits::LIVE_IDENTITY_MS })))?;
+    ivy_live.send(&json!({ "type": "ping" }))?;
+    let ivy_closed = loop {
+        match ivy_live.next() {
+            Ok(_) => continue,
+            Err(e) => break e.to_string(),
+        }
+    };
+    let said_out = say4("l2", "after ivy left")?;
+    let pushed_out = pushed4("out")?;
+    let heard_out = s.eventually(WAIT, || s.push.hooked("ada4").len() == 2 && hears("holder4", "out"));
+    let ivy_subs = api.signed(&ada, "GET", &format!("/api/f/{name4}/subscriptions"), None)?;
+    let ivy_sub_kept = ivy_subs.body["subscriptions"].as_array().is_some_and(|subs| subs.iter().any(|x| x["principal"] == ivy_id.as_str()));
+    s.ok(
+        "a link-visible org fragment: offboarded, a viewer who never held its link hears no more by webhook (its subscription ends) or push, and their pinging socket closes (4001), while a browser of someone who holds only its link is still pushed to",
+        made4.status == 200 && wrote4.status == 200 && deployed4.status == 200 && ivy_in.status == 200 && ivy_hello["role"] == "viewer"
+            && hooks4.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200)) && browsers4.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200))
+            && said_in.status == 200 && pushed_in.status == 200 && heard_in
+            && ivy_out.status == 200 && aged4.status == 200 && ivy_closed.contains("4001")
+            && said_out.status == 200 && pushed_out.status == 200 && heard_out
+            && s.push.hooked("ivy4").len() == 1 && !hears("ivy4", "out") && ivy_subs.status == 200 && !ivy_sub_kept,
+        json!({ "ivyHooks": s.push.hooked("ivy4").len(), "ivyPushed": s.push.received("ivy4"), "ivyClosed": ivy_closed, "ivySubKept": ivy_sub_kept, "holder": s.push.received("holder4") }),
+    );
+
     // org_admin_cannot_bypass_cap: its budget stops its admin's AI steps too
     let tight = api.signed(&s.operator, "POST", &format!("/api/ledger/{ledger}/budget"), Some(&json!({ "id": "b2", "micros": 1 })))?;
     let _ = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": ledger, "op": "forget-gate" })));

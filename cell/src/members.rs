@@ -660,9 +660,11 @@ impl FragmentCell {
     /// fragment, as a request of theirs would be decided now, by their
     /// membership as it counts, or an agent of theirs that is a member (none
     /// when a row is stale or gone: `stale_members`), or else by its
-    /// visibility (a link's holder counts on a link's: what they subscribed
-    /// by is not revoked by an offboarding). A person's fragment: each may,
-    /// as before, and no registry read. Bounded by the caller's batch.
+    /// visibility. A link's floor is a link holder's alone, one with no row
+    /// here (theirs or an agent's, counting or not): anyone with one is
+    /// decided by their rows, so an offboarding stops them (a webhook's
+    /// subscriber always has one). A person's fragment: each may, as
+    /// before, and no registry read. Bounded by the caller's batch.
     pub(crate) async fn receivers(&self, asks: &[(String, Role)]) -> CellResult<Vec<bool>> {
         if self.owner()?.org().is_none() {
             return Ok(vec![true; asks.len()]);
@@ -679,9 +681,12 @@ impl FragmentCell {
         let visibility = self.visibility()?;
         let mut may = Vec::with_capacity(asks.len());
         for (principal, read) in asks {
-            let member = if stale.contains(principal) { None } else { self.member_role(principal)? };
-            let owns_member_agent = member.is_none() && agents.iter().any(|(agent, owner)| owner == principal && !stale.contains(agent));
-            let standing = access::Standing { member, owns_member_agent, link: visibility == Visibility::Link, signed: npub::is_identity(principal), cap: None, held: None };
+            let row = self.member_role(principal)?;
+            let theirs: Vec<&String> = agents.iter().filter(|(_, owner)| owner == principal).map(|(agent, _)| agent).collect();
+            let link = visibility == Visibility::Link && row.is_none() && theirs.is_empty();
+            let member = row.filter(|_| !stale.contains(principal));
+            let owns_member_agent = member.is_none() && theirs.iter().any(|agent| !stale.contains(*agent));
+            let standing = access::Standing { member, owns_member_agent, link, signed: npub::is_identity(principal), cap: None, held: None };
             may.push(matches!(access::decide(visibility, standing, access::Purpose::Read, *read), access::Decision::Allow(_)));
         }
         Ok(may)

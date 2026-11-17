@@ -491,16 +491,15 @@ impl FragmentCell {
     /// an org's fragment, the role a request of theirs gets now, decided as
     /// at its open (`require`, through `fence`), whatever it came by (their
     /// own row, or an agent of theirs that is a member: its row counts by
-    /// their place too), and a link counting on a link's fragment as
-    /// `receivers` counts it. A person's fragment: never (a removal, or a
-    /// role changed, closes its sockets itself).
-    fn fenced_out(&self, signed: &crate::routed::Signed, role: Role) -> CellResult<bool> {
+    /// their place too), the share link counting only for a socket that
+    /// opened by it alone (`view`: `link`). A person's fragment: never (a
+    /// removal, or a role changed, closes its sockets itself).
+    fn fenced_out(&self, signed: &crate::routed::Signed, role: Role, link: bool) -> CellResult<bool> {
         if self.owner()?.org().is_none() {
             return Ok(false);
         }
         let url = url::Url::parse("https://fragment.internal/__live").expect("a constant URL parses");
         let caller = Caller { signed: Some(signed.clone()), unresolved: None, url, site: true };
-        let link = self.visibility()? == fragment_proto::Visibility::Link;
         Ok(self.require(&caller, link, Role::Public).map_or(true, |now| now < role))
     }
 
@@ -542,7 +541,10 @@ impl FragmentCell {
             (Some(credential), Ok(Some(name))) => match credential.resolve(&self.env, &name).await {
                 // and, in an org's fragment, a membership that still counts at
                 // their place there now (an offboarding closes it here)
-                Ok(Some(signed)) => npub::display(&signed.identity.id) == st.principal && !self.fenced_out(&signed, st.role).unwrap_or(true),
+                Ok(Some(signed)) => {
+                    let link = self.state.get_tags(ws).iter().any(|t| t == "view");
+                    npub::display(&signed.identity.id) == st.principal && !self.fenced_out(&signed, st.role, link).unwrap_or(true)
+                }
                 Ok(None) | Err(_) => false,
             },
             _ => false,
