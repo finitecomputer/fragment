@@ -77,8 +77,9 @@ const _: () = assert!(skills::ABSENT_EVERY_MS < SKILLS_EVERY_MS && skills::ABSEN
 /// SIGTERM: children are told, then the boot is gone within this.
 const STOP_MS_MAX: u64 = 2_500;
 /// Ending the previous start (`end_previous_life`: its leases cleared, its
-/// cut turns closed) is waited for at most this long before the gateway
-/// starts; it takes about half a second.
+/// cut turns closed, its stored prompts asked to rebuild when the hint
+/// changed) is waited for at most this long before the gateway starts; it
+/// takes about half a second.
 const END_PREVIOUS_LIFE_MS_MAX: u64 = 30_000;
 /// Bot Mode's hook in a profile, as images before route A linked it (to
 /// `/opt/fragment/hooks/fragment-bot-chat`, which this image does not hold).
@@ -1139,9 +1140,9 @@ fn end_previous_life(agents: &[Agent], home: &Path) {
     let mut dbs: Vec<PathBuf> = vec![home.join("state.db")];
     dbs.extend(agents.iter().map(|a| hermes::profile_dir(home, &a.fragment).join("state.db")));
     dbs.retain(|p| p.exists());
-    refresh_stored_prompts(&dbs, home);
     if dbs.is_empty() {
-        return;
+        // nothing stored yet: today's hint is stamped
+        return refresh_stored_prompts(&dbs, home);
     }
     let t = Instant::now();
     let script = r#"import sqlite3, sys
@@ -1173,6 +1174,8 @@ for p in sys.argv[1:]:
         Ok(o) => ev!("boot.cut_turns_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>(), "ms": ms }),
         Err(e) => ev!("boot.cut_turns_failed", { "error": e.to_string(), "ms": ms }),
     }
+    // after the chats are unpaused: it needs no lease, and shares their wait
+    refresh_stored_prompts(&dbs, home);
 }
 
 /// When the relay hint (`hermes::relay_hint`) is not the one this home's

@@ -4271,11 +4271,14 @@ for i, p in rows:
     db.execute("UPDATE sessions SET system_prompt_hash = ?, system_prompt = CASE WHEN system_prompt IS NULL THEN NULL ELSE ? END WHERE id = ?", (h, o, i))
 db.commit()
 print(len(rows), len(db.execute(stored).fetchall()))
-open(sys.argv[2], "w").write(old(open(sys.argv[2]).read()))
+was = open(sys.argv[2]).read()
+assert "A voice memo arrives already transcribed" in was, "the stamp is today's hint"
+open(sys.argv[2], "w").write(old(was))
+print(len(old(was)))
 "#;
     let older = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", OLDER, "/data/hermes/profiles/juniper--k3x9/state.db", "/data/hermes/.fragment_relay_hint"]);
     let counts: Vec<u64> = older.split_whitespace().filter_map(|n| n.parse().ok()).collect();
-    assert!(matches!(counts[..], [made, 0] if made > 0), "the chat's stored prompt made the older image's: {older}");
+    assert!(matches!(counts[..], [made, 0, stamped] if made > 0 && stamped > 0), "the chat's stored prompt and the stamp made the older image's: {older}");
     c.restart();
     let after = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "what gate was it" })));
     fake.until(180_000, "the turn after the restart", |w| ended(w, &after)).await;
