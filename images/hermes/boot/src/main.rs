@@ -258,7 +258,9 @@ impl Drop for Busy {
 /// The hold is looked at this often.
 const HOLD_POLL_MS: u64 = 100;
 /// Rounds under way are waited for this long at most: none writes a
-/// database, so the copy goes on after it.
+/// database once the hold is asked (a skills round's prompt refresh,
+/// which does, is skipped under a hold: `spawn_skills`), so the copy goes
+/// on after it.
 const QUIET_WAIT_MS: u64 = 8_000;
 /// A copy is given this long (the platform waits 20 s for the answer).
 const COPY_MS_MAX: u64 = 15_000;
@@ -1059,7 +1061,7 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
         return None;
     }
     let reader = skills::reader(agents, owner)?.clone();
-    let (api, owner, found) = (api.clone(), owner.to_string(), found.clone());
+    let (api, owner, found, held) = (api.clone(), owner.to_string(), found.clone(), quiet.clone());
     let busy = Busy::new(quiet);
     Some(tokio::spawn(async move {
         let _busy = busy;
@@ -1071,8 +1073,21 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
                 let platform = settle_platform();
                 ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "platform": platform, "ms": t.elapsed().as_millis() as u64 });
                 // a skill added, changed or gone: the open chats list it at
-                // their next turn (nothing asked when the set is the same)
-                let _ = tokio::task::spawn_blocking(|| refresh_stored_prompts(&home(), "skills")).await;
+                // their next turn (nothing asked when the set is the same).
+                // Never under a hold: its databases are being copied, and a
+                // request after their copy, with its stamp kept, would be
+                // lost at the restore; the stamp left, the next round or
+                // the boot asks.
+                if held.paused() {
+                    ev!("prompts.refresh_deferred", { "why": "skills", "because": "held" });
+                } else {
+                    let refreshing = tokio::task::spawn_blocking(|| refresh_stored_prompts(&home(), "skills"));
+                    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => ev!("prompts.refresh_failed", { "why": "skills", "error": e.to_string() }),
+                        Err(_) => ev!("prompts.refresh_failed", { "why": "skills", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
+                    }
+                }
             }
             Err(e) => ev!("skills.failed", { "error": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
         }
@@ -1186,9 +1201,12 @@ for p in sys.argv[1:]:
 /// so the next one asks again; the chats keep the prompts they had.
 fn refresh_stored_prompts(home: &Path, why: &str) {
     let stamp = home.join(hermes::PROMPT_STAMP);
-    let indexed = skills::indexed(&[&skills::managed_dir(), Path::new(skills::PLATFORM_VIEW)]);
+    let (indexed, cut) = skills::indexed(&[&skills::managed_dir(), Path::new(skills::PLATFORM_VIEW)]);
+    if cut {
+        ev!("prompts.inputs_cut", { "why": why, "skill_files": indexed.len(), "per_dir_max": skills::FILES_MAX });
+    }
     let inputs = hermes::prompt_inputs(&hermes::relay_hint(), &indexed);
-    if !hermes::inputs_changed(std::fs::read_to_string(&stamp).ok().as_deref(), &inputs) {
+    if !hermes::inputs_changed(read_stamp(&stamp).as_deref(), &inputs) {
         return;
     }
     let mut dbs: Vec<PathBuf> = vec![home.join("state.db")];
@@ -1211,10 +1229,41 @@ fn refresh_stored_prompts(home: &Path, why: &str) {
             Err(e) => return ev!("prompts.refresh_failed", { "why": why, "error": e.to_string(), "ms": ms }),
         }
     }
-    if let Err(e) = std::fs::write(&stamp, &inputs) {
+    if let Err(e) = write_stamp(&stamp, &inputs) {
         ev!("prompts.stamp_failed", { "why": why, "error": e.to_string() });
     }
-    chown(&stamp, hermes_ids());
+}
+
+/// The stamp (`hermes::PROMPT_STAMP`) as the last refresh left it: a
+/// regular file's first bytes alone, never a link, a fifo or a directory
+/// followed or waited on (its home is the hermes user's to write), which
+/// read as no stamp.
+fn read_stamp(stamp: &Path) -> Option<String> {
+    use std::io::Read;
+    if !std::fs::symlink_metadata(stamp).ok()?.file_type().is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(stamp).ok()?.take(256).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// The stamp written whole and never through a link: a fresh file beside
+/// it (made new: whatever stood at its name, removed first, is not
+/// followed), then renamed over it, which replaces a link rather than
+/// writing where it points. The hermes user's, as its home is.
+fn write_stamp(stamp: &Path, inputs: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let fresh = stamp.with_extension("new");
+    match std::fs::remove_file(&fresh) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&fresh)?;
+    f.write_all(inputs.as_bytes())?;
+    drop(f);
+    chown(&fresh, hermes_ids());
+    std::fs::rename(&fresh, stamp)
 }
 
 /// The computer's Python environment (`python.rs`), made or mended off the
@@ -1396,8 +1445,10 @@ async fn boot_main() {
         let home = home.clone();
         tokio::task::spawn_blocking(move || refresh_stored_prompts(&home, "boot"))
     };
-    if tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await.is_err() {
-        ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX });
+    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => ev!("prompts.refresh_failed", { "why": "boot", "error": e.to_string() }),
+        Err(_) => ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
     }
     write_ready(&agents, &home);
     let mut bridge = spawn_bridge(card_timeout_s);

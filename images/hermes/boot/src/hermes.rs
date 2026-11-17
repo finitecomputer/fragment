@@ -1303,7 +1303,7 @@ pub fn prompt_inputs(hint: &str, files: &[(String, Vec<u8>)]) -> String {
 /// refresh left (`PROMPT_STAMP`) is not it, or there is none (a computer
 /// that never stamped, whose prompts hold whatever it had then).
 pub fn inputs_changed(stamp: Option<&str>, inputs: &str) -> bool {
-    stamp.map(str::trim) != Some(inputs)
+    stamp != Some(inputs)
 }
 
 /// Every session of each `state.db` asked to rebuild its stored system
@@ -1414,7 +1414,6 @@ mod tests {
         assert!(inputs_changed(Some(&prompt_inputs(&hint, &set[..1])), &today), "a skill added since");
         assert!(inputs_changed(Some(&prompt_inputs(&hint, &[set[0].clone(), skill("/view/fragment/SKILL.md", "name: fragment\ndescription: new")])), &today), "a skill changed since");
         assert!(!inputs_changed(Some(&today), &today), "a restart on the same inputs");
-        assert!(!inputs_changed(Some(&format!("{today}\n")), &today), "its file's last newline is no change");
         assert_eq!(prompt_inputs(&hint, &[set[1].clone(), set[0].clone()]), today, "the order they are found in is no change");
         assert_ne!(prompt_inputs(&hint, &[skill("/managed/a/SKILL.mdname: a", "")]), prompt_inputs(&hint, &set[..1]), "a path is never read into its bytes");
         assert_eq!(prompts_refreshed("{\"asked\": 2}\n"), Ok(2));

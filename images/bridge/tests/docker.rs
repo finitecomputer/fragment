@@ -4330,11 +4330,14 @@ async fn an_open_chat_lists_a_managed_skill_added_while_it_runs() {
     };
     let first = system_of("remember the green gate");
     assert!(first.contains("garden-log") && !first.contains("seed-swap"), "the chat's prompt lists the set it began with: {}", first.chars().take(4000).collect::<String>());
-    // the owner's set gains a skill while the chat is open
-    fake.with(|w| w.fragments.get_mut(&skills).expect("the skills fragment").files.insert("skills/notes/seed-swap/SKILL.md".into(), bytes::Bytes::from_static(SEEDS.as_bytes())));
+    // the owner's set gains a skill while the chat is open (the first
+    // install's own refresh, if the gateway had a database by then, is
+    // counted before it)
     let refreshed = |c: &Container| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "prompts.refreshed" && e["why"] == "skills").count();
+    let base = refreshed(&c);
+    fake.with(|w| w.fragments.get_mut(&skills).expect("the skills fragment").files.insert("skills/notes/seed-swap/SKILL.md".into(), bytes::Bytes::from_static(SEEDS.as_bytes())));
     let t = Instant::now();
-    while !(installed("notes/seed-swap/SKILL.md") && refreshed(&c) > 0) {
+    while !(installed("notes/seed-swap/SKILL.md") && refreshed(&c) > base) {
         assert!(t.elapsed() < Duration::from_secs(60), "the new skill's install never asked a refresh:\n{}", c.logs().lines().filter(|l| l.contains("skills.") || l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -4347,7 +4350,7 @@ async fn an_open_chat_lists_a_managed_skill_added_while_it_runs() {
     assert!(messages.iter().any(|m| m["role"] == "user" && content_text(m).contains("remember the green gate")), "its conversation kept: {messages:#?}");
     // and an install that changes nothing asks nothing more
     tokio::time::sleep(Duration::from_secs(6)).await;
-    assert_eq!(refreshed(&c), 1, "one refresh for the one change: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
+    assert_eq!(refreshed(&c), base + 1, "one refresh for the one change: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
 }
 
 // ---- teammates asking each other (route A: images/hermes/plugins/fragment-ask) ----
