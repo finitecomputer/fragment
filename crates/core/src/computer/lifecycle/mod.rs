@@ -181,17 +181,19 @@ pub struct Lifecycle {
     #[serde(default)]
     kept_ms: i64,
     /// A record or a join for its agents was posted at this time
-    /// (`Event::Posted`) after its guest's last work ended, and no keepalive
-    /// has opened since: work its guest has not taken up, which no save
-    /// holds. Cleared when a keepalive opens, or at a sleep that owes no
-    /// start. None in a lifecycle stored before it was kept.
+    /// (`Event::Posted`) after its guest last opened a keepalive, with none
+    /// open: work its guest has not taken up, which no save holds. Cleared
+    /// when a keepalive opens, or at a sleep that owes no start. None in a
+    /// lifecycle stored before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     owed_ms: Option<i64>,
-    /// When its guest's last keepalive closed (its last work ended): a
-    /// record posted before it was there while its guest worked, which
-    /// queues what comes. 0 when none has, or stored before it was kept.
+    /// When its guest last opened a keepalive (began work it was given): a
+    /// record posted before it was there for that work to take up. Its
+    /// opening, never a close: a close the object only infers (a socket a
+    /// deploy cut) says nothing of when its guest's work ended. 0 when none
+    /// has, or stored before it was kept.
     #[serde(default, skip_serializing_if = "is_zero")]
-    closed_ms: i64,
+    opened_ms: i64,
     /// The previous release's fields (`Legacy`), by its names, kept equal
     /// to the phase (`Legacy::of`) at every step and stored with it for one
     /// release. Plain fields, never `#[serde(flatten)]`: its buffering
@@ -246,7 +248,7 @@ impl Lifecycle {
             worked_ms: 0,
             kept_ms: 0,
             owed_ms: None,
-            closed_ms: 0,
+            opened_ms: 0,
             wake_after_sleep: false,
             retry_at_ms: None,
             failed_ms: 0,
@@ -384,9 +386,9 @@ impl Lifecycle {
         let mut step = Step::default();
         match (self.phase.clone(), event) {
             (_, Event::Posted { at_ms }) => {
-                // a guest at work queues it; one whose work ended after it
-                // was there while it was posted
-                if self.keepalives == 0 && at_ms > self.closed_ms {
+                // a guest at work queues it; one whose last work began after
+                // it was posted took it up
+                if self.keepalives == 0 && at_ms > self.opened_ms {
                     self.owed_ms = Some(self.owed_ms.map_or(at_ms, |owed| owed.min(at_ms)));
                 }
             }
@@ -606,6 +608,7 @@ impl Lifecycle {
                         self.keepalives += 1;
                         // its guest took up the work it was woken for
                         self.owed_ms = None;
+                        self.opened_ms = self.opened_ms.max(now_ms);
                     }
                     Socket::Tab => self.tabs += 1,
                 }
@@ -640,9 +643,6 @@ impl Lifecycle {
                 };
                 let was = *count;
                 *count = count.saturating_sub(1);
-                if socket == Socket::Keepalive && was == 1 {
-                    self.closed_ms = self.closed_ms.max(now_ms);
-                }
                 // one it counted (none after its owner's sleep let go of them)
                 if was > 0 {
                     self.worked(now_ms);

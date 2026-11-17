@@ -565,7 +565,7 @@ mod tests {
     fn an_exit_with_work_not_kept_is_still_a_crash() {
         // what is done between its save and the exit, and whether that loses work
         type Case = (&'static str, fn(&mut Computer), bool);
-        let cases: [Case; 8] = [
+        let cases: [Case; 9] = [
             ("a turn ended 10 s ago", |c| {
                 c.apply(Event::Opened { socket: Socket::Keepalive });
                 c.apply(Event::Closed { socket: Socket::Keepalive });
@@ -602,6 +602,22 @@ mod tests {
                 c.apply(Event::Opened { socket: Socket::Keepalive });
                 c.apply(Event::Closed { socket: Socket::Keepalive });
                 c.apply(Event::Posted { at_ms: c.now + 500 });
+                c.apply(Event::Wake { why: Wake::Record });
+                c.now += SAVE_SETTLE_MS;
+                let g = c.life.generation();
+                assert_eq!(c.apply(Event::Alarm).actions.last(), Some(&Action::Hold { generation: g }));
+                c.saved_as("b2");
+            }, false),
+            // Codex's second round: a deploy cut its keepalive, the guest's
+            // turn ended, a message came, and the object closed the lost
+            // socket only as that message's wake reached it: a close it
+            // infers says nothing of when the work ended
+            ("a message after a keepalive a deploy cut, closed as its wake came", |c| {
+                c.apply(Event::Opened { socket: Socket::Keepalive });
+                c.now += 60_000;
+                let posted = c.now;
+                c.apply(Event::Closed { socket: Socket::Keepalive });
+                c.apply(Event::Posted { at_ms: posted });
                 c.apply(Event::Wake { why: Wake::Record });
                 c.now += SAVE_SETTLE_MS;
                 let g = c.life.generation();

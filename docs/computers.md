@@ -68,9 +68,9 @@ an image may rely on this:
   that its guest has not taken up, has slept: no strike, no rollback,
   nothing told, and nothing starts it again, though the hold after its
   last work had not run out. Its next wake restores that save. A message
-  or a join's notice posted after its guest's last keepalive closed, with
-  none opened since, is work not taken up (a record's wake carries when it
-  was posted; one posted while its guest worked was queued by it), and a
+  or a join's notice posted after its guest last opened a keepalive, with
+  none open then or since, is work not taken up (a record's wake carries
+  when it was posted; a guest at work queues what comes), and a
   life with no save of its own may have been woken for work it has not
   begun, so either stop is a crash (below), as is every other.
 - **A crash** (the container stopped on its own) starts it again while
