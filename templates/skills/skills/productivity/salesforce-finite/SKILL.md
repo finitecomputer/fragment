@@ -46,6 +46,12 @@ stderr and exit 1. Do what its `hint` says; its `body` is Salesforce's own
 answer, a list of `{errorCode, message, fields?}` (`MALFORMED_QUERY`,
 `INVALID_FIELD`, `REQUIRED_FIELD_MISSING`).
 
+On an older computer: `fragment api` came with an image newer than a
+computer awake since before it. If the command is `unrecognized`, your
+computer takes that image when it next restarts. Until then, send the same
+calls with `curl -H "Authorization: Bearer $SALESFORCE_ACCESS_TOKEN"`: the computer swaps
+that the same way.
+
 ## Reading
 
 ```bash

@@ -47,6 +47,12 @@ The connection reaches `api.linear.app` (the GraphQL API) and
 `uploads.linear.app` (files attached to issues) only. It is one Linear
 workspace: the one your owner picked when they connected it.
 
+On an older computer: `fragment api` came with an image newer than a
+computer awake since before it. If the command is `unrecognized`, your
+computer takes that image when it next restarts. Until then, send the same
+calls with `curl -H "Authorization: Bearer $LINEAR_OAUTH_ACCESS_TOKEN"`: the computer swaps
+that the same way.
+
 ## Read only
 
 Your owner picks, as they connect Linear, whether you may only read or
