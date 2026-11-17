@@ -754,7 +754,7 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     // (read again each time its config is, so it follows a connect, a
     // disconnect and a new skill within that cadence)
     let providers = a.credentials.iter().map(|c| c.provider.clone()).collect();
-    let withheld = skills::withheld(&skills::managed_dir(), &skills::load_manifest(Path::new(skills::MANIFEST)), &providers);
+    let withheld = skills::withheld(&skills::managed_dir(), &skills::load_manifest(Path::new(skills::MANIFEST)), &providers, &dir.join("skills"));
     let text = hermes::profile_config(a, name, role, home, team, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE), &withheld);
     if std::fs::read_to_string(&config).ok().as_deref() != Some(text.as_str()) {
         write_whole(&config, &text, ids);
