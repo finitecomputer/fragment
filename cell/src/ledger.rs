@@ -71,6 +71,11 @@ const TEST_SLOW_MAX_MS: u64 = 30_000;
 /// The grants a test fails at once, at most (`fail-grants`), and the
 /// resets whose answers it loses (`fail-resets`).
 const TEST_FAIL_GRANTS_MAX: u32 = 10;
+/// The meta keys of the resets whose answers a test fleet's ledger is to
+/// lose, and of how many it lost (`TestHook::FailResets`): kept, so a
+/// restart between the lever and the reset changes neither.
+const RESETS_TO_LOSE: &str = "test_resets_to_lose";
+const RESETS_LOST: &str = "test_resets_lost";
 /// The meta key of a capped ledger's paid calls (`TestHook::PaidCalls`).
 const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// How long a gate waits on a ledger it has no fresh answer from: a few
@@ -114,8 +119,6 @@ pub struct LedgerCell {
     slow_ms: Cell<u64>,
     /// Test fleets: the next grants to fail before they are taken.
     fail_grants: Cell<u32>,
-    /// Test fleets: the next resets to take, then answer as a failure.
-    fail_resets: Cell<u32>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
 }
@@ -128,7 +131,7 @@ impl DurableObject for LedgerCell {
         let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
         let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, env, told: RefCell::new(None), left: Rc::default(), cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), fail_resets: Cell::new(0), schema }
+        LedgerCell { state, raw, env, told: RefCell::new(None), left: Rc::default(), cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -269,8 +272,9 @@ pub struct OrgStatus {}
 /// `TEST_FAIL_GRANTS_MAX`, 0 to end it: a ledger not reached once the
 /// router recorded an org's grant, which its retry completes), or take its
 /// next `times` resets and answer each as a failure (`fail-resets {times}`,
-/// the same bounds: a reset's answer lost on its way back, which its run
-/// asks again and is answered as the first was).
+/// the same bounds, answering `{failResets, lost}`: those still to lose,
+/// and how many it lost: a reset's answer lost on its way back, which its
+/// run asks again and is answered as the first was).
 /// Read as its fields (`TestHookFields`), not as serde's internally tagged
 /// reading, which buffers each to find its `op`: about 17 KB of the cell's Wasm.
 #[derive(Debug, Serialize, Deserialize)]
@@ -916,9 +920,14 @@ impl LedgerCell {
             <ResetMonthUsage as Route>::PATH => {
                 let c: ResetMonthUsage = decode(&body)?;
                 let reset = self.mutate(move |l, s, now| l.reset_month(s, &c, now)).await?;
-                if self.fail_resets.get() > 0 {
-                    self.fail_resets.set(self.fail_resets.get() - 1);
-                    return Err(CellError::host("a test's lost answer (`fail-resets`): the reset was taken").into());
+                if self.cfg.test_hooks {
+                    let count = |key: &str| -> CellResult<u32> { Ok(self.meta(key)?.and_then(|v| v.parse().ok()).unwrap_or(0)) };
+                    let to_lose = count(RESETS_TO_LOSE)?;
+                    if to_lose > 0 {
+                        self.set_meta(RESETS_TO_LOSE, &(to_lose - 1).to_string())?;
+                        self.set_meta(RESETS_LOST, &(count(RESETS_LOST)? + 1).to_string())?;
+                        return Err(CellError::host("a test's lost answer (`fail-resets`): the reset was taken").into());
+                    }
                 }
                 reply(reset)
             }
@@ -1011,8 +1020,10 @@ impl LedgerCell {
                 reply(json!({ "failGrants": self.fail_grants.get() }))
             }
             TestHook::FailResets { times } => {
-                self.fail_resets.set(times.min(TEST_FAIL_GRANTS_MAX));
-                reply(json!({ "failResets": self.fail_resets.get() }))
+                let times = times.min(TEST_FAIL_GRANTS_MAX);
+                self.set_meta(RESETS_TO_LOSE, &times.to_string())?;
+                let lost: u32 = self.meta(RESETS_LOST)?.and_then(|v| v.parse().ok()).unwrap_or(0);
+                reply(json!({ "failResets": times, "lost": lost }))
             }
             TestHook::PaidCalls { max } => {
                 let max = match max {

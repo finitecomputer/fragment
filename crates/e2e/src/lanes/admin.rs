@@ -302,8 +302,9 @@ fn usage_reset(s: &mut Suite, api: &Api, operator: &Keys, cli_home: &Path, key_f
 
     // ---- everyone's, una's ledger answering its first ask as a failure
     // after it took the reset: a call cut off on its way back
-    let lost = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": una_id, "op": "fail-resets", "times": 1 })))?;
-    anyhow::ensure!(lost.status == 200, "una's ledger loses its next reset's answer: {lost}");
+    let lose = |times: u32| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": una_id, "op": "fail-resets", "times": times })));
+    let lost = lose(1)?;
+    anyhow::ensure!(lost.status == 200 && lost.body["lost"] == 0, "una's ledger loses its next reset's answer: {lost}");
     let id = format!("reset-e2e-{}", crate::api::now_ms());
     let first = start(operator, json!({ "id": id }))?;
     let again = start(operator, json!({ "id": id }))?;
@@ -325,14 +326,22 @@ fn usage_reset(s: &mut Suite, api: &Api, operator: &Keys, cli_home: &Path, key_f
         json!({ "first": first.body, "again": again.body, "other": other.body }),
     );
     let of = || api.signed(operator, "GET", &format!("/api/admin/usage-resets/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
-    // its first ask failed, and is to be tried again: a barrier on the run's own state
-    let retrying = s.eventually(wait, || m(&of(), "retrying") >= 1);
     let finished = s.eventually(Duration::from_secs(180), || !of()["finishedAt"].is_null());
     let done = of();
+    // una's ledger lost one answer, and she is reset: only an answer marks a
+    // payer done, so the run asked her again (the ledger's own count, not a
+    // window of time the run's progress may be read in)
+    let asked_again = lose(0)?;
     s.ok(
         RESET_CHECKS[2],
-        retrying && finished && m(&done, "reset") == m(&done, "people") + m(&done, "orgs") && m(&done, "pending") == 0 && m(&done, "failedCount") == 0 && done["failed"] == json!([]) && m(&done, "restoredMicros") >= drawn,
-        &done,
+        finished
+            && asked_again.body["lost"] == 1
+            && m(&done, "reset") == m(&done, "people") + m(&done, "orgs")
+            && m(&done, "pending") == 0
+            && m(&done, "failedCount") == 0
+            && done["failed"] == json!([])
+            && m(&done, "restoredMicros") >= drawn,
+        json!({ "run": done, "lever": asked_again.body }),
     );
     let after = ledger_of(&una);
     let included_after = m(&totals(&una_id), "included");
@@ -527,9 +536,10 @@ fn reset_page(s: &mut Suite, b: &mut crate::browser::Browser, page: &crate::brow
         wait,
     );
     shoot(b, "confirm")?;
-    // a person whose ledger loses its first answer: tried again ten seconds on
+    // a person whose ledger loses its first two answers: tried again ten,
+    // then twenty, seconds on, so the run goes on for half a minute
     let held = api.person()?;
-    let lost = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": api.identity(&held)?, "op": "fail-resets", "times": 1 })))?;
+    let lost = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": api.identity(&held)?, "op": "fail-resets", "times": 2 })))?;
     anyhow::ensure!(lost.status == 200, "a ledger loses its next reset's answer: {lost}");
     b.click(page, "#reset-yes")?;
     let going = b.until(page, "!document.getElementById('reset-confirm').checkVisibility() && document.getElementById('reset-all').checkVisibility() && document.getElementById('reset-all').disabled && /^Resetting: \\d+ of \\d+, 1 to try again$/.test(document.getElementById('reset-run').textContent)", wait);
