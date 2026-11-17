@@ -230,23 +230,24 @@ pub fn skill_names(installed: &Installed) -> BTreeSet<String> {
 
 /// The names a profile's own skills go by (its `skills/`, its agent
 /// fragment's): each `SKILL.md`'s name as Hermes gives it, and its
-/// directory's. Read no deeper than `<category>/<name>/SKILL.md`, and no
-/// more than `FILES_MAX` of them.
+/// directory's. Wherever under it one is: Hermes finds a skill at any
+/// depth, and `sync::scan` syncs one. Bounded as that scan is: by the
+/// profile's tree, no link followed, and `FILES_MAX` skills in it.
 fn own_names(own: &Path) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    let mut dirs = vec![(own.to_path_buf(), 0u8)];
+    let mut dirs = vec![own.to_path_buf()];
     let mut read = 0;
-    while let Some((dir, depth)) = dirs.pop() {
+    while let Some(dir) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for path in entries.filter_map(Result::ok).map(|e| e.path()) {
-            if path.is_dir() {
-                if depth < 2 {
-                    dirs.push((path, depth + 1));
-                }
-            } else if path.file_name().is_some_and(|n| n == "SKILL.md") && read < FILES_MAX {
+        for entry in entries.filter_map(Result::ok) {
+            // the entry's own kind: a link is neither, and is not followed
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                dirs.push(entry.path());
+            } else if kind.is_file() && entry.file_name() == "SKILL.md" && read < FILES_MAX {
                 read += 1;
                 let dir_name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(text) = std::fs::read_to_string(entry.path()) {
                     names.insert(skill_name(&text, &dir_name));
                 }
                 names.insert(dir_name);
@@ -569,7 +570,13 @@ mod tests {
         write_file(&own, "tracking/jira-finite/SKILL.md", skill("my jira notes", None).as_bytes()).unwrap();
         write_file(&own, "notes/SKILL.md", skill("unrelated", None).as_bytes()).unwrap();
         assert_eq!(holding(&[]), ["confluence-finite", "google-workspace-finite"], "its own linear-finite and jira-finite are not hidden with the managed ones");
-        assert_eq!(own_names(&own).into_iter().collect::<Vec<_>>(), ["jira-finite", "linear-finite", "my jira notes", "notes", "unrelated"]);
+        // and however deep its own skill sits, by its folder or its frontmatter (Hermes finds one at any depth)
+        write_file(&own, "work/tracking/wiki/confluence-finite/SKILL.md", skill("team wiki", None).as_bytes()).unwrap();
+        write_file(&own, "a/b/c/d/mail/SKILL.md", skill("google-workspace-finite", None).as_bytes()).unwrap();
+        // a link back up its own tree is not followed
+        std::os::unix::fs::symlink(&own, own.join("work/again")).unwrap();
+        assert!(holding(&[]).is_empty() && holding(&["atlassian", "google", "linear"]).is_empty(), "none of its own is hidden, connected or not");
+        assert_eq!(own_names(&own).into_iter().collect::<Vec<_>>(), ["confluence-finite", "google-workspace-finite", "jira-finite", "linear-finite", "mail", "my jira notes", "notes", "team wiki", "unrelated"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
