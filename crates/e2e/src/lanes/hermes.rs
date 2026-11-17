@@ -795,7 +795,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
 
     // its eyes (Paul, 2026-10-05): Maple is on the medium tier, whose
     // GLM-5.3 reads no images; its computer_use screenshot goes to the
-    // route's `vision` (the deployment's vision model, GLM-5.3 Flash), as
+    // route's `vision` (the deployment's vision model, DeepSeek V4.1 Flash), as
     // Maple, metered to its owner, and its answer is what that model saw
     let calls_before = s.ai.calls().len();
     let r = api.signed(&owner, "POST", &format!("/api/f/{grove_name}/channels/chat"), Some(&json!({ "id": "g2", "body": { "text": "look at your screen" } })))?;
@@ -808,7 +808,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let seen: Vec<Value> = calls.iter().map(|c| json!({ "model": c.model, "agent": c.metadata["agent_id"], "image": shown(c) })).collect();
     let looks: Vec<&fragment_fakes::workers_ai::AiCall> = calls.iter().filter(|c| shown(c)).collect();
     s.ok(
-        "a medium-tier agent's computer_use screenshot goes to the route's vision model (GLM-5.3 Flash), as that agent, its main calls on GLM-5.3 and none of them shown an image",
+        "a medium-tier agent's computer_use screenshot goes to the route's vision model (DeepSeek V4.1 Flash), as that agent, its main calls on GLM-5.3 and none of them shown an image",
         !looks.is_empty()
             && looks.iter().all(|c| c.model == fragment_core::models::VISION_MODEL_DEFAULT && c.metadata["agent_id"] == maple_opaque.as_str())
             && calls.iter().any(|c| c.model == fragment_core::models::MEDIUM_MODEL && c.metadata["agent_id"] == maple_opaque.as_str())

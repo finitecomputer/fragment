@@ -50,10 +50,11 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{AgentMade, InviteAnswer};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
 use crate::principal::calls::{Face, IndexChange, List};
-use crate::registry::calls::{ClaimInvite, InviteEmail};
+use crate::registry::calls::InviteEmail;
 use crate::registry::invites::ForgetInvite;
 
 /// Index changes one flush sends at most, all at once (and a delete, of
@@ -62,11 +63,6 @@ use crate::registry::invites::ForgetInvite;
 /// the e2e preview (2026-10-06): about 0.3 s a list, each a Principal made
 /// on the spot.
 pub(crate) const INDEX_FLUSH_MAX: i64 = 32;
-
-/// Marks the registry's `invites/claim` and `invites/decline`, a person's
-/// yes or no to the invite waiting on their email, and the platform's
-/// `members/agent` (`agent_made`); the router never sets it.
-pub(crate) const CLAIM_HEADER: &str = "x-fragment-invite-claim";
 
 /// `agent`, just made by `person` (registered: lib.rs `identities`; or
 /// taken by their computer: computer.rs, once both its agent fragment and
@@ -81,9 +77,9 @@ pub(crate) async fn agent_made(env: &Env, person: &str, agent: &str) {
         Ok(list) => list.fragments.into_iter().filter(|f| matches!(f.role, Role::Viewer | Role::Editor)).map(|f| f.name).collect(),
         Err(e) => return console_error!("{}", json!({ "agent-made": agent, "list": person, "failed": e.message })),
     };
-    let body = json!({ "person": person, "agent": agent });
+    let made = AgentMade { person: person.to_string(), agent: agent.to_string() };
     for round in theirs.chunks(INDEX_FLUSH_MAX as usize) {
-        let told = join_all(round.iter().map(|f| crate::fragment::ask(env, f, "members/agent", &body))).await;
+        let told = join_all(round.iter().map(|f| crate::fragment::call(env, f, &made))).await;
         for (f, told) in round.iter().zip(told) {
             if let Err(e) = told {
                 console_error!("{}", json!({ "agent-made": agent, "fragment": f, "failed": e.message, "code": e.code }));
@@ -928,7 +924,7 @@ impl FragmentCell {
     /// as it (the registry's `AnswerInvite`, a no): it waits no more, and its
     /// owner's list counts it no more. 404 when none waits. Its event
     /// names no one: they are not in it.
-    pub(crate) async fn decline_invite(&self, claim: &ClaimInvite) -> CellResult<Value> {
+    pub(crate) async fn decline_invite(&self, claim: &InviteAnswer) -> CellResult<()> {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
         self.drop_spent_invites().await?;
@@ -939,7 +935,7 @@ impl FragmentCell {
         self.sharing_changed()?;
         self.event("invite.declined", "an invite was declined", json!({}));
         self.flush_index().await;
-        Ok(json!({ "ok": true }))
+        Ok(())
     }
 
     /// The invite waiting on `email`, met by `identity`, a person who signs
@@ -951,7 +947,7 @@ impl FragmentCell {
     /// already), and the registry forgets it. A full fragment keeps it.
     /// Their agents (`claim.agents`, the registry's) come in with them
     /// (decision 64: `agents_join`), or the claim is refused whole.
-    pub(crate) async fn claim_invite(&self, claim: &ClaimInvite) -> CellResult<Value> {
+    pub(crate) async fn claim_invite(&self, claim: &InviteAnswer) -> CellResult<Role> {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
         self.drop_spent_invites().await?;
@@ -989,7 +985,7 @@ impl FragmentCell {
         }
         self.flush_index().await;
         self.flush_joined().await;
-        Ok(json!({ "role": now }))
+        Ok(now)
     }
 
     /// How many of `ids` are no members here.
@@ -1070,28 +1066,22 @@ impl FragmentCell {
         Ok(rows.iter().filter_map(|r| r["principal"].as_str().map(str::to_string)).collect())
     }
 
-    /// `members/agent` (the platform's, as an agent is made: `agent_made`):
-    /// `agent`, just made by `person`, comes in beside them when they are a
-    /// member here who is not its owner, at their role. Anything else
-    /// changes nothing.
-    pub(crate) async fn agent_with_person(&self, body: &Value) -> CellResult<Value> {
+    /// An agent just made, in beside its person (`calls::AgentMade`).
+    pub(crate) async fn agent_with_person(&self, AgentMade { person, agent }: AgentMade) -> CellResult<()> {
         self.name()?;
-        let (Some(person), Some(agent)) = (body["person"].as_str(), body["agent"].as_str()) else {
-            return Err(CellError::invalid("members/agent names a person and their agent"));
-        };
-        if !npub::is_identity(person) || !npub::is_identity(agent) {
-            return Err(CellError::invalid("members/agent names identities"));
+        if !npub::is_identity(&person) || !npub::is_identity(&agent) {
+            return Err(CellError::invalid("an agent made names identities"));
         }
-        if self.entity_of(person)?.as_deref() != Some(person) {
-            return Ok(json!({ "joined": false }));
+        if self.entity_of(&person)?.as_deref() != Some(person.as_str()) {
+            return Ok(());
         }
-        let role = self.member_role(person)?.expect("a person in is a member");
-        let agents = [agent.to_string()];
+        let role = self.member_role(&person)?.expect("a person in is a member");
+        let agents = [agent];
         self.room_for(self.not_members(&agents)?)?;
-        self.agents_join(person, &agents, role)?;
+        self.agents_join(&person, &agents, role)?;
         self.flush_index().await;
         self.flush_joined().await;
-        Ok(json!({ "joined": true }))
+        Ok(())
     }
 
     /// The fragment's sharing, as its owner's list carries it: `guests`

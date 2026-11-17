@@ -41,13 +41,18 @@ admin route is.
 A person whose old agents' moves are `open` is asked about each, oldest
 first, in `GET /api/notices` (docs/api.md, Notices): a notice that must
 be answered, `move:<old>`, its words the server's
-(`fragment_core::migrations::offer`): "Bring <name> over from
-finite.computer?", "You'll get a month free.", with the roster's picture
-through the platform. Its answers:
+(`fragment_core::migrations::offer`): "<name>'s upgrade is ready", "Its
+memories, chats, and supported files and skills come with it, to a more
+secure home with a fresh key. You'll get a month free.", with the
+roster's picture through the platform. A person reads the move as their
+agent's upgrade: the same agent, in a better home. The words promise
+only what comes (files past the cap, and a skill that needs what this
+platform lacks, stay behind), and its key is new: no words promise the
+same one. Its answers:
 
 | Answer | Does |
 |---|---|
-| Yes | Opens `/move` (F6), which asks what the import needs, makes the new agent, and posts `yes {agent}` |
+| Upgrade <name> (Yes) | Opens `/move` (F6), which asks what the import needs, makes the new agent, and posts `yes {agent}` |
 | Not now | `POST /api/migrations/offers/{old}/later`: asked again after `LATER_MS` (a day) |
 | Never | `POST …/never`: asked no more until `POST …/ask-again` (from `/move`) |
 
@@ -72,18 +77,19 @@ notices again.
 ## The page (F6)
 
 `/move`, a view of the shell's (cell/shell/move-page.js), reached from
-the offer's Yes, and from Settings while the person has old agents. On
+the offer's Yes, and from Settings ("Agent upgrades") while the person
+has old agents. On
 it, the offer's cover stands aside: it is answered there.
 
 - `GET /api/migrations/offers` (`Offers`): the person's old agents, each
   where its move is in the server's words (`fragment_core::migrations::said`):
-  on finite.computer, stopping, copying, bringing over, done, paused for
-  staff. The page reads it again every few seconds while a move is under
-  way.
-- The one question: which to bring over. Each new agent takes its old
+  its upgrade ready, pausing, packing up, upgrading, upgraded, paused for
+  staff (with nothing lost only while its stage is kept). The page reads
+  it again every few seconds while a move is under way.
+- The one question: which to upgrade. Each new agent takes its old
   one's name (the import brings who it is; it is renamed as any agent). A
   Never'd one has Ask again.
-- Bring over: `POST /api/migrations/offers` opens the move (binds them;
+- Upgrade: `POST /api/migrations/offers` opens the move (binds them;
   the comp, once), the page waits for the seat to reach the ledger, then
   for each, one at a time, a new agent is made as Settings' Add makes one
   (`addAgent`, its chat made but not opened), and `…/offers/{old}/yes
@@ -358,7 +364,7 @@ day's deadline holds it for staff.
 
 **Waiting for staff.** A good import is `retiring` with no command: its
 old agent stopped, not retired, with no deadline but its stage's keep.
-Its person reads it as done ("Done.") and has their new agent. The `done`
+Its person reads it as done ("Upgraded.") and has their new agent. The `done`
 comes from an agent following a skill, so nothing irreversible follows
 it: staff check the import, then `retire` (the mover told to retire it
 and mark it moved, its day from then), `retry` (a new attempt into the
