@@ -134,10 +134,12 @@ FROM downloads-${TARGETARCH} AS downloads
 # image is not published for, the same source at the same commit (the
 # image's revision label), built as Cloudflare builds it (its
 # images/sandbox-tools/Dockerfile: Alpine's Rust, statically linked).
-# BuildKit checks the commit it fetches.
+# The source is that commit's archive, pinned by hash like every remote
+# input here (its files are the commit's tree, checked 2026-11-16).
 FROM docker.io/cloudflare/sandbox:1.0.0 AS sandbox-shim-amd64
 FROM rust:1.99-alpine AS sandbox-shim-arm64
-ADD https://github.com/cloudflare/sandbox-sdk.git#f9e972a14123bef3b93e9bb337bab6e83419fe7e /src
+ADD --checksum=sha256:7ef2580bebc5753eb2a974ec1345b68dfc76b5517ca6c379be7a2a4cc332341a https://github.com/cloudflare/sandbox-sdk/archive/f9e972a14123bef3b93e9bb337bab6e83419fe7e.tar.gz /sandbox-sdk.tgz
+RUN mkdir /src && tar -xzf /sandbox-sdk.tgz -C /src --strip-components=1
 WORKDIR /src
 RUN --mount=type=cache,id=sandbox-shim-registry,target=/usr/local/cargo/registry \
     cargo rustc --release --locked --package sandbox-tools --bin sandbox-shim -- -C target-feature=+crt-static \
