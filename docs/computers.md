@@ -60,6 +60,15 @@ an image may rely on this:
   outside `/data`. That start is owed, made by its alarm (asleep or
   won't wake, the start alone), so the restart answers `starting` on
   every path, and its owner's page follows it to awake.
+- **A stop nothing asked for, while idle, is a sleep.** A host may stop
+  a container for its own reasons (its maintenance, a host short of
+  memory). One that stops while its computer is awake with nothing open
+  (no keepalive, no port tab), no save under way, and all this life did
+  in a save it made since it came up, has slept: no strike, no rollback,
+  nothing told, and nothing starts it again, though the hold after its
+  last work had not run out. Its next wake restores that save. A life
+  with no save of its own may have been woken for work it has not begun,
+  so its stop is a crash (below), as is every other.
 - **A crash** (the container stopped on its own) starts it again while
   something wants it; a guest that died holding its keepalive is started
   again however long its turn ran, and its next life ends what was cut.

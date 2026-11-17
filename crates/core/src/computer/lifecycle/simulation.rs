@@ -17,7 +17,9 @@ use crate::computer::*;
 /// came up) ends once. A computer is never asleep with work newer than
 /// its newest save unless a crash or the bounded failure put it there,
 /// and awake and idle with work newer than its newest save, a save is
-/// under way or due . Its saves ride along as the DO keeps them, so
+/// under way or due . An exit nothing asked for while it is idle, all its
+/// life did in a save of its own, is a sleep: no strike, no rollback, and
+/// no start unless always on. Its saves ride along as the DO keeps them, so
 /// their own assertions run too. Method: the DO's reports for the
 /// actions it was handed are delivered in any order, late, twice, or
 /// never, among events of any kind.
@@ -32,7 +34,7 @@ fn simulated_interleavings_keep_the_invariants() {
     }
     // the sim's bound is shorter than the default, so it is reached
     let rules = Rules { unsaved_max_ms: 10 * 60_000 };
-    let mut reached = [0u32; 13];
+    let mut reached = [0u32; 14];
     // the images deploys pin, one after another and back
     let deployed = [IMAGE, "registry/stub@sha256:2", "registry/stub@sha256:3"];
     for seed0 in 1..=8u64 {
@@ -113,6 +115,8 @@ fn simulated_interleavings_keep_the_invariants() {
             let own_destroy = matches!(&event, Event::Exited { generation: e } if matches!(l.phase, Phase::Starting { generation, destroying: true, .. } if generation == *e));
             let start_failed = !own_destroy && matches!(&event, Event::Exited { generation: e } | Event::StartFailed { generation: e, .. } if matches!(l.phase, Phase::Starting { generation, .. } if generation == *e));
             let failures_before = l.failures;
+            // an exit nothing asked for, of an idle life whose work is kept
+            let unasked_sleep = matches!(&event, Event::Exited { generation: e } if matches!(l.phase, Phase::Awake { generation, .. } if generation == *e)) && l.idle_and_kept();
             let coming_up = matches!(&event, Event::Ready { generation: e } if matches!(l.phase, Phase::Starting { generation, .. } if generation == *e));
             let kept = match &event {
                 Event::Saved { generation: e, seq } if l.running() == Some(*e) => matches!(l.saving, Some(Saving::Save { seq: s, .. }) if s == *seq).then_some(*seq),
@@ -179,6 +183,12 @@ fn simulated_interleavings_keep_the_invariants() {
             if busy_crash && !matches!(l.phase, Phase::Failed { .. }) {
                 // made by the alarm it asks for at once
                 assert!(l.start_due(now) && s.alarm_ms == Some(now), "busy when it died, it starts again (seed {seed0}): {l:?}");
+            }
+            if unasked_sleep {
+                assert_eq!(s.ended.map(|e| (e.by, e.saved, e.quiet)), Some((LifeEnd::Sleep, true, true)), "an idle, kept life's exit is a sleep (seed {seed0}): {s:?}");
+                assert_eq!(l.failures, failures_before, "no strike (seed {seed0})");
+                assert_eq!(l.start_due(now), l.always_on, "no start but always on's (seed {seed0}): {l:?}");
+                reached[13] += 1;
             }
             if start_failed {
                 assert_eq!(l.failures, failures_before + 1, "a failed start is one strike (seed {seed0}): {l:?}");
@@ -319,5 +329,5 @@ fn simulated_interleavings_keep_the_invariants() {
         assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
     }
     // every kind of save the lifecycle has was reached, across the seeds
-    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed: {reached:?}");
+    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, idle exits slept: {reached:?}");
 }

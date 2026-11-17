@@ -499,6 +499,8 @@ impl Lifecycle {
                 self.tabs = 0;
                 self.failed(format!("its container kept stopping: start {generation} stopped before it was ready"), now_ms);
             }
+            // stopped unasked while idle, all it did kept: a sleep
+            (Phase::Awake { generation, .. }, Event::Exited { generation: g }) if g == generation && self.idle_and_kept() => self.slept_unasked(now_ms, &mut step),
             (Phase::Awake { generation, .. }, Event::Exited { generation: g }) if g == generation => {
                 // a guest that died busy had turns open: its next life ends
                 // them, so it is held as a record holds it, and starts again
