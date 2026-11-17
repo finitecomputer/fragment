@@ -8,7 +8,7 @@
 //! capped caller past a fragment's cap) is refused; a ledger that does not
 //! answer refuses nothing. Then it is made, bounded
 //! (`fragment_core::models`: the tier's model, the capped `max_tokens`,
-//! GLM's `reasoning_effort` clamped, none of the client's headers), and
+//! its `reasoning_effort` clamped, none of the client's headers), and
 //! charged after its answer, never in its way: its last, cumulative usage
 //! (input less what was cached) as one meter row under a reference of its
 //! own (`aig:<hex>`), sent to the payer's ledger on the ledger's queue
@@ -27,9 +27,9 @@
 //! same, on its slot's own fallback (`fragment_core::models::Models::
 //! fallback_of`, `Tries`), however the call named the slot: a tier's, its
 //! route's (the deployment's `models.fallback` unless it names another:
-//! DeepSeek V4 Flash unless named, behind the cheap tier's GLM-5.3 Flash);
-//! `vision`'s, `fallback` only when that slot says its model reads images
-//! (`images: true`; the default fallback, DeepSeek, reads none); any other
+//! Inkling 2 Small unless named, behind the cheap tier's DeepSeek V4.1
+//! Flash); `vision`'s, `fallback` only when that slot says its model reads
+//! images (`images: true`); any other
 //! slot's, the one it names, if any. It is logged as `model.fallback`, and
 //! charged as the fallback's. Not a race: the fallback is called only
 //! after the model failed. An answer that began is final, and the
@@ -92,15 +92,15 @@ use fragment_core::{decide, embed, multipart, transcribe};
 use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind, Tier};
 use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{Call, Whose};
 use crate::ledger::{self, FragmentOpen, MaySpend};
-use crate::{js, read_body, routed};
+use crate::{js, read_body};
 
 /// A call's request (`fragment_core::models`): Hermes' shrunk screenshot
 /// and its prompt fit.
@@ -577,14 +577,6 @@ async fn bounded_text(resp: &mut Response) -> String {
     String::from_utf8_lossy(&bytes).chars().take(REFUSAL_MAX_CHARS).collect()
 }
 
-/// The answer a `whose` asks a fragment for: its owner, and whether the
-/// agent naming it is in it.
-#[derive(Deserialize)]
-pub(crate) struct Whose {
-    pub owner: String,
-    pub member: bool,
-}
-
 /// `POST /api/models/v1/chat/completions[?fragment=<name>]`: an agent's
 /// model call, signed by the agent (`for` names whom it acts for), its
 /// `model` one of the route's names (a tier, `vision`, `fallback`) or a
@@ -657,12 +649,11 @@ async fn caller(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<
     if !valid_fragment_name(&name) {
         return Err(CellError::invalid("`fragment` is a fragment's name, <label>--<suffix>"));
     }
-    let ask = routed::internal_request("meter/whose", &json!({ "principal": agent.id }).to_string())?;
-    let mut answer = crate::routed::send(env, "FRAGMENT", &name, ask).await?;
+    let mut answer = crate::fragment::pass(env, &name, &Whose { principal: agent.id.clone() }).await?;
     if answer.status_code() != 200 {
         return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}")));
     }
-    let whose: Whose = answer.read_json().await?;
+    let whose: <Whose as Call>::Answer = answer.read_json().await?;
     if !whose.member {
         return Err(CellError::new(ErrorCode::Forbidden, format!("a model call names a fragment its agent is in, and it is not in {name}")));
     }

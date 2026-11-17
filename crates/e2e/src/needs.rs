@@ -1,7 +1,7 @@
 //! What a section needs to run (`Suite::section`), so a run's set is
 //! chosen by where it runs, never by a hand-kept list. A local run has
-//! everything; one on celld everything but the runtime's own containers; a
-//! hosted one (a branch deployment on real vendors) has the levers its
+//! everything; one on celld everything but the move, and its computers only
+//! on a krun engine; a hosted one (a branch deployment on real vendors) has the levers its
 //! test secret opens, Chrome when it is installed, and the computers and
 //! models its deployment offers, and nothing that stands in for a vendor
 //! or controls the node.
@@ -113,10 +113,11 @@ pub enum Rung {
     /// Under `wrangler dev`, with the fakes: everything.
     Local,
     /// Under `celld dev`, with the fakes (`FRAGMENT_E2E_RUNTIME=celld`;
-    /// docs/self-host.md, seam 1): everything but the runtime's own
-    /// containers, which need egress intercepts and snapshots celld's
-    /// Docker engine lacks (seam 2).
-    Celld,
+    /// docs/self-host.md, seam 1): everything but the move, and the
+    /// runtime's own containers only when its node runs computers, on this
+    /// machine's krun engine (`CELLD_CONTAINER_ENGINE=krun:<socket>`; seam
+    /// 2), where Docker builds their images.
+    Celld { computers: bool },
     /// A branch deployment on real vendors.
     Hosted(Offers),
 }
@@ -127,10 +128,10 @@ const NO_REAL_AGENT: &str = "it needs a real agent (our Hermes image on a real m
 pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
     let offers = match rung {
         Rung::Local => return (need == Need::RealAgent).then_some(NO_REAL_AGENT),
-        Rung::Celld => {
+        Rung::Celld { computers } => {
             return match need {
                 Need::RealAgent => Some(NO_REAL_AGENT),
-                Need::LocalDocker | Need::Computers => Some("it needs the runtime's own containers, and celld runs none here: a computer needs egress intercepts and snapshots, which celld's Docker engine lacks (docs/self-host.md, seam 2)"),
+                Need::LocalDocker | Need::Computers if !computers => Some("it needs the runtime's own containers, and this celld node runs none: a computer needs egress intercepts and snapshots, which only the krun engine has (CELLD_CONTAINER_ENGINE=krun:<socket>; docs/self-host.md, seam 2)"),
                 Need::Move => Some("it needs the finite.computer move, which is off on a self-hosted deployment: nothing to move from (docs/self-host.md)"),
                 _ => None,
             };
@@ -185,18 +186,24 @@ mod tests {
         }
     }
 
-    /// celld runs no containers of its own: no computers there. Everything
-    /// else a local run has, it has.
+    /// A celld node without an engine runs no containers of its own: no
+    /// computers there. Everything else a local run has, it has, but the
+    /// move; on the krun engine its computers too.
     #[test]
-    fn celld_has_everything_but_the_runtimes_containers() {
+    fn celld_has_everything_but_the_move_and_computers_on_krun() {
+        let bare = Rung::Celld { computers: false };
+        let krun = Rung::Celld { computers: true };
         for need in Need::ALL {
             let without = matches!(need, Need::LocalDocker | Need::Computers | Need::RealAgent | Need::Move);
-            assert_eq!(missing(need, Rung::Celld).is_some(), without, "{need:?}");
+            assert_eq!(missing(need, bare).is_some(), without, "{need:?}");
+            let without = matches!(need, Need::RealAgent | Need::Move);
+            assert_eq!(missing(need, krun).is_some(), without, "{need:?} on krun");
         }
-        let (need, why) = unmet(&[Need::Levers, Need::Computers], Rung::Celld).expect("no computers on celld");
+        let (need, why) = unmet(&[Need::Levers, Need::Computers], bare).expect("no computers on a bare celld");
         assert_eq!(need, Need::Computers);
-        assert!(why.contains("seam 2"), "{why}");
-        assert_eq!(unmet(&[Need::Fakes, Need::Node, Need::Deployment, Need::Chrome, Need::TwoSites, Need::Operator], Rung::Celld), None);
+        assert!(why.contains("seam 2") && why.contains("krun"), "{why}");
+        assert_eq!(unmet(&[Need::Levers, Need::Computers, Need::LocalDocker, Need::Chrome], krun), None);
+        assert_eq!(unmet(&[Need::Fakes, Need::Node, Need::Deployment, Need::Chrome, Need::TwoSites, Need::Operator], bare), None);
     }
 
     /// A real agent (our Hermes on a real model) is a preview's alone: a

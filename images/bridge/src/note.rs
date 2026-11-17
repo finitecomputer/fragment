@@ -16,8 +16,11 @@
 //! "Before" is the journal's order: the latest of the agent's `turn.start`
 //! records before this turn's own (its claim), passing over a refusal's,
 //! which never ran. At the turn after, the turn before is this one, so the
-//! note is said once. A turn before it with no end in the journal (its end
-//! never landed) is told nothing: only a recorded loss is a cut.
+//! note is said once. A cut turn's continuation is told of it by its id,
+//! and is claimed before anything said after it (engine.rs, `settling`), so
+//! the turn after it is told nothing. A turn before it with no end in the
+//! journal (its end never landed) is told nothing: only a recorded loss is
+//! a cut.
 //!
 //! A call the cut turn asked for (`turn.call`, recorded before it ran) that
 //! no step of its response ended never reported back: it may or may not
