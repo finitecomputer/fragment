@@ -524,20 +524,31 @@ RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(
 # What the boot reads instead of finding it each time: the lean plugin list;
 # the image's Chromium, /opt/fragment/bin/chromium
 # (regular /usr/bin/chromium from the pinned desktop base, always with the
-# flags a container needs: boot/src/hermes.rs); and the platform skill every profile
-# has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs).
-# The adapter extends the pinned Bot Desktop's start, attach and stop paths;
-# the boot refuses upstream source changes before it installs those hooks.
-COPY images/hermes/desktop_browser.py /opt/hermes/tools/bot_desktop/fragment_browser.py
+# flags a container needs and `navigator.webdriver` false: boot/src/hermes.rs);
+# and the platform skill every profile has, from the fragment CLI above
+# (`fragment skill`: boot/src/skills.rs).
 # A link opened on an agent's desktop (a terminal's `claude auth login`
 # sign-in, xdg-open) opens in that agent's own Chromium: the desktop's
 # default web browser, as Xfce's helper (exo-open reads it), in place of
 # Debian's sensible-browser, which names none here, so Xfce asked its person
-# which browser to use (FIN-351).
+# which browser to use (FIN-351). It runs what the desktop's Browser icon
+# runs (Hermes' `dock_argv`) with the link: a browser already on the
+# agent's profile takes it (Chromium's own profile singleton), and
+# browser_exec attaches to one it starts.
 COPY --chmod=755 <<'EOF' /opt/fragment/bin/desktop-browser
 #!/bin/sh
 # The desktop's web browser (images/hermes/Dockerfile): the agent's own.
-exec /opt/hermes/.venv/bin/python /opt/hermes/tools/bot_desktop/fragment_browser.py --open "${1:-about:blank}"
+exec /opt/hermes/.venv/bin/python -c '
+import os, sys
+sys.path.insert(0, "/opt/hermes")
+if not os.environ.get("DISPLAY"):
+    sys.exit("desktop browser: the desktop is not running; open the link on it")
+from tools.bot_desktop import browser
+launch = browser.dock_launch()
+if launch is None:
+    sys.exit("desktop browser: this computer has no Chromium")
+os.execv(launch[0], [*browser.dock_argv(*launch), sys.argv[1]])
+' "${1:-about:blank}"
 EOF
 COPY <<'EOF' /usr/share/xfce4/helpers/fragment-browser.desktop
 [Desktop Entry]
@@ -553,10 +564,7 @@ X-XFCE-CommandsWithParameter=%B "%s";
 EOF
 RUN sed -i 's/^WebBrowser=.*/WebBrowser=fragment-browser/' /etc/xdg/xfce4/helpers.rc \
  && grep -qx 'WebBrowser=fragment-browser' /etc/xdg/xfce4/helpers.rc
-RUN /opt/fragment/bin/hermes-boot build-info \
- && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash \
-    /opt/hermes/tools/bot_desktop/browser.py /opt/hermes/tools/bot_desktop/runtime.py \
-    /opt/hermes/tools/bot_desktop/fragment_browser.py
+RUN /opt/fragment/bin/hermes-boot build-info
 # Playwright launches the system Chromium, the one the desktop and Hermes'
 # browser run (/opt/fragment/bin/chromium: /usr/bin/chromium with a
 # container's flags), never a browser of its own: Chrome for Testing fails

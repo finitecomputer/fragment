@@ -385,8 +385,8 @@ pub fn relay_hint() -> String {
 }
 
 /// The managed overlay: how every profile streams, shows progress, asks
-/// (nothing technical; a card waits `card_timeout_s`), when its desktop is
-/// idle (`screen_idle_ms`), and what it never runs.
+/// (nothing technical; a card waits `card_timeout_s`), when its desktop and
+/// the browser on it are idle (`screen_idle_ms`), and what it never runs.
 pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_idle_ms: u64) -> String {
     let mut y = String::new();
     y.push_str("# Written by hermes-boot at every boot (images/hermes): Hermes' managed overlay,\n");
@@ -463,6 +463,13 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     // Hermes' own watcher, were it to run, would agree.
     let minutes = screen_idle_ms as f64 / 60_000.0;
     y.push_str(&format!("bot_desktop:\n  auto_start: true\n  idle_stop_minutes: {minutes}\n"));
+    // The browser browser_exec starts on that desktop stays up as long as
+    // the desktop does, as the screen shows it: Hermes' own janitor stops a
+    // browser its tool started once that tool goes unused this long (its
+    // default, two minutes, closed the agent's browser under a person who
+    // watched it). Hermes reads this once, process-wide, so the overlay
+    // carries it, in its whole seconds (30 at least).
+    y.push_str(&format!("browser:\n  inactivity_timeout: {}\n", (screen_idle_ms / 1000).max(30)));
     // Lazy installs are off (upstream's image turns them on): they fetch
     // Hermes' own optional backends (providers, platforms, speech) into its
     // home, which a computer configures none of (its model is the platform's
@@ -743,9 +750,11 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
     // XAI_API_KEY enables Hermes' separate x_search, not a web backend.
     // Its browser: Hermes' browser_exec (v0.23: its built-in browser_*
     // tools are gone, FIN-305), headed, on the agent's desktop, so the
-    // screen shows it, running the image's own Chromium (`CHROMIUM`, the
-    // one the desktop's Browser icon runs on the same profile), never
-    // Hermes' Chrome for Testing: one profile, one Chromium release.
+    // screen shows it, running the image's own Chromium (`CHROMIUM`). The
+    // desktop's Browser icon runs the same executable on the same profile
+    // (Hermes' `bot_desktop.browser`), and whichever starts first, the
+    // other attaches to it: one browser, one profile, one Chromium release,
+    // never Hermes' Chrome for Testing.
     y.push_str(&format!("browser:\n  headed: true\n  executable_path: {}\n", q(CHROMIUM)));
     if offered("BROWSER_USE_API_KEY") {
         // Without this Hermes auto-detects the offered key and sends the
@@ -798,11 +807,24 @@ fn provider_env_blocked(name: &str) -> bool {
 /// memory (p5, 2026-10-05).
 pub const CHROMIUM_FLAGS: [&str; 2] = ["--no-sandbox", "--disable-dev-shm-usage"];
 
+/// What keeps a page from seeing the agent's browser as automated:
+/// `navigator.webdriver` stays false, as in a person's own browser, which
+/// Cloudflare's bot check reads (Paul's prod agent, 2026-10-28). Hermes
+/// starts the desktop's browser, from browser_exec or the Browser icon, on
+/// DevTools port 0, the one port for which Chromium writes the
+/// `DevToolsActivePort` file Hermes finds it by; and Chromium marks a
+/// browser on port 0 automated (`navigator.webdriver` true). This turns
+/// that mark, Blink's `AutomationControlled` feature, off. It comes before
+/// the caller's arguments, so a caller's own `--disable-blink-features`
+/// wins (docs/technical-debt-ledger.md, "The image's Chromium hides
+/// Hermes' automation mark").
+pub const CHROMIUM_REGULAR: &str = "--disable-blink-features=AutomationControlled";
+
 /// The image's Chromium: a script that starts regular Chromium from its pinned base
-/// with `CHROMIUM_FLAGS` whatever the runtime. Each profile names it to
-/// Hermes (`browser.executable_path`, `profile_config`), so its browser and
-/// its desktop's Browser icon (Hermes' `bot_desktop.browser.executable()`)
-/// both run it.
+/// with `CHROMIUM_FLAGS` whatever the runtime, and `CHROMIUM_REGULAR`. Each
+/// profile names it to Hermes (`browser.executable_path`, `profile_config`),
+/// so its browser and its desktop's Browser icon (Hermes'
+/// `bot_desktop.browser.executable()`) both run it, as does Playwright.
 pub const CHROMIUM: &str = "/opt/fragment/bin/chromium";
 /// Regular Chromium, already in the pinned upstream desktop base.
 pub const SYSTEM_CHROMIUM: &str = "/usr/bin/chromium";
@@ -815,7 +837,7 @@ pub fn chromium_script(full: &Path) -> String {
     let s = full.display().to_string();
     assert!(full.is_absolute() && !s.contains('\''), "a browser's path, absolute, quotable: {s}");
     let flags = CHROMIUM_FLAGS.join(" ");
-    format!("#!/bin/sh\n# Regular Chromium from the pinned desktop image, with its container flags.\n# --test-type suppresses the unsupported --no-sandbox infobar, as Hermes' dock does.\nexport TMPDIR={CHROMIUM_TMP}\n# Distro Chromium 154 puts a headless throwaway profile under XDG_CONFIG_HOME,\n# unlike the testing build's TMPDIR. Keep it out of every saved home too.\nfor arg in \"$@\"; do\n  case \"$arg\" in --headless|--headless=*) export XDG_CONFIG_HOME=\"/tmp/fragment-chromium-$(id -u)\" ;; esac\ndone\nexec '{s}' {flags} --test-type \"$@\"\n")
+    format!("#!/bin/sh\n# Regular Chromium from the pinned desktop image, with its container flags.\n# --test-type suppresses the unsupported --no-sandbox infobar, as Hermes' dock does.\nexport TMPDIR={CHROMIUM_TMP}\n# Distro Chromium 154 puts a headless throwaway profile under XDG_CONFIG_HOME,\n# unlike the testing build's TMPDIR. Keep it out of every saved home too.\nfor arg in \"$@\"; do\n  case \"$arg\" in --headless|--headless=*) export XDG_CONFIG_HOME=\"/tmp/fragment-chromium-$(id -u)\" ;; esac\ndone\nexec '{s}' {flags} --test-type {CHROMIUM_REGULAR} \"$@\"\n")
 }
 
 /// Chromium's scratch: the container's own `/tmp`, which no save keeps.
@@ -1520,6 +1542,8 @@ mod tests {
             "disabled_toolsets: [\"cronjob\"]",
             "    - \"platforms/discord\"",
             "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 10\n",
+            // the agent's browser stays as long as its desktop
+            "\nbrowser:\n  inactivity_timeout: 600\n",
             "\nmodel_catalog:\n  enabled: false\n",
             "\nsessions:\n  auto_prune: false\n",
             "\nsecurity:\n  allow_lazy_installs: false\n",
@@ -1546,6 +1570,8 @@ mod tests {
         let short = managed_config(&[], 20, crate::desktop::IDLE_STOP_MS);
         assert!(short.contains("\napprovals:\n  mode: \"off\"\n  timeout: 20\n") && short.contains("\nagent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: 20\n"), "{short}");
         assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
+        assert!(managed_config(&[], 20, 30_000).contains("\nbrowser:\n  inactivity_timeout: 30\n"), "and its browser's, in Hermes' seconds");
+        assert!(managed_config(&[], 20, 2_000).contains("\nbrowser:\n  inactivity_timeout: 30\n"), "no shorter than Hermes' own floor");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
         let p = profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Medium.into(), DEFAULT_REASONING, &route("http://model.fragment.internal/"), &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
@@ -1599,7 +1625,8 @@ mod tests {
         assert!(!m.contains("fallback_providers") && !m.contains("stale_timeout_seconds") && !m.contains("api_max_retries"), "a profile's own, never the overlay's: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n"), "the managed skills and the platform skill's view, after its own: {p}");
         assert!(p.contains("browser:\n  headed: true\n  executable_path: \"/opt/fragment/bin/chromium\"\n"), "Hermes' browser, headed, on the image's Chromium, in the profile's own config: {p}");
-        assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");
+        let overlay_browser: Vec<&str> = m.lines().skip_while(|l| *l != "browser:").skip(1).take_while(|l| l.starts_with("  ")).collect();
+        assert_eq!(overlay_browser, ["  inactivity_timeout: 600"], "the overlay's browser setting is its idle bound alone; the rest is each profile's: {m}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
         assert!(p.contains("\n  cwd: \"/data/work/juniper--k3x9\"\n"), "its terminal works in its work directory: {p}");
         assert_eq!(work_dir("juniper--k3x9"), PathBuf::from("/data/work/juniper--k3x9"));
@@ -1791,7 +1818,7 @@ mod tests {
             }
             String::from_utf8(c.output().unwrap().stdout).unwrap()
         };
-        let started = "full --no-sandbox --disable-dev-shm-usage --test-type --user-data-dir=/p https://example.com tmp=/tmp\n";
+        let started = "full --no-sandbox --disable-dev-shm-usage --test-type --disable-blink-features=AutomationControlled --user-data-dir=/p https://example.com tmp=/tmp\n";
         assert_eq!(run(Some(":20")), started, "on a desktop");
         assert_eq!(run(None), started, "with none: its caller asks for headless");
         let _ = std::fs::remove_dir_all(&dir);

@@ -156,7 +156,7 @@ uses the separate `X_API_BEARER_TOKEN` operator placeholder at `api.x.com`.
 Use native `image_generate` for an image you need now in chat; an app's
 repeatable images are a job's `job.ai.image` step (no FAL key needed).
 
-Your native browser tools drive headed Chromium on your own desktop.
+Your `browser_exec` tool drives headed Chromium on your own desktop.
 With `BROWSER_USE_API_KEY` you may also drive a cloud browser from the
 terminal, beside your desktop's:
 `BU_NAME=remote browser-harness 'start_remote_daemon("remote")'`, then
@@ -201,8 +201,8 @@ You have a desktop of your own, with a browser on it (each agent here
 has its own). Yours starts the first time you use a computer-use
 or browser tool, and stops once no one has used it for ten minutes; it
 starts again when you next need it, your browser's sign-ins kept. Your
-native browser tools and the desktop's Browser icon share one regular
-Chromium and its saved sign-ins. Use those tools for signed-in browsing;
+`browser_exec` tool and the desktop's Browser icon share one regular
+Chromium and its saved sign-ins. Use it for signed-in browsing;
 you do not need to install or launch a second browser. In your own code,
 Playwright (Python's and Node's) is installed: a plain `chromium.launch()`
 runs this computer's Chromium, without your desktop's sign-ins; no

@@ -25,58 +25,6 @@ use serde_json::json;
 
 use crate::hermes;
 
-/// Adapt the pinned Python runtime at its dock and stop boundaries: the
-/// desktop's Browser icon starts regular Chromium on a nonzero CDP port
-/// (`fragment_browser.py`, images/hermes/desktop_browser.py), and a desktop's
-/// stop closes it gracefully first. Hermes' browser_exec attaches to that
-/// browser on the same profile (its `browser_launcher`). The helper is
-/// Python because it extends Hermes' own process and lease helpers;
-/// installation and its pin guards stay in this Rust tool. Exact matches
-/// make an upstream change a build failure, never a skipped fix.
-pub fn install_browser(root: &Path) -> Result<(), String> {
-    const DOCK: &str = r#"    return "Exec=" + " ".join(quote(arg) for arg in dock_argv(exe, user_data_dir, sandbox_bypass=sandbox_bypass))
-"#;
-    const STOP: &str = r#"def _stop_locked(sd: Path) -> bool:
-    pid = _launcher_pid()
-"#;
-    for (rel, replacements) in [
-        ("tools/bot_desktop/browser.py", vec![
-            (DOCK, r#"    return "Exec=" + " ".join(quote(arg) for arg in ["/opt/hermes/.venv/bin/python", "/opt/hermes/tools/bot_desktop/fragment_browser.py", user_data_dir])
-"#),
-        ]),
-        ("tools/bot_desktop/runtime.py", vec![
-            (STOP, r#"def _stop_locked(sd: Path) -> bool:
-    from tools.bot_desktop.fragment_browser import stop as stop_browser
-    stop_browser()
-    pid = _launcher_pid()
-"#),
-        ]),
-    ] {
-        let path = root.join(rel);
-        let mut source = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        for (old, new) in replacements {
-            if source.matches(old).count() != 1 {
-                return Err(format!("{}: the pinned desktop browser integration changed", path.display()));
-            }
-            source = source.replacen(old, new, 1);
-        }
-        std::fs::write(&path, source).map_err(|e| format!("{}: {e}", path.display()))?;
-        // The base carries unchecked-hash bytecode: merely editing its source
-        // does not invalidate it. The image build recompiles these files.
-        let cache = path.parent().expect("a source's directory").join("__pycache__");
-        if cache.exists() {
-            let prefix = format!("{}.", path.file_stem().expect("a Python module").to_string_lossy());
-            for file in std::fs::read_dir(&cache).map_err(|e| e.to_string())? {
-                let file = file.map_err(|e| e.to_string())?;
-                if file.file_name().to_string_lossy().starts_with(&prefix) {
-                    std::fs::remove_file(file.path()).map_err(|e| e.to_string())?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// A desktop up and unused this long is stopped. Hermes' own default is
 /// 30 minutes; ten keeps a computer whose agents each opened a browser once
 /// from holding gigabytes for half an hour, and a person's pause while

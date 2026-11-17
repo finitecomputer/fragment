@@ -784,8 +784,10 @@ What our Hermes image guarantees beyond the contract:
   and stopped after 10 minutes unused. Take over is that desktop's lease,
   which Hermes' tools obey until Give back. Its agents run as one user
   (decision 44), so only the lease and the platform skill keep an agent
-  off another's desktop. The desktop and the browser tools share one
-  regular Chromium and one saved profile per agent. A link opened on the
+  off another's desktop. The desktop's Browser icon and the agent's
+  `browser_exec` share one regular Chromium and one saved profile per
+  agent, which shows pages `navigator.webdriver` false, as a person's own
+  browser does. It stays up as long as its desktop. A link opened on the
   desktop (a terminal's sign-in, `xdg-open`) opens there too: it is the
   desktop's default web browser, so no dialog asks which (FIN-351).
 

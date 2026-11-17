@@ -228,23 +228,23 @@ unfinished design, not debt.
   TUI gateway, and the image uses them, proven by
   `two_agents_two_desktops`.
 
-## The Hermes image adapts Bot Desktop's browser ownership
+## The image's Chromium hides Hermes' automation mark
 
-- **Shortcut:** upstream's dock and browser_exec launch Chromium on CDP
-  port 0, which sets `navigator.webdriver`, so images/hermes/desktop_browser.py
-  and source replacements guarded by images/hermes/boot/src/desktop.rs run
-  the base's Chromium on a nonzero port through Hermes' dock and stop
-  paths; browser_exec attaches to it on the same profile. Since v0.23
-  (FIN-305) an agent's own browser_exec launch is upstream's, port 0: the
-  choice of what replaces Hermes' removed built-in browser tools is open.
-- **Risk:** private upstream code changes (the build fails); rolling
-  back past it needs the pre-upgrade save.
-- **Delete when:** a pinned upstream desktop supports regular Chromium
-  with a nonzero CDP port, starts and reattaches it through its own
-  lease fence, and owns its shutdown apart from tool cleanup; then the
-  adapter and replacements go together once
-  `a_regular_browser_is_shared_by_the_desktop_and_tools` and
-  `two_agents_two_desktops` pass against it.
+- **Shortcut:** Hermes starts the desktop's browser (browser_exec's and the
+  Browser icon's) on DevTools port 0, the only port for which Chromium
+  writes the `DevToolsActivePort` file Hermes finds it by, and Chromium
+  marks a port-0 browser automated (`navigator.webdriver` true). The
+  image's Chromium (images/hermes/boot/src/hermes.rs `CHROMIUM_REGULAR`)
+  starts every launch with `--disable-blink-features=AutomationControlled`,
+  which turns that mark off.
+- **Risk:** a launch that passes its own `--disable-blink-features` comes
+  later and wins, and a page sees an automated browser again; a bot check
+  that reads more than `navigator.webdriver` sees no difference this
+  hides.
+- **Delete when:** a pinned Hermes finds its desktop browser on a nonzero
+  port, or Chromium stops marking a port-0 browser, proven by
+  `a_regular_browser_is_shared_by_the_desktop_and_tools` with the flag
+  gone.
 
 ## Each agent's Hermes profile config is rewritten at every boot
 
