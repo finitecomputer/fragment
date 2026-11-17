@@ -1554,9 +1554,10 @@ by email. A client's `id` makes a call idempotent (another body 409).
   no more.
 - **The last admin stays**: stepping down or offboarding never leaves
   the org without one (409).
-- **It outlives its billing**: an org with anyone in its content, or that
-  an operator credited or named a payer for, is never dropped when its
-  seats go.
+- **It outlives its billing**: an org that has had a content admin (the
+  only way it owns fragments), or that an operator credited or named a
+  payer for, is never dropped when its seats go. Its seat holders alone,
+  in its content too, keep nothing.
 - An offer is mailed to no one yet: its person reads it at `GET
   /api/orgs/offers`.
 
@@ -1605,7 +1606,9 @@ that person (decision 67). It is never an agent, a chat or skills.
   more makes its agent no agent member for a `from: agent` channel's
   post or trigger. Whatever admits them
   again takes their old rows away first, an ordinary member still by
-  their own yes.
+  their own yes. An offboarded editor keeps any inbox token and share
+  link they were given, as anyone holding them would: rotate them
+  (`POST /api/f/{name}/rotate`) when offboarding.
 - **No storage token**, to read or to write. A token reads the repo for
   its 15 minutes whatever happens to its holder, so an org's fragment
   hands out none (403).
