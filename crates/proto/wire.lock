@@ -26,6 +26,7 @@ bound FragmentStatus.agentRole default null
 bound FragmentStatus.blobMinBytes default null
 bound FragmentStatus.blobMinBytes range u64
 bound FragmentStatus.kind default "app"
+bound FragmentStatus.ownerRef default null
 bound FragmentStatus.page default null
 bound FragmentStatus.reach default false
 bound FragmentStatus.title default null
@@ -197,6 +198,7 @@ field FragmentStatus.kind required FragmentKind
 field FragmentStatus.name required string
 field FragmentStatus.npub required string
 field FragmentStatus.owner required string
+field FragmentStatus.ownerRef optional OwnerRef|null
 field FragmentStatus.page optional PageReport|null
 field FragmentStatus.pins required Pins
 field FragmentStatus.reach optional boolean
@@ -382,6 +384,10 @@ field OpDecl.ephemeral optional boolean
 field OpDecl.input optional any
 field OpDecl.kind required OpKind
 field OpDecl.role required Role
+field OwnerRef.org.id required string
+field OwnerRef.org.kind required "org"
+field OwnerRef.person.id required string
+field OwnerRef.person.kind required "person"
 field PageError.kind required PageErrorKind
 field PageError.source optional string|null
 field PageError.text required string
@@ -824,6 +830,9 @@ type OldBrain in object
 type OldSite in object
 type OpDecl out object
 type OpKind out enum
+type OwnerRef out union(kind)
+type OwnerRef.org out object
+type OwnerRef.person out object
 type PageError out object
 type PageErrorKind out enum
 type PageReport out object
@@ -1044,6 +1053,8 @@ value NoticeLevel warn
 value OpKind job
 value OpKind mutation
 value OpKind query
+value OwnerRef org
+value OwnerRef person
 value PageErrorKind console
 value PageErrorKind exception
 value PageErrorKind network

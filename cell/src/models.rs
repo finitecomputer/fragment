@@ -225,10 +225,15 @@ impl Charge {
 /// asked side by side (`gate::asked_together`), the payer's refusal said
 /// first, and off the call's path (`ledger::may_beside`): the call waits
 /// on a ledger only when this isolate last heard that question refused.
+/// What an org pays for here is its fragment's own (its app's embeddings;
+/// an agent's owner is a person): an AI step, which meets the org's budget
+/// and the fragment's cap whoever starts it (decisions 67, 68).
 async fn gate(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, model: &'static str, name: &'static str, after: &dyn Background) -> CellResult<Charge> {
+    let org = fragment_core::ledger::org::Payer::parse(payer).is_some_and(|p| p.org().is_some());
     let own = fragment.filter(|f| f.owner == payer);
-    let capped = own.filter(|f| !f.by_owner).map(|f| f.name.to_string());
-    let may = MaySpend { spend: Spend::AgentTurn, by_owner: capped.is_none(), fragment: capped };
+    let capped = own.filter(|f| org || !f.by_owner).map(|f| f.name.to_string());
+    let spend = if org { Spend::AiStep } else { Spend::AgentTurn };
+    let may = MaySpend { spend, by_owner: capped.is_none(), fragment: capped };
     let open = fragment.filter(|f| f.owner != payer && !f.by_owner).map(|f| (f.owner, FragmentOpen { fragment: f.name.to_string() }));
     let theirs = open.as_ref().map(|(owner, open)| ledger::may_beside(env, owner, open, after));
     fragment_core::ledger::gate::asked_together(ledger::may_beside(env, payer, &may, after), theirs).await?;

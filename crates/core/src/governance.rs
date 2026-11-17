@@ -19,6 +19,14 @@
 //!   their waiting offers with them, made or received. One whose grounds
 //!   no longer hold lapses as soon as a change shows it (`lapses`), so it
 //!   is never handed back as if new, nor counted against the cap.
+//! - **In the org now.** A person is in the org's content from their yes
+//!   (to an admin's place, to an invite to one of its fragments, or to a
+//!   seat in it) until an offboarding, which takes their row: since when
+//!   (`since`) is what an org's fragment checks its member rows against
+//!   (`counts`), so what it granted them before opens nothing from the
+//!   moment they leave, and nothing of it comes back with a rehire (Paul,
+//!   2026-10-31: they start fresh). An offer or an invite made before they
+//!   last left admits them no more (the time their offboarding was logged).
 
 use fragment_proto::ErrorCode;
 use serde::{Deserialize, Serialize};
@@ -28,6 +36,9 @@ use serde::{Deserialize, Serialize};
 pub const ADMINS_MAX: u64 = 32;
 /// How long an offer waits for its answer.
 pub const OFFER_TTL_MS: i64 = 7 * 24 * 3_600_000;
+/// Orgs' content a person is in at once: every request of theirs carries
+/// their places (`Identity::orgs`).
+pub const ORGS_PER_PERSON_MAX: u64 = 64;
 /// Entries of an org's governance log a page holds.
 pub const LOG_PAGE: u64 = 100;
 /// A request id, as a client names its change (a replay finds the first).
@@ -141,6 +152,9 @@ pub enum Refusal {
     LastAdmin,
     /// The person is not one of the org's content admins.
     NotIn,
+    /// Made before the person last left the org's content: it admits them
+    /// no more.
+    LeftSince,
 }
 
 impl Refusal {
@@ -150,6 +164,7 @@ impl Refusal {
             Refusal::AdminsFull => ErrorCode::InvalidRequest,
             Refusal::Answered(_) | Refusal::Lapsed(_) | Refusal::LastAdmin => ErrorCode::ConflictingBody,
             Refusal::Ended | Refusal::NotIn => ErrorCode::NotFound,
+            Refusal::LeftSince => ErrorCode::Forbidden,
         }
     }
 
@@ -164,7 +179,8 @@ impl Refusal {
             Refusal::Lapsed(Grounds::Payer) => "this offer was the org's first admin's, and the org has had one since: ask its admins".into(),
             Refusal::Lapsed(Grounds::Operator) => "this offer was the recovery of an org with no admin, and it has one now: ask its admins".into(),
             Refusal::LastAdmin => "the org's last content admin stays: another accepts the place first".into(),
-            Refusal::NotIn => "they are not one of the org's content admins".into(),
+            Refusal::NotIn => "they are not in the org's content".into(),
+            Refusal::LeftSince => "this was made before they left the org's content: only a new one admits them".into(),
         }
     }
 }
@@ -223,6 +239,56 @@ pub fn steps_down(admin: bool, admins: u64) -> Result<bool, Refusal> {
         (false, _) => Ok(false),
         (true, 0..=1) => Err(Refusal::LastAdmin),
         (true, _) => Ok(true),
+    }
+}
+
+/// A person's place in an org's content: one of its admins or not, and
+/// since when they are in it (their yes; a rehire's is a new one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place {
+    pub admin: bool,
+    pub since: i64,
+}
+
+/// Whether what an org's fragment granted someone at `added_at` counts
+/// for them now, their place in its org `place`: only while they are in
+/// it, and only a grant of their place now, never of one before it.
+pub fn counts(place: Option<Place>, added_at: i64) -> bool {
+    place.is_some_and(|p| added_at >= p.since)
+}
+
+/// Whether an admin's offer made at `offered_at` may still be accepted,
+/// the person having last been offboarded at `left` (if ever): one made
+/// before they left admits them no more.
+pub fn accepted(left: Option<i64>, offered_at: i64) -> Result<(), Refusal> {
+    match left.is_some_and(|left| left > offered_at) {
+        true => Err(Refusal::LeftSince),
+        false => Ok(()),
+    }
+}
+
+/// A person coming into the org's content as they come into one of its
+/// fragments, by their yes to an invite made at `invited_at` (none: a
+/// content admin's own add), at `now`: their place, and whether it is new
+/// to them. An invite from before they last left admits no one, though
+/// they came back since by another (Alex's review).
+pub fn enrolled(place: Option<Place>, left: Option<i64>, invited_at: Option<i64>, now: i64) -> Result<(Place, bool), Refusal> {
+    if invited_at.zip(left).is_some_and(|(invited, left)| invited < left) {
+        return Err(Refusal::LeftSince);
+    }
+    match place {
+        Some(p) => Ok((p, false)),
+        None => Ok((Place { admin: false, since: now }, true)),
+    }
+}
+
+/// Whether someone may be offboarded, the org holding `admins`: one in
+/// its content, never its last admin.
+pub fn offboarded(place: Option<Place>, admins: u64) -> Result<(), Refusal> {
+    match place {
+        None => Err(Refusal::NotIn),
+        Some(p) if p.admin && admins <= 1 => Err(Refusal::LastAdmin),
+        Some(_) => Ok(()),
     }
 }
 
@@ -290,6 +356,34 @@ mod tests {
         for g in [Grounds::Admin, Grounds::Payer, Grounds::Operator] {
             assert_eq!(Grounds::parse(g.as_str()), Some(g));
         }
+    }
+
+    /// Offboarding: never the last admin, nor someone not in; what a
+    /// fragment granted before someone's place now never counts (a rehire
+    /// starts fresh); what was made before they left admits them no more.
+    #[test]
+    fn offboarding_fences_what_came_before() {
+        const ADMIN: Place = Place { admin: true, since: T };
+        const IN: Place = Place { admin: false, since: T };
+        assert_eq!(offboarded(Some(IN), 1), Ok(()));
+        assert_eq!(offboarded(Some(ADMIN), 2), Ok(()));
+        assert_eq!(offboarded(Some(ADMIN), 1), Err(Refusal::LastAdmin));
+        assert_eq!(offboarded(None, 2), Err(Refusal::NotIn));
+        // a grant counts only while in, and only one of their place now
+        assert!(counts(Some(IN), T) && counts(Some(IN), T + 1));
+        assert!(!counts(None, T + 1), "out: nothing counts");
+        let rehired = Place { admin: false, since: T + 100 };
+        assert!(!counts(Some(rehired), T + 1), "a grant from before the rehire counts no more");
+        // an invite, or an offer, made before they left admits no one
+        let left = T + 10;
+        assert_eq!(enrolled(None, Some(left), Some(T), left + 5), Err(Refusal::LeftSince));
+        assert_eq!(accepted(Some(left), T), Err(Refusal::LeftSince));
+        // a new one admits them afresh, since now
+        assert_eq!(enrolled(None, Some(left), Some(left + 1), left + 5), Ok((Place { admin: false, since: left + 5 }, true)));
+        assert_eq!(accepted(Some(left), left + 1), Ok(()));
+        // back in by a fresh invite elsewhere, an invite from before they left still admits no one
+        assert_eq!(enrolled(Some(rehired), Some(left), Some(T), left + 200), Err(Refusal::LeftSince));
+        assert_eq!(enrolled(Some(IN), None, None, T + 50), Ok((IN, false)), "in already: their place, nothing new");
     }
 
     /// R1: once someone accepts the first admin's place, who pays's other

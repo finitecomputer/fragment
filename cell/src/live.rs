@@ -33,11 +33,20 @@
 //! socket's attachment, so it is asked about after waking too; a cookie's
 //! token is a secret, held in this activation's memory only. A socket
 //! whose credential no longer names its principal (a sign-out, an ended
-//! session, a revoked key), or whose cookie this activation does not hold
-//! (it woke from hibernation), is closed with 4001, and its page
-//! reconnects as whoever it is now. A computer's follower and a phone sign
-//! with a key: each reconnect costs them a catch-up, and a phone shows it.
-//! A page's (a cookie's) is unseen.
+//! session, a revoked key), whose membership in an org's fragment no
+//! longer counts (an offboarding: fragment.rs `fence`), or whose cookie
+//! this activation does not hold (it woke from hibernation), is closed
+//! with 4001, and its page reconnects as whoever it is now. A computer's
+//! follower and a phone sign with a key: each reconnect costs them a
+//! catch-up, and a phone shows it. A page's (a cookie's) is unseen.
+//!
+//! In an org's fragment the check reaches a socket that sends nothing
+//! too: a record, draft or presence goes to a signed-in socket only while
+//! its check is fresh, and one whose check is due is closed with 4001
+//! instead (`may_tell`), so an offboarding stops every word to its
+//! person's sockets within `LIVE_IDENTITY_MS`, as a sign-out does. The
+//! check decides the role its person (or their agent's membership) holds
+//! there now, and a socket holding less than it opened with closes.
 //!
 //! A fragment holds at most `LIVE_SOCKETS_MAX` sockets, and a principal at
 //! most `LIVE_SOCKETS_PER_PRINCIPAL`. Presence comes whole in `hello`,
@@ -165,12 +174,16 @@ fn state_of(ws: &WebSocket) -> Option<LiveState> {
     ws.deserialize_attachment::<LiveState>().ok().flatten()
 }
 
-/// What a broadcast reads of a socket's attachment: its id and the
-/// channels it follows, and no more (its presence is any JSON a page set).
+/// What a broadcast reads of a socket's attachment: its id, the channels
+/// it follows and who it is, and no more (its presence is any JSON a page
+/// set).
 #[derive(Deserialize)]
 struct Follows {
     id: String,
     subs: Vec<String>,
+    /// Who it is, and when the registry last said so (`may_tell`).
+    principal: String,
+    checked_at: i64,
 }
 
 fn follows_of(ws: &WebSocket) -> Option<Follows> {
@@ -270,10 +283,15 @@ impl FragmentCell {
     }
 
     /// One socket's presence changed, to every socket (its own too): one
-    /// frame, encoded once, and no attachment read.
+    /// frame, encoded once, and no attachment read but an org's
+    /// (`may_tell`).
     fn broadcast_presence(&self, change: Present) {
         let frame = LiveOut::Presence(change).encode();
+        let (org, now) = (self.org_owned(), js::now_ms());
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
+            if org && !follows_of(&ws).is_some_and(|st| self.may_tell(org, &ws, &st, now)) {
+                continue;
+            }
             let _ = ws.send_with_str(&frame);
         }
     }
@@ -286,9 +304,10 @@ impl FragmentCell {
         }
         let frame = LiveOut::record_frame(r);
         let mut found = BTreeSet::new();
+        let (org, now) = (self.org_owned(), js::now_ms());
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             let Some(st) = follows_of(&ws) else { continue };
-            if st.subs.contains(&r.channel) {
+            if st.subs.contains(&r.channel) && self.may_tell(org, &ws, &st, now) {
                 let _ = ws.send_with_str(&frame);
                 found.insert(st.id);
             }
@@ -311,8 +330,9 @@ impl FragmentCell {
             return true;
         }
         let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now, thinking };
+        let org = self.org_owned();
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
-            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
+            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel) && self.may_tell(org, &ws, &st, now)) {
                 send(&ws, &frame);
             }
         }
@@ -465,6 +485,40 @@ impl FragmentCell {
         Ok(())
     }
 
+    /// Whether `signed`'s socket, opened at `role`, holds less here now: in
+    /// an org's fragment, the role a request of theirs gets now, decided as
+    /// at its open (`require`, through `fence`), whatever it came by (their
+    /// own row, or an agent of theirs that is a member: its row counts by
+    /// their place too), the share link counting only for a socket that
+    /// opened by it alone (`view`: `link`). A person's fragment: never (a
+    /// removal, or a role changed, closes its sockets itself).
+    fn fenced_out(&self, signed: &crate::routed::Signed, role: Role, link: bool) -> CellResult<bool> {
+        if self.owner()?.org().is_none() {
+            return Ok(false);
+        }
+        let url = url::Url::parse("https://fragment.internal/__live").expect("a constant URL parses");
+        let caller = Caller { signed: Some(signed.clone()), unresolved: None, url, site: true };
+        Ok(self.require(&caller, link, Role::Public).map_or(true, |now| now < role))
+    }
+
+    /// Whether a record, draft or presence may go to `st` now, or it is
+    /// closed for its due check instead (the module doc). A person's
+    /// fragment, and an anonymous socket: always.
+    fn may_tell(&self, org: bool, ws: &WebSocket, st: &Follows, now: i64) -> bool {
+        if !org || st.principal.starts_with(npub::ANON_PREFIX) || now - st.checked_at < limits::LIVE_IDENTITY_MS {
+            return true;
+        }
+        self.live.borrow_mut().credentials.remove(&st.id);
+        let _ = ws.close(Some(ROLE_CHANGED), Some("who you are is checked again: reconnect"));
+        false
+    }
+
+    /// Whether the fragment is an org's, for a broadcast (`may_tell`): one
+    /// it cannot tell is treated as one, which only asks more.
+    fn org_owned(&self) -> bool {
+        self.owner().map_or(true, |o| o.org().is_some())
+    }
+
     /// Whether a socket still acts as who it connected as (the module doc);
     /// a registry that cannot answer closes it too: fail closed.
     async fn still_who(&self, ws: &WebSocket, st: &mut LiveState) -> bool {
@@ -478,7 +532,12 @@ impl FragmentCell {
         };
         let same = match (credential, self.meta(MetaKey::Name)) {
             (Some(credential), Ok(Some(name))) => match credential.resolve(&self.env, &name).await {
-                Ok(Some(signed)) => npub::display(&signed.identity.id) == st.principal,
+                // and, in an org's fragment, a membership that still counts at
+                // their place there now (an offboarding closes it here)
+                Ok(Some(signed)) => {
+                    let link = self.state.get_tags(ws).iter().any(|t| t == "view");
+                    npub::display(&signed.identity.id) == st.principal && !self.fenced_out(&signed, st.role, link).unwrap_or(true)
+                }
                 Ok(None) | Err(_) => false,
             },
             _ => false,

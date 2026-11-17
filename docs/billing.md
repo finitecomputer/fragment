@@ -85,9 +85,10 @@ its fragments (decision 69).
 
 Decisions 69 to 71. An org's content admins and its governance log are
 the registry's, apart from its members (docs/api.md, Org content). An
-org with anyone in its content, or that an operator credited or named a
-payer for, is never dropped when its subscription ends and its seats go
-(`drop_if_empty`), so its credit is never stranded. A wipe makes its
+org that has had a content admin, or that an operator credited or named
+a payer for, is never dropped when its subscription ends and its seats
+go (`drop_if_empty`), so its fragments and credit are never stranded;
+its seat holders alone, in its content too, keep nothing. A wipe makes its
 person no content admin there rather than taking the org with them; an
 org left with no content admin waits on an operator's recovery offer,
 logged.

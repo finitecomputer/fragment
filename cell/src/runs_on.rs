@@ -104,7 +104,7 @@ impl FragmentCell {
         if !fragment_core::connectors::id_ok(door) {
             return Err(CellError::invalid("door: a connector's id (1 to 32 lower-case letters, digits and single dashes)"));
         }
-        let (owner, agent) = (self.must(MetaKey::Owner)?, self.name()?);
+        let (owner, agent) = (self.owner()?.person().ok_or_else(|| CellError::host("an agent fragment is a person's"))?.to_string(), self.name()?);
         let policy = self.connector_policy()?;
         policy.authorize(&owner, &agent, door, action).map_err(|why| CellError::new(ErrorCode::Forbidden, format!("door {door} {why}")))
     }
@@ -184,7 +184,8 @@ impl FragmentCell {
         match route {
             "assign" => {
                 let b: Assign = crate::json_body(body)?;
-                if self.must(MetaKey::Owner)? != b.owner {
+                // an org's fragment runs on no one's computer: its owner is no person
+                if !self.owner()?.is(&b.owner) {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner runs it on their computer"));
                 }
                 let identity = match self.meta(MetaKey::AgentIdentity)? {
@@ -211,7 +212,8 @@ impl FragmentCell {
             }
             "unassign" => {
                 let b: Assign = crate::json_body(body)?;
-                if self.must(MetaKey::Owner)? != b.owner {
+                // an org's fragment runs on no one's computer: its owner is no person
+                if !self.owner()?.is(&b.owner) {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner moves it"));
                 }
                 if self.meta(MetaKey::Computer)?.as_deref() == Some(b.computer.as_str()) {
@@ -239,7 +241,7 @@ impl FragmentCell {
             "door-ticket" => {
                 let body: Value = crate::json_body(body)?;
                 let text = |k: &str| body[k].as_str().unwrap_or("");
-                if self.must(MetaKey::Owner)? != text("owner") {
+                if !self.owner()?.is(text("owner")) {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner opens or closes its door"));
                 }
                 self.assigned_to(text("computer"))?;
@@ -501,8 +503,8 @@ impl FragmentCell {
     /// The fragment's owner as a caller, for what the platform does on the
     /// owner's behalf here (adding the agent as a member).
     pub(crate) fn as_owner(&self) -> CellResult<crate::fragment::Caller> {
-        let owner = self.must(MetaKey::Owner)?;
-        let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None };
+        let owner = self.owner()?.person().ok_or_else(|| CellError::host("an agent fragment is a person's"))?.to_string();
+        let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None, orgs: vec![] };
         let signed = crate::routed::Signed::new(identity, None);
         Ok(crate::fragment::Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), site: false })
     }

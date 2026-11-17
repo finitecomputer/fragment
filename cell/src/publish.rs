@@ -166,7 +166,7 @@ impl FragmentCell {
             return Ok(vec![]);
         }
         let (_, mut effects) = seed::step(&stage, &Event::Alarm).map_err(refused)?;
-        let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
+        let (name, owner) = (self.name()?, self.owner()?.name());
         let mut after = vec![];
         let mut steps = 0;
         while !effects.is_empty() {

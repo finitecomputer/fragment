@@ -54,10 +54,11 @@ use std::sync::Arc;
 
 use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::npub;
+use fragment_core::ledger::org::Payer;
 use fragment_core::seed;
 use fragment_proto::{
-    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, Pins, Role, Urls,
-    Visibility,
+    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, OwnerRef, Pins, Role,
+    Urls, Visibility,
 };
 use fragment_templates::blessed;
 use serde::de::DeserializeOwned;
@@ -303,7 +304,8 @@ pub(crate) enum MetaKey {
     /// When the fragment was created, its incarnation: a fragment exists
     /// once it has this row, written last.
     CreatedAt,
-    /// The identity that created it.
+    /// Who owns it, by name (`fragment_core::ledger::org::Payer`): the identity
+    /// of the person who made it, or `org:<id>` (decisions 66 to 71).
     Owner,
     /// The fragment's own key.
     Npub,
@@ -629,6 +631,17 @@ impl Facts {
     }
 }
 
+/// Names the org a create is for: set by the router alone
+/// (`create_org_fragment`), which never passes a caller's own headers.
+pub(crate) const ORG_HEADER: &str = "x-fragment-org";
+
+/// Why an org's fragment is no `what`, at its create and at each install
+/// (plane.rs): an org owns apps and brains; a person's agents, chats,
+/// skills and session archive stay theirs.
+pub(crate) fn persons_own(what: &str) -> String {
+    format!("an org owns apps and brains; a {what} stays a person's own")
+}
+
 pub(crate) fn missing(key: MetaKey) -> CellError {
     CellError::host(format!("a created fragment has no {}", key.key()))
 }
@@ -837,9 +850,31 @@ impl FragmentCell {
         })
     }
 
+    /// Who owns it (decisions 66 to 71): its `owner` meta row, the one
+    /// record of it, a person's identity or `org:<id>` (`Payer::name`),
+    /// which names its payer's ledger and its owner's list. Never created
+    /// (or deleted): 404, as `name` answers, so a request's standing read
+    /// first never makes it a 500.
+    pub(crate) fn owner(&self) -> CellResult<Payer> {
+        let [created, owner] = self.metas([MetaKey::CreatedAt, MetaKey::Owner])?;
+        match (created, owner) {
+            (None, _) => Err(not_created()),
+            (Some(_), None) => Err(missing(MetaKey::Owner)),
+            (Some(_), Some(name)) => Payer::parse(&name).ok_or_else(|| CellError::host(format!("its owner row names {name:?}"))),
+        }
+    }
+
     pub(crate) fn visibility(&self) -> CellResult<Visibility> {
         let v = self.must(MetaKey::Visibility)?;
         Visibility::parse(&v).ok_or_else(|| CellError::host(format!("stored visibility {v:?}")))
+    }
+
+    /// The signer's own membership, as it counts now (`fence`): an org's
+    /// fragment's only while they are in its org, and only from then.
+    pub(crate) fn fenced_role(&self, signed: &Signed) -> CellResult<Option<Role>> {
+        let fence = self.fence(Some(signed))?;
+        let rows = self.rows(&format!("SELECT role FROM members WHERE principal = ? AND {fence}"), vec![signed.id.as_str().into()])?;
+        Ok(rows.first().and_then(|r| r["role"].as_str()).and_then(Role::parse))
     }
 
     pub(crate) fn member_role(&self, principal: &str) -> CellResult<Option<Role>> {
@@ -864,8 +899,9 @@ impl FragmentCell {
             role: Option<String>,
             agent: i64,
         }
+        let fence = self.fence(caller.signed.as_ref())?;
         let rows: Vec<Row> = self.typed(
-            "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent",
+            &format!("SELECT (SELECT role FROM members WHERE principal = ? AND {fence}) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ? AND {fence}) AS agent"),
             vec![principal.into(), principal.into()],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
@@ -894,6 +930,13 @@ impl FragmentCell {
     fn standing_for(&self, agent: &Signed, link: bool) -> CellResult<Standing> {
         let asker = agent.acting_for.as_deref().expect("standing_for is for an agent acting for someone");
         let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent acting for someone has no owner"))?;
+        let fence = self.fence(Some(agent))?;
+        // in an org's fragment an agent acts for its own person alone: no
+        // one else's place there is known to this request
+        if self.owner()?.org().is_some() && asker != owner {
+            let cap = access::Cap { agent: None, owner: None };
+            return Ok(Standing { member: None, owns_member_agent: false, link, signed: true, cap: Some(cap), held: agent.held });
+        }
         #[derive(serde::Deserialize)]
         struct Row {
             role: Option<String>,
@@ -901,9 +944,12 @@ impl FragmentCell {
             agent_role: Option<String>,
             owner_role: Option<String>,
         }
+        // an org's: each row at the person's place now (the agent's is its person's)
         let rows: Vec<Row> = self.typed(
-            "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent, \
-             (SELECT role FROM members WHERE principal = ?) AS agent_role, (SELECT role FROM members WHERE principal = ?) AS owner_role",
+            &format!(
+                "SELECT (SELECT role FROM members WHERE principal = ? AND {fence}) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ? AND {fence}) AS agent, \
+                 (SELECT role FROM members WHERE principal = ? AND {fence}) AS agent_role, (SELECT role FROM members WHERE principal = ? AND {fence}) AS owner_role"
+            ),
             vec![asker.into(), asker.into(), agent.id.as_str().into(), owner.into()],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
@@ -911,6 +957,21 @@ impl FragmentCell {
         let member = role(row.role);
         let cap = access::Cap { agent: role(row.agent_role), owner: role(row.owner_role) };
         Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: Some(cap), held: agent.held })
+    }
+
+    /// What a member row must hold to count for `signed` (decisions 69 to
+    /// 71), as a SQL condition on `members`. A person's fragment counts
+    /// every row (`1`); an org's, a row only while the signer is in its org
+    /// (an agent: its person) and only one added since they came in
+    /// (`fragment_core::governance::counts`), the registry's answer at this
+    /// request: an offboarded person's rows open nothing from the moment
+    /// they are (`0` with no place), and a rehire's from before never do.
+    /// Never a cached answer. A number, never a caller's text.
+    pub(crate) fn fence(&self, signed: Option<&Signed>) -> CellResult<String> {
+        Ok(match self.owner()? {
+            Payer::Person(_) => "1".to_string(),
+            Payer::Org(org) => signed.and_then(|s| s.org_place(&org)).map_or_else(|| "0".to_string(), |p| format!("added_at >= {}", p.since)),
+        })
     }
 
     /// Whether the caller sees the fragment as themselves (a member, or an
@@ -967,6 +1028,17 @@ impl FragmentCell {
     /// What a value this fragment seals names (keys.rs): it opens only here.
     pub(crate) fn scope(&self) -> String {
         crate::keys::scope("Fragment", &self.state)
+    }
+
+    /// One of `org`'s content admins now, acting as themselves (never an
+    /// agent, never `for` anyone): who they are, or 403. Their place is the
+    /// registry's answer at this request (`Identity::orgs`).
+    pub(crate) fn content_admin<'a>(&self, caller: &'a Caller, org: &str) -> CellResult<&'a str> {
+        let signed = caller.signed.as_ref().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))?;
+        match signed.administers(org) {
+            true => Ok(&signed.id),
+            false => Err(CellError::new(ErrorCode::Forbidden, "only its org's content admins do this, each as themselves")),
+        }
     }
 
     /// The signer's identity.
@@ -1039,6 +1111,7 @@ impl FragmentCell {
                 })
             }
             Report::PATH => reply::<Report>(self.delivery_report(&decode(body)?)),
+            calls::Authorize::PATH => reply::<calls::Authorize>(self.delivery_authorize(&decode(body)?).await),
             calls::Acked::PATH => reply::<calls::Acked>(self.meter_acked(&decode(body)?).await),
             Whose::PATH => reply::<Whose>(self.whose(&decode::<Whose>(body)?.principal)),
             Routine::PATH => reply::<Routine>(self.move_routine(decode(body)?).await),
@@ -1130,11 +1203,13 @@ impl FragmentCell {
         let segs: Vec<&str> = segments.iter().map(String::as_str).collect();
         match (req.method(), segs.as_slice()) {
             (Method::Post, ["create"]) => {
+                // an org's, the router's alone to name (`create_org_fragment`)
+                let org = req.headers().get(ORG_HEADER)?;
                 let body: CreateFragment = body_json(&mut req).await?;
                 if body.name != routed_name {
                     return Err(CellError::host("the router addressed a different fragment than the body names"));
                 }
-                self.create(&caller, body).await
+                self.create(&caller, body, org).await
             }
             (Method::Delete, ["delete"]) => self.delete(&caller).await,
             // a question the platform embedded once, for many fragments:
@@ -1325,8 +1400,20 @@ impl FragmentCell {
         }
     }
 
-    async fn create(&self, caller: &Caller, body: CreateFragment) -> CellResult<Response> {
-        let owner = self.caller_id(caller)?.to_string();
+    async fn create(&self, caller: &Caller, body: CreateFragment, org: Option<String>) -> CellResult<Response> {
+        let maker = self.caller_id(caller)?.to_string();
+        // an org's maker is one of its content admins, as themselves, who
+        // comes in as its editor (decisions 69 to 71); the router checked
+        // them, and what they carry says so again here, and since when they
+        // are in, by the registry's clock (members.rs `Actor::since`)
+        let (owner, since) = match org {
+            None => (Payer::Person(maker.clone()), 0),
+            Some(org) => {
+                self.content_admin(caller, &org)?;
+                let since = caller.signed.as_ref().and_then(|s| s.org_place(&org)).map_or(0, |p| p.since);
+                (Payer::Org(org), since)
+            }
+        };
         if !valid_fragment_name(&body.name) {
             return Err(CellError::invalid("a fragment's name is <label>--<suffix> (docs/api.md, Names)"));
         }
@@ -1335,6 +1422,9 @@ impl FragmentCell {
         if let Some(t) = body.template.as_deref().filter(|t| crate::publish::template(t).is_none() && blessed::template(t).is_none()) {
             let names: Vec<&str> = fragment_templates::CATALOG.iter().map(|t| t.name).chain(blessed::BLESSED).collect();
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
+        }
+        if let (Payer::Org(_), Some(t)) = (&owner, body.template.as_deref().filter(|t| blessed::PERSONS_OWN.contains(t))) {
+            return Err(CellError::invalid(persons_own(t)));
         }
         if let Some(title) = &body.title {
             if body.template.is_none() {
@@ -1369,13 +1459,14 @@ impl FragmentCell {
         self.set_meta(MetaKey::ClaimedAt, &claim_at.to_string())?;
         // what it waited on, for its client (`Server-Timing`, after the router's)
         let mut laps = js::Laps::start();
+        let owner_name = owner.name();
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
             // its maker's own agent, if it names one: asked before anything
             // is written, so one that is not theirs makes nothing
             let agent = match &body.agent {
                 Some(who) => {
-                    let target = self.own_agent(who, &owner).await?;
+                    let target = self.own_agent(who, &maker).await?;
                     laps.lap("identity");
                     Some(target)
                 }
@@ -1384,7 +1475,7 @@ impl FragmentCell {
             // its repo, unless its template's seed makes it after the answer
             let repo = match making.repo_first() {
                 true => {
-                    let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&crate::publish::repo_name(self.cfg, &body.name, &owner)?).await?;
+                    let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&crate::publish::repo_name(self.cfg, &body.name, &owner_name)?).await?;
                     laps.lap("repo");
                     Some(repo)
                 }
@@ -1431,7 +1522,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::Repo, repo)?;
         }
         for (k, v) in [
-            (MetaKey::Owner, owner.as_str()),
+            (MetaKey::Owner, owner_name.as_str()),
             (MetaKey::Npub, fragment_npub.as_str()),
             (MetaKey::FragmentSecret, sealed.as_str()),
             (MetaKey::Visibility, visibility.as_str()),
@@ -1445,12 +1536,15 @@ impl FragmentCell {
         ] {
             self.set_meta(k, v)?;
         }
+        // its owner, a person; or an org's maker, its editor
+        let role = if owner.org().is_some() { Role::Editor } else { Role::Owner };
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, 'owner', ?, ?, ?, ?)",
+            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)",
             vec![
-                owner.as_str().into(),
-                owner.as_str().into(),
-                SqlStorageValue::Integer(now),
+                maker.as_str().into(),
+                role.as_str().into(),
+                maker.as_str().into(),
+                SqlStorageValue::Integer(now.max(since)),
                 caller.kind().map_or(SqlStorageValue::Null, |k| k.as_str().into()),
                 caller.owner().map_or(SqlStorageValue::Null, |o| o.into()),
             ],
@@ -1468,19 +1562,26 @@ impl FragmentCell {
         if let Some(face) = &face {
             self.set_meta(MetaKey::Face, face)?;
         }
-        self.index_change(&owner, Some(Role::Owner))?;
+        self.index_change(&owner_name, Some(Role::Owner))?;
+        if !owner.is(&maker) {
+            self.index_change(&maker, Some(role))?;
+        }
         // its agent, an editor in the same turn as its owner (members.rs
         // `join_own_agent`), before the install below awaits: every list
         // row of it names that agent
         if let Some(target) = &agent {
-            self.join_own_agent(target)?;
+            self.join_own_agent(target, since)?;
         }
         // its making is written: the stage its rows say is the one its
         // machine says, and what follows is that step's effects, in order
         let (made, effects) = seed::step(&claimed, &seed::Event::Made { making, agent: agent.is_some() }).map_err(crate::publish::refused)?;
         assert!(self.stage()? == made, "a making's rows say the stage it made");
         let shown = repo.as_deref().unwrap_or("made after this answer");
-        self.event("create", &format!("fragment {} created by {owner} (repo {shown})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
+        self.event(
+            "create",
+            &format!("fragment {} created by {maker} for {owner_name} (repo {shown})", body.name),
+            json!({ "repo": repo, "key": caller.key().map(npub::display), "owner": owner_name, "by": maker }),
+        );
         for effect in effects {
             match effect {
                 // a template that seeds after the answer runs from the
@@ -1537,7 +1638,7 @@ impl FragmentCell {
         let created = json_response(&Created {
             name: body.name.clone(),
             npub: fragment_npub,
-            owner: owner.clone(),
+            owner: owner.name(),
             visibility,
             view_token,
             inbox_token,
@@ -1560,7 +1661,16 @@ impl FragmentCell {
         let (name, ended) = {
             let _held = self.plane.lock().await;
             let name = self.name()?;
-            self.require(caller, false, Role::Owner)?;
+            // its owner's own act; an org's, one of its content admins' own
+            // (decision 70), never an agent's
+            match self.owner()? {
+                Payer::Person(_) => {
+                    self.require(caller, false, Role::Owner)?;
+                }
+                Payer::Org(org) => {
+                    self.content_admin(caller, &org)?;
+                }
+            }
             (name, self.end_life()?)
         };
         self.tell_ended(Some(&ended.owner)).await;
@@ -1578,13 +1688,18 @@ impl FragmentCell {
     fn status(&self, caller: &Caller) -> CellResult<Response> {
         let facts = self.facts()?;
         let role = decide(facts.visibility, self.standing(caller, false)?, Purpose::Read, Role::Viewer)?;
-        let [npub, owner, inbox_token] = self.metas([MetaKey::Npub, MetaKey::Owner, MetaKey::InboxToken])?;
+        let [npub, inbox_token] = self.metas([MetaKey::Npub, MetaKey::InboxToken])?;
+        let owner = self.owner()?;
         json_response(&FragmentStatus {
             kind: self.kind()?,
             title: self.title()?,
             agent_role: self.agent_role()?,
             npub: npub.ok_or_else(|| missing(MetaKey::Npub))?,
-            owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
+            owner: owner.person().map_or_else(|| owner.name(), npub::display),
+            owner_ref: Some(match &owner {
+                Payer::Person(id) => OwnerRef::Person { id: npub::display(id) },
+                Payer::Org(id) => OwnerRef::Org { id: id.clone() },
+            }),
             role,
             visibility: facts.visibility,
             // empty until its repo is made (publish.rs `seeds_later`)

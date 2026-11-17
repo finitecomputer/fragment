@@ -1088,14 +1088,28 @@ impl FragmentCell {
     /// (their write's check), so it waits on nothing and their record and
     /// its runs are written in one turn; a mutation's record or a job's
     /// publish may wait on the ledger here, and a crash while it does is a
-    /// failed try, which their retries finish by the record's key.
+    /// failed try, which their retries finish by the record's key. So may
+    /// an org's post that a trigger naming `from` would run for: whether
+    /// its poster's row counts now is the registry's (`stale_members`).
     pub(crate) async fn fire_channel(&self, record: &ChannelRecord, depth: u32) -> CellResult<Vec<i64>> {
-        if self.channel_triggers(record)?.is_empty() {
+        if self.channel_triggers(record, true)?.is_empty() {
             return Ok(vec![]);
         }
         let read_only = self.read_only().await?;
-        // read after the wait, so the runs start from the code installed now
-        let ops = self.channel_triggers(record)?;
+        // a poster whose row counts no more is no member of the kind a
+        // trigger's `from` names: asked only when one would run for them
+        // (a person's fragment asks no one); as sets, their order aside
+        let runs = |counts| self.channel_triggers(record, counts).map(|r| r.into_iter().collect::<std::collections::BTreeSet<_>>());
+        let counts = runs(true)? == runs(false)? || {
+            let poster: Vec<String> = self
+                .rows("SELECT principal FROM records WHERE channel = ? AND seq = ?", vec![record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)])?
+                .iter()
+                .filter_map(|r| r["principal"].as_str().map(str::to_string))
+                .collect();
+            self.stale_members(&poster).await?.is_empty()
+        };
+        // read after the waits, so the runs start from the code installed now
+        let ops = self.channel_triggers(record, counts)?;
         let own = self.own_key()?;
         let input = json!({ "channel": record.channel, "record": record });
         let mut started = vec![];

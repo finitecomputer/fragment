@@ -485,7 +485,8 @@ out. `GET /api/f/<name>/status` (viewer and up).
 | `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, and its title, as its live `fragment.json` last said (an app with no title until it has). |
 | `name` | `string` | required |  |
 | `npub` | `string` | required |  |
-| `owner` | `string` | required |  |
+| `owner` | `string` | required | Its owner as a name: a person's npub, or `org:<id>` (`owner_ref` says which; nothing parses this one for who may act or pay). |
+| `ownerRef` | [`OwnerRef`](#ownerref) or `null` | optional | Who owns it, typed: a person (`id`, their npub) or an org (`id`). |
 | `page` | [`PageReport`](#pagereport) or `null` | optional | What the page reported as its last preview card's shot loaded it (docs/api.md, Cards); absent before the first. |
 | `pins` | [`Pins`](#pins) | required |  |
 | `reach` | `boolean` | optional | It holds a secret or a door, so it has no share link and is not public, and the people its owner adds can use its keys (FIN-352, `Sharing::reach`): the share sheet says so. Add-only: left out when false. |
@@ -890,6 +891,22 @@ out. An operation as `fragment.json` declares it.
 out. 
 
 Values: `query`, `mutation`, `job`.
+
+### `OwnerRef`
+
+out. Who owns a fragment (decisions 66 to 71): a person or an org.
+
+`kind: "person"`. 
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `id` | `string` | required |  |
+
+`kind: "org"`. 
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `id` | `string` | required |  |
 
 ### `PageError`
 

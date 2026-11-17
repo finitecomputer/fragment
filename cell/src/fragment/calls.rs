@@ -217,6 +217,21 @@ impl Call for Report {
     type Answer = ();
 }
 
+/// What the delivery consumer asks a fragment before it sends one of its
+/// fenced deliveries, a retry too (deliveries.rs `delivery_authorize`):
+/// whether it may.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Authorize {
+    pub incarnation: String,
+    pub kind: DeliveryKind,
+    pub sub: Option<i64>,
+}
+
+impl Call for Authorize {
+    const PATH: &'static str = "/call/delivery/authorize";
+    type Answer = bool;
+}
+
 /// What the meter's consumer tells the fragment its batch `seq` came to
 /// (meter.rs `meter_acked`).
 #[derive(Debug, Serialize, Deserialize)]

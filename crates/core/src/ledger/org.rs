@@ -34,7 +34,9 @@ pub fn budget_invalid(c: &OrgBudget) -> Option<Refused> {
     (!(0..=BUDGET_MAX).contains(&c.micros)).then(|| invalid(Invalid::Amount))
 }
 
-/// Who pays, as their ledger is named (`name`, `parse`).
+/// Who pays, as their ledger is named (`name`, `parse`); a fragment's
+/// owner too, as its `owner` meta row names it (decisions 66 to 71), whose
+/// list its owner's row goes to. An org is never a signing identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Payer {
     /// A person, by their identity (an npub).
@@ -58,6 +60,25 @@ impl Payer {
             Some(id) => crate::org::valid_org_id(id).then(|| Payer::Org(id.to_string())),
             None => crate::npub::is_identity(name).then(|| Payer::Person(name.to_string())),
         }
+    }
+
+    pub fn person(&self) -> Option<&str> {
+        match self {
+            Payer::Person(id) => Some(id),
+            Payer::Org(_) => None,
+        }
+    }
+
+    pub fn org(&self) -> Option<&str> {
+        match self {
+            Payer::Org(id) => Some(id),
+            Payer::Person(_) => None,
+        }
+    }
+
+    /// Whether `principal` is this person: an org is never a principal.
+    pub fn is(&self, principal: &str) -> bool {
+        self.person() == Some(principal)
     }
 }
 
@@ -119,10 +140,12 @@ pub(super) fn gate(money: &Money, spend: Spend) -> Result<(), Refused> {
     }
 }
 
-/// Whether a meter row is one an org pays: a fragment's, with no agent,
-/// no computer and no awake time.
+/// Whether a meter row is one an org pays: a fragment's, never a
+/// computer's time. A row may name the agent that started its fragment's
+/// own AI step (an app's step is its fragment's, whoever starts it); an
+/// agent's own turns bill its person and are never sent here.
 pub(super) fn orgs_row(row: &MeterRow) -> bool {
-    row.fragment.is_some() && row.agent.is_none() && row.computer.is_none() && !matches!(row.usage, Usage::Awake { .. })
+    row.fragment.is_some() && row.computer.is_none() && !matches!(row.usage, Usage::Awake { .. })
 }
 
 /// An org's money: a guest's plan that never changes, no seat order, no
@@ -270,6 +293,7 @@ mod tests {
         assert_eq!(Payer::parse(&person), Some(Payer::Person(person.clone())));
         assert_eq!(Payer::parse(&format!("org:{ORG}")), Some(Payer::Org(ORG.into())));
         assert_eq!(Payer::Org(ORG.into()).name(), format!("org:{ORG}"));
+        assert!(Payer::Person(person.clone()).is(&person) && !Payer::Org(ORG.into()).is(ORG), "an org is never a principal");
         for bad in ["org:", "org:org-xyz", "org:npub1", ORG, "", "someone"] {
             assert_eq!(Payer::parse(bad), None, "{bad:?} names no ledger");
         }
@@ -309,12 +333,16 @@ mod tests {
         assert_eq!((&l, &s), (&before.0, &before.1), "a refusal changes nothing");
         let book = PriceBook::defaults();
         let rows = vec![
-            MeterRow { agent: Some("npub1agent".into()), ..step_row("aig:1", APP, T0) },
             MeterRow { computer: Some("cmp-1".into()), usage: Usage::Awake { instance: "standard-1".into(), ms: 60_000 }, fragment: None, ..step_row("awake:1", APP, T0) },
-            MeterRow { fragment: None, ..step_row("step:x", APP, T0) },
+            MeterRow { computer: Some("cmp-1".into()), ..step_row("key:1", APP, T0) },
+            MeterRow { fragment: None, ..step_row("aig:1", APP, T0) },
         ];
         let answer = l.meter(&mut s, &Meter { batch: "frag:1".into(), rows }, T0, &book).unwrap();
         assert_eq!((answer.charged, answer.refused.iter().map(|r| r.why).collect::<Vec<_>>()), (0, vec![Refused::PersonsOnly; 3]));
+        // an app's own AI step an agent started is the app's: the org pays it
+        let started = MeterRow { agent: Some("npub1agent".into()), ..step_row("step:by-agent", APP, T0) };
+        let answer = l.meter(&mut s, &Meter { batch: "frag:2".into(), rows: vec![started] }, T0, &book).unwrap();
+        assert!(answer.charged > 0 && answer.refused.is_empty(), "{answer:?}");
         let (mut person, mut ps) = (Ledger::new(T0), Memory::default());
         assert_eq!(person.set_budget(&mut ps, &budget("b", USD), T0), Err(Refused::OrgsOnly));
         assert_eq!(l.set_budget(&mut s, &budget("too-much", BUDGET_MAX + 1), T0), Err(Refused::Invalid { what: Invalid::Amount }));

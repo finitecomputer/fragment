@@ -43,6 +43,9 @@ struct State {
     subs: HashMap<String, Sub>,
     notified: Vec<Value>,
     refused: Vec<String>,
+    /// A named receiver's (`/notify/<id>`): the 503s it answers first, and
+    /// the records it took.
+    hooks: HashMap<String, (u32, Vec<Value>)>,
 }
 
 pub struct PushService {
@@ -141,6 +144,15 @@ impl PushService {
                 s.notified.push(serde_json::from_slice(&req.body).unwrap_or(Value::Null));
                 return Response::json(200, &serde_json::json!({ "ok": true }));
             }
+            if let Some(id) = req.path.strip_prefix("/notify/") {
+                let hook = s.hooks.entry(id.to_string()).or_default();
+                if hook.0 > 0 {
+                    hook.0 -= 1;
+                    return Response::json(503, &serde_json::json!({}));
+                }
+                hook.1.push(serde_json::from_slice(&req.body).unwrap_or(Value::Null));
+                return Response::json(200, &serde_json::json!({ "ok": true }));
+            }
             let Some(id) = req.path.strip_prefix("/push/") else { return Response::json(404, &serde_json::json!({})) };
             let origin = origin_in.lock().expect("origin").clone();
             if let Err(why) = vapid_ok(req.header("authorization").unwrap_or(""), &origin) {
@@ -218,6 +230,17 @@ impl PushService {
 
     pub fn notified(&self) -> Vec<Value> {
         self.state.lock().expect("push state").notified.clone()
+    }
+
+    /// A named webhook receiver, `{url}/notify/<id>`, answers 503 this many
+    /// times first (a record held on the queue for its retry).
+    pub fn fail_hook(&self, id: &str, times: u32) {
+        self.state.lock().expect("push state").hooks.entry(id.to_string()).or_default().0 = times;
+    }
+
+    /// The records a named webhook receiver took, in order.
+    pub fn hooked(&self, id: &str) -> Vec<Value> {
+        self.state.lock().expect("push state").hooks.get(id).map(|h| h.1.clone()).unwrap_or_default()
     }
 
     /// Pushes refused, and why (a bad token, a bad record).

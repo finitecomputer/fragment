@@ -608,7 +608,10 @@ impl FragmentCell {
         struct Row {
             kind: Option<String>,
         }
-        let rows: Vec<Row> = self.typed("SELECT kind FROM members WHERE principal = ?", vec![signed.id.as_str().into()])?;
+        // an org's: a row that counts at their place now (`fence`); an
+        // offboarded agent's from before is no member's
+        let fence = self.fence(Some(signed))?;
+        let rows: Vec<Row> = self.typed(&format!("SELECT kind FROM members WHERE principal = ? AND {fence}"), vec![signed.id.as_str().into()])?;
         // no member row: the caller reads by the share link, the
         // visibility, or an agent of theirs that is a member, none of
         // which makes them this fragment's member of any kind

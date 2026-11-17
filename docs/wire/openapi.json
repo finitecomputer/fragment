@@ -555,7 +555,20 @@
             "type": "string"
           },
           "owner": {
+            "description": "Its owner as a name: a person's npub, or `org:<id>` (`owner_ref`\nsays which; nothing parses this one for who may act or pay).",
             "type": "string"
+          },
+          "ownerRef": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Who owns it, typed: a person (`id`, their npub) or an org (`id`)."
           },
           "page": {
             "anyOf": [
@@ -2143,6 +2156,44 @@
             "const": "job",
             "description": "Runs as a Workflow, one durable step at a time.",
             "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out"
+      },
+      "OwnerRef": {
+        "description": "Who owns a fragment (decisions 66 to 71): a person or an org.",
+        "oneOf": [
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "person",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "org",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "type": "object"
           }
         ],
         "x-fragment-direction": "out"

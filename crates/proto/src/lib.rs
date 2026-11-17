@@ -970,6 +970,12 @@ impl FragmentKind {
         }
     }
 
+    /// A person's own, never an org's (decisions 66 to 71): an agent, a
+    /// chat, skills or a session archive.
+    pub fn persons_own(self) -> bool {
+        matches!(self, FragmentKind::Agent | FragmentKind::Chat | FragmentKind::Skills | FragmentKind::Sessions)
+    }
+
     /// A kind this build knows, as a `fragment.json` names it; never
     /// `Other`, which no manifest may name.
     pub fn parse(s: &str) -> Option<FragmentKind> {
@@ -1152,7 +1158,13 @@ pub struct FragmentStatus {
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub agent_role: Option<String>,
     pub npub: String,
+    /// Its owner as a name: a person's npub, or `org:<id>` (`owner_ref`
+    /// says which; nothing parses this one for who may act or pay).
     pub owner: String,
+    /// Who owns it, typed: a person (`id`, their npub) or an org (`id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub owner_ref: Option<OwnerRef>,
     /// The caller's role.
     pub role: Role,
     pub visibility: Visibility,
@@ -1675,6 +1687,48 @@ pub struct Identity {
     /// anywhere. `None`: as its owner would.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<Role>,
+    /// The orgs whose content a person is in now (an agent: its owner's),
+    /// each since when (decisions 69 to 71), as the registry answers at
+    /// each request: an org's fragment counts their membership only while
+    /// they are in, and only from then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orgs: Vec<OrgPlace>,
+}
+
+impl Identity {
+    /// Their place in `org`'s content now, if they are in it.
+    pub fn org_place(&self, org: &str) -> Option<&OrgPlace> {
+        self.orgs.iter().find(|p| p.org == org)
+    }
+
+    /// Whether they are one of `org`'s content admins now, acting as
+    /// themselves: a person (an agent's place is never an admin's, and only
+    /// an agent acts `for` anyone).
+    pub fn administers(&self, org: &str) -> bool {
+        self.kind == IdentityKind::Person && self.org_place(org).is_some_and(|p| p.admin)
+    }
+}
+
+/// A person's place in an org's content, as a request carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgPlace {
+    pub org: String,
+    /// Since when they are in it (ms): an org's fragment counts a member
+    /// row only from then (`fragment_core::governance::counts`).
+    pub since: i64,
+    /// One of its content admins (an agent's carries none).
+    #[serde(default)]
+    pub admin: bool,
+}
+
+/// Who owns a fragment (decisions 66 to 71): a person or an org.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OwnerRef {
+    Person { id: String },
+    Org { id: String },
 }
 
 /// One of a person's sign-ins, as their identity shows it: the email is an

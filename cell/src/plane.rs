@@ -558,6 +558,9 @@ impl FragmentCell {
                 Err(why) => return self.code_refused(sha, &format!("fragment.json: {why}")),
             },
         };
+        if manifest.kind().persons_own() && self.owner()?.org().is_some() {
+            return self.code_refused(sha, &crate::fragment::persons_own(manifest.kind().as_str()));
+        }
         // and the release's code, never its own (forking makes code its own)
         let code = match &blessed {
             Some(t) => {
@@ -984,6 +987,12 @@ impl FragmentCell {
         // 403); a share link counts for nothing here, and a public
         // fragment's floor is below a viewer's
         self.require(caller, false, needs)?;
+        // a token reads (or writes) the repo for its 15 minutes whatever
+        // happens to its holder: an org's fragment, whose people an
+        // offboarding removes at once, hands out none, to read or to write
+        if self.owner()?.org().is_some() {
+            return Err(CellError::new(ErrorCode::Forbidden, "an org's fragment hands out no storage token: an offboarding could not take one back"));
+        }
         // the rest read as a viewer through an agent of theirs that is a member
         if !fragment_core::access::repo_role(self.standing(caller, false)?).is_some_and(|r| r >= needs) {
             return Err(CellError::new(ErrorCode::Forbidden, "a storage token reads the repo's whole history, so it is its members' alone: reading it through your agent's membership lends none"));
@@ -1216,7 +1225,10 @@ impl FragmentCell {
     /// once (two triggers that run one operation start it once), in their
     /// first trigger's order. A trigger that names its posters' kind
     /// (`from`) starts one only for a member of that kind: one statement.
-    pub(crate) fn channel_triggers(&self, record: &ChannelRecord) -> CellResult<Vec<String>> {
+    /// `counts`: whether the poster's row counts now (an org's fragment's
+    /// row of someone offboarded since, or a rehire's from before, is no
+    /// member's of any kind: jobs.rs `fire_channel`).
+    pub(crate) fn channel_triggers(&self, record: &ChannelRecord, counts: bool) -> CellResult<Vec<String>> {
         #[derive(Deserialize)]
         struct Run {
             run: String,
@@ -1226,9 +1238,9 @@ impl FragmentCell {
         // its poster as stored (subscriptions.rs `outbox_record` says why)
         let rows: Vec<Run> = self.typed(
             "SELECT run FROM code_triggers WHERE kind = ? AND target = ?
-               AND (from_kind IS NULL OR from_kind = (SELECT kind FROM members WHERE principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?)))
+               AND (from_kind IS NULL OR (? AND from_kind = (SELECT kind FROM members WHERE principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?))))
              GROUP BY run ORDER BY MIN(idx)",
-            vec![kind.into(), target.into(), record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)],
+            vec![kind.into(), target.into(), SqlStorageValue::Integer(i64::from(counts)), record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)],
         )?;
         Ok(rows.into_iter().map(|r| r.run).collect())
     }
