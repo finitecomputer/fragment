@@ -310,9 +310,12 @@ fn a_sleep_failed_late_meters_none_of_its_try() {
 
 /// Goal (#1302's review, round 2): a sleep's try heard late that then
 /// saves is billed what it was shown running for, its sleep to its save's
-/// start, beside its stop's seconds, and none of the silence: whether the
-/// save's report itself comes days on, or a late wake comes first. Method:
-/// the review's trace, saved late.
+/// start, beside its stop's seconds, and none of the silence, when the
+/// save's report itself comes days on. A late wake first (a late event not
+/// its outcome) passes over the silence from there, and its hold, shown
+/// before it, goes unbilled: never a silence billed, at the cost of that
+/// second (#1302's review, at 5e5ceb0cf). Method: the review's trace,
+/// saved late.
 #[test]
 fn a_sleep_saved_late_is_billed_its_try() {
     let late = T + DAYS;
@@ -324,7 +327,29 @@ fn a_sleep_saved_late_is_billed_its_try() {
     let mut m = meters(&l.apply(Event::Wake { why: Wake::Record }, late));
     m.extend(meters(&l.apply(Event::Saved { generation: g, seq }, late + 1_000)));
     m.extend(meters(&l.apply(Event::Asleep { generation: g }, late + 2_000)));
-    assert_eq!(m, vec![(T + 3_000, T + 10_000), (T + 10_000, T + 11_000), (late, late + 2_000)], "a late wake, then its report");
+    assert_eq!(m, vec![(T + 3_000, T + 10_000), (late, late + 2_000)], "a late wake, then its report: its hold unbilled, none of the silence");
+}
+
+/// Goal (#1302's review, Alex's, at 5e5ceb0cf): a try whose hold was
+/// asked again after a silence its meter passed over, then saved late, is
+/// billed none of that silence: only what was shown before it (its awake
+/// time to its sleep), the hold asked again to its answer, and its stop.
+/// Method: the review's sequence, exactly: `Ready` at T + 3 s, its owner's
+/// sleep at T + 60 s, its next alarm at T + 1800 s (the hold asked again),
+/// `Held` at T + 1801 s, `Saved` at T + 3600 s, `Asleep` at T + 3602 s.
+#[test]
+fn a_late_save_after_a_retried_hold_bills_none_of_the_silence() {
+    let mut l = Lifecycle::new();
+    let g = started(&mut l, T);
+    let mut m = meters(&l.apply(Event::Sleep, T + 60_000));
+    let s = l.apply(Event::Alarm, T + 1_800_000);
+    assert!(s.actions.contains(&Action::Sleep { generation: g }), "its hold asked again: {s:?}");
+    m.extend(meters(&s));
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 1_801_000));
+    m.extend(meters(&l.apply(Event::Saved { generation: g, seq }, T + 3_600_000)));
+    m.extend(meters(&l.apply(Event::Asleep { generation: g }, T + 3_602_000)));
+    assert!(m.iter().all(|(from, to)| *to <= T + 60_000 || *from >= T + 1_800_000), "nothing in the silence [T + 60 s, T + 1800 s): {m:?}");
+    assert_eq!(m, vec![(T + 3_000, T + 60_000), (T + 1_800_000, T + 1_801_000), (T + 3_600_000, T + 3_602_000)]);
 }
 
 /// Goal (#1302's review, Alex's): a sleep's try stays free across a late

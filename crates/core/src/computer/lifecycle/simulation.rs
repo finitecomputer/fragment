@@ -32,7 +32,7 @@ fn simulated_interleavings_keep_the_invariants() {
     }
     // the sim's bound is shorter than the default, so it is reached
     let rules = Rules { unsaved_max_ms: 10 * 60_000 };
-    let mut reached = [0u32; 13];
+    let mut reached = [0u32; 14];
     // the images deploys pin, one after another and back
     let deployed = [IMAGE, "registry/stub@sha256:2", "registry/stub@sha256:3"];
     for seed0 in 1..=8u64 {
@@ -46,6 +46,8 @@ fn simulated_interleavings_keep_the_invariants() {
         let mut generation = 0;
         // when each start was made: none of the time before it is metered
         let mut made_at = std::collections::BTreeMap::new();
+        // the silences a late event passed over: none of them is ever metered
+        let mut silences: Vec<(i64, i64)> = vec![];
         let mut came_up = std::collections::BTreeSet::new();
         let mut ended = std::collections::BTreeSet::new();
         // what the DO would report next, for the actions it was handed
@@ -131,6 +133,10 @@ fn simulated_interleavings_keep_the_invariants() {
             let cancels = matches!(&event, Event::Opened { socket: Socket::Keepalive }) && matches!(l.phase, Phase::Sleeping { .. }) && matches!(l.phase, Phase::Sleeping { owner: false, .. }) && matches!(l.saving, Some(Saving::Hold { .. }));
             let free_before = l.unmetered;
             let running_before = l.running();
+            if matches!(l.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) && now > l.shown_up_ms() + ALARM_LATE_MS {
+                silences.push((l.shown_up_ms(), now));
+                reached[13] += 1;
+            }
             reached[9] += u32::from(free_before.is_some());
             let s = l.apply_with(event, now, &rules);
             // stored and read again (its isolate gone): the same computer
@@ -203,6 +209,7 @@ fn simulated_interleavings_keep_the_invariants() {
                         assert!(metered.last().is_none_or(|(_, last)| from_ms >= last), "intervals never overlap");
                         let of = running_before.expect("only a running start is metered");
                         assert!(*from_ms >= made_at[&of], "metered from {from_ms}, before its start {of} was made (seed {seed0}, step {step})");
+                        assert!(silences.iter().all(|(a, b)| to_ms <= a || from_ms >= b), "metered {from_ms}..{to_ms} in a silence passed over, {silences:?} (seed {seed0}, step {step})");
                         // the time kept for failed saves is free: no interval
                         // overlaps the window open before or after this step
                         for (a, b) in [free_before, l.unmetered].into_iter().flatten() {
@@ -325,5 +332,5 @@ fn simulated_interleavings_keep_the_invariants() {
         assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
     }
     // every kind of save the lifecycle has was reached, across the seeds
-    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed: {reached:?}");
+    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over: {reached:?}");
 }

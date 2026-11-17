@@ -379,6 +379,8 @@ impl Lifecycle {
     pub fn apply_with(&mut self, event: Event, now_ms: i64, rules: &Rules) -> Step {
         assert!(rules.unsaved_max_ms >= 0, "a bound is a span of time");
         let mut step = Step::default();
+        // what was metered, or passed over as silence, as this event came
+        let metered_before = self.metered_to_ms;
         // heard late (`ALARM_LATE_MS`): metered to the last moment it was
         // shown up, and none of the time since (FIN-511); a sleep's try
         // under way, which this event may fail (its whole time free:
@@ -576,10 +578,15 @@ impl Lifecycle {
             (Phase::Sleeping { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
                 // its try heard late (its meter passed over the time since,
                 // stopping at its start) and saved: what it was shown
-                // running for, its sleep to its save's start, is its owner's
+                // running for up to its save's start is its owner's, from
+                // its sleep or what was metered or passed over before this
+                // event, whichever is later, so never a silence passed over
+                // before it (a hold asked again after one). One passed over
+                // by a late event before its outcome keeps what it showed
+                // before that silence unbilled: never charged falsely
                 if let Some(Saving::Save { since_ms, .. }) = self.saving {
                     if self.metered_to_ms > since_ms {
-                        self.meter_span(self.save_asked_ms, since_ms, &mut step);
+                        self.meter_span(self.save_asked_ms.max(metered_before), since_ms, &mut step);
                     }
                 }
                 self.saved(now_ms, &mut step);
