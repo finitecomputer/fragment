@@ -345,12 +345,14 @@ pub const ASKING: &str = "You are in a Fragment chat, and its people are not tec
 /// `ASKING` on every turn (2026-10-22: nothing told it an attachment is a
 /// file it can use). The bridge downloads originals into its media scratch
 /// and names each file, MIME and path after the message's words,
-/// independent of Hermes' cache hints and image routing. Its browser tools
-/// have no upload: a site's upload button opens the file dialog on its
-/// desktop, where `computer_use` types the path. The `fragment` skill's
-/// first page (`computer.md`, "Files your owner sends you") says the same
-/// at more length.
-pub const FILES: &str = "Chat attachments are already on your computer. The attachment note names each file, its type and its local path under /tmp/bridge-media. Use that path with your tools to copy or edit the original; copy it into your app or work to keep it across a sleep. To put it on a website, click the site's upload button with your browser tools, then type its full path into the file dialog on your desktop with computer_use and press Enter.";
+/// independent of Hermes' cache hints and image routing. browser_exec's
+/// `upload_file` sets a file on a page's file input; only a page with none
+/// needs the file dialog on its desktop, where `computer_use` types the
+/// path (2026-11-17: GLM-5.3 Flash, through the dialog, sent an empty file
+/// and said it was done). The `fragment` skill's first page
+/// (`computer.md`, "Files your owner sends you") says the same at more
+/// length.
+pub const FILES: &str = "Chat attachments are already on your computer. The attachment note names each file, its type and its local path under /tmp/bridge-media. Use that path with your tools to copy or edit the original; copy it into your app or work to keep it across a sleep. To put it on a website, use browser_exec's upload_file(selector, full path) on the page's file input, and check the page shows it. With no file input, type the path into the desktop's file dialog with computer_use.";
 
 /// What every agent is told of the files it sends in our chats, after
 /// `FILES` on every turn (Paul, 2026-10-23: asked for a PDF in the chat,
@@ -384,10 +386,17 @@ pub fn relay_hint() -> String {
     format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}")
 }
 
+/// How long Hermes' janitor leaves a browser browser_exec started and no
+/// longer uses (its `browser.inactivity_timeout`, in seconds): a day, so the
+/// desktop's own idle stop, which counts a person watching, is what closes
+/// it.
+pub const BROWSER_IDLE_S: u64 = 86_400;
+
 /// The managed overlay: how every profile streams, shows progress, asks
-/// (nothing technical; a card waits `card_timeout_s`), when its desktop is
-/// idle (`screen_idle_ms`), and what it never runs.
-pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_idle_ms: u64) -> String {
+/// (nothing technical; a card waits `card_timeout_s`), that its desktop's
+/// idle stop is the boot's, how long its browser is left
+/// (`BROWSER_IDLE_S`), and what it never runs.
+pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64) -> String {
     let mut y = String::new();
     y.push_str("# Written by hermes-boot at every boot (images/hermes): Hermes' managed overlay,\n");
     y.push_str("# merged over each profile's own config. Hand edits are lost.\n");
@@ -448,15 +457,33 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     // rewrote four caches in its home while the computer was held
     // (docs/computers.md, "What changes under the hold").
     y.push_str("model_catalog:\n  enabled: false\n");
+    // Every session is kept: an agent's chat is its history, read again in
+    // the Session Archive. Hermes keeps them by default too, but from v0.22,
+    // while nothing says so, a gateway posts a question about pruning them
+    // into a profile's home chat once the disk runs low
+    // (`hermes_cli/prune_advisor.py`); a managed value is its answer.
+    y.push_str("sessions:\n  auto_prune: false\n");
     // Each agent's desktop starts for its screen's first viewer (the
     // bridge's `screen-start`), or at the agent's first computer_use or
     // browser call, never at boot (measured: about 300 MiB more once it
     // runs). Its browser, on that desktop, is each profile's own config's
-    // (`profile_config`). Its idle stop is the boot's (desktop.rs: Hermes
-    // stops an idle desktop only from its TUI's gateway), said here too so
-    // Hermes' own watcher, were it to run, would agree.
-    let minutes = screen_idle_ms as f64 / 60_000.0;
-    y.push_str(&format!("bot_desktop:\n  auto_start: true\n  idle_stop_minutes: {minutes}\n"));
+    // (`profile_config`). Its idle stop is the boot's alone (desktop.rs),
+    // which closes its browser first, its cookies written: Hermes' own
+    // watchers (its gateway's, and since v0.23 its desktop launcher's
+    // `idle_watch`) stop it with no such close, so they are off (0, Hermes'
+    // "never"). A person's Take over ends with their socket, and no lease
+    // outlives the bridge (images/bridge/src/screen.rs), so none is left
+    // for Hermes' abandoned-lease rule to stop.
+    y.push_str("bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 0\n");
+    // The browser browser_exec starts on that desktop stays up as long as
+    // the desktop does, as the screen shows it: its idle stop, which counts
+    // a person watching, closes it first (desktop.rs, `close_browser`).
+    // Hermes' own janitor stops a browser its tool started once that tool
+    // goes unused `BROWSER_IDLE_S`, counting a Take over but never a viewer
+    // (its default, two minutes, closed the agent's browser under a person
+    // who watched it). Hermes reads this once, process-wide, so the overlay
+    // carries it.
+    y.push_str(&format!("browser:\n  inactivity_timeout: {BROWSER_IDLE_S}\n"));
     // Lazy installs are off (upstream's image turns them on): they fetch
     // Hermes' own optional backends (providers, platforms, speech) into its
     // home, which a computer configures none of (its model is the platform's
@@ -694,7 +721,12 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
     // subagent_stop, which takes it from its chat's set) and reports as it
     // finishes, not when the last of its batch does (Paul, 2026-11-07);
     // a `group` of tasks the model asks for ends and reports as one.
-    y.push_str("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n");
+    // gateway_mode background: a child runs after its parent's turn, as
+    // on v0.21, and its result comes back as a turn of its own. Hermes'
+    // `auto` (v0.23) would join it inside the parent's turn on a chat with
+    // interim messages off, ours: the turn, its keepalive and its card
+    // would wait out the whole child.
+    y.push_str("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n  gateway_mode: \"background\"\n");
     if let MainModel::Tier(tier) = main {
         if let Some(deep) = route.settings(*tier).and_then(|r| r.deep.as_ref()) {
             y.push_str(&format!("  model: {}\n  reasoning_effort: {}\n  request_overrides:\n    max_tokens: {DEEP_MAX_TOKENS}\n", q(&deep.id), q(deep.reasoning.unwrap_or(Reasoning::Max).name())));
@@ -730,18 +762,18 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
         y.push_str("tts:\n  provider: \"elevenlabs\"\n");
     }
     // XAI_API_KEY enables Hermes' separate x_search, not a web backend.
-    // Its browser: Hermes' built-in browser tools (browser_navigate, …),
-    // driving the image's own Chromium, headed, on the agent's desktop, so
-    // the screen shows it, through agent-browser (in the image: its
-    // Dockerfile). Left unset, Hermes picks Browser Use mode (one
-    // browser_exec tool, its harness a core dependency of Hermes). Hermes
-    // reads `browser` from the profile's own config file alone, never from
-    // the managed overlay.
-    y.push_str("browser:\n  headed: true\n  backend: \"off\"\n");
+    // Its browser: Hermes' browser_exec (v0.23: its built-in browser_*
+    // tools are gone, FIN-305), headed, on the agent's desktop, so the
+    // screen shows it, running the image's own Chromium (`CHROMIUM`). The
+    // desktop's Browser icon runs the same executable on the same profile
+    // (Hermes' `bot_desktop.browser`), and whichever starts first, the
+    // other attaches to it: one browser, one profile, one Chromium release,
+    // never Hermes' Chrome for Testing.
+    y.push_str(&format!("browser:\n  headed: true\n  executable_path: {}\n", q(CHROMIUM)));
     if offered("BROWSER_USE_API_KEY") {
         // Without this Hermes auto-detects the offered key and sends the
-        // built-in browser tools to the cloud. Cloud browsing is opt-in
-        // through BU_NAME=remote browser-harness; the desktop stays local.
+        // agent's browser to the cloud. Cloud browsing is opt-in through
+        // BU_NAME=remote browser-harness; the desktop stays local.
         y.push_str("  cloud_provider: \"local\"\n");
     }
     // Its terminal acts as the agent: the fragment CLI and the skills' helpers
@@ -764,9 +796,10 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
     y
 }
 
-/// Hermes v0.21.7's `_HERMES_PROVIDER_ENV_BLOCKLIST` (v0.21.6's alike), read
-/// from the pinned image's `tools/environments/local_env_policy.py`, plus its dynamic
-/// `_is_hermes_internal_secret` rule (GHSA-rhgp-j443-p4rf). The Docker lane
+/// Hermes v0.23.2's `_HERMES_PROVIDER_ENV_BLOCKLIST`, read from the pinned
+/// image's `tools/environments/local_env_policy.py`, plus its dynamic
+/// `_is_hermes_internal_secret` rule (GHSA-rhgp-j443-p4rf; its `HERMES_*`
+/// names are refused as every `HERMES_*` name is, `env_name_ok`). The Docker lane
 /// checks the snapshot against the image, so a new pin cannot silently
 /// change the policy. Only sandbox registration is filtered: native tools
 /// still read the profile's `.env` through Hermes' secret scope, and the
@@ -780,7 +813,7 @@ fn provider_env_blocked(name: &str) -> bool {
 }
 
 /// The flags Chromium needs in a container: Hermes' own
-/// (`CHROMIUM_SANDBOX_BYPASS_ARGS`, its `tools/browser_tool_session.py`),
+/// (`CHROMIUM_SANDBOX_BYPASS_ARGS`, its `tools/browser_launcher.py`),
 /// which it gives its browser and its desktop's Browser icon only as root
 /// or where it sees Docker's marker (`/.dockerenv`). Cloudflare Containers
 /// has neither that marker nor a `/dev/shm`, and Chromium without these
@@ -788,10 +821,24 @@ fn provider_env_blocked(name: &str) -> bool {
 /// memory (p5, 2026-10-05).
 pub const CHROMIUM_FLAGS: [&str; 2] = ["--no-sandbox", "--disable-dev-shm-usage"];
 
+/// What keeps a page from seeing the agent's browser as automated:
+/// `navigator.webdriver` stays false, as in a person's own browser, which
+/// Cloudflare's bot check reads (Paul's prod agent, 2026-10-28). Hermes
+/// starts the desktop's browser, from browser_exec or the Browser icon, on
+/// DevTools port 0, the one port for which Chromium writes the
+/// `DevToolsActivePort` file Hermes finds it by; and Chromium marks a
+/// browser on port 0 automated (`navigator.webdriver` true). This turns
+/// that mark, Blink's `AutomationControlled` feature, off. It comes before
+/// the caller's arguments, so a caller's own `--disable-blink-features`
+/// wins (docs/technical-debt-ledger.md, "The image's Chromium hides
+/// Hermes' automation mark").
+pub const CHROMIUM_REGULAR: &str = "--disable-blink-features=AutomationControlled";
+
 /// The image's Chromium: a script that starts regular Chromium from its pinned base
-/// with `CHROMIUM_FLAGS` whatever the runtime. Hermes is pointed at it
-/// (`AGENT_BROWSER_EXECUTABLE_PATH`), so its browser and its desktop's
-/// Browser icon (Hermes' `bot_desktop.browser.executable()`) both run it.
+/// with `CHROMIUM_FLAGS` whatever the runtime, and `CHROMIUM_REGULAR`. Each
+/// profile names it to Hermes (`browser.executable_path`, `profile_config`),
+/// so its browser and its desktop's Browser icon (Hermes'
+/// `bot_desktop.browser.executable()`) both run it, as does Playwright.
 pub const CHROMIUM: &str = "/opt/fragment/bin/chromium";
 /// Regular Chromium, already in the pinned upstream desktop base.
 pub const SYSTEM_CHROMIUM: &str = "/usr/bin/chromium";
@@ -804,7 +851,7 @@ pub fn chromium_script(full: &Path) -> String {
     let s = full.display().to_string();
     assert!(full.is_absolute() && !s.contains('\''), "a browser's path, absolute, quotable: {s}");
     let flags = CHROMIUM_FLAGS.join(" ");
-    format!("#!/bin/sh\n# Regular Chromium from the pinned desktop image, with its container flags.\n# --test-type suppresses the unsupported --no-sandbox infobar, as Hermes' dock does.\nexport TMPDIR={CHROMIUM_TMP}\n# Distro Chromium 154 puts a headless throwaway profile under XDG_CONFIG_HOME,\n# unlike the testing build's TMPDIR. Keep it out of every saved home too.\nfor arg in \"$@\"; do\n  case \"$arg\" in --headless|--headless=*) export XDG_CONFIG_HOME=\"/tmp/fragment-chromium-$(id -u)\" ;; esac\ndone\nexec '{s}' {flags} --test-type \"$@\"\n")
+    format!("#!/bin/sh\n# Regular Chromium from the pinned desktop image, with its container flags.\n# --test-type suppresses the unsupported --no-sandbox infobar, as Hermes' dock does.\nexport TMPDIR={CHROMIUM_TMP}\n# Distro Chromium 154 puts a headless throwaway profile under XDG_CONFIG_HOME,\n# unlike the testing build's TMPDIR. Keep it out of every saved home too.\nfor arg in \"$@\"; do\n  case \"$arg\" in --headless|--headless=*) export XDG_CONFIG_HOME=\"/tmp/fragment-chromium-$(id -u)\" ;; esac\ndone\nexec '{s}' {flags} --test-type {CHROMIUM_REGULAR} \"$@\"\n")
 }
 
 /// Chromium's scratch: the container's own `/tmp`, which no save keeps.
@@ -986,6 +1033,12 @@ pub fn link_into_work(profile: &Path, at: &str, to: &Path) -> std::io::Result<Wo
 /// cookies and history its tools make are its work, saved with it.
 pub const BROWSER_PROFILE: &str = "bot-desktop/browser-profile";
 
+/// An agent's browser profile in its work directory, where its profile's
+/// `BROWSER_PROFILE` links to: its cookies and history are its work.
+pub fn browser_dir(agent_fragment: &str) -> PathBuf {
+    work_dir(agent_fragment).join("browser-profile")
+}
+
 /// What a profile's terminal knows of the agent it runs (cli/GUIDE.md, "As
 /// an agent"): the agent fragment its computer signs as, and the person it
 /// acts for, its owner. Hermes passes these from the profile's `.env` to its
@@ -1082,8 +1135,8 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     // HERMES_AUTO_CONTINUE_FRESHNESS: one second, so no message after a
     // restart is wrapped in Hermes' recovery notes (the boot's clean-exit
     // receipt already discards the turns a restart cut short, which the
-    // bridge ends: docs/chat-records.md; the boot closes them in their
-    // sessions, CLOSE_CUT_TURNS, and the bridge tells the next turn what was
+    // bridge ends: docs/chat-records.md; the boot settles them in their
+    // sessions, SETTLE_CUT_TURNS, and the bridge tells the next turn what was
     // cut instead, from the journal).
     // HERMES_GATEWAY_MAX_STARTS: 0, so Hermes' respawn-storm breaker is off.
     // It counts gateway starts in the home, which a save keeps, so six wakes
@@ -1099,69 +1152,91 @@ pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
     home.join("profiles").join(wire::profile(agent_fragment))
 }
 
-/// Closes each turn a restart cut, in Hermes' own sessions, before the
+/// Settles each turn a restart cut, in Hermes' own sessions, before the
 /// gateway starts (docs/computers.md, Durability, P5), run by Hermes' Python as
 /// the hermes user with each `state.db` to look in as its arguments.
 ///
-/// Why: Hermes persists a turn's message as the turn starts and the rest as
-/// it goes, so a turn the container's end cut leaves its session's tail open
-/// (its message, or its tool calls, with no answer). v0.21.5 then joins the
-/// next message to the open request (two user messages in a row are one:
-/// `agent/agent_runtime_helpers.py`, `_merge_consecutive_users`; and
-/// `get_messages_as_conversation(repair_alternation=True)` as the gateway
-/// loads a transcript), and its model redoes the cut request (F10: seen on
-/// the real image, `[paul] do the risky thing\n\n[paul] good morning`). The
-/// bridge has already ended that turn as lost (P1), and tells the next turn
-/// what was cut, from the journal.
+/// Why: Hermes admits each relayed message durably (its session authority,
+/// v0.22: a row in `session_admissions`, `started` once its turn runs), and
+/// a turn the container's end cut is, to the next gateway, a lost turn
+/// (`unknown`) that only its sender may resolve. Until someone does, that
+/// chat's queue is paused: the next message is saved but never run, and
+/// Hermes answers it with a pause notice that asks for `/discard`, which a
+/// person's chat never sends (the bridge keeps a leading `/` from reading as
+/// a command). The bridge has already ended that turn as lost (P1) and
+/// tells the next turn what was cut, from the journal; nothing of it is
+/// ever run again. Left open, its transcript's tail would also be joined to
+/// the next message (consecutive-user repair), and the model would redo the
+/// cut request (F10).
 ///
-/// How, through Hermes' own code and nothing else: the row Hermes itself
-/// writes when a turn ends without an answer, its failed-turn boundary
-/// (`agent/turn_failure_copy.py`: an assistant row, `display_kind`
-/// `failed_turn`, its copy chosen by `failed_turn_notice` from the turn's
-/// rows: "Some actions may already have run" when a tool call is among
-/// them). Hermes writes it for a turn that fails in its process
-/// (`agent/conversation_loop.py`, `_close_durable_failed_turn`;
-/// `gateway/run_turn.py`, `_hmwa_close_failed_turn`, keyed on the durable
-/// tail); a process that was killed never does, and neither its clean-exit
-/// path (it only discards turn markers) nor its unclean one (it resumes the
-/// turn under its old message id, the auto-continue kept off above) closes
-/// it. No Relay frame does either: an inbound's fields (text, media,
-/// context, reply, prompt response) never change how the session's tail is
-/// read. So the boot writes the same row for the turns a restart cut:
-/// every gateway session of the relay platform (`SessionDB.
-/// list_gateway_sessions`, the newest session per chat) whose last message
-/// is a user row, a tool result or a tool call, appended with
-/// `SessionDB.append_message`. At boot every such tail is a cut turn: the
-/// gateway that ran it is gone, and the bridge ended it. Idempotent: a
-/// closed tail is an assistant row. Prints `{"sessions": n, "closed": n}`.
-pub const CLOSE_CUT_TURNS: &str = r#"import json, sys
+/// How, through Hermes' own code and nothing else, as its `/discard` does:
+/// a runtime epoch of the boot's own (nothing else holds the profile yet),
+/// then the gateway's own boot recovery (`recover_session_inputs`: every
+/// turn a previous owner started is `unknown`, never replayed), then each
+/// relayed lost turn resolved as its sender's `/discard` resolves it
+/// (`resolve_unknown_session_input`, terminal `interrupted`) with Hermes'
+/// failed-turn boundary written in the same transaction
+/// (`close_discarded_turn`: "Some actions may already have run"). A chat's
+/// admissions are its compression lineage's root's, as Hermes' own
+/// `logical_owner` reads them (a chat Hermes compressed lists its newest
+/// session, the lineage's tip), and the boundary lands on the lineage's
+/// tip, its transcript now. A message
+/// Hermes took and had not started is a turn the bridge ended lost too, so
+/// it is cancelled, never run (`cancel_session_input`). Turns no person
+/// sent (a background delegation's delivery) are the gateway's, which
+/// settles or runs them as it does on any restart. Then a tail left open
+/// with no admission naming it, as a release before admissions (v0.21)
+/// left a cut turn, is closed with the same boundary, so the first boot of
+/// an upgrade closes what the last of the old image cut. Idempotent: a
+/// settled turn and a closed tail are passed over. Prints `{"lost": n,
+/// "dropped": n, "closed": n}`.
+pub const SETTLE_CUT_TURNS: &str = r#"import json, sys
 from pathlib import Path
 from hermes_state import SessionDB
-from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, failed_turn_notice
-sessions = closed = 0
+from hermes_state_runtime import begin_runtime_epoch, cancel_session_input, list_session_admissions, recover_session_inputs, resolve_unknown_session_input
+from gateway.session_ingress_media import release_admission_media
+from gateway.session_results import close_discarded_turn
+from gateway.session_unattended_unknown import is_unattended
+lost = dropped = closed = 0
 for p in sys.argv[1:]:
     db = SessionDB(Path(p))
     try:
-        for s in db.list_gateway_sessions(platform="relay"):
-            sessions += 1
-            rows = [m for m in db.get_messages_as_conversation(s["id"]) if m.get("role") in ("user", "assistant", "tool")]
-            if not rows or (rows[-1]["role"] == "assistant" and not rows[-1].get("tool_calls")):
-                continue
-            asked = max((i for i, m in enumerate(rows) if m["role"] == "user"), default=0)
-            db.append_message(s["id"], "assistant", failed_turn_notice(rows[asked:]), display_kind=FAILED_TURN_DISPLAY_KIND)
-            closed += 1
+        epoch = begin_runtime_epoch(db, instance_id="fragment-boot")
+        recover_session_inputs(db, epoch=epoch)
+        roots = []
+        for s in db.list_gateway_sessions(platform="relay", active_only=False):
+            lineage = db.get_compression_lineage(s["id"])
+            root = lineage[0] if lineage else s["id"]
+            if root not in roots:
+                roots.append(root)
+        for root in roots:
+            for row in list_session_admissions(db, session_id=root):
+                if is_unattended(row):
+                    continue
+                if row["status"] == "unknown":
+                    resolve_unknown_session_input(db, epoch=epoch, admission_id=row["admission_id"], generation=row["generation"], _terminal_write=lambda conn, cut: close_discarded_turn(db, conn, cut))
+                    lost += 1
+                elif row["status"] == "queued":
+                    cancel_session_input(db, epoch=epoch, admission_id=row["admission_id"])
+                    dropped += 1
+                else:
+                    continue
+                release_admission_media(db, row["admission_id"])
+            if db._execute_write(lambda conn: close_discarded_turn(db, conn, {"target_session_id": root})):
+                closed += 1
     finally:
         db.close()
-print(json.dumps({"sessions": sessions, "closed": closed}))
+print(json.dumps({"lost": lost, "dropped": dropped, "closed": closed}))
 "#;
 
-/// What `CLOSE_CUT_TURNS` printed: the sessions it looked at and those it
-/// closed (its last line), or why that is not its answer.
-pub fn cut_turns_closed(out: &str) -> Result<(u64, u64), String> {
+/// What `SETTLE_CUT_TURNS` printed: the lost turns it settled, the
+/// messages it dropped unrun, and the tails it closed with no admission
+/// (its last line), or why that is not its answer.
+pub fn cut_turns_settled(out: &str) -> Result<(u64, u64, u64), String> {
     let line = out.lines().rev().find(|l| !l.trim().is_empty()).ok_or("it printed nothing")?;
     let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("{line:?}: {e}"))?;
-    match (v["sessions"].as_u64(), v["closed"].as_u64()) {
-        (Some(sessions), Some(closed)) if closed <= sessions => Ok((sessions, closed)),
+    match (v["lost"].as_u64(), v["dropped"].as_u64(), v["closed"].as_u64()) {
+        (Some(lost), Some(dropped), Some(closed)) => Ok((lost, dropped, closed)),
         _ => Err(format!("not its answer: {line}")),
     }
 }
@@ -1219,23 +1294,22 @@ pub fn lean_plugins(plugins_root: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// The closer's answer is its last line, and nothing else is: a line
-    /// Hermes logged before it is passed over, a missing or impossible count
-    /// is no answer. (Run against the real Hermes in the bridge's
-    /// tests/docker.rs.)
+    /// The settler's answer is its last line, and nothing else is: a line
+    /// Hermes logged before it is passed over, a missing count is no answer.
+    /// (Run against the real Hermes in the bridge's tests/docker.rs.)
     #[test]
-    fn the_closers_answer() {
-        assert_eq!(cut_turns_closed("{\"sessions\": 2, \"closed\": 1}\n"), Ok((2, 1)));
-        assert_eq!(cut_turns_closed("a warning Hermes logged\n{\"sessions\": 0, \"closed\": 0}\n\n"), Ok((0, 0)));
-        for bad in ["", "\n", "Traceback (most recent call last):", "{\"sessions\": 1}", "{\"sessions\": 1, \"closed\": 2}", "{\"sessions\": -1, \"closed\": 0}"] {
-            assert!(cut_turns_closed(bad).is_err(), "{bad:?}");
+    fn the_settlers_answer() {
+        assert_eq!(cut_turns_settled("{\"lost\": 1, \"dropped\": 0, \"closed\": 2}\n"), Ok((1, 0, 2)));
+        assert_eq!(cut_turns_settled("a warning Hermes logged\n{\"lost\": 0, \"dropped\": 0, \"closed\": 0}\n\n"), Ok((0, 0, 0)));
+        for bad in ["", "\n", "Traceback (most recent call last):", "{\"lost\": 1}", "{\"lost\": -1, \"dropped\": 0, \"closed\": 0}"] {
+            assert!(cut_turns_settled(bad).is_err(), "{bad:?}");
         }
-        // only Hermes' own session code writes: its boundary row, through its API
-        for uses in ["from hermes_state import SessionDB", "list_gateway_sessions(platform=\"relay\")", "failed_turn_notice(", "display_kind=FAILED_TURN_DISPLAY_KIND", "db.append_message("] {
-            assert!(CLOSE_CUT_TURNS.contains(uses), "{uses}");
+        // only Hermes' own runtime and session code writes, as its /discard does
+        for uses in ["from hermes_state import SessionDB", "begin_runtime_epoch(", "recover_session_inputs(", "resolve_unknown_session_input(", "close_discarded_turn(", "cancel_session_input(", "is_unattended(row)", "list_gateway_sessions(platform=\"relay\"", "get_compression_lineage(", "list_session_admissions(db, session_id=root)", "{\"target_session_id\": root}"] {
+            assert!(SETTLE_CUT_TURNS.contains(uses), "{uses}");
         }
-        for never in ["sqlite3", "execute(", "DELETE", "UPDATE", "INSERT"] {
-            assert!(!CLOSE_CUT_TURNS.contains(never), "no SQL of ours: {never}");
+        for never in ["sqlite3", "execute(", "SELECT", "DELETE", "UPDATE", "INSERT"] {
+            assert!(!SETTLE_CUT_TURNS.contains(never), "no SQL of ours: {never}");
         }
     }
 
@@ -1343,7 +1417,7 @@ mod tests {
         }
         let fresh = profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::of(None, false).into(), Reasoning::of(None), &route("http://m"), &[], creds);
         assert!(fresh.contains("\n  reasoning_effort: \"high\"\n"), "a new agent, with no agent.json, thinks hard: {fresh}");
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(!m.contains("reasoning"), "a profile's own, never the overlay's, which would win over it: {m}");
     }
 
@@ -1377,7 +1451,7 @@ mod tests {
         for (tier, deep, fallback) in [(Tier::Cheap, "deepseek-v4-1-flash", CHEAP_ID), (Tier::Medium, "deepseek/deepseek-v4.1-flash", FALLBACK_ID)] {
             let p = config(&ids, tier.into());
             let delegation = p.split("\ndelegation:\n").nth(1).unwrap().split("\nskills:").next().unwrap();
-            assert!(delegation.starts_with(&format!("  max_concurrent_children: 3\n  independent_completions: true\n  model: {}\n  reasoning_effort: \"max\"\n  request_overrides:\n    max_tokens: 32768\n", q(deep))), "{p}");
+            assert!(delegation.starts_with(&format!("  max_concurrent_children: 3\n  independent_completions: true\n  gateway_mode: \"background\"\n  model: {}\n  reasoning_effort: \"max\"\n  request_overrides:\n    max_tokens: 32768\n", q(deep))), "{p}");
             assert!(delegation.contains(&format!("      model: {}\n", q(fallback))), "{p}");
             assert!(p.contains(&format!("      {}:\n        stale_timeout_seconds: 180\n", q(deep))), "{p}");
             assert!(p.contains("  reasoning_effort: \"high\"\n"), "the old Low pick cannot lower Fast: {p}");
@@ -1388,7 +1462,7 @@ mod tests {
         }
         let own = MainModel::Own { fast: OwnRoute { provider: "openrouter".into(), base: "https://openrouter.ai/api/v1".into(), id: "someone/model".into(), placeholder: "fck_key".into() }, deep: None };
         let p = config(&ids, own);
-        assert!(p.contains("  reasoning_effort: \"low\"\n") && p.contains("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n"));
+        assert!(p.contains("  reasoning_effort: \"low\"\n") && p.contains("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n  gateway_mode: \"background\"\n"));
         assert!(p.contains("  model: \"someone/model\"\n") && p.contains("  fallback_providers: []\n"), "BYO inherits its own Fast, never the platform's Deep: {p}");
         let old = profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Cheap.into(), Reasoning::Low, &route("http://m"), &[], Path::new("/c.sh"));
         assert!(!old.contains("  request_overrides:"), "old cells retain parent inheritance: {old}");
@@ -1438,7 +1512,7 @@ mod tests {
         assert!(matches!(own_main, MainModel::Own { .. }) && p.contains("  default: \"z-ai/glm-5.3\"\n"), "{p}");
         assert!(p.contains(&format!("\nagent:\n  system_prompt: {}\n", q(&told("Juniper", None, "juniper--k3x9", Home::Chat, &[])))) && p.matches("\nagent:\n").count() == 1, "its name alone in its `agent` mapping: {p}");
         assert!(!p.contains("tool_use_enforcement") && !p.contains("execution_guidance"), "an owner's own model's guidance is Hermes' to choose: {p}");
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(!m.contains("tool_use_enforcement") && !m.contains("execution_guidance"), "a profile's own, never the overlay's: {m}");
     }
 
@@ -1480,15 +1554,19 @@ mod tests {
 
     #[test]
     fn configs_say_what_hermes_needs() {
-        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], CARD_TIMEOUT_S);
         for want in [
             "transport: \"draft\"",
             "busy_input_mode: \"queue\"",
             "group_sessions_per_user: false",
             "disabled_toolsets: [\"cronjob\"]",
             "    - \"platforms/discord\"",
-            "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 10\n",
+            // the desktop's idle stop is the boot's alone: Hermes' watchers off
+            "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 0\n",
+            // the agent's browser is the desktop's idle stop's to close
+            "\nbrowser:\n  inactivity_timeout: 86400\n",
             "\nmodel_catalog:\n  enabled: false\n",
+            "\nsessions:\n  auto_prune: false\n",
             "\nsecurity:\n  allow_lazy_installs: false\n",
             "\nstt:\n  echo_transcripts: false\n",
             // Hermes' Bot Mode protocol off for every profile: no roster, no
@@ -1510,9 +1588,10 @@ mod tests {
         assert_eq!(card_timeout_s(Some("20")), 20);
         assert_eq!(card_timeout_s(Some("1")), 10, "no shorter than the bridge's shortest prompt");
         assert_eq!(card_timeout_s(Some("not a number")), CARD_TIMEOUT_S);
-        let short = managed_config(&[], 20, crate::desktop::IDLE_STOP_MS);
+        let short = managed_config(&[], 20);
         assert!(short.contains("\napprovals:\n  mode: \"off\"\n  timeout: 20\n") && short.contains("\nagent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: 20\n"), "{short}");
-        assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
+        assert!(short.contains("\nbrowser:\n  inactivity_timeout: 86400\n"), "its browser left to the desktop's idle stop");
+        const _: () = assert!(BROWSER_IDLE_S >= 100 * crate::desktop::IDLE_STOP_MS / 1000, "Hermes' janitor never beats the desktop's idle stop");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
         let p = profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Medium.into(), DEFAULT_REASONING, &route("http://model.fragment.internal/"), &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
@@ -1565,8 +1644,9 @@ mod tests {
         assert!(!h.contains("fallback_providers") && !h.contains("stale_timeout_seconds") && !h.contains("api_max_retries"), "the high tier has none: {h}");
         assert!(!m.contains("fallback_providers") && !m.contains("stale_timeout_seconds") && !m.contains("api_max_retries"), "a profile's own, never the overlay's: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n"), "the managed skills and the platform skill's view, after its own: {p}");
-        assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
-        assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");
+        assert!(p.contains("browser:\n  headed: true\n  executable_path: \"/opt/fragment/bin/chromium\"\n"), "Hermes' browser, headed, on the image's Chromium, in the profile's own config: {p}");
+        let overlay_browser: Vec<&str> = m.lines().skip_while(|l| *l != "browser:").skip(1).take_while(|l| l.starts_with("  ")).collect();
+        assert_eq!(overlay_browser, ["  inactivity_timeout: 86400"], "the overlay's browser setting is its idle bound alone; the rest is each profile's: {m}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
         assert!(p.contains("\n  cwd: \"/data/work/juniper--k3x9\"\n"), "its terminal works in its work directory: {p}");
         assert_eq!(work_dir("juniper--k3x9"), PathBuf::from("/data/work/juniper--k3x9"));
@@ -1596,17 +1676,17 @@ mod tests {
     /// after `ASKING`, its words, and the page's section.
     #[test]
     fn every_agent_is_told_its_chat_files_are_on_its_computer() {
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}"));
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
-        for said in ["already on your computer", "each file, its type and its local path under /tmp/bridge-media", "tools to copy or edit the original", "copy it into your app or work", "across a sleep", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
+        for said in ["already on your computer", "each file, its type and its local path under /tmp/bridge-media", "tools to copy or edit the original", "copy it into your app or work", "across a sleep", "browser_exec's upload_file(selector, full path)", "check the page shows it", "With no file input", "desktop's file dialog with computer_use"] {
             assert!(FILES.contains(said), "{said}: {FILES}");
         }
         assert!(!FILES.contains(['`', '\n', '$']) && FILES.len() < 500, "one plain paragraph, nothing Hermes would expand: {FILES}");
         let page = include_str!("computer.md");
         let section = page.split("\n## ").find(|s| s.starts_with("Files your owner sends you\n")).expect("computer.md has the section");
         let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
-        for said in ["already on your computer", "original name, type and local path", "/tmp/bridge-media", "copy or edit", "app or work", "across a sleep", "upload button with your browser tools", "file dialog on your desktop", "computer_use", "press Enter"] {
+        for said in ["already on your computer", "original name, type and local path", "/tmp/bridge-media", "copy or edit", "app or work", "across a sleep", "upload_file(selector, path)", "check the page shows it", "no file input", "file dialog on your desktop", "computer_use", "press Enter"] {
             assert!(section.contains(said), "computer.md, \"Files your owner sends you\", says {said}: {section}");
         }
     }
@@ -1621,7 +1701,7 @@ mod tests {
     /// and the page's section.
     #[test]
     fn every_agent_is_told_it_attaches_files_in_its_chat() {
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(relay_hint().contains(&format!("{FILES}\n\n{SENDING}\n\n")), "after the files it is sent: {}", relay_hint());
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
         for said in ["a file (a PDF, an image", "put MEDIA: and its absolute path on a line of its own", "outside code and quotes", "MEDIA:/data/work/report.pdf", "arrives in this chat as an attachment", "rather than emailing it or naming a path"] {
@@ -1644,7 +1724,7 @@ mod tests {
     /// (the bridge's), never this line's.
     #[test]
     fn every_agent_is_told_simplex_is_the_platforms() {
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(relay_hint().contains(&format!("{SENDING}\n\n{SIMPLEX}\n\n")), "after sending: {}", relay_hint());
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
         for said in ["Fragment carries your owner's SimpleX", "never install, run or set up SimpleX"] {
@@ -1687,7 +1767,7 @@ mod tests {
     /// `nothing_technical_asks_its_owner`: each with no card.)
     #[test]
     fn nothing_technical_asks_its_owner() {
-        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&[], CARD_TIMEOUT_S);
         assert!(m.contains("\napprovals:\n  mode: \"off\"\n  timeout: 3600\n  destructive_slash_confirm: false\n"), "{m}");
         assert!(m.contains("\nsecurity:\n  allow_lazy_installs: false\n  protected_instruction_files: false\n"), "{m}");
         assert!(!m.contains("smart") && !m.contains("yolo") && !m.contains("command_allowlist"), "{m}");
@@ -1758,7 +1838,7 @@ mod tests {
             }
             String::from_utf8(c.output().unwrap().stdout).unwrap()
         };
-        let started = "full --no-sandbox --disable-dev-shm-usage --test-type --user-data-dir=/p https://example.com tmp=/tmp\n";
+        let started = "full --no-sandbox --disable-dev-shm-usage --test-type --disable-blink-features=AutomationControlled --user-data-dir=/p https://example.com tmp=/tmp\n";
         assert_eq!(run(Some(":20")), started, "on a desktop");
         assert_eq!(run(None), started, "with none: its caller asks for headless");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1776,7 +1856,7 @@ mod tests {
         assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
         assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
+        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S), default_config("http://m"), profile_config(&agent(), "Juniper", None, Home::Chat, &[], &Tier::Medium.into(), DEFAULT_REASONING, &route("http://m"), &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
         for (name, _) in RUNTIME_ENV {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
             assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");
@@ -1870,7 +1950,7 @@ mod tests {
             a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
             let present = write(&a);
             assert!(present.contains(selection), "offered {provider}: {present}");
-            assert!(present.contains("browser:\n  headed: true\n  backend: \"off\"\n"));
+            assert!(present.contains("browser:\n  headed: true\n  executable_path: \"/opt/fragment/bin/chromium\"\n"));
             a.credentials.clear();
             assert_eq!(write(&a), absent, "revocation restores {provider}'s defaults");
         }
@@ -1944,7 +2024,7 @@ mod tests {
         assert_eq!(unused, None);
         assert!(config.contains("  default: \"fast\"\n  api_key: \"fck_fast\"\n"));
         assert!(config.contains("reasoning_effort: \"low\"\n"));
-        assert!(config.contains("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n  provider: \"custom\"\n  base_url: \"https://models.example/v1\"\n  api_key: \"fck_deep\"\n  model: \"deep\"\n  reasoning_effort: \"max\"\n  fallback_providers: []\n  request_overrides:\n    max_tokens: 32768\n"));
+        assert!(config.contains("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n  gateway_mode: \"background\"\n  provider: \"custom\"\n  base_url: \"https://models.example/v1\"\n  api_key: \"fck_deep\"\n  model: \"deep\"\n  reasoning_effort: \"max\"\n  fallback_providers: []\n  request_overrides:\n    max_tokens: 32768\n"));
         assert!(config.contains("\"fast\":\n        stale_timeout_seconds: 20\n"));
         assert!(config.contains("\"deep\":\n        stale_timeout_seconds: 180\n"));
         assert_eq!(write(&a, json).0, config, "a restart replays both choices");
