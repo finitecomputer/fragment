@@ -471,7 +471,8 @@ struct MessageView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if !isYou {
                     HStack(spacing: 7) {
-                        AgentAvatar(agent: agent, size: 22)
+                        // a circle, as the working line's is: the same face, working and done
+                        AgentAvatar(agent: agent, size: 22, round: true)
                         Text(agent?.displayTitle ?? "Agent").font(.caption.weight(.medium)).foregroundStyle(.secondary)
                         // drawn by SwiftUI, never a UIKit spinner: a platform view
                         // in the lazy stack's rows was in each layout pass of a
