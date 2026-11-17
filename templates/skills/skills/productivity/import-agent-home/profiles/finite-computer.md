@@ -279,7 +279,7 @@ curl -fsS http://api.fragment.internal/api/computer | jq -r --arg a "$FRAGMENT_A
 ```sh
 ph="<the placeholder>" && mkdir -p "$HOME/home-import" && \
 curl -sS -o "$HOME/home-import/finite-site.json" -w 'finite.site: %{http_code}\n' -H "Authorization: Nostr $ph" "https://finite.site/api/v2/projects" && \
-jq -c '.projects[] | select(.role == "owner" and .site != null) | {slug, site: .site.name, url: .site.url, status: .site.status, visibility: .site.visibility, branch: .site.branch, redirect_to: .site.redirect_to}' "$HOME/home-import/finite-site.json"
+jq -c '.projects[] | select(.role == "owner" and .site != null) | {slug, site: .site.name, url: .site.url, status: .site.status, visibility: .site.visibility, branch: .site.branch, spa: .site.spa, redirect_to: .site.redirect_to}' "$HOME/home-import/finite-site.json"
 ```
 
 - **200:** each line is a site the old agent owned. Leave out one whose
@@ -302,7 +302,9 @@ jq -c '.projects[] | select(.role == "owner" and .site != null) | {slug, site: .
   that `progress.md` says is deployed, came over before: make nothing
   for it again, and only point its old address, if your owner now makes
   it public. One `progress.md` names but not as deployed was cut short:
-  go on from its first step not done, with the app named there.
+  go on from its first step not done, with the app named there. Asked
+  only to point an old address, bring nothing over: point only a site
+  that came over before, and name any other in your message.
 
 **Bring one over.** finite.site gives a login for its repository alone:
 it is used for this one clone, into `/tmp`, then deleted. Its files then
@@ -425,4 +427,5 @@ Tell your owner, in the report:
   to its new one. The others keep serving at their old addresses until
   they are turned off. Give them the new addresses. For one kept private
   (in a move, every one), their next step: make it public here, then ask
-  you to point its old address at the new one.
+  you to point its old address at the new one. Not for a single-page
+  app, which is never pointed, nor when finite.site had no key for you.
