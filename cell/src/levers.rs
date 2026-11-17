@@ -38,8 +38,9 @@ use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{FragmentLever, KeysLever};
 use crate::registry::calls;
-use crate::{ask_registry, check_name, json_answer, ledger, no_route, read_body, routed};
+use crate::{ask_registry, check_name, json_answer, ledger, no_route, read_body};
 
 /// The ledger command that makes an e2e person a seat: one id, so signing
 /// the same person in again sets nothing twice.
@@ -174,18 +175,21 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             if cfg.levers_scoped && !levers::is_e2e_fragment(&target.fragment) {
                 return Err(CellError::new(ErrorCode::Forbidden, format!("on a preview, the fragment levers reach the e2e's own fragments ({}…) alone", levers::E2E_LABEL_PREFIX)));
             }
-            let body = String::from_utf8(body).map_err(|_| CellError::invalid("body: not UTF-8"))?;
-            let inner = routed::internal_request(&format!("test/{hook}"), &body)?;
-            crate::routed::send(env, "FRAGMENT", &target.fragment, inner).await
+            let lever: serde_json::Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            match *hook {
+                "keys" => crate::fragment::pass(env, &target.fragment, &KeysLever(lever)).await,
+                _ => crate::fragment::pass(env, &target.fragment, &FragmentLever(lever)).await,
+            }
         }
         (Method::Post, ["computer"]) => {
             /// `{computer, op, times?, on?, ms?, freeze?, offsetMs?,
-            /// generation?}`: a lever on that computer (computer.rs, `lever`):
+            /// generation?, agent?, row?}`: a lever on that computer (computer.rs, `lever`):
             /// `times` is `fail-saves`', `fail-starts`' and
             /// `fail-takeover-destroys`', `on` is `always-on`'s, `ms` is
             /// `hang-backups`', `alive-check`'s, `slow-tell`'s,
             /// `stall-failing-start`'s and `alarm-in`'s, `freeze` is `alive-check`'s,
-            /// `offsetMs` is `clock`'s, `generation` is `exit`'s.
+            /// `offsetMs` is `clock`'s, `generation` is `exit`'s, `agent`
+            /// and `row` are `legacy-grants`'.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {
@@ -203,6 +207,10 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 offset_ms: Option<i64>,
                 #[serde(default)]
                 generation: Option<u64>,
+                #[serde(default)]
+                agent: Option<String>,
+                #[serde(default)]
+                row: Option<serde_json::Value>,
             }
             let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if !valid_computer_id(&t.computer) {
@@ -221,7 +229,8 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 let generation = t.generation.ok_or_else(|| CellError::invalid("exit names its generation"))?;
                 return json_answer(&crate::computer::ask(env, &t.computer, "computer/exited", &serde_json::json!({ "generation": generation })).await?);
             }
-            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "offsetMs": t.offset_ms })).await?)
+            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "offsetMs": t.offset_ms, "agent": t.agent, "row": t.row });
+            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &asked).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
         (Method::Post, ["registry"]) if cfg.levers_scoped => Err(no_route("/api/test/registry")),

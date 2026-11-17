@@ -317,7 +317,7 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
       const open = el("button", null, "Open");
       open.type = "button";
       open.onclick = () => location.assign("/move");
-      account.append(actionLine("Agents from finite.computer", open));
+      account.append(actionLine("Agent upgrades", open));
     }
     account.append(legalLinks());
     if (lost()) return;
