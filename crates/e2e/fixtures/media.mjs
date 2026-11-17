@@ -34,7 +34,7 @@ export class App extends DurableObject {
     return await job.ai.decide({ input: "an inline image", questions: { snack: { type: "predicate", instructions: "Is it a snack?" } }, media: [{ data }] });
   }
 
-  // the high tier is off (decision 23): the step says so
+  // a route the deployment does not list (high, as many configs): the step says so
   async summarize_high({ text }, job) {
     return await job.ai.text({ model: "high", prompt: text });
   }

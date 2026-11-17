@@ -870,7 +870,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     cap_mid_stream(s, api, wait)?;
     fallback(s, api, &hand, &owner_id, wait)?;
     let r = api.signed(&hand, "POST", route, Some(&json!({ "model": "high", "messages": [{ "role": "user", "content": "hi" }] })))?;
-    s.ok("the high tier is refused, saying why (decision 23)", r.status == 400 && r.message().contains("high tier is off"), &r);
+    s.ok("a model that is no route's and no model's id (high) is refused, naming those it may (400)", r.status == 400 && r.message().contains("GET /v1/models lists them"), &r);
     by_id(s, api, &hand, &owner, &owner_id, wait)?;
     vision(s, api, wait)?;
     transcription(s, api, wait)?;
@@ -1010,7 +1010,7 @@ fn by_id(s: &mut Suite, api: &Api, hand: &Keys, owner: &Keys, owner_id: &str, wa
         &r,
     );
     let r = api.call(Call { method: "POST", url: format!("{}{MODEL_ROUTE}", api.base), body: Some(say(GLM).to_string().into_bytes()), content_type: Some("application/json"), keys: Some(hand), extra: vec![("x-fragment-tier", "cheapest".into())], ..Call::default() })?;
-    s.ok("a tier said that is none is refused (400)", r.status == 400 && r.message().contains("x-fragment-tier names a tier"), &r);
+    s.ok("a route said that is none is refused, naming the routes (400)", r.status == 400 && r.message().contains("x-fragment-tier names one of this deployment's routes: cheap, medium"), &r);
     let r = api.signed(hand, "GET", MODELS_ROUTE, None)?;
     let listed: Vec<&str> = r.body["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
     s.ok(
