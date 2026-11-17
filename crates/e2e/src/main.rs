@@ -144,7 +144,7 @@ pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
 /// names, `tinfoil_price`, reading images) and vision (Finite Private),
 /// each private. Standard, the medium tier: OpenRouter's GLM-5.3 Flash
 /// with its routing, its route's fallback and vision a slot of its own,
-/// `cloudflare` (Workers AI's GLM-5.3 Flash, reading images). Each tier
+/// `cloudflare` (Workers AI's DeepSeek V4.1 Flash, reading images). Each tier
 /// its Fast at `high` and its Deep (Paul, 2026-10-27) at `max` and
 /// `DEEP_MAX_TOKENS` a call: Private's Tinfoil's DeepSeek V4.1 Flash
 /// (`private_deep`), falling back to Private's Fast; Standard's
@@ -155,7 +155,7 @@ pub fn private_tier_models(fake: &str) -> Value {
     let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true, "private": true });
     let standard = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::OPENROUTER_FLASH, "body": openrouter_routing(), "label": "Standard", "fallback": "cloudflare", "vision": "cloudflare", "reasoning": "high", "deep": "standard_deep" });
     let standard_deep = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::OPENROUTER_DEEPSEEK, "body": openrouter_deep_routing(), "reasoning": "max", "max_tokens": DEEP_MAX_TOKENS, "fallback": "cloudflare" });
-    let cloudflare = json!({ "provider": "workers_ai", "model": fragment_core::models::GLM_FLASH, "images": true });
+    let cloudflare = json!({ "provider": "workers_ai", "model": fragment_core::models::DEEPSEEK_FLASH, "images": true });
     let vision = private.clone();
     let mut private_deep = tinfoil.clone();
     private_deep.as_object_mut().unwrap().extend([("reasoning".into(), json!("max")), ("max_tokens".into(), json!(DEEP_MAX_TOKENS)), ("fallback".into(), json!("cheap"))]);

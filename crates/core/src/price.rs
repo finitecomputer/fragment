@@ -291,7 +291,7 @@ pub struct TokenPrices {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelPrice {
-    /// The catalog id the intercept calls (`@cf/zai-org/glm-5.3-flash`).
+    /// The catalog id the intercept calls (`@cf/deepseek-ai/deepseek-v4.1-flash-1017`).
     pub model: String,
     pub price: TokenPrices,
 }
@@ -403,8 +403,21 @@ pub struct PriceBook {
 /// the gateway's credits pay, so with the credits fee. A row per
 /// resolution (`media::Resolution::priced_as`), its output one millisecond
 /// of video, priced per million: $140 and $280.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 12] = [
-    // $0.15 in, $0.03 cached, $0.50 out per million tokens (the cheap tier's, and vision)
+///
+/// Workers AI's models from its pricing page (developers.cloudflare.com/
+/// workers-ai/platform/pricing/, read 2026-11-16), as each model's page
+/// lists them: a model with no cached price has none, so its cached or
+/// written token is an input token's price. GLM-5.3 Flash's and DeepSeek V4
+/// Flash's rows stay past their retirement on 2026-11-20 (410 Gone from
+/// then): the usage stored and queued under them is priced by them still.
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 15] = [
+    // $0.30 in, $0.006 cached, $1.20 out per million tokens (the cheap tier's, and vision)
+    (crate::models::DEEPSEEK_FLASH, TokenPrices { input: 300_000, cached_input: 6_000, cache_write: 300_000, output: 1_200_000 }),
+    // $0.30 in, $0.10 cached, $1.00 out (the fallback)
+    (crate::models::INKLING_SMALL, TokenPrices { input: 300_000, cached_input: 100_000, cache_write: 300_000, output: 1_000_000 }),
+    // $0.10 in, $0.30 out, no cache (an icon's subject: crate::icon::SUBJECT_MODEL)
+    (crate::icon::SUBJECT_MODEL, TokenPrices { input: 100_000, cached_input: 100_000, cache_write: 100_000, output: 300_000 }),
+    // retired 2026-11-20: $0.15 in, $0.03 cached, $0.50 out (the cheap tier's and vision until then)
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // Finite Private's (Finite's tiers' by config), at Workers AI's GLM-5.3 Flash's
     ("glm-5-3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
@@ -416,7 +429,7 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 12] = [
     ("@cf/zai-org/glm-5.3", TokenPrices { input: 1_400_000, cached_input: 260_000, cache_write: 1_400_000, output: 4_400_000 }),
     // $4 in, $0.20 cache read, $5 cache write, $20 out (the high tier, off for now)
     ("anthropic/claude-opus-5.5", TokenPrices { input: 4_000_000, cached_input: 200_000, cache_write: 5_000_000, output: 20_000_000 }),
-    // $0.44 in, $0.014 cached, $1.32 out (the fallback)
+    // retired 2026-11-20: $0.44 in, $0.014 cached, $1.32 out (the fallback until then)
     ("@cf/deepseek-ai/deepseek-v4-flash-0731", TokenPrices { input: 440_000, cached_input: 14_000, cache_write: 440_000, output: 1_320_000 }),
     // Clef-flash, $0.038 in; Clef, $0.24; Clef-omni, $0.15; nothing out
     clef(Model::ClefFlash),
@@ -453,8 +466,9 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// The default book's version, informational since a ledger takes any book
 /// whose contents differ from its own (docs/ledger.md; #451). Before, a
 /// ledger took only a newer version, so each change to the defaults
-/// raised it, and each still does: 13 for Firecrawl's credits by the call
-/// (2026-11-07), after 12 for Google Places' photos apart from its
+/// raised it, and each still does: 14 for Workers AI's DeepSeek V4.1
+/// Flash, Inkling 2 Small and Gemma 4 26B (2026-11-16), after 13 for
+/// Firecrawl's credits by the call (2026-11-07), after 12 for Google Places' photos apart from its
 /// searches (2026-11-07), after 11 for
 /// xAI's chat and images apart
 /// from its X searches (2026-11-07), after 10 for fal's images by their
@@ -466,7 +480,7 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 13;
+pub const DEFAULT_BOOK_VERSION: u32 = 14;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -1119,8 +1133,8 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 13);
-        assert_eq!(book.models.len(), 12);
+        assert_eq!(book.version, 14);
+        assert_eq!(book.models.len(), 15);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
 

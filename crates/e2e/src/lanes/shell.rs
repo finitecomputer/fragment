@@ -1296,7 +1296,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let settings = shell(api, &session, "GET", &format!("/api/f/{}/file?path=agent.json", own_named(api, &session, &first_label)?), None, &[])?;
     s.ok(
-        "the shell's first agent names the cheap tier (GLM-5.3 Flash), and no colour: its colour is its identity's",
+        "the shell's first agent names the cheap tier (DeepSeek V4.1 Flash), and no colour: its colour is its identity's",
         settings.status == 200 && settings.body["tier"] == "cheap" && settings.body.get("color").is_none(),
         &settings,
     );
