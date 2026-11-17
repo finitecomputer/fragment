@@ -38,8 +38,9 @@ use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{FragmentLever, KeysLever};
 use crate::registry::calls;
-use crate::{ask_registry, check_name, json_answer, ledger, no_route, read_body, routed};
+use crate::{ask_registry, check_name, json_answer, ledger, no_route, read_body};
 
 /// The ledger command that makes an e2e person a seat: one id, so signing
 /// the same person in again sets nothing twice.
@@ -174,9 +175,11 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             if cfg.levers_scoped && !levers::is_e2e_fragment(&target.fragment) {
                 return Err(CellError::new(ErrorCode::Forbidden, format!("on a preview, the fragment levers reach the e2e's own fragments ({}…) alone", levers::E2E_LABEL_PREFIX)));
             }
-            let body = String::from_utf8(body).map_err(|_| CellError::invalid("body: not UTF-8"))?;
-            let inner = routed::internal_request(&format!("test/{hook}"), &body)?;
-            crate::routed::send(env, "FRAGMENT", &target.fragment, inner).await
+            let lever: serde_json::Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            match *hook {
+                "keys" => crate::fragment::pass(env, &target.fragment, &KeysLever(lever)).await,
+                _ => crate::fragment::pass(env, &target.fragment, &FragmentLever(lever)).await,
+            }
         }
         (Method::Post, ["computer"]) => {
             /// `{computer, op, times?, on?, ms?, freeze?, offsetMs?,
