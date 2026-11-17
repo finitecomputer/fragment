@@ -225,7 +225,10 @@ async fn streams_and_upgrades_pass_through() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_that_is_down_is_502_at_once() {
     let state = tmp("down");
-    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+    // port 0, which nothing listens on: a port bound and dropped can still
+    // answer (a child a parallel test forks holds the socket until it execs,
+    // or another test takes the port)
+    let dead: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
     let lan = Lan::start(config(dead, &state)).unwrap();
     let t0 = std::time::Instant::now();
     let (status, _, body) = get(&lan, ZONE, ZONE, "/", &[], "").await;
