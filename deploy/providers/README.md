@@ -27,8 +27,8 @@ things, and nothing else is edited (FIN-509):
    granted scope by its name here, and no other).
 2. **Its skill**, `templates/skills/skills/<category>/<name>-finite/SKILL.md`,
    whose frontmatter names it (`metadata: fragment: connection: <name>`):
-   the provider's addresses and quirks, as calls of `fragment api <name>`.
-   Docs only: no script, no helper.
+   the provider's addresses and quirks, as calls of
+   `fragment connection call <name>`. Docs only: no script, no helper.
 
 No platform code, shell file or list names a connection. One test holds
 every row to this shape
