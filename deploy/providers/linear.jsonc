@@ -8,9 +8,8 @@
 { "name": "linear", "kind": "connection", "title": "Linear",
   "hosts": ["api.linear.app", "uploads.linear.app"],
   "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-  "key": "<the client secret's store name>",
   "connection_oauth": { "authorize": "https://linear.app/oauth/authorize?actor=user&prompt=consent",
     "exchange": "https://api.linear.app/oauth/token", "revoke": "https://api.linear.app/oauth/revoke",
-    "client_id": "<the app's client id>", "access": { "read": { "scopes": ["read"] }, "write": { "scopes": ["write"] } } },
+    "access": { "read": { "scopes": ["read"] }, "write": { "scopes": ["write"] } } },
   "scope_names": { "read": "Read issues and projects", "write": "Create and change issues" },
   "env": ["LINEAR_OAUTH_ACCESS_TOKEN"] }
