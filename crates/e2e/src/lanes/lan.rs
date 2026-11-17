@@ -152,6 +152,15 @@ fn cases(s: &mut Suite, direct: &Api, lan: Lan, platform: &str) -> Result<()> {
         page.status == 200 && page.text.contains("served on the LAN") && front.site_url(&name, "").starts_with(&format!("https://{name}.{LAN_ZONE}:")),
         &page,
     );
+    // the address a CLI on the node's own port is given (`fragment init` and
+    // `xtask try` print it): the zone's https one a device opens, never one
+    // on the loopback's scheme and port
+    let st = direct.signed(&owner, "GET", &format!("/api/f/{name}/status"), None)?;
+    s.ok(
+        "a CLI on the node's own port is given the fragment's https address on the zone",
+        st.status == 200 && st.body["urls"]["canonical"].as_str() == Some(front.site_url(&name, "").as_str()),
+        &st,
+    );
     let nobody = front.page("nosuch--aaaa", "", None)?;
     s.ok("a name in the zone that is no fragment's reaches the cell, which says so (404)", nobody.status == 404 && nobody.message().contains("no such fragment"), &nobody);
     let elsewhere = front.call(Call { method: "GET", url: format!("{platform}/healthz"), extra: vec![("host", "bank.example".into())], ..Call::default() })?;
