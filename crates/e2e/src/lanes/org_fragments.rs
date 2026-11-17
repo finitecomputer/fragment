@@ -92,6 +92,7 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         ("an agent fragment is a person's (400)", api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgagent"), "template": "agent" })))?, 400),
         ("so is a connector, an agent too (400)", api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgtg"), "template": "telegram" })))?, 400),
         ("its editor gets no storage token: an offboarding could not take one back (403)", api.signed(&ada, "GET", &format!("/api/f/{name}/storage-token"), None)?, 403),
+        ("nor a read-only one, which reads its whole history (403)", api.signed(&ada, "GET", &format!("/api/f/{name}/storage-token?access=read"), None)?, 403),
         ("its cap is no one's to change: its admin's neither (403)", api.signed(&ada, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c1", "micros": 50_000_000 })))?, 403),
         ("a fragment never made has no owner to read: its channels are 404, not 500", api.signed(&ada, "GET", &format!("/api/f/{}/channels", s.named(api, &ada, "nevermade")?), None)?, 404),
     ];
