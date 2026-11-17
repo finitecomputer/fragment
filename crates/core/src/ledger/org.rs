@@ -34,7 +34,9 @@ pub fn budget_invalid(c: &OrgBudget) -> Option<Refused> {
     (!(0..=BUDGET_MAX).contains(&c.micros)).then(|| invalid(Invalid::Amount))
 }
 
-/// Who pays, as their ledger is named (`name`, `parse`).
+/// Who pays, as their ledger is named (`name`, `parse`); a fragment's
+/// owner too, as its `owner` meta row names it (decisions 66 to 71), whose
+/// list its owner's row goes to. An org is never a signing identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Payer {
     /// A person, by their identity (an npub).
@@ -58,6 +60,25 @@ impl Payer {
             Some(id) => crate::org::valid_org_id(id).then(|| Payer::Org(id.to_string())),
             None => crate::npub::is_identity(name).then(|| Payer::Person(name.to_string())),
         }
+    }
+
+    pub fn person(&self) -> Option<&str> {
+        match self {
+            Payer::Person(id) => Some(id),
+            Payer::Org(_) => None,
+        }
+    }
+
+    pub fn org(&self) -> Option<&str> {
+        match self {
+            Payer::Org(id) => Some(id),
+            Payer::Person(_) => None,
+        }
+    }
+
+    /// Whether `principal` is this person: an org is never a principal.
+    pub fn is(&self, principal: &str) -> bool {
+        self.person() == Some(principal)
     }
 }
 
@@ -272,6 +293,7 @@ mod tests {
         assert_eq!(Payer::parse(&person), Some(Payer::Person(person.clone())));
         assert_eq!(Payer::parse(&format!("org:{ORG}")), Some(Payer::Org(ORG.into())));
         assert_eq!(Payer::Org(ORG.into()).name(), format!("org:{ORG}"));
+        assert!(Payer::Person(person.clone()).is(&person) && !Payer::Org(ORG.into()).is(ORG), "an org is never a principal");
         for bad in ["org:", "org:org-xyz", "org:npub1", ORG, "", "someone"] {
             assert_eq!(Payer::parse(bad), None, "{bad:?} names no ledger");
         }

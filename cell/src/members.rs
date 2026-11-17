@@ -811,9 +811,9 @@ impl FragmentCell {
         // themselves or their own agents (decision 71: they may give
         // themselves access, which their event shows)
         let owner = self.owner()?;
-        let own = match &owner {
-            fragment_core::owner::Owner::Person(p) => target.owner.as_deref() == Some(p.as_str()),
-            fragment_core::owner::Owner::Org(_) => target.id == actor.by || target.owner.as_deref() == Some(actor.by.as_str()),
+        let own = match owner.org() {
+            None => target.owner.as_deref() == owner.person(),
+            Some(_) => target.id == actor.by || target.owner.as_deref() == Some(actor.by.as_str()),
         };
         if current.is_none() && !lever && !own {
             return Err(CellError::new(ErrorCode::Forbidden, match target.kind {

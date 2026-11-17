@@ -6,7 +6,7 @@
 //! the subscriber's capability; a computer's wake goes from the outbox to
 //! the computer itself. A member's subscriptions end with its membership.
 
-use fragment_core::owner::Owner;
+use fragment_core::ledger::org::Payer;
 use fragment_core::{egress, npub};
 use fragment_proto::{valid_channel_name, ChannelRecord, DeliveryType, ErrorCode};
 use serde_json::{json, Value};
@@ -76,8 +76,8 @@ impl FragmentCell {
     /// (each sends its channel's records somewhere: who reads out is access).
     fn oversees(&self, caller: &Caller, principal: &str) -> CellResult<bool> {
         Ok(match self.owner()? {
-            Owner::Person(p) => p == principal,
-            Owner::Org(org) => self.content_admin(caller, &org).is_ok(),
+            Payer::Person(p) => p == principal,
+            Payer::Org(org) => self.content_admin(caller, &org).is_ok(),
         })
     }
 

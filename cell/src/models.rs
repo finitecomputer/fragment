@@ -229,7 +229,7 @@ impl Charge {
 /// an agent's owner is a person): an AI step, which meets the org's budget
 /// and the fragment's cap whoever starts it (decisions 67, 68).
 async fn gate(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, model: &'static str, name: &'static str, after: &dyn Background) -> CellResult<Charge> {
-    let org = payer.starts_with(fragment_core::ledger::org::ORG_LEDGER_PREFIX);
+    let org = fragment_core::ledger::org::Payer::parse(payer).is_some_and(|p| p.org().is_some());
     let own = fragment.filter(|f| f.owner == payer);
     let capped = own.filter(|f| org || !f.by_owner).map(|f| f.name.to_string());
     let spend = if org { Spend::AiStep } else { Spend::AgentTurn };

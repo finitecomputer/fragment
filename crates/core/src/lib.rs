@@ -60,7 +60,6 @@ pub mod own_signin;
 pub mod connection_accounts;
 pub mod connection_signin;
 pub mod org;
-pub mod owner;
 pub mod price;
 pub mod ratelimit;
 pub mod retention;

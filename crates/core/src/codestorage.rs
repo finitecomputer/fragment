@@ -206,11 +206,11 @@ pub const REPO_OWNER_HEX: usize = 12;
 /// identity makes later (one a deleted fragment had) never finds the repo
 /// its earlier maker made: a repo a wipe deleted is never made again, nor
 /// another person's files read. The same owner making a deleted name again
-/// finds its repo, as before. An org owns as `org:<id>` (`Owner::name`).
+/// finds its repo, as before. An org owns as `org:<id>` (`ledger::org::Payer::name`).
 /// `None`: not a fragment's name, or no owner's name.
 pub fn repo_name(prefix: &str, fragment: &str, owner: &str) -> Option<String> {
     assert!(prefix.is_empty() || prefix.ends_with("--"), "a deployment's repo prefix is empty or ends in --: {prefix:?}");
-    if !fragment_proto::valid_fragment_name(fragment) || crate::owner::Owner::parse(owner).is_none() {
+    if !fragment_proto::valid_fragment_name(fragment) || crate::ledger::org::Payer::parse(owner).is_none() {
         return None;
     }
     let digest = <sha2::Sha256 as sha2::Digest>::digest(format!("fragment repo owner\0{owner}").as_bytes());

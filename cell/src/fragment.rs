@@ -58,7 +58,7 @@ use std::sync::Arc;
 
 use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::npub;
-use fragment_core::owner::Owner;
+use fragment_core::ledger::org::Payer;
 use fragment_core::seed;
 use fragment_proto::{
     limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, OwnerRef, Pins, Role,
@@ -304,7 +304,7 @@ pub(crate) enum MetaKey {
     /// When the fragment was created, its incarnation: a fragment exists
     /// once it has this row, written last.
     CreatedAt,
-    /// Who owns it, by name (`fragment_core::owner::Owner`): the identity
+    /// Who owns it, by name (`fragment_core::ledger::org::Payer`): the identity
     /// of the person who made it, or `org:<id>` (decisions 66 to 71).
     Owner,
     /// The fragment's own key.
@@ -784,16 +784,16 @@ impl FragmentCell {
     }
 
     /// Who owns it (decisions 66 to 71): its `owner` meta row, the one
-    /// record of it, a person's identity or `org:<id>` (`Owner::name`),
+    /// record of it, a person's identity or `org:<id>` (`Payer::name`),
     /// which names its payer's ledger and its owner's list. Never created
     /// (or deleted): 404, as `name` answers, so a request's standing read
     /// first never makes it a 500.
-    pub(crate) fn owner(&self) -> CellResult<Owner> {
+    pub(crate) fn owner(&self) -> CellResult<Payer> {
         let [created, owner] = self.metas([MetaKey::CreatedAt, MetaKey::Owner])?;
         match (created, owner) {
             (None, _) => Err(not_created()),
             (Some(_), None) => Err(missing(MetaKey::Owner)),
-            (Some(_), Some(name)) => Owner::parse(&name).ok_or_else(|| CellError::host(format!("its owner row names {name:?}"))),
+            (Some(_), Some(name)) => Payer::parse(&name).ok_or_else(|| CellError::host(format!("its owner row names {name:?}"))),
         }
     }
 
@@ -902,8 +902,8 @@ impl FragmentCell {
     /// Never a cached answer. A number, never a caller's text.
     pub(crate) fn fence(&self, signed: Option<&Signed>) -> CellResult<String> {
         Ok(match self.owner()? {
-            Owner::Person(_) => "1".to_string(),
-            Owner::Org(org) => signed.and_then(|s| s.org_place(&org)).map_or_else(|| "0".to_string(), |p| format!("added_at >= {}", p.since)),
+            Payer::Person(_) => "1".to_string(),
+            Payer::Org(org) => signed.and_then(|s| s.org_place(&org)).map_or_else(|| "0".to_string(), |p| format!("added_at >= {}", p.since)),
         })
     }
 
@@ -1366,11 +1366,11 @@ impl FragmentCell {
         // comes in as its editor (decisions 69 to 71); the router checked
         // them, and what they carry says so again here
         let owner = match org {
-            None => Owner::Person(maker.clone()),
+            None => Payer::Person(maker.clone()),
             Some(org) => {
                 let signed = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Person && s.acting_for.is_none());
                 signed.and_then(|s| s.org_place(&org)).filter(|p| p.admin).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's content admins make its fragments"))?;
-                Owner::Org(org)
+                Payer::Org(org)
             }
         };
         if !valid_fragment_name(&body.name) {
@@ -1383,7 +1383,7 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
         }
         // an org owns apps and brains: a person's agents, chats and skills stay theirs
-        if let (Owner::Org(_), Some(t)) = (&owner, body.template.as_deref().filter(|t| blessed::PERSONS_OWN.contains(t))) {
+        if let (Payer::Org(_), Some(t)) = (&owner, body.template.as_deref().filter(|t| blessed::PERSONS_OWN.contains(t))) {
             return Err(CellError::invalid(format!("an org owns apps and brains; a {t} stays a person's own")));
         }
         if let Some(title) = &body.title {
@@ -1624,10 +1624,10 @@ impl FragmentCell {
             // its owner's own act; an org's, one of its content admins' own
             // (decision 70), never an agent's
             match self.owner()? {
-                Owner::Person(_) => {
+                Payer::Person(_) => {
                     self.require(caller, false, Role::Owner)?;
                 }
-                Owner::Org(org) => {
+                Payer::Org(org) => {
                     self.content_admin(caller, &org)?;
                 }
             }
@@ -1657,8 +1657,8 @@ impl FragmentCell {
             npub: npub.ok_or_else(|| missing(MetaKey::Npub))?,
             owner: owner.person().map_or_else(|| owner.name(), npub::display),
             owner_ref: Some(match &owner {
-                Owner::Person(id) => OwnerRef::Person { id: npub::display(id) },
-                Owner::Org(id) => OwnerRef::Org { id: id.clone() },
+                Payer::Person(id) => OwnerRef::Person { id: npub::display(id) },
+                Payer::Org(id) => OwnerRef::Org { id: id.clone() },
             }),
             role,
             visibility: facts.visibility,
