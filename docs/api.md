@@ -1594,12 +1594,19 @@ that person (decision 67). It is never an agent, a chat or skills.
   request, before anything is cleaned up; a rehire's old rows never count.
   What reaches someone unasked is fenced the same way (`PlacesNow`): no
   delivery to a subscription of someone who may read it no more (the
-  queue's consumer asks again before each send: `deliver/authorize`), and
-  their list's row is taken away. Whatever admits them again takes their
-  old rows away first, an ordinary member still by their own yes.
-- **No storage token.** A token writes the repo for its 15 minutes
-  whatever happens to its holder, so an org's fragment hands out none
-  (403).
+  queue's consumer asks again before each send: `deliver/authorize`), no
+  new message to their search (search.rs), and their list's row is taken
+  away, with what their search held of it. What their list held from
+  before stays until the fragment next sends them a row. A live socket
+  goes no further than `LIVE_IDENTITY_MS` (60 s) past its last check, as
+  a sign-out does: one whose check is due is closed (4001) before a
+  record, draft or presence reaches it, and the check decides the role
+  they (or an agent's membership) hold there now. Whatever admits them
+  again takes their old rows away first, an ordinary member still by
+  their own yes.
+- **No storage token**, to read or to write. A token reads the repo for
+  its 15 minutes whatever happens to its holder, so an org's fragment
+  hands out none (403).
 
 | method & path | who | body → answer |
 | --- | --- | --- |

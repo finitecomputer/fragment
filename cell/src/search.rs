@@ -28,6 +28,10 @@
 //!   there first); a failure, or a list that holds no role yet, waits with
 //!   the outboxes' backoff (`fragment_core::backoff`). A batch sent twice
 //!   adds nothing twice: the list keys each entry by `(fragment, n)`.
+//! - **An org's fragment.** A cursor is sent only while its person's row
+//!   counts (members.rs `stale_members`): one offboarded since, or a
+//!   rehire's row from before, gets nothing more, and their row is taken
+//!   from their list instead, as `flush_index` takes it.
 
 use fragment_core::search;
 use fragment_proto::{limits, Role};
@@ -165,7 +169,24 @@ impl FragmentCell {
             Err(e) => return console_error!("{name}: the search outbox did not read ({:?}): {}", e.code, e.message),
         };
         assert!(due.len() as i64 <= FLUSH_PEOPLE_MAX, "a flush sends a bounded set of cursors");
+        // an org's: a member offboarded since (or a rehire's row from
+        // before) is sent no more of its messages, and their row is taken
+        // from their list, which drops what it held of them (members.rs
+        // `flush_index` does the same for a row it sends); not knowing who
+        // is in, it sends nothing now, and the claims lapse for a later pass
+        let people: Vec<String> = due.iter().map(|c| c.principal.clone()).collect();
+        let stale = match self.stale_members(&people).await {
+            Ok(stale) => stale,
+            Err(e) => return console_error!("{name}: who is in its org now was not read for its search ({:?}): {}", e.code, e.message),
+        };
         for cursor in due {
+            if stale.contains(&cursor.principal) {
+                // its cursor goes with the role (`search_follows`)
+                if let Err(e) = self.index_change(&cursor.principal, None) {
+                    console_error!("{name}: {}'s fenced row was not queued to go ({:?}): {}", cursor.principal, e.code, e.message);
+                }
+                continue;
+            }
             if let Err(e) = self.send_search(&name, incarnation, &cursor).await {
                 console_error!("{name}: search entries for {} did not go ({:?}): {}", cursor.principal, e.code, e.message);
             }

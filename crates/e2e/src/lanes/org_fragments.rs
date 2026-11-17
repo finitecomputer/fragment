@@ -6,7 +6,10 @@
 //! its admins' too. Its content admins administer who is in (one may give
 //! themselves access, which its events show), a member who is not one does
 //! not, and no agent does. An offboarding fences a member at once, at
-//! every request, before anything is cleaned up; an invite from before it
+//! every request, before anything is cleaned up, and at what reaches them
+//! unasked: deliveries, their list, their search, their live sockets (a
+//! silent one too, and one held through their agent's membership) and an
+//! agent's post as an agent; an invite from before it
 //! admits no one, and a new one admits them afresh. A batch
 //! whose acknowledgement is lost, sent again after a restart, bills the
 //! org once. It hands out no storage token, and its admin deletes it.
@@ -19,7 +22,7 @@ use serde_json::{json, Value};
 
 use super::jobs::{settle, started};
 use super::ledger::{charged, entries, lever};
-use crate::api::{Api, Call, Reply};
+use crate::api::{Api, Call, Reply, Socket};
 use crate::{Need, Suite};
 
 /// How long a run, a meter's flush or a list's row may take here.
@@ -124,6 +127,9 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     // each seen to work while they are in
     let mut manifest: Value = serde_json::from_str(include_str!("../../../../templates/calories/fragment.json"))?;
     manifest["channels"]["notes"] = json!({ "read": "viewer", "post": "viewer", "listed": { "kinds": ["note"], "fields": ["text"] } });
+    // and a channel every member reads and none lists: its messages reach
+    // its people's searches, and no list row is sent for them
+    manifest["channels"]["talk"] = json!({ "read": "viewer", "post": "viewer" });
     manifest["operations"]["notify"] = json!({
         "kind": "mutation", "role": "editor", "description": "Pushes a title to the browsers subscribed under a tag (`*`: all).",
         "input": { "type": "object", "required": ["title", "who"], "additionalProperties": false, "properties": { "title": { "type": "string", "maxLength": 100 }, "who": { "type": "string", "maxLength": 100 } } }
@@ -138,6 +144,11 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     let deployed = api.signed(&ada, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;
     let note = |id: &str, text: &str| api.signed(&ada, "POST", &format!("/api/f/{name}/channels/notes"), Some(&json!({ "id": id, "body": { "kind": "note", "text": text } })));
     let lists = |who: &Keys, text: &str| super::posts::listed_of(api, who, &name).iter().any(|(_, _, _, f)| f["text"] == text);
+    let say = |id: &str, text: &str| api.signed(&ada, "POST", &format!("/api/f/{name}/channels/talk"), Some(&json!({ "id": id, "body": { "text": text } })));
+    let finds = |who: &Keys, word: &str| {
+        api.signed(who, "GET", &format!("/api/search?q={word}"), None)
+            .is_ok_and(|r| r.body["messages"].as_array().is_some_and(|m| m.iter().any(|x| x["fragment"] == name.as_str())))
+    };
     let hook = format!("{}/notify", s.push.url);
     let subs = [&cal, &ada].map(|k| api.signed(k, "POST", &format!("/api/f/{name}/subscriptions"), Some(&json!({ "channel": "replies", "url": hook }))));
     let replies = |s: &Suite| s.push.notified().iter().filter(|f| f["fragment"] == name.as_str() && f["channel"] == "replies").count();
@@ -168,14 +179,48 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
     settle(api, &ada, &name, started(&r), &["succeeded", "held"], WAIT);
     let both_heard = s.eventually(WAIT, || replies(s) == heard + 2);
     let listed_in = s.eventually(WAIT, || lists(&cal, "before they left"));
+    let said = say("t1", "zebra crossing while in")?;
+    let searched_in = s.eventually(WAIT, || finds(&cal, "zebra"));
     let pushed = [("p-tagged", "updates"), ("p-self", cal_id.as_str())].map(|(id, who)| api.op(&ada, &name, "notify", id, json!({ "title": "while in", "who": who })));
     let active_heard = s.eventually(WAIT, || s.push.received("ada-tagged").iter().any(|p| p["title"] == "while in"));
     s.ok(
-        "while in, a member's list carries a listed channel's newest note, and their webhook hears its replies (beside its admin's); their failing webhook and browsers hold what is queued to them, while an active member's browser hears the push",
+        "while in, a member's list carries a listed channel's newest note, their search finds a message, and their webhook hears its replies (beside its admin's); their failing webhook and browsers hold what is queued to them, while an active member's browser hears the push",
         wrote.status == 200 && deployed.status == 200 && noted.status == 200 && subs.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200)) && both_heard && listed_in
+            && said.status == 200 && searched_in
             && held.status == 200 && browsers.iter().all(|r| r.status == 200) && pushed.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200)) && active_heard
             && s.push.hooked("cal-held").is_empty() && s.push.received("cal-tagged").is_empty() && s.push.received("cal-self").is_empty(),
         json!([wrote.body, deployed.body, noted.body, replies(s) - heard, browsers.iter().map(|r| r.status).collect::<Vec<_>>()]),
+    );
+    // live sockets (the audit), each on its `talk`: a member's own; a
+    // content admin's who is no member, reading through their agent's
+    // membership alone; and an active member's
+    let hal = api.person()?;
+    let hal_id = api.identity(&hal)?;
+    let to_hal = api.signed(&ada, "POST", &format!("{root}/content-admin-offers"), Some(&json!({ "id": "hal", "email": Api::email_of(&hal) })))?;
+    let hal_admin = api.signed(&hal, "POST", &format!("{root}/content-admin-offers/{}/accept", to_hal.body["id"].as_str().unwrap_or("")), Some(&json!({})))?;
+    let hal_hand = Keys::generate();
+    let hal_made = api.signed(&hal, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hal_hand, "POST", reg, &hal) })))?;
+    let hal_hand_id = api.identity(&hal_hand)?;
+    let hal_agent_in = api.signed(&hal, "PUT", &format!("/api/f/{name}/members/{hal_hand_id}"), Some(&json!({ "role": "viewer" })))?;
+    let hal_reads = api.signed(&hal, "GET", &format!("/api/f/{name}/status"), None)?;
+    let live_on = |who: &Keys| -> Result<(Socket, Value)> {
+        let mut sock = Socket::open(api, &name, "__live", Some(who), None)?;
+        let hello = sock.until("hello", 5)?;
+        sock.send(&json!({ "type": "subscribe", "channel": "talk", "after": 0 }))?;
+        sock.until("subscribed", 50)?;
+        sock.patience(Duration::from_secs(15))?;
+        Ok((sock, hello))
+    };
+    let (mut cal_live, _) = live_on(&cal)?;
+    let (mut hal_live, hal_hello) = live_on(&hal)?;
+    let (mut ada_live, _) = live_on(&ada)?;
+    let said_live = say("t-live", "heard live while in")?;
+    let live_heard = [&mut cal_live, &mut hal_live, &mut ada_live].map(|sock| sock.until_where("record", 20, |r| r["body"]["text"] == "heard live while in").is_ok());
+    s.ok(
+        "while in, a member's socket, and a content admin's that reads through their agent's membership alone, hear its new message live, beside an active member's",
+        hal_admin.status == 200 && hal_made.status == 200 && hal_agent_in.status == 200 && hal_reads.status == 200 && hal_reads.body["role"] == "viewer"
+            && hal_hello["role"] == "viewer" && said_live.status == 200 && live_heard.iter().all(|h| *h),
+        json!({ "halAgent": hal_agent_in.body, "halReads": hal_reads.body["role"], "heard": live_heard }),
     );
     // a second fragment of the org's, an invite to it waiting as they leave
     let made2 = api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgnotes"), "template": "calories" })))?;
@@ -194,6 +239,53 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
             && out.status == 200 && place(&cal_id).is_null()
             && fenced_read.status == 403 && fenced_write.status == 403 && fenced_sub.status == 403 && still_listed,
         json!([cal_in.body, out.body, fenced_read.body, fenced_write.body, fenced_sub.body]),
+    );
+    // nor do their sockets go on (the audit): offboarded, with every
+    // socket's identity check due, the admin's agent-only socket is closed
+    // at its next frame (it holds less than it opened with), and a member's
+    // socket that sends nothing is closed (4001) before a new message
+    // reaches it; an active member reconnects and reads it, they do not
+    let hal_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "hal-1", "person": hal_id })))?;
+    let aged = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-live", "ms": fragment_proto::limits::LIVE_IDENTITY_MS })))?;
+    let closed_by = |sock: &mut Socket| -> (Vec<Value>, String) {
+        let mut texts = vec![];
+        loop {
+            match sock.next() {
+                Ok(frame) => texts.push(frame["body"]["text"].clone()),
+                Err(e) => break (texts, e.to_string()),
+            }
+        }
+    };
+    hal_live.send(&json!({ "type": "ping" }))?;
+    let (hal_frames, hal_closed) = closed_by(&mut hal_live);
+    let said_after = say("t-out", "said after they left")?;
+    let (cal_frames, cal_closed) = closed_by(&mut cal_live);
+    let (_, ada_closed) = closed_by(&mut ada_live);
+    let ada_back = Socket::open(api, &name, "__live", Some(&ada), None).and_then(|mut sock| {
+        sock.until("hello", 5)?;
+        sock.send(&json!({ "type": "subscribe", "channel": "talk", "after": 0 }))?;
+        Ok(sock.until_where("record", 50, |r| r["body"]["text"] == "said after they left").is_ok())
+    });
+    let cal_back = Socket::open(api, &name, "__live", Some(&cal), None).map(|_| "opened".to_string()).unwrap_or_else(|e| format!("{e:#}"));
+    let after = json!("said after they left");
+    s.ok(
+        "offboarded, their sockets go no further: the one through their agent's membership closes at its next frame (4001), a silent one closes (4001) before the new message reaches it, and they cannot reconnect (403), while an active member reconnects and reads it",
+        hal_out.status == 200 && aged.status == 200 && hal_closed.contains("4001")
+            && said_after.status == 200 && cal_closed.contains("4001") && !cal_frames.contains(&after) && !hal_frames.contains(&after)
+            && ada_closed.contains("4001") && ada_back.as_ref().is_ok_and(|b| *b) && cal_back.contains("403"),
+        json!({ "hal": [hal_closed, hal_frames], "cal": [cal_closed, cal_frames], "ada": ada_closed, "adaBack": format!("{ada_back:?}"), "calBack": cal_back }),
+    );
+    // nor does their search take its new messages (a channel no list row
+    // carries, so nothing else is sent them): its admin's search finds the
+    // new one, theirs does not, and their row of it goes, with what their
+    // search held of it
+    let said = say("t2", "quokka sighted after they left")?;
+    let admin_finds = s.eventually(WAIT, || finds(&ada, "quokka"));
+    let row_gone = s.eventually(WAIT, || super::posts::row_of(api, &cal, &name).is_null());
+    s.ok(
+        "offboarded, a member's search takes none of its new messages, though its admin's does: their row goes, and their search finds it no more",
+        said.status == 200 && admin_finds && !finds(&cal, "quokka") && row_gone && !finds(&cal, "zebra"),
+        json!({ "said": said.body, "adminFinds": admin_finds, "rowGone": row_gone }),
     );
     // what was held on the queue for them, retried once their endpoints
     // answer, is refused before it is sent: each such subscription ends,
@@ -298,6 +390,34 @@ pub fn org_fragments(s: &mut Suite, api: &Api) -> Result<()> {
         eve_in.status == 200 && eve_out.status == 200 && eve_back.status == 200 && still_listed && eve_made.status == 200
             && agent_in_a.status == 403 && eve_in_a.status == 403 && eve_in_b.status == 200 && ada_made.status == 200 && ada_agent_in_a.status == 200,
         json!({ "agentInA": [agent_in_a.status, agent_in_a.body.clone()], "eveInA": eve_in_a.status, "eveInB": eve_in_b.status, "adaAgentInA": [ada_agent_in_a.status, ada_agent_in_a.body.clone()], "listed": still_listed }),
+    );
+
+    // an offboarded agent's row from before posts as no agent (the audit):
+    // a public org fragment, made with its maker's own agent, whose agents'
+    // channel anyone may post to but only its agent members as agents
+    let ada_hand_id = api.identity(&ada_hand)?;
+    let made3 = api.signed(&ada, "POST", &format!("{root}/fragments"), Some(&json!({ "label": s.name("orgpub"), "visibility": "public", "agent": ada_hand_id })))?;
+    let name3 = made3.body["name"].as_str().context("the org's public fragment")?.to_string();
+    let files = json!([{ "path": "fragment.json", "text": r#"{"channels":{"work":{"read":"public","post":"public","from":"agent"}}}"# }]);
+    let wrote3 = api.signed(&ada, "POST", &format!("/api/f/{name3}/files"), Some(&json!({ "key": "agents-channel", "message": "an agents' channel", "files": files })))?;
+    let deployed3 = api.signed(&ada, "POST", &format!("/api/f/{name3}/deploy"), Some(&json!({})))?;
+    let gus = api.person()?;
+    let gus_id = api.identity(&gus)?;
+    invite(&name3, &gus)?;
+    let gus_in = accept(&name3, &gus)?;
+    let gus_listed = s.eventually(WAIT, || !super::posts::row_of(api, &gus, &name3).is_null());
+    let gus_hand = Keys::generate();
+    let gus_made = api.signed(&gus, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&gus_hand, "POST", reg, &gus) })))?;
+    let step = |who: &Keys, id: &str| api.signed(who, "POST", &format!("/api/f/{name3}/channels/work"), Some(&json!({ "id": id, "body": { "kind": "turn.step", "turn": "t1", "text": "a step" } })));
+    let gus_posts = step(&gus_hand, "g1")?;
+    let gus_out = api.signed(&ada, "POST", &format!("{root}/offboard"), Some(&json!({ "id": "gus-1", "person": gus_id })))?;
+    let gus_after = step(&gus_hand, "g2")?;
+    let ada_agent_posts = step(&ada_hand, "a1")?;
+    s.ok(
+        "an org's public fragment's agents' channel takes a member's agent's post while its person is in; offboarded, that agent's row from before makes it no agent member there (403), while its maker's own agent, made a member with it, still posts",
+        made3.status == 200 && wrote3.status == 200 && deployed3.status == 200 && gus_in.status == 200 && gus_listed && gus_made.status == 200
+            && gus_posts.status == 200 && gus_out.status == 200 && gus_after.status == 403 && gus_after.message().contains("agent members only") && ada_agent_posts.status == 200,
+        json!({ "made": made3.body, "gusPosts": gus_posts.body, "gusAfter": [gus_after.status, gus_after.body.clone()], "adaAgent": [ada_agent_posts.status, ada_agent_posts.body.clone()] }),
     );
 
     // org_admin_cannot_bypass_cap: its budget stops its admin's AI steps too
