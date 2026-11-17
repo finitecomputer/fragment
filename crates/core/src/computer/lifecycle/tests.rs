@@ -308,6 +308,50 @@ fn a_sleep_failed_late_meters_none_of_its_try() {
     assert_eq!(meters(&l.apply(Event::Alarm, T + DAYS + 60_000)), vec![], "and nothing after it: its window, free");
 }
 
+/// Goal (#1302's review, round 2): a sleep's try heard late that then
+/// saves is billed what it was shown running for, its sleep to its save's
+/// start, beside its stop's seconds, and none of the silence: whether the
+/// save's report itself comes days on, or a late wake comes first. Method:
+/// the review's trace, saved late.
+#[test]
+fn a_sleep_saved_late_is_billed_its_try() {
+    let late = T + DAYS;
+    let (mut l, g, seq) = saving_sleep();
+    let mut m = meters(&l.apply(Event::Saved { generation: g, seq }, late));
+    m.extend(meters(&l.apply(Event::Asleep { generation: g }, late + 1_000)));
+    assert_eq!(m, vec![(T + 3_000, T + 10_000), (T + 10_000, T + 11_000), (late, late + 1_000)], "its saved report, days on");
+    let (mut l, g, seq) = saving_sleep();
+    let mut m = meters(&l.apply(Event::Wake { why: Wake::Record }, late));
+    m.extend(meters(&l.apply(Event::Saved { generation: g, seq }, late + 1_000)));
+    m.extend(meters(&l.apply(Event::Asleep { generation: g }, late + 2_000)));
+    assert_eq!(m, vec![(T + 3_000, T + 10_000), (T + 10_000, T + 11_000), (late, late + 2_000)], "a late wake, then its report");
+}
+
+/// Goal (#1302's review, Alex's): a sleep's try stays free across a late
+/// event that is not its outcome, then fails: none of the try, and none of
+/// the silence, is charged, whether a late wake came first (its save under
+/// way) or a late alarm that only asked its hold again. Method: each
+/// sequence, then an alarm in its window.
+#[test]
+fn a_try_failed_after_a_late_event_is_free() {
+    let late = T + DAYS;
+    let (mut l, g, seq) = saving_sleep();
+    let mut m = meters(&l.apply(Event::Wake { why: Wake::Record }, late));
+    m.extend(meters(&l.apply(Event::SaveFailed { generation: g, seq, why: "R2 is down".into() }, late + 1_000)));
+    m.extend(meters(&l.apply(Event::Alarm, late + 60_000)));
+    assert_eq!(m, vec![(T + 3_000, T + 10_000)], "a late wake, then its failure");
+    let mut l = Lifecycle::new();
+    let g = started(&mut l, T);
+    l.apply(Event::Sleep, T + 10_000);
+    let s = l.apply(Event::Alarm, late);
+    assert!(s.actions.contains(&Action::Sleep { generation: g }), "its hold asked again: {s:?}");
+    let mut m = meters(&s);
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, late + 1_000));
+    m.extend(meters(&l.apply(Event::SaveFailed { generation: g, seq, why: "R2 is down".into() }, late + 2_000)));
+    m.extend(meters(&l.apply(Event::Alarm, late + 60_000)));
+    assert_eq!(m, vec![(T + 3_000, T + 10_000)], "a late alarm, then its failure");
+}
+
 /// Goal (FIN-511, the other side): an ordinary sleep that saves is
 /// metered as ever, its hold, save and stop to its end. Method: the
 /// review's trace, its save reported and its stop done on time.

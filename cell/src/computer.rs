@@ -51,10 +51,10 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, awake_rows, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
-use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
+use fragment_core::ledger::{MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
@@ -1293,9 +1293,8 @@ impl ComputerCell {
         let intervals: Vec<(i64, i64)> = rows.iter().filter_map(|r| Some((r["from_ms"].as_i64()?, r["to_ms"].as_i64()?))).collect();
         let Some((first, _)) = intervals.first().copied() else { return Ok(()) };
         let last = intervals.last().map_or(first, |(from, _)| *from);
-        let (meter_rows, too_long) = awake_rows(&id, &intervals);
-        if !meter_rows.is_empty() {
-            let meter = Meter { batch: format!("awake:{id}:{first}-{last}"), rows: meter_rows };
+        let (meter, too_long) = awake_batch(&id, &intervals);
+        if let Some(meter) = meter {
             let metered = crate::ledger::ask(&self.env, &owner, &meter).await.map_err(CellError::from)?;
             for r in &metered.refused {
                 // a row the ledger refused changed nothing there: it is logged, not kept

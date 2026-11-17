@@ -38,7 +38,7 @@ pub const METER_EVERY_MS: i64 = 5 * 60_000;
 /// another, or the platform's delay), and nothing shows it ran meanwhile,
 /// so that time is not metered (FIN-511).
 pub const ALARM_LATE_MS: i64 = 20 * 60_000;
-/// No awake row longer than this is charged (`awake_rows`): the longest the
+/// No awake row longer than this is charged (`awake_batch`): the longest the
 /// lifecycle meters is a meter's wait and a sleep's steps, each heard within
 /// `ALARM_LATE_MS`, about twenty minutes in all, so one longer came from a
 /// path it should not have, and is logged, never billed (FIN-511).

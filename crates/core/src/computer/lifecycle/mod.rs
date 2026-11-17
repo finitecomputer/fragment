@@ -311,18 +311,23 @@ impl Lifecycle {
     /// before the window and after it).
     fn meter(&mut self, now_ms: i64, step: &mut Step) {
         if now_ms > self.metered_to_ms {
-            if !self.always_on {
-                let (from, to) = (self.metered_to_ms, now_ms);
-                let (free_from, free_to) = self.unmetered.unwrap_or((to, to));
-                assert!(free_from <= free_to, "a window runs forward");
-                if from < free_from.min(to) {
-                    step.actions.push(Action::Meter { from_ms: from, to_ms: free_from.min(to) });
-                }
-                if free_to.max(from) < to && self.unmetered.is_some() {
-                    step.actions.push(Action::Meter { from_ms: free_to.max(from), to_ms: to });
-                }
-            }
+            self.meter_span(self.metered_to_ms, now_ms, step);
             self.metered_to_ms = now_ms;
+        }
+    }
+
+    /// Awake time `[from, to)`, but what falls in the unsaved window, and
+    /// none while always on.
+    fn meter_span(&self, from: i64, to: i64, step: &mut Step) {
+        if from < to && !self.always_on {
+            let (free_from, free_to) = self.unmetered.unwrap_or((to, to));
+            assert!(free_from <= free_to, "a window runs forward");
+            if from < free_from.min(to) {
+                step.actions.push(Action::Meter { from_ms: from, to_ms: free_from.min(to) });
+            }
+            if free_to.max(from) < to && self.unmetered.is_some() {
+                step.actions.push(Action::Meter { from_ms: free_to.max(from), to_ms: to });
+            }
         }
     }
 
@@ -569,6 +574,14 @@ impl Lifecycle {
                 step.actions.push(Action::Unhold { generation });
             }
             (Phase::Sleeping { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
+                // its try heard late (its meter passed over the time since,
+                // stopping at its start) and saved: what it was shown
+                // running for, its sleep to its save's start, is its owner's
+                if let Some(Saving::Save { since_ms, .. }) = self.saving {
+                    if self.metered_to_ms > since_ms {
+                        self.meter_span(self.save_asked_ms, since_ms, &mut step);
+                    }
+                }
                 self.saved(now_ms, &mut step);
                 self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
                 step.actions.push(Action::Stop { generation, saved: true });
