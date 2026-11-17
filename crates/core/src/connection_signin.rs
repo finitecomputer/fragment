@@ -168,7 +168,7 @@ pub fn revoke_form(token: &str) -> String {
 /// provider grants them beside whatever else the person allows (Google's
 /// granular consent offers no box for them; Microsoft may leave
 /// `offline_access` out of its answer's `scope`), so a grant of these alone
-/// lets an agent do nothing (`tokens` refuses it), none is ever missing, and
+/// lets an agent do nothing (`tokens_of` refuses it), none is ever missing, and
 /// none tells an access.
 pub const IDENTITY_SCOPES: [&str; 6] = ["openid", "email", "profile", "offline_access", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"];
 
@@ -206,10 +206,6 @@ pub enum Refused {
     NoScopes,
 }
 
-pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
-    tokens_of(answer, requested, requested)
-}
-
 /// Every scope a row names, of either access: what a grant's answer is
 /// read against (`spelled_as_asked`), whichever access was asked for.
 pub fn scopes_named(o: &ConnectionOAuth) -> Vec<String> {
@@ -222,8 +218,10 @@ pub fn scopes_named(o: &ConnectionOAuth) -> Vec<String> {
     named
 }
 
-/// `tokens`, its answer's scopes spelled as `named` (the row's every scope,
-/// `scopes_named`) spells them where the provider answered them another way.
+/// A token endpoint's answer as the grant to import, or why it is none.
+/// Its scopes are spelled as `named` (the row's every scope,
+/// `scopes_named`) spells them, where the provider answered them another
+/// way.
 pub fn tokens_of(answer: &Value, requested: &[String], named: &[String]) -> Result<Tokens, Refused> {
     use Refused::Invalid;
     let access = answer["access_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
@@ -489,6 +487,12 @@ fn id_claims(answer: &Value, client_id: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tokens_of`, read against what was asked alone: an answer that
+    /// spells its scopes as its row does.
+    fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
+        tokens_of(answer, requested, requested)
+    }
 
     fn config() -> ConnectionOAuth {
         let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect() };
