@@ -4220,6 +4220,20 @@ async fn a_voice_memo_is_transcribed_through_the_route() {
     assert_eq!((h.body["model"].clone(), h.body["language"].clone(), h.body["audio_bytes"].clone()), (json!("whisper"), serde_json::Value::Null, json!(audio.len())), "the route's whisper, the memo whole, no language forced");
     let asked = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).any(|c| c.body["messages"].to_string().contains(words));
     assert!(asked, "the turn's model call carries what the memo said: {:#?}", calls.iter().map(|c| c.body["messages"].to_string().chars().take(400).collect::<String>()).collect::<Vec<_>>());
+    // what the turn's model is told (Austin, 2026-11-17: his agent
+    // transcribed memos again itself): its system prompt says a memo arrives
+    // transcribed (hermes::VOICE), and its message is the shape VOICE
+    // describes, the words quoted just above Hermes' audio note, then the
+    // bridge's note naming the same recording. A Hermes that moves the
+    // quote makes VOICE false, and fails here.
+    let memo_call = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).find(|c| c.body["messages"].to_string().contains(words)).expect("the memo's model call");
+    let messages = memo_call.body["messages"].as_array().cloned().unwrap_or_default();
+    let system = messages.first().filter(|m| m["role"] == "system").map(content_text).unwrap_or_default();
+    assert!(system.contains("A voice memo arrives already transcribed: the quoted words just above the note that the user sent audio"), "its system prompt says a memo is already transcribed (hermes::VOICE): {}", system.chars().take(2000).collect::<String>());
+    let user = messages.iter().rev().find(|m| m["role"] == "user").map(content_text).unwrap_or_default();
+    let quoted = user.find(&format!("\"{words}\"\n[User sent audio: "));
+    let noted = user.find("sent a file: 'memo.wav' (audio/wav). It is on your computer at: /tmp/bridge-media/");
+    assert!(matches!((quoted, noted), (Some(q), Some(n)) if q < n), "its message quotes the words just above Hermes' audio note, then the bridge's note: {user}");
     let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == t).collect::<Vec<_>>());
     eprintln!("memo: replies {replies:?}");
     assert_eq!(replies.len(), 1, "one reply, no transcript echoed as a message of its own: {replies:?}");

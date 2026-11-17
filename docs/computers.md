@@ -817,8 +817,11 @@ payment card fill still asks. A card is its owner's alone to answer
 
 Every turn also tells the agent that a file attached in the chat is
 already on its computer, at the path the attachment note names, scratch
-until it copies it into its work (`hermes::FILES`); and that a reply line
-`MEDIA:<absolute path>` attaches a file there (`hermes::SENDING`).
+until it copies it into its work (`hermes::FILES`); that a voice memo
+arrives already transcribed, its words the quote above Hermes' audio
+note, its file only for work on the sound (`hermes::VOICE`); and that a
+reply line `MEDIA:<absolute path>` attaches a file there
+(`hermes::SENDING`).
 
 ### Its name, in our Hermes image
 
