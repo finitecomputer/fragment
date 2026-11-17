@@ -30,6 +30,12 @@
 //!                    target/devstack/macrofiche; external, in a store
 //!                    already running (CODESTORAGE_API_URL, CODESTORAGE_ORG,
 //!                    CODESTORAGE_PRIVATE_KEY_FILE): docs/self-host.md, seam 5
+//!   codestore carry --state <codestorage.json> --config <macrofiche.json> --org <org>
+//!   codestore verify --state <codestorage.json> --url <macrofiche> --org <org> --key-file <key>
+//!                    a dev stack's repos carried from the code.storage fake
+//!                    into macrofiche (MACROFICHE_BIN) while it is stopped,
+//!                    each keeping the url form, id and commit ids the cell
+//!                    holds; then read back from it serving (xtask/src/codestore.rs)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -129,6 +135,7 @@ mod ci_caches;
 mod ci_gate;
 mod cloudflare;
 mod cli_release;
+mod codestore;
 mod deploy;
 mod dev_agent;
 mod dns;
@@ -906,6 +913,7 @@ fn main() -> Result<()> {
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
+        Some("codestore") => codestore::codestore(&args[1..]),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
         Some("wire") => wire::write(&devstack::repo_root()),
         Some("secret") => secret::secret(&args[1..]),
@@ -914,7 +922,7 @@ fn main() -> Result<()> {
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
         Some("cli-release") => cli_release::run(&args[1..]),
-        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | codestore carry | verify ... | schema-lock | wire | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 

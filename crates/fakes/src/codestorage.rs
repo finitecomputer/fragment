@@ -36,6 +36,8 @@
 //!
 //! Test levers are methods on [`CodeStorage`]; none is an HTTP route.
 
+pub mod carry;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
