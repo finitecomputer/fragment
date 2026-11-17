@@ -442,21 +442,22 @@ git build natively there, `cargo xtask engine` then `cargo build
   on the VM's loopback, a systemd unit restarting it, the stack pointed
   at it with `--codestore external`.
 - **Backups while live:** a repository is changed only by its writes,
-  each `fsync`'d before it is answered, and every ref move is atomic, so
-  a copy of a repository taken file by file can catch a pack being
-  written. Take one of these instead, each consistent without stopping
-  anything:
-  - `git clone --mirror` (or `git fetch` into an existing mirror) of
-    each repository over its smart HTTP with an org token, from another
-    machine: git's own snapshot of every branch, the legacy ids aside
-    (hidden refs; a mirror of an imported repository keeps its history,
-    not the ids a cell's pins may still name);
-  - a filesystem snapshot (APFS on the enclosure from the Mac, or btrfs
-    or ZFS under the image) with macrofiche running: what a crash would
-    leave, which macrofiche recovers at boot (its crash rounds, its
-    docs/evidence/crash.json), copied off the box after.
-  A restore is the copy put back as the state directory while macrofiche
-  is stopped.
+  each `fsync`'d before it is answered, and every ref move is atomic, but
+  a copy of the state directory taken file by file can catch a pack being
+  written. The backup is a filesystem snapshot of the whole state
+  directory (APFS on the enclosure from the Mac, or btrfs or ZFS under
+  the image), taken with macrofiche running and copied off the box: what
+  a crash would leave, which macrofiche recovers at boot (its crash
+  rounds, its docs/evidence/crash.json). It holds everything a cell
+  relies on: each repository's identity (`repo.json`: its id and the url
+  form a cell holds it by) and, for a repository imported from the fake,
+  the legacy ids its pins may still name (`refs/macrofiche/legacy/`). A
+  restore is that snapshot put back as the state directory while
+  macrofiche is stopped.
+- A `git clone --mirror` of a repository over its smart HTTP (an org
+  token) is a second copy of its history, not a backup of the box: it
+  keeps neither the identity nor the legacy ids (hidden refs), so it
+  cannot be restored as the state directory.
 
 ## 12. Secrets: the store's bindings, read from the node's backend
 
