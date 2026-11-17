@@ -29,7 +29,12 @@ libc = "0.2"
 # while no node runs) before dev's WorkOS fake starts (src/lib.rs
 # `signed_in_subjects`): the crate e2e and the CLI pin
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+# the code store's org key's public half (src/codestore.rs), derived here so
+# macrofiche is never given the private key: the crate core signs with
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8"] }
 
 [dev-dependencies]
 # a P-256 org key made for a test (src/codestore.rs), never one committed
 fragment-fakes = { path = "../fakes" }
+# a JWT's signature, decoded to check it (src/codestore.rs's test)
+base64 = "0.22"
