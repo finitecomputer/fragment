@@ -17,8 +17,10 @@
 //!   `narrate: <command>` says words first, in the same response as its
 //!   call (`NARRATED`, a mid-turn answer well past 300 characters, streamed
 //!   before the call as a model streams it), then runs that command;
-//! - `browse: <url>` is a `browser_navigate` call, `look at your screen`
-//!   a `computer_use` capture, `desk: <json>` a `computer_use` call with
+//! - `browse: <url>` is a `browser_exec` call that opens it (Hermes'
+//!   browser tool since v0.23: Python against its helpers), `inspect
+//!   browser: <js>` one that prints that expression's value on the page
+//!   it shows, `look at your screen` a `computer_use` capture, `desk: <json>` a `computer_use` call with
 //!   those arguments, `write: <path>` a `write_file` of one line
 //!   there, and `code: <python>` an `execute_code` of that line (each
 //!   through Hermes' `tool_call` bridge when it defers the tool); their
@@ -386,6 +388,17 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         let call = json!({ "index": 0, "id": format!("call_{}", results + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
         return (String::new(), Some(call));
     }
+    // `run within <n>s: <command>`: that command, the terminal given its own
+    // timeout of n seconds (the call's `timeout`)
+    let within = last_user.lines().find_map(|l| {
+        let (_, rest) = l.split_once("run within ")?;
+        let (secs, command) = rest.split_once("s: ")?;
+        Some((secs.trim().parse::<u64>().ok()?, command.trim().to_string()))
+    });
+    if let (Some((secs, command)), true, None) = (within, has_terminal, &tool_result) {
+        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command, "timeout": secs }).to_string() } });
+        return (String::new(), Some(call));
+    }
     // `both: <a> | <b>`: both commands, two calls in the one response
     // (Hermes runs a terminal's one after the other)
     let both = last_user.lines().find_map(|l| l.split_once("both: ").map(|(_, c)| c.to_string()));
@@ -417,7 +430,8 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // `narrate: <command>`: words first (`narrated`), in the response that
     // calls the terminal with that command
     let narrate = last_user.lines().find_map(|l| l.split_once("narrate: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
-    // `browse: <url>`: the browser tool goes there; `look at your screen`:
+    // `browse: <url>`: the browser tool goes there; `inspect browser:
+    // <js>`: it prints that on the page it shows; `look at your screen`:
     // computer_use captures it. Each answer quotes what its tool said.
     let browse = last_user.lines().find_map(|l| l.split_once("browse: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty());
     let inspect_browser = last_user.lines().find_map(|l| l.split_once("inspect browser: ").map(|(_, expression)| expression.trim().to_string())).filter(|s| !s.is_empty());
@@ -562,16 +576,24 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             ("scripted: no execute_code among my tools".into(), None)
         };
     }
-    if let Some(expression) = inspect_browser {
-        return if offered("browser_console") {
-            (String::new(), Some(call("browser_console", json!({ "expression": expression }))))
+    // Hermes' browser_exec runs Python against its pre-imported helpers
+    // (new_tab, wait_for_load, page_info, js), its first line the step's label
+    let browser_code = match (&browse, &inspect_browser) {
+        (Some(url), _) => Some(format!("# Opening {url}\nnew_tab({})\nwait_for_load()\nprint(page_info())", json!(url))),
+        (None, Some(expression)) => Some(format!("# Reading the page\nprint(js({}))", json!(expression))),
+        (None, None) => None,
+    };
+    if let Some(code) = browser_code {
+        let args = json!({ "code": code });
+        return if offered("browser_exec") {
+            (String::new(), Some(call("browser_exec", args)))
+        } else if deferred("browser_exec") {
+            (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "browser_exec", "arguments": args }] }))))
         } else {
-            ("scripted: no browser_console among my tools".into(), None)
+            ("scripted: no browser_exec among my tools".into(), None)
         };
     }
     match (browse, look) {
-        (Some(url), _) if offered("browser_navigate") => return (String::new(), Some(call("browser_navigate", json!({ "url": url })))),
-        (Some(_), _) => return ("scripted: no browser_navigate among my tools".into(), None),
         (None, Some(args)) if offered("computer_use") => return (String::new(), Some(call("computer_use", args))),
         (None, Some(args)) if deferred("computer_use") => return (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "computer_use", "arguments": args }] })))),
         (None, Some(_)) => return ("scripted: no computer_use among my tools".into(), None),
@@ -723,9 +745,14 @@ fn answers_are_the_transcripts() {
     let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] send: echo made=/t/a.txt" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "{\"output\": \"made=/t/a.txt\", \"exit_code\": 0}" }], "tools": tools }));
     assert_eq!(t, "scripted: sent\nMEDIA:/t/a.txt");
     // the browser, and computer_use directly or behind Hermes' tool_search
-    let browser = json!([{ "type": "function", "function": { "name": "browser_navigate" } }]);
+    let browser = json!([{ "type": "function", "function": { "name": "browser_exec" } }]);
     let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] browse: https://example.com" }], "tools": browser }));
-    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "url": "https://example.com" }).to_string());
+    let code = |call: Option<Value>| serde_json::from_str::<Value>(call.unwrap()["function"]["arguments"].as_str().unwrap()).unwrap()["code"].as_str().unwrap().to_string();
+    assert_eq!(code(call), "# Opening https://example.com\nnew_tab(\"https://example.com\")\nwait_for_load()\nprint(page_info())");
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] inspect browser: navigator.webdriver === false ? 'ordinary' : 'automated'" }], "tools": browser }));
+    assert_eq!(code(call), "# Reading the page\nprint(js(\"navigator.webdriver === false ? 'ordinary' : 'automated'\"))");
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] browse: https://example.com" }], "tools": tools }));
+    assert_eq!((t.as_str(), call), ("scripted: no browser_exec among my tools", None));
     let bridged = json!([{ "type": "function", "function": { "name": "tool_search", "description": "… computer_use: Background desktop control …" } }, { "type": "function", "function": { "name": "tool_call" } }]);
     let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] look at your screen" }], "tools": bridged }));
     let call = call.unwrap();
