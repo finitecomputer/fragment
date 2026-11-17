@@ -143,8 +143,9 @@ fails or the match is ambiguous.
 Where `gws` is not on your PATH, the same APIs with `fragment api google
 <METHOD> <url>`: it sends the connection's placeholder for you, `--param`
 encodes a query parameter, `--body` is the JSON sent, and the answer is
-Google's JSON. A refusal is one line of JSON on stderr, `{error, status,
-message, hint}`, and exit 1.
+Google's JSON. A refusal is one line of JSON on stderr and exit 1: its
+`hint` says what to tell your owner, and its `body` is Google's own answer
+(`error.status`, `error.message`).
 
 ```bash
 G="fragment api google"

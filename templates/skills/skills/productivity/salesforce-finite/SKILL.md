@@ -36,21 +36,15 @@ SF="https://acme.my.salesforce.com/services/data/v63.0"   # the host in urls.res
 ```
 
 - An answer with `urls`: connected, go on.
-- `not_connected`: your owner has not connected Salesforce, or must
-  authorize it again. Ask them to connect it in Settings, under
-  Connections, then try again.
-- `forbidden`: your owner narrowed your connections and left Salesforce
-  out, or the call went to another org's host (the message names the
-  connected org's). Say so, and stop.
-- `invalid_session_id`: Salesforce refused the token (the person revoked
-  the app, or their org's admin did). Ask them to reconnect Salesforce.
 - `urls.rest` names no host under `my.salesforce.com` (an org without My
   Domain): say so, and stop.
+- `forbidden` on a call to an org's host: it went to another org's (the
+  message names the connected one's). Use that host.
 
 The answer is Salesforce's JSON on stdout. A refusal is one line of JSON on
-stderr, `{error, status, message, hint}`, and exit 1; Salesforce's own
-codes come through lower case (`malformed_query`, `invalid_field`,
-`required_field_missing`, `insufficient_access_or_readonly`).
+stderr and exit 1. Do what its `hint` says; its `body` is Salesforce's own
+answer, a list of `{errorCode, message, fields?}` (`MALFORMED_QUERY`,
+`INVALID_FIELD`, `REQUIRED_FIELD_MISSING`).
 
 ## Reading
 
@@ -106,11 +100,9 @@ Composite, UI API) is the same call with another path.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| Salesforce's `errorCode` | Fix |
 |---------|-----|
-| `not_connected` | Your owner connects Salesforce in Settings → Connections |
-| `forbidden` | Your owner left Salesforce off this agent's connections, or the call went to another org's host |
-| `invalid_session_id` | Your owner reconnects Salesforce in Settings → Connections |
-| `insufficient_access_or_readonly` | Their Salesforce user may not do this: their org's admin grants it |
-| `malformed_query`, `invalid_field` | Check the API names with `describe` |
-| `redirected` | Salesforce answered a redirect, which is never followed with the token: say so, and stop |
+| `INVALID_SESSION_ID` (401) | Salesforce refused the token (the person revoked the app, or their org's admin did): your owner reconnects Salesforce in Settings → Connections |
+| `INSUFFICIENT_ACCESS_OR_READONLY` | Their Salesforce user may not do this: their org's admin grants it |
+| `MALFORMED_QUERY`, `INVALID_FIELD` | Check the API names with `describe` |
+| `REQUEST_LIMIT_EXCEEDED` | The org's daily allowance is spent (`$SF/limits`): say so, and stop |
