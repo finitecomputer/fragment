@@ -1582,7 +1582,8 @@ org, id}` says which). An org's fragment is the org's to pay for: its
 hosting, storage, cards, icons and its own AI steps bill the org's ledger,
 every AI step meets its $5 cap and the org's budget, whoever starts it,
 and no one changes its cap (403). A person's agent working in it bills
-that person (decision 67). It is never an agent, a chat or skills.
+that person (decision 67). It is never an agent, a chat, skills or a
+session archive.
 
 - **Its content admins administer it**, each as themselves (an agent:
   403): members, invites, visibility, share link and delete (decision

@@ -971,9 +971,9 @@ impl FragmentKind {
     }
 
     /// A person's own, never an org's (decisions 66 to 71): an agent, a
-    /// chat or skills.
+    /// chat, skills or a session archive.
     pub fn persons_own(self) -> bool {
-        matches!(self, FragmentKind::Agent | FragmentKind::Chat | FragmentKind::Skills)
+        matches!(self, FragmentKind::Agent | FragmentKind::Chat | FragmentKind::Skills | FragmentKind::Sessions)
     }
 
     /// A kind this build knows, as a `fragment.json` names it; never

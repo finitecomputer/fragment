@@ -629,8 +629,8 @@ impl Facts {
 pub(crate) const ORG_HEADER: &str = "x-fragment-org";
 
 /// Why an org's fragment is no `what`, at its create and at each install
-/// (plane.rs): an org owns apps and brains; a person's agents, chats and
-/// skills stay theirs.
+/// (plane.rs): an org owns apps and brains; a person's agents, chats,
+/// skills and session archive stay theirs.
 pub(crate) fn persons_own(what: &str) -> String {
     format!("an org owns apps and brains; a {what} stays a person's own")
 }
