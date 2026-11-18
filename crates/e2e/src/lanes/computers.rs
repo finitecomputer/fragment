@@ -329,11 +329,13 @@ fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
 /// The bound checks (r4, r6: a sick container after a wake, and a sleep
 /// that never ended; #362: a start from a snapshot that came up dead), each
 /// skipped off the stub and the fakes.
-const BOUND_CHECKS: [&str; 4] = [
+const BOUND_CHECKS: [&str; 6] = [
     "a start that waits for its guest, as one from a snapshot does, is up once its guest reads its view",
     "one whose guest never reads it came up dead: the same wake starts it again from its save (#362)",
     "a sleep whose backups never answer (a sick container's) fails at their bound, and keeps its container, saying why",
     "its backups answering again, its owner's sleep saves it, and it sleeps",
+    "a sleep whose snapshot takes 45 s (a big disk's first, which 30 s cut) waits for it and keeps it, its container gone",
+    "the wake after it starts once, nothing failed",
 ];
 
 /// A start that waits for its guest, as a start from a snapshot does (local
@@ -341,8 +343,9 @@ const BOUND_CHECKS: [&str; 4] = [
 /// the save wait so, and with `freeze` stops its guest so it never reads its
 /// view), and a sleep whose backups never answer (the lever's
 /// `hang-backups`: the container's `sandbox-shim` never answers, and its
-/// saves' backups are bounded by the lever's few seconds). Starts and ends
-/// asleep.
+/// saves' backups are bounded by the lever's few seconds), and a sleep
+/// whose snapshot is slow (the lever's `slow-snapshot`: one made up that
+/// takes its ms, as a big disk's first does). Starts and ends asleep.
 fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
     let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
     let asleep = api.signed(c.owner, "GET", &path(""), None)?.body;
@@ -419,6 +422,40 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
         BOUND_CHECKS[3],
         unhang.status == 200 && r.body["phase"] == "asleep" && r.body.get("why").is_none() && newest["generation"] == generation && newest["id"] != before["id"],
         format!("{r} / {newest}"),
+    );
+    // a slow snapshot: its sleep waits it out, keeps it as its save's cache,
+    // and its container is gone by the answer, so the next start is clean
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let g = woke.body["generation"].as_u64().unwrap_or(0);
+    std::thread::sleep(QUEUE_DRAIN);
+    let slow = Duration::from_secs(45);
+    let lever_set = lever_with(api, c.id, json!({ "op": "slow-snapshot", "ms": slow.as_millis() as u64 }))?;
+    let t0 = std::time::Instant::now();
+    // its answer comes once the snapshot ends: longer than a request's own wait
+    let slept = api.patient(slow * 3).signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let took = t0.elapsed();
+    let kept = lever(api, c.id, "saves")?;
+    let snapshot = &kept.body["snapshot"];
+    s.ok(
+        BOUND_CHECKS[4],
+        woke.body["phase"] == "awake"
+            && lever_set.status == 200
+            && slept.body["phase"] == "asleep"
+            && took >= slow
+            && snapshot["id"].as_str().is_some_and(|id| id.starts_with("lever-") && id.ends_with(&format!("-{g}")))
+            && snapshot["save"] == kept.body["saves"][0]["id"]
+            && kept.body["saves"][0]["generation"].as_u64() == Some(g)
+            && kept.body["running"] == false,
+        format!("slept in {took:.1?}; {slept} / {kept}"),
+    );
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let after = lever(api, c.id, "saves")?;
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    s.ok(
+        BOUND_CHECKS[5],
+        woke.body["phase"] == "awake" && woke.body["generation"].as_u64() == Some(g + 1) && after.body["failures"] == 0 && slept.body["phase"] == "asleep",
+        format!("{woke} / {after} / {slept}"),
     );
     Ok(())
 }

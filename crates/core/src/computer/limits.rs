@@ -26,8 +26,10 @@ pub const WONT_WAKE_RETRY_MS: i64 = 30 * 60_000;
 /// leaves an alarm's other events room: a start made by an alarm fits it).
 pub const START_DEADLINE_MS: i64 = 15 * 60_000;
 /// A sleep's stop (snapshot, signal, five seconds of exit, destroy)
-/// finishes within this, or it is asked again.
-pub const SLEEP_DEADLINE_MS: i64 = 60_000;
+/// finishes within this, or it is asked again: its snapshot is given up to
+/// five minutes, a full disk's first one (the cell's `SNAPSHOT_MAX_MS`),
+/// and its other steps seconds.
+pub const SLEEP_DEADLINE_MS: i64 = 6 * 60_000;
 /// Awake time is metered at least this often.
 pub const METER_EVERY_MS: i64 = 5 * 60_000;
 /// A running computer is heard from at least every `METER_EVERY_MS` (its

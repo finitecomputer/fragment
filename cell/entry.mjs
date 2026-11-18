@@ -470,8 +470,11 @@ class ContainerHost {
   }
 
   // A snapshot of the container within `ms` (`Overdue` past it): its id.
-  async snapshot(generation, name, ms) {
+  // `slowMs` (the lever's `slow-snapshot`, where local workerd takes none):
+  // one made up that takes that long.
+  async snapshot(generation, name, ms, slowMs) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+    if (slowMs > 0) return bounded("the snapshot", ms, () => new Promise((r) => setTimeout(() => r(`lever-${name}`), slowMs)));
     const s = await bounded("the snapshot", ms, () => this.#c.snapshotContainer({ name }));
     return s.id;
   }

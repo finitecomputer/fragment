@@ -464,7 +464,14 @@ backups get what the rest leaves (`BACKUPS_MS`, 11 minutes 10 seconds).
 That is the most any save can have, so it is fixed, not one that follows
 a save's progress. Saves over 1 GB moved 9 to 156 MB/s on production
 (2026-10-27 to 11-03), so a full disk's save (about 10.8 GB) fits all but
-the slowest 6% of tries, each tried again. A start takes an alarm of its
+the slowest 6% of tries, each tried again. The snapshot after it is given
+what the hold and the save left of the sleep's 14 minutes, at least 30
+seconds and at most five (`snapshot_ms`): a snapshot is incremental, but
+the first after a disk grew took about 85 s for 9 GB (preview,
+2026-11-18), and 30 s for every one lost each over about 1.5 GB. A
+snapshot cut short frees nothing sooner: the runtime's takes no signal and
+holds the container until it ends. A wake that comes during the stop
+starts once the stop ends (`owes_start`). A start takes an alarm of its
 own: the one start an alarm makes (a retry's, or one owed after a sleep),
 its disk's read among its steps, with the alarm's other events, fits
 15 minutes (`RESTORE_MS` leaves them their 65 seconds). So an owner's
