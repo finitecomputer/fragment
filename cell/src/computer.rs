@@ -61,7 +61,7 @@ use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind, Reason};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -877,7 +877,7 @@ impl ComputerCell {
     /// `drive_with`, its answer taken as its start is owed when `answer` is
     /// asked for (an owner's restart: `drive_events`).
     async fn drive_answering(&self, first: Option<Event>, asked: bool, mut answer: Option<&mut Option<Unasked>>) -> CellResult<Option<String>> {
-        let told = self.notices()?;
+        let told = (self.notices()?, phase_told(&self.lifecycle()?));
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
         let mut refused = self.drive_events(first, answer.as_deref_mut()).await;
@@ -901,9 +901,10 @@ impl ComputerCell {
             // in which the alarm makes the start a restart owed
             self.slow_tell().await;
         }
-        // what its owner is told changed: their open pages read it again
-        // (whatever the events did, a step that failed half way included)
-        if self.notices().is_ok_and(|now| now != told) {
+        // what its owner is told changed (its notices, or its phase): their
+        // open pages read it again (whatever the events did, a step that
+        // failed half way included)
+        if self.notices().and_then(|n| Ok((n, phase_told(&self.lifecycle()?)))).is_ok_and(|now| now != told) {
             self.tell_owner().await;
         }
         refused
@@ -1041,9 +1042,15 @@ impl ComputerCell {
     /// reads it as it reconnects, or at its next change: logged, never failed.
     async fn tell_owner(&self) {
         let Ok(Some(owner)) = self.meta(MetaKey::Owner) else { return };
-        if let Err(e) = crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await {
-            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": e.message }));
-        }
+        tell(self.env.clone(), owner, self.meta(MetaKey::Id).ok().flatten()).await;
+    }
+
+    /// `tell_owner` beside what follows, never in its way: a start's steps
+    /// wait on no page, and nothing comes between its stored phase and them
+    /// (a drive's end tells again, awaited, should this be lost).
+    fn tell_owner_aside(&self) {
+        let Ok(Some(owner)) = self.meta(MetaKey::Owner) else { return };
+        worker::wasm_bindgen_futures::spawn_local(tell(self.env.clone(), owner, self.meta(MetaKey::Id).ok().flatten()));
     }
 
     /// `answer`, when asked for and still empty, takes the view as its
@@ -1071,7 +1078,7 @@ impl ComputerCell {
         // unhold), or at a start or a sleep's end
         while let Some(event) = queue.pop() {
             let mut life = self.lifecycle()?;
-            let shown = life.shown(js::now_ms());
+            let was = phase_told(&life);
             let logged = json!(event);
             let applied = event.clone();
             let step = life.apply_with(event, js::now_ms(), &rules);
@@ -1101,10 +1108,10 @@ impl ComputerCell {
                 }
             }
             self.alarm_at(step.alarm_ms).await?;
-            // its phase shown changed: its owner's open pages read it again,
-            // before a start's actions (a chat says its agent is getting ready)
-            if life.shown(js::now_ms()) != shown {
-                self.tell_owner().await;
+            // its phase changed: its owner's open pages read it again as a
+            // start's actions begin (a chat says its agent is getting ready)
+            if phase_told(&life) != was {
+                self.tell_owner_aside();
             }
             refused = refused.or(step.refused.clone());
             for next in self.perform(step).await? {
@@ -4285,4 +4292,19 @@ fn target_fragment(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/f/").or_else(|| path.strip_prefix("/api/f/"))?;
     let name = rest.split('/').next()?;
     fragment_proto::valid_fragment_name(name).then(|| name.to_string())
+}
+
+/// What its owner's pages show of its phase, and so are told of as it
+/// changes: the phase its view shows (`Lifecycle::shown`), and the stored
+/// one, as a start due (shown starting before its alarm) is made.
+fn phase_told(life: &Lifecycle) -> (std::mem::Discriminant<Phase>, ComputerPhase) {
+    (std::mem::discriminant(&life.phase), life.shown(js::now_ms()))
+}
+
+/// Tells `owner`'s open pages to read again (`Changed`). One that did not
+/// hear reads it as it reconnects, or at its next change: logged, never failed.
+async fn tell(env: Env, owner: String, computer: Option<String>) {
+    if let Err(e) = crate::principal::ask(&env, &owner, &crate::principal::calls::Changed {}).await {
+        console_error!("{}", json!({ "computer": computer, "told": "owner", "error": e.message }));
+    }
 }
