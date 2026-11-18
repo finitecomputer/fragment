@@ -202,7 +202,9 @@ fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str, agen
     // its person's press wakes it, once (Paul, 2026-11-18). Shown as a pane
     // shows it, the frame filling the page, at 1280 and 390 px.
     let shots = s.dir("hermes");
-    chrome.eval(&shell, "(Object.assign(document.querySelector('iframe').style, { position: 'fixed', inset: '0', width: '100vw', height: '100vh', border: '0' }), true)")?;
+    let framed = format!("[...document.querySelectorAll('iframe')].find((f) => f.src.includes({}))", serde_json::to_string(&computer)?);
+    chrome.eval(&shell, &format!("(Object.assign({framed}.style, {{ position: 'fixed', inset: '0', width: '100vw', height: '100vh', border: '0', zIndex: '2147483647' }}), true)"))?;
+    chrome.viewport(&shell, 1280, 800, false)?;
     let view = || api.signed(owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body["phase"].clone()).unwrap_or_default();
     let r = api.signed(owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     let asleep = "document.body.dataset.state === 'asleep' && document.getElementById('status').textContent === 'Your computer is asleep. Press anywhere to wake it.' && !document.getElementById('note').hidden";
@@ -219,9 +221,10 @@ fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str, agen
         told && stayed,
         json!({ "sleep": r.body["phase"], "phase": view(), "status": said(&mut chrome) }),
     );
-    // its person presses on it: it wakes, once, and streams again
+    // its person presses on it (a real press, in the middle of the page the
+    // frame fills): it wakes, once, and streams again
     let before = chrome.eval_in_frame(&shell, &computer, connects).unwrap_or_default().as_u64().unwrap_or(0);
-    chrome.click(&shell, "iframe")?;
+    chrome.click_at(&shell, (640.0, 400.0))?;
     let woke = s.eventually(Duration::from_secs(240), || chrome.eval_in_frame(&shell, &computer, &format!("{connects} === {} && document.body.dataset.state === 'watching'", before + 1)).ok() == Some(json!(true)));
     let _ = chrome.screenshot(&shell, &shots.join("screen-woken-1280.png"));
     s.ok("a press on it wakes its computer and the screen streams again: one stream more", woke && view() == "awake", json!({ "phase": view(), "status": said(&mut chrome), "streams": chrome.eval_in_frame(&shell, &computer, connects).unwrap_or_default() }));
