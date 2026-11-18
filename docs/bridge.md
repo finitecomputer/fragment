@@ -345,7 +345,7 @@ any runtime's, `nohup … &`, a download) holds the computer while the
 computer is working, for at most `LEFT_RUNNING_HOLD_MS` (2 hours) after
 its agents' work last held it: a turn queued or running, or a runtime's
 own work. An idle server, an idle runtime and its desktop never do
-(load.rs; `Input::Load`).
+(load.rs; `Input::Slice`).
 
 - **Working** is read from the computer's own counters every
   `LOAD_SLICE_MS` (20 s): its CPU time (its cgroup's `cpu.stat`, else the
@@ -354,8 +354,11 @@ own work. An idle server, an idle runtime and its desktop never do
   (`/proc/net/dev`). A slice over either floor
   (`LOAD_CPU_FLOOR_PERMILLE`, `LOAD_NET_FLOOR_BYTES_PER_S`) is work, and
   the computer is working while one of its last `LOAD_SLICES` (2
-  minutes) was. Disk writes are no measure: idle write-back alone passes
-  any useful floor. The measurements behind the floors are beside them.
+  minutes) was, counting only slices that began after its agents' work
+  stopped holding it: a turn's own work (its last tool, the runtime's
+  reply) never holds the computer on. Disk writes are no measure: idle
+  write-back alone passes any useful floor. The measurements behind the
+  floors are beside them.
 - **The bound is this life's**, never saved: a new life (a restart, a
   wake) holds nothing until its own agents' work ends, so a wake's own
   start never holds a computer woken for a look. A bridge restarted alone

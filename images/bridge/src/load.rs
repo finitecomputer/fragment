@@ -1,19 +1,16 @@
 //! Work left running on the computer, outside any turn (docs/bridge.md,
 //! "Work left running"): the computer's CPU time and network bytes, read
 //! every `LOAD_SLICE_MS` from its own counters, whatever started the work
-//! (a background command of any runtime's, `nohup … &`, a download). It is
-//! working while a slice of the last `LOAD_SLICES` was over a floor: an
-//! idle runtime, its desktop and an idle server stay under it. The engine
-//! holds the computer for it only within `LEFT_RUNNING_HOLD_MS` of its
-//! agents' last turn (`Input::Load`).
+//! (a background command of any runtime's, `nohup … &`, a download). Each
+//! slice goes to the engine, over a floor or not (`Input::Slice`): an
+//! idle runtime, its desktop and an idle server stay under it.
 
-use std::collections::VecDeque;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 
 use crate::engine::Input;
-use crate::limits::{LOAD_CPU_FLOOR_PERMILLE, LOAD_NET_FLOOR_BYTES_PER_S, LOAD_SLICES, LOAD_SLICE_MS};
+use crate::limits::{LOAD_CPU_FLOOR_PERMILLE, LOAD_NET_FLOOR_BYTES_PER_S, LOAD_SLICE_MS};
 
 /// The computer's own counters, each counting up from its start.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -24,37 +21,17 @@ pub struct Counters {
     pub net_bytes: u64,
 }
 
-/// The last `LOAD_SLICES` slices, each over a floor or not.
-#[derive(Debug, Default)]
-pub struct Window {
-    last: Option<(Counters, u64)>,
-    slices: VecDeque<bool>,
-}
-
-impl Window {
-    /// The counters read at `now_ms`: whether the computer is working, as
-    /// the slice since the read before and the slices before it say. A
-    /// counter that went back (a new container under the same bridge
-    /// cannot, but a fallback's might) starts over from it.
-    pub fn read(&mut self, c: Counters, now_ms: u64) -> bool {
-        if let Some((was, at)) = self.last.replace((c, now_ms)) {
-            if let (Some(cpu), Some(net), true) = (c.cpu_usec.checked_sub(was.cpu_usec), c.net_bytes.checked_sub(was.net_bytes), now_ms > at) {
-                let ms = now_ms - at;
-                // a microsecond of CPU per millisecond is a thousandth of a core
-                let over = cpu / ms >= LOAD_CPU_FLOOR_PERMILLE || net.saturating_mul(1000) / ms >= LOAD_NET_FLOOR_BYTES_PER_S;
-                if self.slices.len() == LOAD_SLICES {
-                    self.slices.pop_front();
-                }
-                self.slices.push_back(over);
-            }
-        }
-        assert!(self.slices.len() <= LOAD_SLICES, "a window keeps its slices");
-        self.working()
+/// Whether the slice from `was` to `now`, `ms` long, was over either
+/// floor; none when a counter went back (a fallback's might) or no time
+/// passed.
+pub fn over(was: Counters, now: Counters, ms: u64) -> Option<bool> {
+    let cpu = now.cpu_usec.checked_sub(was.cpu_usec)?;
+    let net = now.net_bytes.checked_sub(was.net_bytes)?;
+    if ms == 0 {
+        return None;
     }
-
-    pub fn working(&self) -> bool {
-        self.slices.iter().any(|&s| s)
-    }
+    // a microsecond of CPU per millisecond is a thousandth of a core
+    Some(cpu / ms >= LOAD_CPU_FLOOR_PERMILLE || net.saturating_mul(1000) / ms >= LOAD_NET_FLOOR_BYTES_PER_S)
 }
 
 /// `usage_usec` of a cgroup v2 `cpu.stat`.
@@ -88,14 +65,14 @@ pub fn net_bytes(dev: &str) -> Option<u64> {
             continue;
         }
         let f: Vec<u64> = rest.split_whitespace().map(|v| v.parse().ok()).collect::<Option<_>>()?;
-        // receive: bytes …(8 fields); transmit: bytes …
+        // receive: bytes and 7 more; transmit: bytes …
         total = total.saturating_add(*f.first()?).saturating_add(*f.get(8)?);
         any = true;
     }
     any.then_some(total)
 }
 
-/// Where the counters are read from: the container's own cgroup (v2), else
+/// Where the CPU time is read from: the container's own cgroup (v2), else
 /// the machine's `/proc/stat`. Docker shows a container its own cgroup and
 /// the host's `/proc/stat`, so the cgroup goes first.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -114,16 +91,15 @@ fn read(from: CpuFrom) -> Option<Counters> {
     Some(Counters { cpu_usec, net_bytes })
 }
 
-/// Reads the counters every `LOAD_SLICE_MS` for the bridge's life, and tells
-/// the engine each time the computer starts or stops working
-/// (`Input::Load`, as `wrap` puts it in `inbox`). With no counters to
-/// read, it says so once and holds nothing, as a bridge before it.
+/// Reads the counters every `LOAD_SLICE_MS` for the bridge's life, and
+/// gives the engine each slice (`Input::Slice`, as `wrap` puts it in
+/// `inbox`). With no counters to read, it says so once and gives none, as
+/// a bridge before it.
 pub async fn watch<M>(inbox: mpsc::Sender<M>, wrap: fn(Input) -> M, mut stop: watch::Receiver<bool>) {
     let from = [CpuFrom::Cgroup, CpuFrom::Proc].into_iter().find(|f| read(*f).is_some());
-    crate::ev!("load.counters", { "cpu": format!("{from:?}") });
+    crate::ev!("load.counters", { "cpu": from.map(|f| format!("{f:?}")) });
     let Some(from) = from else { return };
-    let mut window = Window::default();
-    let mut said = false;
+    let mut last: Option<(Counters, u64)> = None;
     let mut every = tokio::time::interval(Duration::from_millis(LOAD_SLICE_MS));
     // bounded by the bridge's life: one read per slice, ended by `stop`
     loop {
@@ -132,10 +108,10 @@ pub async fn watch<M>(inbox: mpsc::Sender<M>, wrap: fn(Input) -> M, mut stop: wa
             _ = crate::net::stopped(&mut stop) => return,
         }
         let Some(c) = read(from) else { continue };
-        let working = window.read(c, crate::log::now_ms());
-        if working != said {
-            said = working;
-            if inbox.send(wrap(Input::Load(working))).await.is_err() {
+        let now = crate::log::now_ms();
+        if let Some((was, at)) = last.replace((c, now)) {
+            let Some(over) = over(was, c, now.saturating_sub(at)) else { continue };
+            if inbox.send(wrap(Input::Slice { from: at, over })).await.is_err() {
                 return;
             }
         }
@@ -152,42 +128,18 @@ mod tests {
         Counters { cpu_usec, net_bytes }
     }
 
-    /// Goal: the computer is working while a slice of the window was over
-    /// either floor, and not once the window holds none. Invalid: a first
-    /// read says nothing yet; a counter that went back, or a clock that did
-    /// not move, makes no slice.
+    /// Goal: a slice at either floor is over it, and one just under both
+    /// is not. Invalid: a counter that went back, or no time passed, is no
+    /// slice.
     #[test]
-    fn working_is_a_slice_over_a_floor_in_the_window() {
-        let mut w = Window::default();
-        assert!(!w.read(at(0, 0), 0), "one read is no slice");
-        // just under each floor, every slice
-        let under_cpu = LOAD_CPU_FLOOR_PERMILLE * S - S;
-        let under_net = LOAD_NET_FLOOR_BYTES_PER_S * S / 1000 - 1;
-        let (mut cpu, mut net) = (0, 0);
-        for i in 1..=LOAD_SLICES as u64 + 2 {
-            cpu += under_cpu;
-            net += under_net;
-            assert!(!w.read(at(cpu, net), i * S), "under both floors");
-        }
-        let mut t = (LOAD_SLICES as u64 + 2) * S;
-        // a slice at the CPU floor works, and the window holds it
-        t += S;
-        cpu += LOAD_CPU_FLOOR_PERMILLE * S;
-        assert!(w.read(at(cpu, net), t));
-        for _ in 1..LOAD_SLICES {
-            t += S;
-            assert!(w.read(at(cpu, net), t), "held by the window");
-        }
-        t += S;
-        assert!(!w.read(at(cpu, net), t), "the window holds no slice over");
-        // the network's floor alone
-        t += S;
-        net += LOAD_NET_FLOOR_BYTES_PER_S * S / 1000;
-        assert!(w.read(at(cpu, net), t));
-        // invalid: a counter that went back and a clock that stood still
-        // make no slice, and the window keeps what it held
-        assert!(w.read(at(0, 0), t + S));
-        assert!(w.read(at(u64::MAX / 2, 0), t + S), "no time passed");
+    fn a_slice_is_over_either_floor() {
+        let zero = at(0, 0);
+        assert_eq!(over(zero, at(LOAD_CPU_FLOOR_PERMILLE * S, 0), S), Some(true), "the CPU's floor");
+        assert_eq!(over(zero, at(0, LOAD_NET_FLOOR_BYTES_PER_S * S / 1000), S), Some(true), "the network's floor");
+        assert_eq!(over(zero, at(LOAD_CPU_FLOOR_PERMILLE * S - 1, LOAD_NET_FLOOR_BYTES_PER_S * S / 1000 - 1), S), Some(false), "just under both");
+        assert_eq!(over(at(5, 0), at(4, 0), S), None, "went back");
+        assert_eq!(over(at(0, 5), at(0, 4), S), None, "went back");
+        assert_eq!(over(zero, at(1, 1), 0), None, "no time passed");
     }
 
     #[test]
