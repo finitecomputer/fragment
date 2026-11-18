@@ -1720,7 +1720,7 @@ mod tests {
         }
         assert_eq!((s.calls.len(), s.failures.len()), (4, 1), "each call recorded, the queued failure left for the next");
         let models = fragment_core::models::Models::defaults();
-        let platform = [models.cheap.model(), models.medium.model(), models.fallback.model(), models.vision.model(), fragment_core::icon::SUBJECT_MODEL, fragment_core::icon::IMAGE_MODEL];
+        let platform = models.slots.iter().map(|s| s.upstream.model()).chain([fragment_core::icon::SUBJECT_MODEL, fragment_core::icon::IMAGE_MODEL]);
         for id in platform {
             assert!(!RETIRED.iter().any(|(r, _)| *r == id), "{id} is retired");
         }
@@ -1839,7 +1839,8 @@ mod tests {
         let mut metered = fragment_core::models::Stream::default().on(&routed);
         metered.push(&r.body, None);
         assert_eq!(metered.usage().and_then(|u| fragment_core::models::usage_of(model, u)), Some(fragment_core::price::Usage::Tokens { model: model.into(), input: 20, cached_input: 30, cache_write: 0, output: 7 }));
-        let mut deltas = fragment_core::models::Stream::default().on(&fragment_core::models::Models::defaults().cheap);
+        let defaults = fragment_core::models::Models::defaults();
+        let mut deltas = fragment_core::models::Stream::default().on(&defaults.slots[defaults.routes[defaults.default].slot].upstream);
         deltas.push(&r.body, None);
         assert_eq!(deltas.usage(), None, "on Workers AI, a chunk with a choice carries a delta");
     }
