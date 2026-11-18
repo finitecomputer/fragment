@@ -364,8 +364,8 @@ unfinished design, not debt.
   so hermes-boot writes each `config.yaml` whole
   (images/hermes/boot/src/hermes.rs `profile_config`).
 - **Risk:** an agent's own `hermes config set` lasts until it sleeps.
-- **Delete when:** an agent's settings live in its `agent.json` and the
-  boot merges them into the profile's config, proven by a setting that
+- **Delete when:** an agent's settings live in the agent fragment's
+  `meta` and the boot merges them into the profile's config, proven by a setting that
   survives a wake.
 
 ## A Stop over Hermes' Relay reaches its turn through the image
@@ -424,8 +424,8 @@ unfinished design, not debt.
   `own_chat`; the CLI's `direct_label` finds the same).
 - **Risk:** an agent made another way has no home chat until one is made
   with that label; a second chat of that label may be taken instead.
-- **Delete when:** the agent fragment names its own chat (its
-  `agent.json`), and the bridge, the shell and the CLI read that.
+- **Delete when:** the agent fragment names its own chat (in its
+  `meta`), and the bridge, the shell and the CLI read that.
 
 ## A Hermes release has no rollback
 
