@@ -313,32 +313,21 @@ pub const LIVE_PING_MS: u64 = 30_000;
 /// platform then counts it closed, and its computer would sleep under the
 /// turn that holds it.
 pub const KEEPALIVE_PING_MS: u64 = 15_000;
-/// Work left running outside any turn (load.rs; docs/bridge.md, "Work left
-/// running") holds the computer at most this long after its agents' work
-/// last did: a forgotten loop costs at most this much awake time (the plan
-/// to a sandbox per agent, Q9, 2026-11-18).
+/// Work left running (load.rs) holds the computer at most this long after
+/// its agents' work last did: what a forgotten loop costs, at most.
 pub const LEFT_RUNNING_HOLD_MS: u64 = 2 * 60 * 60 * 1000;
-/// A card with an option for the computer (a sign-in's code, whose login
-/// lives in this life's process) holds the computer at most this long
-/// while it is open, or to its expiry if sooner: a person signs in and
-/// pastes a code within minutes, and one left open costs no more awake
-/// time than this (the plan to a sandbox per agent, P4).
+/// A card only this life can take (a sign-in's code) holds the computer
+/// at most this long while open, or to its expiry if sooner: a person
+/// signs in within minutes.
 pub const COMPUTER_CARD_HOLD_MS: u64 = 10 * 60 * 1000;
-/// The computer's counters are read this often (load.rs): a slice.
+/// The counters are read every slice; the computer works while one of its
+/// last `LOAD_SLICES` was over a floor (a pause in the work holds on).
 pub const LOAD_SLICE_MS: u64 = 20_000;
-/// It is working while one of its last this many slices was over a floor:
-/// a pause in the work (a build waiting on a download) holds on.
 pub const LOAD_SLICES: usize = 6;
-/// A slice is work at this much CPU, in thousandths of one core, every
-/// process's together: celld's guard. Measured in the Hermes image on
-/// Docker (2026-11-18, 20 s slices): idle Hermes 4–10, 29 just after its
-/// first reply, its desktop up 4–7, an idle `http.server` left running
-/// 6–18; a busy loop 979–1003, `gzip` 1093–1161; a 200 KB/s download 7–11.
+/// The floors: CPU in thousandths of a core, network both ways. Measured
+/// in the Hermes image (#1349): idle at most 29 and 1,700 B/s; a busy loop
+/// about 1,000; a 200 KB/s download only 7–11 of CPU.
 pub const LOAD_CPU_FLOOR_PERMILLE: u64 = 50;
-/// Or this many bytes a second on the network, both ways (a download is
-/// work its CPU does not show). Measured as above: idle 380–1,700; that
-/// download 199,000–200,000. Disk writes are no measure: idle Hermes'
-/// write-back alone reached 1.2 MB/s in a slice.
 pub const LOAD_NET_FLOOR_BYTES_PER_S: u64 = 50_000;
 
 /// A post the platform did not take is tried this many times, waiting a

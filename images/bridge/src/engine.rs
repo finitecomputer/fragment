@@ -355,10 +355,8 @@ pub struct Prompt {
     pub computer: Vec<String>,
     pub expires_at: u64,
     pub closed: bool,
-    /// Until when it holds the computer (the engine's clock; 0, never): a
-    /// card with an option for the computer, whose answer only this life
-    /// can take, until its expiry or `COMPUTER_CARD_HOLD_MS`, whichever is
-    /// first. A restart ends its turn, so never kept.
+    /// Until when it holds the computer (0, never): an option for the
+    /// computer is this life's alone (`COMPUTER_CARD_HOLD_MS`). Never kept.
     #[serde(skip)]
     pub holds_until: u64,
     /// Its owner's answer, held from the runtime until its closure is on
@@ -556,10 +554,8 @@ pub enum Input {
     Posted { turn: String, id: String, kept: bool },
     /// Time passed: expiries, quiet turns, and claims to try again.
     Tick,
-    /// A slice of the computer's counters, from `from` (ms) until now,
-    /// over a floor or not (load.rs): work left running, which holds it
-    /// within `LEFT_RUNNING_HOLD_MS` of its agents' work. None: the
-    /// platform's hold overlapped it, so its save's work says nothing.
+    /// A slice of the computer's counters from `from` (ms) to now, over a
+    /// floor or not; none under the platform's hold (load.rs).
     Slice { from: u64, over: Option<bool> },
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
@@ -667,15 +663,10 @@ pub struct Engine {
     /// Its agents' work held the computer at the last step: a turn queued
     /// or running, or a runtime's own work.
     busy: bool,
-    /// Work left running (docs/bridge.md, "Work left running"): the last
-    /// `LOAD_SLICES` slices of the computer's counters, each its start and
-    /// whether it was over a floor, or unknown under a save
-    /// (`Input::Slice`); when this life's
-    /// agents' work last stopped holding the computer, from which alone
-    /// slices count, for `LEFT_RUNNING_HOLD_MS`; and whether it holds it
-    /// now. Never written to `/data`: a new life holds none of it until its
-    /// own work ends, so a wake's own start never holds a computer woken
-    /// for a look.
+    /// Work left running (docs/bridge.md): the last `LOAD_SLICES` slices
+    /// (start, `Input::Slice`'s `over`); when this life's agents' work last
+    /// stopped holding the computer; whether it holds it now. Never saved:
+    /// a wake's own start never holds a computer woken for a look.
     slices: VecDeque<(u64, Option<bool>)>,
     left_from: Option<u64>,
     left: bool,
@@ -914,8 +905,7 @@ impl Engine {
             self.end(id, Outcome::Error(LOST.into()), Closed::Expired);
         }
         assert!(self.state.turns.values().all(|t| matches!(t.phase, Phase::Queued | Phase::Ended)), "a recovered life holds only queued and ended turns");
-        // an earlier life's turns, ended here, were no work of this life's:
-        // work left running counts from none of them
+        // an earlier life's turns, ended here, are no work of this life's
         self.busy = false;
         self.left_from = None;
         self.pump_all();
@@ -961,21 +951,18 @@ impl Engine {
     fn finish(&mut self) -> Step {
         let working = self.runtimes.values().any(|r| r.working);
         let busy = working || self.state.turns.values().any(|t| t.phase == Phase::Queued || (t.phase == Phase::Running && !t.asking));
-        // a card only this life can take holds it too (a sign-in's code: a
-        // later life refuses it, and its person starts again); it is
-        // waiting on a person, so work left running counts from its start
+        // a card only this life can take holds it too; it waits on a
+        // person, so work left running counts from its start
         let card = self.state.turns.values().any(|t| t.active() && t.prompts.iter().any(|p| !p.closed && self.now < p.holds_until));
         if self.busy && !busy {
             self.left_from = Some(self.now);
         }
         self.busy = busy;
-        // only slices wholly after the agents' work: its own (a turn's
-        // last tool, the runtime's reply) never holds the computer on
+        // only slices wholly after the agents' work count, and a save's
+        // (none) keep a hold as it was
         let window = limits::LOAD_SLICES as u64 * limits::LOAD_SLICE_MS;
         let fresh = |start: u64| start + window + limits::LOAD_SLICE_MS > self.now;
         let working = |from: u64| self.slices.iter().any(|&(start, over)| over == Some(true) && start >= from && fresh(start));
-        // under a save the counters say nothing: a hold stays as it was
-        // (a save never starts one, nor ends one while work runs)
         let saving = self.slices.back().is_some_and(|&(start, over)| over.is_none() && start + 2 * limits::LOAD_SLICE_MS > self.now);
         let left = !busy && self.left_from.is_some_and(|from| self.now < from + limits::LEFT_RUNNING_HOLD_MS && (working(from) || (saving && self.left)));
         if left != self.left {

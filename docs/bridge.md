@@ -366,9 +366,8 @@ own work. An idle server, an idle runtime and its desktop never do
 (load.rs; `Input::Slice`).
 
 - **Working** is read from the computer's own counters every
-  `LOAD_SLICE_MS` (20 s): its CPU time (its cgroup's `cpu.stat`, else the
-  machine's `/proc/stat`, which in a computer's own VM is the computer's)
-  and its network bytes both ways on every interface but loopback
+  `LOAD_SLICE_MS` (20 s): its CPU time (its cgroup's `cpu.stat`) and its
+  network bytes both ways on every interface but loopback
   (`/proc/net/dev`). A slice over either floor
   (`LOAD_CPU_FLOOR_PERMILLE`, `LOAD_NET_FLOOR_BYTES_PER_S`) is work, and
   the computer is working while one of its last `LOAD_SLICES` (2
@@ -388,7 +387,7 @@ own work. An idle server, an idle runtime and its desktop never do
   longer. A bridge restarted alone
   loses the hold; the computer then sleeps after its idle wait unless a
   turn runs.
-- A computer with no counters to read (`load.counters` names none) holds
+- A computer with no counters to read (`load.counters` says so) holds
   nothing for it. Its awake time is billed as any other.
 
 ## Agents asking each other
