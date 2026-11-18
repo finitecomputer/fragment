@@ -226,24 +226,33 @@ const BRACKETS: [(char, char); 6] = [('\'', '\''), ('"', '"'), ('`', '`'), ('(',
 /// A failed save's reason as the glance shows it: the platform's words,
 /// never a person's file names (a backup's error may name a file it could
 /// not read). Of each path, only an absolute one's first directory stays
-/// (`/data`, the platform's own); the rest is left out up to where it
-/// ends: its closing quote or bracket, else the next `": "`, else the
-/// reason's end. Its spaces are one, and it is at most `WHY_MAX_BYTES`,
+/// (`/data`, the platform's own). The rest is left out to where it ends,
+/// erring long, since a name may hold a space, a quote or a `": "`: the
+/// last of its closing quote or bracket, else the last `": "`, else the
+/// reason's end. A relative path's earlier words may be its own too: it is
+/// left out back to its opening bracket, or the `": "` before it, or the
+/// reason's start. Its spaces are one, and it is at most `WHY_MAX_BYTES`,
 /// cut at a character.
 pub fn why(raw: &str) -> String {
     let spaced = cut(raw, WHY_READ_MAX_BYTES).split_whitespace().collect::<Vec<_>>().join(" ");
+    let opens = |c: char| BRACKETS.iter().find(|(o, _)| *o == c).map(|(_, close)| *close);
     let mut out = String::with_capacity(spaced.len());
     let mut rest = spaced.as_str();
     // bounded: each turn takes the slash it found, at least, off `rest`
     while let Some(slash) = rest.find('/') {
-        // the path's word begins after a space or an opening bracket
-        let opener = rest[..slash].char_indices().rev().find(|(_, c)| *c == ' ' || BRACKETS.iter().any(|(o, _)| o == c));
-        let start = opener.map_or(0, |(i, c)| i + c.len_utf8());
-        let closer = opener.and_then(|(_, c)| BRACKETS.iter().find(|(o, _)| *o == c)).map(|(_, close)| *close);
-        let absolute = slash == start;
-        let kept = match absolute {
-            true => slash + 1 + rest[slash + 1..].find(|c: char| !(c.is_ascii_alphanumeric() || "_.-".contains(c))).unwrap_or(rest.len() - slash - 1),
-            false => start,
+        let before = rest[..slash].chars().next_back();
+        // absolute: its slash begins a word (after a space or an opening bracket)
+        let absolute = before.is_none_or(|c| c == ' ' || opens(c).is_some());
+        let (kept, closer) = match absolute {
+            true => (slash + 1 + rest[slash + 1..].find(|c: char| !(c.is_ascii_alphanumeric() || "_.-".contains(c))).unwrap_or(rest.len() - slash - 1), before.and_then(opens)),
+            false => {
+                let bracket = rest[..slash].char_indices().rev().find(|(_, c)| opens(*c).is_some()).map(|(i, c)| (i + c.len_utf8(), opens(c)));
+                let colon = rest[..slash].rfind(": ").map(|i| i + 2);
+                match (bracket, colon) {
+                    (Some((b, close)), c) if c.is_none_or(|c| b > c) => (b, close),
+                    (_, c) => (c.unwrap_or(0), None),
+                }
+            }
         };
         out.push_str(&rest[..kept]);
         rest = &rest[kept..];
@@ -251,9 +260,12 @@ pub fn why(raw: &str) -> String {
             // a path of one directory, as it is
             continue;
         }
-        let end = closer.and_then(|c| rest.find(c)).or_else(|| rest.find(": ")).unwrap_or(rest.len());
-        // past the slash it found (an absolute path's next, at 0), whatever it ends at
-        let end = end.max(slash.saturating_sub(kept) + 1);
+        // where the path left out ends, looked for past the slash it found
+        // (an absolute path's next, at 0): never before it
+        let from = slash.saturating_sub(kept);
+        let tail = &rest[from..];
+        let end = from + closer.and_then(|c| tail.rfind(c)).or_else(|| tail.rfind(": ")).unwrap_or(tail.len());
+        assert!(end > from, "a turn takes its slash");
         out.push_str(if absolute { "/…" } else { "…" });
         rest = &rest[end..];
     }
@@ -417,11 +429,13 @@ mod tests {
     /// Goal: a reason shows the platform's words, never a person's file
     /// names (a backup's error may name one it could not read): a path
     /// keeps its first directory (`/data`, the platform's), the rest left
-    /// out up to where it ends (its quote or bracket, else `": "`, else the
-    /// reason's end), a relative path or a URL whole; its spaces are one,
-    /// and it is short, cut at a character. Valid (the platform's own
-    /// words, as they are), each shape of path, too long at each width of
-    /// character.
+    /// out to the last of its closing quote or bracket, else the last
+    /// `": "`, else the reason's end (a name may hold a quote, a space or
+    /// a `": "`); a relative path or a URL whole, back to its bracket or
+    /// the `": "` before it; its spaces are one, and it is short, cut at a
+    /// character. Valid (the platform's own words, as they are), each shape
+    /// of path (a name holding its quote and a `": "`, watched leaking
+    /// before), too long at each width of character.
     #[test]
     fn a_reason_leaves_out_a_persons_paths_and_is_short() {
         let own = ["its container is not running", "the backup of /data: no answer within 727000 ms", "backup '/data': No space left on device (os error 28)", "start 4 is not the running one", "a / b"];
@@ -437,11 +451,18 @@ mod tests {
             ("~/notes/Tax.pdf: gone", "…: gone"),
             ("request failed (http://gateway/parts/1?d=/data/home/Tax.pdf) at last", "request failed (…) at last"),
             ("backup\n  '/data':\tdisk   full", "backup '/data': disk full"),
+            // a name that holds its quote, or a ": ": left out to the last
+            ("backup '/data/home/Ann's Tax Return.pdf': EACCES", "backup '/data/…': EACCES"),
+            ("open /data/home/Tax: Return.pdf: Permission denied", "open /data/…: Permission denied"),
+            // a relative path's earlier words may be its own: left out back to a bracket, a ": ", or the start
+            ("failed to read My Documents/Tax.pdf: EACCES", "…: EACCES"),
+            ("backup '/data': read My Documents/Tax.pdf", "backup '/data': …"),
+            ("(a)b/secret: x", "(…: x"),
         ];
         for (raw, shown) in paths {
             let w = why(raw);
             assert_eq!(w, shown);
-            assert!(["home", "Tax", "notes", "diary", "Return"].iter().all(|p| !w.contains(p)), "{w}");
+            assert!(["home", "Tax", "notes", "diary", "Return", "Ann", "My", "Documents", "secret"].iter().all(|p| !w.contains(p)), "{w}");
         }
         for c in ['x', 'é', '€', '𝄞'] {
             for pad in WHY_MAX_BYTES - 8..=WHY_MAX_BYTES {
