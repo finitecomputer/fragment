@@ -1299,7 +1299,7 @@ async fn work_left_running_holds_the_computer_while_it_works() {
     assert!(c.exec(&["pgrep", "-f", "sleep 900"]), "the idle command still runs");
     assert_eq!(left(&c)[before..], [true, false], "let go once");
     let log = c.logs();
-    assert!(log.contains("\"load.counters\"") && log.contains("\"cpu\":\"Cgroup\""), "the container's own cgroup is read");
+    assert!(log.contains("\"load.counters\"") && log.contains("\"read\":true"), "the container's own cgroup is read");
 }
 
 /// Goal (Alex on #1086): a `group` Hermes runs as one completion unit.
