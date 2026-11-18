@@ -397,10 +397,10 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{made} {files}"),
     );
     if scripted {
-        let named = fragment_core::codestorage::repo_name("", &agent_name, &fresh_id).unwrap_or_default();
-        s.ok("its repo is named for its new owner", s.fake.repo_url(&named).as_deref() == Some(fresh_repo.as_str()), &named);
+        let named = fragment_core::codestorage::repo_name("", &agent_name, made.body["npub"].as_str().unwrap_or_default()).unwrap_or_default();
+        s.ok("its repo is named for its new life", s.fake.repo_url(&named).as_deref() == Some(fresh_repo.as_str()), &named);
     } else {
-        s.skip("its repo is named for its new owner", "it reads code.storage's own record, the fake's");
+        s.skip("its repo is named for its new life", "it reads code.storage's own record, the fake's");
     }
     s.owned(&made.body, &fresh);
     s.commit(&made.body, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"a new soul\n"))]);
