@@ -86,6 +86,13 @@ pub enum Event {
     RestoreFailed { generation: u64, why: String, older: bool },
     Opened { socket: Socket },
     Closed { socket: Socket },
+    /// A person used one of its port tabs: its page sent the container a
+    /// message (the DO tells it a minute apart at most: cell/entry.mjs,
+    /// `TAB_USED_EVERY_MS`). An open tab holds the computer only this way,
+    /// `IDLE_MS` after its last use: a page left open says nothing (its
+    /// screen backs off to silence when no one touches it), and a computer
+    /// under it sleeps as under no tab (Paul, 2026-11-18).
+    TabUsed,
     /// The DO touched the hold of start `generation` and waited: whether
     /// the guest answered `held` in time.
     Held { generation: u64, held: bool },
@@ -193,4 +200,11 @@ pub struct Ended {
     /// was kept: told as any loss.
     #[serde(default)]
     pub quiet: bool,
+    /// No turn ran and no port tab was used on it since that save (a
+    /// keepalive opened or closed, a tab's page spoke: `Lifecycle`'s
+    /// `changed`): what the platform ran that may change its files is in
+    /// that save. `quiet` is this and more. False for an end recorded
+    /// before this was kept: told as a change lost.
+    #[serde(default)]
+    pub unchanged: bool,
 }

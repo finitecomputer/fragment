@@ -113,6 +113,12 @@ pub struct Saves {
     starting: Option<Starting>,
     /// How the last life ended, until the next start that comes up reads it.
     ended: Option<Ended>,
+    /// The save that held all the last life did as it ended (`ended`): read
+    /// then, while its own save is still kept, since saves of starts that
+    /// never came up may push it out before a start comes up. None when
+    /// stored before it was kept, or not known: worked out as it is read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ended_in: Option<EndedIn>,
     /// What the last start that came up restored.
     restored: Option<ComputerRestore>,
     /// The image the last start that came up runs: what a snapshot its
@@ -148,6 +154,15 @@ pub struct Saves {
     pub(super) disk_told: bool,
 }
 
+/// The save that held all a life did as it ended (`Saves::ended`): `save`,
+/// or none (an empty `/data`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndedIn {
+    pub life: u64,
+    #[serde(default)]
+    pub save: Option<String>,
+}
+
 /// A start that went back in time, as its owner is told of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +176,11 @@ pub struct WentBack {
     pub restored: ComputerRestore,
     /// That save's number (none: it restored nothing).
     pub save: Option<u64>,
+    /// No turn ran and no port tab was used on the lost life after the save
+    /// it went back to (`Saves::unchanged`). False when stored before this
+    /// was kept: told as a change lost.
+    #[serde(default)]
+    pub unchanged: bool,
 }
 
 /// Why a life's work since its last save is in no save, from how it ended
@@ -241,11 +261,38 @@ impl Saves {
     /// nothing of such a start (`notices`); its guest still reads it as a
     /// rollback (`restored`).
     fn lost_nothing(&self, e: &Ended, back_to: Option<&Save>) -> bool {
-        let kept_in = match self.saves.iter().find(|s| s.generation == e.generation) {
-            Some(own) => Some(Some(own.id.as_str())),
-            None => self.restored.as_ref().filter(|r| r.generation == e.generation).map(|r| r.save.as_deref()),
+        e.quiet && self.back_to_its_own(e, back_to)
+    }
+
+    /// Whether going back to `back_to` after the life `e` ended changed
+    /// nothing the platform ran since: no turn ran and no port tab was used
+    /// on that life since its newest save that worked (`Ended::unchanged`),
+    /// and `back_to` is that save (or the one it came up from), as for
+    /// `lost_nothing`. Its owner is told it went back, never that changes
+    /// were lost.
+    pub fn unchanged(&self, e: &Ended, back_to: Option<&Save>) -> bool {
+        e.unchanged && self.back_to_its_own(e, back_to)
+    }
+
+    /// Whether `back_to` (none: an empty `/data`) is the save that holds
+    /// what the life `e` did up to its newest save that worked: that save,
+    /// or, with none of its own, the one it came up from.
+    fn back_to_its_own(&self, e: &Ended, back_to: Option<&Save>) -> bool {
+        let kept_in = match self.ended_in.as_ref().filter(|k| k.life == e.generation) {
+            Some(k) => Some(k.save.as_deref()),
+            None => self.kept_in(e.generation),
         };
-        e.quiet && kept_in == Some(back_to.map(|s| s.id.as_str()))
+        kept_in == Some(back_to.map(|s| s.id.as_str()))
+    }
+
+    /// The save that holds what life `generation` did up to its newest save
+    /// that worked, as the saves kept now say: that save, or, with none of
+    /// its own kept, the one it came up from (none: not known).
+    fn kept_in(&self, generation: u64) -> Option<Option<&str>> {
+        match self.saves.iter().find(|s| s.generation == generation) {
+            Some(own) => Some(Some(own.id.as_str())),
+            None => self.restored.as_ref().filter(|r| r.generation == generation).map(|r| r.save.as_deref()),
+        }
     }
 
     /// Its owner saw the notice of the lost life `life`: it, and any loss
@@ -300,6 +347,7 @@ impl Saves {
     /// A life ended (the lifecycle's `Step::ended`).
     pub fn ended(&mut self, ended: Ended) {
         assert!(self.ended.is_none_or(|e| e.generation < ended.generation), "a life ends once, after the lives before it");
+        self.ended_in = self.kept_in(ended.generation).map(|save| EndedIn { life: ended.generation, save: save.map(str::to_string) });
         self.ended = Some(ended);
     }
 
@@ -341,11 +389,11 @@ impl Saves {
         // its owner is told of it until they say they saw it (`notices`),
         // unless it lost nothing (read before this start's `restored`
         // replaces the lost life's)
-        let told = ended.filter(|e| rollback && !self.lost_nothing(e, restored_save));
+        let told = ended.filter(|e| rollback && !self.lost_nothing(e, restored_save)).map(|e| (e, self.unchanged(&e, restored_save)));
         self.rollbacks += u64::from(rollback);
         self.restored = Some(restored.clone());
-        if let Some(e) = told {
-            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number) });
+        if let Some((e, unchanged)) = told {
+            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number), unchanged });
         }
         // a restart's start is fresh; the starts after it may use a snapshot again
         self.fresh = false;
@@ -489,6 +537,37 @@ mod tests {
     use super::*;
     use crate::computer::testing::{rec, Computer, IMAGE, T};
     use crate::computer::*;
+
+    /// Goal (the lifecycle's simulation, 2026-11-18): a life that ended
+    /// after a save of its own, nothing done since, is in that save. Starts
+    /// that never came up may push that save out before one comes up (one
+    /// put to sleep as it started, its save failing, stays up and saves);
+    /// going back past it, to the save the life came up from, lost its work,
+    /// and is told. Read as it ended, not after (before, it was told
+    /// nothing). Restart: the same once stored and read back.
+    #[test]
+    fn a_lifes_own_save_pushed_out_before_a_start_is_still_its_own() {
+        let mut v = Saves::default();
+        v.saved(1, rec("s0"), T, true);
+        v.starting(2, RestoreSource::Backup);
+        v.came_up(2, RestoreSource::Backup, Some("s0"), Some(IMAGE), T + 1_000).expect("came up from s0");
+        v.saved(2, rec("s1"), T + 2_000, true);
+        v.ended(Ended { generation: 2, by: LifeEnd::Exit, saved: false, at_ms: T + 3_000, restart: false, quiet: true, unchanged: true });
+        assert!(v.pending_loss().is_none(), "s1 holds its work: back to s1 loses nothing, while s1 is kept");
+        // three starts that never came up, each saving what will not restore
+        for g in 3..=5 {
+            v.saved(g, rec(&format!("x{g}")), T + 10_000 * g as i64, false);
+            assert!(v.unusable(&format!("x{g}")) || g == 5);
+        }
+        assert!(v.all().iter().all(|s| s.id != "s1"), "s1 pushed out: {:?}", v.all().iter().map(|s| s.id.clone()).collect::<Vec<_>>());
+        assert_eq!(v.current().map(|s| s.id.as_str()), Some("s0"), "back to the save it came up from");
+        let v: Saves = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+        let mut v = v;
+        v.starting(6, RestoreSource::Backup);
+        let r = v.came_up(6, RestoreSource::Backup, Some("s0"), Some(IMAGE), T + 90_000).expect("came up");
+        assert!(r.rollback);
+        assert!(v.went_back().is_some_and(|w| w.life == 2 && w.save == Some(1)), "its work since s0 is lost, and told: {:?}", v.went_back());
+    }
 
     /// Goal (P3): a wake uses the snapshot only while it caches the current
     /// save for the pinned image; any other is the image and the save, and
