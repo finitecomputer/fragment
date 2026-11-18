@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, look_at, notices, refresh_due, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::ledger::{MeterRow, Month, Spend};
@@ -354,6 +354,13 @@ enum MetaKey {
     /// taken when step 6 dropped them (`fragment_core::grants::Owed`): each
     /// handed over at its agent's next ask, then forgotten. None owed, no row.
     GrantsOwed,
+    /// When something but a quiet wake last woke it, or its guest last began
+    /// work (P7, `refresh_due`): ms.
+    Used,
+    /// When its quiet wake began (P7): set until something else wakes it,
+    /// its owner restarts it, or its guest begins work, and while set its
+    /// awake time is the platform's, never metered to its owner.
+    Quiet,
 }
 
 impl MetaKey {
@@ -381,6 +388,8 @@ impl MetaKey {
             MetaKey::StallTakeOver => "stall_take_over",
             MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
             MetaKey::GrantsOwed => "grants_owed",
+            MetaKey::Used => "used",
+            MetaKey::Quiet => "quiet",
         }
     }
 }
@@ -512,6 +521,9 @@ impl DurableObject for ComputerCell {
         if !self.wiped.get() && self.meta(MetaKey::Id).ok().flatten().is_some() {
             if let Err(e) = self.drive_with(Some(Event::Alarm), false).await {
                 console_error!("{{\"computer\":\"alarm\",\"error\":{}}}", json!(e.message));
+            }
+            if let Err(e) = self.refresh().await {
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "refresh": "failed", "error": e.message }));
             }
         }
         Response::ok("")
@@ -1094,7 +1106,12 @@ impl ComputerCell {
                     *slot = Some(self.view_unasked()?);
                 }
             }
-            self.alarm_at(step.alarm_ms).await?;
+            // asleep, used lately: its own look at its image (P7)
+            let alarm = match step.alarm_ms {
+                Some(at) => Some(at),
+                None => look_at(&life, self.used_ms()?, js::now_ms(), u32::from_le_bytes(js::random_bytes::<4>())),
+            };
+            self.alarm_at(alarm).await?;
             refused = refused.or(step.refused.clone());
             for next in self.perform(step).await? {
                 queue.push(next);
@@ -1205,6 +1222,10 @@ impl ComputerCell {
                 Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
                 Action::Unhold { generation } => self.unhold(generation).await,
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved).await),
+                Action::Meter { from_ms, to_ms } if self.meta(MetaKey::Quiet)?.is_some() => {
+                    // a quiet wake's time is the platform's (P7): logged, never charged
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "unmetered": { "from_ms": from_ms, "to_ms": to_ms }, "why": "quiet" }));
+                }
                 Action::Meter { from_ms, to_ms } => {
                     // kept until the owner's ledger has it: a flush that fails
                     // is tried again at the next interval, or the next wake
@@ -1220,8 +1241,9 @@ impl ComputerCell {
     /// credit, no wakes). A computer already up is not asked about. A
     /// ledger that does not answer lets it wake (docs/ledger.md).
     async fn wake(&self, why: Wake) -> CellResult<()> {
+        self.used()?;
         if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Starting { .. }) {
-            self.may_start(json!(why)).await?;
+            self.may_start(json!(why), true).await?;
         }
         // a wake that started nothing says why
         if let Some(why) = self.drive(Event::Wake { why }).await? {
@@ -1230,16 +1252,61 @@ impl ComputerCell {
         Ok(())
     }
 
+    /// Something but a quiet wake woke it, or its guest began work: it was
+    /// used now, and a quiet wake's life under way is its own no more.
+    fn used(&self) -> CellResult<()> {
+        self.set_meta(MetaKey::Used, &js::now_ms().to_string())?;
+        self.delete_meta(MetaKey::Quiet)
+    }
+
+    fn used_ms(&self) -> CellResult<Option<i64>> {
+        Ok(self.meta(MetaKey::Used)?.and_then(|ms| ms.parse().ok()))
+    }
+
+    /// Its quiet wake (P7), when due (`refresh_due`): a pre-wake's start, its
+    /// owner told nothing and charged nothing, then a pre-wake's minute
+    /// again once it is up, so its guest boots before its idle sleep holds
+    /// it and takes the snapshot its person's next wake starts from. A
+    /// start that fails is let go, not tried again (`Event::Sleep`): never
+    /// a strike toward "won't wake".
+    async fn refresh(&self) -> CellResult<()> {
+        let (life, saves, next) = (self.lifecycle()?, self.saves()?, self.images()?);
+        if !refresh_due(&life, &saves, next.next(), self.cfg.computer_snapshots, self.used_ms()?, js::now_ms()) {
+            return Ok(());
+        }
+        let id = self.meta(MetaKey::Id)?;
+        if self.may_start(json!("refresh"), false).await.is_err() {
+            return Ok(());
+        }
+        self.set_meta(MetaKey::Quiet, &js::now_ms().to_string())?;
+        console_log!("{}", json!({ "computer": id, "refresh": "wake", "image": next.next(), "ran": saves.ran() }));
+        self.drive(Event::Wake { why: Wake::Presence }).await?;
+        if self.meta(MetaKey::Quiet)?.is_none() {
+            // something else woke it meanwhile: the wake is theirs
+            return Ok(());
+        }
+        match self.lifecycle()?.phase {
+            Phase::Awake { .. } => self.drive(Event::Wake { why: Wake::Presence }).await.map(|_| ()),
+            Phase::Asleep { retry: Some(_) } => {
+                console_log!("{}", json!({ "computer": id, "refresh": "unstarted" }));
+                self.drive(Event::Sleep).await.map(|_| ())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Whether its owner's ledger lets it start (decision 27: at zero
     /// credit, no wakes; `asked` names what asked, for the log). A refusal
-    /// is kept as its view's `why` until a start comes up. A ledger that
-    /// does not answer lets it (docs/ledger.md).
-    async fn may_start(&self, asked: Value) -> CellResult<()> {
+    /// is kept as its view's `why` until a start comes up (`told`; a quiet
+    /// wake's is not). A ledger that does not answer lets it (docs/ledger.md).
+    async fn may_start(&self, asked: Value, told: bool) -> CellResult<()> {
         let owner = self.must(MetaKey::Owner)?;
         let may = crate::ledger::MaySpend { spend: Spend::Wake, fragment: None, by_owner: true };
         if let Err(e) = crate::ledger::ask(&self.env, &owner, &may).await {
             if e.refused.is_some() {
-                self.set_meta(MetaKey::Note, &e.message)?;
+                if told {
+                    self.set_meta(MetaKey::Note, &e.message)?;
+                }
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": asked, "refused": e.message }));
                 return Err(CellError::new(e.code, e.message));
             }
@@ -1276,7 +1343,8 @@ impl ComputerCell {
         }
         if !matches!(life.phase, Phase::Starting { .. }) {
             // the start under way is the restart's, asked of no ledger again
-            self.may_start(json!("restart")).await?;
+            self.used()?;
+            self.may_start(json!("restart"), true).await?;
             self.update_saves(|s| s.restart_fresh())?;
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": life.generation(), "phase": life.phase }));
         }
@@ -3445,6 +3513,8 @@ impl ComputerCell {
         // tagged with its container's start: a late close from an earlier one counts for nothing
         let generation = format!("g{}", self.lifecycle()?.generation());
         self.state.accept_websocket_with_tags(&pair.server, &["keepalive", &generation]);
+        // its guest began work: its life is no longer a quiet wake's
+        self.used()?;
         self.drive(Event::Opened { socket: Socket::Keepalive }).await?;
         Ok(Response::from_websocket(pair.client)?)
     }

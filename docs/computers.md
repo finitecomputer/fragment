@@ -41,6 +41,20 @@ an image may rely on this:
   to with `wake: true`, one of its agents added to a fragment, an open
   port tab, a page's presence on a subscribed fragment (a pre-wake, held
   a minute), or its owner. Never by its own guest's traffic.
+- **A quiet wake after an image change** (P7). A snapshot is tied to
+  the image it was taken on, so after a deploy that changed the image a
+  wake pulls it and restores the whole save. Asleep, a computer that
+  something but its quiet wake woke within `REFRESH_USED_MS` (7 days)
+  looks at its image every 1.5 to 3 hours (`REFRESH_LOOK_MS`, its own
+  alarm). Its next start on an image its last start did not run, with no
+  snapshot there (`refresh_due`), it wakes once as a page's presence
+  does, held a minute more once up so its guest boots, then idles out:
+  its sleep saves and snapshots on the new image, and its person's next
+  wake starts from that. Its owner is told nothing and charged nothing
+  for it (its meters are logged `unmetered`); a wake by anything else, or
+  its guest beginning work, makes the life theirs, metered from then on.
+  A ledger that refuses it, or a start that fails, ends it there: never a
+  strike.
 - **It stays awake** while a port tab is open or the guest holds its
   keepalive socket, and `IDLE_MS` (20 minutes) after neither does. An
   always-on seat's computer never sleeps (decision 25; docs/billing.md).

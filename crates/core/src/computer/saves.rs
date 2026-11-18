@@ -467,6 +467,12 @@ impl Saves {
         self.running.as_ref().filter(|r| r.generation == generation).map(|r| r.image.as_str())
     }
 
+    /// The image's reference the last start that came up ran, whether it
+    /// runs still or not: what its last sleep's snapshot is of.
+    pub fn ran(&self) -> Option<&str> {
+        self.running.as_ref().map(|r| r.image.as_str())
+    }
+
     pub fn restored(&self) -> Option<&ComputerRestore> {
         self.restored.as_ref()
     }

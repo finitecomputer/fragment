@@ -99,6 +99,13 @@ pub const STARTS_OWED_MAX: u32 = SAVES_KEPT as u32 + 2;
 /// its intercepts were set waits out its backoff, at most 30 s and half
 /// again of jitter for our bridge's (`net::Backoff`).
 pub const ALIVE_MS: i64 = 45_000;
+/// A computer woken within this, by anything but a quiet wake, wakes quietly
+/// once after its image changes (P7, `refresh_due`).
+pub const REFRESH_USED_MS: i64 = 7 * 24 * 60 * 60_000;
+/// An asleep computer used within `REFRESH_USED_MS` looks at its image this
+/// often at most, and half as often at least (`look_at`): a deploy's quiet
+/// wakes spread over these hours.
+pub const REFRESH_LOOK_MS: i64 = 3 * 60 * 60_000;
 /// Keepalives closed at most per event for want of a socket
 /// (`Lifecycle::keepalives_lost`): each close is an event of its own, and
 /// the next event closes the rest.
@@ -112,6 +119,7 @@ const _: () = assert!(HOLD_WAIT_MS < HOLD_DEADLINE_MS, "a hold's wait fits its d
 const _: () = assert!(SAVES_KEPT >= 2, "a save to fall back to");
 const _: () = assert!(UNSAVED_NOTICE_FAILURES >= 1, "told after a failure, never before");
 const _: () = assert!(ALIVE_MS < START_DEADLINE_MS, "a start's wait for its guest fits its deadline");
+const _: () = assert!(REFRESH_LOOK_MS < REFRESH_USED_MS, "a computer used lately looks before it is not");
 const _: () = assert!(WONT_WAKE_RETRY_MS > START_DEADLINE_MS, "a computer that won't wake tries one start at a time");
 const _: () = assert!(ALARM_LATE_MS > SAVE_DEADLINE_MS && ALARM_LATE_MS > METER_EVERY_MS, "an alarm held up behind a save, or one meter's wait, is on time");
 const _: () = assert!(
