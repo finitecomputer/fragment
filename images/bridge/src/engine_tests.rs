@@ -1189,18 +1189,22 @@ fn a_restart_starts_nothing_twice() {
     assert_eq!(e2.state().boot, 2);
 }
 
-/// Goal (a rollback of `/data`): the turns a life reads again that another
-/// life ran (their claims answered 409) are ones its runtime does not
-/// remember: the agent's next turn in that chat carries them
-/// (`TurnStart::forgotten`, the newest `NOTE_FORGOTTEN_MAX` and how many
-/// more), said once; another chat's turn, or another agent's, carries none.
-/// Method: a life's claims answered as another's, then its own.
+/// Goal (a rollback or a loss of `/data`; M17): a chat where another
+/// life ran turns of the agent's (their claims answered 409, and their
+/// lost ends too: that life ended them) is one its runtime forgot: the
+/// agent's next turn there carries it (`TurnStart::forgotten`, so the
+/// driver tells it the chat), said once a life; another chat's turn, or
+/// another agent's, carries nothing. A life that wakes with the same old
+/// `/data` reads them again, and is told again: once a life, not once
+/// ever. A turn another life was cut in (its lost end lands as this
+/// life's) is the cut note's: nothing forgotten. Method: a life's claims
+/// answered as another's, then its own; then a new life from the same
+/// state.
 #[test]
-fn turns_another_life_ran_are_told_once_to_the_next_turn() {
+fn turns_another_life_ran_are_told_once_a_life() {
     let a = agent("juniper");
     let b = agent("rowan");
     let v = view(&[&a, &b]);
-    let mut e = engine(&[a.clone(), b.clone()]);
     let theirs = |e: &mut Engine, s: Step| -> Vec<String> {
         let claims: Vec<String> = s.effects.iter().filter_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).collect();
         for turn in &claims {
@@ -1214,28 +1218,50 @@ fn turns_another_life_ran_are_told_once_to_the_next_turn() {
         }
         claims
     };
-    // the backlog a rollback sent the cursor back over: six of juniper's turns
-    let mut ran = vec![];
-    for seq in 1..=(limits::NOTE_FORGOTTEN_MAX as u64 + 2) {
-        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(seq, "id:paul", json!({ "text": format!("old {seq}") })), view: Some(v.clone()), since: 0 }, T0);
-        ran.extend(theirs(&mut e, s));
+    // the backlog a rollback (or a loss) sent the cursor back over: three
+    // of juniper's turns, each another life's
+    let backlog = |e: &mut Engine| -> Vec<String> {
+        let mut ran = vec![];
+        for seq in 1..=3 {
+            let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(seq, "id:paul", json!({ "text": format!("old {seq}") })), view: Some(v.clone()), since: 0 }, T0);
+            ran.extend(theirs(e, s));
+        }
+        ran
+    };
+    for life in [LIFE, "fedcba9876543210fedcba9876543210"] {
+        // each life wakes with the same old (here empty) state
+        let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, life).expect("a fresh state").with_runtime(crate::runtime::DEFAULT, &[]);
+        e.step(Input::Agents(vec![a.clone(), b.clone()]), T0);
+        e.recover(T0);
+        e.step(heard(Event::Connected(true)), T0);
+        assert_eq!(backlog(&mut e).len(), 3, "{life}: each claim another life's");
+        // rowan's own turn there is told nothing of juniper's
+        let r = said(&mut e, &b, &v, 20, "id:paul", json!({ "text": "@rowan hi", "to": [b.identity] }), T0 + 2);
+        let rowans = started(&r).expect("rowan's runs");
+        assert!(!rowans.forgotten, "{life}: {rowans:?}");
+        // juniper's next turn there is told
+        let r = said(&mut e, &a, &v, 21, "id:paul", json!({ "text": "and now?" }), T0 + 3);
+        let next = started(&r).expect("juniper's runs");
+        assert!(next.forgotten, "{life}: {next:?}");
+        ev(&mut e, Event::Reply { turn: next.turn.clone(), part: 1, text: "ok".into() }, T0 + 4);
+        ev(&mut e, Event::End { turn: next.turn.clone(), outcome: Outcome::Idle }, T0 + 4);
+        // said once a life: the turn after it is told nothing
+        let r = said(&mut e, &a, &v, 22, "id:paul", json!({ "text": "again" }), T0 + 5);
+        let after = started(&r).expect("runs");
+        assert!(!after.forgotten, "{life}: {after:?}");
     }
-    assert_eq!(ran.len(), limits::NOTE_FORGOTTEN_MAX + 2);
-    // rowan's own turn there is told nothing of juniper's
-    let r = said(&mut e, &b, &v, 20, "id:paul", json!({ "text": "@rowan hi", "to": [b.identity] }), T0 + 2);
-    let rowans = started(&r).expect("rowan's runs");
-    assert!(rowans.forgotten.is_empty() && rowans.forgotten_more == 0, "{rowans:?}");
-    // juniper's next turn there is told of the newest four, and two more
-    let r = said(&mut e, &a, &v, 21, "id:paul", json!({ "text": "and now?" }), T0 + 3);
-    let next = started(&r).expect("juniper's runs");
-    assert_eq!(next.forgotten, ran[2..].to_vec(), "the newest, oldest first");
-    assert_eq!(next.forgotten_more, 2);
-    ev(&mut e, Event::Reply { turn: next.turn.clone(), part: 1, text: "ok".into() }, T0 + 4);
-    ev(&mut e, Event::End { turn: next.turn.clone(), outcome: Outcome::Idle }, T0 + 4);
-    // said once: the turn after it is told nothing
-    let r = said(&mut e, &a, &v, 22, "id:paul", json!({ "text": "again" }), T0 + 5);
-    let after = started(&r).expect("runs");
-    assert!(after.forgotten.is_empty() && after.forgotten_more == 0, "{after:?}");
+    // another life was cut in it: its lost end lands as this life's, and
+    // its continuation, the next turn there, is told of it by the cut note
+    // alone
+    let mut e = engine(&[a.clone(), b.clone()]);
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(1, "id:paul", json!({ "text": "cut there" })), view: Some(v.clone()), since: 0 }, T0);
+    let Some(Effect::Claim { turn: cut, .. }) = s.effects.iter().find(|x| matches!(x, Effect::Claim { .. })).cloned() else { panic!("a claim") };
+    e.step(Input::Claimed { turn: cut.clone(), answer: ClaimAnswer::Theirs }, T0 + 1);
+    let landed = e.step(Input::Posted { turn: cut.clone(), id: records::work_id(&cut, "end"), kept: true }, T0 + 1);
+    assert!(landed.effects.iter().any(|x| matches!(x, Effect::ReadCut { turn, .. } if *turn == cut)), "{landed:?}");
+    let read = e.step(Input::CutRead { turn: cut.clone(), waited: false }, T0 + 2);
+    let cont = started(&answered(&mut e, read, T0 + 2)).expect("its continuation runs");
+    assert!(cont.continues.as_deref() == Some(cut.as_str()) && !cont.forgotten, "{cont:?}");
 }
 
 /// Invalid state: a turn past its channel's cursor, or a wrong id, is
