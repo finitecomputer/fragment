@@ -490,13 +490,15 @@ impl FragmentCell {
             self.reused(&p, &kept);
             return Ok(kept.result);
         }
-        let tier = bounds::tier_named(t.model.as_deref()).map_err(|why| permanent(why.message()))?;
+        // the route it names (one of the deployment's: `models.routes`), else the default
+        let models = &crate::config::Config::from_env(&self.env).models;
+        let route = models.step_route(t.model.as_deref()).map_err(|e| permanent(format!("model names {}", e.message())))?;
         let body = bounds::text_body(t).map_err(|why| permanent(why.message()))?;
         let drafting = bounds::draft_of(t).map(|d| self.drafting(run, d)).transpose()?;
-        // where the deployment runs the tier (Workers AI, or an
+        // where the deployment runs the route (Workers AI, or an
         // OpenAI-compatible API: Finite Private on Finite's own), streamed
-        let models = &crate::config::Config::from_env(&self.env).models;
-        let bounded = models.capped(bounds::Named::Tier(tier)).and_then(|m| bounds::bound(m, body, true)).map_err(|why| permanent(why.message()))?;
+        let named = bounds::Named::Route(u8::try_from(route).expect("at most ROUTES_MAX routes"));
+        let bounded = bounds::bound(models.capped(named), body, true).map_err(|why| permanent(why.message()))?;
         self.gate(&p).await?;
         let read = match self.read_text(&p, &bounded, drafting.as_ref()).await {
             Ok(read) => read,
@@ -515,7 +517,7 @@ impl FragmentCell {
         // how long it took (docs/api.md, AI): kept with what it bought
         let timing = json!({ "first_ms": read.first_ms, "ms": read.ms, "model": read.model, "calls": read.calls, "tries": tried });
         let a = &read.answer;
-        let result = json!({ "text": a.content, "message": a.message(), "finish_reason": a.finish_reason, "model": read.model, "tier": tier, "usage": read.used, "timing": timing });
+        let result = json!({ "text": a.content, "message": a.message(), "finish_reason": a.finish_reason, "model": read.model, "tier": models.name_of(named), "usage": read.used, "timing": timing });
         self.keep(&p, &result, usage, read.log_id.as_deref()).await?;
         self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
         Ok(result)
