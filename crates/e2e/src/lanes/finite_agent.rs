@@ -17,7 +17,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use fragment_fakes::workers_ai::Reply;
+use fragment_fakes::workers_ai::{Pace, Reply};
 use serde_json::{json, Value};
 
 use super::computers::{agent_replies, phase, turn_of, work_of, CHAT_JSON};
@@ -99,13 +99,15 @@ pub fn finite_agent(s: &mut Suite, api: &Api) -> Result<()> {
     let follows = subs.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["channel"] == "chat" && x["url"] == format!("fragment:{agent_name}").as_str()));
     s.ok("the agent follows the chat, a subscription naming its fragment (a live call, as the agent)", run["status"] == "succeeded" && follows, json!({ "run": run, "subscriptions": subs.body }));
     s.ok("nothing woke the computer", phase(api, &owner, &computer) == "asleep", phase(api, &owner, &computer));
+    // a call's run goes through a Workflow (a followed record's is called at once: jobs.rs `live_direct`)
+    println!("      (the follow, a call through a Workflow: created to finished {:?} ms)", run["finishedAt"].as_i64().zip(run["createdAt"].as_i64()).map(|(f, c)| f - c));
 
     let mut page = Socket::open(api, &chat_name, "__live", Some(&owner), None)?;
     page.until("hello", 5)?;
     page.send(&json!({ "type": "subscribe", "channel": "chat", "after": 0 }))?;
     page.until("subscribed", 20)?;
     let mut n = 0u32;
-    let mut say = |s: &mut Suite, page: &mut Socket, text: &str| -> Result<(String, Option<u128>, Option<u128>, Value)> {
+    let mut say = |s: &mut Suite, page: &mut Socket, text: &str| -> Result<(String, Option<u128>, Option<u128>, Value, Value)> {
         n += 1;
         let t0 = Instant::now();
         let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": format!("m{n}"), "body": { "text": text } })))?;
@@ -118,14 +120,31 @@ pub fn finite_agent(s: &mut Suite, api: &Api) -> Result<()> {
         let reply_ms = replied.then(|| t0.elapsed().as_millis());
         s.eventually(Duration::from_secs(20), || work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.end"));
         let end = work_of(&records(api, &owner, &chat_name, "work"), &turn).into_iter().find(|r| r["body"]["kind"] == "turn.end").unwrap_or(Value::Null);
-        Ok((turn, first_draft, reply_ms, end))
+        // where the time went, by the platform's clocks: the post's record,
+        // the run its delivery started (the agent's), the agent's own
+        // receipt, the reply's record
+        let post_at = r.body["record"]["at"].as_i64().unwrap_or(0);
+        let reply_at = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().find(|r| r["body"]["turn"] == turn.as_str()).and_then(|r| r["at"].as_i64());
+        let runs = api.signed(&owner, "GET", &format!("/api/f/{agent_name}/runs?op=drive"), None).map(|r| r.body["runs"].clone()).unwrap_or(Value::Null);
+        let created = runs.as_array().into_iter().flatten().filter(|r| r["via"] == "followed").filter_map(|r| r["createdAt"].as_i64()).filter(|at| *at >= post_at).min();
+        let received = end["body"]["timing"]["received_at"].as_i64();
+        let split = json!({
+            "delivery_ms": created.map(|c| c - post_at),
+            "run_start_ms": created.zip(received).map(|(c, r)| r - c),
+            "agent_ms": end["body"]["timing"]["answered_ms"],
+            "post_to_reply_record_ms": reply_at.map(|a| a - post_at),
+        });
+        Ok((turn, first_draft, reply_ms, end, split))
     };
 
     // ---- valid: a turn with no tool
     if fakes {
+        // paced, as a model streams: its words come over a second or two,
+        // so a page sees the answer grow in the draft before the reply
+        s.ai.pace_next(&[Pace { every_ms: 200, thinking: 0, hold_ms: 0 }]);
         s.ai.reply_next(&[Reply::Text("Hello from pi, in a fragment.".into())]);
     }
-    let (turn, first_draft, reply_ms, end) = say(s, &mut page, "hi pi")?;
+    let (turn, first_draft, reply_ms, end, split) = say(s, &mut page, "hi pi")?;
     let replies = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity);
     let work = work_of(&records(api, &owner, &chat_name, "work"), &turn);
     let kinds: Vec<&str> = work.iter().filter_map(|r| r["body"]["kind"].as_str()).collect();
@@ -140,14 +159,14 @@ pub fn finite_agent(s: &mut Suite, api: &Api) -> Result<()> {
     );
     s.ok("a page sees its draft live, then the reply", first_draft.is_some() && reply_ms.is_some(), format!("draft {first_draft:?} ms, reply {reply_ms:?} ms"));
     s.ok("a turn with no tool leaves the computer asleep", phase(api, &owner, &computer) == "asleep", phase(api, &owner, &computer));
-    println!("      (no tool, computer asleep: first draft {first_draft:?} ms, reply {reply_ms:?} ms after the post; {})", end["body"]["timing"]);
+    println!("      (no tool, computer asleep: first draft {first_draft:?} ms, reply {reply_ms:?} ms after the post; split {split}; {})", end["body"]["timing"]);
 
     // ---- a tool turn wakes the sleeping computer
     if fakes {
         s.ai.reply_next(&[Reply::Tools(vec![("run".into(), json!({ "command": "echo pi-was-here" }))]), Reply::Text("It printed pi-was-here.".into())]);
     }
     let calls = if fakes { s.ai.calls().len() } else { 0 };
-    let (turn, first_draft, reply_ms, end) = say(s, &mut page, if fakes { "run a command please" } else { "Use the run tool to run `echo pi-was-here` and tell me what it printed." })?;
+    let (turn, first_draft, reply_ms, end, split) = say(s, &mut page, if fakes { "run a command please" } else { "Use the run tool to run `echo pi-was-here` and tell me what it printed." })?;
     let work = work_of(&records(api, &owner, &chat_name, "work"), &turn);
     let step = work.iter().find(|r| r["body"]["kind"] == "turn.step").cloned().unwrap_or(Value::Null);
     let result_seen = !fakes || s.ai.calls()[calls..].iter().any(|c| c.body.to_string().contains("pi-was-here"));
@@ -156,7 +175,7 @@ pub fn finite_agent(s: &mut Suite, api: &Api) -> Result<()> {
         step["body"]["tool"] == "run" && step["body"]["ok"] == true && work.iter().any(|r| r["body"]["kind"] == "turn.call") && result_seen && phase(api, &owner, &computer) == "awake",
         json!({ "work": work, "phase": phase(api, &owner, &computer) }),
     );
-    println!("      (a tool, computer asleep: first draft {first_draft:?} ms, reply {reply_ms:?} ms; {})", end["body"]["timing"]);
+    println!("      (a tool, computer asleep: first draft {first_draft:?} ms, reply {reply_ms:?} ms; split {split}; {})", end["body"]["timing"]);
 
     // ---- a tool turn on the awake computer: the hop
     if fakes {
@@ -167,11 +186,11 @@ pub fn finite_agent(s: &mut Suite, api: &Api) -> Result<()> {
         ]);
     }
     let calls = if fakes { s.ai.calls().len() } else { 0 };
-    let (turn, _, reply_ms, end) = say(s, &mut page, if fakes { "write and read a file" } else { ASKS[4].0 })?;
+    let (turn, _, reply_ms, end, split) = say(s, &mut page, if fakes { "write and read a file" } else { ASKS[4].0 })?;
     let steps: Vec<Value> = work_of(&records(api, &owner, &chat_name, "work"), &turn).into_iter().filter(|r| r["body"]["kind"] == "turn.step").collect();
     let read_back = !fakes || s.ai.calls()[calls..].iter().any(|c| c.body.to_string().contains("hello pi"));
     s.ok("a file is written and read back on the computer, each a step", steps.len() >= 2 && steps.iter().all(|r| r["body"]["ok"] == true) && read_back, json!(steps));
-    println!("      (tools, computer awake: reply {reply_ms:?} ms; {})", end["body"]["timing"]);
+    println!("      (tools, computer awake: reply {reply_ms:?} ms; split {split}; {})", end["body"]["timing"]);
 
     // ---- replay: the same record run again is one turn
     let chat_records = records(api, &owner, &chat_name, "chat");
@@ -188,10 +207,10 @@ pub fn finite_agent(s: &mut Suite, api: &Api) -> Result<()> {
     if !fakes {
         for (ask, tool) in ASKS {
             let before = phase(api, &owner, &computer);
-            let (_, first_draft, reply_ms, end) = say(s, &mut page, ask)?;
+            let (_, first_draft, reply_ms, end, split) = say(s, &mut page, ask)?;
             let touched = end["body"]["timing"]["tools"].as_array().is_some_and(|t| !t.is_empty());
-            println!("      [{}] tool asked {tool}, used {touched}, computer was {before}: first draft {first_draft:?} ms, reply {reply_ms:?} ms; {}", ask, end["body"]["timing"]);
-            measured.push(Measured { ask: ask.into(), tool_asked: tool, computer_touched: touched, first_draft_ms: first_draft, reply_ms, timing: end["body"]["timing"].clone() });
+            println!("      [{}] tool asked {tool}, used {touched}, computer was {before}: first draft {first_draft:?} ms, reply {reply_ms:?} ms; split {split}; {}", ask, end["body"]["timing"]);
+            measured.push(Measured { ask: ask.into(), tool_asked: tool, computer_touched: touched, first_draft_ms: first_draft, reply_ms, timing: json!({ "split": split, "agent": end["body"]["timing"], "computer_before": before }) });
         }
         let untouched = measured.iter().filter(|m| !m.computer_touched).count();
         // the model calls' charges on the owner's ledger, every turn of the section's

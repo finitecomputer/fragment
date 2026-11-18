@@ -1124,10 +1124,11 @@ impl FragmentCell {
         let read_only = self.read_only().await?;
         let own = self.own_key()?;
         let input = json!({ "fragment": f.fragment, "channel": f.channel, "record": f.record });
+        let mut direct = vec![];
         for op in &ops {
             let call_id = format!("followed:{}:{}:{}:{op}", f.fragment, f.channel, f.record["seq"]);
             let sha = crate::ops::input_sha(op, &fragment_proto::canonical_json(&input));
-            self.start_run(NewRun {
+            let started = self.start_run(NewRun {
                 op,
                 via: Via::Followed,
                 trigger: Some(format!("{}/{}", f.fragment, f.channel)),
@@ -1138,9 +1139,50 @@ impl FragmentCell {
                 input: input.clone(),
                 owner_read_only: read_only.clone(),
             })?;
+            // a live operation's run is called at once, claimed here so no
+            // Workflow launches it: its first call is on no Workflow's path
+            if !started.replayed && started.status == RunStatus::Queued && self.declared(op).is_ok_and(|d| d.kind == OpKind::Live) {
+                self.exec("UPDATE runs SET status = 'running', launched_at = ? WHERE id = ? AND status = 'queued'", vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(started.id)])?;
+                direct.push(started.id);
+            }
+        }
+        // SAFETY: as `later`'s: the object outlives a promise it gave the runtime
+        let cell: &'static FragmentCell = unsafe { &*(self as *const FragmentCell) };
+        for id in direct {
+            self.state.wait_until(cell.live_direct(id));
         }
         self.later();
         Ok(())
+    }
+
+    /// A live run's call made at once (`fire_followed`; phase 1's `live`),
+    /// held by this object while the app works: done, it finishes the run;
+    /// one that asks for a wake, or whose call was cut, goes to a Workflow
+    /// as any queued run, which calls it again (the app's own state
+    /// resumes it). An object evicted mid-call leaves the run running with
+    /// no Workflow: `reconcile_runs` queues it again.
+    async fn live_direct(&self, id: i64) {
+        let t0 = js::now_ms();
+        let Ok(rows) = self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ? AND status = 'running'"), vec![SqlStorageValue::Integer(id)]) else { return };
+        let Some(run) = rows.first().map(run_row) else { return };
+        let answer = self.step_live(&run).await;
+        let outcome = match answer {
+            Ok(v) if v["sleep"].is_u64() || v["again"] == true => "workflow",
+            Ok(v) => {
+                let _ = self.finish_run(&run, Ok(v["output"].clone()));
+                "done"
+            }
+            Err(StepFail::Permanent(why)) => {
+                let _ = self.finish_run(&run, Err(why));
+                "failed"
+            }
+            Err(StepFail::Retry(_)) => "workflow",
+        };
+        if outcome == "workflow" {
+            let _ = self.exec("UPDATE runs SET status = 'queued', launched_at = NULL WHERE id = ? AND status = 'running'", vec![SqlStorageValue::Integer(id)]);
+            self.launch_queued().await;
+        }
+        console_log!("{}", json!({ "event": "live.direct", "run": id, "outcome": outcome, "ms": js::now_ms() - t0 }));
     }
 
     /// Starts the runs a move of `main` triggers, blocked when `read_only`
@@ -1478,6 +1520,11 @@ impl FragmentCell {
                     Some(s @ ("errored" | "terminated" | "complete")) => format!("its Workflow ended ({s}) without reporting: {}", st["error"]),
                     _ => continue,
                 },
+                // a live run called at once has none: its call was cut, so a Workflow calls it again
+                Ok(None) if run.via == Via::Followed => {
+                    let _ = self.exec("UPDATE runs SET status = 'queued', launched_at = NULL WHERE id = ? AND status = 'running'", vec![SqlStorageValue::Integer(run.id)]);
+                    continue;
+                }
                 Ok(None) => "its Workflow is gone".to_string(),
                 // the binding did not answer: ask again on the next pass
                 Err(_) => continue,
