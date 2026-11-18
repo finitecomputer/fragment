@@ -40,7 +40,7 @@
   // server enforces that: Take over is the agent's own lease, so its
   // screen tools wait while a person holds it.
   import RFB from "./novnc/core/rfb.js";
-  import { attention } from "./attend.js";
+  import { attention, PAUSE_MS } from "./attend.js";
 
   const agent = new URLSearchParams(location.search).get("agent");
   const viewer = crypto.randomUUID().replaceAll("-", "");
@@ -90,7 +90,7 @@
   // the computer's: once it closes (a sleep or a restart closes it with
   // 4000 and says which), nothing is opened again until a press or a key.
   const RETRY_MIN_MS = 1000, RETRY_MAX_MS = 10000;
-  let rfb = null, connects = 0, retry = RETRY_MIN_MS, shown = false, closed = null, mine = false, holder = null, control = null, paused = false, waking = null;
+  let rfb = null, connects = 0, retry = RETRY_MIN_MS, shown = false, closed = null, mine = false, holder = null, control = null, paused = false, waking = null, wokeAt = -Infinity;
   const show = () => {
     // a holder may give back while the stream reconnects
     const ready = control?.readyState === WebSocket.OPEN && (shown || mine);
@@ -153,8 +153,19 @@
   // could not be reached. The stream goes with it, its last frame kept.
   const lost = (code, reason) => {
     const why = code === 4000 ? reason : "";
-    // a press's sockets refused (one still going to sleep wakes after it):
-    // not yet, and the next press tries again
+    // a press's control socket refused: its computer is starting (its port
+    // not listening yet) or still going to sleep (which wakes it after).
+    // Opened again as the stream is, after RETRY_MIN_MS, doubling, while
+    // within PAUSE_MS of that press (attend.js): never on its own
+    if (why === "" && Date.now() - wokeAt < PAUSE_MS && attn.attended()) {
+      setTimeout(() => {
+        if (closed !== null || !attn.attended() || control?.readyState !== WebSocket.CLOSED) return;
+        openControl();
+        if (!rfb) connect();
+      }, retry);
+      retry = Math.min(retry * 2, RETRY_MAX_MS);
+      return show();
+    }
     const pressed = waking !== null;
     closed =
       why === "asleep" ? { state: "asleep", text: "Your computer is asleep. Press anywhere to wake it." }
@@ -204,6 +215,7 @@
     // asleep wakes for them)
     wake: () => {
       waking = closed?.state ?? "closed";
+      wokeAt = Date.now();
       closed = null;
       paused = false;
       retry = RETRY_MIN_MS;
