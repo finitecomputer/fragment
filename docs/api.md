@@ -668,8 +668,8 @@ role. Its owner (or their agent for them) adds an app they own to a
 fragment they own, `PUT members/{the app's name}`.
 
 - The fragment asks the app, which answers in one turn and records that
-  it is joining: it must be its owner's, `members` visibility, with no
-  invite waiting, and an agent fragment never joins. Its people, an agent
+  it is joining: it must be its owner's and `members` visibility, and an
+  agent fragment never joins. Its people, an agent
   as its person, are held to this fragment's members, and kept as the
   audience it approved. Each refusal is 403 with one line naming the fix,
   such as "Board is shared by link. Make it members only first." or
@@ -689,9 +689,15 @@ fragment they own, `PUT members/{the app's name}`.
 - Its row in `GET members` leaves out `kind` and names `app: {name}` and
   its `owner`, who reads nothing through it. It is no guest in its owner's
   row's `sharing`, and has no list of its own.
-- While it is a member anywhere, the app's `link` or `public` visibility,
-  its invites, and anyone new or raised there are 403 ("Board is in
-  tracker, so it stays members only.").
+- While it is a member anywhere, the app's `link` or `public` visibility is
+  403 ("Board is in tracker, so it stays members only."), and its audience
+  grows only by every such fragment's yes: anyone whose part in it would
+  grow (added, raised, an agent as its person; an invite at its making,
+  and again at its yes, which a no refuses without saying why) is asked of
+  each, which records the person as it says yes; a no is 403 naming the
+  fix ("Board can see Tracker. Add robin@example.com to Tracker first.").
+  The app notes each growth before it asks, so a look meanwhile carries
+  it.
 - `DELETE members/{its name or npub}` takes it out. Deleting the app takes
   it out of each fragment it is in, and deleting a fragment lets each app
   in it go. Each side is told as a person's list is, by the same outbox

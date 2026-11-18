@@ -1,9 +1,9 @@
 //! An app as a member of another fragment (decision 72): an owner adds an
 //! app of theirs to a fragment of theirs while everyone it shows is held
 //! there; a removal or a lowered role there pauses it until they are held
-//! again; while it is in, it stays members only and its people stay as
-//! they are; and removing it, deleting it or deleting the fragment it is
-//! in lets it go.
+//! again; while it is in, it stays members only and its audience grows
+//! only by that fragment's yes; and removing it, deleting it or deleting
+//! the fragment it is in lets it go.
 
 use anyhow::Result;
 use fragment_core::npub;
@@ -47,16 +47,6 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     let owning = put(&owner, &tracker, &board, "owner")?;
     s.ok("an app made an owner is refused (400): it views or edits", owning.status == 400 && owning.message().contains("never own it"), &owning);
 
-    // ---- refused while anyone else may come in: an invite waiting
-    let invited = api.signed(&owner, "POST", &format!("/api/f/{board}/invites"), Some(&json!({ "email": "apps-carol@e2e.test", "role": "viewer" })))?;
-    let shared = put(&owner, &tracker, &board, "viewer")?;
-    s.ok(
-        "an app with an invite waiting is refused (403): whoever accepted it would join unasked",
-        invited.status == 200 && shared.status == 403 && shared.message() == format!("{} has an invite waiting. For now an app joins once each is answered.", label(&board)),
-        format!("{invited} {shared}"),
-    );
-    api.signed(&owner, "DELETE", &format!("/api/f/{board}/invites/apps-carol@e2e.test"), None)?;
-
     // ---- a fragment with no room: refused, and the app is let go at once
     let (full, _) = made(s, &owner, "apps-full")?;
     api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": full, "op": "members", "fill": fragment_proto::limits::MEMBERS_MAX })))?;
@@ -97,8 +87,10 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     let invite = api.signed(&owner, "POST", &format!("/api/f/{board}/invites"), Some(&json!({ "email": "apps-carol@e2e.test", "role": "viewer" })))?;
     let in_line = |r: &Reply, tail: &str| r.status == 403 && r.message() == format!("{} is in {}, {tail}", label(&board), label(&tracker));
     s.ok(
-        "while in, the app's link and its invites are refused (403), each naming where it is",
-        in_line(&open, "so it stays members only.") && in_line(&invite, "so for now its people stay as they are."),
+        "while in, the app's link is refused (403), naming where it is; an invite to an email no one signs in as is refused, naming the fix",
+        in_line(&open, "so it stays members only.")
+            && invite.status == 403
+            && invite.message() == format!("{} can see {}. Add apps-carol@e2e.test to {} first.", label(&board), label(&tracker), label(&tracker)),
         format!("{open} {invite}"),
     );
     let editor = put(&owner, &tracker, &board, "editor")?;
@@ -118,7 +110,11 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     let held = put(&owner, &tracker, &board, "editor")?;
     s.ok("held here, its editor an editor, it joins as an editor, not paused", held.status == 200 && held.body["app"].get("paused").is_none(), &held);
     let raised = api.share(&board, &dana_id, "editor")?;
-    s.ok("while in, raising one of its people is refused (403)", raised.status == 403 && in_line(&raised, "so for now its people stay as they are."), &raised);
+    s.ok(
+        "while in, raising one of its people to edit it is asked of the fragment, which says no (403): they only view there",
+        raised.status == 403 && raised.message() == format!("{} can edit {}. Make {} an editor there first.", label(&board), label(&tracker), Api::email_of(&dana)),
+        &raised,
+    );
     let paused = |who: &str| -> Result<bool> { Ok(app_row(&tracker)?.is_some_and(|m| m["app"]["paused"] == who)) };
 
     // ---- a narrowing: never refused, it pauses the app in the same turn
@@ -136,6 +132,20 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     let raise = put(&owner, &tracker, &board, "editor")?;
     s.ok("asked again while its list is short, it is refused (403), and stays paused", raise.status == 403 && app_row(&tracker)?.is_some_and(|m| !m["app"]["paused"].is_null()), &raise);
 
+    // ---- a growth asked before a restart: Erin, a member there, invited here
+    let erin = api.person()?;
+    let erin_id = npub::encode(erin.pubkey_hex());
+    let invite_erin = || api.signed(&owner, "POST", &format!("/api/f/{board}/invites"), Some(&json!({ "email": Api::email_of(&erin), "role": "viewer" })));
+    let no = invite_erin()?;
+    s.ok(
+        "inviting someone not in the fragment it is in is refused (403), naming the fix",
+        no.status == 403 && no.message() == format!("{} can see {}. Add {} to {} first.", label(&board), label(&tracker), Api::email_of(&erin), label(&tracker)),
+        &no,
+    );
+    api.share(&tracker, &erin_id, "viewer")?;
+    let (yes, again) = (invite_erin()?, invite_erin()?);
+    s.ok("once they are in it, the fragment says yes and the invite waits; asked again, yes again", yes.status == 200 && again.status == 200, format!("{yes} {again}"));
+
     // ---- a restart of every object: still in, still held, still paused
     s.reload()?;
     let open = visibility(&owner, &board, "link")?;
@@ -152,6 +162,23 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
         "one held again here, it waits on the other; the other taken out of the app, the fragment looks again and it resumes",
         one.as_ref().is_some_and(|m| m["app"]["paused"] == dana_id.as_str()) && out.status == 200 && both.as_ref().is_some_and(|m| m["app"].get("paused").is_none()),
         format!("{one:?} {out} {both:?}"),
+    );
+
+    // ---- the invite's yes asks again, after the restart; then the app narrows
+    let accepted = api.signed(&erin, "POST", &format!("/api/invites/{board}/accept"), Some(&json!({})))?;
+    let board_people = api.signed(&owner, "GET", &format!("/api/f/{board}/members"), None)?;
+    s.ok(
+        "their yes, asked of the fragment again, makes them a member of the app",
+        accepted.status == 200 && board_people.body["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == erin_id.as_str())),
+        &accepted,
+    );
+    api.signed(&owner, "DELETE", &format!("/api/f/{tracker}/members/{erin_id}"), None)?;
+    let waits = paused(&erin_id)?;
+    let left = api.signed(&owner, "DELETE", &format!("/api/f/{board}/members/{erin_id}"), None)?;
+    s.ok(
+        "removed from the fragment it is in, they pause it; removed from the app too, the fragment looks again and it resumes",
+        waits && left.status == 200 && app_row(&tracker)?.is_some_and(|m| m["app"].get("paused").is_none()),
+        &left,
     );
 
     // ---- removed: told in the removal's own turn, its link its own again

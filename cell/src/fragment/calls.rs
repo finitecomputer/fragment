@@ -155,8 +155,26 @@ impl Call for AppAsked {
     type Answer = AppAnswer;
 }
 
+/// The app `app` (its own key, titled `title`) in this fragment would
+/// grow: `person` would hold `role` in it (added, invited, raised). Yes
+/// records them on the list this fragment approved; no is 403, saying why
+/// in one line.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AppGrows {
+    pub app: String,
+    pub title: String,
+    pub person: String,
+    pub role: Role,
+}
+
+impl Call for AppGrows {
+    const PATH: &'static str = "/call/app/grows";
+    type Answer = ();
+}
+
 /// The app's audience as a fragment it is in holds it: its people, an
-/// agent as its person, with what each does to it.
+/// agent as its person, with what each does to it, and each growth it
+/// asked and has not written yet.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AppAudienceOf {}
 

@@ -1040,6 +1040,7 @@ impl FragmentCell {
             calls::AppAsked::PATH => reply::<calls::AppAsked>(self.app_asked(decode(body)?)),
             calls::AppTold::PATH => reply::<calls::AppTold>(self.app_told(decode(body)?).await),
             calls::AppAudienceOf::PATH => reply::<calls::AppAudienceOf>(self.app_audience_of()),
+            calls::AppGrows::PATH => reply::<calls::AppGrows>(self.app_grows(decode(body)?).await),
             FaceOf::PATH => reply::<FaceOf>(self.face_of()),
             ReachOf::PATH => reply::<ReachOf>(self.reach_of()),
             AgentMade::PATH => reply::<AgentMade>(self.agent_with_person(decode(body)?).await),

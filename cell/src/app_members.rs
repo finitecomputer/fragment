@@ -1,15 +1,14 @@
 //! An app as a member of another fragment (docs/api.md, "An app as a
 //! member"; decision 72): `fragment_core::app_member` holds the rule, and
-//! this its two ends. Its owner adds it to a fragment they own; for now its
-//! people stay as they are while it is in anywhere (asking each fragment it
-//! is in before its audience grows comes next).
+//! this its two ends. Its owner adds it to a fragment they own, and while it
+//! is in anywhere, its audience grows only by every such fragment's yes.
 //!
 //! - **The target asks the app** (`add_app`): `PUT members/<the app's
 //!   name>`, its owner's, or their agent's for them. It records the ask
 //!   (`app_asks`, at a new version of its changes), and the app answers in
-//!   one turn (`app_asked`): it is their own and members only, with no
-//!   invite waiting, and it records that it is joining, at the ask's
-//!   version. The target then, in its own turn, takes the answer only while
+//!   one turn (`app_asked`): it is their own and members only, and it
+//!   records that it is joining, at the ask's version (an invite waiting
+//!   asks at its yes, below). The target then, in its own turn, takes the answer only while
 //!   its ask is still the newest (no later ask, removal or app's end since),
 //!   holds its audience to the rule beside every yes it gave before, keeps
 //!   it as the app's approved list (`app_audience`), and writes the app's
@@ -23,9 +22,14 @@
 //!   the app: any change to who is in the app asks each fragment it is in
 //!   to look at its audience again (`app_looked`), and what that fragment
 //!   approved before the look and the app no longer shows comes off it.
-//! - **While it is a member anywhere** the app stays members only, and no
-//!   one's part in it grows (`stays_members_only`, `stays_alone`), beside
-//!   reach's refusals (reach.rs).
+//! - **Its audience grows by every yes** (`ask_growth`): anyone whose part
+//!   in it would grow (added, invited and asked again at their yes,
+//!   raised) is asked of each fragment it is in, which records them on its
+//!   list as it says yes (`app_grows`). The app notes the growth first
+//!   (`app_growth`), so a look meanwhile carries it, and writes it only once
+//!   all said yes; a no tells those that said yes to look again.
+//! - **While it is a member anywhere** the app stays members only
+//!   (`stays_members_only`), beside reach's refusals (reach.rs).
 //! - **The two are told as a person's list is** (members.rs
 //!   `tell_index`), each way by its own key: `app:<name>`, a target's word
 //!   to an app (its role there, or out: removed, refused, the target
@@ -41,11 +45,12 @@ use std::collections::BTreeMap;
 
 use fragment_core::app_member::{self, Audience};
 use fragment_proto::{ErrorCode, FragmentKind, Member, Role};
+use futures_util::future::join_all;
 use serde_json::json;
 use worker::SqlStorageValue;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::calls::{AppAnswer, AppAsked, AppAudienceOf, AppTold};
+use crate::fragment::calls::{AppAnswer, AppAsked, AppAudienceOf, AppGrows, AppTold};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 use crate::members::Actor;
@@ -77,13 +82,70 @@ impl FragmentCell {
         }
     }
 
-    /// Anyone let in (an invite), or raised, refused while it is a member
-    /// anywhere: for now an app in another keeps its people as they are.
-    pub(crate) fn stays_alone(&self) -> CellResult<()> {
-        match self.member_of_any()? {
-            Some(target) => Err(CellError::new(ErrorCode::Forbidden, format!("{} is in {}, so for now its people stay as they are.", self.app_title()?, label(&target)))),
+    /// The fragments this app is in, by name.
+    fn targets(&self) -> CellResult<Vec<String>> {
+        let rows = self.rows("SELECT name FROM member_of WHERE role IS NOT NULL ORDER BY name", vec![])?;
+        Ok(rows.iter().filter_map(|r| r["name"].as_str().map(str::to_string)).collect())
+    }
+
+    /// `person` would hold `role` in this app: asked of every fragment it is
+    /// in (none: nothing to ask), the growth noted first, so a look at its
+    /// audience meanwhile carries it. All yes: the note, to drop once the
+    /// growth is written (`grown`); else the first no, the note dropped and
+    /// those that said yes told to look again. A fragment gone is no one to
+    /// ask.
+    pub(crate) async fn ask_growth(&self, person: &str, role: Role) -> CellResult<Option<i64>> {
+        let targets = self.targets()?;
+        if targets.is_empty() || role < Role::Viewer {
+            return Ok(None);
+        }
+        let power = if role >= Role::Editor { Role::Editor } else { Role::Viewer };
+        let noted = self.rows(
+            "INSERT INTO app_growth (person, power, at) VALUES (?, ?, ?) RETURNING id",
+            vec![person.into(), power.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+        )?;
+        let id = noted.first().and_then(|r| r["id"].as_i64()).ok_or_else(|| CellError::host("a growth noted has no id"))?;
+        let asked = AppGrows { app: self.must(MetaKey::Npub)?, title: self.app_title()?, person: person.to_string(), role };
+        // bounded: the fragments an app is in hold it as a member
+        let answers = join_all(targets.iter().map(|t| crate::fragment::call(&self.env, t, &asked))).await;
+        let refused = answers.iter().find_map(|a| a.as_ref().err().filter(|e| e.code != ErrorCode::NotFound));
+        let Some(refused) = refused else { return Ok(Some(id)) };
+        self.exec("DELETE FROM app_growth WHERE id = ?", vec![SqlStorageValue::Integer(id)])?;
+        for (target, answer) in targets.iter().zip(&answers) {
+            if answer.is_ok() {
+                self.app_look(target)?;
+            }
+        }
+        self.flush_index().await;
+        Err(CellError::new(refused.code, refused.message.clone()))
+    }
+
+    /// A growth asked and written, or given up: its note goes.
+    pub(crate) fn grown(&self, noted: Option<i64>) -> CellResult<()> {
+        match noted {
+            Some(id) => self.exec("DELETE FROM app_growth WHERE id = ?", vec![SqlStorageValue::Integer(id)]),
             None => Ok(()),
         }
+    }
+
+    /// An app member's growth asked here (`AppGrows`): yes records the
+    /// person on the list this fragment approved for it, before the app
+    /// writes them. One not in yet (its join's answer still on its way) is
+    /// held to the strictest role, an editor's.
+    pub(crate) async fn app_grows(&self, g: AppGrows) -> CellResult<()> {
+        self.created()?;
+        let app_role = self.member_role(&g.app)?.unwrap_or(Role::Editor);
+        let mut approved = self.app_audience(&g.app)?;
+        let holds = self.member_role(&g.person)?;
+        if let Err(refused) = app_member::grow(&mut approved, app_role, &g.person, g.role, holds) {
+            let person = self.emails(vec![g.person.clone()]).await.remove(&g.person).unwrap_or_else(|| fragment_core::npub::display(&g.person));
+            return Err(CellError::new(ErrorCode::Forbidden, refused.line(&g.title, &self.app_title()?, &person)));
+        }
+        let power = approved.get(&g.person).copied().unwrap_or(Role::Viewer);
+        self.exec(
+            "INSERT INTO app_audience (app, person, power, at) VALUES (?, ?, ?, ?) ON CONFLICT (app, person) DO UPDATE SET power = excluded.power, at = excluded.at",
+            vec![g.app.as_str().into(), g.person.as_str().into(), power.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+        )
     }
 
     /// `PUT members/<name>`, `name` an app of its owner's, at `role`: the
@@ -243,11 +305,7 @@ impl FragmentCell {
             return Err(refused(format!("{title} is an agent: it joins as itself, with its person.")));
         }
         app_member::members_only(self.visibility()?).map_err(|r| refused(r.line(&title, &a.title, "")))?;
-        let audience = app_member::audience(&owner, &self.member_list()?.members);
-        // whoever accepts one would join unasked: none waits
-        if self.count_of("SELECT COUNT(*) AS n FROM invites WHERE expires_at > ?", vec![SqlStorageValue::Integer(js::now_ms())])? > 0 {
-            return Err(refused(format!("{title} has an invite waiting. For now an app joins once each is answered.")));
-        }
+        let audience = self.app_audience_of()?;
         // its joining, as it answers: from now on it stays members only and
         // its owner's alone; an ask older than what the target told it
         // since is no yes
@@ -262,7 +320,7 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Conflict, "an older ask: it was asked again since"));
         }
         self.event("app.joining", &format!("asked into {} as {}, by its owner", a.target, a.role.as_str()), json!({ "target": a.target, "role": a.role }));
-        Ok(AppAnswer { npub: self.must(MetaKey::Npub)?, incarnation: self.incarnation()?, title, audience: audience.into_iter().collect() })
+        Ok(AppAnswer { npub: self.must(MetaKey::Npub)?, incarnation: self.incarnation()?, title, audience })
     }
 
     /// A change between an app and a target (`AppTold`). To the app: the
@@ -326,10 +384,17 @@ impl FragmentCell {
         self.apps_held()
     }
 
-    /// Its audience as a fragment it is in holds it (`AppAudienceOf`).
+    /// Its audience as a fragment it is in holds it (`AppAudienceOf`): its
+    /// people, and each growth noted and not yet written.
     pub(crate) fn app_audience_of(&self) -> CellResult<Vec<(String, Role)>> {
         self.created()?;
-        Ok(app_member::audience(&self.must(MetaKey::Owner)?, &self.member_list()?.members).into_iter().collect())
+        let mut audience = app_member::audience(&self.must(MetaKey::Owner)?, &self.member_list()?.members);
+        for g in self.rows("SELECT person, power FROM app_growth", vec![])? {
+            let (Some(person), Some(power)) = (g["person"].as_str(), g["power"].as_str().and_then(Role::parse)) else { continue };
+            let held = audience.entry(person.to_string()).or_insert(power);
+            *held = (*held).max(power);
+        }
+        Ok(audience.into_iter().collect())
     }
 
     /// Each fragment this app is in asked to look at its audience again, at
@@ -339,16 +404,20 @@ impl FragmentCell {
         let targets = self.rows("SELECT name FROM member_of WHERE role IS NOT NULL ORDER BY name", vec![])?;
         // bounded: the fragments an app is in hold it as a member
         for target in targets.iter().filter_map(|t| t["name"].as_str()) {
-            self.index_rows("SELECT ? AS principal, ? AS role", vec![format!("{FROM_APP}{target}").into(), Role::Viewer.as_str().into()])?;
+            self.app_look(target)?;
         }
         Ok(())
     }
 
-    /// Whether `target` joining at `role` grows this app's audience: the
+    /// `target` asked to look at this app's audience again.
+    fn app_look(&self, target: &str) -> CellResult<()> {
+        self.index_rows("SELECT ? AS principal, ? AS role", vec![format!("{FROM_APP}{target}").into(), Role::Viewer.as_str().into()])
+    }
+
+    /// Whom `target` joining at `role` grows this app's audience by: the
     /// person it counts as (an agent, its person), when they would do more
-    /// to it than they do now. While it is in anywhere, that is refused for
-    /// now (`stays_alone`).
-    pub(crate) fn grows(&self, target: &fragment_proto::Identity, role: Role) -> CellResult<bool> {
+    /// to it than they do now (`ask_growth`).
+    pub(crate) fn grows(&self, target: &fragment_proto::Identity, role: Role) -> CellResult<Option<String>> {
         let owner = self.must(MetaKey::Owner)?;
         let audience = app_member::audience(&owner, &self.member_list()?.members);
         let person = match (target.kind, &target.owner) {
@@ -356,7 +425,7 @@ impl FragmentCell {
             _ => target.id.as_str(),
         };
         let power = if role >= Role::Editor { Role::Editor } else { Role::Viewer };
-        Ok(audience.get(person).is_none_or(|now| *now < power))
+        Ok(audience.get(person).is_none_or(|now| *now < power).then(|| person.to_string()))
     }
 
     /// The app `name` told its role here (none: out), at a new version, by

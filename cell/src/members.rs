@@ -644,7 +644,19 @@ impl FragmentCell {
     /// them"): anyone else joins by their own yes to an invite, but for a
     /// test's `lever`.
     async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool, laps: &mut crate::js::Laps) -> CellResult<Member> {
-        let member = self.write_member(actor, target, body, lever)?;
+        // an app's audience grows by each fragment it is in saying yes
+        // (app_members.rs): anyone whose part in it would grow
+        let grows = match self.member_of_any()? {
+            Some(_) => self.grows(target, body.role)?,
+            None => None,
+        };
+        let noted = match grows {
+            Some(person) => self.ask_growth(&person, body.role).await?,
+            None => None,
+        };
+        let member = self.write_member(actor, target, body, lever);
+        self.grown(noted)?;
+        let member = member?;
         // the agent's list holds this fragment before its computer is told
         self.flush_index().await;
         laps.lap("list");
@@ -668,11 +680,6 @@ impl FragmentCell {
             }));
         }
         self.connector_role(body.role)?;
-        // anyone whose part in an app that is in anywhere would grow: for
-        // now, none (app_members.rs)
-        if self.member_of_any()?.is_some() && self.grows(target, body.role)? {
-            self.stays_alone()?;
-        }
         if current.is_some() && body.role < Role::Editor && self.chat_agent()?.as_deref() == Some(target.id.as_str()) {
             return Err(refusal(true, CHAT_AGENT_STAYS_EDITOR));
         }
@@ -880,8 +887,22 @@ impl FragmentCell {
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
         }
-        // decided in the invite's own turn, as an app's ask is (app_members.rs)
-        self.stays_alone()?;
+        // an app in other fragments: each says yes to whoever signs in as
+        // the email, asked again at their yes (`claim_invite`); no one signs
+        // in as it, none can (app_members.rs)
+        if let Some(target) = self.member_of_any()? {
+            let person = match self.named(&email).await {
+                Ok(person) => person.id,
+                Err(e) if e.code == ErrorCode::NotFound => {
+                    let short = fragment_core::app_member::Short { person: email.clone(), power: Role::Viewer, holds: None };
+                    let app = self.title()?.unwrap_or_else(|| crate::share::label(&name).to_string());
+                    return Err(CellError::new(ErrorCode::Forbidden, fragment_core::app_member::Refusal::Grows(short).line(&app, crate::share::label(&target), &email)));
+                }
+                Err(e) => return Err(e),
+            };
+            let noted = self.ask_growth(&person, body.role).await?;
+            self.grown(noted)?;
+        }
         let now = js::now_ms();
         let expires_at = now + limits::INVITE_TTL_S * 1000;
         let write = |role: &str, expires_at: i64, by: &str, at: i64| {
@@ -1013,6 +1034,17 @@ impl FragmentCell {
         let owner = current == Some(Role::Owner);
         let agents: &[String] = if owner { &[] } else { &claim.agents };
         self.room_for(u64::from(current.is_none()) + self.not_members(agents)?)?;
+        // an app in other fragments: each says yes again (app_members.rs);
+        // a no keeps the invite, and tells its person no more than that
+        let noted = match kept || owner || self.member_of_any()?.is_none() {
+            true => None,
+            false => self.ask_growth(who, role).await.map_err(|_| CellError::new(ErrorCode::Forbidden, "it isn't open to you yet: its owner can tell you why"))?,
+        };
+        // asked meanwhile: the invite may have gone (revoked, run out)
+        if noted.is_some() && self.rows("SELECT 1 AS x FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?.is_empty() {
+            self.grown(noted)?;
+            return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
+        }
         self.exec("DELETE FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
         // met, whatever it grants: the owner's list counts it no more
         self.sharing_changed()?;
@@ -1034,6 +1066,7 @@ impl FragmentCell {
         }
         // each app member held to its list again, now they are in
         self.apps_held()?;
+        self.grown(noted)?;
         self.flush_index().await;
         self.flush_joined().await;
         Ok(now)
