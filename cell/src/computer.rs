@@ -357,6 +357,9 @@ enum MetaKey {
     /// The test lever's hold on its saves (`hold-saves`): while set, each
     /// save waits before its backups until the lever lets it go.
     HoldSaves,
+    /// The test lever's wait in its next let-go of a hold (`stall-unhold`),
+    /// between its look and its command, in ms.
+    StallUnhold,
 }
 
 impl MetaKey {
@@ -385,6 +388,7 @@ impl MetaKey {
             MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
             MetaKey::GrantsOwed => "grants_owed",
             MetaKey::HoldSaves => "hold_saves",
+            MetaKey::StallUnhold => "stall_unhold",
         }
     }
 }
@@ -1952,6 +1956,8 @@ impl ComputerCell {
         if !self.container_running().await || self.lifecycle().is_ok_and(|l| l.saving().is_some()) {
             return;
         }
+        // (the lever's `stall-unhold`: a let-go slow to land, after its look)
+        self.lever_wait(MetaKey::StallUnhold, STALL_FAILING_START_MAX_MS).await;
         let g = JsValue::from_f64(generation as f64);
         if let Err(e) = self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unhold": "failed", "generation": generation, "error": e.message }));
@@ -2675,11 +2681,16 @@ impl ComputerCell {
                 self.alarm_at(Some(js::now_ms() + i64::from(ms))).await?;
                 Ok(json!({ "computer": id }))
             }
-            "stall-failing-start" | "stall-takeover" => {
+            "stall-failing-start" | "stall-takeover" | "stall-unhold" => {
                 // its next start that fails waits `ms` between storing that
                 // it fails and destroying its container, or its next
-                // takeover of a start destroying, before its destroy (0: none)
-                let key = if b.op == "stall-takeover" { MetaKey::StallTakeOver } else { MetaKey::StallFailingStart };
+                // takeover of a start destroying, before its destroy, or its
+                // next let-go of a hold between its look and its command (0: none)
+                let key = match b.op.as_str() {
+                    "stall-takeover" => MetaKey::StallTakeOver,
+                    "stall-unhold" => MetaKey::StallUnhold,
+                    _ => MetaKey::StallFailingStart,
+                };
                 let ms = b.ms.filter(|ms| u64::from(*ms) <= STALL_FAILING_START_MAX_MS).ok_or_else(|| CellError::invalid("it names its ms, 0 to 600000"))?;
                 self.set_meta(key, &ms.to_string())?;
                 Ok(json!({ "computer": id }))

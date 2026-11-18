@@ -427,11 +427,15 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
 
 /// The checks of a wake into an idle sleep (docs/computers.md, Lifecycle),
 /// each skipped off the stub and the fakes.
-const CANCEL_CHECKS: [&str; 3] = [
+const CANCEL_CHECKS: [&str; 4] = [
     "with nothing holding it, it goes to sleep on its own, its sleep's save under way (held there by the lever's hold-saves)",
     "a message as its idle sleep saves cancels the sleep: awake on the same container, the save going on and its guest still held, the message not yet taken",
     "its save let go, it answers the message on that container with no start made, its sleep's save kept as its newest, no failure told",
+    "its owner's sleep asked as a save's let-go is in flight (the lever's stall-unhold): that let-go lands before the sleep's hold, never after, so a message during the sleep's held save is not taken there, and is answered once it slept and woke",
 ];
+/// The lever's `stall-unhold` in the cancel checks: how long a save's
+/// let-go of its hold waits between its look and its command.
+const UNHOLD_STALL: Duration = Duration::from_secs(10);
 
 /// A message posted while an idle sleep's save is under way (FIN-474): its
 /// wake cancels the sleep, the save goes on as an awake save, and the
@@ -498,11 +502,59 @@ fn cancel_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str)
             && notice(&after, "unsaved").is_null(),
         json!({ "after": after, "kept": kept, "before": before }),
     );
+    // its turn's end is saved once it settles: that save held under way,
+    // its let-go held after its look, and its owner's sleep asked meanwhile
+    // (#1357's review: a let-go landing after a newer hold's touch let the
+    // guest claim during a save recorded as held)
+    let gate = lever_with(api, c.id, json!({ "op": "hold-saves", "on": true }))?;
+    let gated = s.eventually(SAVED_AFTER_WORK, || {
+        let v = saves_of(api, c.id);
+        v["phase"]["phase"] == "awake" && v["saving"]["step"] == "save"
+    });
+    let stall = lever_with(api, c.id, json!({ "op": "stall-unhold", "ms": UNHOLD_STALL.as_millis() as u64 }))?;
+    let opened = lever_with(api, c.id, json!({ "op": "hold-saves", "on": false }))?;
+    let saved = s.eventually(Duration::from_secs(30), || saves_of(api, c.id)["saving"].is_null());
+    let stalled_at = std::time::Instant::now();
+    let gate_again = lever_with(api, c.id, json!({ "op": "hold-saves", "on": true }))?;
+    // its owner's sleep: its request is given up on here, as a page's would
+    // be, and its save waits at the gate
+    let _ = api.impatient(Duration::from_secs(3)).signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})));
+    let mut sleeping = Value::Null;
+    let held = s.eventually(UNHOLD_STALL + Duration::from_secs(40), || {
+        sleeping = saves_of(api, c.id);
+        sleeping["phase"]["phase"] == "sleeping" && sleeping["saving"]["step"] == "save" && sleeping["saving"]["held"] == true
+    });
+    // past the stalled let-go, wherever it landed: a message now
+    if let Some(left) = (UNHOLD_STALL + QUEUE_DRAIN).checked_sub(stalled_at.elapsed()) {
+        std::thread::sleep(left);
+    }
+    let before = replies().len();
+    say(42, "are you held?")?;
+    let quiet = !s.eventually(Duration::from_secs(10), || replies().len() > before);
+    let let_go = lever_with(api, c.id, json!({ "op": "hold-saves", "on": false }))?;
+    let answered = s.eventually(c.wake, || replies().len() > before);
+    let after = view();
+    s.ok(
+        CANCEL_CHECKS[3],
+        gate.status == 200
+            && gated
+            && stall.status == 200
+            && opened.status == 200
+            && saved
+            && gate_again.status == 200
+            && held
+            && quiet
+            && let_go.status == 200
+            && answered
+            && replies().last().is_some_and(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("are you held?")))
+            && after["generation"].as_u64() > woke["generation"].as_u64(),
+        json!({ "sleeping": sleeping, "quiet": quiet, "after": after }),
+    );
     // asleep, as the checks after it begin
     std::thread::sleep(QUEUE_DRAIN);
     let slept = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
     anyhow::ensure!(slept.body["phase"] == "asleep", "asleep after the cancel checks: {slept}");
-    Ok(1)
+    Ok(2)
 }
 
 /// The crash checks, each skipped off the stub and the fakes. The ones
