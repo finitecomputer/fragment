@@ -452,7 +452,7 @@ impl FragmentCell {
                     return Err(CellError::new(ErrorCode::RateLimited, format!("presence changes past {} a second are dropped", limits::PRESENCE_PER_S)));
                 };
                 let had = st.presence.is_some();
-                let began = typing_began(st.presence.as_ref(), &data);
+                let began = typing_began(st.role, st.presence.as_ref(), &data);
                 st.presence = (!data.is_null()).then_some(data);
                 st.presence_at = at;
                 ws.serialize_attachment(&st)?;

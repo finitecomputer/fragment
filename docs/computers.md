@@ -41,10 +41,10 @@ an image may rely on this:
   to with `wake: true`, one of its agents added to a fragment, an open
   port tab, its owner, or a person beginning to use it: in its owner's
   shell a chat picked or the launcher opened (their own wake), and on
-  any page of a fragment one of its agents follows, typing begun (the
-  page's presence `typing` turning on, decision 39). Never by its own
-  guest's traffic, a page loading, a tab shown again, a socket
-  reconnecting, or a timer.
+  any page of a fragment one of its agents follows, an editor's typing
+  begun (the page's presence `typing` turning on, decision 39). Never
+  by its own guest's traffic, a page loading, a tab shown again, a
+  socket reconnecting, or a timer.
 - **It stays awake** while the guest holds its keepalive socket, and
   `IDLE_MS` (20 minutes) after what last held it: a keepalive's close, a
   wake, or a port tab's opening, close or use (a message from its page).
