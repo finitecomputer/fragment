@@ -16,8 +16,10 @@ use crate::computer::*;
 /// busy starts again unless it gave up, and each life (a start that
 /// came up) ends once. A computer is never asleep with work newer than
 /// its newest save unless a crash or the bounded failure put it there,
-/// and awake and idle with work newer than its newest save, a save is
-/// under way or due . Its saves ride along as the DO keeps them, so
+/// and awake and idle with work newer than its newest save (a turn's, or
+/// a port tab's), a save is under way or due . An exit nothing asked for while it is idle, all its
+/// life did in a save of its own, is a sleep: no strike, no rollback, and
+/// no start unless always on. Its saves ride along as the DO keeps them, so
 /// their own assertions run too. Method: the DO's reports for the
 /// actions it was handed are delivered in any order, late, twice, or
 /// never, among events of any kind.
@@ -32,7 +34,7 @@ fn simulated_interleavings_keep_the_invariants() {
     }
     // the sim's bound is shorter than the default, so it is reached
     let rules = Rules { unsaved_max_ms: 10 * 60_000 };
-    let mut reached = [0u32; 14];
+    let mut reached = [0u32; 16];
     // the images deploys pin, one after another and back
     let deployed = [IMAGE, "registry/stub@sha256:2", "registry/stub@sha256:3"];
     for seed0 in 1..=8u64 {
@@ -56,6 +58,8 @@ fn simulated_interleavings_keep_the_invariants() {
         let mut taken = std::collections::BTreeMap::new();
         let mut newest_save_ms = i64::MIN;
         let mut last_work_ms = i64::MIN;
+        // what its owner last did through a port tab while it was awake
+        let mut last_tab_work_ms = i64::MIN;
         // what was done on the running life (the lifecycle's `worked`)
         // and the time its newest save kept was taken (its start before
         // any), and the save that holds what it did up to then: its
@@ -83,6 +87,8 @@ fn simulated_interleavings_keep_the_invariants() {
                         Event::Restart { generation: g }
                     }
                     0 => Event::Wake { why: [Wake::Record, Wake::Presence, Wake::Tab, Wake::Owner, Wake::Joined][(rng(&mut seed) % 5) as usize] },
+                    // a record for its agents, posted a while before its wake comes
+                    15 => Event::Posted { at_ms: now - (rng(&mut seed) % 5_000) as i64 },
                     1 => Event::Ready { generation: g },
                     2 => Event::StartFailed { generation: g, why: "sim".into() },
                     3 => Event::Opened { socket: if rng(&mut seed).is_multiple_of(2) { Socket::Tab } else { Socket::Keepalive } },
@@ -110,6 +116,9 @@ fn simulated_interleavings_keep_the_invariants() {
             if matches!(l.phase, Phase::Awake { .. }) && l.keepalives > 0 {
                 last_work_ms = now;
             }
+            if matches!(l.phase, Phase::Awake { .. }) && l.tabs > 0 {
+                last_tab_work_ms = now;
+            }
             // a crash of the running start while its guest holds a keepalive
             let busy_crash = matches!(&event, Event::Exited { generation: e } if matches!(l.phase, Phase::Awake { generation, .. } if generation == *e)) && l.keepalives > 0;
             // a start that failed, however it was heard (its report, or its container's end)
@@ -117,6 +126,8 @@ fn simulated_interleavings_keep_the_invariants() {
             let own_destroy = matches!(&event, Event::Exited { generation: e } if matches!(l.phase, Phase::Starting { generation, destroying: true, .. } if generation == *e));
             let start_failed = !own_destroy && matches!(&event, Event::Exited { generation: e } | Event::StartFailed { generation: e, .. } if matches!(l.phase, Phase::Starting { generation, .. } if generation == *e));
             let failures_before = l.failures;
+            // an exit nothing asked for, of an idle life whose work is kept
+            let unasked_sleep = matches!(&event, Event::Exited { generation: e } if matches!(l.phase, Phase::Awake { generation, .. } if generation == *e)) && l.idle_and_kept();
             let coming_up = matches!(&event, Event::Ready { generation: e } if matches!(l.phase, Phase::Starting { generation, .. } if generation == *e));
             let kept = match &event {
                 Event::Saved { generation: e, seq } if l.running() == Some(*e) => matches!(l.saving, Some(Saving::Save { seq: s, .. }) if s == *seq).then_some(*seq),
@@ -184,10 +195,17 @@ fn simulated_interleavings_keep_the_invariants() {
                 (life_worked, life_kept, life_save) = (if l.open() { now } else { i64::MIN }, now, r.save.clone());
                 // a new life's /data is its save's: no work of its own yet
                 last_work_ms = i64::MIN;
+                last_tab_work_ms = i64::MIN;
             }
             if busy_crash && !matches!(l.phase, Phase::Failed { .. }) {
                 // made by the alarm it asks for at once
                 assert!(l.start_due(now) && s.alarm_ms == Some(now), "busy when it died, it starts again (seed {seed0}): {l:?}");
+            }
+            if unasked_sleep {
+                assert_eq!(s.ended.map(|e| (e.by, e.saved, e.quiet)), Some((LifeEnd::Sleep, true, true)), "an idle, kept life's exit is a sleep (seed {seed0}): {s:?}");
+                assert_eq!(l.failures, failures_before, "no strike (seed {seed0})");
+                assert_eq!(l.start_due(now), l.always_on, "no start but always on's (seed {seed0}): {l:?}");
+                reached[14] += 1;
             }
             if start_failed {
                 assert_eq!(l.failures, failures_before + 1, "a failed start is one strike (seed {seed0}): {l:?}");
@@ -256,6 +274,11 @@ fn simulated_interleavings_keep_the_invariants() {
             if matches!(l.phase, Phase::Awake { .. }) && l.keepalives == 0 && last_work_ms > newest_save_ms {
                 assert!(l.saving.is_some() || l.save_due_ms.is_some(), "awake with work unsaved and no save due (seed {seed0}, step {step}): {l:?}");
                 reached[4] += 1;
+            }
+            // and with nothing open, what was done through a port tab too
+            if matches!(l.phase, Phase::Awake { .. }) && !l.open() && last_tab_work_ms > newest_save_ms {
+                assert!(l.saving.is_some() || l.save_due_ms.is_some(), "awake with a tab's work unsaved and no save due (seed {seed0}, step {step}): {l:?}");
+                reached[15] += 1;
             }
             if l.unsaved_since_ms.is_some() && matches!(l.phase, Phase::Awake { .. }) {
                 reached[5] += 1;
@@ -332,5 +355,5 @@ fn simulated_interleavings_keep_the_invariants() {
         assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
     }
     // every kind of save the lifecycle has was reached, across the seeds
-    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over: {reached:?}");
+    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over, idle exits slept, tab work due: {reached:?}");
 }

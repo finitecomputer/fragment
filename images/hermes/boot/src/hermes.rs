@@ -354,6 +354,22 @@ pub const ASKING: &str = "You are in a Fragment chat, and its people are not tec
 /// length.
 pub const FILES: &str = "Chat attachments are already on your computer. The attachment note names each file, its type and its local path under /tmp/bridge-media. Use that path with your tools to copy or edit the original; copy it into your app or work to keep it across a sleep. To put it on a website, use browser_exec's upload_file(selector, full path) on the page's file input, and check the page shows it. With no file input, type the path into the desktop's file dialog with computer_use.";
 
+/// What every agent is told of a voice memo, after `FILES` on every turn
+/// (Austin, 2026-11-17: his agent, sent web voice memos, pip-installed
+/// faster-whisper, downloaded a model and wrote itself a skill to
+/// transcribe them, though Hermes had transcribed every one through the
+/// route before its turn, `stt` in `profile_config`). Hermes puts the
+/// words above its `[User sent audio: <path>]` note as a bare quote, which
+/// it keeps unlabeled on purpose (a wrapper read as a meta-instruction:
+/// its `transcript_note`), and the bridge's attachment note after them
+/// names the same recording, which `FILES` says to use with tools; so
+/// nothing told the agent the quote was the memo. Its file stays for work
+/// on the recording itself (timings for an edit, the one time it needed
+/// it; keeping or sending it on).
+/// Hermes' own notes when it could not transcribe one, or heard nothing,
+/// keep their wording, which this names.
+pub const VOICE: &str = "A voice memo arrives already transcribed: the quoted words just above the note that the user sent audio are what they said in it. Answer those words, and never transcribe the recording again or install speech-to-text to hear it. Use its file only for work on the recording itself, such as timings, an edit, or keeping or sending it on. If a note says the voice message could not be transcribed or came through empty, ask them in plain words to send it again or type it.";
+
 /// What every agent is told of the files it sends in our chats, after
 /// `FILES` on every turn (Paul, 2026-10-23: asked for a PDF in the chat,
 /// his agent named a path on its computer, then emailed it, and attached
@@ -380,10 +396,11 @@ pub const DELEGATING: &str = "Hand big builds (a new app, a large change, or wid
 
 /// The relay's hint, appended to every agent's system prompt on every turn
 /// in our chats (Hermes' `platform_hints.relay.append`): how it asks
-/// (`ASKING`), then the files it is sent (`FILES`), then how it sends one
-/// (`SENDING`), SimpleX's rule (`SIMPLEX`), and delegation (`DELEGATING`).
+/// (`ASKING`), then the files it is sent (`FILES`) and its voice memos
+/// (`VOICE`), then how it sends one (`SENDING`), SimpleX's rule
+/// (`SIMPLEX`), and delegation (`DELEGATING`).
 pub fn relay_hint() -> String {
-    format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}")
+    format!("{ASKING}\n\n{FILES}\n\n{VOICE}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}")
 }
 
 /// How long Hermes' janitor leaves a browser browser_exec started and no
@@ -441,8 +458,9 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64) -> Strin
     // config (`told_team`).
     y.push_str(&format!("agent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: {card_timeout_s}\n  bot_mode_protocol: false\n"));
     // The agent asks its people about outcomes alone, in plain words
-    // (`ASKING`), and knows the files they attach are on its computer
-    // (`FILES`).
+    // (`ASKING`), knows the files they attach are on its computer
+    // (`FILES`), and that a voice memo's words are already in its message
+    // (`VOICE`).
     y.push_str(&format!("platform_hints:\n  relay:\n    append: {}\n", q(&relay_hint())));
     // A voice memo's transcript is no message of its own: the agent hears it
     // and answers once (one reply a turn, #160). The gateway reads this from
@@ -1253,6 +1271,77 @@ pub fn cut_turns_settled(out: &str) -> Result<(u64, u64, u64), String> {
     }
 }
 
+/// Where the boot keeps the digest of what the sessions' stored system
+/// prompts were built from (`prompt_inputs`), under the gateway's home.
+pub const PROMPT_STAMP: &str = ".fragment_prompt_inputs";
+
+/// What of ours a session's system prompt is built from, as one digest
+/// (SHA-256, hex): the relay hint (`relay_hint`) and every skill file
+/// Hermes indexes into it (`files`, each its path and bytes:
+/// `skills::indexed`, the SKILL.md and DESCRIPTION.md files its own
+/// skills-index snapshot watches), in path order. A change to any of them
+/// (an image's hint or its platform or bundled skills, an owner's managed
+/// skills) is a prompt the stored ones lack (`REFRESH_PROMPTS`).
+pub fn prompt_inputs(hint: &str, files: &[(String, Vec<u8>)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut h = Sha256::new();
+    h.update(b"hint\0");
+    h.update(hint.as_bytes());
+    for (path, bytes) in sorted {
+        h.update(b"\0file\0");
+        h.update(path.as_bytes());
+        h.update(b"\0");
+        h.update(Sha256::digest(bytes));
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether the sessions' stored system prompts may have been built from
+/// other inputs than `inputs` (`prompt_inputs`): the stamp the last
+/// refresh left (`PROMPT_STAMP`) is not it, or there is none (a computer
+/// that never stamped, whose prompts hold whatever it had then).
+pub fn inputs_changed(stamp: Option<&str>, inputs: &str) -> bool {
+    stamp != Some(inputs)
+}
+
+/// Every session of each `state.db` asked to rebuild its stored system
+/// prompt once, on its next turn, as Hermes' own `hermes sessions
+/// refresh-prompts` asks (a refresh epoch in the profile's state.db,
+/// `request_prompt_refresh`): history, session ids and the tools pin kept,
+/// one prompt-cache miss each, and the skills index read from disk again
+/// (its `rebuild_for_refresh`). Hermes replays a session's stored prompt on
+/// every later turn, rebuilding it only at a compression, a model change
+/// or `/new`, so a changed input (`prompt_inputs`) would otherwise reach
+/// only new chats (Austin, 2026-11-17: `VOICE`, which an open chat's agent
+/// never saw; a managed skill added to an owner's set, which it never
+/// listed). Run as the hermes user with each `state.db` as its arguments,
+/// at boot before the gateway starts or beside it (Hermes takes a request
+/// while it runs, a warm agent included). Prints `{"asked": n}`, n the
+/// databases.
+pub const REFRESH_PROMPTS: &str = r#"import json, sys
+from pathlib import Path
+from hermes_state import SessionDB
+asked = 0
+for p in sys.argv[1:]:
+    db = SessionDB(Path(p))
+    try:
+        db.request_prompt_refresh(None)
+        asked += 1
+    finally:
+        db.close()
+print(json.dumps({"asked": asked}))
+"#;
+
+/// What `REFRESH_PROMPTS` printed: the databases it asked (its last line),
+/// or why that is not its answer.
+pub fn prompts_refreshed(out: &str) -> Result<u64, String> {
+    let line = out.lines().rev().find(|l| !l.trim().is_empty()).ok_or("it printed nothing")?;
+    let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("{line:?}: {e}"))?;
+    v["asked"].as_u64().ok_or_else(|| format!("not its answer: {line}"))
+}
+
 /// The gateway's control socket (Hermes' `gateway/control_socket.py`):
 /// `$HERMES_HOME/gateway.sock`, or the path its pointer file names when the
 /// home's is too long for a socket. One JSON line in, one out, per
@@ -1305,6 +1394,35 @@ pub fn lean_plugins(plugins_root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (Austin, 2026-11-17: `VOICE` never reached an open chat):
+    /// a boot asks the sessions to rebuild their stored prompts exactly when
+    /// the hint they may hold is not today's: no stamp yet, or another
+    /// hint's; the same hint asks nothing (no cache miss on a plain
+    /// restart). The refresher's answer is its last line, as the settler's,
+    /// and it writes only through Hermes' own refresh request. (Run against
+    /// the real Hermes in the bridge's tests/docker.rs.)
+    #[test]
+    fn a_changed_hint_refreshes_the_stored_prompts() {
+        let hint = relay_hint();
+        let skill = |path: &str, text: &str| (path.to_string(), text.as_bytes().to_vec());
+        let set = vec![skill("/managed/a/SKILL.md", "name: a"), skill("/view/fragment/SKILL.md", "name: fragment")];
+        let today = prompt_inputs(&hint, &set);
+        assert_eq!(today.len(), 64, "a SHA-256, hex: {today}");
+        assert!(inputs_changed(None, &today), "a computer that never stamped");
+        assert!(inputs_changed(Some(&prompt_inputs(&hint.replace(&format!("{VOICE}\n\n"), ""), &set)), &today), "the hint before VOICE");
+        assert!(inputs_changed(Some(&prompt_inputs(&hint, &set[..1])), &today), "a skill added since");
+        assert!(inputs_changed(Some(&prompt_inputs(&hint, &[set[0].clone(), skill("/view/fragment/SKILL.md", "name: fragment\ndescription: new")])), &today), "a skill changed since");
+        assert!(!inputs_changed(Some(&today), &today), "a restart on the same inputs");
+        assert_eq!(prompt_inputs(&hint, &[set[1].clone(), set[0].clone()]), today, "the order they are found in is no change");
+        assert_ne!(prompt_inputs(&hint, &[skill("/managed/a/SKILL.mdname: a", "")]), prompt_inputs(&hint, &set[..1]), "a path is never read into its bytes");
+        assert_eq!(prompts_refreshed("{\"asked\": 2}\n"), Ok(2));
+        assert_eq!(prompts_refreshed("a warning Hermes logged\n{\"asked\": 0}\n\n"), Ok(0));
+        for bad in ["", "\n", "Traceback (most recent call last):", "{\"dbs\": 1}", "{\"asked\": -1}"] {
+            assert!(prompts_refreshed(bad).is_err(), "{bad:?}");
+        }
+        assert!(REFRESH_PROMPTS.contains("from hermes_state import SessionDB") && REFRESH_PROMPTS.contains("db.request_prompt_refresh(None)"), "{REFRESH_PROMPTS}");
+    }
 
     /// The settler's answer is its last line, and nothing else is: a line
     /// Hermes logged before it is passed over, a missing count is no answer.
@@ -1689,7 +1807,7 @@ mod tests {
     #[test]
     fn every_agent_is_told_its_chat_files_are_on_its_computer() {
         let m = managed_config(&[], CARD_TIMEOUT_S);
-        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}"));
+        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{VOICE}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}"));
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
         for said in ["already on your computer", "each file, its type and its local path under /tmp/bridge-media", "tools to copy or edit the original", "copy it into your app or work", "across a sleep", "browser_exec's upload_file(selector, full path)", "check the page shows it", "With no file input", "desktop's file dialog with computer_use"] {
             assert!(FILES.contains(said), "{said}: {FILES}");
@@ -1714,7 +1832,7 @@ mod tests {
     #[test]
     fn every_agent_is_told_it_attaches_files_in_its_chat() {
         let m = managed_config(&[], CARD_TIMEOUT_S);
-        assert!(relay_hint().contains(&format!("{FILES}\n\n{SENDING}\n\n")), "after the files it is sent: {}", relay_hint());
+        assert!(relay_hint().contains(&format!("{VOICE}\n\n{SENDING}\n\n")), "after the files it is sent: {}", relay_hint());
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
         for said in ["a file (a PDF, an image", "put MEDIA: and its absolute path on a line of its own", "outside code and quotes", "MEDIA:/data/work/report.pdf", "arrives in this chat as an attachment", "rather than emailing it or naming a path"] {
             assert!(SENDING.contains(said), "{said}: {SENDING}");
@@ -1726,6 +1844,24 @@ mod tests {
         for said in ["`MEDIA:<absolute-path>`", "a line of its own", "outside code and quotes", "attachment they can open and download", "email it only when they ask for email", "never answer with a path"] {
             assert!(section.contains(said), "computer.md, \"Files you send\", says {said}: {section}");
         }
+    }
+
+    /// Goal (Austin, 2026-11-17: sent voice memos Hermes had already
+    /// transcribed, his agent installed faster-whisper and transcribed them
+    /// again): every agent is told, on every turn in our chats, that a voice
+    /// memo's words are the quote above Hermes' audio note, to answer them
+    /// and not transcribe or install anything to hear it, that its file is
+    /// for work on the recording, and what to do when Hermes says it could not
+    /// hear one. Method: the overlay's relay hint after `FILES`, its words.
+    #[test]
+    fn every_agent_is_told_a_voice_memo_arrives_transcribed() {
+        let m = managed_config(&[], CARD_TIMEOUT_S);
+        assert!(relay_hint().contains(&format!("{FILES}\n\n{VOICE}\n\n")), "after the files it is sent: {}", relay_hint());
+        assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
+        for said in ["already transcribed", "quoted words just above the note that the user sent audio", "never transcribe the recording again", "install speech-to-text", "only for work on the recording itself", "timings, an edit, or keeping or sending it on", "could not be transcribed or came through empty", "send it again or type it"] {
+            assert!(VOICE.contains(said), "{said}: {VOICE}");
+        }
+        assert!(!VOICE.contains(['`', '\n', '$']) && VOICE.len() < 500, "one plain paragraph, nothing Hermes would expand: {VOICE}");
     }
 
     /// Goal (Paul, 2026-10-26: asked over SimpleX to send its voice reply
