@@ -674,13 +674,18 @@ fragment they own, `PUT members/{the app's name}`.
   audience it approved. Each refusal is 403 with one line naming the fix,
   such as "Board is shared by link. Make it members only first." or
   "robin@example.com can see Board but isn't in Tracker. Add them here
-  first."; owning one, 400.
+  first."; owning one, 400. The fragment takes the answer only while its
+  ask is the newest (no later ask, removal or end of the app since); an
+  answer it does not take (that, a refusal, no room) leaves the app told
+  what it holds there now.
 - A removal or a lowered role here is never refused. One that leaves an
   app short of anyone it approved pauses it in the same turn: its row's
   `app.paused` names whom it waits on (an `app.paused` event says so), and
-  it holds no role here until they are held again (`app.resumed`), or
-  they leave it, or it is taken out. Asked again at a role while short,
-  it is refused.
+  it holds no role here until they are held again (`app.resumed`), or it
+  is taken out. Any change to who is in the app asks this fragment to look
+  at its audience again: someone it approved before the look and the app
+  no longer shows comes off its list, so taking them out of the app
+  resumes it too.
 - Its row in `GET members` leaves out `kind` and names `app: {name}` and
   its `owner`, who reads nothing through it. It is no guest in its owner's
   row's `sharing`, and has no list of its own.

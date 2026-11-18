@@ -253,7 +253,9 @@ impl FragmentCell {
     /// Who is in, or who may open it, changed: the owner's row in their
     /// list is sent again, with the sharing as it is when it goes.
     pub(crate) fn sharing_changed(&self) -> CellResult<()> {
+        // as a fragment apps are in, and as an app in others (app_members.rs)
         self.apps_held()?;
+        self.apps_look()?;
         let owner = self.must(MetaKey::Owner)?;
         self.index_change(&owner, Some(Role::Owner))
     }
@@ -262,11 +264,12 @@ impl FragmentCell {
     /// it was not taken (`fragment_core::ended::list_told`): the list's
     /// refusal, or a failure a later try may pass.
     pub(crate) async fn tell_index(&self, principal: &str, change: &IndexChange) -> Result<(), Failure> {
-        // an app, or a fragment an app is in, takes it by its name
-        // (app_members.rs): one with no life has nothing to take
-        if fragment_proto::valid_fragment_name(principal) {
-            let told = AppTold(IndexChange { role: change.role, ..IndexChange::gone(change.fragment.clone(), change.incarnation, change.version) });
-            return match crate::fragment::call(&self.env, principal, &told).await {
+        // an app, or a fragment an app is in, takes it by its name, each way
+        // its own (app_members.rs): one with no life has nothing to take
+        let to = |key: &str| principal.strip_prefix(key).filter(|name| fragment_proto::valid_fragment_name(name));
+        if let Some((name, from_app)) = to(crate::app_members::TO_APP).map(|n| (n, false)).or_else(|| to(crate::app_members::FROM_APP).map(|n| (n, true))) {
+            let told = AppTold { from_app, change: IndexChange { role: change.role, ..IndexChange::gone(change.fragment.clone(), change.incarnation, change.version) } };
+            return match crate::fragment::call(&self.env, name, &told).await {
                 Ok(()) => Ok(()),
                 Err(e) if e.code == ErrorCode::NotFound => Ok(()),
                 Err(e) if e.release_refused.is_some() => fragment_core::ended::list_told(None, &e.message),
@@ -332,8 +335,8 @@ impl FragmentCell {
                 }
             };
             let mut change = IndexChange { role, ..IndexChange::gone(name.clone(), incarnation, version) };
-            // an app's: its role alone (app_members.rs)
-            if fragment_proto::valid_fragment_name(&principal) {
+            // an app's, or to a fragment an app is in: its role alone (app_members.rs)
+            if principal.starts_with(crate::app_members::TO_APP) || principal.starts_with(crate::app_members::FROM_APP) {
                 batch.push((principal, version, attempts, Some(change)));
                 continue;
             }
@@ -665,11 +668,9 @@ impl FragmentCell {
             }));
         }
         self.connector_role(body.role)?;
-        // anyone new who is not its owner's own (a test's lever), or a
-        // person raised: what an app that is in anywhere takes from no one
-        // for now (app_members.rs)
-        let owners = target.id == self.must(MetaKey::Owner)? || target.owner.as_deref() == Some(self.must(MetaKey::Owner)?.as_str());
-        if (current.is_none() && !owners) || (current.is_some_and(|c| body.role > c) && self.entity_of(&target.id)?.is_some()) {
+        // anyone whose part in an app that is in anywhere would grow: for
+        // now, none (app_members.rs)
+        if self.member_of_any()?.is_some() && self.grows(target, body.role)? {
             self.stays_alone()?;
         }
         if current.is_some() && body.role < Role::Editor && self.chat_agent()?.as_deref() == Some(target.id.as_str()) {
@@ -918,7 +919,7 @@ impl FragmentCell {
             Err(e) => {
                 // what this call wrote, unless a yes met it meanwhile
                 self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
-                if let Some(was) = before.first() {
+                if let (Some(was), None) = (before.first(), self.member_of_any()?) {
                     let field = |k: &str| was[k].as_str().unwrap_or_default().to_string();
                     let int = |k: &str| was[k].as_i64().unwrap_or_default();
                     write(&field("role"), int("expires_at"), &field("created_by"), int("created_at"))?;
@@ -1031,6 +1032,8 @@ impl FragmentCell {
         if !owner {
             self.agents_join(who, agents, now)?;
         }
+        // each app member held to its list again, now they are in
+        self.apps_held()?;
         self.flush_index().await;
         self.flush_joined().await;
         Ok(now)

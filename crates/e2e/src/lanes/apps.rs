@@ -57,6 +57,18 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     );
     api.signed(&owner, "DELETE", &format!("/api/f/{board}/invites/apps-carol@e2e.test"), None)?;
 
+    // ---- a fragment with no room: refused, and the app is let go at once
+    let (full, _) = made(s, &owner, "apps-full")?;
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": full, "op": "members", "fill": fragment_proto::limits::MEMBERS_MAX })))?;
+    let no_room = put(&owner, &full, &board, "viewer")?;
+    let open = visibility(&owner, &board, "link")?;
+    s.ok(
+        "a fragment at its member cap refuses the app (400), and the app, told at once, is not held to it: its link opens",
+        no_room.status == 400 && no_room.message().contains("at most") && open.status == 200,
+        format!("{no_room} {open}"),
+    );
+    visibility(&owner, &board, "members")?;
+
     // ---- in, as a viewer: its row names the app and its owner, no kind
     let joined = put(&owner, &tracker, &board, "viewer")?;
     let again = put(&owner, &tracker, &board, "viewer")?;
@@ -134,12 +146,12 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     );
     api.share(&tracker, &carol_id, "editor")?;
     let one = app_row(&tracker)?;
-    api.share(&tracker, &dana_id, "viewer")?;
+    let out = api.signed(&owner, "DELETE", &format!("/api/f/{board}/members/{dana_id}"), None)?;
     let both = app_row(&tracker)?;
     s.ok(
-        "each held again, it resumes once the last is",
-        one.as_ref().is_some_and(|m| m["app"]["paused"] == dana_id.as_str()) && both.as_ref().is_some_and(|m| m["app"].get("paused").is_none()),
-        format!("{one:?} {both:?}"),
+        "one held again here, it waits on the other; the other taken out of the app, the fragment looks again and it resumes",
+        one.as_ref().is_some_and(|m| m["app"]["paused"] == dana_id.as_str()) && out.status == 200 && both.as_ref().is_some_and(|m| m["app"].get("paused").is_none()),
+        format!("{one:?} {out} {both:?}"),
     );
 
     // ---- removed: told in the removal's own turn, its link its own again

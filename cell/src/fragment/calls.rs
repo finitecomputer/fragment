@@ -155,13 +155,27 @@ impl Call for AppAsked {
     type Answer = AppAnswer;
 }
 
+/// The app's audience as a fragment it is in holds it: its people, an
+/// agent as its person, with what each does to it.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AppAudienceOf {}
+
+impl Call for AppAudienceOf {
+    const PATH: &'static str = "/call/app/audience";
+    type Answer = Vec<(String, Role)>;
+}
+
 /// A change between an app and a target, as a list takes one
 /// (`IndexChange`, by the fragment that sends it): the target's word on the
-/// app's role there (none: it is out), or the app's, at its life's end,
-/// that it is gone. 404 from a fragment with no life: nothing to take.
+/// app's role there (none: it is out); or, `from_app`, the app's: at its
+/// life's end, that it is gone (none), and at a change to who is in it, to
+/// look at its audience again (`viewer`). 404 from a fragment with no
+/// life: nothing to take.
 #[derive(Serialize, Deserialize)]
-#[serde(transparent)]
-pub(crate) struct AppTold(pub crate::principal::calls::IndexChange);
+pub(crate) struct AppTold {
+    pub from_app: bool,
+    pub change: crate::principal::calls::IndexChange,
+}
 
 impl Call for AppTold {
     const PATH: &'static str = "/call/app/told";
