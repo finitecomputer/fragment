@@ -1,9 +1,9 @@
 //! Whether a runtime's memory of a chat is behind (M17; FIN-530, FIN-543).
 //!
 //! The journal says which turns the agent took in a chat (`work`). This
-//! marker says which turn its runtime was last handed there: one small file per chat, `fragment-seen/<chat>`, holding
-//! that turn's id, in the directory where the runtime keeps the agent's
-//! memory of its chats (`Runtime::memory`: Hermes' profile, beside its
+//! marker says which turn its runtime was last handed there: one small
+//! file per chat, `fragment-seen/<chat>`, holding that turn's id, in the
+//! directory where the runtime keeps the agent's memory of its chats (`Runtime::memory`: Hermes' profile, beside its
 //! `state.db`; Claude Code's project, beside its transcripts). So it goes
 //! back in time with that memory and is lost with it: a computer that
 //! never ran the agent has none, a rollback took it back, a profile lost
