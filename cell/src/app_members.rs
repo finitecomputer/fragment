@@ -168,7 +168,9 @@ impl FragmentCell {
 
     /// `PUT members/<name>`, `name` an app of its owner's, at `role`: the
     /// app asked, then held to the rule in this fragment's own turn.
-    pub(crate) async fn add_app(&self, actor: &Actor, name: &str, role: Role) -> CellResult<Member> {
+    /// `key`: the app life asked for, when one already is (a role by its
+    /// key): another life under the name is no yes.
+    pub(crate) async fn add_app(&self, actor: &Actor, name: &str, role: Role, key: Option<&str>) -> CellResult<Member> {
         let me = self.name()?;
         let title = self.app_title()?;
         if name == me {
@@ -190,7 +192,10 @@ impl FragmentCell {
             Ok(answer) => {
                 // each person by their email, as the owner sees them, should a line name one
                 let names = self.emails(answer.audience.iter().map(|(p, _)| p.clone()).collect()).await;
-                self.app_answered(actor, name, role, (incarnation, version, &owner, &title), &answer, &names)
+                match key.is_some_and(|k| k != answer.npub) {
+                    true => Err(CellError::new(ErrorCode::Conflict, "that app is no longer the one asked for: open its sheet again")),
+                    false => self.app_answered(actor, name, role, (incarnation, version, &owner, &title), &answer, &names),
+                }
             }
             Err(e) => Err(e),
         };

@@ -598,11 +598,12 @@ impl FragmentCell {
         // an app member by its key: its role, asked of it again, never an
         // app added by a sheet that went stale (app_members.rs)
         if let Some(name) = npub::parse(who).map(|k| npub::identity_of(&k)).map(|p| self.app_of(&p)).transpose()?.flatten() {
-            return json_response(&self.add_app(&actor, &name, body.role).await?);
+            let key = npub::parse(who).map(|k| npub::identity_of(&k)).unwrap_or_default();
+            return json_response(&self.add_app(&actor, &name, body.role, Some(&key)).await?);
         }
         // a fragment's name: an app of its owner's (app_members.rs)
         if fragment_proto::valid_fragment_name(who) {
-            return json_response(&self.add_app(&actor, who, body.role).await?);
+            return json_response(&self.add_app(&actor, who, body.role, None).await?);
         }
         // what it waited on, for its client (`Server-Timing`)
         let mut laps = crate::js::Laps::start();
