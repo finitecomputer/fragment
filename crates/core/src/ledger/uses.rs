@@ -130,8 +130,11 @@ pub fn count(t: &mut impl Tally, u: &Used, now_ms: i64) -> Result<u32, Refused> 
 
 /// Takes a computer's month from before the move, once by its id: the same
 /// body again adds nothing; another under its id is refused. A month past
-/// what is kept is taken and kept nowhere. Bounded by the computer's own
-/// cap (`OWED_ROWS_MAX`), not `ROWS_MAX`: rows owed are never dropped.
+/// what is kept is taken and kept nowhere, and months past it forgotten,
+/// as a count forgets them. Bounded by the computer's own cap
+/// (`OWED_ROWS_MAX`), not `ROWS_MAX`, and a row's charge by nothing but
+/// its sign (a month's total, no call's: `CHARGE_MAX` bounds one call):
+/// rows owed are never dropped.
 pub fn take(t: &mut impl Tally, o: &TakeUses, now_ms: i64) -> Result<(), Refused> {
     if !valid_id(&o.id) {
         return Err(invalid(Invalid::Id));
@@ -139,7 +142,7 @@ pub fn take(t: &mut impl Tally, o: &TakeUses, now_ms: i64) -> Result<(), Refused
     if o.rows.is_empty() || o.rows.len() > OWED_ROWS_MAX {
         return Err(invalid(Invalid::Rows));
     }
-    if !o.rows.iter().all(|r| r.calls > 0 && valid_row(&r.agent, &r.provider, r.micros)) {
+    if !o.rows.iter().all(|r| r.calls > 0 && r.micros >= 0 && valid_id(&r.agent) && valid_id(&r.provider)) {
         return Err(invalid(Invalid::Id));
     }
     let digest = hex::encode(Sha256::digest(serde_json::to_vec(&(o.month, &o.rows)).expect("rows serialize")));
@@ -148,18 +151,23 @@ pub fn take(t: &mut impl Tally, o: &TakeUses, now_ms: i64) -> Result<(), Refused
         Some(_) => return Err(Refused::ConflictingBody),
         None => {}
     }
-    if o.month >= oldest(now_ms) {
+    let oldest = oldest(now_ms);
+    if o.month >= oldest {
         for r in &o.rows {
             t.add(o.month, &r.agent, &r.provider, r.calls, r.micros);
         }
     }
     t.put_taken(&o.id, &digest);
+    t.forget_before(oldest);
     Ok(())
 }
 
-/// `month`'s uses.
-pub fn read(t: &impl Tally, month: Month) -> LedgerUses {
-    LedgerUses { month: month.label(), uses: t.month(month) }
+/// `month`'s uses at `now_ms`: none for a month past those kept, which a
+/// read leaves out (it writes nothing) until a count or a hand-over
+/// forgets it.
+pub fn read(t: &impl Tally, month: Month, now_ms: i64) -> LedgerUses {
+    let uses = if month < oldest(now_ms) { vec![] } else { t.month(month) };
+    LedgerUses { month: month.label(), uses }
 }
 
 /// A tally in memory, for tests.
@@ -321,6 +329,37 @@ mod tests {
         assert_eq!((t.rows.len(), t.taken.len()), (0, 1), "taken, kept nowhere");
     }
 
+
+    /// Goal: a month's total is no single call: a computer's month whose
+    /// charge for one agent at one provider is past what one call may cost
+    /// (`CHARGE_MAX`) is taken whole, never refused, which its computer
+    /// would forget (Codex review of #1343). Method: a month at twice it.
+    #[test]
+    fn a_months_total_past_one_calls_most_is_taken() {
+        let mut t = Memory::default();
+        let month = Month::of(NOW);
+        let big = TakeUses { id: "c-1:682".into(), month, rows: vec![row("lead--a1", "elevenlabs", 30_000, 2 * CHARGE_MAX), row("lead--a1", "github", 2, 0)] };
+        assert_eq!(take(&mut t, &big, NOW), Ok(()));
+        assert_eq!(of(&t, month), [line("elevenlabs", "lead--a1", 30_000, 2 * CHARGE_MAX), line("github", "lead--a1", 2, 0)]);
+    }
+
+    /// Goal: what is past the months kept is read as nothing and forgotten,
+    /// even for a person whose agents count nothing since: a read writes
+    /// nothing, so it leaves it out; a hand-over forgets it as a count does
+    /// (Codex review of #1343). Method: a month counted, read thirteen
+    /// months on; then a hand-over.
+    #[test]
+    fn a_month_past_those_kept_is_read_as_none() {
+        let mut t = Memory::default();
+        let month = Month::of(NOW);
+        count(&mut t, &used("lead--a1", NOW, &[("github", 0)]), NOW).expect("counted");
+        let later = NOW + 400 * DAY_MS;
+        assert_eq!(read(&t, month, NOW).uses.len(), 1, "kept while in the window");
+        assert_eq!(read(&t, month, later).uses, vec![], "past it, none, with no count since");
+        let owed = TakeUses { id: "c-1:695".into(), month: Month::of(later), rows: vec![row("lead--a1", "github", 1, 0)] };
+        assert_eq!(take(&mut t, &owed, later), Ok(()));
+        assert_eq!(t.rows(month), 0, "a hand-over forgets it");
+    }
 
     /// A step-6 computer holding `rows` (month, provider, agent, calls,
     /// micros) in its `uses`, as a release before the move wrote them.

@@ -904,6 +904,12 @@ impl LedgerCell {
             Delay::from(std::time::Duration::from_millis(slow)).await;
         }
         let body = req.bytes().await?;
+        // a wipe that ran while this waited (its body, `slow`) is seen here:
+        // each route's transaction follows with no await between, so none
+        // writes rows back into a ledger its wipe emptied
+        if self.wiped.get() {
+            return Err(Failed::Refused(Refused::Wiped));
+        }
         fn done(answer: ()) -> Done {
             let () = answer;
             Done {}
@@ -1009,7 +1015,7 @@ impl LedgerCell {
                 let q: UsesOf = decode(&body)?;
                 let now = js::now_ms() + self.offset_ms()?;
                 let store = SqlStore::new(self.sql());
-                let answer = uses::read(&store, q.month.unwrap_or_else(|| Month::of(now)));
+                let answer = uses::read(&store, q.month.unwrap_or_else(|| Month::of(now)), now);
                 store.checked()?;
                 reply(answer)
             }
