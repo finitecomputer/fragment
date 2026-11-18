@@ -947,9 +947,11 @@ impl FragmentCell {
                 json_response(&Shared::Invited(invite))
             }
             Err(e) => {
-                // what this call wrote, unless a yes met it meanwhile
-                self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
-                if let Some(was) = before.first() {
+                // what this call wrote, unless a yes met it meanwhile; the
+                // one before comes back only into the place this one still
+                // held (a revoke or a newer invite since stands)
+                let ours = self.rows("DELETE FROM invites WHERE email = ? AND created_at = ? RETURNING email", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
+                if let (Some(was), false) = (before.first(), ours.is_empty()) {
                     let field = |k: &str| was[k].as_str().unwrap_or_default().to_string();
                     let int = |k: &str| was[k].as_i64().unwrap_or_default();
                     write(&field("role"), int("expires_at"), &field("created_by"), int("created_at"))?;
@@ -1054,12 +1056,18 @@ impl FragmentCell {
         if noted.is_some() {
             let made = SqlStorageValue::Integer(row["created_at"].as_i64().unwrap_or(0));
             let same = self.rows(
-                "SELECT 1 AS x FROM invites WHERE email = ? AND created_at = ? AND expires_at > ?",
-                vec![claim.email.as_str().into(), made, SqlStorageValue::Integer(js::now_ms())],
+                "SELECT 1 AS x FROM invites WHERE email = ? AND created_at = ? AND role = ? AND expires_at > ?",
+                vec![claim.email.as_str().into(), made, role.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
             )?;
             if same.is_empty() {
                 self.given_up(noted).await?;
-                return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
+                // a newer invite in its place is not this one's to spend, nor
+                // the registry's to forget: a conflict, not a 404
+                let newer = !self.rows("SELECT 1 AS x FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?.is_empty();
+                return Err(match newer {
+                    true => CellError::new(ErrorCode::Conflict, "a newer invite waits on that email: answer that one"),
+                    false => CellError::new(ErrorCode::NotFound, "no invite waits on that email"),
+                });
             }
             if let Err(e) = self.room_for(u64::from(self.member_role(who)?.is_none()) + self.not_members(agents)?) {
                 self.given_up(noted).await?;
