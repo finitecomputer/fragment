@@ -46,9 +46,8 @@ an image may rely on this:
   wake pulls it and restores the whole save. Asleep, a computer that
   something but its quiet wake woke within `REFRESH_USED_MS` (7 days)
   looks at its image every 1.5 to 3 hours (`REFRESH_LOOK_MS`, its own
-  alarm). Its next start on an image its last start did not run, with no
-  snapshot there (`refresh_due`), it wakes once as a page's presence
-  does, held a minute more once up so its guest boots, then idles out:
+  alarm). Its next start on an image its last start did not run
+  (`refresh_due`), it wakes once as a page's presence does, held a minute more once up so its guest boots, then idles out:
   its sleep saves and snapshots on the new image, and its person's next
   wake starts from that. Its owner is told nothing and charged nothing
   for it (its meters are logged `unmetered`); a wake by anything else, or

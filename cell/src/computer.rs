@@ -1271,7 +1271,7 @@ impl ComputerCell {
     /// a strike toward "won't wake".
     async fn refresh(&self) -> CellResult<()> {
         let (life, saves, next) = (self.lifecycle()?, self.saves()?, self.images()?);
-        if !refresh_due(&life, &saves, next.next(), self.cfg.computer_snapshots, self.used_ms()?, js::now_ms()) {
+        if !refresh_due(&life, &saves, next.next(), self.used_ms()?, js::now_ms()) {
             return Ok(());
         }
         let id = self.meta(MetaKey::Id)?;

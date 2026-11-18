@@ -8,20 +8,18 @@
 
 use crate::computer::lifecycle::{Lifecycle, Phase};
 use crate::computer::limits::{REFRESH_LOOK_MS, REFRESH_USED_MS};
-use crate::computer::saves::{Plan, Saves};
+use crate::computer::saves::Saves;
 
 /// Whether a computer wakes quietly now: it is asleep with no start due,
 /// something other than a quiet wake woke it within `REFRESH_USED_MS`
-/// (`used_ms`), its next start runs an image (`next`, its reference) that
-/// its last start did not come up on, and that start would restore its
-/// save whole, as no snapshot of it is on `next` (`snapshots`: whether the
-/// deployment takes them). Once it came up on `next`, it is not again.
-pub fn refresh_due(life: &Lifecycle, saves: &Saves, next: Option<&str>, snapshots: bool, used_ms: Option<i64>, now_ms: i64) -> bool {
-    let Some(next) = next else { return false };
+/// (`used_ms`), and its next start runs an image (`next`, its reference)
+/// its last start did not come up on. That start would pull the image and
+/// restore its save whole, since a snapshot is only ever of the image its
+/// life ran (`Saves::plan`). Once it came up on `next`, it is not again.
+pub fn refresh_due(life: &Lifecycle, saves: &Saves, next: Option<&str>, used_ms: Option<i64>, now_ms: i64) -> bool {
     let asleep = matches!(life.phase, Phase::Asleep { retry: None });
-    let full = saves.plan(snapshots.then_some(next)) == Plan::Backup;
-    let moved = saves.ran().is_some_and(|ran| ran != next);
-    asleep && used(used_ms, now_ms) && full && moved
+    let moved = saves.ran().is_some_and(|ran| next.is_some_and(|next| next != ran));
+    asleep && used(used_ms, now_ms) && moved
 }
 
 /// When an asleep computer looks again (`refresh_due`): between half of
@@ -90,10 +88,10 @@ mod tests {
         let mut c = slept_on_image();
         let used = c.now;
         c.now += DAY;
-        assert!(!refresh_due(&c.life, &c.saves, c.images.next(), true, Some(used), c.now), "its snapshot is on the image it runs next");
+        assert!(!refresh_due(&c.life, &c.saves, c.images.next(), Some(used), c.now), "its snapshot is on the image it runs next");
         assert!(c.images.looked(Some(NEXT)), "a deploy changed the image");
         assert_eq!(c.saves.plan(Some(NEXT)), Plan::Backup, "its next wake would pull the image and restore its save whole");
-        assert!(refresh_due(&c.life, &c.saves, c.images.next(), true, Some(used), c.now));
+        assert!(refresh_due(&c.life, &c.saves, c.images.next(), Some(used), c.now));
         quiet_life(&mut c, "b2");
         assert_eq!(c.saves.plan(Some(NEXT)), Plan::Snapshot { id: "s2".into() }, "the person's next wake is a snapshot's");
         assert_eq!(c.saves.ran(), Some(NEXT));
@@ -107,16 +105,16 @@ mod tests {
         let mut c = slept_on_image();
         let used = c.now;
         assert!(c.images.looked(Some(NEXT)));
-        let due = |c: &Computer, used: Option<i64>| refresh_due(&c.life, &c.saves, c.images.next(), true, used, c.now);
+        let due = |c: &Computer, used: Option<i64>| refresh_due(&c.life, &c.saves, c.images.next(), used, c.now);
         assert!(due(&c, Some(used)));
         assert!(!due(&c, None), "never woken since a release kept when");
         let now = c.now;
         c.now = used + REFRESH_USED_MS;
         assert!(!due(&c, Some(used)), "a week since it was used");
         c.now = now;
-        assert!(!refresh_due(&c.life, &c.saves, None, true, Some(used), c.now), "no image by its name");
+        assert!(!refresh_due(&c.life, &c.saves, None, Some(used), c.now), "no image by its name");
         let mut never = Computer::new();
-        assert!(!refresh_due(&never.life, &never.saves, never.images.next(), true, Some(never.now), never.now), "a computer never started has nothing to restore");
+        assert!(!refresh_due(&never.life, &never.saves, never.images.next(), Some(never.now), never.now), "a computer never started has nothing to restore");
         never.wake();
         assert!(!due(&never, Some(never.now)), "awake: its own sleep takes the snapshot");
         // a failed start's retry is due: the lifecycle's own alarm makes it
@@ -139,25 +137,20 @@ mod tests {
     }
 
     /// Goal (replay): a look again after the quiet wake, and after one
-    /// whose snapshot failed, wakes nothing: once it came up on the new
-    /// image it waits for the next. Snapshots off (a local fleet), the
-    /// same: one quiet wake an image.
+    /// whose snapshot was lost (or never taken: snapshots off, as on a
+    /// local fleet), wakes nothing: once it came up on the new image it
+    /// waits for the next.
     #[test]
     fn it_wakes_once_an_image_however_often_it_looks() {
         let mut c = slept_on_image();
         let used = c.now;
         assert!(c.images.looked(Some(NEXT)));
         quiet_life(&mut c, "b2");
-        assert!(!refresh_due(&c.life, &c.saves, c.images.next(), true, Some(used), c.now), "its snapshot is on the new image");
+        assert!(!refresh_due(&c.life, &c.saves, c.images.next(), Some(used), c.now), "its snapshot is on the new image");
         assert_eq!(c.saves.snapshot_failed().map(|s| s.image), Some(NEXT.to_string()));
-        assert!(!refresh_due(&c.life, &c.saves, c.images.next(), true, Some(used), c.now), "a snapshot lost on the image it ran: no second quiet wake");
+        assert!(!refresh_due(&c.life, &c.saves, c.images.next(), Some(used), c.now), "a snapshot lost on the image it ran: no second quiet wake");
         assert!(c.images.looked(Some(IMAGE)), "pinned back");
-        assert!(refresh_due(&c.life, &c.saves, c.images.next(), true, Some(used), c.now), "another image, another quiet wake");
-        let mut off = slept_on_image();
-        assert!(off.images.looked(Some(NEXT)));
-        assert!(refresh_due(&off.life, &off.saves, off.images.next(), false, Some(used), off.now));
-        quiet_life(&mut off, "b2");
-        assert!(!refresh_due(&off.life, &off.saves, off.images.next(), false, Some(used), off.now), "snapshots off: once");
+        assert!(refresh_due(&c.life, &c.saves, c.images.next(), Some(used), c.now), "another image, another quiet wake");
     }
 
     /// Goal (restart): the decision is a function of what the DO stores,
@@ -170,10 +163,10 @@ mod tests {
         assert!(c.images.looked(Some(NEXT)));
         let life = Lifecycle::read(&serde_json::to_string(&c.life).unwrap()).unwrap().0;
         let saves: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
-        assert!(refresh_due(&life, &saves, Some(NEXT), true, Some(used), c.now));
+        assert!(refresh_due(&life, &saves, Some(NEXT), Some(used), c.now));
         quiet_life(&mut c, "b2");
         let saves: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
-        assert!(!refresh_due(&c.life, &saves, Some(NEXT), true, Some(used), c.now), "its quiet life is kept");
+        assert!(!refresh_due(&c.life, &saves, Some(NEXT), Some(used), c.now), "its quiet life is kept");
         assert_eq!(saves.plan(Some(NEXT)), Plan::Snapshot { id: "s2".into() });
     }
 
