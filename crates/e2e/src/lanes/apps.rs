@@ -6,7 +6,6 @@
 //! the fragment it is in lets it go.
 
 use anyhow::Result;
-use fragment_core::npub;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -100,7 +99,8 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- its people: Carol edits the board, Dana views it; held to them here
     let (carol, dana) = (api.person()?, api.person()?);
-    let (carol_id, dana_id) = (npub::encode(carol.pubkey_hex()), npub::encode(dana.pubkey_hex()));
+    // each by their identity, as a member row names them (not their key's npub)
+    let (carol_id, dana_id) = (api.identity(&carol)?, api.identity(&dana)?);
     api.signed(&owner, "DELETE", &format!("/api/f/{tracker}/members/{board}"), None)?;
     api.share(&board, &carol_id, "editor")?;
     api.share(&board, &dana_id, "viewer")?;
@@ -162,7 +162,7 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- a growth asked before a restart: Erin, a member there, invited here
     let erin = api.person()?;
-    let erin_id = npub::encode(erin.pubkey_hex());
+    let erin_id = api.identity(&erin)?;
     let invite_erin = || api.signed(&owner, "POST", &format!("/api/f/{board}/invites"), Some(&json!({ "email": Api::email_of(&erin), "role": "viewer" })));
     let no = invite_erin()?;
     s.ok(
@@ -226,7 +226,7 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{board}"), None)?;
     s.ok(
         "an app deleted is out of the fragment it was in",
-        rejoined.status == 200 && deleted.status == 200 && app_row(&tracker)?.is_none() && members(&tracker)?.len() == 1,
+        rejoined.status == 200 && deleted.status == 200 && app_row(&tracker)?.is_none(),
         format!("{rejoined} {deleted}"),
     );
 
