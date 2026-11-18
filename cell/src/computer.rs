@@ -61,7 +61,7 @@ use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind, Reason};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -1066,6 +1066,7 @@ impl ComputerCell {
         // unhold), or at a start or a sleep's end
         while let Some(event) = queue.pop() {
             let mut life = self.lifecycle()?;
+            let shown = life.shown(js::now_ms());
             let logged = json!(event);
             let applied = event.clone();
             let step = life.apply_with(event, js::now_ms(), &rules);
@@ -1095,6 +1096,11 @@ impl ComputerCell {
                 }
             }
             self.alarm_at(step.alarm_ms).await?;
+            // its phase shown changed: its owner's open pages read it again,
+            // before a start's actions (a chat says its agent is getting ready)
+            if life.shown(js::now_ms()) != shown {
+                self.tell_owner().await;
+            }
             refused = refused.or(step.refused.clone());
             for next in self.perform(step).await? {
                 queue.push(next);
@@ -2405,14 +2411,10 @@ impl ComputerCell {
     fn view_unasked(&self) -> CellResult<Unasked> {
         let id = self.must(MetaKey::Id)?;
         let life = self.lifecycle()?;
-        let (phase, why) = match &life.phase {
-            // a start owed and due is told as starting (`Lifecycle::starting`)
-            Phase::Asleep { .. } if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
-            Phase::Asleep { .. } => (ComputerPhase::Asleep, None),
-            Phase::Starting { .. } => (ComputerPhase::Starting, None),
-            Phase::Awake { .. } => (ComputerPhase::Awake, None),
-            Phase::Sleeping { .. } => (ComputerPhase::Sleeping, None),
-            Phase::Failed { why, .. } => (ComputerPhase::WontWake, Some(why.clone())),
+        let phase = life.shown(js::now_ms());
+        let why = match &life.phase {
+            Phase::Failed { why, .. } => Some(why.clone()),
+            _ => None,
         };
         let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
         let saves = self.saves()?;

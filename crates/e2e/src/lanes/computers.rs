@@ -288,9 +288,10 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
 
 /// The disk checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes.
-const DISK_CHECKS: [&str; 2] = [
+const DISK_CHECKS: [&str; 3] = [
     "its disk is read in its start, before its guest runs: its size and what is free, read by that start",
     "and in its next start, by that start",
+    "its owner's open pages are told as its phase changes, its notices the same: as it sleeps, and as it wakes",
 ];
 
 /// Its disk, read (`df`) in each start before its guest is let go
@@ -314,14 +315,27 @@ fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
     let (v, d) = (view(), disk());
     let (total, free) = (d["total"].as_u64().unwrap_or(0), d["free"].as_u64().unwrap_or(u64::MAX));
     s.ok(DISK_CHECKS[0], v["phase"] == "awake" && read_by(&d, &v["restored"]) && total > 0 && free <= total, json!({ "disk": d, "restored": v["restored"] }));
+    // its owner's pages watch: what came before told first (read until a
+    // read waits 5 s for nothing), then each read counts what came
+    let url = format!("{}/api/fragments/watch", api.base);
+    let mut tab = super::shell::watching(Socket::connect(api, &url, Some(c.owner), None, None).map(|(w, _)| w));
+    let mut told = || tab.as_mut().map(|w| (0..10).take_while(|_| w.next().is_ok_and(|m| m == json!({ "type": "changed" }))).count()).unwrap_or(0);
+    let before = told();
     // a sleep and a wake: read in the start the wake made
-    api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let told_slept = told();
     let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let told_woke = told();
     let started = disk();
     s.ok(
         DISK_CHECKS[1],
         woke.body["phase"] == "awake" && read_by(&started, &woke.body["restored"]) && at(&started) > at(&d) && started["total"].as_u64() == Some(total),
         json!({ "disk": started, "restored": woke.body["restored"] }),
+    );
+    s.ok(
+        DISK_CHECKS[2],
+        before < 10 && slept.body["phase"] == "asleep" && told_slept > 0 && told_woke > 0 && slept.body["notices"] == v["notices"] && woke.body["notices"] == v["notices"],
+        json!({ "before": before, "slept": [&slept.body["phase"], told_slept], "woke": [&woke.body["phase"], told_woke], "notices": [&v["notices"], &slept.body["notices"], &woke.body["notices"]] }),
     );
     Ok(())
 }
