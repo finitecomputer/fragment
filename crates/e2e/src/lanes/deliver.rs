@@ -219,7 +219,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{call:?}"),
     );
     let r = run("t-high", "summarize_high", json!({ "text": "the high tier" }))?;
-    s.ok("a step on the high tier is refused, saying why (decision 23)", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("high tier is off")), &r);
+    s.ok("a step naming no route of the deployment's (high) is refused, naming its routes", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("model names one of this deployment's routes: cheap, medium")), &r);
 
     let r = run("i1", "draw", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.jpg" }))?;
     s.ok(
