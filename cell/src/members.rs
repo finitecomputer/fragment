@@ -918,7 +918,7 @@ impl FragmentCell {
             Err(e) => return Err(e),
         }
         self.drop_spent_invites().await?;
-        let before = self.rows("SELECT email, role, expires_at, created_by, created_at FROM invites WHERE email = ?", vec![email.as_str().into()])?;
+        let before = self.rows("SELECT email, role, expires_at, created_by, created_at, app, app_key FROM invites WHERE email = ?", vec![email.as_str().into()])?;
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
         }
@@ -984,9 +984,13 @@ impl FragmentCell {
                 // held (a revoke or a newer invite since stands)
                 let ours = self.rows("DELETE FROM invites WHERE email = ? AND created_at = ? RETURNING email", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
                 if let (Some(was), false) = (before.first(), ours.is_empty()) {
-                    let field = |k: &str| was[k].as_str().unwrap_or_default().to_string();
-                    let int = |k: &str| was[k].as_i64().unwrap_or_default();
-                    write(&field("role"), int("expires_at"), &field("created_by"), int("created_at"))?;
+                    // whole, an app's marks too: it grants what it granted
+                    let text = |k: &str| was[k].as_str().map_or(SqlStorageValue::Null, Into::into);
+                    let int = |k: &str| SqlStorageValue::Integer(was[k].as_i64().unwrap_or_default());
+                    self.exec(
+                        "INSERT INTO invites (email, role, expires_at, created_by, created_at, app, app_key) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (email) DO NOTHING",
+                        vec![text("email"), text("role"), int("expires_at"), text("created_by"), int("created_at"), text("app"), text("app_key")],
+                    )?;
                 }
                 Err(e)
             }

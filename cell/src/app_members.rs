@@ -266,8 +266,8 @@ impl FragmentCell {
         // an invite's yes: that same invite, waiting still, for that same app life
         if let Some(i) = invited {
             let waits = self.rows(
-                "SELECT 1 AS x FROM invites WHERE email = ? AND created_at = ? AND app = ? AND expires_at > ?",
-                vec![i.email.as_str().into(), SqlStorageValue::Integer(i.made), name.into(), SqlStorageValue::Integer(js::now_ms())],
+                "SELECT 1 AS x FROM invites WHERE email = ? AND created_at = ? AND app = ? AND role = ? AND expires_at > ?",
+                vec![i.email.as_str().into(), SqlStorageValue::Integer(i.made), name.into(), role.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
             )?;
             if waits.is_empty() || answer.npub != i.key {
                 return Err(CellError::new(ErrorCode::Conflict, "that invite is no longer this app's: ask its owner to invite it again"));
@@ -359,8 +359,8 @@ impl FragmentCell {
         let now = js::now_ms();
         let expires_at = now + fragment_proto::limits::INVITE_TTL_S * 1000;
         // one app's invite to a member at a time: a newer one takes its
-        // place, and the one before comes back should the mail fail
-        let before = self.rows("SELECT email, role, expires_at, created_by, created_at, app, app_key FROM invites WHERE email = ?", vec![email.as_str().into()])?;
+        // place; should its mail fail, none is left (the registry may hold
+        // neither), and the owner invites again
         self.exec(
             "INSERT INTO invites (email, role, expires_at, created_by, created_at, app, app_key) VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (email) DO UPDATE SET role = excluded.role, expires_at = excluded.expires_at, created_by = excluded.created_by,
@@ -376,15 +376,8 @@ impl FragmentCell {
             expires_at,
         };
         if let Err(e) = crate::ask_registry(&self.env, &asked).await {
-            self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
-            if let Some(was) = before.first() {
-                let text = |k: &str| was[k].as_str().map_or(SqlStorageValue::Null, Into::into);
-                let int = |k: &str| SqlStorageValue::Integer(was[k].as_i64().unwrap_or_default());
-                self.exec(
-                    "INSERT INTO invites (email, role, expires_at, created_by, created_at, app, app_key) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (email) DO NOTHING",
-                    vec![text("email"), text("role"), int("expires_at"), text("created_by"), int("created_at"), text("app"), text("app_key")],
-                )?;
-            }
+            self.exec("DELETE FROM invites WHERE email = ? AND created_at = ? AND app = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now), name.into()])?;
+            self.sharing_changed()?;
             return Err(e);
         }
         self.sharing_changed()?;
