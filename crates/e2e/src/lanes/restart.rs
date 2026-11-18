@@ -34,6 +34,8 @@ const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
 const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
 const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
 const SECRET: &str = "sk-e2e-restart-5b2e07";
+/// An own key a computer kept from before the move (M16), across the restart.
+const OWN_KEPT: &str = "mail-own-e2e-restart-41f6";
 const MEMBER_EMAIL: &str = "restart-member@e2e.test";
 
 fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
@@ -353,22 +355,25 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let tool_calls_before = s.ai.calls().len();
     // a CLI's code asked for and an own key's sign-in begun, each left
     // under way across the restart: their state is the registry's and the
-    // computer's rows, and the browser's cookie
+    // person's Vault's rows, and the browser's cookie; and an own key their
+    // computer kept from before the move (M16), owed to their Vault
     let pending_key = Keys::generate();
     let pending_code = api.cli_begin(&pending_key)?.body["code"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(!pending_code.is_empty(), "pending CLI code setup");
-    // an own key's sign-in finishes at its person's computer: none on celld
+    // an own key's computer from before the move: none on celld
     let own_key = match s.on_celld() {
         true => None,
         false => {
             let connector = api.person()?;
             let connector_session = api.sign_in(&Api::email_of(&connector))?;
             let made = api.signed(&connector, "POST", "/api/computers", Some(&json!({})))?;
+            let computer = made.body["computer"].as_str().unwrap_or_default().to_string();
+            let kept = api.unsigned("POST", "/api/test/computer", Some(&json!({ "computer": computer, "op": "legacy-own-key", "provider": crate::SWAP_OWN, "key": OWN_KEPT })))?;
             let asked = super::credentials::shell_authorize(&api, &connector_session)?;
             let bound = super::credentials::own_key_cookie(&asked);
             let back = super::credentials::sent_back(&api, asked.body["url"].as_str().unwrap_or_default())?;
-            anyhow::ensure!(made.status == 200 && asked.status == 200 && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {asked} {back}");
-            Some((connector, connector_session, bound, back))
+            anyhow::ensure!(made.status == 200 && kept.body["held"] == json!([crate::SWAP_OWN]) && asked.status == 200 && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {kept} {asked} {back}");
+            Some((connector, connector_session, bound, back, computer))
         }
     };
 
@@ -398,14 +403,20 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         json!({ "typed": typed.status, "added": pressed.status, "me": theirs.body }),
     );
     const OWN_KEY: &str = "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected";
+    const OWN_KEY_KEPT: &str = "after a restart an own key its computer kept from before the move is still owed, and goes to its person's Vault as they read their connections: set, and the computer holds it no more";
     match own_key {
-        Some((connector, connector_session, bound, back)) => {
+        Some((connector, connector_session, bound, back, computer)) => {
             let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
             let state = api.signed(&connector, "GET", "/api/connections", None)?;
-            let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
-            s.ok(OWN_KEY, page.status == 200 && page.text.contains("is connected") && connected, json!({ "page": page.to_string(), "connections": state.body }));
+            let state_of = |p: &str| state.body["providers"].as_array().and_then(|l| l.iter().find(|x| x["provider"] == p)).map(|x| x["state"].clone()).unwrap_or(Value::Null);
+            s.ok(OWN_KEY, page.status == 200 && page.text.contains("is connected") && state_of(crate::SWAP_ROUTER) == "set", json!({ "page": page.to_string(), "connections": state.body }));
+            let held = api.unsigned("POST", "/api/test/computer", Some(&json!({ "computer": computer, "op": "legacy-own-key", "provider": crate::SWAP_OWN })))?;
+            s.ok(OWN_KEY_KEPT, state_of(crate::SWAP_OWN) == "set" && held.body["held"] == json!([]) && !state.text.contains(OWN_KEPT), json!({ "state": state_of(crate::SWAP_OWN), "held": held.body["held"] }));
         }
-        None => s.skip(OWN_KEY, NO_COMPUTERS),
+        None => {
+            s.skip(OWN_KEY, NO_COMPUTERS);
+            s.skip(OWN_KEY_KEPT, NO_COMPUTERS);
+        }
     }
     const FACE: &str = "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them";
     match face {

@@ -9,7 +9,8 @@
 //!   as WorkOS Pipes says of the account (its connected account: no token
 //!   is minted to tell); an operator key `offered`; an own key `set` or
 //!   `not_set`. Reading it tells the person's computer the connections'
-//!   states, so a guest learns of a new connection at its next read.
+//!   states, so a guest learns of a new connection at its next read, and
+//!   reads their own keys from their Vault beside it.
 //! - `POST /api/connections/{provider}/authorize` → `{url}`: where the
 //!   person's browser goes to connect a connection. Its own provider's code
 //!   returns to Fragment; browser/session/provider binding is checked before
@@ -26,17 +27,18 @@
 //!   fences the account: no connect begun before the disconnect connects
 //!   it after (a 429 while one is importing).
 //! - `PUT /api/connections/{provider}/key {key}` and `DELETE …/key`: the
-//!   person's own key for an `own` provider, kept sealed by their computer
-//!   (one computer per person for now: decision 13), which swaps it in.
+//!   person's own key for an `own` provider, kept sealed in their Vault
+//!   (vault.rs; M16), which their computers' swaps ask for it. The body is
+//!   passed on as it came, and the Vault checks it.
 //! - An own key whose row has a sign-in (`oauth`) is connected from
 //!   settings instead, never pasted (Paul, 2026-10-08;
 //!   `fragment_core::own_signin`): `POST …/authorize`, from the shell's
-//!   session, begins it (their computer keeps its nonce and verifier, and a
+//!   session, begins it (their Vault keeps its nonce and verifier, and a
 //!   cookie binds the nonce to their browser) and answers the provider's
 //!   page, and `GET /api/connections/{provider}/callback?code=&state=`,
 //!   where the provider sends their browser back, finishes it only in that
 //!   browser (`auth::trip_bound`), signed in as them: it exchanges the code
-//!   for their key and has their own computer seal it. Disconnecting is
+//!   for their key and has their own Vault seal it. Disconnecting is
 //!   `DELETE …/key`; the key itself is revoked at the provider (its
 //!   `manage` page).
 
@@ -58,14 +60,6 @@ use crate::keys::PipesAccount;
 use crate::registry::calls::SubjectOf;
 use crate::routed::Signed;
 use fragment_core::gather::Gathered;
-
-/// An own key, at most (a provider's API key is far shorter).
-pub use fragment_core::own_signin::OWN_KEY_MAX_BYTES;
-
-/// Whether `key` is a key the swap may send: a printable token.
-pub fn own_key_ok(key: &str) -> bool {
-    (1..=OWN_KEY_MAX_BYTES).contains(&key.len()) && key.bytes().all(|b| (0x21..=0x7e).contains(&b))
-}
 
 /// The WorkOS user the person signed in as, which their connections are.
 pub async fn workos_user(env: &Env, cfg: &Config, who: &str) -> CellResult<Option<String>> {
@@ -215,18 +209,23 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             let mut listed = BTreeMap::new();
             let states = connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut listed)).await?;
             // the person's computer keeps them, for its guest's next read; one
-            // not made yet has nothing to tell, and so no own key either
+            // not made yet has nothing to tell
             let told = json!({ "connections": states, "accounts": held_of(cfg, &listed) });
-            /// `computer/own-keys`' answer: the providers it holds a key of its own for.
+            /// `computer/own-keys`' answer: the own keys it kept before the
+            /// move (M16), each handed to their Vault as it answers or still owed.
             #[derive(serde::Deserialize)]
             struct OwnKeys {
                 providers: Vec<String>,
             }
-            let own: Vec<String> = match crate::routed::ask_object::<OwnKeys>(env, "COMPUTER", &computer, "computer/own-keys", &told).await {
+            // their own keys are their Vault's, read beside it: a key the
+            // computer hands over meanwhile is in its answer
+            let (kept, names) = futures_util::future::join(crate::routed::ask_object::<OwnKeys>(env, "COMPUTER", &computer, "computer/own-keys", &told), crate::vault::names(env, who, &[])).await;
+            let mut own: Vec<String> = match kept {
                 Ok(keys) => keys.providers,
                 Err(e) if e.code == ErrorCode::NotFound => vec![],
                 Err(e) => return Err(e),
             };
+            own.extend(names?.1);
             let providers = cfg
                 .providers
                 .providers()
@@ -282,7 +281,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                 if signed.key.is_some() {
                     return Err(CellError::new(ErrorCode::Forbidden, format!("{provider} is connected from settings, in a browser signed in to the platform")));
                 }
-                return sign_in(env, cfg, url, &computer, provider, o).await;
+                return sign_in(env, cfg, url, who, provider, o).await;
             }
             if p.kind != Kind::Connection {
                 return Err(CellError::invalid(format!("{provider} is no connection: it is a key, which is not authorized through WorkOS")));
@@ -371,24 +370,12 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             json_response(&json!({ "provider": provider, "account": id, "state": state, "revoked": revoked }))
         }
         (Method::Put | Method::Delete, [provider, "key"]) => {
-            if provider_of(provider)?.kind != Kind::Own {
-                return Err(CellError::invalid(format!("{provider} takes no key of yours: only an own key's provider does")));
-            }
-            let key = if method == Method::Put {
-                let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                let key = v["key"].as_str().map(str::trim).unwrap_or_default().to_string();
-                if !own_key_ok(&key) {
-                    return Err(CellError::invalid(format!("a key is 1 to {OWN_KEY_MAX_BYTES} printable characters, with no space")));
-                }
-                Some(key)
-            } else {
-                None
-            };
-            match crate::computer::ask(env, &computer, "computer/own-key", &json!({ "provider": provider, "key": key })).await {
-                Ok(_) => json_response(&json!({ "provider": provider, "state": if key.is_some() { ProviderState::Set } else { ProviderState::NotSet } })),
-                Err(e) if e.code == ErrorCode::NotFound => Err(CellError::new(ErrorCode::NotFound, "your own keys are kept by your computer: make it first (POST /api/computers)")),
-                Err(e) => Err(e),
-            }
+            // one offered here; the Vault checks it is an own key's, and the key
+            provider_of(provider)?;
+            let put: Option<crate::vault::OwnPut> = if method == Method::Put { Some(crate::json_body(body)?) } else { None };
+            let answer = crate::vault::own_put(env, who, provider, &put).await?;
+            own_changed(env, who).await;
+            crate::json_response::json_bytes(answer)
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/connections/{}", m.as_ref(), rest.join("/")))),
     }
@@ -420,7 +407,7 @@ fn missing(o: Option<&ConnectionOAuth>, account: &PipesAccount) -> Option<Vec<St
 }
 
 /// Where the provider sends the person's browser back.
-fn callback_url(cfg: &Config, provider: &str) -> String {
+pub(crate) fn callback_url(cfg: &Config, provider: &str) -> String {
     format!("{}/api/connections/{provider}/callback", cfg.platform())
 }
 
@@ -480,23 +467,27 @@ async fn disconnected_told(env: &Env, cfg: &Config, computer: &str, provider: &s
     }
 }
 
-/// A sign-in to `provider`'s own key, begun: the person's computer keeps
+/// Their own keys changed (M16: their Vault's): their open pages read
+/// their computer again, whose agents' models may change. Logged, never
+/// failed.
+async fn own_changed(env: &Env, person: &str) {
+    if let Err(e) = crate::principal::ask(env, person, &crate::principal::calls::Changed {}).await {
+        console_error!("{{\"own-key\":\"changed\",\"told\":\"owner\",\"error\":{:?}}}", e.message);
+    }
+}
+
+/// A sign-in to `provider`'s own key, begun: the person's Vault keeps
 /// its nonce and verifier, and the nonce, the round trip's state, is bound
 /// to their browser (`auth::trip_begun`); answers the provider's page.
-async fn sign_in(env: &Env, cfg: &Config, url: &Url, computer: &str, provider: &str, o: &KeyOAuth) -> CellResult<Response> {
+async fn sign_in(env: &Env, cfg: &Config, url: &Url, person: &str, provider: &str, o: &KeyOAuth) -> CellResult<Response> {
     reachable(cfg, &o.authorize)?;
-    let begun = match crate::computer::ask(env, computer, "computer/sign-in", &json!({ "provider": provider })).await {
-        Ok(v) => v,
-        Err(e) if e.code == ErrorCode::NotFound => return Err(CellError::new(ErrorCode::NotFound, "your own keys are kept by your computer: make it first (POST /api/computers)")),
-        Err(e) => return Err(e),
-    };
-    let (nonce, challenge) = (begun["nonce"].as_str().unwrap_or_default(), begun["challenge"].as_str().unwrap_or_default());
-    if !roundtrip::valid_state(nonce) || !own_signin::valid_token(challenge) {
-        return Err(CellError::host("the computer began a sign-in with no nonce"));
+    let crate::vault::Begun(nonce, challenge) = crate::vault::sign_in(env, person, provider).await?;
+    if !roundtrip::valid_state(&nonce) || !own_signin::valid_token(&challenge) {
+        return Err(CellError::host("the Vault began a sign-in with no nonce"));
     }
-    let to = own_signin::authorize_url(o, &callback_url(cfg, provider), challenge, nonce);
+    let to = own_signin::authorize_url(o, &callback_url(cfg, provider), &challenge, &nonce);
     let mut resp = json_response(&json!({ "provider": provider, "url": to }))?;
-    resp.headers_mut().append("set-cookie", &crate::auth::trip_begun(Trip::OwnKey, nonce, url))?;
+    resp.headers_mut().append("set-cookie", &crate::auth::trip_begun(Trip::OwnKey, &nonce, url))?;
     Ok(resp)
 }
 
@@ -600,9 +591,9 @@ fn named(provider: &str) -> String {
 /// platform's host: the person's browser, back from the provider's page.
 /// It finishes only the sign-in this browser began (its cookie holds the
 /// state: `auth::trip_bound`), and only for the person signed in here: the
-/// computer is theirs (`computer::SignedIn::of`), never one a URL names, so
+/// Vault is theirs (`vault::SignedIn::of`), never one a URL names, so
 /// a sign-in someone else began and sent them seals nothing anywhere. The
-/// code is exchanged for their key, which their computer seals; a page
+/// code is exchanged for their key, which their Vault seals; a page
 /// says so. A refusal at the provider (the person declined: no code) or
 /// here is a 303 to `?refused=<word>`, a page that says what to do;
 /// nothing is set.
@@ -662,16 +653,16 @@ async fn finish_connection(req: &Request, env: &Env, url: &Url, provider: &str) 
 }
 
 /// The own-key sign-in this request comes back with, finished: bound to
-/// this browser, for the person signed in here, whose computer began it
+/// this browser, for the person signed in here, whose Vault began it
 /// (another's has no such nonce, and keeps none of theirs); its verifier
 /// taken (once), the provider's code exchanged with it, and the key sealed
-/// by that computer. `Err`: nothing is set.
+/// by that Vault. `Err`: nothing is set.
 async fn finish(req: &Request, env: &Env, cfg: &Config, url: &Url, provider: &str, o: &KeyOAuth) -> CellResult<Result<(), Unfinished>> {
     let Some(bound) = crate::auth::trip_bound(req, url, &[Trip::OwnKey])? else { return Ok(Err(Unfinished::NotBegunHere)) };
     let Some((_, live)) = crate::auth::platform_session(req, env, url).await? else { return Ok(Err(Unfinished::SignedOut)) };
-    let signed = crate::computer::SignedIn::of(bound, &live.identity, provider);
+    let signed = crate::vault::SignedIn::of(bound, &live.identity, provider);
     // taken whatever comes back: a declined sign-in is let go too
-    let taken = crate::computer::signed_in(env, &signed).await;
+    let taken = crate::vault::signed_in(env, &signed).await;
     let Some(code) = crate::auth::query(url, "code").filter(|c| own_signin::valid_code(c)) else { return Ok(Err(Unfinished::Declined)) };
     let verifier = match taken {
         Ok(v) => v,
@@ -689,7 +680,8 @@ async fn finish(req: &Request, env: &Env, cfg: &Config, url: &Url, provider: &st
             return Ok(Err(Unfinished::NoKey));
         }
     };
-    crate::computer::ask(env, signed.computer(), "computer/own-key", &json!({ "provider": provider, "key": key })).await?;
+    crate::vault::own_put(env, signed.person(), provider, &crate::vault::OwnPut { key }).await?;
+    own_changed(env, signed.person()).await;
     Ok(Ok(()))
 }
 

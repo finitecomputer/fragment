@@ -135,6 +135,9 @@ fn last_seen(s: &Suite, before: usize) -> Value {
     s.upstream.seen().get(before..).and_then(|l| l.last().cloned()).unwrap_or(Value::Null)
 }
 
+/// The own key `swap_checks` sets, behind basic auth.
+const SWAP_OWN_KEY: &str = "mail-own-e2e-55aa";
+
 /// The checks; answers how many turns of the agent's they took (each a
 /// reply in the chat).
 pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
@@ -411,7 +414,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     s.ok(SWAP_CHECKS[13], other.starts_with("fetched 403") && other.contains("names no agent on this computer") && s.upstream.seen().len() == seen_before, &other);
 
     // an own key, behind basic auth
-    let own = "mail-own-e2e-55aa";
+    let own = SWAP_OWN_KEY;
     let r = api.signed(w.owner, "PUT", &format!("/api/connections/{SWAP_OWN}/key"), Some(&json!({ "key": own })))?;
     let listed = api.signed(w.owner, "GET", "/api/connections", None)?;
     let given = say(s, 114, "credentials")?;
@@ -466,7 +469,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     s.ok(SWAP_CHECKS[36], scrape_sent && held_row("firecrawl:credit", 1, credit) == 1 && held_row("firecrawl", 0, 0) == 1 && credit < charge_of("firecrawl"), json!({ "credit": credit, "rows": rows }));
     s.ok(SWAP_CHECKS[37], session_sent && reused_sent && held_row("browser-use", 1, charge_of("browser-use")) == 1 && held_row("browser-use", 0, 0) == 2, json!({ "rows": rows }));
     s.ok(SWAP_CHECKS[38], lookup_sent && search_sent && held_row("x", 0, 0) == 2, json!({ "rows": rows }));
-    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 3, charge_of("google-places:photo")), ("firecrawl", 2, charge_of("firecrawl:credit")), ("fal", 3, image), ("browser-use", 3, charge_of("browser-use")), ("xai", 3, charge_of("xai")), ("x", 3, charge_of("x")), (SWAP_OWN, 1, 0)];
+    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 3, charge_of("google-places:photo")), ("firecrawl", 2, charge_of("firecrawl:credit")), ("fal", 3, image), ("browser-use", 3, charge_of("browser-use")), ("xai", 3, charge_of("xai")), ("x", 3, charge_of("x")), (SWAP_OWN, 1 + OWN_MOVE_CALLS, 0)];
     let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
     let counted = |u: &Value| expect.iter().all(|(p, calls, micros)| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == *p && x["agent"] == w.agent && x["calls"] == *calls && x["micros"] == *micros)));
     let all = s.eventually(Duration::from_secs(20), || counted(&uses()));
@@ -1154,6 +1157,168 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     for name in ["e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic", "e2e-oauth", "e2e-nostr-handed"] {
         api.signed(w.owner, "DELETE", &format!("/api/vault/{name}"), None)?;
     }
+    Ok(turns)
+}
+
+/// An own key a computer kept before the move (M16), and one set since:
+/// what `own_move_checks` and `own_signin_moved_checks` use. None is ever
+/// in a log.
+const OWN_BEFORE: &str = "mail-own-e2e-before-7c41";
+const OWN_ROUTER_BEFORE: &str = "sk-or-v1-e2e-before-3d9a";
+const OWN_SINCE: &str = "mail-own-e2e-since-b20e";
+/// The calls through an own key `own_move_checks` makes that its provider
+/// answers: counted as the agent's before `swap_checks` counts its own.
+const OWN_MOVE_CALLS: i32 = 2;
+
+/// A person's own keys moved from their computer to their Vault (M16):
+/// the checks `own_move_checks` makes, as a run without the stub or the
+/// fakes skips them. They run before `swap_checks` sets an own key, so the
+/// person has said nothing of one since the move.
+pub(super) const OWN_MOVE_CHECKS: &[&str] = &[
+    "an own key its computer kept from before the move goes to its person's Vault, never lost: its agent's next call goes with that key, the computer holds it no more, and its person's list says it is set",
+    "one its owner's view reads first goes over then: its agent may run that provider's models",
+    "what its person said since stands: a key set after the move is never replaced by the one its computer hands over late (a hand-over again), nor one removed put back, the agent's call then refused, reaching no provider",
+];
+
+/// The checks; answers how many turns of the agent's they took. The
+/// computer's own keys are written as the release before the move kept
+/// them (`legacy-own-key`); each is left removed.
+pub(super) fn own_move_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let mut turns = 0;
+    let mut say = |s: &Suite, n: u32, text: &str| -> Result<String> {
+        turns += 1;
+        fetched(s, n, text)
+    };
+    // which own keys the computer still holds, `key` kept first
+    let kept = |provider: &str, key: Option<&str>| -> Value {
+        let r = api.unsigned("POST", "/api/test/computer", Some(&json!({ "computer": w.id, "op": "legacy-own-key", "provider": provider, "key": key })));
+        r.map(|r| r.body["held"].clone()).unwrap_or(Value::Null)
+    };
+    let state = |provider: &str| -> Value {
+        let r = api.signed(w.owner, "GET", "/api/connections", None).ok();
+        r.and_then(|r| r.body["providers"].as_array().and_then(|l| l.iter().find(|x| x["provider"] == provider)).map(|x| x["state"].clone())).unwrap_or(Value::Null)
+    };
+    let mail = |s: &Suite| format!("fetch http://{SWAP_OWN_HOST}/v3/send with {} as basic api", placeholder(s, w.id, w.agent, SWAP_OWN));
+    let basic = |key: &str| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("api:{key}")));
+    let sent_with = |s: &Suite, before: usize, key: &str| {
+        let seen = last_seen(s, before);
+        seen["host"] == SWAP_OWN_HOST && seen["auth"]["authorization"] == basic(key)
+    };
+
+    // kept as before the move: the next touch hands it over, and the
+    // agent's call goes with it
+    let wrote = kept(SWAP_OWN, Some(OWN_BEFORE));
+    let seen = s.upstream.seen().len();
+    let said = say(s, 210, &mail(s))?;
+    let went = sent_with(s, seen, OWN_BEFORE);
+    let held = kept(SWAP_OWN, None);
+    let listed = state(SWAP_OWN);
+    s.ok(
+        OWN_MOVE_CHECKS[0],
+        wrote == json!([SWAP_OWN]) && said.starts_with("fetched 200") && went && held == json!([]) && listed == "set",
+        json!({ "wrote": wrote, "said": said, "went": went, "held": held, "listed": listed }),
+    );
+
+    // read first by its owner's view: which models its agent may run
+    let agent_of = |r: &crate::api::Reply| r.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == w.agent)).cloned().unwrap_or(Value::Null);
+    let wrote = kept(SWAP_ROUTER, Some(OWN_ROUTER_BEFORE));
+    let view = api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None)?;
+    let held = kept(SWAP_ROUTER, None);
+    let listed = state(SWAP_ROUTER);
+    let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{SWAP_ROUTER}/key"), None)?;
+    s.ok(
+        OWN_MOVE_CHECKS[1],
+        wrote == json!([SWAP_ROUTER]) && agent_of(&view)["modelProviders"] == json!([SWAP_ROUTER]) && held == json!([]) && listed == "set" && gone.status == 200 && state(SWAP_ROUTER) == "not_set",
+        json!({ "wrote": wrote, "models": agent_of(&view)["modelProviders"], "held": held, "listed": listed, "gone": gone.status }),
+    );
+
+    // set since, then removed since: a hand-over again, late, changes neither
+    let set = api.signed(w.owner, "PUT", &format!("/api/connections/{SWAP_OWN}/key"), Some(&json!({ "key": OWN_SINCE })))?;
+    let late = kept(SWAP_OWN, Some(OWN_BEFORE));
+    let seen = s.upstream.seen().len();
+    let said = say(s, 211, &mail(s))?;
+    let went = sent_with(s, seen, OWN_SINCE);
+    let held = kept(SWAP_OWN, None);
+    let removed = api.signed(w.owner, "DELETE", &format!("/api/connections/{SWAP_OWN}/key"), None)?;
+    let late_again = kept(SWAP_OWN, Some(OWN_BEFORE));
+    let seen = s.upstream.seen().len();
+    let refused = say(s, 212, &mail(s))?;
+    let unreached = s.upstream.seen().len() == seen;
+    let held_again = kept(SWAP_OWN, None);
+    let listed = state(SWAP_OWN);
+    s.ok(
+        OWN_MOVE_CHECKS[2],
+        set.status == 200
+            && late == json!([SWAP_OWN])
+            && said.starts_with("fetched 200")
+            && went
+            && held == json!([])
+            && removed.status == 200
+            && late_again == json!([SWAP_OWN])
+            && refused.starts_with("fetched 403")
+            && refused.contains(&format!("give your own {SWAP_OWN} key first"))
+            && unreached
+            && held_again == json!([])
+            && listed == "not_set",
+        json!({ "set": set.status, "said": said, "went": went, "held": [held, held_again], "removed": removed.status, "refused": refused, "listed": listed }),
+    );
+    Ok(turns)
+}
+
+/// An own key's sign-in begun before the move (M16), and the log: the
+/// checks `own_signin_moved_checks` makes, as a run without the stub or the
+/// fakes skips them.
+pub(super) const OWN_SIGNIN_MOVED_CHECKS: &[&str] = &[
+    "an own key's sign-in begun on its computer before the move finishes after it, in the browser that began it: the key the provider made is its person's, given to the guest as a placeholder and never itself, and the sign-in comes back once",
+    "no own key, kept from before the move, set, or made by a sign-in, is in the node's log",
+];
+
+/// The checks; answers how many turns of the agent's they took. Run after
+/// `model_checks`, the provider's key left removed.
+pub(super) fn own_signin_moved_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let mut turns = 0;
+    let mut say = |s: &Suite, n: u32, text: &str| -> Result<String> {
+        turns += 1;
+        fetched(s, n, text)
+    };
+    let session = api.sign_in(&Api::email_of(w.owner))?;
+    let begun = api.unsigned("POST", "/api/test/computer", Some(&json!({ "computer": w.id, "op": "legacy-sign-in", "provider": SWAP_ROUTER })))?;
+    let nonce = begun.body["nonce"].as_str().unwrap_or_default().to_string();
+    let back = sent_back(api, begun.body["url"].as_str().unwrap_or_default())?;
+    let (bound, signed_in) = (format!("fragment_own_key={nonce}"), format!("fragment_session={session}"));
+    let exchanges = s.openrouter.exchanges().len();
+    let page = came_back(api, &back, &[&bound, &signed_in])?;
+    let key = s.openrouter.keys().last().cloned().unwrap_or_default();
+    let listed = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let set = listed.body["providers"].as_array().and_then(|l| l.iter().find(|x| x["provider"] == SWAP_ROUTER)).map(|x| x["state"].clone()).unwrap_or(Value::Null);
+    let given = say(s, 213, "credentials")?;
+    let again = came_back(api, &back, &[&bound, &signed_in])?;
+    let exchanged = s.openrouter.exchanges().len() - exchanges;
+    s.ok(
+        OWN_SIGNIN_MOVED_CHECKS[0],
+        begun.status == 200
+            && back.contains("code=")
+            && page.status == 200
+            && page.text.contains("is connected")
+            && set == "set"
+            && given.contains(&format!("{SWAP_ROUTER} {SWAP_ROUTER_ENV} fck_{SWAP_ROUTER}_"))
+            && !key.is_empty()
+            && !given.contains(&key)
+            && !page.text.contains(&key)
+            && !listed.text.contains(&key)
+            && again.refused_cleanly()
+            && exchanged == 1,
+        json!({ "begun": begun.status, "page": page.to_string(), "state": set, "again": again.to_string(), "exchanged": exchanged }),
+    );
+    let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{SWAP_ROUTER}/key"), None)?;
+    anyhow::ensure!(gone.status == 200, "the sign-in's key removed again: {gone}");
+
+    // every own key this lane gave, kept or made
+    let log = s.node_log().unwrap_or_default();
+    let mut keys: Vec<String> = [OWN_BEFORE, OWN_ROUTER_BEFORE, OWN_SINCE, SWAP_OWN_KEY].iter().map(|k| k.to_string()).collect();
+    keys.extend(s.openrouter.keys());
+    let named: Vec<usize> = keys.iter().enumerate().filter(|(_, k)| log.contains(k.as_str())).map(|(i, _)| i).collect();
+    s.ok(OWN_SIGNIN_MOVED_CHECKS[1], !log.is_empty() && keys.len() >= 5 && named.is_empty(), json!({ "logBytes": log.len(), "keys": keys.len(), "named": named }));
     Ok(turns)
 }
 

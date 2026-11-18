@@ -212,7 +212,7 @@ computers) returns once this product works.
 37. **Agents can do anything they could do in Finite.** Services that act
     as you are connections (22); paid APIs that need only a key use the
     operator's keys, priced per call (`price::DEFAULT_KEYS`); a person's
-    own keys are sealed by their computer and never metered.
+    own keys are sealed in their Vault and never metered.
 38. **Routines are fragment cron:** scheduled records on any fragment, an
     agent's on its own `tasks` (`fragment schedule add --routine`).
     Hermes' scheduler is off (docs/api.md, "Scheduled records").
