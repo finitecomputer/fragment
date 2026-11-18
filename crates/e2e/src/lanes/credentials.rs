@@ -48,7 +48,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "a placeholder sent to a host that is not its provider's is refused, and reaches no provider",
     "a forged tag names no agent: refused, reaching no provider",
     "another computer's agent's tag is refused here",
-    "an own key: its owner gives it, sealed by the computer, and it is the guest's at once",
+    "an own key: its owner gives it, sealed in their Vault, and it is the guest's at once",
     "basic auth: the own key in its password's place, its user as it came",
     "a key that is no printable token is refused, and one sent bare (not in {key}) refused without being quoted back; taken away, the guest is given it no more",
     "each operator key's call is charged to the agent's owner's ledger after it, as the agent, at its list price and the margin",

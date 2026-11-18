@@ -4599,9 +4599,11 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
 }
 
 /// Screenshots of settings' row `row` (an own key's), at 1280 px and at
-/// 390 px as a phone's, named `<name>-<width>.png` in `shots`; the page
-/// left at 1280 by 800, as the lane runs it.
+/// 390 px as a phone's, named `<name>-<width>.png` in `shots`, any dialog
+/// an earlier step left open closed first; the page left at 1280 by 800,
+/// as the lane runs it.
 fn own_key_shots(b: &mut Browser, page: &Page, row: &str, shots: &std::path::Path, name: &str) -> Result<()> {
+    b.eval(page, "(document.querySelectorAll('dialog[open]').forEach((d) => d.close()), true)")?;
     for (width, height, mobile) in [(1280, 800, false), (390, 844, true)] {
         b.viewport(page, width, height, mobile)?;
         b.eval(page, &format!("(document.querySelector('{row}')?.scrollIntoView({{ block: 'center' }}), true)"))?;
