@@ -68,19 +68,32 @@ impl Lifecycle {
     /// work settles (a turn's end saves instead). A save under way goes on
     /// as an awake save, held to its end as any is: a backup cut short is
     /// never sure to be whole or gone, and one that goes on is reported,
-    /// and kept or failed, as every awake save is.
+    /// and kept or failed, as every awake save is. It is awake as it was
+    /// before its sleep began (a moment before it), so its sleep's save,
+    /// asked as that began, is one this awake run made (`idle_and_kept`);
+    /// a keepalive open is busy from now (its saves every `SAVE_EVERY_MS`).
     pub(super) fn sleep_cancelled(&mut self, generation: u64, now_ms: i64, step: &mut Step) {
         assert!(self.cancels_sleep(), "only an idle sleep, before its stop, is cancelled");
-        self.phase = Phase::Awake { generation, since_ms: now_ms };
+        let Phase::Sleeping { since_ms, .. } = self.phase else { unreachable!("a cancel is of a sleep") };
+        self.phase = Phase::Awake { generation, since_ms: since_ms - 1 };
+        if self.keepalives > 0 {
+            self.busy_since_ms = Some(now_ms);
+        }
         if matches!(self.saving, Some(Saving::Hold { .. })) {
             self.saving = None;
-            if self.keepalives > 0 {
-                self.busy_since_ms = Some(now_ms);
-            } else {
+            if self.keepalives == 0 {
                 self.save_due_ms = Some(now_ms + SAVE_SETTLE_MS);
             }
             step.actions.push(Action::Unhold { generation });
         }
+    }
+
+    /// Whether save `seq` of start `generation`, done, is one no longer
+    /// waited for: another hold, save or stop of the same container is
+    /// under way (its owner's sleep or restart after a cancel asked a newer
+    /// one). The DO lets its records go, never the newest kept.
+    pub fn superseded(&self, generation: u64, seq: u64) -> bool {
+        self.running() == Some(generation) && self.saving.is_some_and(|step| !matches!(step, Saving::Save { seq: n, .. } if n == seq))
     }
 
     /// Begins a save while it stays awake: its hold first.
@@ -347,7 +360,7 @@ mod tests {
         l.apply(Event::Alarm, T + IDLE_MS);
         let s = l.apply(Event::Opened { socket: Socket::Keepalive }, T + IDLE_MS + 200);
         assert_eq!(s.actions, vec![Action::Unhold { generation: g }]);
-        assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: T + IDLE_MS + 200 });
+        assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: T + IDLE_MS - 1 }, "awake as before its sleep");
         assert!(l.saving().is_none(), "awake, held no more");
         // its hold's late answer changes nothing, but lets go again (its
         // touch may have landed after the cancel let go of it)

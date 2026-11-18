@@ -614,7 +614,7 @@ fn any_wake_cancels_an_idle_sleep_before_its_stop() {
         let (mut l, g, _) = idle_sleep(false);
         let s = l.apply(Event::Wake { why }, at);
         assert_eq!(s.actions, vec![Action::Unhold { generation: g }], "{why:?}");
-        assert_eq!((&l.phase, l.saving()), (&Phase::Awake { generation: g, since_ms: at }, None), "{why:?}");
+        assert_eq!((&l.phase, l.saving()), (&Phase::Awake { generation: g, since_ms: T + IDLE_MS - 1 }, None), "awake as before its sleep: {why:?}");
         assert_eq!((l.held_until_ms(), l.save_due_ms), (at + why.hold_ms(), Some(at + SAVE_SETTLE_MS)), "{why:?}");
         let s = l.apply(Event::Alarm, at + SAVE_SETTLE_MS);
         assert_eq!(s.actions.last(), Some(&Action::Hold { generation: g }), "the save it was for, awake: {why:?}: {s:?}");
@@ -626,7 +626,7 @@ fn any_wake_cancels_an_idle_sleep_before_its_stop() {
         let (mut l, g, _) = idle_sleep(true);
         let s = l.apply(Event::Wake { why }, at);
         assert!(s.actions.is_empty(), "its save holds the guest to its end: {why:?}: {s:?}");
-        assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: at }, "{why:?}");
+        assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: T + IDLE_MS - 1 }, "awake as before its sleep: {why:?}");
         assert_eq!(l.saving(), Some(Saving::Save { since_ms: T + IDLE_MS + 500, held: true, seq: 1 }), "its save goes on: {why:?}");
         let s = l.apply(Event::Saved { generation: g, seq: 1 }, at + 60_000);
         assert_eq!((s.actions, s.note, s.ended), (vec![Action::Unhold { generation: g }], SaveNote::Clear, None), "{why:?}");
@@ -812,8 +812,79 @@ fn a_cancelled_sleep_is_metered_once_without_a_gap() {
     assert_eq!(m, vec![(T + 3_000, T + IDLE_MS)]);
     let late = T + DAYS;
     let s = l.apply(Event::Wake { why: Wake::Record }, late);
-    assert_eq!((meters(&s), &l.phase), (vec![], &Phase::Awake { generation: g, since_ms: late }), "none of its hold, nor the silence");
+    assert_eq!((meters(&s), &l.phase), (vec![], &Phase::Awake { generation: g, since_ms: T + IDLE_MS - 1 }), "none of its hold, nor the silence");
     let s = l.apply(Event::Alarm, late + 1_000);
     assert_eq!(meters(&s), vec![(late, late + 1_000)], "from the wake on");
     assert!(s.actions.contains(&Action::Unhold { generation: g }) && l.unsaved_since_ms().is_none() && l.free_since_ms().is_none(), "its lost save failed as an awake one's: {s:?}");
+}
+
+/// Goal (#1357's review): a cancel is no new awake run. Its sleep's save,
+/// kept, is one this run made, so a host's stop after it, nothing done
+/// since (a pre-wake's cancel), is a sleep: no strike, nothing started,
+/// its save holding all of it. A message's cancel is work its guest has
+/// not taken up, so that stop stays a crash, started again. Method: a
+/// cancel at the save, the save kept, then the container's exit.
+#[test]
+fn a_host_stop_after_a_cancelled_sleeps_save_is_a_sleep() {
+    let at = T + IDLE_MS + 1_000;
+    let (mut l, g, _) = idle_sleep(true);
+    l.apply(Event::Wake { why: Wake::Presence }, at);
+    l.apply(Event::Saved { generation: g, seq: 1 }, at + 1_000);
+    let s = l.apply(Event::Exited { generation: g }, at + 2_000);
+    assert_eq!(s.ended.map(|e| (e.by, e.saved, e.quiet)), Some((LifeEnd::Sleep, true, true)), "{s:?}");
+    assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })) && l.failures() == 0 && !l.start_due(at + 2_000), "{l:?}");
+    // a message's cancel: its work not taken up, a crash, started again
+    let (mut l, g, _) = idle_sleep(true);
+    l.apply(Event::Posted { at_ms: at - 100 }, at);
+    l.apply(Event::Wake { why: Wake::Record }, at);
+    l.apply(Event::Saved { generation: g, seq: 1 }, at + 1_000);
+    let s = l.apply(Event::Exited { generation: g }, at + 2_000);
+    assert_eq!(s.ended.map(|e| e.by), Some(LifeEnd::Exit), "{s:?}");
+    assert!(l.start_due(at + 2_000), "started again for its message: {l:?}");
+}
+
+/// Goal (#1357's review): a keepalive its guest opened as its idle sleep
+/// saved unheld (its hold unanswered, a claim in flight) is busy from the
+/// cancel: saved every `SAVE_EVERY_MS` while it stays open, as any turn.
+/// Method: the hold unanswered, the keepalive during the save, a wake, the
+/// save kept, then the alarms of a long turn.
+#[test]
+fn a_turn_open_at_a_cancel_is_saved_as_it_runs() {
+    let mut l = Lifecycle::new();
+    let g = started(&mut l, T);
+    l.apply(Event::Alarm, T + IDLE_MS);
+    assert_eq!(save_asked(&l.apply(Event::Held { generation: g, held: false }, T + IDLE_MS + HOLD_WAIT_MS)), (g, false, 1));
+    l.apply(Event::Opened { socket: Socket::Keepalive }, T + IDLE_MS + HOLD_WAIT_MS + 100);
+    let at = T + IDLE_MS + HOLD_WAIT_MS + 500;
+    l.apply(Event::Wake { why: Wake::Record }, at);
+    assert_eq!(l.apply(Event::Saved { generation: g, seq: 1 }, at + 1_000).actions, vec![Action::Unhold { generation: g }]);
+    let due = l.next_alarm().filter(|due| *due <= at + SAVE_EVERY_MS);
+    let mut s = Step::default();
+    // bounded: a meter's alarm every five minutes, then the save's
+    for _ in 0..4 {
+        let Some(next) = l.next_alarm().filter(|next| *next <= at + SAVE_EVERY_MS) else { break };
+        s = l.apply(Event::Alarm, next);
+    }
+    assert!(due.is_some() && s.actions.contains(&Action::Hold { generation: g }), "its turn's save, {} minutes on: {s:?}", SAVE_EVERY_MS / 60_000);
+}
+
+/// Goal (#1357's review): a save its owner's sleep or restart asked anew
+/// after a cancel (the cancelled sleep's save still under way) supersedes
+/// it: the DO keeps the newer, never the older as its newest. Valid: the
+/// save under way, alone, is no superseded one; nor one of another start.
+/// Method: `superseded` before and after its owner's sleep.
+#[test]
+fn a_save_asked_again_after_a_cancel_supersedes_the_one_under_way() {
+    let at = T + IDLE_MS + 1_000;
+    for owner in [Event::Sleep, Event::Restart { generation: 0 }] {
+        let (mut l, g, _) = idle_sleep(true);
+        assert!(!l.superseded(g, 1), "a save under way is waited for");
+        l.apply(Event::Wake { why: Wake::Record }, at);
+        assert!(!l.superseded(g, 1), "and goes on after a cancel");
+        l.apply(owner.clone(), at + 100);
+        assert!(l.superseded(g, 1), "a newer one asked: {owner:?}");
+        assert!(!l.superseded(g + 1, 1), "of another start, nothing");
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 200));
+        assert!(seq == 2 && !l.superseded(g, 2) && l.superseded(g, 1), "{owner:?}");
+    }
 }
