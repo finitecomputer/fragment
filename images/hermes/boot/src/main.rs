@@ -561,8 +561,16 @@ fn hermes_ids() -> Option<(u32, u32)> {
     Some((f.get(2)?.parse().ok()?, f.get(3)?.parse().ok()?))
 }
 
+/// Owns `path` (never what a link points to) as `ids`, unless it is owned
+/// so already: a chown changes its ctime even then, which a save reads as
+/// a change to the work it is in (docs/computers.md, "Saves and what a
+/// wake restores"), and a start chowns its agents' work at every boot.
 fn chown(path: &Path, ids: Option<(u32, u32)>) {
+    use std::os::unix::fs::MetadataExt;
     let Some((uid, gid)) = ids else { return };
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.uid() == uid && m.gid() == gid) {
+        return;
+    }
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else { return };
     // SAFETY: a valid NUL-terminated path; lchown never follows a link.
     unsafe {

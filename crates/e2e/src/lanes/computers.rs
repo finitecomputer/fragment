@@ -183,12 +183,15 @@ const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered 
 
 /// The save checks (docs/computers.md, "Saves and what a wake restores"), each skipped off
 /// the stub and the fakes.
-const SAVE_CHECKS: [&str; 7] = [
+const SAVE_CHECKS: [&str; 10] = [
     "awake and idle after a turn, it has a save newer than the turn, held",
     "and its disk is read again after that awake save",
     "it keeps its newest three saves (and the one it came up from), newest first, and its view lists them",
     "a save leaves out what its guest's answer to the hold names, and keeps the rest (DirectoryBackup's exclude)",
     "a save is two records, /data and its work (/data/work), and a wake restores both",
+    "a save keeps its work's record while nothing under the work changed since it was restored: one stored copy for both saves",
+    "a wake from that save restores the work's tree as it was (hashed before the sleep and after the wake)",
+    "a change under the work is saved: a new record, and a wake restores the change",
     "a sleep whose save fails keeps its container, and its view says so",
     "a save that then works lets it sleep, and its view says no more of it",
 ];
@@ -249,6 +252,8 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     std::thread::sleep(QUEUE_DRAIN);
     let slept = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
     let records = newest_save(api, c.id)["records"].as_array().map(|l| l.iter().map(|r| r["dir"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    let work_of = |save: &Value| save["records"].as_array().and_then(|l| l.iter().find(|r| r["dir"] == "/data/work")).map(|r| r["id"].clone()).unwrap_or(Value::Null);
+    let copied = work_of(&newest_save(api, c.id));
     let woke = api.signed(c.owner, "POST", &format!("/api/computers/{}/wake", c.id), Some(&json!({})))?;
     let read = [said(64, "read notes/keep.txt")?, said(65, "read notes/gone.scratch")?, said(67, "read work/notes.txt")?];
     s.ok(
@@ -257,6 +262,34 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
         format!("{wrote:?} / {read:?} / {}", woke.body["restored"]),
     );
     s.ok(SAVE_CHECKS[4], records == ["/data", "/data/work"] && read[2] == "read work/notes.txt: in the work", format!("{records:?} / {read:?}"));
+    // its work untouched since that wake restored it (its turns read it):
+    // the next save keeps the record that wake restored, and the wake after
+    // restores the same tree (P9); then a change is saved
+    let said = |n: u32, text: &str| -> Result<String> {
+        let r = say(n, text)?;
+        s.eventually(c.wake, || reply_of(seq_of(&r)).is_some());
+        Ok(reply_of(seq_of(&r)).and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+    };
+    let sleep_wake = |sleep: bool| api.signed(c.owner, "POST", &format!("/api/computers/{}/{}", c.id, if sleep { "sleep" } else { "wake" }), Some(&json!({})));
+    let before = said(680, "hash work")?;
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = sleep_wake(true)?;
+    let kept = newest_save(api, c.id);
+    let woke = sleep_wake(false)?;
+    let after = said(681, "hash work")?;
+    let wrote = said(682, "write work/more/new.txt changed")?;
+    std::thread::sleep(QUEUE_DRAIN);
+    sleep_wake(true)?;
+    let changed = newest_save(api, c.id);
+    sleep_wake(false)?;
+    let read = [said(683, "read work/more/new.txt")?, said(684, "hash work")?];
+    s.ok(SAVE_CHECKS[5], slept.body["phase"] == "asleep" && copied.is_string() && work_of(&kept) == copied && kept["records"][0]["id"] != copied, json!({ "restored": copied, "kept": kept }));
+    s.ok(SAVE_CHECKS[6], before.starts_with("hash work: ") && before == after && woke.body["restored"]["save"] == kept["id"], json!({ "before": before, "after": after, "restored": woke.body["restored"] }));
+    s.ok(
+        SAVE_CHECKS[7],
+        wrote == "wrote work/more/new.txt" && work_of(&changed).is_string() && work_of(&changed) != copied && read[0] == "read work/more/new.txt: changed" && read[1].starts_with("hash work: ") && read[1] != after,
+        json!({ "kept": copied, "changed": changed, "read": read }),
+    );
     let generation = view()["restored"]["generation"].clone();
     // a sleep whose save fails keeps its container: the same start, awake
     std::thread::sleep(QUEUE_DRAIN);
@@ -265,7 +298,7 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     let r = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
     let kept = lever(api, c.id, "saves")?;
     s.ok(
-        SAVE_CHECKS[5],
+        SAVE_CHECKS[8],
         failing.status == 200
             && r.body["phase"] == "awake"
             && r.body["why"].as_str().is_some_and(|w| w.contains("could not save") && w.contains("the test lever failed it"))
@@ -279,11 +312,11 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     let r = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
     let newest = newest_save(api, c.id);
     s.ok(
-        SAVE_CHECKS[6],
+        SAVE_CHECKS[9],
         r.body["phase"] == "asleep" && r.body.get("why").is_none() && newest["generation"] == generation && newest["id"] != saves_before["id"],
         format!("{r} / {newest}"),
     );
-    Ok(7)
+    Ok(12)
 }
 
 /// The disk checks (docs/computers.md, "What its owner is told"), each

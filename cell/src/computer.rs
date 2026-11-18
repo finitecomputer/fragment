@@ -53,8 +53,9 @@ use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
     alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
-    SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
+    SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX, STAMP_NEXT, STAMP_RESTORED, STAMP_TAKEN, WORK_CHANGED, WORK_CHECK_MS, WORK_STAMPS,
 };
+use fragment_core::computer::{stamp_name_ok, work_unchanged};
 use fragment_core::ledger::{MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
@@ -167,7 +168,8 @@ const CHECK_UNUSABLE: i64 = 3;
 /// `/data`'s record leaves the work out (`WORK_LEFT_OUT`), and what a held
 /// guest names; the work's record leaves out only what it named under
 /// `/work/` (`work_left_out`: its agents' caches).
-const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
+const SAVED_DIRS: [&str; 2] = ["/data", WORK_DIR];
+const WORK_DIR: &str = "/data/work";
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
@@ -1577,6 +1579,12 @@ impl ComputerCell {
                         return Err(Unstarted::Unusable(format!("save {}'s {}: {why}", save.number, record["dir"].as_str().unwrap_or("?"))));
                     }
                 }
+                // its work's record's stamp (`STAMP_RESTORED`), before
+                // anything else touches it: a save keeps that record while
+                // nothing under the work changes
+                if let Some(rid) = save.records.iter().find(|r| r["dir"] == WORK_DIR).and_then(|r| r["id"].as_str()).filter(|id| stamp_name_ok(id)) {
+                    self.stamp(&g, STAMP_RESTORED, &[rid], until).await;
+                }
                 // the image's check, behind the gate: nothing reads /data yet
                 let argv = js::to_js(&json!(["sh", "-c", CHECK]));
                 let out = js::from_js(&self.call("exec", &[g.clone(), argv, JsValue::from_f64(CHECK_EXEC_MS as f64)]).await?).map_err(CellError::host)?;
@@ -1815,16 +1823,34 @@ impl ComputerCell {
             // of its own) and what it copied or named; its work leaves out
             // only the caches it named in it
             let (name, exclude) = match dir {
-                "/data" => ("home", std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>()),
+                "/data" => ("home", [WORK_LEFT_OUT, WORK_STAMPS].into_iter().map(str::to_string).chain(left_out.iter().cloned()).collect::<Vec<_>>()),
                 // what it named in its work (its agents' caches), relative to it
                 _ => ("work", fragment_core::computer::work_left_out(&left_out)),
             };
             let exclude = js::to_js(&json!(exclude));
             let t = js::now_ms();
-            let left = JsValue::from_f64((until - t).max(1) as f64);
+            // its work's last record, kept when nothing in it changed since
+            // that was taken or restored; else a stamp, then its backup
+            let mut stamped = false;
+            if dir == WORK_DIR {
+                let (kept, checked) = self.work_kept(&g, generation, until).await;
+                took["checked"] = json!(checked);
+                if let Some(record) = kept {
+                    took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t, "kept": true });
+                    records.push(record);
+                    continue;
+                }
+                stamped = self.stamp(&g, STAMP_NEXT, &[&seq.to_string()], until).await;
+            }
+            let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
             match self.call("backup", &[g.clone(), dir.into(), exclude, left]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
                 Ok(record) => {
                     took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
+                    // its stamp is this record's (`STAMP_TAKEN`): the next
+                    // save keeps it while nothing under the work changes
+                    if let (true, Some(id)) = (stamped, record["id"].as_str().filter(|id| stamp_name_ok(id))) {
+                        took[name]["stamped"] = json!(self.stamp(&g, STAMP_TAKEN, &[&seq.to_string(), id], until).await);
+                    }
                     records.push(record);
                     // its home is in, the copies its guest made under the
                     // hold with it: an awake save lets go of its hold before
@@ -1848,7 +1874,7 @@ impl ComputerCell {
             Ok(save) => {
                 // one line per save (lesson 14): which, how big, how long,
                 // and its home's and its work's apart
-                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0, "home": took["home"], "work": took["work"] }));
+                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0, "home": took["home"], "work": took["work"], "workChecked": took["checked"] }));
                 Event::Saved { generation, seq }
             }
             Err(e) => {
@@ -1883,6 +1909,57 @@ impl ComputerCell {
             }
             // held on to its end, as before: its end lets go
             Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": seq, "homeSaved": "untold", "error": e.message })),
+        }
+    }
+
+    /// The work's last record in start `g`'s container
+    /// (`Saves::work_of`), when nothing under the work changed since its
+    /// stamp (`WORK_CHANGED`, within `WORK_CHECK_MS` and what is left until
+    /// `until`): this save keeps it, unchanged. Else none, and why: none
+    /// to keep, `changed`, or what made the check unsure (an exit, an
+    /// error, no answer), each of which copies the work.
+    async fn work_kept(&self, g: &JsValue, generation: u64, until: i64) -> (Option<Value>, String) {
+        let Some(record) = self.saves().ok().and_then(|s| s.work_of(generation).cloned()) else { return (None, "none to keep".into()) };
+        let Some(rid) = record["id"].as_str().filter(|id| stamp_name_ok(id)) else { return (None, "no stamp names it".into()) };
+        let ms = WORK_CHECK_MS.min(until - js::now_ms());
+        if ms <= 0 {
+            return (None, "no time left".into());
+        }
+        let argv = js::to_js(&json!(["sh", "-c", WORK_CHANGED, "sh", SAVED_DIRS[0], rid]));
+        let t = js::now_ms();
+        let out = self.call("exec", &[g.clone(), argv, JsValue::from_f64(ms as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        let took = js::now_ms() - t;
+        match out {
+            Ok(o) if work_unchanged(o["exitCode"].as_i64(), o["output"].as_str().unwrap_or_default()) => (Some(record), format!("unchanged in {took} ms")),
+            // the path it names is the person's: never logged
+            Ok(o) if o["exitCode"] == 0 => (None, format!("changed, seen in {took} ms")),
+            Ok(o) => (None, format!("unsure: exit {} in {took} ms", o["exitCode"])),
+            Err(e) => (None, format!("unsure: {}", e.message)),
+        }
+    }
+
+    /// Runs the stamp `script` (`STAMP_NEXT`, `STAMP_TAKEN`,
+    /// `STAMP_RESTORED`) with `args` in start `g`'s container, within
+    /// `MARK_EXEC_MS` and what is left until `until`: whether it worked.
+    /// One that did not leaves no stamp a save keeps a record by.
+    async fn stamp(&self, g: &JsValue, script: &str, args: &[&str], until: i64) -> bool {
+        let ms = MARK_EXEC_MS.min(until - js::now_ms());
+        if ms <= 0 {
+            return false;
+        }
+        let argv = js::to_js(&json!(["sh", "-c", script, "sh", SAVED_DIRS[0]].into_iter().chain(args.iter().copied()).collect::<Vec<_>>()));
+        let out = self.call("exec", &[g.clone(), argv, JsValue::from_f64(ms as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        match out {
+            Ok(o) if o["exitCode"] == 0 => true,
+            // exit 2: its image's `find` cannot compare change times
+            Ok(o) => {
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "stamp": "unmade", "exit": o["exitCode"] }));
+                false
+            }
+            Err(e) => {
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "stamp": "unmade", "error": e.message }));
+                false
+            }
         }
     }
 

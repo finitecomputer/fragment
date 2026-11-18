@@ -1641,6 +1641,45 @@ async fn held_nothing_under_data_changes() {
     }
 }
 
+/// Goal (P9): a start of the image whose agents and Python environment are
+/// as it left them writes nothing under `/data/work`, so the save after a
+/// wake keeps the work's record (fragment-core's `computer/work.rs`): no
+/// chown of what is owned so already, no `.pth` written again. Method:
+/// Hermes up and its agent answered (its first start made the work), a
+/// stamp as the platform makes one (a file, then a tick of the clock past
+/// it), the container restarted with its disk, as a computer's next start
+/// finds `/data`, and its boot's work done again (its profile written,
+/// its Python environment looked at, its gateway up); then the platform's
+/// own question: has anything under the work a change time newer than the
+/// stamp. Each path that has is named.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_start_writes_nothing_under_the_work() {
+    let (_fake, _model, _chat, c) = hermes_running().await;
+    let count = |what: &str| c.logs().matches(&format!("\"{what}\"")).count();
+    let booted = |n: usize| ["profile.written", "python.env", "boot.gateway"].iter().all(|e| count(e) >= n);
+    let t = Instant::now();
+    // bounded: two minutes
+    while !booted(1) {
+        assert!(t.elapsed() < Duration::from_secs(120), "its first start's work: {}", c.logs());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(c.exec(&["test", "-x", "/data/work/python/bin/python"]), "its Python environment is in the work");
+    let stamp = "mkdir -p /data/.work-stamps && cd /data/.work-stamps && touch s && until touch .probe && [ -n \"$(find .probe -newer s)\" ]; do sleep 0.01; done";
+    assert!(c.exec(&["sh", "-c", stamp]), "the stamp");
+    c.restart();
+    let t = Instant::now();
+    // bounded: two minutes
+    while !booted(2) {
+        assert!(t.elapsed() < Duration::from_secs(120), "its second start's work: {}", c.logs());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // what its gateway does as it comes up, a few seconds more
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let changed = c.exec_out(&["find", "/data/work", "-newercm", "/data/.work-stamps/s", "-print"]);
+    assert_eq!(changed.trim(), "", "a start that changed nothing wrote under the work");
+}
+
 /// What the agent's desktop looks like from inside the container, as the
 /// hermes user: the pointer's position and the windows' titles, read from
 /// the X server the profile publishes (`<profile>/bot-desktop/env`).

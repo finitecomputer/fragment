@@ -75,6 +75,7 @@ mod saves;
 #[cfg(test)]
 mod testing;
 mod which;
+mod work;
 
 pub use awake::awake_batch;
 pub use disk::{disk_clear, disk_filling, disk_of_df, reads_disk_after, ComputerDisk, DISK_CLEAR_FREE_MIN, DISK_CLEAR_USED_PCT, DISK_READ, DISK_TOLD_FREE_MAX, DISK_TOLD_USED_PCT};
@@ -88,3 +89,4 @@ pub use limits::{
 pub use notices::{notices, support_url_ok, SUPPORT_URL_MAX_BYTES};
 pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};
 pub use which::{default_computer_of, prewoken};
+pub use work::{stamp_name_ok, work_unchanged, STAMP_NEXT, STAMP_RESTORED, STAMP_TAKEN, WORK_CHANGED, WORK_CHECK_MS, WORK_STAMPS};
