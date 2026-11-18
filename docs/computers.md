@@ -38,12 +38,16 @@ Phases: `asleep`, `starting`, `awake`, `sleeping`, and `wont_wake`
 an image may rely on this:
 
 - **It is woken** by a record on a channel one of its agents subscribed
-  to with `wake: true`, one of its agents added to a fragment, an open
-  port tab, a page's presence on a subscribed fragment (a pre-wake, held
-  a minute), or its owner. Never by its own guest's traffic.
-- **It stays awake** while a port tab is open or the guest holds its
-  keepalive socket, and `IDLE_MS` (20 minutes) after neither does. An
-  always-on seat's computer never sleeps (decision 25; docs/billing.md).
+  to with `wake: true`, a sign that its person means to use it (below),
+  an open port tab, or its owner. Never by its own guest's traffic.
+- **It stays awake** while one of its agents' turns runs (the guest holds
+  its keepalive socket) or a port tab is open, while its person is
+  interacting, and for the idle wait (`IDLE_MS`, 20 minutes) after a
+  turn, a record that woke it, a port tab closed, or its owner's own
+  wake or restart. Each sign of intent holds it a minute (`PREWAKE_MS`):
+  a chat opened or begun typing in, their agent's desktop opened, a page
+  opening a fragment it follows, one of its agents added to a fragment.
+  Nothing else holds it, but always on (decision 25; docs/billing.md).
 - **It is saved** when its work ends (its last keepalive or its last
   port tab closes, and 30 s pass with no keepalive opened again), every 15 minutes while a keepalive stays
   open, and at every sleep (below, "Saves and what a wake restores").
@@ -517,7 +521,8 @@ sleep answers within 14 minutes.
 - **An agent added to a fragment wakes its computer** (Paul, 2026-10-03:
   to hide a wake's latency): the agent fragment posts `{kind: "joined",
   fragment}` on its `tasks` once for that membership, and the computer
-  wakes, so the guest follows the new chat before anyone speaks there.
+  wakes, held a minute as any sign of intent is, so the guest follows the
+  new chat before anyone speaks there.
 - What a guest follows, and the records' shapes, are docs/chat-records.md's.
   A record from before the agent's membership's `addedAt` is not for it.
 

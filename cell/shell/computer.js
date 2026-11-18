@@ -38,9 +38,6 @@ export function platformImage(img, path) {
 
 export function createComputer({ api, el, seg, named, section, line, actionLine, computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, openPage, timers = globalThis, now = () => Date.now() }) {
   // ---- the computer: awake while the person is here, and its updates ----
-  let woke = 0;
-  // asking for a wake as the person arrives or focuses a chat hides the
-  // computer's start (decision 39's pre-wake, from the shell)
   // The person's computer, made once (making it again is the same one:
   // docs/api.md).
   let making = null;
@@ -49,19 +46,30 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     making.catch(() => { making = null; });
     return making;
   }
+  // The pre-wake (decision 39) races the computer's start against what the
+  // person is about to ask of it: each sign that they mean to use their
+  // agent (a chat opened, by the sidebar or the launcher; the first
+  // keystroke after a pause in a chat with their agent, frame-messages.js
+  // `active`; their agent's desktop opened) asks it to wake
+  // (`POST …/prewake`) and holds it a minute, as a page's presence does
+  // (`fragment_core::computer::PREWAKE_MS`), never an owner's twenty. Only
+  // another such sign holds it longer; a page left open asks nothing, and
+  // it sleeps. One ask every `PREWAKE_AGAIN_MS` at most: signs closer than
+  // that are one sign.
   // A computer that won't start is not woken by the person's presence: its
   // starts kept failing, so the next is theirs to ask for (Restart, in its
   // notice), never one every visit pays for unasked. While the first run
   // makes the agent, its computer starts once it is in its chat (the
   // platform's `joined`), with the agent assigned, not before.
+  const PREWAKE_AGAIN_MS = 10_000;
+  let woke = -Infinity;
   function prewake() {
     if (setupPending()) return;
     const c = computer();
-    if (!c || document.hidden || Date.now() - woke < 60_000 || ["awake", "starting", "wont_wake"].includes(c.phase)) return;
-    woke = Date.now();
-    api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then(computerIs).catch(() => {});
+    if (!c || document.hidden || c.phase === "wont_wake" || now() - woke < PREWAKE_AGAIN_MS) return;
+    woke = now();
+    api("POST", `/api/computers/${seg(c.computer)}/prewake`, {}).then(computerIs).catch(() => {});
   }
-  document.addEventListener("visibilitychange", prewake);
   // ---- what the person is told (FIN-458, `GET /api/notices`): each
   // notice in the server's own words, the most pressing first, drawn the
   // same way whatever its kind, with its actions. Each owner tells this
@@ -551,7 +559,6 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     asks.replaceChildren(go);
   }
   return { computerOf, prewake, renderComputer, restartComputer, computerSection, dispose: () => {
-    document.removeEventListener("visibilitychange", prewake);
     document.removeEventListener("visibilitychange", followVisibility);
     if (tick !== null) timers.clearTimeout(tick);
     raised.disconnect();

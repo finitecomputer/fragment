@@ -69,6 +69,12 @@ export const MESSAGES = Object.freeze({
     fields: "{}",
     says: "The person's message was sent there: a chat they archived is unarchived (`PUT /api/fragments/{name}/archived`), back in their sidebar.",
   },
+  active: {
+    kind: "active",
+    from: "a chat → the shell",
+    fields: "{}",
+    says: "The person began typing in its composer (the first keystroke after a pause, as its typing presence turns on): while it is the chat in front and one of their agents is in it, the shell races their computer's pre-wake (`POST /api/computers/{id}/prewake`, held a minute).",
+  },
   forgetDraft: {
     kind: "forget-draft",
     from: "the shell → each chat, before signing out",

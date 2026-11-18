@@ -1320,6 +1320,19 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let signed = b.until(&page, "[...document.querySelectorAll('#frames iframe')].some(f => !f.dataset.blocked)", wait);
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &host, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     let _ = b.screenshot(&page, &shots.join("first-hello.png"));
+    // beginning to type in the chat in front is a sign of intent (decision
+    // 39; frame-messages.js `active`): with the page's clock moved past its
+    // last ask, the first keystroke races their computer's pre-wake again,
+    // held a minute (`POST …/prewake`), never an owner's wake
+    let watching = b.eval(&page, PREWAKES_WATCHED)?;
+    let keyed = b.eval_in_frame(&page, &host, "(() => { const t = document.getElementById('text'); if (!t) return false; t.value = 'h'; t.dispatchEvent(new Event('input', { bubbles: true })); return true; })()")?;
+    let renewed = b.until(&page, "window.__prewakes.length > 0", wait);
+    let asked = b.eval(&page, "(Date.now = window.__realNow, window.__prewakes)")?;
+    s.ok(
+        "the first keystroke in the chat in front asks its computer's pre-wake again: a minute's hold (`/prewake`), never the owner's wake",
+        watching == json!(true) && keyed == json!(true) && renewed && asked.as_array().is_some_and(|l| l.len() == 1 && l[0].as_str().is_some_and(|p| p.starts_with("/api/computers/") && p.ends_with("/prewake"))),
+        &asked,
+    );
     // the person's first message, answered by an agent already up
     let t0 = std::time::Instant::now();
     let mut typed = false;
@@ -3630,7 +3643,8 @@ const RESTART_STEPS: &str = "(() => { window.__restartSaid = []; window.__stateS
 /// every one while `window.__failComputers` is `true` (its default), or
 /// as many as it counts. With `__holdMakes` set before it, a first run's
 /// makes (`POST /api/fragments`, `POST /api/computers`) are held for good
-/// (counted: `__makes`), so nothing is made, and so is a wake; with
+/// (counted: `__makes`), so nothing is made, and so is a wake or a
+/// pre-wake; with
 /// `__holdMembers`, its read of a chat's members waits for
 /// `__membersHeld()`, then answers none. Whether it ever said "Making your
 /// agent…" (`__makingSaid`), and at which read (`__makingAt`). Its top
@@ -3643,11 +3657,18 @@ const FAIL_COMPUTERS: &str = "(() => { if (window !== window.top || window.__com
         if (fail) throw new TypeError('Failed to fetch'); } \
       if (window.__holdMembers && o?.method === 'GET' && /^\\/api\\/f\\/[^/]+\\/members$/.test(url)) { await new Promise((r) => { window.__membersHeld = r; }); window.__membersHeld = null; \
         return new Response('{\"members\":[]}', { status: 200, headers: { 'content-type': 'application/json' } }); } \
-      if (window.__holdMakes && o?.method === 'POST' && (url === '/api/fragments' || url.startsWith('/api/computers'))) { if (!url.endsWith('/wake')) window.__makes++; await new Promise(() => {}); } \
+      if (window.__holdMakes && o?.method === 'POST' && (url === '/api/fragments' || url.startsWith('/api/computers'))) { if (!url.endsWith('wake')) window.__makes++; await new Promise(() => {}); } \
       return real(url, o); }; \
     new MutationObserver(() => { if (!window.__makingSaid && document.getElementById('notice')?.textContent.includes('Making your agent')) Object.assign(window, { __makingSaid: true, __makingAt: window.__computerReads }); }) \
       .observe(document, { subtree: true, childList: true, characterData: true }); \
     return true; })()";
+/// The shell's wakes of its computer from now on, by path (`__prewakes`),
+/// and its clock moved 31 s on (the real one kept as `__realNow`): past the
+/// last pre-wake it asked, so the next thing the person does asks again.
+const PREWAKES_WATCHED: &str = "(() => { window.__prewakes = []; const send = window.fetch; \
+    window.fetch = (u, o) => { const p = new URL(String(u instanceof Request ? u.url : u), location.href).pathname; \
+      if ((o?.method ?? 'GET').toUpperCase() === 'POST' && /^\\/api\\/computers\\/[^/]+\\/(pre)?wake$/.test(p)) window.__prewakes.push(p); return send(u, o); }; \
+    window.__realNow = Date.now; const real = Date.now.bind(Date); Date.now = () => real() + 31_000; return true; })()";
 /// The band's line for a read of the computer that failed, its Try again ready.
 const REFRESH_LINE: &str = "(() => { const r = document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=refresh]'); \
     return !!r && r.innerText.includes(\"Couldn't refresh your computer\") && !!r.querySelector('button[data-action=refresh]:enabled'); })()";

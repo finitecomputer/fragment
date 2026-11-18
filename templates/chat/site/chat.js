@@ -2980,7 +2980,10 @@ export function mount(root) {
   // this page's typing, to everyone here: on while there is text and a key
   // came lately, off after a send or TYPING_MS of quiet
   // with whether the chat is on screen (`looking`), which keeps the
-  // chat's code from pushing its replies to this page's person (app.mjs)
+  // chat's code from pushing its replies to this page's person (app.mjs).
+  // Its turning on (the first keystroke after a pause) is told to the
+  // shell that frames it too, which races its person's computer's
+  // pre-wake (frame-messages.js, `active`).
   const onScreen = () => document.visibilityState === "visible";
   const shared = { typing: false, looking: onScreen() };
   let typingTimer = 0;
@@ -2990,6 +2993,7 @@ export function mount(root) {
     if (on === shared.typing) return;
     shared.typing = on;
     fragment.presence.set({ ...shared });
+    if (on && framed && state.me) window.parent.postMessage({ fragment: KIND.active }, state.me.platform);
   }
   document.addEventListener("visibilitychange", () => {
     if (onScreen() === shared.looking) return;

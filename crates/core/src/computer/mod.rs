@@ -7,15 +7,17 @@
 //!
 //! What it decides:
 //! - **Waking.** A record on a subscribed channel, an open port tab, a
-//!   page's presence (a pre-wake), one of its agents added to a fragment,
-//!   or the owner. A wake while asleep
+//!   sign that its person means to use it (a pre-wake: a page's presence,
+//!   its owner's shell, one of its agents added to a fragment), or the
+//!   owner. A wake while asleep
 //!   starts the container; one while it starts or is awake holds it
 //!   longer; one while it is going to sleep starts it again once it is
 //!   asleep (the newest push wins: lesson 3 of docs/cloudflare-v1.md).
 //! - **Staying awake.** While the guest holds a keepalive socket or a
 //!   port tab is open; with nothing open, until the latest hold runs out
-//!   (twenty minutes after a record or the last socket closed, a minute
-//!   after a pre-wake). An always-on computer never sleeps.
+//!   (twenty minutes after a record, the last socket closed or its
+//!   owner's own wake or restart; a minute after a pre-wake). Nothing
+//!   else holds it, but always on: an always-on computer never sleeps.
 //! - **Saving** (docs/computers.md, Durability, step 1). `/data` is saved when
 //!   work ends (the guest's last keepalive or its owner's last port tab
 //!   closes, and `SAVE_SETTLE_MS` pass with no keepalive opened again, so

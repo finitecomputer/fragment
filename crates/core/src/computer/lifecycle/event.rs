@@ -27,7 +27,9 @@ impl Default for Rules {
 pub enum Wake {
     /// A record on a channel one of its agents subscribed to.
     Record,
-    /// A page opened a fragment it subscribes to, or someone is typing.
+    /// A page opened a fragment it subscribes to, or its owner's page
+    /// pre-wakes it (`POST /api/computers/{id}/prewake`: a chat opened, or
+    /// typed in).
     Presence,
     /// A port tab is opening.
     Tab,
@@ -36,15 +38,19 @@ pub enum Wake {
     /// One of its agents was added to a fragment (Paul, 2026-10-03: agents
     /// are woken eagerly, to hide a wake's latency): the guest lists its
     /// agent's fragments and follows the new one before anyone speaks
-    /// there, and is held as a record holds it, since someone is about to.
+    /// there. Held as a pre-wake is: someone may be about to speak there,
+    /// and what they say holds it then (Paul, 2026-11-18: each sign of
+    /// intent holds it a minute).
     Joined,
 }
 
 impl Wake {
+    /// How long it holds the computer: a sign that someone may soon want
+    /// it, a minute; work for it, or its owner's own ask, the idle wait.
     pub(super) fn hold_ms(self) -> i64 {
         match self {
-            Wake::Presence => PREWAKE_MS,
-            Wake::Record | Wake::Tab | Wake::Owner | Wake::Joined => IDLE_MS,
+            Wake::Presence | Wake::Joined => PREWAKE_MS,
+            Wake::Record | Wake::Tab | Wake::Owner => IDLE_MS,
         }
     }
 }

@@ -1681,6 +1681,75 @@ fn put_to_sleep(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> (bool, V
     (slept, last)
 }
 
+/// Two computers woken as the lane begins, each its own person's, with no
+/// agent and nothing sent to them: one by its owner's page's pre-wake
+/// (`POST …/prewake`, what the shell asks as its person opens a chat or
+/// types in one), one by its owner's own wake (`POST …/wake`). Checked
+/// later in the lane (`prewakes_checked`), so the minute between runs
+/// beside the lane's other checks.
+struct Prewoken {
+    page: (crate::Keys, String),
+    owner: (crate::Keys, String),
+    /// When the pre-wake and the wake were asked (this machine's clock).
+    asked_ms: i64,
+    woken_ms: i64,
+    prewake: crate::api::Reply,
+    wake: crate::api::Reply,
+}
+
+const PREWAKE_CHECKS: [&str; 2] = [
+    "its owner's page's pre-wake (a chat opened, nothing sent) wakes their computer and holds it a minute, as a page's presence does: it sleeps again after about a minute, not twenty",
+    "its owner's own wake still holds it twenty minutes: awake past the pre-wake's minute",
+];
+
+/// How long past its minute a pre-woken computer may take to be asleep:
+/// its alarm, its hold, a save of a `/data` with nothing in it, its stop.
+const PREWAKE_SLEPT_WITHIN: Duration = Duration::from_secs(90);
+/// How long past a minute from its wake the owner's computer is looked at:
+/// held only a minute, it would be going to sleep by then.
+const PREWAKE_PAST_MS: i64 = 15_000;
+
+fn prewakes_started(api: &Api) -> Result<Prewoken> {
+    let made = || -> Result<(crate::Keys, String)> {
+        let who = api.person_paying(0)?;
+        let r = api.signed(&who, "POST", "/api/computers", Some(&json!({})))?;
+        anyhow::ensure!(r.status == 200 && r.body["phase"] == "asleep", "a computer made, asleep: {r}");
+        Ok((who, r.body["computer"].as_str().unwrap_or("").to_string()))
+    };
+    let (page, owner) = (made()?, made()?);
+    let asked_ms = now_ms();
+    let prewake = api.signed(&page.0, "POST", &format!("/api/computers/{}/prewake", page.1), Some(&json!({})))?;
+    let woken_ms = now_ms();
+    let wake = api.signed(&owner.0, "POST", &format!("/api/computers/{}/wake", owner.1), Some(&json!({})))?;
+    Ok(Prewoken { page, owner, asked_ms, woken_ms, prewake, wake })
+}
+
+fn prewakes_checked(s: &mut Suite, api: &Api, w: &Prewoken) -> Result<()> {
+    let ((page, page_id), (owner, owner_id)) = (&w.page, &w.owner);
+    let hold = fragment_core::computer::PREWAKE_MS;
+    let by = w.asked_ms + hold + PREWAKE_SLEPT_WITHIN.as_millis() as i64;
+    let left = Duration::from_millis(u64::try_from(by - now_ms()).unwrap_or(0)).max(Duration::from_secs(5));
+    let woke = w.prewake.status == 200 && w.prewake.body["phase"] == "awake";
+    let asleep = woke && s.eventually(left, || phase(api, page, page_id) == "asleep");
+    // its sleep's save: when its minute ran out (a second of clocks between
+    // this machine and the deployment's either way)
+    let saved = newest_save(api, page_id);
+    let slept_after = saved["atMs"].as_i64().map(|at| at - w.asked_ms);
+    let about_a_minute = slept_after.is_some_and(|ms| ms >= hold - 1_000 && ms <= hold + PREWAKE_SLEPT_WITHIN.as_millis() as i64);
+    s.ok(PREWAKE_CHECKS[0], woke && asleep && about_a_minute, json!({ "prewake": [w.prewake.status, &w.prewake.body["phase"]], "asleep": asleep, "sleptAfterMs": slept_after, "save": saved }));
+    // past a pre-wake's minute from its wake (and the start of a sleep a
+    // minute's hold would have begun), the owner's wake holds on
+    let past = w.woken_ms + hold + PREWAKE_PAST_MS - now_ms();
+    if past > 0 {
+        std::thread::sleep(Duration::from_millis(past as u64));
+    }
+    let held = phase(api, owner, owner_id);
+    s.ok(PREWAKE_CHECKS[1], w.wake.status == 200 && w.wake.body["phase"] == "awake" && held == "awake", json!({ "wake": [w.wake.status, &w.wake.body["phase"]], "now": held, "sinceMs": now_ms() - w.woken_ms }));
+    // its container let go, its twenty minutes not waited out
+    api.signed(owner, "POST", &format!("/api/computers/{owner_id}/sleep"), Some(&json!({})))?;
+    Ok(())
+}
+
 /// What the routine checks act on: the lane's computer, its agent and chat.
 struct Routined<'a> {
     owner: &'a crate::Keys,
@@ -1915,6 +1984,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // a hosted run's owner pays a real model, from the run's budget
     let owner = api.person_paying(HOSTED_PAID_CALLS)?;
     let stranger = api.person()?;
+    let prewoken = prewakes_started(api)?;
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
@@ -2103,6 +2173,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         replies_so_far += 1;
         s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
     }
+    prewakes_checked(s, api, &prewoken)?;
     let owner_id = api.identity(&owner)?;
 
     // the swap (Paul, 2026-10-04): the guest finds each credential its agent

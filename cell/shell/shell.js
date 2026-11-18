@@ -1385,6 +1385,8 @@ addEventListener("message", async (event) => {
 // origin, through a ticket that lands on the agent's page (docs/computers.md, Ports) ----
 async function openScreen(agent) {
   if (!state.computer || !agent) return;
+  // a sign they mean to use it: its start raced as its port's ticket is asked
+  prewake();
   try {
     const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/?agent=${encodeURIComponent(agent)}` });
     const frame = frameOf(t.url, `${titleOf(agent)}'s screen`);
@@ -2190,6 +2192,16 @@ addEventListener("message", (event) => {
   const name = frameOfWindow(event.source)?.dataset.fragment;
   if (name && byName(name)?.kind === "chat" && byName(name).archived) setArchived(name, false);
 });
+// A chat's page says its person typed there (`active`): the chat in front,
+// with one of their agents in it, keeps their computer's pre-wake
+// (computer.js `prewake`). A chat behind another, or one without their
+// agent, keeps nothing awake.
+addEventListener("message", (event) => {
+  if (event.data?.fragment !== KIND.active) return;
+  const frame = frameOfWindow(event.source);
+  const name = frame?.dataset.fragment;
+  if (name && name === state.current && !frame.hidden && !$("frames").hidden && agentsOf(name).some((id) => state.agents.has(id))) prewake();
+});
 addEventListener("message", (event) => {
   const d = event.data;
   if (d?.fragment !== KIND.agentsAsk && d?.fragment !== KIND.busy) return;
@@ -2248,7 +2260,6 @@ async function start(open) {
   // where it is answered, shows over the page
   // after a reload for a new release, its windows where they were
   reopenWindows(settings);
-  prewake();
 }
 
 // ---- a guest (`GET /api/seat`'s `guest`: no seat, and no plan of their
