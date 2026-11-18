@@ -757,11 +757,14 @@ impl FragmentCell {
             }
             Some("legacy-picture") => {
                 // an agent's picture as a release before kept it, its row
-                // (`<sha256> <type> <commit>`) and no icon, its face showing
-                // it: what runs_on.rs `take_picture` takes
+                // (`<sha256> <type> <commit>`), its face showing it, and no
+                // icon (or, `icon: true`, the one it kept from before it was
+                // an agent): what runs_on.rs `take_picture` takes
                 let row = body["row"].as_str().ok_or_else(|| CellError::invalid("legacy-picture names its row: <sha256> <type> <commit>"))?;
                 self.set_meta(MetaKey::Picture, row)?;
-                self.del_meta(MetaKey::Icon)?;
+                if body["icon"] != true {
+                    self.del_meta(MetaKey::Icon)?;
+                }
                 let now = self.face_now()?;
                 self.face_is(now.kind, now.title.as_deref(), now.role.as_deref())?;
                 json!({ "picture": self.icon_shown(now.kind)? })

@@ -839,12 +839,16 @@ impl FragmentCell {
     }
 
     /// The Open Graph tags its pages carry (`site::inject_og`), when its
-    /// live manifest has a `meta`: that `meta`, titled as its face is (a
-    /// rename moves no commit: `site::og_tag` names it in a page's tag).
+    /// live manifest has a `meta` or its face a title: that `meta`, titled
+    /// as its face is (a rename moves no commit: `site::og_tag` names it in
+    /// a page's tag).
     fn og(&self) -> CellResult<Option<fragment_core::manifest::Meta>> {
-        let Some(text) = self.meta(MetaKey::MetaLive)? else { return Ok(None) };
-        let mut meta: fragment_core::manifest::Meta = crate::json_text(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?;
+        let stored = self.meta(MetaKey::MetaLive)?;
+        let mut meta: fragment_core::manifest::Meta = match &stored {
+            Some(text) => crate::json_text(text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?,
+            None => Default::default(),
+        };
         meta.title = self.title()?;
-        Ok(Some(meta))
+        Ok((stored.is_some() || meta.title.is_some()).then_some(meta))
     }
 }

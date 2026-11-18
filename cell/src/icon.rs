@@ -115,8 +115,10 @@ impl FragmentCell {
     /// whoever sees the agent may fetch; any other's at its own.
     pub(crate) fn icon_shown(&self, kind: FragmentKind) -> CellResult<Option<String>> {
         if kind == FragmentKind::Agent {
-            // its picture from before it was its icon, until taken (`take_picture`)
-            let sha = self.icon_sha()?.or(self.picture_untaken()?.map(|(sha, _, _)| sha));
+            // its picture from before it was its icon, until taken
+            // (`take_picture`): an icon beside it is one it kept from
+            // before it was an agent, never shown as its picture
+            let sha = self.picture_untaken()?.map(|(sha, _, _)| sha).or(self.icon_sha()?);
             return sha.map(|sha| Ok(face::picture_path(&self.must(MetaKey::Npub)?, &sha))).transpose();
         }
         let Some(shown) = self.icon_now()? else { return Ok(None) };

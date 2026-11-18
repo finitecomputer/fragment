@@ -1036,7 +1036,10 @@ impl FragmentCell {
                 self.test_countdown(MetaKey::TestFailSigninVisibility, "its visibility was not read")?;
                 reply::<VisibilityOf>(self.facts().map(|f| f.visibility))
             }
-            Picture::PATH => self.picture().await,
+            Picture::PATH => {
+                let asked: Picture = decode(body)?;
+                self.picture(&asked.identity).await
+            }
             DoorCheck::PATH => reply::<DoorCheck>(self.door_check(decode(body)?)),
             DoorActor::PATH => reply::<DoorActor>(self.door_actor(decode(body)?)),
             FaceOf::PATH => reply::<FaceOf>(self.face_of()),

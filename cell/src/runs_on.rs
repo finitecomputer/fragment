@@ -110,10 +110,15 @@ impl FragmentCell {
     /// `calls::Picture`: an agent's picture, for `GET
     /// /api/identities/<npub>/picture`: its own icon (icon.rs), its bytes
     /// as kept. One kept before its picture was its icon is taken first
-    /// (`take_picture`).
-    pub(crate) async fn picture(&self) -> CellResult<Response> {
+    /// (`take_picture`). Only this life's agent's, while it is an agent:
+    /// any other fragment's icon is its viewers' alone (an app a computer
+    /// once ran, a name made again since, a kind changed since).
+    pub(crate) async fn picture(&self, identity: &str) -> CellResult<Response> {
         let none = || CellError::new(ErrorCode::NotFound, "this agent has no picture");
         self.must(MetaKey::CreatedAt).map_err(|_| none())?;
+        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(identity) || self.face_now()?.kind != fragment_proto::FragmentKind::Agent {
+            return Err(none());
+        }
         self.take_picture().await?;
         let sha = self.meta(MetaKey::Icon)?.ok_or_else(none)?;
         let mut resp = self.icon_body(&crate::icon::Shown::Own(sha)).await?;
@@ -163,9 +168,9 @@ impl FragmentCell {
             let now = self.face_now()?;
             return self.face_is(now.kind, now.title.as_deref(), now.role.as_deref());
         }
-        if self.meta(MetaKey::Icon)?.is_none() {
-            self.set_meta(MetaKey::Icon, sha)?;
-        }
+        // its picture, whatever icon it kept from before it was an agent
+        // (one set since would have let the row go: icon.rs `show_icon`)
+        self.set_meta(MetaKey::Icon, sha)?;
         self.event("picture.taken", "its picture is its icon now, taken from its avatar.png", json!({ "sha256": sha, "commit": commit }));
         Ok(())
     }
