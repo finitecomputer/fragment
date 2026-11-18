@@ -542,6 +542,10 @@ pub enum Input {
     Posted { turn: String, id: String, kept: bool },
     /// Time passed: expiries, quiet turns, and claims to try again.
     Tick,
+    /// The computer is working outside any turn, or no longer (load.rs):
+    /// work left running, which holds it within `LEFT_RUNNING_HOLD_MS` of
+    /// its agents' work.
+    Load(bool),
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
     /// The agents whose SimpleX link is bound now (simplex/run.rs), each
@@ -645,6 +649,18 @@ pub struct Engine {
     agents: Vec<Agent>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
+    /// Its agents' work held the computer at the last step: a turn queued
+    /// or running, or a runtime's own work.
+    busy: bool,
+    /// Work left running (docs/bridge.md, "Work left running"): the
+    /// computer is working outside any turn (`Input::Load`), it may hold
+    /// the computer until `left_until`, `LEFT_RUNNING_HOLD_MS` after this
+    /// life's agents' work last held it, and it holds it now. Never
+    /// written to `/data`: a new life holds none of it until its own work
+    /// ends, so a wake's own start never holds a computer woken for a look.
+    load: bool,
+    left_until: Option<u64>,
+    left: bool,
     /// Turns that ran here and ended lately, oldest first (at most
     /// `ENDED_HOPS_MAX`, each for `ENDED_HOPS_MS`): a reply of one read after
     /// it was let go is one hop past it (`hop_of`). Never written to `/data`.
@@ -771,6 +787,10 @@ impl Engine {
             agents: Vec::new(),
             views: HashMap::new(),
             keepalive: false,
+            busy: false,
+            load: false,
+            left_until: None,
+            left: false,
             ended: VecDeque::new(),
             forgotten: BTreeMap::new(),
             unread_cuts: BTreeSet::new(),
@@ -895,6 +915,7 @@ impl Engine {
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
             Input::ComputerAnswer { agent, turn, prompt, option, words, reply } => self.computer_answer(&agent, &turn, &prompt, &option, words, reply),
+            Input::Load(working) => self.load = working,
             Input::Relaying(agents) => {
                 assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
                 self.relaying = agents;
@@ -913,9 +934,19 @@ impl Engine {
     fn finish(&mut self) -> Step {
         let working = self.runtimes.values().any(|r| r.working);
         let busy = working || self.state.turns.values().any(|t| t.phase == Phase::Queued || (t.phase == Phase::Running && !t.asking));
-        if busy != self.keepalive {
-            self.keepalive = busy;
-            self.out.push(Effect::Keepalive(busy));
+        if self.busy && !busy {
+            self.left_until = Some(self.now + limits::LEFT_RUNNING_HOLD_MS);
+        }
+        self.busy = busy;
+        let left = !busy && self.load && self.left_until.is_some_and(|until| self.now < until);
+        if left != self.left {
+            self.left = left;
+            crate::ev!("keepalive.left", { "hold": left, "until": self.left_until });
+        }
+        let hold = busy || left;
+        if hold != self.keepalive {
+            self.keepalive = hold;
+            self.out.push(Effect::Keepalive(hold));
         }
         assert!(self.state.turns.len() <= limits::TURNS_OPEN_MAX, "admission bounds the open turns");
         // the format it holds: 3 only while a turn holds a return

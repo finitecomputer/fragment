@@ -727,14 +727,22 @@ mod tests {
 
     /// Goal (P5 of the plan to sandbox per agent): an agent plans
     /// honestly, knowing a sleep or restart ends the servers and background
-    /// commands it started and that nothing starts them again, and where
-    /// what must outlive its turn lives instead.
+    /// commands it started and that nothing starts them again, where what
+    /// must outlive its turn lives instead, and (P6) that one still working
+    /// holds the computer only up to the bridge's bound, which both pages
+    /// name as the code keeps it.
     #[test]
     fn an_agent_is_told_a_sleep_ends_its_processes() {
         let page = COMPUTER_PAGE.split_whitespace().collect::<Vec<_>>().join(" ");
-        for said in ["A sleep or a restart ends every process you started (a server, a background command, a loop, crontab, `hermes cron`), and nothing starts it again", "a schedule on yourself, kept through every restart and sleep", "What should run without you (frequent checks, or for others) is an app"] {
+        let hours = fragment_bridge::limits::LEFT_RUNNING_HOLD_MS / 3_600_000;
+        assert_eq!(hours * 3_600_000, fragment_bridge::limits::LEFT_RUNNING_HOLD_MS, "a bound in whole hours");
+        let held = format!("keeps your computer awake up to {hours} hours after your turn; an idle server does not");
+        for said in ["A sleep or a restart ends every process you started (a server, a background command, a loop, crontab, `hermes cron`), and nothing starts it again", "a schedule on yourself, kept through every restart and sleep", "What should run without you (frequent checks, or for others) is an app", &held] {
             assert!(page.contains(said), "computer.md says {said}");
         }
+        let guide = include_str!("../../../../cli/GUIDE.md").split_whitespace().collect::<Vec<_>>().join(" ");
+        let held = format!("keeps the computer awake up to {hours} hours after the agent's last turn; an idle server does not");
+        assert!(guide.contains(&held), "GUIDE.md says {held}");
     }
 
     #[test]

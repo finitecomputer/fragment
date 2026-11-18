@@ -16,6 +16,7 @@ pub mod engine;
 pub mod history;
 pub mod lease;
 pub mod limits;
+pub mod load;
 pub mod log;
 pub mod net;
 pub mod note;

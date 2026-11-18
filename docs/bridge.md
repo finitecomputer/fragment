@@ -338,6 +338,32 @@ it, and the hook returns only then:
   turn): its memory review's and a delegated child's are not. A call
   whose end is not observed is no step; nothing is guessed.
 
+## Work left running
+
+Work an agent leaves running outside its turns (a background command of
+any runtime's, `nohup … &`, a download) holds the computer while the
+computer is working, for at most `LEFT_RUNNING_HOLD_MS` (2 hours) after
+its agents' work last held it: a turn queued or running, or a runtime's
+own work. An idle server, an idle runtime and its desktop never do
+(load.rs; `Input::Load`).
+
+- **Working** is read from the computer's own counters every
+  `LOAD_SLICE_MS` (20 s): its CPU time (its cgroup's `cpu.stat`, else the
+  machine's `/proc/stat`, which in a computer's own VM is the computer's)
+  and its network bytes both ways on every interface but loopback
+  (`/proc/net/dev`). A slice over either floor
+  (`LOAD_CPU_FLOOR_PERMILLE`, `LOAD_NET_FLOOR_BYTES_PER_S`) is work, and
+  the computer is working while one of its last `LOAD_SLICES` (2
+  minutes) was. Disk writes are no measure: idle write-back alone passes
+  any useful floor. The measurements behind the floors are beside them.
+- **The bound is this life's**, never saved: a new life (a restart, a
+  wake) holds nothing until its own agents' work ends, so a wake's own
+  start never holds a computer woken for a look. A bridge restarted alone
+  loses the hold; the computer then sleeps after its idle wait unless a
+  turn runs.
+- A computer with no counters to read (`load.counters` names none) holds
+  nothing for it. Its awake time is billed as any other.
+
 ## Agents asking each other
 
 A person's agents hand work to each other in a chat they share. One

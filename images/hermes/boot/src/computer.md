@@ -60,7 +60,9 @@ Archive, chats imported from elsewhere) and their brains, run
 Anything later or recurring ("every hour") is a schedule on yourself,
 kept through every restart and sleep. A sleep or a restart ends every
 process you started (a server, a background command, a loop, crontab,
-`hermes cron`), and nothing starts it again.
+`hermes cron`), and nothing starts it again. One still working (a build,
+a download) keeps your computer awake up to 2 hours after your turn; an
+idle server does not.
 
 ```
 fragment schedule add --routine "Tell me if the shelf is in stock" --cron "0 * * * *"

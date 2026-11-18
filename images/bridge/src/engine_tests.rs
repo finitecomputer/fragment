@@ -50,6 +50,59 @@ fn runtime_work_holds_until_it_ends_and_is_never_restored() {
     assert_eq!(keepalive(&e.step(heard(Event::Working(false)), T0 + 6)), None);
 }
 
+// ---- work left running ----
+
+/// Goal (the plan to a sandbox per agent, P6): work an agent leaves running
+/// (a build, a download) holds the computer while the computer is working,
+/// for at most `LEFT_RUNNING_HOLD_MS` after its agents' work last held it.
+/// Valid: a turn ends with the computer working, and the hold goes on; it
+/// lets go when the work drops under the floor, and holds again when it
+/// rises. Bound: it lets go at the bound, working or not, and a turn ending
+/// later gives a new one. Invalid: work with no turn ended in this life
+/// holds nothing. Restart: a new life holds none of an earlier life's, so a
+/// wake's own start never holds a computer woken for a look; its own turns
+/// give it one.
+#[test]
+fn work_left_running_holds_within_its_bound() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let bound = limits::LEFT_RUNNING_HOLD_MS;
+    // invalid: no turn of this life has ended
+    assert_eq!(keepalive(&e.step(Input::Load(true), T0)), None);
+    assert!(!e.keepalive(), "work with no turn of this life holds nothing");
+    e.step(Input::Load(false), T0);
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "build it" }), T0)).expect("started").turn;
+    assert!(e.keepalive());
+    e.step(Input::Load(true), T0 + 1);
+    let end = T0 + 10;
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), end)), None, "the turn ends; its work holds on");
+    assert!(e.keepalive());
+    // under the floor, it lets go; over it again, it holds
+    assert_eq!(keepalive(&e.step(Input::Load(false), end + 1_000)), Some(false));
+    assert_eq!(keepalive(&e.step(Input::Load(true), end + 2_000)), Some(true));
+    // the bound, from the turn's end, working all the while
+    assert_eq!(keepalive(&e.step(Input::Tick, end + bound - 1)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, end + bound)), Some(false), "at the bound it lets go");
+    assert_eq!(keepalive(&e.step(Input::Load(true), end + bound + 1)), None);
+    // a later turn's end gives a new bound
+    let next = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "again" }), end + bound + 2)).expect("started").turn;
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn: next, outcome: Outcome::Idle }), end + bound + 3)), None, "held from the turn to its work");
+    assert!(e.keepalive());
+
+    // restart mid-hold: the next life holds nothing of it
+    let settings = Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 };
+    let mut next = Engine::new(e.state().clone(), settings, "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    next.step(Input::Agents(vec![a.clone()]), end + bound + 4);
+    next.recover(end + bound + 4);
+    next.step(heard(Event::Connected(true)), end + bound + 4);
+    assert_eq!(keepalive(&next.step(Input::Load(true), end + bound + 5)), None);
+    assert!(!next.keepalive(), "a new life holds no earlier life's work");
+    let t = started(&said(&mut next, &a, &v, 3, "npub1paul", json!({ "text": "and again" }), end + bound + 6)).expect("started").turn;
+    assert_eq!(keepalive(&next.step(heard(Event::End { turn: t, outcome: Outcome::Idle }), end + bound + 7)), None);
+    assert!(next.keepalive(), "its own turn's work holds it");
+}
+
 // ---- several runtimes ----
 
 /// What `runtime`, one of the bridge's, said.

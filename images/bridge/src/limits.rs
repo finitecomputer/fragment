@@ -313,6 +313,27 @@ pub const LIVE_PING_MS: u64 = 30_000;
 /// platform then counts it closed, and its computer would sleep under the
 /// turn that holds it.
 pub const KEEPALIVE_PING_MS: u64 = 15_000;
+/// Work left running outside any turn (load.rs; docs/bridge.md, "Work left
+/// running") holds the computer at most this long after its agents' work
+/// last did: a forgotten loop costs at most this much awake time (the plan
+/// to a sandbox per agent, Q9, 2026-11-18).
+pub const LEFT_RUNNING_HOLD_MS: u64 = 2 * 60 * 60 * 1000;
+/// The computer's counters are read this often (load.rs): a slice.
+pub const LOAD_SLICE_MS: u64 = 20_000;
+/// It is working while one of its last this many slices was over a floor:
+/// a pause in the work (a build waiting on a download) holds on.
+pub const LOAD_SLICES: usize = 6;
+/// A slice is work at this much CPU, in thousandths of one core, every
+/// process's together: celld's guard. Measured in the Hermes image on
+/// Docker (2026-11-18, 20 s slices): idle Hermes 4–10, 29 just after its
+/// first reply, its desktop up 4–7, an idle `http.server` left running
+/// 6–18; a busy loop 979–1003, `gzip` 1093–1161; a 200 KB/s download 7–11.
+pub const LOAD_CPU_FLOOR_PERMILLE: u64 = 50;
+/// Or this many bytes a second on the network, both ways (a download is
+/// work its CPU does not show). Measured as above: idle 380–1,700; that
+/// download 199,000–200,000. Disk writes are no measure: idle Hermes'
+/// write-back alone reached 1.2 MB/s in a slice.
+pub const LOAD_NET_FLOOR_BYTES_PER_S: u64 = 50_000;
 
 /// A post the platform did not take is tried this many times, waiting a
 /// jittered backoff between (ids make every retry the same record).
