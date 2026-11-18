@@ -60,6 +60,11 @@ use crate::share::label;
 /// an app to a fragment it is in: each way its own, so neither is read as
 /// the other (members.rs `tell_index`).
 pub(crate) const TO_APP: &str = "app:";
+
+/// How long an app's growth note lasts: a growth asks each fragment it is
+/// in once, in one request, far sooner; a note older is one a request left
+/// as it ended (a restart), and looks no longer carry it.
+const GROWTH_NOTED_MS: i64 = 10 * 60 * 1000;
 pub(crate) const FROM_APP: &str = "in:";
 
 impl FragmentCell {
@@ -105,27 +110,35 @@ impl FragmentCell {
             vec![person.into(), power.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
         let id = noted.first().and_then(|r| r["id"].as_i64()).ok_or_else(|| CellError::host("a growth noted has no id"))?;
-        let asked = AppGrows { app: self.must(MetaKey::Npub)?, title: self.app_title()?, person: person.to_string(), role };
+        let asked = AppGrows { app: self.must(MetaKey::Npub)?, name: self.name()?, title: self.app_title()?, person: person.to_string(), role };
         // bounded: the fragments an app is in hold it as a member
         let answers = join_all(targets.iter().map(|t| crate::fragment::call(&self.env, t, &asked))).await;
         let refused = answers.iter().find_map(|a| a.as_ref().err().filter(|e| e.code != ErrorCode::NotFound));
         let Some(refused) = refused else { return Ok(Some(id)) };
-        self.exec("DELETE FROM app_growth WHERE id = ?", vec![SqlStorageValue::Integer(id)])?;
-        for (target, answer) in targets.iter().zip(&answers) {
-            if answer.is_ok() {
-                self.app_look(target)?;
-            }
-        }
-        self.flush_index().await;
+        self.given_up(Some(id)).await?;
         Err(CellError::new(refused.code, refused.message.clone()))
     }
 
-    /// A growth asked and written, or given up: its note goes.
+    /// A growth asked and written: its note goes.
     pub(crate) fn grown(&self, noted: Option<i64>) -> CellResult<()> {
         match noted {
             Some(id) => self.exec("DELETE FROM app_growth WHERE id = ?", vec![SqlStorageValue::Integer(id)]),
             None => Ok(()),
         }
+    }
+
+    /// A growth asked and not written (a no, a refusal after the yes, an
+    /// invite's ask, which its yes asks again): its note goes, and every
+    /// fragment it is in looks again, so no yes stays for someone it never
+    /// took.
+    pub(crate) async fn given_up(&self, noted: Option<i64>) -> CellResult<()> {
+        if noted.is_none() {
+            return Ok(());
+        }
+        self.grown(noted)?;
+        self.apps_look()?;
+        self.flush_index().await;
+        Ok(())
     }
 
     /// An app member's growth asked here (`AppGrows`): yes records the
@@ -134,7 +147,12 @@ impl FragmentCell {
     /// held to the strictest role, an editor's.
     pub(crate) async fn app_grows(&self, g: AppGrows) -> CellResult<()> {
         self.created()?;
-        let app_role = self.member_role(&g.app)?.unwrap_or(Role::Editor);
+        let asking = !self.rows("SELECT 1 AS x FROM app_asks WHERE name = ?", vec![g.name.as_str().into()])?.is_empty();
+        let app_role = match self.member_role(&g.app)? {
+            Some(role) => role,
+            None if asking => Role::Editor,
+            None => return Err(CellError::new(ErrorCode::NotFound, "that app is no member here")),
+        };
         let mut approved = self.app_audience(&g.app)?;
         let holds = self.member_role(&g.person)?;
         if let Err(refused) = app_member::grow(&mut approved, app_role, &g.person, g.role, holds) {
@@ -429,6 +447,8 @@ impl FragmentCell {
     pub(crate) fn app_audience_of(&self) -> CellResult<AppAudience> {
         self.created()?;
         let mut audience = app_member::audience(&self.must(MetaKey::Owner)?, &self.member_list()?.members);
+        // a note a request left when it ended unanswered (a restart) goes
+        self.exec("DELETE FROM app_growth WHERE at < ?", vec![SqlStorageValue::Integer(js::now_ms() - GROWTH_NOTED_MS)])?;
         for g in self.rows("SELECT person, power FROM app_growth", vec![])? {
             let (Some(person), Some(power)) = (g["person"].as_str(), g["power"].as_str().and_then(Role::parse)) else { continue };
             let held = audience.entry(person.to_string()).or_insert(power);

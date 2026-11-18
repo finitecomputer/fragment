@@ -664,7 +664,10 @@ impl FragmentCell {
             None => None,
         };
         let member = self.write_member(actor, target, body, lever);
-        self.grown(noted)?;
+        match member.is_ok() {
+            true => self.grown(noted)?,
+            false => self.given_up(noted).await?,
+        }
         let member = member?;
         // the agent's list holds this fragment before its computer is told
         self.flush_index().await;
@@ -909,8 +912,14 @@ impl FragmentCell {
                 }
                 Err(e) => return Err(e),
             };
+            // asked to give its owner the fix now; the yes is asked again
+            // at theirs, so none is kept for the invite meanwhile
             let noted = self.ask_growth(&person, body.role).await?;
-            self.grown(noted)?;
+            self.given_up(noted).await?;
+            // the cap again, in the write's turn: another invite may have taken the room meanwhile
+            if self.rows("SELECT 1 AS x FROM invites WHERE email = ?", vec![email.as_str().into()])?.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
+                return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
+            }
         }
         let now = js::now_ms();
         let expires_at = now + limits::INVITE_TTL_S * 1000;
@@ -949,7 +958,7 @@ impl FragmentCell {
             Err(e) => {
                 // what this call wrote, unless a yes met it meanwhile
                 self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
-                if let (Some(was), None) = (before.first(), self.member_of_any()?) {
+                if let Some(was) = before.first() {
                     let field = |k: &str| was[k].as_str().unwrap_or_default().to_string();
                     let int = |k: &str| was[k].as_i64().unwrap_or_default();
                     write(&field("role"), int("expires_at"), &field("created_by"), int("created_at"))?;
@@ -1030,7 +1039,7 @@ impl FragmentCell {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
         self.drop_spent_invites().await?;
-        let rows = self.rows("SELECT role, created_by FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
+        let rows = self.rows("SELECT role, created_by, created_at FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
         let Some(row) = rows.first() else {
             return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
         };
@@ -1049,10 +1058,22 @@ impl FragmentCell {
             true => None,
             false => self.ask_growth(who, role).await.map_err(|_| CellError::new(ErrorCode::Forbidden, "it isn't open to you yet: its owner can tell you why"))?,
         };
-        // asked meanwhile: the invite may have gone (revoked, run out)
-        if noted.is_some() && self.rows("SELECT 1 AS x FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?.is_empty() {
-            self.grown(noted)?;
-            return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
+        // asked meanwhile: the invite may have gone (revoked, run out) or
+        // another taken its place, and others may have taken the room
+        if noted.is_some() {
+            let made = SqlStorageValue::Integer(row["created_at"].as_i64().unwrap_or(0));
+            let same = self.rows(
+                "SELECT 1 AS x FROM invites WHERE email = ? AND created_at = ? AND expires_at > ?",
+                vec![claim.email.as_str().into(), made, SqlStorageValue::Integer(js::now_ms())],
+            )?;
+            if same.is_empty() {
+                self.given_up(noted).await?;
+                return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
+            }
+            if let Err(e) = self.room_for(u64::from(self.member_role(who)?.is_none()) + self.not_members(agents)?) {
+                self.given_up(noted).await?;
+                return Err(e);
+            }
         }
         self.exec("DELETE FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
         // met, whatever it grants: the owner's list counts it no more

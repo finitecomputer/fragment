@@ -162,6 +162,8 @@ impl Call for AppAsked {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AppGrows {
     pub app: String,
+    /// Its fragment name: a join still on its way is asked by it.
+    pub name: String,
     pub title: String,
     pub person: String,
     pub role: Role,
