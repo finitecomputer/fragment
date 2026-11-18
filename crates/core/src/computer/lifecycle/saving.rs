@@ -88,12 +88,12 @@ impl Lifecycle {
         }
     }
 
-    /// Whether save `seq` of start `generation`, done, is one no longer
-    /// waited for: another hold, save or stop of the same container is
-    /// under way (its owner's sleep or restart after a cancel asked a newer
-    /// one). The DO lets its records go, never the newest kept.
-    pub fn superseded(&self, generation: u64, seq: u64) -> bool {
-        self.running() == Some(generation) && self.saving.is_some_and(|step| !matches!(step, Saving::Save { seq: n, .. } if n == seq))
+    /// Whether save `seq`, done, was superseded: a newer save was asked as
+    /// it ran (its owner's sleep or restart after a cancel asked one while
+    /// the cancelled sleep's save went on), kept or not. The DO lets its
+    /// records go: never the newest kept, ahead of a newer capture.
+    pub fn superseded(&self, seq: u64) -> bool {
+        seq < self.save_seq
     }
 
     /// Begins a save while it stays awake: its hold first.

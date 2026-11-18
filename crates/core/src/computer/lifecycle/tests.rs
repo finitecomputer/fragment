@@ -870,21 +870,24 @@ fn a_turn_open_at_a_cancel_is_saved_as_it_runs() {
 
 /// Goal (#1357's review): a save its owner's sleep or restart asked anew
 /// after a cancel (the cancelled sleep's save still under way) supersedes
-/// it: the DO keeps the newer, never the older as its newest. Valid: the
-/// save under way, alone, is no superseded one; nor one of another start.
-/// Method: `superseded` before and after its owner's sleep.
+/// it, while that newer save is under way and after it is kept and its
+/// sleep ended: the DO never keeps the older as its newest. Valid: the
+/// save under way, alone, is no superseded one. Method: `superseded`
+/// through its owner's sleep, to its end.
 #[test]
 fn a_save_asked_again_after_a_cancel_supersedes_the_one_under_way() {
     let at = T + IDLE_MS + 1_000;
     for owner in [Event::Sleep, Event::Restart { generation: 0 }] {
         let (mut l, g, _) = idle_sleep(true);
-        assert!(!l.superseded(g, 1), "a save under way is waited for");
+        assert!(!l.superseded(1), "a save under way is waited for");
         l.apply(Event::Wake { why: Wake::Record }, at);
-        assert!(!l.superseded(g, 1), "and goes on after a cancel");
         l.apply(owner.clone(), at + 100);
-        assert!(l.superseded(g, 1), "a newer one asked: {owner:?}");
-        assert!(!l.superseded(g + 1, 1), "of another start, nothing");
+        assert!(!l.superseded(1), "a hold asks no save yet: {owner:?}");
         let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 200));
-        assert!(seq == 2 && !l.superseded(g, 2) && l.superseded(g, 1), "{owner:?}");
+        assert!(seq == 2 && !l.superseded(2) && l.superseded(1), "{owner:?}");
+        l.apply(Event::Saved { generation: g, seq: 2 }, at + 300);
+        l.apply(Event::Asleep { generation: g }, at + 400);
+        assert!(l.running().is_none(), "its sleep ended: {owner:?}");
+        assert!(l.superseded(1) && !l.superseded(2), "and after its sleep: {owner:?}");
     }
 }
