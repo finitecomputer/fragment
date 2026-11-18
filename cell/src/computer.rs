@@ -1414,7 +1414,8 @@ impl ComputerCell {
     /// answer leaves them owed to the next (docs/technical-debt-ledger.md,
     /// "A computer keeps its owner's own keys from before the move").
     async fn hand_over_own(&self) -> CellResult<Vec<String>> {
-        let rows = self.rows("SELECT provider, sealed, set_at FROM own_keys ORDER BY provider", vec![])?;
+        // bounded: the rest go at the next touch
+        let rows = self.rows(&format!("SELECT provider, sealed, set_at FROM own_keys ORDER BY provider LIMIT {}", fragment_core::vault::SECRETS_MAX), vec![])?;
         if rows.is_empty() {
             return Ok(vec![]);
         }
@@ -2893,15 +2894,11 @@ impl ComputerCell {
                     *self.accounts.borrow_mut() = b.accounts.unwrap_or_default();
                     self.states_told.set(self.states_told.get() + 1);
                 }
-                // the own keys it kept before the move go to the Vault first:
-                // those taken and those still owed are its owner's set ones (the
-                // router reads their Vault's beside this)
-                let mut held = self.hand_over_own().await.unwrap_or_else(|e| {
-                    console_error!("{{\"computer\":{:?},\"ownKeys\":\"owed\",\"error\":{:?}}}", self.meta(MetaKey::Id).ok().flatten().unwrap_or_default(), e.message);
-                    vec![]
-                });
-                held.extend(self.owed_own()?);
-                json_response(&json!({ "providers": held }))
+                // the own keys it kept before the move go to the Vault first;
+                // those still owed are its owner's set ones too (the router
+                // reads their Vault's after this)
+                self.hand_over_logged().await;
+                json_response(&json!({ "providers": self.owed_own()? }))
             }
             "computer/joined" => {
                 let b: JoinedAsk = body_json(&mut req).await?;
@@ -3314,25 +3311,24 @@ impl ComputerCell {
         // asked for: one its owner took away is refused from their next
         // request on (its time logged)
         let catalogued = b.placeholders.iter().any(|p| self.cfg.providers.named(&p.provider, p.connection).is_some());
-        // its owner's own keys asked for are their Vault's (M16), each asked
+        // its owner's own keys asked for are their Vault's (M16), asked
         // beside its fragment's grants, so the swap waits on no hop more;
-        // one this computer kept before the move goes to the Vault first
+        // one this computer kept before the move goes to the Vault first (a
+        // hand-over that fails is logged: the keys their Vault holds still go)
         let mut own: Vec<&str> = b.placeholders.iter().filter_map(|p| self.cfg.providers.named(&p.provider, p.connection)).filter(|p| p.kind == Kind::Own).map(|p| p.name.as_str()).collect();
         own.sort_unstable();
         own.dedup();
-        if !own.is_empty() {
-            self.hand_over_own().await?;
-        }
         let asked_at = js::now_ms();
         let grants = async {
             let grants = if catalogued { self.grants_of(agent, &identity, None).await? } else { Grants::none() };
             Ok::<_, CellError>((grants, catalogued.then(|| js::now_ms() - asked_at)))
         };
         let keys = async {
-            match own.is_empty() {
-                true => Ok(vec![]),
-                false => crate::vault::own_keys(&self.env, &owner, &own).await,
+            if own.is_empty() {
+                return Ok(vec![]);
             }
+            self.hand_over_logged().await;
+            crate::vault::own_keys(&self.env, &owner, &own).await
         };
         let ((grants, grants_ms), keys) = futures_util::future::try_join(grants, keys).await?;
         let mut secrets = vec![];

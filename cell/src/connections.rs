@@ -212,20 +212,21 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             // not made yet has nothing to tell
             let told = json!({ "connections": states, "accounts": held_of(cfg, &listed) });
             /// `computer/own-keys`' answer: the own keys it kept before the
-            /// move (M16), each handed to their Vault as it answers or still owed.
+            /// move (M16) and could not hand to their Vault, still owed.
             #[derive(serde::Deserialize)]
             struct OwnKeys {
                 providers: Vec<String>,
             }
-            // their own keys are their Vault's, read beside it: a key the
-            // computer hands over meanwhile is in its answer
-            let (kept, names) = futures_util::future::join(crate::routed::ask_object::<OwnKeys>(env, "COMPUTER", &computer, "computer/own-keys", &told), crate::vault::names(env, who, &[])).await;
-            let mut own: Vec<String> = match kept {
+            // their own keys are their Vault's, read once the computer has
+            // handed over any it kept, so one handed meanwhile by another
+            // touch is read too (Codex, #1345); with the hand-over gone, the
+            // two may be asked at once
+            let mut own: Vec<String> = match crate::routed::ask_object::<OwnKeys>(env, "COMPUTER", &computer, "computer/own-keys", &told).await {
                 Ok(keys) => keys.providers,
                 Err(e) if e.code == ErrorCode::NotFound => vec![],
                 Err(e) => return Err(e),
             };
-            own.extend(names?.1);
+            own.extend(crate::vault::names(env, who, &[]).await?.1);
             let providers = cfg
                 .providers
                 .providers()
@@ -372,7 +373,11 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
         (Method::Put | Method::Delete, [provider, "key"]) => {
             // one offered here; the Vault checks it is an own key's, and the key
             provider_of(provider)?;
-            let put: Option<crate::vault::OwnPut> = if method == Method::Put { Some(crate::json_body(body)?) } else { None };
+            // a refusal never quotes the body: it may be the key itself, sent bare
+            let put = match method == Method::Put {
+                true => Some(crate::vault::OwnPut { key: own_signin::key_put(body).map_err(CellError::invalid)? }),
+                false => None,
+            };
             let answer = crate::vault::own_put(env, who, provider, &put).await?;
             own_changed(env, who).await;
             crate::json_response::json_bytes(answer)

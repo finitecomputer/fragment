@@ -50,7 +50,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "another computer's agent's tag is refused here",
     "an own key: its owner gives it, sealed by the computer, and it is the guest's at once",
     "basic auth: the own key in its password's place, its user as it came",
-    "a key that is no printable token is refused; taken away, the guest is given it no more",
+    "a key that is no printable token is refused, and one sent bare (not in {key}) refused without being quoted back; taken away, the guest is given it no more",
     "each operator key's call is charged to the agent's owner's ledger after it, as the agent, at its list price and the margin",
     "this month's uses: each call by agent, a connection's and an own key's counted, never charged, an operator key's at its charge",
     "no one else reads them, and a month is YYYY-MM",
@@ -135,8 +135,10 @@ fn last_seen(s: &Suite, before: usize) -> Value {
     s.upstream.seen().get(before..).and_then(|l| l.last().cloned()).unwrap_or(Value::Null)
 }
 
-/// The own key `swap_checks` sets, behind basic auth.
+/// The own key `swap_checks` sets, behind basic auth, and one it sends bare
+/// (a JSON string, not `{key}`), refused.
 const SWAP_OWN_KEY: &str = "mail-own-e2e-55aa";
+const SWAP_OWN_BARE: &str = "mail-own-e2e-bare-0c9e";
 
 /// The checks; answers how many turns of the agent's they took (each a
 /// reply in the chat).
@@ -424,14 +426,15 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let basic = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("api:{own}")));
     s.ok(SWAP_CHECKS[15], said.starts_with("fetched 200") && seen["host"] == SWAP_OWN_HOST && seen["auth"]["authorization"] == basic, json!({ "said": said, "seen": seen }));
     let bad = api.signed(w.owner, "PUT", &format!("/api/connections/{SWAP_OWN}/key"), Some(&json!({ "key": "two words" })))?;
+    let bare = api.signed(w.owner, "PUT", &format!("/api/connections/{SWAP_OWN}/key"), Some(&json!(SWAP_OWN_BARE)))?;
     let not_own = api.signed(w.owner, "PUT", "/api/connections/perplexity/key", Some(&json!({ "key": "pplx-mine" })))?;
     let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{SWAP_OWN}/key"), None)?;
     let listed = api.signed(w.owner, "GET", "/api/connections", None)?;
     let given = say(s, 116, "credentials")?;
     s.ok(
         SWAP_CHECKS[16],
-        bad.status == 400 && not_own.status == 400 && gone.status == 200 && state_of(&listed, SWAP_OWN) == "not_set" && !given.contains(SWAP_OWN_ENV),
-        json!({ "bad": bad.status, "notOwn": not_own.status, "gone": gone.status, "given": given }),
+        bad.status == 400 && bare.status == 400 && !bare.text.contains(SWAP_OWN_BARE) && not_own.status == 400 && gone.status == 200 && state_of(&listed, SWAP_OWN) == "not_set" && !given.contains(SWAP_OWN_ENV),
+        json!({ "bad": bad.status, "bare": bare.status, "bareQuoted": bare.text.contains(SWAP_OWN_BARE), "notOwn": not_own.status, "gone": gone.status, "given": given }),
     );
 
     // the charges: each operator key's call, at its price; and the month's counts
@@ -1315,10 +1318,10 @@ pub(super) fn own_signin_moved_checks(s: &mut Suite, api: &Api, w: &Swapping, fe
 
     // every own key this lane gave, kept or made
     let log = s.node_log().unwrap_or_default();
-    let mut keys: Vec<String> = [OWN_BEFORE, OWN_ROUTER_BEFORE, OWN_SINCE, SWAP_OWN_KEY].iter().map(|k| k.to_string()).collect();
+    let mut keys: Vec<String> = [OWN_BEFORE, OWN_ROUTER_BEFORE, OWN_SINCE, SWAP_OWN_KEY, SWAP_OWN_BARE].iter().map(|k| k.to_string()).collect();
     keys.extend(s.openrouter.keys());
     let named: Vec<usize> = keys.iter().enumerate().filter(|(_, k)| log.contains(k.as_str())).map(|(i, _)| i).collect();
-    s.ok(OWN_SIGNIN_MOVED_CHECKS[1], !log.is_empty() && keys.len() >= 5 && named.is_empty(), json!({ "logBytes": log.len(), "keys": keys.len(), "named": named }));
+    s.ok(OWN_SIGNIN_MOVED_CHECKS[1], !log.is_empty() && keys.len() >= 6 && named.is_empty(), json!({ "logBytes": log.len(), "keys": keys.len(), "named": named }));
     Ok(turns)
 }
 

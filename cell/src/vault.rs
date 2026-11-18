@@ -551,11 +551,17 @@ impl VaultCell {
 
     /// The own keys a computer kept before the move (M16), each taken where
     /// its person has set or removed none here since (`keep_own`). The
-    /// providers it took, as JSON. Taken again, it takes nothing. A key the
-    /// swap may not send is refused whole, nothing taken.
+    /// providers it took, as JSON. Taken again, it takes nothing. One no
+    /// swap could send (no provider's name, or no printable key: none such
+    /// was ever kept) is not taken, and logged by its provider alone; the
+    /// rest are (Codex, #1345: one never stops the others).
     async fn hand_over(&self, keys: Vec<Handed>) -> CellResult<String> {
-        if keys.len() > rules::SECRETS_MAX || keys.iter().any(|Handed(p, k, _)| !fragment_core::catalog::valid_name(p) || !own_signin::key_ok(k)) {
-            return Err(CellError::invalid(format!("a hand-over is at most {} own keys, each a provider's name and a key the swap may send", rules::SECRETS_MAX)));
+        if keys.len() > rules::SECRETS_MAX {
+            return Err(CellError::invalid(format!("a hand-over is at most {} own keys", rules::SECRETS_MAX)));
+        }
+        let (keys, unsendable): (Vec<Handed>, Vec<Handed>) = keys.into_iter().partition(|Handed(p, k, _)| fragment_core::catalog::valid_name(p) && own_signin::key_ok(k));
+        for Handed(provider, _, _) in &unsendable {
+            console_error!("{{\"vault\":\"own-handover\",\"unsendable\":{:?}}}", provider.chars().take(64).collect::<String>());
         }
         let taken = self.keep_own(keys.into_iter().map(|Handed(p, k, at)| (p, Some(k), at)).collect(), true).await?;
         serde_json::to_string(&taken).map_err(|e| CellError::host(e.to_string()))
@@ -774,8 +780,12 @@ impl VaultCell {
     /// empty, with the row that says it was wiped, in one step. Again, it
     /// changes nothing.
     fn wipe(&self, route: &str) -> CellResult<String> {
-        // a secret, or an own key
-        let held = || -> CellResult<bool> { Ok(!self.rows("SELECT name FROM secrets UNION ALL SELECT provider FROM own_keys WHERE sealed IS NOT NULL LIMIT 1", vec![])?.is_empty()) };
+        // a secret, or an own key: a vault that refuses its schema may be
+        // one from before its own keys' step, with no such table (Codex, #1345)
+        let held = || -> CellResult<bool> {
+            let own = self.rows("SELECT provider FROM own_keys WHERE sealed IS NOT NULL LIMIT 1", vec![]).is_ok_and(|r| !r.is_empty());
+            Ok(own || !self.rows("SELECT name FROM secrets LIMIT 1", vec![])?.is_empty())
+        };
         match route {
             "view" => Ok(format!("{{\"wiped\":{},\"held\":{}}}", self.wiped.get(), held()?)),
             "end" => {

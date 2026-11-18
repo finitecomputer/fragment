@@ -112,7 +112,9 @@ unfinished design, not debt.
   schema step drops `own_keys` and `own_signins`; `hand_over_own`,
   `owed_own`, `computer/signed-in` and the Vault's fallback to it,
   `computer/own-keys`' `providers`, both levers and the Vault's
-  `own-handover` go, and its removals may.
+  `own-handover` go, its removals may, and `GET /api/connections` asks
+  the computer and the Vault at once (it asks the Vault after the
+  computer's hand-over until then).
 
 ## A chat wiped while its seed runs can keep its template's repo
 

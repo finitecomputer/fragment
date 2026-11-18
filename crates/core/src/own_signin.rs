@@ -154,6 +154,15 @@ pub fn given(key: &str) -> Option<String> {
     Some(key.trim()).filter(|k| key_ok(k)).map(str::to_string)
 }
 
+/// The own key a person's `PUT …/key` body gives (`{"key": "…"}`), kept as
+/// `given` keeps one; or why not, said to them in words that never quote
+/// the body: a parser's would quote the key itself, sent bare (Codex, #1345).
+pub fn key_put(body: &[u8]) -> Result<String, String> {
+    let refused = || format!("the body is {{\"key\": \"…\"}}, the key 1 to {OWN_KEY_MAX_BYTES} printable characters, with no space");
+    let put: Value = serde_json::from_slice(body).map_err(|_| refused())?;
+    put.get("key").and_then(Value::as_str).and_then(given).ok_or_else(refused)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +221,19 @@ mod tests {
             assert_eq!(given(bad), None, "{bad:?}");
         }
         assert!(key_ok("a") && !key_ok(" a") && !key_ok("a\u{7f}"));
+    }
+
+    /// Valid: `{"key": "…"}`, trimmed (another field beside it is let be).
+    /// Invalid: anything else, refused in words that never quote the body,
+    /// which may be the key itself sent bare (Codex, #1345).
+    #[test]
+    fn a_put_names_its_key_and_a_refusal_quotes_nothing() {
+        assert_eq!(key_put(br#"{"key": " sk-or-v1-abc "}"#), Ok("sk-or-v1-abc".into()));
+        assert_eq!(key_put(br#"{"key": "sk-or-v1-abc", "note": 1}"#), Ok("sk-or-v1-abc".into()));
+        let secret = "sk-or-v1-bare-7e1d";
+        for bad in [format!("{secret:?}"), format!("[{secret:?}]"), format!(r#"{{"key": 5, "also": {secret:?}}}"#), format!(r#"{{"value": {secret:?}}}"#), format!(r#"{{"key": "two {secret}"}}"#), secret.to_string(), "null".into(), String::new()] {
+            let refused = key_put(bad.as_bytes()).expect_err(&bad);
+            assert!(!refused.contains(secret) && !refused.contains("sk-or"), "{refused}");
+        }
     }
 }
