@@ -145,9 +145,9 @@ weekday at 8") is a schedule on itself: a scheduled record on its own
 agent fragment's `tasks` (Scheduled records, below), which the platform
 keeps and fires through every restart and sleep of its computer. Never
 a background loop, `sleep`, crontab or `hermes cron` on the computer:
-they die with it. The computer sleeps when nothing holds it awake (a
-turn, an open tab), and a sleep or a restart ends every process an agent
-started: a server, a background command, a download. Nothing starts
+they die with it. The computer sleeps a while after nothing holds it
+awake (a turn, a port tab open on it), and a sleep or a restart ends
+every process an agent started: a server, a background command, a download. Nothing starts
 those again. What must outlive a turn is a routine, or an app (its crons
 and triggers run on the platform). The agent is an editor of its own fragment, so it adds
 one as any editor does; on a computer `fragment schedule` acts on the
