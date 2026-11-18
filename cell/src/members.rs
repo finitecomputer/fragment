@@ -143,6 +143,17 @@ pub(crate) struct Actor {
 }
 
 impl Actor {
+    /// The person whose day an invite's mail counts in: the owner an agent
+    /// shared for, else who shared.
+    pub(crate) fn sharer(&self) -> String {
+        self.for_owner.clone().unwrap_or_else(|| self.by.clone())
+    }
+
+    /// The invite's maker, the owner, as whoever made a change its yes makes.
+    pub(crate) fn invited_by(by: String) -> Actor {
+        Actor { role: Some(Role::Owner), by, for_owner: None }
+    }
+
     /// The words a change's summary ends with: an agent's names it and the
     /// owner it acted for; a person's, nothing (the owner made it).
     pub(crate) fn said(&self) -> String {
@@ -170,6 +181,7 @@ fn invite_json(r: &Value) -> Invite {
         role: r["role"].as_str().and_then(Role::parse).unwrap_or(Role::Viewer),
         expires_at: r["expires_at"].as_i64().unwrap_or(0),
         created_by: npub::display(r["created_by"].as_str().unwrap_or("")),
+        app: r["app"].as_str().map(str::to_string),
     }
 }
 
@@ -595,7 +607,8 @@ impl FragmentCell {
         }
         // a fragment's name: an app of its owner's (app_members.rs)
         if fragment_proto::valid_fragment_name(who) {
-            return json_response(&self.add_app(&actor, who, body.role).await?);
+            let owner = self.must(MetaKey::Owner)?;
+            return json_response(&self.add_app(&actor, who, body.role, &owner).await?);
         }
         // what it waited on, for its client (`Server-Timing`)
         let mut laps = crate::js::Laps::start();
@@ -785,6 +798,8 @@ impl FragmentCell {
         let mut agents_left = false;
         // bounded: one person and their agents
         for who in &gone {
+            // an app of theirs here goes out with them (decision 72)
+            self.apps_go_with(&actor, who)?;
             let removed = self.rows("DELETE FROM members WHERE principal = ? RETURNING owner, kind", vec![who.as_str().into()])?;
             agents_left |= removed.first().is_some_and(|r| r["kind"] == "agent");
             self.listed_left(who)?;
@@ -869,6 +884,10 @@ impl FragmentCell {
             return Err(CellError::invalid("an invite grants viewer or editor"));
         }
         self.connector_role(body.role)?;
+        // an app (decision 72): its owner's yes, or at once if it is ours
+        if let Some(app) = &body.app {
+            return json_response(&self.invite_app(&actor, app, body.role).await?);
+        }
         let email = body.email.trim().to_ascii_lowercase();
         if !fragment_core::mail::valid_address(&email) {
             return Err(CellError::invalid(format!("{email:?} is not an email")));
@@ -936,7 +955,7 @@ impl FragmentCell {
                     actor.noted(json!({ "role": body.role, "expiresAt": expires_at })),
                 );
                 self.flush_index().await;
-                let invite = Invite { email, role: body.role, expires_at, created_by: actor.by.clone() };
+                let invite = Invite { email, role: body.role, expires_at, created_by: actor.by.clone(), app: None };
                 json_response(&Shared::Invited(invite))
             }
             Err(e) => {
@@ -955,7 +974,7 @@ impl FragmentCell {
     pub(crate) async fn invites(&self, caller: &Caller) -> CellResult<Response> {
         self.require_owner(caller)?;
         self.drop_spent_invites().await?;
-        let rows = self.rows("SELECT email, role, expires_at, created_by FROM invites ORDER BY created_at, email", vec![])?;
+        let rows = self.rows("SELECT email, role, expires_at, created_by, app FROM invites ORDER BY created_at, email", vec![])?;
         json_response(&InviteList { invites: rows.iter().map(invite_json).collect() })
     }
 
@@ -1023,12 +1042,16 @@ impl FragmentCell {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
         self.drop_spent_invites().await?;
-        let rows = self.rows("SELECT role, created_by FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
+        let rows = self.rows("SELECT role, created_by, app FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
         let Some(row) = rows.first() else {
             return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
         };
         let role = row["role"].as_str().and_then(Role::parse).ok_or_else(|| CellError::host("invites.role"))?;
         let by = row["created_by"].as_str().unwrap_or_default().to_string();
+        // an app's: its owner's yes asks it in (app_members.rs)
+        if let Some(app) = row["app"].as_str() {
+            return self.claim_app_invite(claim, app, role, by).await;
+        }
         let who = claim.identity.as_str();
         let current = self.member_role(who)?;
         let kept = current.is_some_and(|c| c >= role);

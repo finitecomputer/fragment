@@ -1781,8 +1781,15 @@ pub struct SetRole {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateInvite {
+    /// Whom it waits on; none for an app's (`app`), which waits on its
+    /// owner's.
+    #[serde(default)]
     pub email: String,
     pub role: Role,
+    /// An app, by its fragment name (decision 72): one of the owner's own
+    /// joins at once; another member's waits on that member's yes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 /// An invite waiting on an email: whoever signs in as it, and accepts it,
@@ -1794,6 +1801,9 @@ pub struct Invite {
     pub role: Role,
     pub expires_at: i64,
     pub created_by: String,
+    /// An app's invite, waiting on its owner's yes (decision 72).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 /// The answer to `POST /api/f/<name>/invites`: the invite, mailed, waiting

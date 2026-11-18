@@ -800,10 +800,16 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             1 => "a day left".to_string(),
             _ => "less than a day left".to_string(),
         };
+        // an app's waits on its owner's yes (decision 72)
+        let (shown, asked) = match &i.app {
+            Some(app) => (format!("{} (app)", label(app)), format!("Asked of {} · ", i.email)),
+            None => (i.email.clone(), String::new()),
+        };
         out += &format!(
-            "<li><span class=\"av\" aria-hidden=\"true\">{mail}</span><span class=\"who\">{e}<small>Invited as {r} · {until}</small></span>{revoke}</li>",
+            "<li><span class=\"av\" aria-hidden=\"true\">{mail}</span><span class=\"who\">{e}<small>{asked}Invited as {r} · {until}</small></span>{revoke}</li>",
             mail = svg("i", MAIL),
-            e = esc(&i.email),
+            e = esc(&shown),
+            asked = esc(&asked),
             r = role_phrase(i.role),
             revoke = action_form(
                 sheet,
@@ -1008,7 +1014,7 @@ async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, se
         return drawn(&before, Some(Flash::Already { who: email, role: m.role }), 200);
     }
     let again = before.invites.iter().any(|i| i.email == email);
-    let flash = match ask::<Shared>(env, url, name, who, Method::Post, "/api/invites", body(&CreateInvite { email: email.to_string(), role })).await? {
+    let flash = match ask::<Shared>(env, url, name, who, Method::Post, "/api/invites", body(&CreateInvite { email: email.to_string(), role, app: None })).await? {
         Shared::Invited(i) => Flash::Invited { who: email, role: i.role, again },
         Shared::Member(_) => return Err(CellError::host("an invite made a member at once: invites wait for a yes (decision 63)")),
     };

@@ -240,5 +240,43 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
         joined.status == 200 && gone.status == 200 && open.status == 200,
         format!("{joined} {gone} {open}"),
     );
+
+    // ---- a member's app, on two yeses: the fragment's owner invites it by
+    // name, and its owner, a member there, accepts
+    let (team, _) = made(s, &owner, "apps-team")?;
+    let bob_id = npub::encode(bob.pubkey_hex());
+    let row_in = |target: &str, app: &str| -> Result<Option<Value>> { Ok(members(target)?.into_iter().find(|m| m["app"]["name"] == app)) };
+    let invite_app = |app: &str| api.signed(&owner, "POST", &format!("/api/f/{team}/invites"), Some(&json!({ "app": app, "role": "viewer" })));
+    let outside = invite_app(&bobs)?;
+    s.ok(
+        "another person's app is invited only while they are a member here (403, naming the fix)",
+        outside.status == 403 && outside.message() == format!("{}'s owner isn't in {}. Add them here first.", label(&bobs), label(&team)),
+        &outside,
+    );
+    api.share(&team, &bob_id, "viewer")?;
+    let invited = invite_app(&bobs)?;
+    s.ok(
+        "a member's app is invited: it waits on its owner's yes, by their email, and is no member yet",
+        invited.status == 200 && invited.body["invited"]["app"] == bobs.as_str() && invited.body["invited"]["email"] == Api::email_of(&bob).as_str() && row_in(&team, &bobs)?.is_none(),
+        &invited,
+    );
+    let yes = api.signed(&bob, "POST", &format!("/api/invites/{team}/accept"), Some(&json!({})))?;
+    let row = row_in(&team, &bobs)?;
+    s.ok(
+        "its owner's yes asks the app in: a member, theirs, at the invite's role",
+        yes.status == 200 && row.as_ref().is_some_and(|m| m["owner"] == bob_id.as_str() && m["role"] == "viewer"),
+        format!("{yes} {row:?}"),
+    );
+    let (mine, _) = made(s, &owner, "apps-mine")?;
+    visibility(&owner, &mine, "members")?;
+    let own = invite_app(&mine)?;
+    s.ok("the owner's own app, invited, joins at once", own.status == 200 && own.body["member"]["app"]["name"] == mine.as_str(), &own);
+    let out = api.signed(&owner, "DELETE", &format!("/api/f/{team}/members/{bob_id}"), None)?;
+    let open = visibility(&bob, &bobs, "link")?;
+    s.ok(
+        "removing its owner takes their app out with them, and lets it go; the owner's own stays",
+        out.status == 200 && row_in(&team, &bobs)?.is_none() && open.status == 200 && row_in(&team, &mine)?.is_some(),
+        format!("{out} {open}"),
+    );
     Ok(())
 }

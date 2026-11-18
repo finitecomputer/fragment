@@ -50,7 +50,7 @@ use serde_json::json;
 use worker::{console_error, SqlStorageValue};
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::calls::{AppAnswer, AppAsked, AppAudience, AppAudienceOf, AppGrows, AppTold};
+use crate::fragment::calls::{AppAnswer, AppAsked, AppAudience, AppAudienceOf, AppGrows, AppOwnerOf, AppTold};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 use crate::members::Actor;
@@ -150,7 +150,7 @@ impl FragmentCell {
 
     /// `PUT members/<name>`, `name` an app of its owner's, at `role`: the
     /// app asked, then held to the rule in this fragment's own turn.
-    pub(crate) async fn add_app(&self, actor: &Actor, name: &str, role: Role) -> CellResult<Member> {
+    pub(crate) async fn add_app(&self, actor: &Actor, name: &str, role: Role, app_owner: &str) -> CellResult<Member> {
         let me = self.name()?;
         let title = self.app_title()?;
         if name == me {
@@ -167,12 +167,12 @@ impl FragmentCell {
             "INSERT INTO app_asks (name, version) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET version = excluded.version",
             vec![name.into(), SqlStorageValue::Integer(version)],
         )?;
-        let asked = AppAsked { target: me, title: title.clone(), incarnation, version, owner: owner.clone(), role };
+        let asked = AppAsked { target: me, title: title.clone(), incarnation, version, owner: app_owner.to_string(), role };
         let taken = match crate::fragment::call(&self.env, name, &asked).await {
             Ok(answer) => {
                 // each person by their email, as the owner sees them, should a line name one
                 let names = self.emails(answer.audience.iter().map(|(p, _)| p.clone()).collect()).await;
-                self.app_answered(actor, name, role, (incarnation, version, &owner, &title), &answer, &names)
+                self.app_answered(actor, name, role, (incarnation, version, &owner, app_owner, &title), &answer, &names)
             }
             Err(e) => Err(e),
         };
@@ -204,7 +204,7 @@ impl FragmentCell {
     /// why not: only while the ask is the newest, the life that asked and
     /// its owner's; held to the rule; then its row, the answer's life the
     /// one row of its name. Answers the row as written.
-    fn app_answered(&self, actor: &Actor, name: &str, role: Role, (incarnation, version, owner, title): (i64, i64, &str, &str), answer: &AppAnswer, names: &BTreeMap<String, String>) -> CellResult<Member> {
+    fn app_answered(&self, actor: &Actor, name: &str, role: Role, (incarnation, version, owner, app_owner, title): (i64, i64, &str, &str, &str), answer: &AppAnswer, names: &BTreeMap<String, String>) -> CellResult<Member> {
         let newest = self.rows("SELECT 1 AS x FROM app_asks WHERE name = ? AND version = ?", vec![name.into(), SqlStorageValue::Integer(version)])?;
         // an answer from a life whose end was heard meanwhile is no yes
         let ended = self.rows("SELECT 1 AS x FROM app_ended WHERE name = ? AND incarnation >= ?", vec![name.into(), SqlStorageValue::Integer(answer.incarnation)])?;
@@ -245,7 +245,7 @@ impl FragmentCell {
         )?;
         self.exec(
             "INSERT INTO member_apps (principal, name, owner, incarnation) VALUES (?, ?, ?, ?) ON CONFLICT (principal) DO NOTHING",
-            vec![answer.npub.as_str().into(), name.into(), owner.into(), SqlStorageValue::Integer(answer.incarnation)],
+            vec![answer.npub.as_str().into(), name.into(), app_owner.into(), SqlStorageValue::Integer(answer.incarnation)],
         )?;
         // bounded as its audience is
         for (person, power) in &list {
@@ -256,13 +256,95 @@ impl FragmentCell {
         }
         self.app_change(name, Some(role))?;
         self.sharing_changed()?;
-        let data = json!({ "principal": answer.npub, "role": role, "kind": "app", "app": name, "owner": owner });
+        let data = json!({ "principal": answer.npub, "role": role, "kind": "app", "app": name, "owner": app_owner });
         self.event("member.set", &format!("the app {name} is now {}{}", role.as_str(), actor.said()), actor.noted(data));
         if current.is_some_and(|was| was != role) {
             self.reopen_sockets(&format!("p:{}", answer.npub), "your role changed");
         }
         let row = self.member_list()?.members.into_iter().find(|m| m.principal == answer.npub);
         row.ok_or_else(|| CellError::host("an app member just written is not there"))
+    }
+
+    /// `POST invites {app}`: the app `name` asked whose it is; its owner's
+    /// (this fragment's owner's) joins at once (`add_app`), and another
+    /// member's waits on that member's yes, as an invite to their email,
+    /// naming the app, with the notice and mail any invite has.
+    pub(crate) async fn invite_app(&self, actor: &Actor, name: &str, role: Role) -> CellResult<fragment_proto::Shared> {
+        let me = self.name()?;
+        if !fragment_proto::valid_fragment_name(name) || name == me {
+            return Err(CellError::invalid("an app is invited by its fragment's name, and is not this one"));
+        }
+        let owner = self.must(MetaKey::Owner)?;
+        let theirs = crate::fragment::call(&self.env, name, &AppOwnerOf {}).await?.owner;
+        if theirs == owner {
+            return Ok(fragment_proto::Shared::Member(self.add_app(actor, name, role, &owner).await?));
+        }
+        let (title, shown) = (self.app_title()?, label(name));
+        if self.member_role(&theirs)?.is_none() {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{shown}'s owner isn't in {title}. Add them here first.")));
+        }
+        let Some(email) = self.emails(vec![theirs.clone()]).await.remove(&theirs) else {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{shown}'s owner has no email to ask.")));
+        };
+        self.drop_spent_invites().await?;
+        if self.count_of("SELECT COUNT(*) AS n FROM invites WHERE email != ?", vec![email.as_str().into()])? >= fragment_proto::limits::INVITES_MAX as u64 {
+            return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", fragment_proto::limits::INVITES_MAX)));
+        }
+        let now = js::now_ms();
+        let expires_at = now + fragment_proto::limits::INVITE_TTL_S * 1000;
+        // one app's invite to a member at a time: a newer one takes its place
+        self.exec(
+            "INSERT INTO invites (email, role, expires_at, created_by, created_at, app) VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (email) DO UPDATE SET role = excluded.role, expires_at = excluded.expires_at, created_by = excluded.created_by,
+               created_at = excluded.created_at, app = excluded.app",
+            vec![email.as_str().into(), role.as_str().into(), SqlStorageValue::Integer(expires_at), actor.by.as_str().into(), SqlStorageValue::Integer(now), name.into()],
+        )?;
+        let asked = crate::registry::calls::InviteEmail {
+            email: email.clone(),
+            fragment: me,
+            sharer: actor.sharer(),
+            role,
+            title: format!("{title}, for your app {shown}"),
+            expires_at,
+        };
+        if let Err(e) = crate::ask_registry(&self.env, &asked).await {
+            self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
+            return Err(e);
+        }
+        self.sharing_changed()?;
+        self.event("invite.created", &format!("the app {name} is invited, as {}{}", role.as_str(), actor.said()), actor.noted(json!({ "role": role, "app": name, "expiresAt": expires_at })));
+        self.flush_index().await;
+        Ok(fragment_proto::Shared::Invited(fragment_proto::Invite { email, role, expires_at, created_by: actor.by.clone(), app: Some(name.to_string()) }))
+    }
+
+    /// An app's invite accepted by `claim`'s person (the registry's yes):
+    /// the app asked in, for its owner, them; it holds then, or the invite
+    /// waits on, as any refusal of the app's leaves it.
+    pub(crate) async fn claim_app_invite(&self, claim: &crate::fragment::calls::InviteAnswer, app: &str, role: Role, by: String) -> CellResult<Role> {
+        let member = self.add_app(&Actor::invited_by(by), app, role, &claim.identity).await?;
+        self.exec("DELETE FROM invites WHERE email = ? AND app = ?", vec![claim.email.as_str().into(), app.into()])?;
+        self.sharing_changed()?;
+        self.flush_index().await;
+        Ok(member.role)
+    }
+
+    /// The app members `person` owns, out with them (decision 72: a
+    /// member's app goes out with its person).
+    pub(crate) fn apps_go_with(&self, actor: &Actor, person: &str) -> CellResult<()> {
+        let theirs = self.rows("SELECT principal, name FROM member_apps WHERE owner = ?", vec![person.into()])?;
+        // bounded: their app members, members here
+        for app in &theirs {
+            if let (Some(principal), Some(name)) = (app["principal"].as_str(), app["name"].as_str()) {
+                self.remove_app(actor, principal, name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whose this app is (`AppOwnerOf`), for an invite naming it.
+    pub(crate) fn app_owner_of(&self) -> CellResult<crate::fragment::calls::AppOwner> {
+        self.created()?;
+        Ok(crate::fragment::calls::AppOwner { owner: self.must(MetaKey::Owner)? })
     }
 
     /// The app member `principal`, by its name, if it is one.

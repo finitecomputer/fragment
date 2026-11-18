@@ -172,6 +172,20 @@ impl Call for AppGrows {
     type Answer = ();
 }
 
+/// Whose this fragment is, for an invite naming it as an app (decision 72).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AppOwnerOf {}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AppOwner {
+    pub owner: String,
+}
+
+impl Call for AppOwnerOf {
+    const PATH: &'static str = "/call/app/owner";
+    type Answer = AppOwner;
+}
+
 /// The app's audience as a fragment it is in holds it: its people, an
 /// agent as its person, with what each does to it, and each growth it
 /// asked and has not written yet; and its own key (the life that answers).

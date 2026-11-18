@@ -2676,7 +2676,7 @@ fn run(cli: Cli) -> Result<()> {
                             }
                             _ => false,
                         };
-                        let body = fragment_proto::CreateInvite { email: email.clone(), role };
+                        let body = fragment_proto::CreateInvite { email: email.clone(), role, app: None };
                         match c.call_as::<Shared>(c.post_json(&format!("/api/f/{name}/invites"), &body)?)? {
                             Shared::Member(m) => m,
                             Shared::Invited(i) => {
@@ -2691,7 +2691,19 @@ fn run(cli: Cli) -> Result<()> {
                             }
                         }
                     }
-                    auth::Member::Npub(who) | auth::Member::App(who) => c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?,
+                    auth::Member::Npub(who) => c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?,
+                    // an app: yours joins at once; another member's waits on their yes
+                    auth::Member::App(app) => {
+                        let body = fragment_proto::CreateInvite { email: String::new(), role, app: Some(app.clone()) };
+                        match c.call_as::<Shared>(c.post_json(&format!("/api/f/{name}/invites"), &body)?)? {
+                            Shared::Member(m) => m,
+                            Shared::Invited(i) => {
+                                json_exit(j, &Shared::Invited(i.clone()));
+                                println!("invited the app {app} as {} on {name}: it joins once its owner, {}, accepts", i.role.as_str(), i.email);
+                                return Ok(());
+                            }
+                        }
+                    }
                 };
                 json_exit(j, &v);
                 match &v.app {
