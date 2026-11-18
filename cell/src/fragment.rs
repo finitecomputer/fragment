@@ -1654,6 +1654,10 @@ impl FragmentCell {
         if let Err(e) = self.drop_spent_invites().await {
             self.event("invites.drop-failed", &e.message, json!({ "code": e.code }));
         }
+        // an app's growth notes a request left as it ended go (app_members.rs)
+        if let Err(e) = self.growth_spent().await {
+            self.event("app.growth-failed", &e.message, json!({ "code": e.code }));
+        }
         // a listed send that waited for its gap's end queues its rows for this flush
         if let Err(e) = self.listed_send_due() {
             self.event("listed.send-failed", &e.message, json!({ "code": e.code }));
@@ -1797,7 +1801,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.search_forget_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
+        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.search_forget_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, self.growth_due_at()?, ended, also];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;

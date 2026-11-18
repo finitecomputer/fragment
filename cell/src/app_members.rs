@@ -110,6 +110,8 @@ impl FragmentCell {
             vec![person.into(), power.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
         let id = noted.first().and_then(|r| r["id"].as_i64()).ok_or_else(|| CellError::host("a growth noted has no id"))?;
+        // the alarm covers the note, should this request end unanswered
+        self.schedule().await?;
         let asked = AppGrows { app: self.must(MetaKey::Npub)?, name: self.name()?, title: self.app_title()?, person: person.to_string(), role };
         // bounded: the fragments an app is in hold it as a member
         let answers = join_all(targets.iter().map(|t| crate::fragment::call(&self.env, t, &asked))).await;
@@ -117,6 +119,24 @@ impl FragmentCell {
         let Some(refused) = refused else { return Ok(Some(id)) };
         self.given_up(Some(id)).await?;
         Err(CellError::new(refused.code, refused.message.clone()))
+    }
+
+    /// When the oldest growth note runs out, if one is noted (for the alarm).
+    pub(crate) fn growth_due_at(&self) -> CellResult<Option<i64>> {
+        let rows = self.rows("SELECT MIN(at) AS at FROM app_growth", vec![])?;
+        Ok(rows.first().and_then(|r| r["at"].as_i64()).map(|at| at + GROWTH_NOTED_MS))
+    }
+
+    /// The alarm's part: notes a request left as it ended (a restart) go,
+    /// and every fragment this app is in looks again, so a yes they kept
+    /// for it comes off.
+    pub(crate) async fn growth_spent(&self) -> CellResult<()> {
+        let gone = self.rows("DELETE FROM app_growth WHERE at < ? RETURNING id", vec![SqlStorageValue::Integer(js::now_ms() - GROWTH_NOTED_MS)])?;
+        if !gone.is_empty() {
+            self.apps_look()?;
+            self.flush_index().await;
+        }
+        Ok(())
     }
 
     /// A growth asked and written: its note goes.
@@ -452,9 +472,10 @@ impl FragmentCell {
     pub(crate) fn app_audience_of(&self) -> CellResult<AppAudience> {
         self.created()?;
         let mut audience = app_member::audience(&self.must(MetaKey::Owner)?, &self.member_list()?.members);
-        // a note a request left when it ended unanswered (a restart) goes
-        self.exec("DELETE FROM app_growth WHERE at < ?", vec![SqlStorageValue::Integer(js::now_ms() - GROWTH_NOTED_MS)])?;
-        for g in self.rows("SELECT person, power FROM app_growth", vec![])? {
+        // a note a request left when it ended unanswered (a restart) goes,
+        // and the alarm then asks every fragment to look again (`growth_spent`)
+        let fresh = js::now_ms() - GROWTH_NOTED_MS;
+        for g in self.rows("SELECT person, power FROM app_growth WHERE at >= ?", vec![SqlStorageValue::Integer(fresh)])? {
             let (Some(person), Some(power)) = (g["person"].as_str(), g["power"].as_str().and_then(Role::parse)) else { continue };
             let held = audience.entry(person.to_string()).or_insert(power);
             *held = (*held).max(power);
