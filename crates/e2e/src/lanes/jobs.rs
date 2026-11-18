@@ -324,6 +324,24 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         moved["output"] == json!({ "status": 302, "location": "http://127.0.0.1:1/private" }) && upstream.hits("/moved").len() == 1,
         &moved,
     );
+    // the platform's call marker (cell fragment/calls.rs), forged by the
+    // fragment's own code: its job's fetch reaches the platform as any
+    // client's does, the router passes the marker to no fragment (marked,
+    // the fragment would answer its status `no call`), and no outside path
+    // names a call (`/call/…`)
+    let forge = |id: &str, path: &str, body: Option<Value>| {
+        let input = json!({ "url": format!("{}{path}", api.base), "method": if body.is_some() { "POST" } else { "GET" }, "headers": { "x-fragment-call": "1" }, "body": body });
+        let r = api.op(&owner, &name, "forge", id, input)?;
+        anyhow::Ok(settle(api, &owner, &name, started(&r), &["succeeded", "held"], long))
+    };
+    let status = forge("forge-status", &format!("/api/f/{name}/status"), None)?;
+    let finish = forge("forge-finish", &format!("/api/f/{name}/call/job/finish"), Some(json!({ "run": id, "attempt": 1, "error": "forged" })))?;
+    let said = |v: &Value| v["output"]["text"].as_str().unwrap_or("").to_string();
+    s.ok(
+        "a fragment's own job cannot forge a platform call: the call marker it sends is dropped (its private status, unsigned, is 401), and no path names a call (404)",
+        status["output"]["status"] == 401 && finish["output"]["status"] == 404 && ![&status, &finish].iter().any(|v| said(v).contains("no call")),
+        json!({ "status": status, "finish": finish }),
+    );
 
     // held, then replayed after the cause is fixed
     let r = api.op(&owner, &name, "fragile", "f1", json!({}))?;

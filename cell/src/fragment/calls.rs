@@ -6,6 +6,11 @@
 //! (`FragmentCell::called`), so the two ends agree at compile time, as a
 //! person's list's calls (principal/calls.rs) and the Registry's do.
 //!
+//! entry.mjs makes some of them too: a run's Workflow (`Job`) and the app
+//! facet's capabilities (`Files`, `Search`), naming the same paths through
+//! `routed::InternalRoute`; JavaScript cannot share these types, so the
+//! e2e's jobs, files and search sections hold the two ends together.
+//!
 //! Every call's path is `/call/…`, and it carries `HEADER` (set by
 //! `routed::internal_request`), which the router never passes (nor an
 //! inbox: `fragment_core::manifest::inbox_header_ok`): a request without it
@@ -13,6 +18,7 @@
 
 use fragment_core::ledger::Metered;
 use fragment_core::wipe::LifeLeft;
+use fragment_proto::search;
 use fragment_proto::{FragmentKind, IdentityKind, Role, Visibility};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -287,3 +293,137 @@ impl Call for KeysLever {
     const PATH: &'static str = "/call/test/keys";
     type Answer = Value;
 }
+
+/// A run's Workflow (entry.mjs `Job`; jobs.rs) drives it with three calls,
+/// each naming the fragment's life it is from (`incarnation`) and the run
+/// and attempt it drives: one from an earlier life, or for a run or
+/// attempt no longer current, does nothing and is told `{stop: true}`.
+///
+/// An advance: the job's body re-run in the app facet over the answers of
+/// its first `count` steps, up to its next step.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct JobAdvance {
+    pub incarnation: String,
+    pub run: i64,
+    pub attempt: u32,
+    /// Steps taken so far: the cell kept each one's answer.
+    pub count: u32,
+    /// The last step, when it ran out of retries: its answer is the error
+    /// only the Workflow saw.
+    #[serde(default)]
+    pub failed: Option<FailedStep>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FailedStep {
+    pub index: u32,
+    pub kind: String,
+    pub error: String,
+}
+
+impl Call for JobAdvance {
+    const PATH: &'static str = "/call/job/advance";
+    /// The next step, or how the run ended.
+    type Answer = Value;
+}
+
+/// A step, performed and its answer kept: its kind and args decode into a
+/// `fragment_core::steps::Step` (a step that does not is the job's failure).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct JobEffect {
+    pub incarnation: String,
+    pub run: i64,
+    pub attempt: u32,
+    pub index: u32,
+    pub kind: String,
+    pub args: Value,
+    /// The Workflow's try of this step, from 1 (its step context's
+    /// `attempt`), when it says: a text step's timing reports it.
+    #[serde(default, rename = "try")]
+    pub tried: Option<u32>,
+}
+
+impl Call for JobEffect {
+    const PATH: &'static str = "/call/job/effect";
+    /// The step's answer, or `{stop: true}`.
+    type Answer = Value;
+}
+
+/// The Workflow gave up: the run is held with its `error`.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct JobFinish {
+    pub incarnation: String,
+    pub run: i64,
+    pub attempt: u32,
+    pub error: String,
+}
+
+impl Call for JobFinish {
+    const PATH: &'static str = "/call/job/finish";
+    type Answer = ();
+}
+
+/// The app facet's `Files` capability (entry.mjs `Files`; files.rs): a
+/// file's bytes at `main`, 404 when there is none.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FilesRead {
+    pub path: String,
+}
+
+impl Call for FilesRead {
+    const PATH: &'static str = "/call/files/read";
+    type Answer = worker::Response;
+}
+
+/// The files at `main` under `prefix`.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FilesList {
+    pub prefix: String,
+}
+
+impl Call for FilesList {
+    const PATH: &'static str = "/call/files/list";
+    type Answer = Vec<Value>;
+}
+
+/// A file at `main`: its size, blob and last commit; none when absent.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FilesStat {
+    pub path: String,
+}
+
+impl Call for FilesStat {
+    const PATH: &'static str = "/call/files/stat";
+    type Answer = Option<Value>;
+}
+
+/// The app facet's `Search` capability (entry.mjs `Search`; searchable.rs):
+/// its own index, written and asked with the API's bodies, and answered as
+/// the API answers them.
+impl Call for search::Upsert {
+    const PATH: &'static str = "/call/search/upsert";
+    type Answer = worker::Response;
+}
+
+impl Call for search::Delete {
+    const PATH: &'static str = "/call/search/delete";
+    type Answer = worker::Response;
+}
+
+impl Call for search::Query {
+    const PATH: &'static str = "/call/search/query";
+    type Answer = worker::Response;
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SearchStatus {}
+
+impl Call for SearchStatus {
+    const PATH: &'static str = "/call/search/status";
+    type Answer = worker::Response;
+}
+
+/// The capabilities' calls: each is one of the app facet's subrequests
+/// (ops.rs `facet_calls_lever`).
+pub(crate) const CAPABILITIES: [&str; 7] =
+    [FilesRead::PATH, FilesList::PATH, FilesStat::PATH, search::Upsert::PATH, search::Delete::PATH, search::Query::PATH, SearchStatus::PATH];
