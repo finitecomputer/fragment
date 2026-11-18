@@ -354,6 +354,22 @@ pub const ASKING: &str = "You are in a Fragment chat, and its people are not tec
 /// length.
 pub const FILES: &str = "Chat attachments are already on your computer. The attachment note names each file, its type and its local path under /tmp/bridge-media. Use that path with your tools to copy or edit the original; copy it into your app or work to keep it across a sleep. To put it on a website, use browser_exec's upload_file(selector, full path) on the page's file input, and check the page shows it. With no file input, type the path into the desktop's file dialog with computer_use.";
 
+/// What every agent is told of a voice memo, after `FILES` on every turn
+/// (Austin, 2026-11-17: his agent, sent web voice memos, pip-installed
+/// faster-whisper, downloaded a model and wrote itself a skill to
+/// transcribe them, though Hermes had transcribed every one through the
+/// route before its turn, `stt` in `profile_config`). Hermes puts the
+/// words above its `[User sent audio: <path>]` note as a bare quote, which
+/// it keeps unlabeled on purpose (a wrapper read as a meta-instruction:
+/// its `transcript_note`), and the bridge's attachment note after them
+/// names the same recording, which `FILES` says to use with tools; so
+/// nothing told the agent the quote was the memo. Its file stays for work
+/// on the recording itself (timings for an edit, the one time it needed
+/// it; keeping or sending it on).
+/// Hermes' own notes when it could not transcribe one, or heard nothing,
+/// keep their wording, which this names.
+pub const VOICE: &str = "A voice memo arrives already transcribed: the quoted words just above the note that the user sent audio are what they said in it. Answer those words, and never transcribe the recording again or install speech-to-text to hear it. Use its file only for work on the recording itself, such as timings, an edit, or keeping or sending it on. If a note says the voice message could not be transcribed or came through empty, ask them in plain words to send it again or type it.";
+
 /// What every agent is told of the files it sends in our chats, after
 /// `FILES` on every turn (Paul, 2026-10-23: asked for a PDF in the chat,
 /// his agent named a path on its computer, then emailed it, and attached
@@ -380,10 +396,11 @@ pub const DELEGATING: &str = "Hand big builds (a new app, a large change, or wid
 
 /// The relay's hint, appended to every agent's system prompt on every turn
 /// in our chats (Hermes' `platform_hints.relay.append`): how it asks
-/// (`ASKING`), then the files it is sent (`FILES`), then how it sends one
-/// (`SENDING`), SimpleX's rule (`SIMPLEX`), and delegation (`DELEGATING`).
+/// (`ASKING`), then the files it is sent (`FILES`) and its voice memos
+/// (`VOICE`), then how it sends one (`SENDING`), SimpleX's rule
+/// (`SIMPLEX`), and delegation (`DELEGATING`).
 pub fn relay_hint() -> String {
-    format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}")
+    format!("{ASKING}\n\n{FILES}\n\n{VOICE}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}")
 }
 
 /// How long Hermes' janitor leaves a browser browser_exec started and no
@@ -441,8 +458,9 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64) -> Strin
     // config (`told_team`).
     y.push_str(&format!("agent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: {card_timeout_s}\n  bot_mode_protocol: false\n"));
     // The agent asks its people about outcomes alone, in plain words
-    // (`ASKING`), and knows the files they attach are on its computer
-    // (`FILES`).
+    // (`ASKING`), knows the files they attach are on its computer
+    // (`FILES`), and that a voice memo's words are already in its message
+    // (`VOICE`).
     y.push_str(&format!("platform_hints:\n  relay:\n    append: {}\n", q(&relay_hint())));
     // A voice memo's transcript is no message of its own: the agent hears it
     // and answers once (one reply a turn, #160). The gateway reads this from
@@ -1689,7 +1707,7 @@ mod tests {
     #[test]
     fn every_agent_is_told_its_chat_files_are_on_its_computer() {
         let m = managed_config(&[], CARD_TIMEOUT_S);
-        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}"));
+        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{VOICE}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}"));
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
         for said in ["already on your computer", "each file, its type and its local path under /tmp/bridge-media", "tools to copy or edit the original", "copy it into your app or work", "across a sleep", "browser_exec's upload_file(selector, full path)", "check the page shows it", "With no file input", "desktop's file dialog with computer_use"] {
             assert!(FILES.contains(said), "{said}: {FILES}");
@@ -1714,7 +1732,7 @@ mod tests {
     #[test]
     fn every_agent_is_told_it_attaches_files_in_its_chat() {
         let m = managed_config(&[], CARD_TIMEOUT_S);
-        assert!(relay_hint().contains(&format!("{FILES}\n\n{SENDING}\n\n")), "after the files it is sent: {}", relay_hint());
+        assert!(relay_hint().contains(&format!("{VOICE}\n\n{SENDING}\n\n")), "after the files it is sent: {}", relay_hint());
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
         for said in ["a file (a PDF, an image", "put MEDIA: and its absolute path on a line of its own", "outside code and quotes", "MEDIA:/data/work/report.pdf", "arrives in this chat as an attachment", "rather than emailing it or naming a path"] {
             assert!(SENDING.contains(said), "{said}: {SENDING}");
@@ -1726,6 +1744,24 @@ mod tests {
         for said in ["`MEDIA:<absolute-path>`", "a line of its own", "outside code and quotes", "attachment they can open and download", "email it only when they ask for email", "never answer with a path"] {
             assert!(section.contains(said), "computer.md, \"Files you send\", says {said}: {section}");
         }
+    }
+
+    /// Goal (Austin, 2026-11-17: sent voice memos Hermes had already
+    /// transcribed, his agent installed faster-whisper and transcribed them
+    /// again): every agent is told, on every turn in our chats, that a voice
+    /// memo's words are the quote above Hermes' audio note, to answer them
+    /// and not transcribe or install anything to hear it, that its file is
+    /// for work on the recording, and what to do when Hermes says it could not
+    /// hear one. Method: the overlay's relay hint after `FILES`, its words.
+    #[test]
+    fn every_agent_is_told_a_voice_memo_arrives_transcribed() {
+        let m = managed_config(&[], CARD_TIMEOUT_S);
+        assert!(relay_hint().contains(&format!("{FILES}\n\n{VOICE}\n\n")), "after the files it is sent: {}", relay_hint());
+        assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
+        for said in ["already transcribed", "quoted words just above the note that the user sent audio", "never transcribe the recording again", "install speech-to-text", "only for work on the recording itself", "timings, an edit, or keeping or sending it on", "could not be transcribed or came through empty", "send it again or type it"] {
+            assert!(VOICE.contains(said), "{said}: {VOICE}");
+        }
+        assert!(!VOICE.contains(['`', '\n', '$']) && VOICE.len() < 500, "one plain paragraph, nothing Hermes would expand: {VOICE}");
     }
 
     /// Goal (Paul, 2026-10-26: asked over SimpleX to send its voice reply
