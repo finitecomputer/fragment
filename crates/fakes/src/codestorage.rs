@@ -1333,6 +1333,15 @@ impl CodeStorage {
         self.with(|st| st.commit_packs)
     }
 
+    /// Every request to `repo` (a name or url), on any route, from every
+    /// caller: what code.storage was asked about it.
+    pub fn repo_requests(&self, repo: &str) -> u32 {
+        self.with(|st| {
+            let Some(url) = st.url_of(repo) else { return 0 };
+            st.requests.iter().filter(|((_, r, _), _)| *r == url).map(|(_, n)| n).sum()
+        })
+    }
+
     /// Requests to `repo` (a name or url) on one route, as `"<method>
     /// <route>"` (`"GET branch"`, `"GET file"`, `"GET files/metadata"`),
     /// from every caller, answered or not. A check counts by difference;

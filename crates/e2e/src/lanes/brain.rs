@@ -151,7 +151,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     });
     s.ok("the person's list says it is a brain, and its title", listed, "");
     let m = api.signed(&keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
-    s.ok("its repo names the template, nothing else (its face is its cell's)", m.body == json!({ "template": "brain" }), &m);
+    s.ok("it has no repo until its first file (the release's code runs it): no manifest of its own (404), and its making named no repo", m.status == 404 && repo.is_empty(), &m);
     let st = api.status(&keys, &name)?;
     let ops = &st.body["code"]["operations"];
     let release = fragment_templates::blessed::release("brain").map(|r| format!("blessed:brain@{r}"));
@@ -321,6 +321,8 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // an asset: its bytes a blob, named by its source note, served
+    // its repo, made by its first sync
+    let repo = api.status(&keys, &name)?.body["repo"].as_str().unwrap_or("").to_string();
     let pointer = s.fake.file_at(&repo, "main", ASSET).unwrap_or_default();
     s.ok(
         "an asset of 1 MiB or more is a blob: a pointer in git",

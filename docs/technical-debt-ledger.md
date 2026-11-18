@@ -106,20 +106,19 @@ unfinished design, not debt.
   row. Then `MetaKey::Picture`, `take_picture`, `picture_untaken`,
   `face::AGENT_PICTURE`, the lever and the pass's step go.
 
-## A chat wiped while its seed runs can keep its template's repo
+## A blessed fragment wiped while its first writer's seed runs can keep its repo
 
-- **Shortcut:** a chat's create answers before its repo is made
-  (`publish::seeds_later`); its seed makes the repo right after. A life
-  that ends while that seed waits on code.storage records no repo for its
-  wipe (none was made when it ended), and the seed, seeing the life gone,
-  stops and keeps what it made, as a delete keeps a repo
-  (`publish.rs` `seed`). A wipe in that second leaves the repo holding
-  the chat's first `fragment.json` (its template alone: its title is its
-  face's), or nothing.
-- **Risk:** an empty chat's repo outlives its owner's wipe at
-  code.storage, when the wipe lands within about a second of that chat's
-  making; nothing of theirs is in it (chats made before the face moved to
-  `meta` held their title there).
+- **Shortcut:** a blessed fragment's repo is made at its first file
+  (`seed::Making::SeedsLater`), by its first writer's seed. A life that
+  ends while that seed waits on code.storage records no repo for its wipe
+  (none was made when it ended), and the seed, seeing the life gone, stops
+  and keeps what it made, as a delete keeps a repo (`publish.rs` `seed`).
+  A wipe in that second leaves the repo holding the fragment's first
+  `fragment.json` (its template alone), or nothing; the writer's own file
+  never lands.
+- **Risk:** an empty repo outlives its owner's wipe at code.storage, when
+  the wipe lands within about a second of the fragment's first file;
+  nothing of theirs is in it.
 - **Delete when:** a wipe deletes its person's repos by their name
   (`codestorage::repo_name`, the owner's digest), not only those its
   fragments' lives recorded.

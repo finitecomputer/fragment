@@ -20,24 +20,6 @@ use crate::js;
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;
 
-/// The blessed templates whose fragment is answered before its repo is
-/// made (`seed::Making::SeedsLater`): the create answers once its claim and
-/// its facts are written, the fragment runs its template from the release
-/// meanwhile (`install_pending`), and its repo and first commit come from
-/// its alarm, armed at once by the create, else at a later pass. Only the
-/// chat for now (Paul, 2026-11-04: what a person waits on): each other
-/// template has readers of its repo of its own (a computer syncing its
-/// agent, a brain's sync), to be measured and tested before it joins.
-const SEEDS_LATER: [&str; 1] = ["chat"];
-
-/// Whether a create of `template` answers before its repo is made
-/// (`SEEDS_LATER`): a blessed template's, whose content the release serves.
-pub(crate) fn seeds_later(template: &str) -> bool {
-    let later = SEEDS_LATER.contains(&template);
-    assert!(!later || blessed::template(template).is_some(), "only a blessed template runs from the release before its repo: {template}");
-    later
-}
-
 /// The name of the repo of `fragment`, made by `owner`: derived here
 /// alone, from both, so a name another identity makes later never finds
 /// it.
@@ -133,6 +115,11 @@ impl FragmentCell {
     /// commit, that is its deploy again (live already at main's tip, it
     /// moves nothing), for only its own deploy's install lands it.
     ///
+    /// Taken by `by` (`seed::Event`): a writer of its repo (`Write`,
+    /// `repo_ready`), or its alarm's pass (`Alarm`), which takes no step of
+    /// a template the release runs: that one's repo is made at its first
+    /// file (`seed::Making::SeedsLater`).
+    ///
     /// One at a time: the create seeds, and the alarm it arms meanwhile
     /// (its index flush) seeds too. On code.storage, a round trip away, the
     /// two met: the second commit, changing nothing, was refused (412), and
@@ -143,8 +130,8 @@ impl FragmentCell {
     /// Landed is installed: the agents that joined meanwhile are told then
     /// (`Stage::joins_wait`), by whichever seed lands it, the create's or a
     /// later one.
-    pub(crate) async fn seed(&self) -> CellResult<()> {
-        for effect in self.seed_locked().await? {
+    pub(crate) async fn seed(&self, by: Event) -> CellResult<()> {
+        for effect in self.seed_locked(&by).await? {
             assert!(effect == Effect::TellJoined, "only its agents' notice follows a seed's lock");
             self.flush_joined().await;
         }
@@ -155,14 +142,14 @@ impl FragmentCell {
     /// stepped, and the rows read back, which must say the step the
     /// machine said as far as rows can (`Stage::durable`; a life that ended
     /// meanwhile goes no further). Answers what is left for after the lock.
-    async fn seed_locked(&self) -> CellResult<Vec<Effect>> {
+    async fn seed_locked(&self, by: &Event) -> CellResult<Vec<Effect>> {
         let _seeding = self.seeding.lock().await;
         let Some(life) = self.seed_rows()?.created_at else { return Ok(vec![]) };
         let mut stage = self.stage_in(life)?;
         if !stage.waits_template() {
             return Ok(vec![]);
         }
-        let (_, mut effects) = seed::step(&stage, &Event::Alarm).map_err(refused)?;
+        let (_, mut effects) = seed::step(&stage, by).map_err(refused)?;
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let mut after = vec![];
         let mut steps = 0;
@@ -208,8 +195,8 @@ impl FragmentCell {
     /// Carries out one seed step in `life` (`seed::Effect`): what happened.
     async fn seed_step(&self, effect: Effect, life: i64, name: &str, owner: &str) -> CellResult<Vec<Event>> {
         match effect {
-            // a template that seeds after the create's answer (`seeds_later`)
-            // makes its repo here, once: a later try finds it by its name
+            // a blessed template's (`seed::Making::SeedsLater`), at its first
+            // writer, makes its repo here, once: a later try finds it by its name
             Effect::EnsureRepo => {
                 let repo = self.cs()?.ensure_repo(&repo_name(self.cfg, name, owner)?).await?;
                 // its life ended while code.storage made the repo: the repo

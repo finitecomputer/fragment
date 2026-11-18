@@ -230,8 +230,8 @@ impl FragmentCell {
     pub(crate) fn end_life_wiped(&self) -> CellResult<Ended> {
         let [created_at, repo] = self.metas([MetaKey::CreatedAt, MetaKey::Repo])?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
-        // a life whose repo was not made yet (its template seeds after the
-        // create's answer, publish.rs `seeds_later`) records none
+        // a life whose repo was not made (a blessed fragment's, made at its
+        // first file: `seed::Making::SeedsLater`) records none
         if let Some(repo) = &repo {
             assert!(!repo.is_empty(), "a made repo has a name");
             self.exec(

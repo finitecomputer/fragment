@@ -29,8 +29,10 @@
 //!   template still to land, at one of its seed's steps (`Step`): made, its
 //!   repo made, its template committed; and, within a seed, deployed and
 //!   installed from live.
-//!   Meanwhile a blessed template whose create answers first runs from the
-//!   release (`release_installed`: a chat's).
+//!   Meanwhile a blessed template runs from the release
+//!   (`release_installed`), whose code it is: its repo is made at its first
+//!   file (`Event::Write`), and a fragment that never has one (a chat) never
+//!   asks code.storage for anything.
 //! - **Landed**: its template is in, or it had none.
 //! - **Ended**: the life a step began in is over (deleted, and maybe made
 //!   again): what that step does next is nothing.
@@ -38,10 +40,12 @@
 //! `step` takes a stage and what happened (`Event`) to the next stage and
 //! what to do (`Effect`). The cell carries the effects out, then reads the
 //! rows again, which must say the stage `step` said, as far as rows can
-//! (`Stage::durable`). Every pending stage keeps the fragment busy, so its
-//! alarm is always due within the poll interval (plane.rs `busy`), and
-//! each pass steps it on from the stage the rows say: what a restart cut
-//! short, the next pass does.
+//! (`Stage::durable`). A template the release does not run (a copied one,
+//! or a blessed one whose release install failed) keeps the fragment busy,
+//! so its alarm is due within the poll interval (plane.rs `busy`), and each
+//! pass steps it on from the stage the rows say: what a restart cut short,
+//! the next pass does. One the release runs is stepped on by its writers
+//! alone, each from where the rows say, so it costs no alarm.
 
 /// How long a create in progress holds its name: past it, a claim whose
 /// create crashed mid-flight lapses, and the name is free again.
@@ -86,8 +90,8 @@ pub enum Stage {
 /// A pending template's seed, by the last step it took.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// Its facts are written; its repo is not made yet (a template that
-    /// seeds after its create's answer, publish.rs `SEEDS_LATER`).
+    /// Its facts are written; its repo is not made yet (a blessed
+    /// template's, made at its first file: `Making::SeedsLater`).
     Made,
     /// Its repo is made, its template not committed yet.
     RepoMade,
@@ -123,9 +127,10 @@ pub enum Making {
     /// A template that lands before its create answers: its repo made
     /// before its facts, its seed in its create.
     SeedsNow,
-    /// A blessed template its create answers before (publish.rs
-    /// `SEEDS_LATER`): its repo is not made yet, it runs from the release,
-    /// and its seed comes from its alarm, due at once.
+    /// A blessed template, whose code is the release's: its create makes
+    /// no repo, it runs from the release, and its seed is its first
+    /// writer's (`Event::Write`): its repo is made at its first file. Its
+    /// alarm, due at once, seeds it only if the release did not install.
     SeedsLater,
 }
 
@@ -161,8 +166,13 @@ pub enum Event {
     Landed,
     /// Its life ended.
     Delete,
-    /// Its alarm's pass, or a writer that needs its template in first.
+    /// Its alarm's pass: the next step of a template the release does not
+    /// run (`Stage::alarm_seeds`).
     Alarm,
+    /// A writer of its repo (a file, a storage token, a deploy, a
+    /// refresh: plane.rs `repo_ready`) needs its template in first: the
+    /// next step, whatever runs it.
+    Write,
     /// A new activation of its object: whatever the last one held in memory
     /// is gone.
     Activation,
@@ -290,11 +300,17 @@ impl Stage {
     /// Its template is still to land: a writer of its repo lands it first
     /// (plane.rs `repo_ready`; its repo alone is not enough, a commit or a
     /// deploy after it may have failed), its pins move by its seed alone
-    /// (`ensure_pins` asks code.storage nothing), a platform deploy
-    /// installs it from the release again (`blessed_current`), and its
-    /// alarm is due within the poll interval (`busy`).
+    /// (`ensure_pins` asks code.storage nothing), and a platform deploy
+    /// installs it from the release again (`blessed_current`).
     pub fn waits_template(&self) -> bool {
         matches!(self, Stage::Pending { .. })
+    }
+
+    /// Its alarm takes its seed's next step, so it is due within the poll
+    /// interval (plane.rs `busy`): a template the release does not run.
+    /// One the release runs waits for its first writer.
+    pub fn alarm_seeds(&self) -> bool {
+        matches!(self, Stage::Pending { release_installed: false, .. })
     }
 
     /// The release's install runs it until its template lands: its site is
@@ -369,9 +385,12 @@ pub fn step(stage: &Stage, event: &Event) -> Result<(Stage, Vec<Effect>), Refuse
         (Stage::Claimed { .. }, Event::Made { making, agent }) => made(*making, *agent),
         (Stage::Free | Stage::Claimed { .. }, Event::Delete) => return Err(Refused::NoLife),
         (_, Event::Delete) => (Stage::Ended, vec![]),
-        // a pass finds it at a step, and takes the next
+        // a writer finds it at a step, and takes the next; a pass does
+        // only while the release does not run it
+        (Stage::Pending { step, .. }, Event::Write) => (stage.clone(), vec![next_step(step)]),
+        (Stage::Pending { .. }, Event::Alarm) if !stage.alarm_seeds() => (stage.clone(), vec![]),
         (Stage::Pending { step, .. }, Event::Alarm) => (stage.clone(), vec![next_step(step)]),
-        (Stage::Free | Stage::Claimed { .. } | Stage::Landed, Event::Alarm) => (stage.clone(), vec![]),
+        (Stage::Free | Stage::Claimed { .. } | Stage::Landed, Event::Alarm | Event::Write) => (stage.clone(), vec![]),
         (Stage::Pending { step, release_installed }, event) => pending(step, *release_installed, event).ok_or_else(out_of_order)?,
         // a step's outcome after it landed (a second seed, its install
         // again) changes nothing
@@ -409,8 +428,9 @@ fn made(making: Making, agent: bool) -> (Stage, Vec<Effect>) {
         // its seed from its commit on, in its create; its agents are told
         // by the seed that lands it, whichever
         Making::SeedsNow => (Stage::Pending { step: Step::RepoMade, release_installed: false }, vec![Effect::FlushIndex, Effect::Commit, Effect::Arm { soon: false }]),
-        // answered once it runs from the release; its seed is its alarm's,
-        // due at once, which a restart keeps
+        // answered once it runs from the release; its seed is its first
+        // writer's, or its alarm's (due at once, which a restart keeps) if
+        // the release's install failed
         Making::SeedsLater => (
             Stage::Pending { step: Step::Made, release_installed: false },
             vec![Effect::InstallFromRelease, Effect::FlushIndex, Effect::Arm { soon: true }],
@@ -451,7 +471,7 @@ fn pending(step: &Step, release_installed: bool, event: &Event) -> Option<(Stage
             Step::Installed { .. } => Some((Stage::Landed, vec![Effect::TellJoined])),
             Step::Made | Step::RepoMade | Step::Committed | Step::Deployed { .. } => None,
         },
-        Event::Claim { .. } | Event::Made { .. } | Event::Delete | Event::Alarm | Event::Activation => None,
+        Event::Claim { .. } | Event::Made { .. } | Event::Delete | Event::Alarm | Event::Write | Event::Activation => None,
     }
 }
 
@@ -622,19 +642,38 @@ mod tests {
         /// persisted steps this activation lives through: past it, it is
         /// cut short, before the next effect, joined notices included.
         fn pass(&mut self, budget: u32) -> Ran {
-            let ran = self.seed(budget);
+            self.seed_by(&Event::Alarm, budget)
+        }
+
+        /// A writer's seed (plane.rs `repo_ready`), then the joined outbox's
+        /// flush, as `pass`.
+        fn write(&mut self, budget: u32) -> Ran {
+            self.seed_by(&Event::Write, budget)
+        }
+
+        /// What seeds a template its making leaves: its writers when the
+        /// release runs it (a blessed one), else its alarm's passes.
+        fn seeds(&mut self, budget: u32) -> Ran {
+            match self.stage().runs_release() {
+                true => self.write(budget),
+                false => self.pass(budget),
+            }
+        }
+
+        fn seed_by(&mut self, by: &Event, budget: u32) -> Ran {
+            let ran = self.seed(by, budget);
             if ran != Ran::Cut {
                 self.flush_joined();
             }
             ran
         }
 
-        fn seed(&mut self, mut budget: u32) -> Ran {
+        fn seed(&mut self, by: &Event, mut budget: u32) -> Ran {
             let mut stage = self.stage();
             if !stage.waits_template() {
                 return Ran::Done;
             }
-            let (_, mut queue) = step(&stage, &Event::Alarm).expect("an alarm is never refused");
+            let (_, mut queue) = step(&stage, by).expect("a pass or a writer is never refused");
             let mut steps = 0;
             while !queue.is_empty() {
                 if budget == 0 {
@@ -681,12 +720,15 @@ mod tests {
         assert_eq!(e, vec![Effect::InstallFromRelease, Effect::FlushIndex, Effect::Arm { soon: true }]);
         let (s, e) = step(&s, &Event::ReleaseInstalled).unwrap();
         assert_eq!((s.clone(), e), (pending(Step::Made, true), vec![]));
-        assert_eq!(step(&s, &Event::Alarm).unwrap().1, vec![Effect::EnsureRepo]);
+        // the release runs it: its alarm takes no step, its first writer does
+        assert_eq!(step(&s, &Event::Alarm).unwrap(), (s.clone(), vec![]));
+        assert_eq!(step(&s, &Event::Write).unwrap().1, vec![Effect::EnsureRepo]);
         let (s, e) = step(&s, &Event::RepoMade).unwrap();
         assert_eq!((s.clone(), e), (pending(Step::RepoMade, true), vec![Effect::Commit]));
         let (s, e) = step(&s, &Event::Committed).unwrap();
         assert_eq!((s.clone(), e), (pending(Step::Committed, true), vec![Effect::Deploy]));
-        assert_eq!(step(&s, &Event::Alarm).unwrap().1, vec![Effect::Deploy]);
+        assert_eq!(step(&s, &Event::Write).unwrap().1, vec![Effect::Deploy]);
+        assert_eq!(step(&pending(Step::Committed, false), &Event::Alarm).unwrap().1, vec![Effect::Deploy], "one the release does not run: its alarm too");
         let (s, e) = step(&s, &Event::Deployed { live: live(NEW_LIVE) }).unwrap();
         assert_eq!((s.clone(), e), (pending(Step::Deployed { live: live(NEW_LIVE) }, true), vec![]));
         let (s, e) = step(&s, &Event::Installed { live: live(NEW_LIVE) }).unwrap();
@@ -697,7 +739,37 @@ mod tests {
         let (s, e) = step(&s, &Event::Landed).unwrap();
         assert_eq!((s.clone(), e), (Stage::Landed, vec![Effect::TellJoined]));
         assert_eq!(step(&s, &Event::Alarm).unwrap(), (Stage::Landed, vec![]));
+        assert_eq!(step(&s, &Event::Write).unwrap(), (Stage::Landed, vec![]));
         assert_eq!(step(&s, &Event::Delete).unwrap(), (Stage::Ended, vec![]));
+    }
+
+    /// Goal (the audit's move 5): a fragment the release runs has no repo
+    /// until its first file. Valid: a blessed making, its release install
+    /// standing, is never seeded by its alarm (no repo, no code.storage call,
+    /// not busy), however many passes; its first writer lands it. Invalid:
+    /// its release install failed, its alarm seeds it (it serves nothing
+    /// else); a copied template's alarm seeds it as before. Restart: the
+    /// rows alone say which (`blessed`).
+    #[test]
+    fn a_fragment_the_release_runs_has_no_repo_until_its_first_writer() {
+        let mut world = World::new(Making::SeedsLater);
+        world.carry(Effect::InstallFromRelease);
+        let made = world.rows.clone();
+        for _ in 0..3 {
+            assert_eq!(world.pass(u32::MAX), Ran::Done);
+            assert_eq!(world.rows, made, "a pass asks code.storage nothing");
+            assert!(!world.stage().alarm_seeds() && world.stage().runs_release() && !world.stage().joins_wait());
+        }
+        assert_eq!(world.told, 1, "its agent follows the release meanwhile");
+        assert_eq!(world.write(u32::MAX), Ran::Done);
+        assert_eq!((world.stage(), world.rows.repo), (Stage::Landed, true), "its first writer makes its repo and lands it");
+        // its release install failed: its alarm seeds it
+        let mut failed = World::new(Making::SeedsLater);
+        assert!(failed.stage().alarm_seeds());
+        assert_eq!(failed.pass(u32::MAX), Ran::Done);
+        assert_eq!(failed.stage(), Stage::Landed);
+        // a copied template: its alarm, as ever
+        assert!(World::new(Making::SeedsNow).stage().alarm_seeds());
     }
 
     /// Valid: each way of making, its create's effects in order; the
@@ -818,6 +890,7 @@ mod tests {
             Event::Installed { live: live(NEW_LIVE) },
             Event::Landed,
             Event::Alarm,
+            Event::Write,
             Event::Activation,
         ];
         for s in [Stage::Free, Stage::Claimed { at: NOW }] {
@@ -877,15 +950,15 @@ mod tests {
                     world.carry(Effect::InstallFromRelease);
                 }
                 world.down = vec![failing];
-                assert_eq!(world.pass(u32::MAX), Ran::Failed, "{making:?}: its {failing:?} fails");
+                assert_eq!(world.seeds(u32::MAX), Ran::Failed, "{making:?}: its {failing:?} fails");
                 world.refresh();
                 assert_eq!(world.installed.as_deref(), Some(OLD_LIVE), "the old live is installed");
                 assert_eq!(world.stage().durable(), pending(at.clone(), true), "{making:?}: its rows are no further than its own {failing:?} failed");
                 // and stay so while that step fails
-                assert_eq!(world.pass(u32::MAX), Ran::Failed);
+                assert_eq!(world.seeds(u32::MAX), Ran::Failed);
                 assert!(world.stage().waits_template());
                 world.down = vec![];
-                assert_eq!(world.pass(u32::MAX), Ran::Done);
+                assert_eq!(world.seeds(u32::MAX), Ran::Done);
                 assert_eq!(world.stage(), Stage::Landed);
                 assert_eq!(world.installed.as_deref(), Some(NEW_LIVE), "{making:?}: landed from its own deploy");
                 assert_eq!(world.told, 1);
@@ -933,10 +1006,11 @@ mod tests {
     /// Restart: an activation cut short after each persisted step (its
     /// repo, its commit, its deploy, its landing, and after landing before
     /// its agent is told), memory dropped; the rows and the outbox alone
-    /// say where it is, an alarm is due, and alarm passes carry it on to
-    /// landed, installed from its own deploy, its agent told once and only
-    /// once nothing waits. Each way of making, with code.storage down for
-    /// its first passes, and a deploy whose install is left to the poll.
+    /// say where it is, and the seeds after (a copied template's alarm
+    /// passes, a blessed one's writers) carry it on to landed, installed
+    /// from its own deploy, its agent told once and only once nothing
+    /// waits. Each way of making, with code.storage down for its first
+    /// seeds, and a deploy whose install is left to the poll.
     #[test]
     fn restart_after_each_step() {
         for making in [Making::SeedsNow, Making::SeedsLater] {
@@ -956,13 +1030,13 @@ mod tests {
                             if at == Stage::Landed && !world.outbox {
                                 break;
                             }
-                            // not landed, it keeps its alarm due (`busy` asks this)
+                            // not landed, its writers land it first
                             assert!(at == Stage::Landed || at.waits_template(), "{at:?}, {case}");
                             world.down = if pass < outage_passes { SEED_STEPS.to_vec() } else { vec![] };
                             world.installs = installs_on_first_deploy || pass > outage_passes;
                             // the first pass with code.storage back is cut short once
                             let budget = if pass >= outage_passes && !cut { cut_after } else { u32::MAX };
-                            if world.pass(budget) == Ran::Cut {
+                            if world.seeds(budget) == Ran::Cut {
                                 cut = true;
                             }
                         }
@@ -982,7 +1056,7 @@ mod tests {
         let rows = Rows { now_ms: NOW, created_at: Some(LIFE + 1), template_pending: true, ..Rows::default() };
         let older = stage_in(&rows, LIFE).unwrap();
         assert_eq!(older, Stage::Ended);
-        for e in [Event::Installed { live: live(NEW_LIVE) }, Event::RepoMade, Event::Committed, Event::Landed, Event::Alarm, Event::Delete] {
+        for e in [Event::Installed { live: live(NEW_LIVE) }, Event::RepoMade, Event::Committed, Event::Landed, Event::Alarm, Event::Write, Event::Delete] {
             assert_eq!(step(&older, &e), Ok((Stage::Ended, vec![])), "{e:?}");
         }
         // and the next life's own stage is its own
@@ -999,7 +1073,7 @@ mod tests {
         world.carry(Effect::EnsureRepo);
         world.down = SEED_STEPS.to_vec();
         for _ in 0..3 {
-            assert_eq!(world.pass(u32::MAX), Ran::Failed);
+            assert_eq!(world.write(u32::MAX), Ran::Failed);
             let at = world.stage();
             assert_eq!(at, pending(Step::RepoMade, true));
             assert!(at.runs_release() && at.waits_template() && !at.joins_wait(), "{at:?}");

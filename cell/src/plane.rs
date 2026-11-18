@@ -337,11 +337,12 @@ impl FragmentCell {
     /// push): while its template is still to land (`Stage::waits_template`),
     /// the same seed the create and the alarm run (one at a time:
     /// `seeding`) lands it first, its repo, commit, deploy and install, so a
-    /// write lands on top of its template, never under it. A seed that
-    /// cannot land fails the writer as code.storage failed it.
+    /// write lands on top of its template, never under it. A blessed
+    /// fragment's repo is made here, at its first file. A seed that cannot
+    /// land fails the writer as code.storage failed it.
     pub(crate) async fn repo_ready(&self) -> CellResult<String> {
         if self.stage()?.waits_template() {
-            self.seed().await?;
+            self.seed(fragment_core::seed::Event::Write).await?;
         }
         self.must(MetaKey::Repo)
     }
@@ -362,8 +363,8 @@ impl FragmentCell {
     /// (main) or the code (live) follow. Callers hold `self.plane`.
     async fn refresh_pin(&self, which: &str) -> CellResult<PinMove> {
         let [repo, from] = self.metas([MetaKey::Repo, MetaKey::pin(which)])?;
-        // no repo yet (its template seeds after its create's answer,
-        // publish.rs `seeds_later`): no branch, so nothing pinned moved
+        // no repo yet (a blessed fragment's, made at its first file): no
+        // branch, so nothing pinned moved
         let Some(repo) = repo else {
             assert!(from.is_none(), "a pin is a commit of a repo made");
             return Ok(PinMove { changed: false, to: None, paths: vec![], removed: vec![] });
@@ -513,9 +514,9 @@ impl FragmentCell {
         self.install(manifest, Some((&cs, repo.as_str())), sha).await
     }
 
-    /// A fragment whose template seeds after its create's answer
-    /// (publish.rs `seeds_later`) runs that template from the release
-    /// until its first commit lands: installed as live's will be, from the
+    /// A blessed fragment (`seed::Making::SeedsLater`) runs its template
+    /// from the release until its first writer's seed lands its first
+    /// commit: installed as live's will be, from the
     /// same `fragment.json` its seed commits (`blessed_manifest_bytes`),
     /// with no commit (`""`, as the code's sha and the status's repo say).
     /// The seed's own install, from live, replaces it.
@@ -776,7 +777,7 @@ impl FragmentCell {
             }
             match self.meta(MetaKey::PinLive)? {
                 Some(live) => self.install_code(Some(&live)).await?,
-                // before its first deploy (publish.rs `seeds_later`): its template from the release again
+                // before its first file's deploy (`seed::Making::SeedsLater`): its template from the release again
                 None if self.stage()?.waits_template() => self.install_pending().await?,
                 None => self.install_code(None).await?,
             }
@@ -892,13 +893,14 @@ impl FragmentCell {
     /// Whether the fragment's next pass (its housekeeping, and the poll
     /// backstop) comes within the poll interval rather than a day after the
     /// last: the pins may lag the repo (`pins_may_lag`), a run is in flight
-    /// (each pass checks it against its Workflow), or a template is still to
-    /// land (each pass tries again). The rest of the alarm's work has due times of its own.
-    /// A fragment nothing touches (a chat, from its second day) is woken
-    /// once a day, and asks code.storage nothing.
+    /// (each pass checks it against its Workflow), or a template the
+    /// release does not run is still to land (each pass tries again:
+    /// `Stage::alarm_seeds`). The rest of the alarm's work has due times of
+    /// its own. A fragment nothing touches (a chat, from its first day) is
+    /// woken once a day, and asks code.storage nothing.
     pub(crate) fn busy(&self) -> CellResult<bool> {
         let running = self.count("SELECT EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS n")? != 0;
-        Ok(self.pins_may_lag()? || self.stage()?.waits_template() || running)
+        Ok(self.pins_may_lag()? || self.stage()?.alarm_seeds() || running)
     }
 
     /// Whether the pins may lag the repo: in the last day a storage token

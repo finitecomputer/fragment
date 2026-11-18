@@ -1335,7 +1335,7 @@ const MADE_WITH_AGENT_CHECKS: [&str; 4] = [
     "an app made with its agent while its template cannot land (its seed the create's) is made, the agent an editor, and its computer is not told it joined: not at the answer, nor at the alarm's pass whose seed fails again",
     "a chat made with its agent then runs its template from the release: its computer is told it joined after the answer, once, after its install, and follows the chat's channel, its first commit still not landed",
     "across a restart of every object the app's notice waits; commits back, the alarm's seed that lands its template tells its computer, after it",
-    "and the chat's template lands, its computer told no more",
+    "and the chat, with no file of its own, makes no repo and lands nothing at its alarm's pass (the release runs it), its computer told no more",
 ];
 
 /// A fragment made with its agent in it (its create's `agent`, as the
@@ -1346,9 +1346,9 @@ const MADE_WITH_AGENT_CHECKS: [&str; 4] = [
 /// at its rediscovery, minutes off (images/bridge `limits.rs`). Both
 /// orders: an app's seed is its create's, and its template is installed
 /// only by the seed that lands it, the alarm's, across a restart; a chat
-/// runs its template from the release as its create answers (publish.rs
-/// `seeds_later`), and is told after the seed its alarm takes right after
-/// the answer, whether that lands or not.
+/// runs its template from the release as its create answers
+/// (`seed::Making::SeedsLater`), and is told then: its repo waits for its
+/// first file, which a chat never has.
 fn made_with_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str, identity: &str) -> Result<()> {
     if s.hosted() {
         for label in MADE_WITH_AGENT_CHECKS {
@@ -1419,11 +1419,12 @@ fn made_with_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str, identity
         heard && told(&app).len() == 1 && after_landed && notified.len() == 1,
         json!({ "told": told(&app), "template": landed, "agentTold": notified }),
     );
-    let landed = s.eventually(Duration::from_secs(30), || !events(&chat, "template").is_empty());
+    let passed = s.eventually(Duration::from_secs(30), || api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": chat, "op": "alarm" }))).is_ok_and(|r| r.body["pollAt"].as_i64() > Some(crate::api::now_ms())));
+    let repo = api.status(owner, &chat).map(|r| r.body["repo"].clone()).unwrap_or_default();
     s.ok(
         MADE_WITH_AGENT_CHECKS[3],
-        landed && told(&chat).len() == 1 && events(&chat, "agent.told").len() == 1,
-        json!({ "told": told(&chat), "agentTold": events(&chat, "agent.told") }),
+        passed && repo == "" && events(&chat, "template").is_empty() && told(&chat).len() == 1 && events(&chat, "agent.told").len() == 1,
+        json!({ "repo": repo, "told": told(&chat), "agentTold": events(&chat, "agent.told") }),
     );
     Ok(())
 }
