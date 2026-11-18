@@ -3,16 +3,29 @@
 // deploy. Its address stays put. Shared by Apps, chats and agents; the
 // shell supplies its API and list.
 export function createTitles({ $, api, seg, byName, titleOf, reload, heard, ApiError }) {
-  // With `was`, only while its title is that (409 otherwise).
+  // With `was`, only while its title is that (409 otherwise). An agent's
+  // job (its SOUL.md, on main, where its computer reads it) says its new
+  // name where it said an old one, written first: a rename that fails leaves
+  // both as they were, and asked again finds its old name there. Its face is
+  // then set only while its title is the one the job was rewritten from; a
+  // rename another made meanwhile wins (409), its name said in the job.
   async function retitle(name, title, was) {
-    // an agent's job says its new name where it said an old one, in a
-    // commit of its own (on main, where its computer reads it): its name
-    // as its list says it, and the one the shell's first job gave it
-    const agent = byName(name)?.kind === "agent";
-    const job = agent ? await jobOf(name) : null;
-    const renamed = job === null ? null : jobRenamed(job, [byName(name)?.title, jobFirstName(job)], title);
-    await api("PUT", `/api/f/${seg(name)}/face`, was === undefined ? { title } : { title, was });
-    if (renamed !== null) await api("POST", `/api/f/${seg(name)}/files`, { message: "its job, renamed", files: [{ path: JOB, text: renamed }] });
+    const face = (body) => api("PUT", `/api/f/${seg(name)}/face`, body);
+    if (byName(name)?.kind !== "agent") return void (await face(was === undefined ? { title } : { title, was }));
+    const titleNow = async () => (await api("GET", `/api/f/${seg(name)}/status`)).title ?? null;
+    const writeJob = (text) => api("POST", `/api/f/${seg(name)}/files`, { message: "its job, renamed", files: [{ path: JOB, text }] });
+    const before = await titleNow();
+    const job = await jobOf(name);
+    const renamed = job === null ? null : jobRenamed(job, [before, jobFirstName(job)], title);
+    if (renamed !== null) await writeJob(renamed);
+    try {
+      await face(before === null ? { title } : { title, was: before });
+    } catch (err) {
+      const now = renamed !== null && err.status === 409 ? await titleNow() : null;
+      const back = now === null ? null : jobRenamed((await jobOf(name)) ?? "", [title], now);
+      if (back !== null) await writeJob(back);
+      throw err;
+    }
   }
   // An agent's job (its SOUL.md) as its owner's rename leaves it (docs/api.md,
   // "An agent's name and picture"; `fragment_core::face::job_renamed`, which

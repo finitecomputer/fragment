@@ -746,7 +746,7 @@ fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Re
     let before = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
     s.ok("CLI template creation gives the app its own display name instead of Blank", before.body["meta"]["title"].as_str().is_some_and(|t| !t.is_empty() && t != "Blank"), &before.body);
     // work waiting on main, undeployed; then a rename (FIN-541)
-    let waiting = api.signed(keys, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "message": "not yet", "files": [{ "path": "waiting.txt", "text": "not deployed\n" }] })))?;
+    let waiting = api.signed(keys, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "message": "not yet", "files": [{ "path": "site/waiting.txt", "text": "not deployed\n" }] })))?;
     let pins = api.status(keys, &name)?.body["pins"].clone();
     let renamed = s.cli_json(api, home, &["rename", &name, "Meals this week", "--json"])?;
     let status = api.status(keys, &name)?;

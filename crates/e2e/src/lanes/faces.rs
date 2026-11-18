@@ -250,18 +250,20 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     let blank = face(json!({ "title": "   " }), &paul)?;
     let nothing = face(json!({}), &paul)?;
     let pictured = face(json!({ "picture": shown }), &paul)?;
+    let stale = face(json!({ "title": "Fred", "was": "Juniper" }), &paul)?;
     let (_, text) = set_face(api, &paul, &agent, None, Some(Some(b"hello, I am no picture")))?;
     let text = text.context("its picture")?;
     let kept = row(api, &paul, &agent);
     s.ok(
-        "a title past 120 characters, one of only spaces, a change naming nothing or a picture, are refused (400) saying why; a file that is no picture is refused (400); its name and picture stay",
+        "a title past 120 characters, one of only spaces, a change naming nothing or a picture, are refused (400) saying why; a file that is no picture is refused (400); a rename whose `was` is no longer its title is refused (409); its name and picture stay",
         [&long, &blank, &nothing, &pictured, &text].iter().all(|r| r.status == 400)
+            && stale.status == 409
             && long.text.contains("1 to 120 characters")
             && pictured.text.contains("icon")
             && kept["title"] == "Frank"
             && kept["picture"] == shown.as_str()
             && events(api, &paul, &agent, "face.changed") == 1,
-        json!({ "long": long.to_string(), "blank": blank.to_string(), "nothing": nothing.to_string(), "picture": pictured.to_string(), "text": text.to_string(), "row": kept }),
+        json!({ "long": long.to_string(), "blank": blank.to_string(), "nothing": nothing.to_string(), "picture": pictured.to_string(), "text": text.to_string(), "stale": stale.to_string(), "row": kept }),
     );
     // someone else's agent: Bob, a viewer then, and no member now, changes nothing
     let (bobs, bobs_picture) = set_face(api, &bob, &agent, Some("Bobbed"), Some(Some(&blue)))?;
@@ -520,6 +522,22 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         "an agent made with no title is untitled (its label shows, and `fragment agent` says it), never called by the template's word",
         made && shown_bare.get("title").is_none_or(Value::is_null) && status.is_null() && said.is_ok_and(|v| v["name"] == label_of(&bare)),
         json!({ "row": shown_bare, "status": status }),
+    );
+    // an agent with a picture the release before kept, beside an icon of
+    // its own, deployed as an app (forked): its row goes at its pass, and
+    // its icon, an app's, is the icon it had, never that avatar
+    let (_, own_icon) = set_face(api, &paul, &bare, None, Some(Some(&blue)))?;
+    legacy_picture_beside(api, &paul, &bare, &orange, true)?;
+    let forked = write(&bare, "fragment.json", "{}\n")?.status == 200 && deploy(&bare)?.status == 200;
+    let app_now = s.eventually(WAIT, || row(api, &paul, &bare)["kind"] == "app");
+    let r = super::ledger::lever(api, &bare, "poll-now", json!({}))?;
+    let passed = r.status == 200 && s.eventually(WAIT, || api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": bare, "op": "alarm" }))).is_ok_and(|r| r.body["pollAt"].as_i64() > Some(crate::api::now_ms())));
+    let icon = api.signed(&paul, "GET", &format!("/api/f/{bare}/icon"), None)?;
+    let blue_at = fragment_core::icon::icon_path(&bare, &hex::encode(Sha256::digest(&blue)));
+    s.ok(
+        "an agent with a picture the release before kept beside an icon of its own, forked into an app: its pass lets the row go, never taking that avatar, and its icon is the one it had",
+        own_icon.is_some_and(|r| r.status == 200) && forked && app_now && passed && icon.bytes == blue && row(api, &paul, &bare)["picture"] == blue_at.as_str() && events(api, &paul, &bare, "picture.taken") == 0,
+        json!({ "row": row(api, &paul, &bare), "icon": icon.status, "events": super::site::event_kinds(api, &paul, &bare) }),
     );
     // its role: the tag beside its name, on its owner's list as its name is
     // (Paul, 2026-10-30: one source, live everywhere), set through its face;
