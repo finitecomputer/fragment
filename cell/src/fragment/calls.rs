@@ -174,13 +174,19 @@ impl Call for AppGrows {
 
 /// The app's audience as a fragment it is in holds it: its people, an
 /// agent as its person, with what each does to it, and each growth it
-/// asked and has not written yet.
+/// asked and has not written yet; and its own key (the life that answers).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AppAudienceOf {}
 
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AppAudience {
+    pub npub: String,
+    pub audience: Vec<(String, Role)>,
+}
+
 impl Call for AppAudienceOf {
     const PATH: &'static str = "/call/app/audience";
-    type Answer = Vec<(String, Role)>;
+    type Answer = AppAudience;
 }
 
 /// A change between an app and a target, as a list takes one
