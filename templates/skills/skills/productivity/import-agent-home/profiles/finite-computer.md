@@ -274,11 +274,22 @@ curl -fsS http://api.fragment.internal/api/computer | jq -r --arg a "$FRAGMENT_A
   has to be set up there for me first. Ask Finite's team, then ask me
   again." The rest of an import goes on.
 
-**Its sites.** List them:
+Then save its header in a file, once:
 
 ```sh
 ph="<the placeholder>" && mkdir -p "$HOME/home-import" && \
-curl -sS -o "$HOME/home-import/finite-site.json" -w 'finite.site: %{http_code}\n' -H "Authorization: Nostr $ph" "https://finite.site/api/v2/projects" && \
+printf '%s: Nostr %s\n' Authorization "$ph" > "$HOME/home-import/finite-site.auth" && echo saved
+```
+
+Every request below sends it from that file
+(`-H @"$HOME/home-import/finite-site.auth"`). Never write the header
+into a command yourself: your tools show a credential header as `***`,
+and a header copied from what they show goes out unsigned.
+
+**Its sites.** List them:
+
+```sh
+curl -sS -o "$HOME/home-import/finite-site.json" -w 'finite.site: %{http_code}\n' -H @"$HOME/home-import/finite-site.auth" "https://finite.site/api/v2/projects" && \
 jq -c '.projects[] | select(.role == "owner" and .site != null) | {slug, site: .site.name, url: .site.url, status: .site.status, visibility: .site.visibility, branch: .site.branch, spa: .site.spa, redirect_to: .site.redirect_to}' "$HOME/home-import/finite-site.json"
 ```
 
@@ -313,11 +324,11 @@ which leaves out every file whose name says it may hold a password or
 key:
 
 ```sh
-ph="<the placeholder>" slug="<its slug>" branch="<its branch>" && \
+slug="<its slug>" branch="<its branch>" && \
 case "$slug" in "" | *[!a-z0-9-]*) echo "STOP: not a plain slug" ;; *) \
   t="/tmp/finite-site-$FRAGMENT_AS_AGENT-$slug" H="$HOME/home-import/home/sites/$slug" && \
   rm -rf -- "$t" "$H" && mkdir -p "$t/src/sites" && chmod 700 "$t" && \
-  curl -fsS -X POST -H "Authorization: Nostr $ph" -H "content-type: application/json" -d '{}' -o "$t/auth.json" "https://finite.site/api/v2/projects/$slug/git-auth" && \
+  curl -fsS -X POST -H @"$HOME/home-import/finite-site.auth" -H "content-type: application/json" -d '{}' -o "$t/auth.json" "https://finite.site/api/v2/projects/$slug/git-auth" && \
   jq -r '"https://\(.username | @uri):\(.password | @uri)@finite.site"' "$t/auth.json" > "$t/login" && \
   git -c credential.helper= -c credential.helper="store --file=$t/login" clone --quiet --depth 1 --branch "$branch" "https://finite.site/$slug.git" "$t/src/sites/$slug"; \
   ok=$?; rm -f -- "$t/auth.json" "$t/login"; rm -rf -- "$t/src/sites/$slug/.git"; \
@@ -365,8 +376,8 @@ address keeps serving, and the report names the pages that failed.
 Otherwise:
 
 ```sh
-ph="<the placeholder>" slug="<its slug>" to="<its new address>" && \
-curl -sS -w '\nfinite.site: %{http_code}\n' -X POST -H "Authorization: Nostr $ph" -H "content-type: application/json" -d "$(jq -cn --arg to "$to" '{to: $to}')" "https://finite.site/api/v2/projects/$slug/site/redirect"
+slug="<its slug>" to="<its new address>" && \
+curl -sS -w '\nfinite.site: %{http_code}\n' -X POST -H @"$HOME/home-import/finite-site.auth" -H "content-type: application/json" -d "$(jq -cn --arg to "$to" '{to: $to}')" "https://finite.site/api/v2/projects/$slug/site/redirect"
 ```
 
 A 200 answers `redirect_to`, the new address. Check it: `curl -sS -o
