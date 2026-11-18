@@ -951,9 +951,9 @@ label.settings-line { cursor: pointer; }
 .app-delete { display: flex; flex-direction: column; gap: 10px; margin: 2px 0 0 54px; padding: 16px 20px; background: var(--bg-window); border: 1px solid color-mix(in srgb, var(--danger-text) 45%, transparent); border-radius: 10px; }
 .app-delete p { margin: 0; font-size: 13px; }
 .app-delete .app-delete-title { font-size: 14px; font-weight: 600; }
-.app-delete-field { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 0; color: var(--text-secondary); font-size: 13px; }
-.app-delete-field code { padding: 0 4px; color: var(--text-primary); font: 500 12.5px/1.4 "JetBrains Mono", monospace; overflow-wrap: anywhere; }
-.app-delete-field input { flex-basis: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-card); color: var(--text-primary); font: 500 13px/1.4 "JetBrains Mono", monospace; }
+.app-delete-field { display: flex; flex-direction: column; gap: 6px; color: var(--text-secondary); font-size: 13px; }
+.app-delete-field code { color: var(--text-primary); font: 500 12.5px/1.4 "JetBrains Mono", monospace; overflow-wrap: anywhere; }
+.app-delete-field input { min-width: 0; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-card); color: var(--text-primary); font: 500 13px/1.4 "JetBrains Mono", monospace; }
 .app-delete-actions { display: flex; gap: 8px; }
 .app-delete-actions .danger { border-color: transparent; background: var(--danger-text); color: var(--bg-window); }
 .app-delete-actions button:disabled { opacity: .45; cursor: default; }

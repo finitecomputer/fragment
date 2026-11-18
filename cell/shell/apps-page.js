@@ -597,7 +597,10 @@ export function createAppsPage(page, h, shelf = "apps") {
     input.setAttribute("autocapitalize", "off");
     input.value = typed.get(name) ?? "";
     input.disabled = deleting;
-    field.append(h.el("span", null, "Type "), h.el("code", null, name), h.el("span", null, " to confirm"), input);
+    // one line of words, read as one: its name in it
+    const words = h.el("span");
+    words.append("Type ", h.el("code", null, name), " to confirm");
+    field.append(words, input);
     const sure = button(deleting ? "Deleting…" : "Delete", "delete-sure", null, deleting || !matches(input.value));
     sure.type = "submit";
     sure.classList.add("danger");
