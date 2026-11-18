@@ -326,14 +326,16 @@ impl Starts {
             // the wake it answered is answered
             self.asked = None;
         }
-        if matches!(event, Event::Opened { socket: Socket::Keepalive }) {
+        // a turn once the wait passed is not its wake's, though no event
+        // came between to write its line
+        if matches!(event, Event::Opened { socket: Socket::Keepalive }) && l.ready_ms.is_none_or(|ready| now_ms - ready < TURN_WAIT_MS) {
             l.turn_ms.get_or_insert(now_ms);
         }
         self.due(now_ms)
     }
 
     /// Its line, once its start came up and its guest took a turn or
-    /// `TURN_WAIT_MS` passed.
+    /// `TURN_WAIT_MS` passed (written at the first event or view read after).
     fn due(&mut self, now_ms: i64) -> Option<String> {
         let l = self.line.as_ref()?;
         match l.ready_ms {
@@ -542,6 +544,15 @@ mod tests {
         // replay: its turn after the wait writes nothing more
         d.turn();
         let _ = d.line(g3);
+        // a quiet computer: no event at all until a turn past the wait (Codex
+        // on #1344): written then, without that turn
+        let mut quiet = Driven::new();
+        let s = quiet.wake(Wake::Presence);
+        let (q1, _) = quiet.start(&s, Outcome::Ready);
+        quiet.c.now += TURN_WAIT_MS + 14_000;
+        quiet.apply(Event::Opened { socket: Socket::Keepalive });
+        let l = quiet.line(q1);
+        assert_eq!((&l["end"], l.get("turnMs")), (&"ready".into(), None), "{l}");
         // saved awake, its host stops it idle (a sleep, the lifecycle's,
         // no snapshot taken); then a start that fails, and its retry: a
         // line each, the retry's times from the wake that asked for both

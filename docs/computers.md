@@ -464,8 +464,9 @@ by its id alone, and is at most 512 bytes:
 
 It is written once, as the start ends: `failed`; `replaced` (a later start
 began before its end was heard); or `ready`, once its guest opens its first
-keepalive (a turn), `TURN_WAIT_MS` (a minute) passes after it came up, or
-its life ends, whichever is first.
+keepalive (a turn), `TURN_WAIT_MS` (a minute) passes after it came up (it
+is written at the next event or view read: the guest reads its view each
+minute), or its life ends, whichever is first.
 
 - `failed`: `start` (its own steps), `snapshot` (the snapshot would not
   start), `dead` (its guest never read its view within its wait: a
