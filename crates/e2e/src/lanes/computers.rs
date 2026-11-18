@@ -642,7 +642,7 @@ const RECOVERY_CHECKS: [&str; 13] = [
     "seen, it is told no more; seen again, the same; a notice never told is refused",
     "when no save works for the bound, it is put to sleep unsaved at the time it said, and told it will go back",
     "its next wake goes back to that save, told once, the same notice; and its agent answers",
-    "and its agent is told, once, what it no longer remembers of the chat: the turn the stop lost, from the journal",
+    "and its agent is told the chat, once, from the records: the turn the stop lost among it, both sides",
     "asleep, its owner's restart starts it, fresh from its save",
     "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from the start of a sleep's try whose save failed to its bound, or to the restart that ended it; the time before and after is",
     "a restart whose save fails, with nothing done since the save it came up from: it goes back to that save and tells its owner nothing, since nothing was lost (Paul, 2026-10-23); a notice of it is refused",
@@ -815,7 +815,7 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     let then = replied(once_seq).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
     s.ok(
         RECOVERY_CHECKS[8],
-        zebra_ran && after_back.contains("(told: Your memory of this chat is behind") && after_back.contains("You were asked: “remember the zebra”") && answered_once && !then.contains("(told:"),
+        zebra_ran && after_back.contains("(told: Your memory of this chat is behind") && after_back.contains("\nYour owner: remember the zebra\nYou: echo: ") && answered_once && !then.contains("(told:"),
         json!([after_back, then]),
     );
     // asleep, a restart is a start
