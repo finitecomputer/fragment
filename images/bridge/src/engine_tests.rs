@@ -2489,8 +2489,8 @@ fn a_state_owing_an_answer_is_one_an_older_bridge_sets_aside() {
     assert_ne!(owing["version"], json!(2), "an older bridge sets it aside, never checks it");
     let dir = std::env::temp_dir().join(format!("bridge-state-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(crate::driver::state_path(&dir), owing.to_string()).unwrap();
-    assert_eq!(crate::driver::load(&dir).unwrap(), *e.state(), "this bridge reads it back");
+    std::fs::write(crate::store::state_path(&dir), owing.to_string()).unwrap();
+    assert_eq!(crate::store::load(&dir).unwrap(), *e.state(), "this bridge reads it back");
     // let go once posted: format 2 again, all an older bridge needs
     let s = answered(&mut e, end, T0);
     assert!(e.state().turns.is_empty(), "{:?}", s.effects);
@@ -2498,8 +2498,8 @@ fn a_state_owing_an_answer_is_one_an_older_bridge_sets_aside() {
     assert_eq!(older["version"], json!(2));
     assert!(!older.to_string().contains("\"ret\"") && !older.to_string().contains("\"to\""), "nothing an older bridge's check refuses");
     older["version"] = json!(2);
-    std::fs::write(crate::driver::state_path(&dir), older.to_string()).unwrap();
-    assert_eq!(crate::driver::load(&dir).unwrap(), *e.state(), "and reads its own format too");
+    std::fs::write(crate::store::state_path(&dir), older.to_string()).unwrap();
+    assert_eq!(crate::store::load(&dir).unwrap(), *e.state(), "and reads its own format too");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

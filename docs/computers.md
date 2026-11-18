@@ -121,7 +121,7 @@ back in time without changing what happens.
 | Fact | Its one authority | A cache of it |
 |---|---|---|
 | What was said | the chat's `chat` channel | the runtime's transcript |
-| Which turns started, which calls they asked for, what they did, how they ended, each card's answer | the chat's `work` channel, the journal (docs/chat-records.md) | the bridge's `state.json` |
+| Which turns started, which calls they asked for, what they did, how they ended, each card's answer | the chat's `work` channel, the journal (docs/chat-records.md) | the bridge's state (`/data/bridge`) |
 | The agent's self (`SOUL.md`, memories, skills) | the agent fragment's repo | the profile's checkout |
 | The runtime's context and the agent's working files | `/data`, as of its newest save | the snapshot, for one image |
 | Which save is current, and what a wake restored | the Computer DO | |

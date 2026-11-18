@@ -3,8 +3,10 @@
 //! - the restore gate (`RESTORE_PENDING=1`: wait for
 //!   `/run/computer/restored` before reading `/data`);
 //! - the life: 128 random bits of this process's, never written to `/data`;
-//! - the state file (`<state>/state.json`), written whole and renamed into
-//!   place after every step that changed it, before the step's effects;
+//! - the state (store.rs): what each step changed, appended to
+//!   `<state>/state.log` and synced before the step's effects, and written
+//!   whole to `<state>/state.json` as the bridge starts, as the log fills,
+//!   and while the platform holds the computer;
 //! - followers: for each agent and each fragment it follows (its chats'
 //!   `chat`, its own `tasks`), a wake subscription, a catch-up from the
 //!   cursor over `GET …/channels/{c}?after=`, then `__live`, reconnecting
@@ -33,7 +35,7 @@ use tokio::sync::{mpsc, watch, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::{self, Api, ApiError, HomeChat};
-use crate::engine::{self, ChatView, ClaimAnswer, Effect, Engine, Input, Settings, State};
+use crate::engine::{self, ChatView, ClaimAnswer, Effect, Engine, Input, Settings};
 use crate::history::{Budget, Unavailable};
 use crate::limits;
 use crate::net::Backoff;
@@ -42,6 +44,7 @@ use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Cause, Record};
 use crate::runtime::{Agent, Command, Event, Kept, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
 use crate::scratch::Scratch;
+use crate::store::{Gate, Store};
 
 /// Each running turn's files (its message's, its answers'), by turn: their
 /// pins (`LocalFile::pin`) held until the engine ends the turn (`act`), so
@@ -113,39 +116,6 @@ impl std::fmt::Display for BridgeError {
     }
 }
 
-// ---- state on disk ----
-
-pub fn state_path(dir: &Path) -> PathBuf {
-    dir.join("state.json")
-}
-
-/// The state as last written, or a fresh one. A state of another format (an
-/// older bridge's) is set aside for a fresh one: the state is a cache of
-/// the journal (one life per turn), so starting from none reads the chats
-/// again and runs nothing twice. A state that contradicts itself is refused.
-pub fn load(dir: &Path) -> Result<State, BridgeError> {
-    let path = state_path(dir);
-    let corrupt = |why: String| BridgeError::Corrupt(format!("{}: {why}", path.display()));
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            if bytes.len() > limits::STATE_FILE_MAX_BYTES {
-                return Err(corrupt(format!("{} bytes, past the bound", bytes.len())));
-            }
-            let value: Value = serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
-            let Some(version) = value.get("version").and_then(Value::as_u64) else { return Err(corrupt("no version".into())) };
-            if !engine::STATE_VERSIONS.iter().any(|v| u64::from(*v) == version) {
-                crate::ev!("state.set_aside", { "path": path.display().to_string(), "version": version, "why": "another bridge's format: the journal says which turns ran" });
-                return Ok(State::default());
-            }
-            let state: State = serde_json::from_value(value).map_err(|e| corrupt(e.to_string()))?;
-            engine::check(&state).map_err(|c| BridgeError::Corrupt(c.0))?;
-            Ok(state)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
-        Err(e) => Err(BridgeError::Disk(format!("{}: {e}", path.display()))),
-    }
-}
-
 /// This process's life: 128 bits from the kernel's random source, as 32
 /// lowercase hex. Never written to `/data`, so no save carries it into
 /// another life (docs/chat-records.md, `turn.start`).
@@ -157,27 +127,6 @@ pub fn new_life() -> Result<String, BridgeError> {
     let life = records::hex(&bits);
     assert!(records::valid_life(&life), "a life is 32 lowercase hex");
     Ok(life)
-}
-
-/// Writes the state whole: a temporary file, synced, renamed over the old,
-/// and the directory synced, so a crash leaves the old state or the new.
-pub fn save(dir: &Path, state: &State) -> Result<(), BridgeError> {
-    let bytes = serde_json::to_vec(state).map_err(|e| BridgeError::Disk(e.to_string()))?;
-    assert!(bytes.len() <= limits::STATE_FILE_MAX_BYTES, "the engine bounds its state: {} bytes", bytes.len());
-    let path = state_path(dir);
-    let tmp = dir.join("state.json.tmp");
-    let write = || -> std::io::Result<()> {
-        use std::io::Write;
-        std::fs::create_dir_all(dir)?;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, &path)?;
-        std::fs::File::open(dir)?.sync_all()?;
-        Ok(())
-    };
-    write().map_err(|e| BridgeError::Disk(format!("{}: {e}", path.display())))?;
-    Ok(())
 }
 
 /// Whether `pattern` is one a hold's answer may name (docs/computers.md,
@@ -319,12 +268,16 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // the hold as the runtimes see it, and what of theirs it waits on
     let (held_tx, held_rx) = watch::channel(false);
     let runtimes_unquiet = Arc::new(AtomicUsize::new(0));
+    // and the state's log, written into its snapshot before the answer
+    // (store.rs, `Gate`): unknown until the store opens, so no answer
+    // before it has
+    let gate = Arc::new(Gate { logged: std::sync::atomic::AtomicBool::new(true), ..Gate::default() });
     let answer: String = cfg.left_out.iter().map(|p| format!("{p}\n")).collect();
     // a core a bridge before this one left running is gone before any hold is answered
     if let Some(sc) = &cfg.simplex {
         crate::simplex::run::kill_strays(sc).await;
     }
-    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), held_tx, runtimes_unquiet.clone(), stop.clone()));
+    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), held_tx, runtimes_unquiet.clone(), gate.clone(), stop.clone()));
     // SimpleX, when the image names its core: told of the computer at each
     // read; it says which agents' links are bound (`relaying`), whose
     // relayed records alone the engine honors, each with its SimpleX chat
@@ -335,7 +288,8 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     if let Some(h) = &simplex {
         let _ = simplex_page.handle.set(h.clone());
     }
-    let state = load(&cfg.state_dir)?;
+    let (store, state) = Store::open(&cfg.state_dir, gate)?;
+    let store = Mutex::new(store);
     let life = new_life()?;
     let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?;
 
@@ -420,7 +374,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
             }
         }
         if step.dirty {
-            save(&cfg.state_dir, engine.state())?;
+            store.lock().expect("store").write(engine.state())?;
             // a turn over lets its files go (bounded: the turns open)
             turn_files.lock().expect("turn files").retain(|t, _| engine.state().turns.get(t).is_some_and(|t| t.phase != engine::Phase::Ended));
             *shared.cursors.lock().expect("cursors") = engine.state().cursors.clone();
@@ -511,6 +465,9 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut computer_read = Instant::now();
     let mut stop_rx = stop.clone();
+    // the hold as the runtimes see it: as it comes, the state's log is
+    // written into its snapshot, which its answer waits for
+    let mut holding = held_rx.clone();
     // bounded by the bridge's life: one input per pass, ended by `stop`
     let result = loop {
         tokio::select! {
@@ -548,6 +505,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     break Err(e);
                 }
             }
+            Ok(()) = holding.changed() => {
+                if let Err(e) = store.lock().expect("store").settle() {
+                    break Err(e);
+                }
+            }
             r = relaying_rx.changed() => {
                 if r.is_err() {
                     break Ok(());
@@ -562,6 +524,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
             _ = tick.tick() => {
                 let s = engine.step(Input::Tick, crate::log::now_ms());
                 if let Err(e) = act(&engine, s) {
+                    break Err(e);
+                }
+                // held, its log written into its snapshot (a backstop: it
+                // is, as the hold comes)
+                if let Err(e) = store.lock().expect("store").settle() {
                     break Err(e);
                 }
                 // The computer's agents are read again this often: one assigned
@@ -2008,22 +1975,29 @@ async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
 /// hold, and starts none while it lasts; always true with no SimpleX), and
 /// nothing of a runtime's own runs outside its turns (`runtimes_unquiet`:
 /// each runtime is told the hold, `runtimes_held`, and quiets its own), and
-/// not otherwise. The platform clears `held` before each hold, so an
-/// answer is always to the hold it finds. The answer is `answer`: what the
+/// not otherwise; and it is first written once the state's log holds
+/// nothing its snapshot does not (`gate`: so a save holds the state whole,
+/// as an older bridge reads it). The platform clears `held` before each
+/// hold, so an answer is always to the hold it finds. The answer is `answer`: what the
 /// save may leave out, one per line (none, empty). Looked at every
 /// `HOLD_POLL_MS`, for the bridge's life.
 #[allow(clippy::too_many_arguments)]
-async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, runtimes_held: watch::Sender<bool>, runtimes_unquiet: Arc<AtomicUsize>, mut stop: watch::Receiver<bool>) {
+async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, runtimes_held: watch::Sender<bool>, runtimes_unquiet: Arc<AtomicUsize>, gate: Arc<Gate>, mut stop: watch::Receiver<bool>) {
     assert!(hold != held, "a hold and its answer are two files");
     assert!(answer.len() <= limits::HELD_ANSWER_MAX_BYTES, "an answer the platform reads whole");
     // bounded by the bridge's life: one look per `HOLD_POLL_MS`, ended by `stop`
     loop {
         let holding = hold.exists();
+        // stored before the log is looked at (store.rs, `Gate`)
+        gate.holding.store(holding, Ordering::SeqCst);
         runtimes_held.send_if_modified(|was| std::mem::replace(was, holding) != holding);
         let quiet = holding && in_flight.load(Ordering::SeqCst) == 0 && cores_quiet.load(Ordering::SeqCst) && runtimes_unquiet.load(Ordering::SeqCst) == 0;
         match (quiet, held.exists()) {
-            // written whole, then renamed: the platform never reads half
-            (true, false) => match write_whole(&held, answer.as_bytes()) {
+            // written whole, then renamed: the platform never reads half.
+            // The log stops an answer not made yet, never takes one back:
+            // once held, every write is whole and none says the log holds a
+            // change (store.rs).
+            (true, false) if !gate.logged.load(Ordering::SeqCst) => match write_whole(&held, answer.as_bytes()) {
                 Ok(()) => crate::ev!("held", { "held": held.display().to_string() }),
                 Err(e) => crate::ev!("held.failed", { "held": held.display().to_string(), "error": e.to_string() }),
             },
@@ -2034,6 +2008,8 @@ async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: A
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(limits::HOLD_POLL_MS)) => {}
+            // the log written into its snapshot: looked at again at once
+            _ = gate.settled.notified() => {}
             _ = crate::net::stopped(&mut stop) => return,
         }
     }
