@@ -528,9 +528,12 @@ pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &B
     };
     let replied: Vec<&str> = said.iter().filter_map(|r| own_turn(r, me, owner)).collect();
     let seqs: Vec<u64> = said.iter().map(|r| r.seq).collect();
+    let last = seqs.last().copied().unwrap_or(0);
     // a turn here that neither a reply nor what started it tells (a routine
-    // that said nothing): its steps where it started, among the messages
-    let mut alone = started.iter().filter(|(t, at, cause)| *at >= said[0].at && !replied.contains(t) && cause.is_none_or(|s| !seqs.contains(&s))).map(|(t, at, _)| (*t, *at)).peekable();
+    // that said nothing): its steps where it started, among the messages;
+    // never one a message after them started (the turn's own, or the cut
+    // turn it continues: the cut note's)
+    let mut alone = started.iter().filter(|(t, at, cause)| *at >= said[0].at && !replied.contains(t) && cause.is_none_or(|s| s < last && !seqs.contains(&s))).map(|(t, at, _)| (*t, *at)).peekable();
     let mut tooled: Vec<&str> = Vec::new();
     let mut lines: Vec<String> = Vec::new();
     for r in said {
@@ -1094,6 +1097,10 @@ mod tests {
         for (at, body) in [(95, turn_start("t4", OWNER, ME, &routine, LIFE)), (96, turn_step("t4", 1, &step("terminal", "touch done", true))), (97, turn_end("t4", &Outcome::Idle))] {
             w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at, principal: ME.into(), kind: "message".into(), body });
         }
+        // the cut turn a continuation answers, started by the message after
+        // these (the cut note's): never told here
+        w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 130, principal: ME.into(), kind: "message".into(), body: turn_start("cut", OWNER, ME, &Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 14 }, LIFE) });
+        w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 131, principal: ME.into(), kind: "message".into(), body: turn_step("cut", 1, &step("terminal", "the cut one", true)) });
         let (said, begins) = exchanges(&chat, ME, OWNER, true, 15, i64::MAX);
         assert!(begins, "the records reach back to its join");
         assert_eq!(said.iter().map(|r| r.seq).collect::<Vec<_>>(), [2, 3, 4, 5, 6, 7, 8, 11, 12]);

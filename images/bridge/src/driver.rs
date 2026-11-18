@@ -1806,7 +1806,7 @@ async fn read_back(api: &Api, agent: &str, fragment: &str, channel: &str, before
 #[allow(clippy::too_many_arguments)]
 async fn read_pages(api: &Api, agent: &str, fragment: &str, channel: &str, before: u64, scan: (u32, usize), enough: impl Fn(&[Record]) -> bool, budget: &mut Budget) -> Result<(Vec<Record>, bool), Unavailable> {
     let (page_records, most) = scan;
-    assert!(page_records >= 1 && page_records <= limits::NOTE_PAGE_RECORDS && page_records as usize <= most, "a scan reads whole pages");
+    assert!((1..=limits::NOTE_PAGE_RECORDS).contains(&page_records) && page_records as usize <= most, "a scan reads whole pages");
     let mut got: Vec<Record> = Vec::new();
     // the newest seq not read yet
     let mut upto = before.saturating_sub(1);
