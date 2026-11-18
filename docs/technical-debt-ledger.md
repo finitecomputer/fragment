@@ -1095,14 +1095,28 @@ unfinished design, not debt.
 
 - **Shortcut:** `fragment session import` commits each batch of
   conversations as upserts on whatever head main has
-  (cli/src/session/mod.rs `commit`); only the indexes' commit is made
-  again from main when it loses its race.
+  (cli/src/session/mod.rs `commit`).
 - **Risk:** two imports of one conversation at once keep the last one's
-  file, and its index entry may name the other's copy, so the next
-  import skips a newer copy once or writes one again. Nothing is lost.
-- **Delete when:** each batch's commit is made again from main as the
-  indexes' is (keeping the newer entry), or the archive moves to an app
-  whose mutation writes both.
+  file, which may be the older copy; its row describes that file, so
+  the archive lists what it holds. Nothing is lost: importing the newer
+  copy again replaces it.
+- **Delete when:** each batch's commit compares and swaps each file it
+  replaces, made again from main when it loses (keeping the newer).
+
+## A session archive from before its rows lists its index files
+
+- **Shortcut:** an archive imported before its list was rows holds
+  `index/<kind>.json` and no rows: its page (templates/sessions/site/sessions.js
+  `list`), the shell's History (cell/shell/session-archive.js
+  `chatsIndexed`) and the iPhone's (ios/Sources/FragmentApp.swift
+  `loadImported`) read its chats from that file while it has no rows,
+  and the CLI's next import takes the files away (cli/src/session/mod.rs
+  `write`).
+- **Risk:** none beyond a second read path: an archive its person never
+  imports into again is listed from its index file for good.
+- **Delete when:** no archive holds `index/` files (an operator's count
+  across `sessions` fragments), or one fill moves the rest (an operator
+  running the import's fill as each owner).
 
 ## The computer's view carries two fixed routes beside the list
 

@@ -119,6 +119,23 @@ struct ShellTests {
         #expect(stub.seen.first { $0.path == "/api/f/archive--s1/file" }?.query == ["path": "index/chat.json"])
     }
 
+    /// The archive's rows are its list (templates/sessions/app.mjs): every
+    /// page of its chats, asked of its app, and no index file read; an
+    /// archive with none yet reads its index file (the tests around this).
+    @Test func theArchivesRowsListItsChats() async throws {
+        let stub = Stub { seen, before in
+            guard seen.route == "POST /api/f/archive--s1/ops/sessions" else { return Self.platform(seen, before) }
+            return before.contains { $0.route == seen.route }
+                ? (200, #"{"result":{"sessions":[{"key":"hermes-b","kind":"chat","title":"Second","started_at":"2026-10-01T10:00:00Z"}],"next":null},"replayed":false}"#)
+                : (200, #"{"result":{"sessions":[{"key":"hermes-a","kind":"chat","title":"First","ended_at":"2026-10-02T10:00:00Z","commit":"0123456789abcdef0123456789abcdef01234567"}],"next":"hermes-a"},"replayed":false}"#)
+        }
+        let library = Library()
+        await library.load(try stub.api())
+        #expect(library.error == nil && library.imported.map(\.key) == ["hermes-a", "hermes-b"])
+        #expect(stub.seen.filter { $0.route == "POST /api/f/archive--s1/ops/sessions" }.count == 2)
+        #expect(!stub.seen.contains { $0.route == "GET /api/f/archive--s1/file" })
+    }
+
     /// The archive's index is optional: one of other kinds alone (cron,
     /// subagents) has none, and one that fails to read stops nothing.
     @Test func anArchiveWithoutChatsOrFailingNeverStopsAgents() async throws {

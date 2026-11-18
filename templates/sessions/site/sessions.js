@@ -3,7 +3,8 @@
 // tasks folded away; with `?s=<key>`, that conversation, read-only, in a
 // chat's look: what the person and the agent said, and the agent's tool
 // calls, their results and its reasoning folded into steps, as a chat
-// folds them. Everything is read from the archive's own files (`__file`).
+// folds them. The list is the archive's rows (app.mjs `sessions`); a
+// conversation is read from its file (`__file`).
 // Framed by the shell, a conversation offers Continue: the shell asks with
 // which of the person's agents, and makes a chat of it with that one (or
 // opens the chat it made before).
@@ -45,8 +46,30 @@ function row(e) {
   return li;
 }
 
+// The archive's rows, every page of them; null when it could not say.
+async function rows() {
+  const out = [];
+  let after = "";
+  for (;;) {
+    const r = await fetch("__op/sessions", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: `list-${Date.now()}-${Math.random().toString(36).slice(2)}`, input: { after } }) }).catch(() => null);
+    const page = r?.ok ? (await r.json().catch(() => null))?.result : null;
+    if (!Array.isArray(page?.sessions)) return null;
+    out.push(...page.sessions);
+    if (!page.next) return out;
+    after = page.next;
+  }
+}
+
+// When it was last said, else begun: newest first.
+const newest = (a, b) => (b.ended_at ?? b.started_at ?? "").localeCompare(a.ended_at ?? a.started_at ?? "") || (a.key < b.key ? -1 : 1);
+
 async function list(page) {
-  const lists = await Promise.all(KINDS.map(([kind]) => file(`index/${kind}.json`).then((v) => (Array.isArray(v?.sessions) ? v.sessions : []))));
+  const all = await rows();
+  // An archive imported before its rows were lists its index files until its
+  // next import fills them (docs/technical-debt-ledger.md).
+  const lists = all?.length
+    ? KINDS.map(([kind]) => all.filter((e) => e.kind === kind).sort(newest))
+    : await Promise.all(KINDS.map(([kind]) => file(`index/${kind}.json`).then((v) => (Array.isArray(v?.sessions) ? v.sessions : []))));
   const head = el("header", "archive-head");
   head.append(el("h1", null, "Session Archive"));
   if (lists.every((l) => !l.length)) {

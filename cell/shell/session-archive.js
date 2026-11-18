@@ -1,6 +1,7 @@
 // The person's Session Archive (templates/sessions/README.md): its chats,
-// newest first, as its chats' index lists them (`index/chat.json`, read
-// with this page's session), which the History page lists with the
+// as its rows list them (its app's `sessions`, asked with this page's
+// session; an archive imported before its rows were, its `index/chat.json`
+// until its next import fills them), which the History page lists with the
 // person's chats (history-page.js; Paul, 2026-10-31: in place of a
 // sidebar section of their own). One opens in the middle column,
 // read-only: the archive's own page for it (`/?s=<key>`), framed as a chat
@@ -8,11 +9,11 @@
 // folded away. The archive is the one fragment of kind `sessions` the
 // person owns; the shell makes none (`fragment session import` does).
 //
-// The index is read again as the person's list is read (each change it
+// The list is read again as the person's list is read (each change it
 // tells this page of) at most once a minute, at once when the archive is
 // new to this page, and as the page comes back into view: an import moves
 // the archive's files and not their list.
-// `changed`: the index read again, or the conversation open in it moved.
+// `changed`: the list read again, or the conversation open in it moved.
 //
 // History's search asks the archive's own search too (`search`), which
 // each import writes (templates/sessions/README.md, Search): its chats
@@ -56,11 +57,31 @@ export function createSessionArchive({
     const mine = ++read.asked;
     read.at = Date.now();
     // failed, what was read before stays: a failure is not "none"
-    const index = await api("GET", `/api/f/${seg(name)}/file?path=${encodeURIComponent("index/chat.json")}`).catch((e) => (e.status === 404 ? { sessions: [] } : null));
-    if (mine !== read.asked || !index) return;
+    const entries = await chatsOf(name).catch(() => null);
+    if (mine !== read.asked || !entries) return;
     read.name = name;
-    read.entries = Array.isArray(index.sessions) ? index.sessions : [];
+    read.entries = entries;
     changed();
+  }
+
+  // the archive's chats, every page of its rows; none yet (or no app to
+  // ask), its chats' index file, gone once its next import fills its rows
+  async function chatsOf(name) {
+    const out = [];
+    for (let after = ""; ;) {
+      const page = await api("POST", `/api/f/${seg(name)}/ops/sessions`, { id: `history-${Date.now()}-${read.asked}`, input: { kind: "chat", after } })
+        .then((r) => r?.result, (e) => (e.status === 404 ? null : Promise.reject(e)));
+      if (!Array.isArray(page?.sessions)) break;
+      out.push(...page.sessions);
+      if (!page.next) return out.length ? out : chatsIndexed(name);
+      after = page.next;
+    }
+    return chatsIndexed(name);
+  }
+
+  async function chatsIndexed(name) {
+    const index = await api("GET", `/api/f/${seg(name)}/file?path=${encodeURIComponent("index/chat.json")}`).catch((e) => (e.status === 404 ? { sessions: [] } : Promise.reject(e)));
+    return Array.isArray(index?.sessions) ? index.sessions : [];
   }
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) load().catch(() => {});

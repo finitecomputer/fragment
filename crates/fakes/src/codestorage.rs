@@ -54,6 +54,9 @@ use crate::http::{Request, Response, Server};
 use fragment_core::codestorage::{Claims, OrgKey, CHUNK_MAX};
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
+/// Rows a session archive's list answers a page (templates/sessions/app.mjs
+/// answers 1000): two, so the CLI's paging is exercised.
+const LIST_PAGE: usize = 2;
 
 pub struct Options {
     pub org: String,
@@ -196,6 +199,10 @@ struct State {
     /// (`enable_search`; crate::search), by its name.
     #[serde(skip)]
     search: BTreeMap<String, crate::search::Index>,
+    /// The rows of each session archive whose list a test turned on
+    /// (`enable_list`; templates/sessions/app.mjs), by its name, then key.
+    #[serde(skip)]
+    lists: BTreeMap<String, BTreeMap<String, Value>>,
     /// Another writer's moves still to land, each just ahead of the next
     /// search upsert to that fragment (`land_before_upserts`), by its name.
     #[serde(skip)]
@@ -568,6 +575,37 @@ impl Inner {
                     Some(index) => index.handle(op, req),
                     None => problem(404, &format!("no route {m} {path}")),
                 };
+            }
+            // a session archive's list (templates/sessions/app.mjs: its
+            // `sessions` and `filed`), for a fragment whose list is on;
+            // another's is a host before it (404)
+            if let Some((name, op)) = path.strip_prefix("/api/f/").and_then(|p| p.split_once("/ops/")).filter(|_| m == "POST") {
+                let Some(rows) = st.lists.get_mut(name) else { return problem(404, &format!("no route {m} {path}")) };
+                let input = serde_json::from_slice::<Value>(&req.body).unwrap_or_default()["input"].clone();
+                let result = match op {
+                    "sessions" => {
+                        let after = input["after"].as_str().unwrap_or("");
+                        let page: Vec<Value> = rows.range::<str, _>((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded)).take(LIST_PAGE + 1).map(|(_, v)| v.clone()).collect();
+                        let next = (page.len() > LIST_PAGE).then(|| page[LIST_PAGE - 1]["key"].clone());
+                        json!({ "sessions": page.into_iter().take(LIST_PAGE).collect::<Vec<_>>(), "next": next })
+                    }
+                    "filed" => {
+                        for row in input["rows"].as_array().into_iter().flatten() {
+                            let Some(key) = row["key"].as_str().filter(|_| row["kind"].is_string()) else { return problem(422, "no entry") };
+                            let mut row = row.clone();
+                            if row["commit"].is_null() {
+                                row.as_object_mut().map(|o| o.remove("commit"));
+                            }
+                            rows.insert(key.to_string(), row);
+                        }
+                        for key in input["gone"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                            rows.remove(key);
+                        }
+                        json!({})
+                    }
+                    _ => return problem(404, &format!("no operation {op}")),
+                };
+                return Response::json(200, &json!({ "result": result, "replayed": false }));
             }
             // the caller's list (`GET /api/fragments`): every repo, as its
             // owner's, so a bare label resolves (`Client::fragment`)
@@ -1361,6 +1399,20 @@ impl CodeStorage {
         self.with(|st| {
             st.search.entry(name.into()).or_default();
         });
+    }
+
+    /// Turns on the session archive's list for fragment `name` (with
+    /// `host_routes`); another's ops answer as a host before it (404).
+    pub fn enable_list(&self, name: &str) {
+        self.with(|st| {
+            st.lists.entry(name.into()).or_default();
+        });
+    }
+
+    /// Fragment `name`'s list's rows, by key, when its list is on: to read
+    /// or to seed.
+    pub fn list_rows<T>(&self, name: &str, f: impl FnOnce(&mut BTreeMap<String, Value>) -> T) -> Option<T> {
+        self.with(|st| st.lists.get_mut(name).map(f))
     }
 
     /// Each of `ahead` lands just ahead of one of the next search upserts

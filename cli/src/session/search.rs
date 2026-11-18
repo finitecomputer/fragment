@@ -6,8 +6,8 @@
 //! After an import's writes, the archive's search is reconciled with the
 //! archive **as it stands then**, not as this import left it: another
 //! import may have written since (newer copies, conversations of its own).
-//! Its indexes at main's head say each conversation's sha256, and its files
-//! changed since them are read (`held`, `found`); each conversation whose
+//! Its rows say each conversation's sha256, and the files no row
+//! describes are read (`held`, `found`); each conversation whose
 //! sha256 is not the revision search holds for its file is written, its
 //! bytes read at that head and its revision theirs. Search is read before
 //! the archive, so a revision it holds is never of a newer copy than the
@@ -131,12 +131,12 @@ pub(super) enum Wrote {
 }
 
 /// The archive at main's head as it stands now: the head, and each
-/// conversation its `sessions/` holds, by key, as its indexes describe it
-/// or, where they may not, as its file is (`found`).
-fn archive_now(c: &Client, name: &str, storage: &CodeStorage, blobs: &Blobs) -> Result<(Option<String>, BTreeMap<String, Entry>)> {
-    let h = super::held(storage, blobs)?;
-    let found: BTreeMap<String, Entry> = super::found(c, name, storage, &h, &BTreeMap::new())?.into_iter().map(|e| (e.key.clone(), e)).collect();
-    let entries = h.stored.keys().filter_map(|k| found.get(k).or_else(|| h.indexed.get(k)).map(|e| (k.clone(), e.clone()))).collect();
+/// conversation its `sessions/` holds, by key, as its row describes it or,
+/// where none does, as its file is (`found`).
+fn archive_now(c: &Client, name: &str, storage: &CodeStorage) -> Result<(Option<String>, BTreeMap<String, Entry>)> {
+    let h = super::held(c, name, storage)?;
+    let mut entries = h.indexed.clone();
+    entries.extend(super::found(c, name, storage, &h)?.into_iter().map(|r| (r.entry.key.clone(), r.entry)));
     Ok((h.head, entries))
 }
 
@@ -280,7 +280,6 @@ pub fn sync(c: &Client, name: &str, spool: &Spool) -> Searched {
         Ok(s) => s,
         Err(e) => return Searched::Skipped { why: format!("{e:#}") },
     };
-    let blobs = Blobs::new(c, name);
     let (mut written, mut unchanged, mut left_out, mut refused, mut refused_count) = (0, 0, 0, Vec::new(), 0);
     // after a pass, the conversations its writes found overtaken
     let mut unresolved: BTreeSet<String> = BTreeSet::new();
@@ -292,7 +291,7 @@ pub fn sync(c: &Client, name: &str, spool: &Spool) -> Searched {
                 Err(_) => break,
             };
         }
-        let (head, entries) = match archive_now(c, name, &storage, &blobs) {
+        let (head, entries) = match archive_now(c, name, &storage) {
             Ok(now) => now,
             Err(e) if pass == 0 => return Searched::Skipped { why: format!("reading the archive: {e:#}") },
             Err(_) => break,
