@@ -769,11 +769,12 @@ impl LedgerCell {
     /// store, at the ledger's now, in one synchronous step (no other call
     /// runs between), and nothing is written: not the head, which `op`
     /// cannot change, nor the alarm, which the write that made the head
-    /// set and each sweep sets again (F14). Its person is told when what
-    /// the ledger says changed by the clock alone (`told`, which writes
-    /// only then), as after a mutation. A ledger no call has written yet
-    /// is made by its first (`head`: a person's default plan is a command
-    /// it keeps), so that call is a mutation, writing it.
+    /// set and each sweep sets again, unless it was lost (`alarm_kept`)
+    /// (F14). Its person is told when what the ledger says changed by the
+    /// clock alone (`told`, which writes only then), as after a mutation.
+    /// A ledger no call has written yet is made by its first (`head`: a
+    /// person's default plan is a command it keeps), so that call is a
+    /// mutation, writing it.
     async fn read<T: 'static>(&self, op: impl FnOnce(&Ledger, &SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
         let now = js::now_ms() + self.offset_ms()?;
         let store = SqlStore::new(self.sql());
@@ -783,8 +784,24 @@ impl LedgerCell {
         let answer = op(&ledger, &store, now);
         store.checked()?;
         self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok())));
+        if self.armed.get().is_none() {
+            self.alarm_kept(ledger.next_sweep_ms(now)).await?;
+        }
         self.told();
         answer.map_err(Failed::Refused)
+    }
+
+    /// An activation's first read keeps the alarm: the one set is read,
+    /// not written, or, when none is (a sweep that failed, its retry unset
+    /// too), `next` is set, as a mutation would set it. The sweep rolls
+    /// each month even when nothing else changes the ledger, and a month's
+    /// included credit pays a debt as it arrives.
+    async fn alarm_kept(&self, next: i64) -> CellResult<()> {
+        match self.state.storage().get_alarm().await? {
+            Some(real) => self.armed.set(Some(real + self.offset_ms()?)),
+            None => self.arm(next).await?,
+        }
+        Ok(())
     }
 
     /// Its person's pages told (`changed`) when what the ledger says (its
