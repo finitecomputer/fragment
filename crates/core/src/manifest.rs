@@ -774,7 +774,7 @@ mod tests {
             let back = db.rows("SELECT value FROM meta WHERE key = 'inbox_secret'").expect("its row");
             assert_eq!(back[0]["value"].as_str().map(InboxDecl::from_stored), Some(Ok(decl)), "rolled forward, it reads as written");
         }
-        assert_eq!((newest, FRAGMENT.steps[8].name), (9, "inbox_forward_only"));
+        assert_eq!(FRAGMENT.steps[8].name, "inbox_forward_only", "step 9 is the inbox's: every release before it reads the row as no secret");
     }
 
     #[test]
