@@ -26,6 +26,7 @@ mod faces;
 mod deliver;
 mod doc;
 mod door;
+mod elsewhere;
 mod finite_private;
 mod search;
 mod search_across;
@@ -157,6 +158,7 @@ const LANES: &[Lane] = &[
     admin::admin_page,
     shell::shell_platform,
     computers::computers,
+    elsewhere::elsewhere,
     export::export,
     search::search,
     search_across::search_across,
@@ -202,7 +204,7 @@ const LANES: &[Lane] = &[
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 5] = [
     &[
-        "keys", "levers", "delegation", "orgs", "admin-page", "computers", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask",
+        "keys", "levers", "delegation", "orgs", "admin-page", "computers", "elsewhere", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask",
         "agent-app", "agent-restart", "checkout",
     ],
     &["shell-ui"],

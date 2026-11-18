@@ -239,7 +239,7 @@ impl FragmentCell {
         // its checks: JSON only, and a session or an anonymous principal.
         // No operation name has a `/`, so none is ever mistaken for one.
         if let Some(channel) = op.strip_prefix(SITE_POST_PREFIX).filter(|_| caller.site) {
-            let (record, replayed) = self.post(caller, facts, principal, link, channel, &body.id, &body.input).await?;
+            let (record, replayed) = self.post(caller, facts, principal, link, channel, &body.id, &body.input, crate::channels::POST_TRIGGERS_DEPTH).await?;
             let result = serde_json::value::to_raw_value(&record).expect("a record serializes");
             return Ok(Answered { result, replayed });
         }
@@ -311,6 +311,7 @@ impl FragmentCell {
             OpKind::Query => {
                 // a query publishes nothing, so it is told no channels
                 let meta = json!({ "principal": npub::display(inv.asker.unwrap_or(inv.principal)), "agent": agent, "role": inv.role });
+                let _at = self.at_depth(inv.depth);
                 match facet.query(inv.op, &input_text, &meta).await? {
                     Answer::Ran(q) => bounded(Answered { result: q.result, replayed: false }),
                     Answer::Refused(why) => Err(refused(why, inv.op)),

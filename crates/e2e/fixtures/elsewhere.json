@@ -1,0 +1,7 @@
+{
+  "operations": {
+    "act": { "kind": "query", "role": "editor" },
+    "relay": { "kind": "job" }
+  },
+  "triggers": [{ "channel": "inbox", "run": "relay" }]
+}

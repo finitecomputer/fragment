@@ -1159,7 +1159,7 @@ impl PrincipalCell {
         };
         let url = Url::parse(&url).map_err(|e| CellError::host(format!("{url}: {e}")))?;
         let routed = Routed { name: name.to_string(), url, signed: Some(Signed::new(identity, None)), credential: None };
-        routed.ask(&self.env, method, &inner, None, range).await
+        routed.ask(&self.env, method, &inner, None, range.map(|r| ("range", r))).await
     }
 
     /// A fragment's route as the person: its answer's bytes, or its refusal

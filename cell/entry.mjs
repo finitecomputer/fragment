@@ -157,6 +157,26 @@ export class Search extends WorkerEntrypoint {
   status() { return this.#answer("status", {}); }
 }
 
+// The app acting in another fragment (acting.rs), handed to its facet as
+// `env.FRAGMENTS` bound to one fragment by `props`, as SEARCH is: as that
+// fragment's own principal, its agent, whom the target checks as it would
+// the agent's own request. It answers as SEARCH does, `{answer}` or a
+// plain `{error}`, which platform.mjs's `otherFragments` throws.
+export class Fragments extends WorkerEntrypoint {
+  async #answer(act, name, channel, body) {
+    const { fragment } = this.ctx.props;
+    const path = `call/fragments/${act}/${encodeURIComponent(name)}/${encodeURIComponent(channel)}`;
+    const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, path, JSON.stringify(body ?? {})));
+    const answer = await resp.json().catch(() => ({}));
+    if (resp.ok) return { answer };
+    return { error: { message: answer.message || `fragments.${act} answered ${resp.status}`, code: answer.error ?? null, status: resp.status } };
+  }
+
+  post(name, channel, record) { return this.#answer("post", name, channel, record); }
+  draft(name, channel, draft) { return this.#answer("draft", name, channel, draft); }
+  records(name, channel, page) { return this.#answer("records", name, channel, page); }
+}
+
 // One run of an operation (docs/api.md, Jobs and triggers). Each round asks
 // the supervisor to advance the job to its next step, then performs that
 // step through the supervisor, which keeps the step's answer before it

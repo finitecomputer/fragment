@@ -113,6 +113,8 @@ pub struct FragmentCell {
     /// Test fleets only: the facet start the `facet-calls` lever counts
     /// capability calls for, and how many it has made.
     pub(crate) facet_calls: Cell<(u32, u64)>,
+    /// The hop depths of the app's calls under way (acting.rs `at_depth`).
+    pub(crate) app_depths: RefCell<Vec<u32>>,
     /// What this activation knows of its live sockets (live.rs).
     pub(crate) live: RefCell<crate::live::LiveMemory>,
     /// The minute it last set the alarm to close a request count for.
@@ -162,6 +164,7 @@ impl DurableObject for FragmentCell {
             swept: Cell::new(false),
             woke: Cell::new(false),
             facet_calls: Cell::new((0, 0)),
+            app_depths: RefCell::default(),
             settling: RefCell::default(),
             search_sending: RefCell::default(),
             app,
@@ -1013,9 +1016,13 @@ impl FragmentCell {
         self.ready()?;
         // the app facet's capabilities: each call one of its subrequests,
         // to a fragment that is
-        if calls::CAPABILITIES.contains(&path) {
+        let acts = path.starts_with(crate::acting::PREFIX);
+        if calls::CAPABILITIES.contains(&path) || acts {
             self.facet_calls_lever()?;
             self.name()?;
+        }
+        if acts {
+            return self.act(path, body).await;
         }
         match path {
             KeysLever::PATH if self.cfg.test_hooks => {
@@ -1225,9 +1232,10 @@ impl FragmentCell {
             }
             (Method::Get, ["api", "channels", channel, "newest"]) => self.newest_api(&caller, channel),
             (Method::Post, ["api", "channels", channel]) => {
+                let depth = req.headers().get(crate::jobs::HOPS_HEADER)?.and_then(|h| h.parse().ok());
                 let body = body_json(&mut req).await?;
                 let channel = channel.to_string();
-                self.post_api(&caller, &channel, body).await
+                self.post_api(&caller, &channel, body, depth).await
             }
             (Method::Put, ["api", "channels", channel, "draft"]) => {
                 let body = body_json(&mut req).await?;

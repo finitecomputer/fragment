@@ -612,6 +612,8 @@ impl FragmentCell {
                     "door": self.job_door()?,
                 });
                 let results: Vec<Value> = results.iter().map(|r| serde_json::to_value(r).expect("a step result serializes")).collect();
+                // what the job asks of another fragment meanwhile is as deep as it (acting.rs)
+                let _at = self.at_depth(run.depth);
                 let answer = facet.call("__job", &[op.as_str().into(), input, meta, Value::Array(results)]).await.map_err(|e| match e.code {
                     ErrorCode::NodeFull => e,
                     _ => CellError::host(format!("the app facet: {}", e.message)),

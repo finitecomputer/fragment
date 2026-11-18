@@ -191,19 +191,21 @@ impl Routed {
     /// search across fragments, a sign-in's look. `inner` is its route
     /// there (`/api/…`, `/serve/…`, or the platform's own `/search/asked`
     /// and `/signin/known`, which the router maps no outside path to);
-    /// `body` is JSON, and `range` a byte range of the answer. Asked again
-    /// while the fragment refuses this release (it did nothing); its answer
-    /// as the fragment made it. The router's own forward (lib.rs) is not
-    /// one: it passes a client's headers, and its body may stream through.
-    pub(crate) async fn ask(&self, env: &Env, method: Method, inner: &str, body: Option<&str>, range: Option<&str>) -> CellResult<Response> {
+    /// `body` is JSON, and `header` one of the platform's own (a byte
+    /// range of the answer, or a capability's hop depth: acting.rs). Asked
+    /// again while the fragment refuses this release (it did nothing); its
+    /// answer as the fragment made it. The router's own forward (lib.rs) is
+    /// not one: it passes a client's headers, and its body may stream
+    /// through.
+    pub(crate) async fn ask(&self, env: &Env, method: Method, inner: &str, body: Option<&str>, header: Option<(&str, &str)>) -> CellResult<Response> {
         let make = || {
             let headers = Headers::new();
             self.to_headers(&headers)?;
             if body.is_some() {
                 headers.set("content-type", "application/json")?;
             }
-            if let Some(r) = range {
-                headers.set("range", r)?;
+            if let Some((k, v)) = header {
+                headers.set(k, v)?;
             }
             let mut init = RequestInit::new();
             init.with_method(method.clone()).with_headers(headers);

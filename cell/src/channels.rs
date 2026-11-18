@@ -128,8 +128,9 @@ const _: () = assert!(retry_horizon_ms() < crate::ops::LEDGER_KEPT_MS);
 const POST_INDEX: i64 = 0;
 /// A post is a call from outside, as a mutation called from outside is
 /// (depth 0): the runs its record triggers are one hop deeper, as that
-/// mutation's records' are.
-const POST_TRIGGERS_DEPTH: u32 = 1;
+/// mutation's records' are. A post a fragment's app makes elsewhere says
+/// how deep its own call was (acting.rs): its runs are one hop deeper.
+pub(crate) const POST_TRIGGERS_DEPTH: u32 = 1;
 
 // A post's retry within the horizon finds the runs its first try started.
 const _: () = assert!(retry_horizon_ms() < limits::RUN_RETENTION_MS);
@@ -488,10 +489,10 @@ impl FragmentCell {
     /// spends a public call. The same (principal, id) again answers the
     /// record it appended and appends nothing; a retry that finds it also
     /// finishes what the first try left undone (its deliveries, its
-    /// triggers' runs). Another body under that id is 409. Answers the
-    /// record, and whether it was a replay.
+    /// triggers' runs, at `depth`). Another body under that id is 409.
+    /// Answers the record, and whether it was a replay.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn post(&self, caller: &Caller, facts: &Facts, principal: &str, link: bool, channel: &str, id: &str, body: &Value) -> CellResult<(ChannelRecord, bool)> {
+    pub(crate) async fn post(&self, caller: &Caller, facts: &Facts, principal: &str, link: bool, channel: &str, id: &str, body: &Value, depth: u32) -> CellResult<(ChannelRecord, bool)> {
         let standing = self.standing(caller, link)?;
         // whether the caller can see the fragment at all comes first
         decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
@@ -526,7 +527,7 @@ impl FragmentCell {
         // mutation's effects are tried again; later, the runs it started may
         // be forgotten, and it would start them twice.
         if appended || js::now_ms() - record.at < retry_horizon_ms() {
-            self.published(&record, appended, POST_TRIGGERS_DEPTH, &mut laps).await?;
+            self.published(&record, appended, depth, &mut laps).await?;
         }
         laps.log("post", json!({ "fragment": facts.name, "channel": channel, "seq": record.seq, "replayed": !appended }));
         Ok((record, !appended))
@@ -744,10 +745,14 @@ impl FragmentCell {
     }
 
     /// `POST /api/f/<name>/channels/<channel>`: a signed poster.
-    pub(crate) async fn post_api(&self, caller: &Caller, channel: &str, post: PostRecord) -> CellResult<Response> {
+    /// `depth`: the depth its record's triggers run at, when another
+    /// fragment's app posted it (`x-fragment-hops`, which only the
+    /// platform sets here: acting.rs).
+    pub(crate) async fn post_api(&self, caller: &Caller, channel: &str, post: PostRecord, depth: Option<u32>) -> CellResult<Response> {
         let who = self.caller_id(caller)?.to_string();
         let facts = self.facts()?;
-        let (record, replayed) = self.post(caller, &facts, &who, false, channel, &post.id, &post.body).await?;
+        let depth = depth.unwrap_or(POST_TRIGGERS_DEPTH);
+        let (record, replayed) = self.post(caller, &facts, &who, false, channel, &post.id, &post.body, depth).await?;
         json_response(&Posted { record, replayed })
     }
 

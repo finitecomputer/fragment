@@ -19,6 +19,8 @@
 // / query / status` write and ask the fragment's own search index
 // (docs/api.md, "A fragment's search") as the fragment itself, its owner
 // paying; camel case, so no operation (`a-z`, `0-9`, `_`) can shadow it.
+// `this.otherFragments.post / draft / records` act in another fragment as
+// this one's agent (docs/api.md, "Acting in another fragment").
 //
 // A job's method gets (input, job) and runs as a Workflow: each `await
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
@@ -496,6 +498,22 @@ export class App extends AuthorApp {
       delete: (source) => answered(cap.delete(source)),
       query: (question) => answered(cap.query(question)),
       status: () => answered(cap.status()),
+    };
+  }
+
+  // Another fragment, acted in through the FRAGMENTS capability as this
+  // fragment's agent (acting.rs): a refusal throws as `searchIndex`'s does.
+  get otherFragments() {
+    const cap = this.env.FRAGMENTS;
+    const answered = async (pending) => {
+      const { answer, error } = await pending;
+      if (error) throw Object.assign(new Error(error.message), error);
+      return answer;
+    };
+    return {
+      post: (name, channel, record) => answered(cap.post(String(name), String(channel), record)),
+      draft: (name, channel, draft) => answered(cap.draft(String(name), String(channel), draft)),
+      records: (name, channel, page = {}) => answered(cap.records(String(name), String(channel), page)),
     };
   }
 

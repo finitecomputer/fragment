@@ -1126,6 +1126,26 @@ at its pin; writes land on `main` as commits the cell makes.
   swap on the blob `sha` (`null`: must not exist), failing with `conflict`.
 - A move of `main` by the cell's own commit carries its writer's depth.
 
+### Acting in another fragment
+
+An agent's fragment acts in other fragments as its agent, from anything
+async, through its `FRAGMENTS` capability (`this.otherFragments`):
+
+- `post(name, channel, {id, body})` → `{record, replayed}`, as `POST
+  /api/f/{name}/channels/{channel}` (`PostRecord`);
+- `draft(name, channel, {turn, text})` → `{ok}`, as `PUT …/draft`;
+- `records(name, channel, {after?, before?, limit?})` → a `ChannelPage`,
+  as `GET …/channels/{channel}`.
+
+Each is checked there exactly as the agent's own signed request (its
+membership and role, its owner's hold, a `relayed` record's door), so it
+opens nothing the agent could not do. A fragment that is no agent's is
+refused (403); a refusal throws with its `code` and `status`. Each is one
+of the app's capability calls. A post's record triggers its runs a hop
+deeper than the app's call that made it (a job's run or a query: the
+deepest under way), as a job's publish does, so fragments triggering one
+another stop at `HOP_DEPTH_MAX`.
+
 ### Blobs
 
 A file of 1 MiB or more is a git-lfs v1 pointer in git, its bytes a blob in
@@ -1679,7 +1699,8 @@ run at its next step as its next attempt (`run.restarted`), held at the
 Every job call and trigger is a **run**: `queued`, `running`, `succeeded`,
 `held` or `blocked`. Triggered runs act as the fragment (its npub) with an
 editor's role, at a `depth`: a record appended at depth d triggers at
-d + 1 (a delivery's `x-fragment-hops`), and past `HOP_DEPTH_MAX` a run is
+d + 1 (a delivery's `x-fragment-hops`; another fragment's post, Acting in
+another fragment), and past `HOP_DEPTH_MAX` a run is
 `blocked` (`cycle.detected`). An operation's triggers pause themselves
 (`op.auto-paused`) after `AUTO_PAUSE_HELD` held runs in
 `AUTO_PAUSE_WINDOW_MS` or `TRIGGERED_RUNS_PER_HOUR` triggered runs in an
