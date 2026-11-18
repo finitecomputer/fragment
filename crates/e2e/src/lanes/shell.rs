@@ -5806,8 +5806,8 @@ fn own_skills(api: &Api, session: &str) -> Result<Vec<String>> {
 /// row): a person with an agent and no skills fragment (theirs deleted
 /// here; people set up before 2026-10-03 have none). Valid: Settings'
 /// Skills offers Open, which makes the fragment from the blessed template
-/// and opens it. Replay: loaded again, there is no second. Loading makes
-/// none unasked.
+/// and opens the Skills page on it (skills-page.js). Replay: loaded again,
+/// there is no second. Loading makes none unasked.
 fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let before = own_skills(api, session)?;
@@ -5829,9 +5829,9 @@ fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     let manifest_of = || shell(api, session, "GET", &format!("/api/f/{name}/manifest"), None, &[]);
     s.eventually(wait, || manifest_of().is_ok_and(|m| m.body["template"] == "skills"));
     let manifest = manifest_of()?;
-    let window = b.until(page, &format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{name}\"]"))), wait);
+    let window = b.until(page, "location.pathname === '/skills' && !!document.querySelector('#skills-page .skills-tab')", wait);
     s.ok(
-        "Open makes them one from the blessed template, and opens it",
+        "Open makes them one from the blessed template, and opens the Skills page",
         made && manifest.body["template"] == "skills" && window,
         json!({ "skills": now, "manifest": manifest.body, "window": window }),
     );
@@ -5878,6 +5878,42 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         w.status == 200 && offered && window && opened,
         json!({ "write": w.status, "offered": offered, "window": window, "open": b.eval_in_frame(page, &agent, "({ hash: location.hash, active: document.querySelector('#tree .row.active')?.dataset.path ?? null })").unwrap_or(Value::Null) }),
     );
+    back_to_settings(b, page, wait);
+    optional_skills_ui(s, api, b, page, session, &skills)
+}
+
+/// The Skills page's library: the pinned Hermes image's optional skills
+/// (the release's catalog in the skills fragment), each a switch. Valid:
+/// switched on, the fragment holds its `optional/hermes/<id>.on`, which
+/// is what the image's boot installs; switched off, it is gone. A labelled
+/// skill asks first. Replay: loaded again, the switch is as it was left.
+fn optional_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, skills: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let marker = "optional/hermes/creative/excalidraw.on";
+    let has = |path: &str| shell(api, session, "GET", &format!("/api/f/{skills}/files"), None, &[]).is_ok_and(|r| r.body["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == path)));
+    b.eval(page, "(document.querySelector('#settings-skills [data-action=open-skills]').click(), true)")?;
+    let library = "[...document.querySelectorAll('#skills-page .skills-tab')].find((t) => t.dataset.tab === 'library')";
+    let shown = b.until(page, &format!("location.pathname === '/skills' && !!{library}"), wait);
+    b.eval(page, &format!("({library}.click(), true)"))?;
+    let toggle = "document.querySelector('#skills-page [data-skill=\"creative/excalidraw\"] .skills-switch')";
+    let listed = b.until(page, &format!("!!{toggle} && !{toggle}.checked"), wait);
+    let count = b.eval(page, "document.querySelectorAll('#skills-page [data-skill]').length")?;
+    s.ok("the Skills page's library lists the pinned Hermes image's optional skills, each a switch", shown && listed && count.as_u64().is_some_and(|n| n > 100), json!({ "shown": shown, "listed": listed, "skills": count }));
+    b.eval(page, &format!("({toggle}.click(), true)"))?;
+    let on = s.eventually(wait, || has(marker));
+    let said = b.until(page, "/Excalidraw is on/.test(document.querySelector('#skills-page .skills-status')?.textContent ?? '')", wait);
+    s.ok("switched on, the skills fragment holds its switch, and the page says when the agents have it", on && said, json!({ "on": on, "said": said }));
+    b.reload(page)?;
+    b.until(page, &format!("location.pathname === '/skills' && !!{library}"), wait);
+    b.eval(page, &format!("({library}.click(), true)"))?;
+    let kept = b.until(page, &format!("!!{toggle} && {toggle}.checked"), wait);
+    b.eval(page, &format!("({toggle}.click(), true)"))?;
+    let off = s.eventually(wait, || !has(marker));
+    s.ok("loaded again it is still on; switched off, its switch is gone", kept && off, json!({ "kept": kept, "off": off }));
+    let labelled = "document.querySelector('#skills-page [data-skill=\"productivity/telephony\"]')";
+    b.eval(page, &format!("({labelled}.querySelector('.skills-switch').click(), true)"))?;
+    let asked = b.until(page, &format!("!!{labelled}.querySelector('.skills-ask')"), wait);
+    s.ok("a skill that can spend money asks before it is on, and writes nothing until then", asked && !has("optional/hermes/productivity/telephony.on"), json!({ "asked": asked }));
     back_to_settings(b, page, wait);
     Ok(())
 }
