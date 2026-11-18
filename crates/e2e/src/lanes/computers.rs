@@ -14,7 +14,9 @@
 //! owner answers its prompt; a reply carries a file. The swap lends the
 //! agent every connection its owner has unless its owner narrows them
 //! (decision 44). Put to sleep, a record on the chat wakes it, its `/data`
-//! restored, and nothing is answered twice. A second agent on the same
+//! restored, and nothing is answered twice. A message as an idle sleep
+//! saves cancels that sleep, and is answered on the container still
+//! there, with no start. A second agent on the same
 //! computer answers when @mentioned, the lead otherwise. Its ports answer
 //! its owner on its own origin through a one-time ticket, in a tab or in a
 //! frame of the platform's page (frames.rs, `computer_ports`), and no one
@@ -421,6 +423,86 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
         format!("{r} / {newest}"),
     );
     Ok(())
+}
+
+/// The checks of a wake into an idle sleep (docs/computers.md, Lifecycle),
+/// each skipped off the stub and the fakes.
+const CANCEL_CHECKS: [&str; 3] = [
+    "with nothing holding it, it goes to sleep on its own, its sleep's save under way (held there by the lever's hold-saves)",
+    "a message as its idle sleep saves cancels the sleep: awake on the same container, the save going on and its guest still held, the message not yet taken",
+    "its save let go, it answers the message on that container with no start made, its sleep's save kept as its newest, no failure told",
+];
+
+/// A message posted while an idle sleep's save is under way (FIN-474): its
+/// wake cancels the sleep, the save goes on as an awake save, and the
+/// message is answered on the container still there, with no start. The
+/// save is held under way by the lever's `hold-saves` until the message is
+/// in, so nothing races a timer. Nothing but always on holds it (the
+/// lever's, turned off), so it sleeps on its own at once. Starts and ends
+/// asleep. Answers how many replies of its agent it added.
+fn cancel_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
+    let view = || api.signed(c.owner, "GET", &format!("/api/computers/{}", c.id), None).map(|r| r.body).unwrap_or(Value::Null);
+    let replies = || agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity);
+    let on = lever_with(api, c.id, json!({ "op": "always-on", "on": true }))?;
+    let up = s.eventually(c.wake, || view()["phase"] == "awake");
+    let woke = view();
+    let before = newest_save(api, c.id);
+    let hold = lever_with(api, c.id, json!({ "op": "hold-saves", "on": true }))?;
+    let off = lever_with(api, c.id, json!({ "op": "always-on", "on": false }))?;
+    let mut saving = Value::Null;
+    let held = s.eventually(Duration::from_secs(60), || {
+        saving = saves_of(api, c.id);
+        saving["phase"]["phase"] == "sleeping" && saving["saving"]["step"] == "save"
+    });
+    s.ok(
+        CANCEL_CHECKS[0],
+        on.status == 200 && up && hold.status == 200 && off.status == 200 && held && saving["phase"]["owner"] == false && saving["generation"] == woke["generation"],
+        json!({ "woke": woke, "saves": saving }),
+    );
+    let answered_before = replies().len();
+    say(40, "still there?")?;
+    let mut cancelled = Value::Null;
+    let awake = s.eventually(Duration::from_secs(15), || {
+        cancelled = saves_of(api, c.id);
+        cancelled["phase"]["phase"] == "awake"
+    });
+    // its save holds the guest to its end: nothing claimed meanwhile
+    std::thread::sleep(QUEUE_DRAIN);
+    let waiting = saves_of(api, c.id);
+    s.ok(
+        CANCEL_CHECKS[1],
+        awake
+            && cancelled["generation"] == woke["generation"]
+            && cancelled["running"] == true
+            && waiting["phase"]["phase"] == "awake"
+            && waiting["saving"]["step"] == "save"
+            && waiting["saving"]["seq"] == saving["saving"]["seq"]
+            && replies().len() == answered_before,
+        json!({ "cancelled": cancelled, "waiting": waiting }),
+    );
+    let let_go = lever_with(api, c.id, json!({ "op": "hold-saves", "on": false }))?;
+    let answered = s.eventually(c.wake, || replies().len() == answered_before + 1);
+    let (after, kept, saves) = (view(), newest_save(api, c.id), saves_of(api, c.id));
+    s.ok(
+        CANCEL_CHECKS[2],
+        let_go.status == 200
+            && answered
+            && replies().last().is_some_and(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("still there?")))
+            && after["phase"] == "awake"
+            && after["generation"] == woke["generation"]
+            && after["restored"] == woke["restored"]
+            && kept["generation"] == woke["generation"]
+            && kept["id"] != before["id"]
+            && kept["held"] == true
+            && saves["unsavedSince"].is_null()
+            && notice(&after, "unsaved").is_null(),
+        json!({ "after": after, "kept": kept, "before": before }),
+    );
+    // asleep, as the checks after it begin
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
+    anyhow::ensure!(slept.body["phase"] == "asleep", "asleep after the cancel checks: {slept}");
+    Ok(1)
 }
 
 /// The crash checks, each skipped off the stub and the fakes. The ones
@@ -2291,11 +2373,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let crashing = Crashing { owner: &owner, owner_id: &owner_id, id: &id, chat: &chat_name, agent: &agent_name, identity: &identity, wake };
         replies_so_far += save_checks(s, api, &crashing, &|n, text| say(n, text))?;
         bound_checks(s, api, &crashing)?;
+        replies_so_far += cancel_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
         disk_checks(s, api, &crashing)?;
     } else {
-        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(DISK_CHECKS.iter()) {
+        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CANCEL_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(DISK_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
         }
     }

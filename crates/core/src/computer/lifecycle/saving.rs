@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Action, Lifecycle, Phase, SaveNote, Step};
-use crate::computer::limits::{HOLD_DEADLINE_MS, SAVE_DEADLINE_MS, SLEEP_DEADLINE_MS};
+use crate::computer::limits::{HOLD_DEADLINE_MS, SAVE_DEADLINE_MS, SAVE_SETTLE_MS, SLEEP_DEADLINE_MS};
 
 /// The save under way (awake, or a sleep's), by its step, and since when
 /// that step began (its deadline counts from there).
@@ -53,6 +53,34 @@ impl Lifecycle {
         self.busy_since_ms = None;
         self.save_asked_ms = now_ms;
         step.actions.push(Action::Sleep { generation });
+    }
+
+    /// Whether something that wants it now cancels the sleep under way: an
+    /// idle one (not its owner's, nor a restart) still at its hold or its
+    /// save. Once its stop begins, its container is going: not then.
+    pub(super) fn cancels_sleep(&self) -> bool {
+        matches!(self.phase, Phase::Sleeping { owner: false, .. }) && matches!(self.saving, Some(Saving::Hold { .. } | Saving::Save { .. }))
+    }
+
+    /// Its idle sleep is cancelled (`cancels_sleep`): awake again on the
+    /// container it has, nothing restored and nothing started. A hold not
+    /// answered yet is let go at once, and the save it was for is due when
+    /// work settles (a turn's end saves instead). A save under way goes on
+    /// as an awake save, held to its end as any is: a backup cut short is
+    /// never sure to be whole or gone, and one that goes on is reported,
+    /// and kept or failed, as every awake save is.
+    pub(super) fn sleep_cancelled(&mut self, generation: u64, now_ms: i64, step: &mut Step) {
+        assert!(self.cancels_sleep(), "only an idle sleep, before its stop, is cancelled");
+        self.phase = Phase::Awake { generation, since_ms: now_ms };
+        if matches!(self.saving, Some(Saving::Hold { .. })) {
+            self.saving = None;
+            if self.keepalives > 0 {
+                self.busy_since_ms = Some(now_ms);
+            } else {
+                self.save_due_ms = Some(now_ms + SAVE_SETTLE_MS);
+            }
+            step.actions.push(Action::Unhold { generation });
+        }
     }
 
     /// Begins a save while it stays awake: its hold first.
@@ -317,15 +345,14 @@ mod tests {
         let mut l = Lifecycle::new();
         let g = started(&mut l, T);
         l.apply(Event::Alarm, T + IDLE_MS);
-        // a record wakes it as it holds: the newest push wins either way
-        l.apply(Event::Wake { why: Wake::Record }, T + IDLE_MS + 100);
         let s = l.apply(Event::Opened { socket: Socket::Keepalive }, T + IDLE_MS + 200);
         assert_eq!(s.actions, vec![Action::Unhold { generation: g }]);
         assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: T + IDLE_MS + 200 });
-        assert!(l.saving().is_none(), "awake: a wake heard as it was held owes nothing more");
-        // its hold's late answer changes nothing
+        assert!(l.saving().is_none(), "awake, held no more");
+        // its hold's late answer changes nothing, but lets go again (its
+        // touch may have landed after the cancel let go of it)
         let before = l.clone();
-        assert!(l.apply(Event::Held { generation: g, held: true }, T + IDLE_MS + 300).actions.is_empty());
+        assert_eq!(l.apply(Event::Held { generation: g, held: true }, T + IDLE_MS + 300).actions, vec![Action::Unhold { generation: g }]);
         assert_eq!(l, before);
         // the work ends: saved as any work is, then idle it sleeps again
         l.apply(Event::Closed { socket: Socket::Keepalive }, T + IDLE_MS + 60_000);

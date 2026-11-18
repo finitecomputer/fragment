@@ -45,7 +45,8 @@ pub enum Phase {
     Awake { generation: u64, since_ms: i64 },
     /// `owner`: its owner's sleep (no keepalive cancels it); `restarting`:
     /// their restart (a save that fails keeps no container); `owes_start`:
-    /// a start follows its stop (a restart's, or a wake heard as it went).
+    /// a start follows its stop (a restart's, or a wake heard as it went
+    /// that did not cancel it: `Lifecycle::cancels_sleep`).
     Sleeping {
         generation: u64,
         since_ms: i64,
@@ -444,7 +445,15 @@ impl Lifecycle {
                         self.hold(now_ms + why.hold_ms());
                         self.start(now_ms, &mut step);
                     }
+                    Phase::Sleeping { generation, .. } if self.cancels_sleep() => {
+                        // wanted before its idle sleep's stop began: it
+                        // stays awake on the container it has
+                        self.hold(now_ms + why.hold_ms());
+                        self.sleep_cancelled(generation, now_ms, &mut step);
+                    }
                     Phase::Sleeping { generation, since_ms, owner, restarting, .. } => {
+                        // its owner's sleep, or one whose stop began: a
+                        // start once its container is gone
                         self.hold(now_ms + why.hold_ms());
                         self.phase = Phase::Sleeping { generation, since_ms, owner, restarting, owes_start: true };
                     }
@@ -601,6 +610,12 @@ impl Lifecycle {
             (Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. }, Event::Held { generation: g, held }) if g == generation && matches!(self.saving, Some(Saving::Hold { .. })) => {
                 self.save(generation, held, now_ms, &mut step);
             }
+            (Phase::Awake { generation, .. }, Event::Held { generation: g, .. }) if g == generation && self.saving.is_none() => {
+                // a hold whose sleep was cancelled as it was made: its touch
+                // may have landed after the cancel let go of it, so it is
+                // let go again, and no guest stays held for nothing
+                step.actions.push(Action::Unhold { generation });
+            }
             (Phase::Awake { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
                 self.saving = None;
                 self.saved(now_ms, &mut step);
@@ -670,10 +685,7 @@ impl Lifecycle {
                     Phase::Sleeping { generation, owner: false, .. } if socket == Socket::Keepalive && matches!(self.saving, Some(Saving::Hold { .. })) => {
                         // the guest took work as its idle sleep held it: it
                         // stays awake, and nothing it claimed is cut (P2)
-                        self.phase = Phase::Awake { generation, since_ms: now_ms };
-                        self.saving = None;
-                        self.busy_since_ms = Some(now_ms);
-                        step.actions.push(Action::Unhold { generation });
+                        self.sleep_cancelled(generation, now_ms, &mut step);
                     }
                     _ => {}
                 }

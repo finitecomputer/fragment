@@ -84,15 +84,18 @@ fn an_agent_joining_a_fragment_wakes_it() {
     assert!(s.actions.is_empty() && s.refused.is_some(), "{s:?}");
 }
 
-/// Goal: a wake racing a sleep wins, and starts a new generation once
-/// the old one is gone; the old one's late reports change nothing.
+/// Goal: a wake racing a sleep whose stop began (its container is going)
+/// wins, and starts a new generation once the old one is gone; the old
+/// one's late reports change nothing.
 #[test]
 fn a_wake_during_sleep_starts_it_again_after() {
     let mut l = Lifecycle::new();
     let g1 = started(&mut l, T);
     l.apply(Event::Alarm, T + IDLE_MS);
-    assert!(matches!(l.phase, Phase::Sleeping { .. }));
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g1, held: true }, T + IDLE_MS + 500));
+    assert_eq!(l.apply(Event::Saved { generation: g1, seq }, T + IDLE_MS + 800).actions, vec![Action::Stop { generation: g1, saved: true }]);
     assert!(l.apply(Event::Wake { why: Wake::Record }, T + IDLE_MS + 1_000).actions.is_empty());
+    assert!(matches!(l.phase, Phase::Sleeping { owes_start: true, .. }));
     let s = l.apply(Event::Asleep { generation: g1 }, T + IDLE_MS + 5_000);
     let s = owed(&mut l, &s, T + IDLE_MS + 5_000);
     assert!(s.actions.contains(&Action::Start { generation: g1 + 1 }), "{s:?}");
@@ -571,4 +574,246 @@ fn a_computer_awake_for_days_is_metered_for_all_of_it() {
     let (from, to) = (metered[0].0, metered[metered.len() - 1].1);
     assert_eq!((from, metered.iter().map(|(a, b)| b - a).sum::<i64>()), (T + 3_000, to - from));
     assert!(until - to < METER_EVERY_MS, "all three days");
+}
+
+/// The wakes there are.
+const WAKES: [Wake; 5] = [Wake::Record, Wake::Presence, Wake::Tab, Wake::Owner, Wake::Joined];
+
+/// A life started at T in the idle sleep its alarm began at `T + IDLE_MS`:
+/// at its hold, or (`saving`) at its save, number 1, held, asked half a
+/// second on. Its generation, and what was metered.
+fn idle_sleep(saving: bool) -> (Lifecycle, u64, Vec<(i64, i64)>) {
+    let mut l = Lifecycle::new();
+    let g = started(&mut l, T);
+    let s = l.apply(Event::Alarm, T + IDLE_MS);
+    assert_eq!(s.actions.last(), Some(&Action::Sleep { generation: g }), "its idle sleep: {s:?}");
+    let mut m = meters(&s);
+    if saving {
+        let s = l.apply(Event::Held { generation: g, held: true }, T + IDLE_MS + 500);
+        assert_eq!(s.actions, vec![Action::Save { generation: g, held: true, seq: 1 }]);
+        m.extend(meters(&s));
+    }
+    (l, g, m)
+}
+
+/// Goal (FIN-474): a wake of any kind (a message's, a pre-wake, a port
+/// tab's, its owner's, a join's) during an idle sleep's hold or save
+/// cancels the sleep: awake again on the container it has, nothing
+/// started or restored, held as that wake holds. At its hold, the hold is
+/// let go at once, and the save it was for is due when work settles:
+/// nothing coming, that save is made awake, and it sleeps once the wake's
+/// hold runs out. At its save, the save goes on, holding the guest to its
+/// end as an awake save does, and is kept as one: its end lets go of the
+/// hold, nothing stops, and what this life did before its sleep is kept.
+/// Method: each wake at each step, then the alarms and reports after it.
+#[test]
+fn any_wake_cancels_an_idle_sleep_before_its_stop() {
+    let at = T + IDLE_MS + 1_000;
+    for why in WAKES {
+        // at its hold
+        let (mut l, g, _) = idle_sleep(false);
+        let s = l.apply(Event::Wake { why }, at);
+        assert_eq!(s.actions, vec![Action::Unhold { generation: g }], "{why:?}");
+        assert_eq!((&l.phase, l.saving()), (&Phase::Awake { generation: g, since_ms: at }, None), "{why:?}");
+        assert_eq!((l.held_until_ms(), l.save_due_ms), (at + why.hold_ms(), Some(at + SAVE_SETTLE_MS)), "{why:?}");
+        let s = l.apply(Event::Alarm, at + SAVE_SETTLE_MS);
+        assert_eq!(s.actions.last(), Some(&Action::Hold { generation: g }), "the save it was for, awake: {why:?}: {s:?}");
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + SAVE_SETTLE_MS + 500));
+        assert_eq!(l.apply(Event::Saved { generation: g, seq }, at + SAVE_SETTLE_MS + 1_000).actions, vec![Action::Unhold { generation: g }]);
+        let s = l.apply(Event::Alarm, at + why.hold_ms());
+        assert_eq!(s.actions.last(), Some(&Action::Sleep { generation: g }), "asleep once the wake's hold runs out: {why:?}: {s:?}");
+        // at its save
+        let (mut l, g, _) = idle_sleep(true);
+        let s = l.apply(Event::Wake { why }, at);
+        assert!(s.actions.is_empty(), "its save holds the guest to its end: {why:?}: {s:?}");
+        assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: at }, "{why:?}");
+        assert_eq!(l.saving(), Some(Saving::Save { since_ms: T + IDLE_MS + 500, held: true, seq: 1 }), "its save goes on: {why:?}");
+        let s = l.apply(Event::Saved { generation: g, seq: 1 }, at + 60_000);
+        assert_eq!((s.actions, s.note, s.ended), (vec![Action::Unhold { generation: g }], SaveNote::Clear, None), "{why:?}");
+        assert!(matches!(l.phase, Phase::Awake { generation, .. } if generation == g) && l.saving().is_none(), "{why:?}");
+        assert_eq!(l.kept_ms, T + IDLE_MS, "what it did before its sleep is kept: {why:?}");
+    }
+}
+
+/// Goal: a wake never cancels its owner's sleep (at its hold or its
+/// save), their restart (an image change is one), an idle sleep its owner
+/// asked for again, or a sleep whose stop began: its save worked, its
+/// saves failed past their bound, or a release before saves were its own
+/// stored it in its stop. Its container is its owner's to stop, or going:
+/// each owes a start once it is asleep, as before. Method: its owner's
+/// wake at each.
+#[test]
+fn a_wake_never_cancels_its_owners_sleep_nor_a_stop() {
+    fn woken(l: &mut Lifecycle, at: i64) {
+        let s = l.apply(Event::Wake { why: Wake::Owner }, at);
+        assert!(s.actions.is_empty() && matches!(l.phase, Phase::Sleeping { owes_start: true, .. }), "{s:?}: {l:?}");
+    }
+    // its owner's sleep, at its hold and at its save
+    for saving in [false, true] {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Sleep, T + 10_000);
+        if !saving {
+            woken(&mut l, T + 10_500);
+        }
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 11_000));
+        if saving {
+            woken(&mut l, T + 11_500);
+        }
+        assert_eq!(l.apply(Event::Saved { generation: g, seq }, T + 12_000).actions, vec![Action::Stop { generation: g, saved: true }]);
+        let s = l.apply(Event::Asleep { generation: g }, T + 13_000);
+        assert_eq!(owed(&mut l, &s, T + 13_000).actions, vec![Action::Start { generation: g + 1 }]);
+    }
+    // their restart
+    let mut l = Lifecycle::new();
+    let g = started(&mut l, T);
+    l.apply(Event::Restart { generation: g }, T + 10_000);
+    woken(&mut l, T + 10_500);
+    assert!(matches!(l.phase, Phase::Sleeping { restarting: true, .. }));
+    // an idle sleep its owner asked for again
+    let (mut l, _, _) = idle_sleep(false);
+    l.apply(Event::Sleep, T + IDLE_MS + 100);
+    woken(&mut l, T + IDLE_MS + 200);
+    // its stop begun, its save kept
+    let (mut l, g, _) = idle_sleep(true);
+    assert_eq!(l.apply(Event::Saved { generation: g, seq: 1 }, T + IDLE_MS + 1_000).actions, vec![Action::Stop { generation: g, saved: true }]);
+    woken(&mut l, T + IDLE_MS + 2_000);
+    let s = l.apply(Event::Asleep { generation: g }, T + IDLE_MS + 5_000);
+    assert_eq!(owed(&mut l, &s, T + IDLE_MS + 5_000).actions, vec![Action::Start { generation: g + 1 }]);
+    // its stop begun, its saves failed past their bound
+    let (mut l, g, _) = idle_sleep(true);
+    let s = l.apply_with(Event::SaveFailed { generation: g, seq: 1, why: "no room".into() }, T + IDLE_MS + 1_000, &Rules { unsaved_max_ms: 0 });
+    assert_eq!(s.actions.last(), Some(&Action::Stop { generation: g, saved: false }), "{s:?}");
+    woken(&mut l, T + IDLE_MS + 2_000);
+    // stored in its stop by a release before saves were its own (no save step)
+    let mut old = Lifecycle { phase: Phase::Sleeping { generation: 1, since_ms: T, owner: false, restarting: false, owes_start: false }, generation: 1, ..Lifecycle::new() };
+    woken(&mut old, T + 1_000);
+}
+
+/// Goal: what comes after a cancel, again or late, changes nothing: a
+/// second wake only holds it longer; its hold's answer, whose touch may
+/// have landed after the cancel let go of it, is let go again; its
+/// sleep's end, a failure from its hold (no container found) or a report
+/// of a save it never asked for is of a sleep no longer under way; and
+/// the save that went on is kept once, a report of it again nothing.
+/// Method: each, after a cancel at the hold and at the save.
+#[test]
+fn what_comes_after_a_cancel_changes_nothing() {
+    let at = T + IDLE_MS + 1_000;
+    // at its hold
+    let (mut l, g, _) = idle_sleep(false);
+    l.apply(Event::Wake { why: Wake::Presence }, at);
+    let before = l.clone();
+    assert_eq!(l.apply(Event::Held { generation: g, held: true }, at + 100).actions, vec![Action::Unhold { generation: g }]);
+    assert_eq!(l, before, "let go again, and nothing else");
+    for e in [Event::Asleep { generation: g }, Event::SaveFailed { generation: g, seq: 0, why: "gone".into() }, Event::Saved { generation: g, seq: 1 }] {
+        assert!(l.apply(e, at + 200).actions.is_empty());
+        assert_eq!(l, before);
+    }
+    let s = l.apply(Event::Wake { why: Wake::Record }, at + 300);
+    assert!(s.actions.is_empty() && l.phase == before.phase && l.held_until_ms() == at + 300 + IDLE_MS, "{s:?}");
+    // at its save
+    let (mut l, g, _) = idle_sleep(true);
+    l.apply(Event::Wake { why: Wake::Presence }, at);
+    let s = l.apply(Event::Wake { why: Wake::Record }, at + 100);
+    assert!(s.actions.is_empty() && matches!(l.saving(), Some(Saving::Save { seq: 1, .. })), "its save goes on: {s:?}");
+    assert_eq!(l.apply(Event::Saved { generation: g, seq: 1 }, at + 200).actions, vec![Action::Unhold { generation: g }]);
+    let before = l.clone();
+    for e in [Event::Saved { generation: g, seq: 1 }, Event::SaveFailed { generation: g, seq: 1, why: "late".into() }, Event::Asleep { generation: g }] {
+        assert!(l.apply(e, at + 300).actions.is_empty());
+        assert_eq!(l, before);
+    }
+}
+
+/// Goal: a cancel survives its isolate. Stored and read back with its
+/// save under way, the save's report keeps it as any; that report lost
+/// with the isolate, the save's deadline fails it as an awake save (held
+/// no more, tried again after a pause), never a sleep's (no unsaved
+/// window, no free time), and it stays awake. Stored at its hold, the
+/// save it was for follows. Method: the lifecycle stored and read as the
+/// DO does, at each point, then its alarms as it asks for them.
+#[test]
+fn a_cancel_survives_its_isolate() {
+    let at = T + IDLE_MS + 1_000;
+    let read = |l: &Lifecycle| Lifecycle::read(&serde_json::to_string(l).unwrap()).unwrap().0;
+    let (mut l, g, _) = idle_sleep(true);
+    l.apply(Event::Wake { why: Wake::Record }, at);
+    let mut l = read(&l);
+    assert_eq!(l.apply(Event::Saved { generation: g, seq: 1 }, at + 1_000).actions, vec![Action::Unhold { generation: g }]);
+    // its report lost: the save's deadline fails it
+    let (mut l, g, _) = idle_sleep(true);
+    l.apply(Event::Wake { why: Wake::Record }, at);
+    let mut l = read(&l);
+    let deadline = T + IDLE_MS + 500 + SAVE_DEADLINE_MS;
+    let mut s = Step::default();
+    // bounded: a meter's alarm every five minutes up to the deadline
+    for _ in 0..8 {
+        let Some(next) = l.next_alarm().filter(|next| *next <= deadline) else { break };
+        s = l.apply(Event::Alarm, next);
+    }
+    assert!(s.actions.contains(&Action::Unhold { generation: g }), "{s:?}");
+    assert!(matches!(l.phase, Phase::Awake { generation, .. } if generation == g) && l.saving().is_none(), "{l:?}");
+    assert_eq!((l.unsaved_since_ms(), l.free_since_ms(), l.save_due_ms), (None, None, Some(deadline + SAVE_RETRY_MS)));
+    // stored at its hold: the save it was for follows
+    let (mut l, g, _) = idle_sleep(false);
+    l.apply(Event::Wake { why: Wake::Record }, at);
+    let mut l = read(&l);
+    assert_eq!(l.apply(Event::Alarm, at + SAVE_SETTLE_MS).actions.last(), Some(&Action::Hold { generation: g }));
+}
+
+/// Goal (money): a cancelled sleep's awake time runs on, metered once and
+/// without a gap: its sleep's steps and all that follows, to its next
+/// sleep's end, in intervals that meet, at its hold and at its save. A
+/// wake heard late into an idle sleep whose save's report was lost (its
+/// isolate gone, days on) bills none of the silence (FIN-511): metered to
+/// its sleep, then from the wake on, its lost save failed as an awake
+/// one's (no free time). Method: every interval metered, each alarm as it
+/// asked and each hold, save and stop answered.
+#[test]
+fn a_cancelled_sleep_is_metered_once_without_a_gap() {
+    let at = T + IDLE_MS + 1_000;
+    for saving in [false, true] {
+        let (mut l, g, mut m) = idle_sleep(saving);
+        m.extend(meters(&l.apply(Event::Wake { why: Wake::Record }, at)));
+        if saving {
+            m.extend(meters(&l.apply(Event::Saved { generation: g, seq: 1 }, at + 60_000)));
+        }
+        let (mut now, mut queue) = (at + 60_000, vec![]);
+        // bounded: its alarms to its next sleep's end, twenty minutes on
+        for _ in 0..32 {
+            let event = match queue.pop() {
+                Some(e) => e,
+                None => match l.next_alarm() {
+                    Some(alarm) => {
+                        now = now.max(alarm);
+                        Event::Alarm
+                    }
+                    None => break,
+                },
+            };
+            now += 100;
+            let s = l.apply(event, now);
+            m.extend(meters(&s));
+            for a in &s.actions {
+                match *a {
+                    Action::Sleep { generation } | Action::Hold { generation } => queue.push(Event::Held { generation, held: true }),
+                    Action::Save { generation, seq, .. } => queue.push(Event::Saved { generation, seq }),
+                    Action::Stop { generation, .. } => queue.push(Event::Asleep { generation }),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(l.phase, Phase::ASLEEP, "asleep once its hold ran out");
+        assert!(m.iter().all(|(a, b)| a < b) && m.windows(2).all(|w| w[0].1 == w[1].0), "each interval meets the next, none twice: {m:?}");
+        assert_eq!((m[0].0, m[m.len() - 1].1), (T + 3_000, now), "from its start to its sleep's end");
+    }
+    // a late wake, days on, into an idle sleep whose save's report was lost
+    let (mut l, g, m) = idle_sleep(true);
+    assert_eq!(m, vec![(T + 3_000, T + IDLE_MS)]);
+    let late = T + DAYS;
+    let s = l.apply(Event::Wake { why: Wake::Record }, late);
+    assert_eq!((meters(&s), &l.phase), (vec![], &Phase::Awake { generation: g, since_ms: late }), "none of its hold, nor the silence");
+    let s = l.apply(Event::Alarm, late + 1_000);
+    assert_eq!(meters(&s), vec![(late, late + 1_000)], "from the wake on");
+    assert!(s.actions.contains(&Action::Unhold { generation: g }) && l.unsaved_since_ms().is_none() && l.free_since_ms().is_none(), "its lost save failed as an awake one's: {s:?}");
 }

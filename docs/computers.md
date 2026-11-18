@@ -54,6 +54,16 @@ an image may rely on this:
   again; after `computers.unsaved_max_ms` (30 minutes unless the
   deployment says otherwise) of failed tries it sleeps unsaved, and its
   next wake is a rollback.
+- **A wake cancels an idle sleep until its stop begins.** A wake of any
+  kind during an idle sleep's hold or save keeps it awake on the
+  container it has: nothing is restored or started, and the message
+  that woke it runs there. A hold not yet answered is let go at once,
+  and the save it was for is due when work settles. A save under way
+  goes on as an awake save, holding the guest to its end (a backup cut
+  short could be neither kept nor safely forgotten), and is kept or
+  failed as one: its failure opens no unsaved window. Its owner's sleep
+  or restart is never cancelled, nor a sleep whose stop began: a wake
+  then starts it again once it is asleep.
 - **A restart** (its owner's) is a sleep that saves if it can and stops
   whether or not it did, then a fresh start: from the image and the
   newest good save, never the snapshot, which could carry what broke it
@@ -95,9 +105,9 @@ an image may rely on this:
   2026-11-02), so its nine minutes and 25 seconds hold about 22 GB, more
   than a computer's 20 GB disk. Any restore that fits the disk fits the
   deadline; one that does not fit is set aside, not waited for.
-- **A start owed after its container goes** (a sleep's end with a wake
-  or a restart asked, a crash while wanted, a start that fell back past a
-  bad save) is due at once, told as `starting`: the request that saw it go
+- **A start owed after its container goes** (a sleep's end with a
+  restart asked or a wake it did not cancel, a crash while wanted, a
+  start that fell back past a bad save) is due at once, told as `starting`: the request that saw it go
   (a restart's aside) makes it, and each
   one after it as a start falls back (`STARTS_OWED_MAX` at most), or, in
   an alarm, the alarm it asks for, never the rest of the alarm that ran
