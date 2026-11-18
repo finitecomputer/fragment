@@ -1,6 +1,7 @@
 //! The bridge a computer image runs (docs/computers.md): an agent runtime on
 //! one side (Hermes' Relay, or a scripted stub), the ordinary fragment API
-//! on the other. `engine` holds its rules, pure; `driver` its I/O; `runtime`
+//! on the other. `engine` holds its rules, pure; `driver` its I/O; `store`
+//! its state on disk (a snapshot and a log of each step's change); `runtime`
 //! the runtimes; `api` every route it calls; `ready` which agents the image
 //! has made ready, when it says; `note` what a turn after a cut one is told,
 //! from the journal; `screen` each agent's screen, `screens` the image's
@@ -26,4 +27,5 @@ pub mod scratch;
 pub mod screen;
 pub mod screens;
 pub mod simplex;
+pub mod store;
 pub mod transfer;
