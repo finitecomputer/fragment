@@ -12,6 +12,9 @@
 //!   starts the container; one while it starts or is awake holds it
 //!   longer; one while it is going to sleep starts it again once it is
 //!   asleep (the newest push wins: lesson 3 of docs/cloudflare-v1.md).
+//!   Asleep, a computer used within the week wakes once, quietly, after
+//!   its image changes, so its sleep leaves a snapshot on the new image
+//!   (`refresh_due`, P7).
 //! - **Staying awake.** While the guest holds a keepalive socket or a
 //!   port tab is open; with nothing open, until the latest hold runs out
 //!   (twenty minutes after a record or the last socket closed, a minute
@@ -70,6 +73,7 @@ mod images;
 mod lifecycle;
 mod limits;
 mod notices;
+mod refresh;
 mod saves;
 #[cfg(test)]
 mod testing;
@@ -81,9 +85,10 @@ pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_
 pub use images::{does_simplex, image_running, valid_version, version_now, version_of, version_running, Images, VERSION_HEX};
 pub use lifecycle::{alive, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};
 pub use limits::{
-    ALARM_LATE_MS, ALIVE_MS, AWAKE_ROW_MAX_MS, FAILED_WHY_MAX_BYTES, HOLD_DEADLINE_MS, HOLD_WAIT_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, PREWAKE_MS, RETRY_PAUSE_MS, SAVES_KEPT, SAVE_DEADLINE_MS, SAVE_EVERY_MS, SAVE_RETRY_MS,
+    ALARM_LATE_MS, ALIVE_MS, AWAKE_ROW_MAX_MS, FAILED_WHY_MAX_BYTES, HOLD_DEADLINE_MS, HOLD_WAIT_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, PREWAKE_MS, REFRESH_LOOK_MS, REFRESH_USED_MS, RETRY_PAUSE_MS, SAVES_KEPT, SAVE_DEADLINE_MS, SAVE_EVERY_MS, SAVE_RETRY_MS,
     SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, STARTS_OWED_MAX, START_DEADLINE_MS, UNSAVED_MAX_MS_DEFAULT, UNSAVED_NOTICE_FAILURES, WONT_WAKE_RETRY_MS,
 };
 pub use notices::{notices, support_url_ok, SUPPORT_URL_MAX_BYTES};
+pub use refresh::{look_at, refresh_due};
 pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};
 pub use which::{default_computer_of, prewoken};

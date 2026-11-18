@@ -96,8 +96,8 @@ in every attempt, so a step tried again after its call was paid is
 charged once.
 
 Not metered: a person's own keys (decisions 37 and 60: their provider
-bills them); a computer's time kept for its failed saves (the platform's:
-docs/computers.md); a computer's saves, an app facet's database and git
+bills them); a computer's time kept for its failed saves, and its quiet
+wake after an image change (both the platform's: docs/computers.md); a computer's saves, an app facet's database and git
 storage (the debt ledger).
 
 ## The price book
