@@ -526,20 +526,31 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
   // (the platform's release, which their computers install for every agent),
   // opened from one row (Paul, 2026-11-04). Each agent's own are its
   // fragment's skills/, opened from its item in Agents. ----
-  // one labelled `skills` first, as the computers pick (hermes-boot's skills.rs `pick`)
+  // one labelled `skills` first, else the first by name, as the computers
+  // pick (hermes-boot's skills.rs `pick`)
   const skillsFragmentOf = () => {
-    const theirs = allFragments().filter((f) => f.kind === "skills" && own(f));
+    const theirs = allFragments().filter((f) => f.kind === "skills" && own(f)).sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
     return theirs.find((f) => f.name.slice(0, f.name.lastIndexOf("--")) === "skills") ?? theirs[0];
   };
   // The person's skills fragment, made from the blessed template when they
   // have none: at setup, as their default agent is, or from settings' Skills
   // for a person without one (deleted, or set up before 2026-10-03).
+  // One made at a time, whoever asks meanwhile waiting for it; and then
+  // the one the computers pick, should there be two.
+  let makingSkills = null;
   async function skillsFragment() {
     const have = skillsFragmentOf();
     if (have) return have.name;
-    const made = await api("POST", "/api/fragments", { label: freeLabel("skills"), template: "skills" });
-    await load();
-    return made.name;
+    makingSkills ??= (async () => {
+      try {
+        const made = await api("POST", "/api/fragments", { label: freeLabel("skills"), template: "skills" });
+        await load();
+        return skillsFragmentOf()?.name ?? made.name;
+      } finally {
+        makingSkills = null;
+      }
+    })();
+    return makingSkills;
   }
   // Skills: one row as Computer's are (its label, a short line under it,
   // Open with an icon). Open is the Skills page (skills-page.js), which

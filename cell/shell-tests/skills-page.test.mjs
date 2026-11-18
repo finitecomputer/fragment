@@ -3,12 +3,15 @@
 // and the `optional/hermes/<id>.on` switches), a search, a slug in words,
 // a SKILL.md's description; and the page itself: loading, the On tab and
 // the Library, a switch written as one file, put back when the write
-// fails, and a labelled skill asking first.
+// fails, a labelled skill asking first, a switch the catalog no longer
+// names, a skills fragment without the catalog, and the shell making one
+// skills fragment however often it is asked meanwhile.
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { byCategory, createSkillsPage, descriptionOf, markerPath, matches, readListing, words } from "../shell/skills-page.js";
+import { byCategory, createSkillsPage, descriptionOf, FILE_MAX_BYTES, markerPath, matches, onRows, readListing, words } from "../shell/skills-page.js";
+import { createSettings } from "../shell/settings.js";
 
 test("a listing's managed skills, and the optional skills it switches on", () => {
   const { managed, on } = readListing([
@@ -17,10 +20,12 @@ test("a listing's managed skills, and the optional skills it switches on", () =>
     { path: "skills/software-development/apps-finite/SKILL.md" },
     { path: "skills/software-development/apps-finite/references/x.md" },
     { path: "skills/music-generation-finite/SKILL.md" },
+    { path: "skills/archive/SKILL.md", size: FILE_MAX_BYTES + 1 },
     { path: "optional/hermes/creative/excalidraw.on" },
     { path: "optional/hermes/mlops/training/unsloth.on" },
     { path: "optional/hermes/creative/sketch.off" },
   ]);
+  // one the computer refuses for its size is never installed: not listed
   assert.deepEqual(managed.map((m) => [m.name, m.folder]), [["apps-finite", "skills/software-development/apps-finite/"], ["music-generation-finite", "skills/music-generation-finite/"]]);
   assert.deepEqual([...on], ["creative/excalidraw", "mlops/training/unsloth"]);
   assert.equal(markerPath("mlops/training/unsloth"), "optional/hermes/mlops/training/unsloth.on");
@@ -69,7 +74,7 @@ const CATALOG = {
   ],
 };
 
-function page({ on = [] } = {}) {
+function page({ on = [], catalog = CATALOG } = {}) {
   const calls = [];
   const opened = [];
   const h = {
@@ -88,7 +93,8 @@ function page({ on = [] } = {}) {
     for (const c of calls.filter((c) => c.method === "GET" && !c.done)) {
       c.done = true;
       if (c.path.endsWith("/files")) c.ok({ files: [{ path: "skills/software-development/apps-finite/SKILL.md" }, ...on.map((id) => ({ path: markerPath(id) }))] });
-      else c.ok(CATALOG);
+      else if (catalog) c.ok(catalog);
+      else c.fail(Object.assign(new Error("not found"), { status: 404 }));
     }
   };
   const item = (id) => find("skills-item").find((n) => n.dataset.skill === id);
@@ -214,4 +220,59 @@ test("reopened while a switch saves, the page reads once the write lands, and sh
   await settle();
   t.find("skills-tab")[1].onclick();
   assert.ok(!t.toggle("creative/excalidraw").checked, "off, as written");
+});
+
+test("a switch whose id the catalog no longer names stays in On, by its id, to be switched off", async () => {
+  assert.deepEqual(onRows(CATALOG.skills, new Set(["creative/excalidraw", "creative/retired"])).map((s) => [s.id, s.name, !!s.gone]), [["creative/excalidraw", "excalidraw", false], ["creative/retired", "retired", true]]);
+  const t = page({ on: ["creative/retired"] });
+  t.p.open();
+  await settle();
+  t.answerReads();
+  await settle();
+  assert.equal(t.find("skills-tab")[0].textContent, "On · 2");
+  const sw = t.toggle("creative/retired");
+  assert.ok(sw.checked);
+  sw.checked = false;
+  sw.onchange();
+  assert.deepEqual(t.writes()[0].body.files, [{ path: "optional/hermes/creative/retired.on", delete: true }]);
+  t.writes()[0].ok({ commit: "c3" });
+  await settle();
+  assert.equal(t.item("creative/retired"), undefined, "gone once off");
+  assert.equal(t.find("skills-tab")[0].textContent, "On · 1");
+});
+
+test("a skills fragment without the catalog (no longer on the template) still shows what is on, and its files", async () => {
+  const t = page({ catalog: null });
+  t.p.open();
+  await settle();
+  t.answerReads();
+  await settle();
+  await settle();
+  assert.deepEqual(t.find("skills-tab").map((n) => n.textContent), ["On · 1", "Library · 0"]);
+  assert.deepEqual(t.find("skills-desc").map((n) => n.textContent), ["Publish and share apps."]);
+  t.find("skills-files")[0].onclick();
+  assert.deepEqual(t.opened, [["app", "skills--z8w6"]]);
+  t.find("skills-tab")[1].onclick();
+  assert.match(t.find("skills-empty")[0].children[0].textContent, /The library isn't in this skills fragment/);
+});
+
+test("asked twice while it has none, the shell makes one skills fragment, and names the one the computers pick", async () => {
+  let fragments = [];
+  const posts = [];
+  const api = (method, path, body) => {
+    assert.equal(`${method} ${path}`, "POST /api/fragments");
+    return new Promise((ok) => posts.push({ body, ok }));
+  };
+  const settings = createSettings({
+    api, account: {}, navigation: {}, notices: {}, sections: {}, agents: {},
+    allFragments: () => fragments, own: (f) => f.role === "owner", freeLabel: (l) => l,
+    load: async () => { fragments = [{ name: "skills--zzzz", kind: "skills", role: "owner" }, { name: "skills--aaaa", kind: "skills", role: "owner" }]; },
+  });
+  const first = settings.skillsFragment();
+  const second = settings.skillsFragment();
+  await settle();
+  assert.equal(posts.length, 1, "one made");
+  // another tab made one meanwhile: both pages name the one Hermes takes
+  posts[0].ok({ name: "skills--zzzz" });
+  assert.deepEqual(await Promise.all([first, second]), ["skills--aaaa", "skills--aaaa"]);
 });
