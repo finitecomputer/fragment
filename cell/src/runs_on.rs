@@ -116,10 +116,16 @@ impl FragmentCell {
     pub(crate) async fn picture(&self, identity: &str) -> CellResult<Response> {
         let none = || CellError::new(ErrorCode::NotFound, "this agent has no picture");
         self.must(MetaKey::CreatedAt).map_err(|_| none())?;
-        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(identity) || self.face_now()?.kind != fragment_proto::FragmentKind::Agent {
+        let agent = || -> CellResult<bool> { Ok(self.meta(MetaKey::AgentIdentity)?.as_deref() == Some(identity) && self.face_now()?.kind == fragment_proto::FragmentKind::Agent) };
+        if !agent()? {
             return Err(none());
         }
         self.take_picture().await?;
+        // asked again after the await, with the icon read in the same turn:
+        // a deploy or a life made again meanwhile shows none
+        if !agent()? {
+            return Err(none());
+        }
         let sha = self.meta(MetaKey::Icon)?.ok_or_else(none)?;
         let mut resp = self.icon_body(&crate::icon::Shown::Own(sha)).await?;
         let h = resp.headers_mut();
@@ -148,9 +154,14 @@ impl FragmentCell {
     /// Asked twice at once, or again after a restart cut it short, it takes
     /// it once: a blob is put by its hash, and the row is read again,
     /// unchanged, after the awaits. Bytes git no longer holds as checked
-    /// are said and let go: there is nothing else to take.
+    /// are said and let go: there is nothing else to take. A fragment no
+    /// longer an agent lets its row go, as the release before's install of
+    /// any other kind did: its picture is its icon, never that avatar.
     pub(crate) async fn take_picture(&self) -> CellResult<()> {
         let Some(untaken) = self.picture_untaken()? else { return Ok(()) };
+        if self.face_now()?.kind != fragment_proto::FragmentKind::Agent {
+            return self.del_meta(MetaKey::Picture);
+        }
         let (sha, mime, commit) = &untaken;
         let read = self.cs()?.read(&self.must(MetaKey::Repo)?, commit, fragment_core::face::AGENT_PICTURE, limits::PICTURE_MAX_BYTES).await?;
         let kept = read.filter(|b| hex::encode(Sha256::digest(b)) == *sha && fragment_core::blob::served_type(mime) == Some(mime.as_str()));
@@ -158,8 +169,9 @@ impl FragmentCell {
         if let Some(bytes) = kept {
             self.put_blob_typed(sha, bytes, Some(mime)).await?;
         }
-        // taken meanwhile (another ask, a new icon or none): nothing more
-        if self.picture_untaken()?.as_ref() != Some(&untaken) {
+        // taken meanwhile (another ask, a new icon or none), or no agent
+        // since (its next take lets the row go): nothing more
+        if self.picture_untaken()?.as_ref() != Some(&untaken) || self.face_now()?.kind != fragment_proto::FragmentKind::Agent {
             return Ok(());
         }
         self.del_meta(MetaKey::Picture)?;
