@@ -3024,10 +3024,27 @@ fn refused_live(c: &api::Client, name: &str, live_tip: &str) -> Result<FragmentS
 /// a word; a new picture, its icon, which the platform checks; or none. Each
 /// is set at once, with no deploy. Whether it asked for any change.
 fn agent_face(c: &api::Client, agent: &str, name: Option<&str>, picture: Option<&Path>, no_picture: bool) -> Result<bool> {
-    if let Some(name) = name.map(str::trim) {
-        if name.is_empty() || name.chars().count() > fragment_proto::limits::TITLE_MAX_CHARS {
-            return Err(usage(format!("a name is 1 to {} characters", fragment_proto::limits::TITLE_MAX_CHARS)));
+    let name = name.map(str::trim);
+    if name.is_some_and(|n| n.is_empty() || n.chars().count() > fragment_proto::limits::TITLE_MAX_CHARS) {
+        return Err(usage(format!("a name is 1 to {} characters", fragment_proto::limits::TITLE_MAX_CHARS)));
+    }
+    // its picture read and checked before anything is written, so a bad
+    // file changes nothing: one of the four types, within a request's body
+    let picture = match picture {
+        Some(path) => {
+            let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            if fragment_core::face::picture_type(&bytes).is_none() {
+                return Err(usage(fragment_core::face::Refused::NotAnImage.message(&path.display().to_string())));
+            }
+            if bytes.len() > fragment_proto::limits::BODY_MAX_BYTES {
+                return Err(usage(format!("{} is {} bytes; a picture is sent in at most {}: make it smaller", path.display(), bytes.len(), fragment_proto::limits::BODY_MAX_BYTES)));
+            }
+            Some(bytes)
         }
+        None => None,
+    };
+    let asked = name.is_some() || picture.is_some() || no_picture;
+    if let Some(name) = name {
         // its name now, and its job, read before anything changes
         let old: FragmentStatus = c.call_as(c.get(&format!("/api/f/{agent}/status"))?)?;
         let job = agent_job(c, agent)?;
@@ -3036,20 +3053,20 @@ fn agent_face(c: &api::Client, agent: &str, name: Option<&str>, picture: Option<
         if let Some(job) = job {
             let olds: Vec<&str> = old.title.as_deref().into_iter().chain(fragment_core::face::job_first_name(&job)).collect();
             if let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, name) {
-                // keyed by what it writes: sent again, it commits nothing twice
-                let key = format!("agent-job-{}", &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(renamed.as_bytes()))[..16]);
+                // one key a rename: its retries commit nothing twice, and a
+                // later rename back to this name commits again
+                let key = format!("agent-job-{:032x}", rand::random::<u128>());
                 let files = json!([{ "path": fragment_core::face::JOB, "text": renamed }]);
                 c.call_as::<Value>(c.post_json(&format!("/api/f/{agent}/files"), &json!({ "files": files, "message": "its job, renamed", "key": key }))?)?;
             }
         }
     }
-    if let Some(path) = picture {
-        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if let Some(bytes) = picture {
         c.call_as::<Value>(c.put_bytes(&format!("/api/f/{agent}/icon"), bytes)?)?;
     } else if no_picture {
         c.call_as::<Value>(c.delete(&format!("/api/f/{agent}/icon"))?)?;
     }
-    Ok(name.is_some() || picture.is_some() || no_picture)
+    Ok(asked)
 }
 
 /// An agent's job (`SOUL.md`) at main, as text: none when it has none, or
@@ -3277,11 +3294,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Goal: `fragment agent --name` refuses a name the platform would,
-    /// before anything is sent (the host here answers nothing): a blank, or
-    /// one past 120 characters, is usage (exit 2).
+    /// Goal: `fragment agent` refuses what the platform would before
+    /// anything is sent (the host here answers nothing), so a bad picture
+    /// never leaves a rename half done: a blank name, one past 120
+    /// characters, a picture file that is no image, missing, or past a
+    /// request's body, each usage (exit 2) or an error, naming why.
     #[test]
-    fn an_agents_name_is_checked_before_anything_is_sent() {
+    fn an_agents_name_and_picture_are_checked_before_anything_is_sent() {
         let c = api::Client::new("http://127.0.0.1:9", auth::fixed(7));
         for name in ["  ", &"n".repeat(fragment_proto::limits::TITLE_MAX_CHARS + 1)] {
             let err = agent_face(&c, "j--k3x9", Some(name), None, false).unwrap_err();
@@ -3289,6 +3308,19 @@ mod tests {
             assert!(err.to_string().contains("1 to 120 characters"), "{err}");
         }
         assert!(!agent_face(&c, "j--k3x9", None, None, false).unwrap(), "nothing asked, nothing sent");
+        let dir = std::env::temp_dir().join(format!("fragment-agent-face-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (text, big) = (dir.join("me.txt"), dir.join("big.png"));
+        std::fs::write(&text, "not a picture").unwrap();
+        std::fs::write(&big, [&b"\x89PNG"[..], &vec![0u8; fragment_proto::limits::BODY_MAX_BYTES]].concat()).unwrap();
+        for (file, said) in [(&text, "is not a picture"), (&big, "make it smaller")] {
+            let err = agent_face(&c, "j--k3x9", Some("Frank"), Some(file), false).unwrap_err();
+            assert_eq!(classify_err(&err), Code::InvalidUsage, "{}", file.display());
+            assert!(err.to_string().contains(&file.display().to_string()) && err.to_string().contains(said), "{err}");
+        }
+        let err = agent_face(&c, "j--k3x9", Some("Frank"), Some(&dir.join("gone.png")), false).unwrap_err().to_string();
+        assert!(err.contains("reading") && err.contains("gone.png"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn coded(code: Code) -> anyhow::Error {

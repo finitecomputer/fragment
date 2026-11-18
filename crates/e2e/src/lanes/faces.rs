@@ -90,13 +90,19 @@ pub(super) fn set_face(api: &Api, keys: &Keys, agent: &str, title: Option<&str>,
 /// it): `bytes` committed there and deployed, then the row written by the
 /// test lever, no icon. The commit.
 pub(super) fn legacy_picture(api: &Api, keys: &Keys, agent: &str, bytes: &[u8]) -> Result<String> {
+    legacy_picture_beside(api, keys, agent, bytes, false)
+}
+
+/// [`legacy_picture`], keeping the icon it has (`icon`): one a release
+/// before left hidden beside its picture, from before it was an agent.
+fn legacy_picture_beside(api: &Api, keys: &Keys, agent: &str, bytes: &[u8], icon: bool) -> Result<String> {
     let files = json!({ "message": "its picture, as a release before kept it", "files": [{ "path": "avatar.png", "base64": base64::engine::general_purpose::STANDARD.encode(bytes) }] });
     let wrote = api.signed(keys, "POST", &format!("/api/f/{agent}/files"), Some(&files))?;
     let deployed = api.signed(keys, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?;
     let live = deployed.body["live"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(wrote.status == 200 && deployed.status == 200 && !live.is_empty(), "its avatar.png committed and deployed: {wrote} {deployed}");
     let row = format!("{} image/png {live}", hex::encode(Sha256::digest(bytes)));
-    let r = super::ledger::lever(api, agent, "legacy-picture", json!({ "row": row }))?;
+    let r = super::ledger::lever(api, agent, "legacy-picture", json!({ "row": row, "icon": icon }))?;
     anyhow::ensure!(r.status == 200, "its row, as a release before kept it: {r}");
     Ok(live)
 }
@@ -138,13 +144,13 @@ fn jpeg_size(bytes: &[u8]) -> Option<(u16, u16)> {
     None
 }
 
-/// A JPEG past what a picture may be (`PICTURE_MAX_BYTES`), its picture
-/// the icon lane's 40×24 photograph: comment segments after its start.
-fn heavy_jpeg() -> Vec<u8> {
+/// A JPEG of more than `bytes`, its picture the icon lane's 40×24
+/// photograph: comment segments after its start.
+pub(super) fn heavy_jpeg(bytes: usize) -> Vec<u8> {
     let photo = super::icons::photo();
     let mut out = photo[..2].to_vec();
     let comment = vec![b'x'; 60_000];
-    while out.len() <= fragment_proto::limits::PICTURE_MAX_BYTES {
+    while out.len() <= bytes {
         out.extend_from_slice(&[0xFF, 0xFE]);
         out.extend_from_slice(&((comment.len() + 2) as u16).to_be_bytes());
         out.extend_from_slice(&comment);
@@ -287,7 +293,7 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     // a picture past what one is kept as (256 KiB) is cropped by Images to
     // fill the icon's square (it is shown round), a JPEG, at its owner's charge
     if s.makes_icons() {
-        let heavy = heavy_jpeg();
+        let heavy = heavy_jpeg(fragment_proto::limits::PICTURE_MAX_BYTES);
         let (_, put) = set_face(api, &paul, &agent, None, Some(Some(&heavy)))?;
         let put = put.context("its heavy picture")?;
         let at = put.body["icon"].as_str().unwrap_or("").to_string();
@@ -366,6 +372,18 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && lost.status == 404 && dropped && events(api, &paul, &agent, "picture.lost") == 1,
         json!({ "lost": lost.to_string(), "row": row(api, &paul, &agent) }),
     );
+    // a row beside an icon it kept from before it was an agent: its
+    // picture is the row's, shown and served, and taken over that icon
+    let (_, hidden) = set_face(api, &paul, &agent, None, Some(Some(&blue)))?;
+    legacy_picture_beside(api, &paul, &agent, &orange, true)?;
+    let shows = s.eventually(WAIT, || row(api, &paul, &agent)["picture"] == shown.as_str());
+    let served = fetched(api, &shown)?;
+    let icon = api.signed(&paul, "GET", &format!("/api/f/{agent}/icon"), None)?;
+    s.ok(
+        "a row beside an icon kept from before it was an agent: the row's picture shows and is served, and is its icon once taken, never that old icon",
+        hidden.is_some_and(|r| r.status == 200) && shows && served.bytes == orange && icon.bytes == orange && row(api, &paul, &agent)["picture"] == shown.as_str(),
+        json!({ "row": row(api, &paul, &agent), "served": served.status }),
+    );
 
     // the CLI, as its person uses it (cli/GUIDE.md): `fragment agent
     // --name` renames it and says its new name; every reader follows, its
@@ -416,6 +434,18 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         again.is_ok() && recovered == "You are Frances, paul@example.com's default agent: the first one they talk to.\nFrances keeps the garden.\n" && replay.is_ok() && replayed == (recovered.clone(), tip.clone()),
         json!({ "recovered": recovered, "replayed": replayed.0, "tips": [tip, replayed.1] }),
     );
+    // renamed back and forth (A, B, A, B): each rename says its name in its
+    // job; none is taken for an earlier rename to the same name
+    let mut named = vec![];
+    for name in ["Frank", "Frances", "Frank", "Frances"] {
+        let said = s.cli_json(api, &home, &["agent", &agent, "--name", name, "--json"]);
+        named.push(json!({ "name": name, "cli": said.is_ok(), "job": job_now().lines().next().unwrap_or("").to_string() }));
+    }
+    s.ok(
+        "renamed back and forth with `fragment agent --name` (A, B, A, B), its job says each new name in turn",
+        named.iter().all(|n| n["cli"] == true && n["job"].as_str().is_some_and(|j| j.starts_with(&format!("You are {},", n["name"].as_str().unwrap_or(""))))),
+        json!(named),
+    );
     // `fragment agent --picture` sets its icon, and `--no-picture` takes it away
     let file = s.dir("faces-cli-picture").join("me.png");
     std::fs::write(&file, &orange)?;
@@ -450,6 +480,33 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         "an agent's page reads its job as its computer leaves it, on main, with no deploy; an app's page reads its file from live until it deploys",
         staged && its_job == second && app_staged && apps == one,
         json!({ "job": its_job, "app": apps }),
+    );
+    // an app has no identity's picture, even run by a computer as an agent
+    // would be: its icon stays its viewers' alone
+    if s.makes_icons() {
+        let (_, iconed) = set_face(api, &paul, &app, None, Some(Some(&orange)))?;
+        let computer = api.signed(&paul, "POST", "/api/computers", Some(&json!({})))?.body["computer"].as_str().unwrap_or("").to_string();
+        let r = api.signed(&paul, "PUT", &format!("/api/computers/{computer}/agents/{app}"), Some(&json!({})))?;
+        let id = r.body["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == app.as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+        let public = fetched(api, &format!("/api/identities/{id}/picture"))?;
+        let own = api.signed(&paul, "GET", &format!("/api/f/{app}/icon"), None)?;
+        s.ok(
+            "an app a computer runs has no public picture (404 at its identity's address), its icon still its viewers'",
+            iconed.is_some_and(|r| r.status == 200) && !id.is_empty() && public.status == 404 && own.status == 200,
+            json!({ "assigned": r.status, "identity": id, "public": public.status, "own": own.status }),
+        );
+    } else {
+        s.skip_icon("an app a computer runs has no public picture");
+    }
+    // its page's Open Graph title is its name, its fragment.json naming none
+    let page_wrote = write(&app, "site/index.html", "<!doctype html><html><head></head><body>notes</body></html>")?.status == 200 && deploy(&app)?.status == 200;
+    let renamed = api.signed(&paul, "PUT", &format!("/api/f/{app}/face"), Some(&json!({ "title": "Garden notes" })))?;
+    let cookie = site_cookie(api, &session, &app)?;
+    let page = api.page(&app, "", Some(&format!("fragment_site={cookie}")))?;
+    s.ok(
+        "an app whose fragment.json has no meta, renamed: its page's Open Graph title and its tab's title are its new name",
+        page_wrote && renamed.status == 200 && page.status == 200 && page.text.contains(r#"og:title" content="Garden notes""#) && page.text.contains("<title>Garden notes</title>"),
+        &page,
     );
     let bare = s.named(api, &paul, "faces-bare")?;
     let r = api.create_with(&paul, json!({ "name": bare, "template": "agent" }))?;

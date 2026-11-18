@@ -96,11 +96,35 @@ export function editTenancy(current) {
 export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, retitle, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
   // ---- an agent's name and picture (docs/api.md, "A fragment's name and
   // an agent's picture"): its face, set at once (its title, `retitle`) and
-  // its icon, which the platform keeps as it is when it is a picture and
-  // crops to fill otherwise. Every page shows it by them; the rows here
-  // follow the list. ----
+  // its icon, which the platform keeps as it is when it is a picture. Every
+  // page shows it by them; the rows here follow the list. ----
+  // What the platform keeps as it is (fragment_core::face): a PNG, JPEG,
+  // WebP or GIF of at most 256 KiB. A larger one (a phone's photo is past
+  // what a request carries), or any other image the browser reads, is drawn
+  // again at most PICTURE_PX square: a PNG, else a JPEG, that fits.
+  const PICTURE_MAX_BYTES = 256 * 1024;
+  const PICTURE_PX = 512;
+  async function pictureOf(file) {
+    if (file.size <= PICTURE_MAX_BYTES && /^image\/(png|jpeg|webp|gif)$/.test(file.type)) return file;
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch {
+      throw new Error("That file is not a picture: choose a PNG, JPEG, WebP or GIF.");
+    }
+    const scale = Math.min(1, PICTURE_PX / Math.max(bitmap.width, bitmap.height));
+    const canvas = el("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    for (const [type, quality] of [["image/png"], ["image/jpeg", 0.9], ["image/jpeg", 0.7]]) {
+      const blob = await new Promise((done) => canvas.toBlob(done, type, quality));
+      if (blob && blob.size <= PICTURE_MAX_BYTES) return blob;
+    }
+    throw new Error("That picture stays over 256 KiB however it is drawn: choose a smaller one.");
+  }
   async function setPicture(agent, file) {
-    if (file) await api("PUT", `/api/f/${seg(agent)}/icon`, file);
+    if (file) await api("PUT", `/api/f/${seg(agent)}/icon`, await pictureOf(file));
     else await api("DELETE", `/api/f/${seg(agent)}/icon`);
   }
   // An agent removed (FIN-250): the chats it is the last live agent of are

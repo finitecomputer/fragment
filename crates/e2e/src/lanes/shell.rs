@@ -2786,8 +2786,21 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         !fresh.is_empty() && blank && said.len() == 5 && said.iter().all(|c| c["wrote"] == true && c["row"] == true && c["named"] == true),
         json!({ "said": said, "blank refused": blank }),
     );
-    // Remove: gone everywhere
+    // a phone's photo, past what a request carries (3 MiB): drawn again in
+    // the browser to a picture, then kept, shown in its image's place
     b.click(page, "#settings")?;
+    let photo = shots.join("agent-photo.jpg");
+    std::fs::write(&photo, super::faces::heavy_jpeg(3 * 1024 * 1024))?;
+    b.until(page, &format!("!!document.querySelector({})", js(&format!("[data-picture-for={}]", js(&agent)))), wait);
+    b.choose_files(page, &format!("[data-picture-for={}]", js(&agent)), &[&photo])?;
+    let redrawn = format!("(() => {{ const i = document.querySelector({}); return !!i && i.getAttribute('src') !== {} && i.complete && i.naturalWidth === 40; }})()", js(&format!("{hero} img")), js(&path));
+    let photographed = b.until(page, &redrawn, wait);
+    s.ok(
+        "and a photo past what a request carries (3 MiB) is drawn again in the browser and kept: the sidebar shows it, a new address",
+        std::fs::metadata(&photo).map(|m| m.len()).unwrap_or(0) > 3 * 1024 * 1024 && photographed,
+        json!({ "row": own_row_of(api, me.session, &agent), "said": b.eval(page, "document.querySelector('.agent-picture-field')?.closest('.agent-card, details, section')?.textContent?.slice(0, 200) ?? null").ok() }),
+    );
+    // Remove: gone everywhere
     let remove = js(&format!("[data-picture-remove={}]", js(&agent)));
     b.until(page, &format!("!!document.querySelector({remove}) && !document.querySelector({remove}).hidden"), wait);
     b.eval(page, &format!("(document.querySelector({remove}).click(), true)"))?;
