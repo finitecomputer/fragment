@@ -1,12 +1,13 @@
 // cell/shell/computer.js's pre-wake (decision 39; Paul, 2026-11-18: each
-// sign of intent holds the computer a minute): as its person opens a chat,
-// begins typing in one with their agent, or opens their agent's desktop,
-// the shell races their computer's start, as a page's presence does
-// (`POST …/prewake`, held a minute), never as its owner's wake
-// (`POST …/wake`, held twenty). Only another such sign asks again, one ask
-// every 10 s at most: nothing the page does on its own (a timer, the tab
-// shown again) asks, so a tab left open lets the computer sleep. The real
-// `createComputer`, its page faked as far as the pre-wake.
+// sign of intent holds the computer a minute): as its person picks a chat,
+// opens the launcher, or begins typing in a chat of theirs with their
+// agent (shell.js calls `prewake` for each), the shell races their
+// computer's start, as a page's presence does (`POST …/prewake`, held a
+// minute), never as its owner's wake (`POST …/wake`, held twenty). Only
+// another such sign asks again, one ask every 10 s at most: nothing the
+// page does on its own (a timer, the tab shown again) asks, so a tab left
+// open lets the computer sleep. The real `createComputer`, its page faked
+// as far as the pre-wake.
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";

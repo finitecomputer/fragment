@@ -455,8 +455,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
     setupChanged({ joined: true });
     await hello(agent, chatName);
-    // its hello's turn holds the computer; the person is here, in its chat
-    api("POST", `/api/computers/${seg(computer.computer)}/prewake`, {}).then(computerIs).catch(() => {});
+    api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).then(computerIs).catch(() => {});
     await load();
     return { chat: chatName, id, computer: computer.computer };
   }

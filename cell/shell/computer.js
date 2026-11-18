@@ -48,14 +48,15 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   }
   // The pre-wake (decision 39) races the computer's start against what the
   // person is about to ask of it: each sign that they mean to use their
-  // agent (a chat opened, by the sidebar or the launcher; the first
-  // keystroke after a pause in a chat with their agent, frame-messages.js
-  // `active`; their agent's desktop opened) asks it to wake
-  // (`POST …/prewake`) and holds it a minute, as a page's presence does
+  // agent (a chat picked, shell.js `pickChat`; the launcher opened; the
+  // first keystroke after a pause in a chat of theirs with their agent,
+  // frame-messages.js `active`) asks it to wake (`POST …/prewake`) and
+  // holds it a minute, as a page's presence does
   // (`fragment_core::computer::PREWAKE_MS`), never an owner's twenty. Only
-  // another such sign holds it longer; a page left open asks nothing, and
-  // it sleeps. One ask every `PREWAKE_AGAIN_MS` at most: signs closer than
-  // that are one sign.
+  // another such sign holds it longer; a page left open, or loaded again,
+  // asks nothing, and it sleeps. Their agent's desktop is woken by its own
+  // port. One ask every `PREWAKE_AGAIN_MS` at most: signs closer than that
+  // are one sign.
   // A computer that won't start is not woken by the person's presence: its
   // starts kept failing, so the next is theirs to ask for (Restart, in its
   // notice), never one every visit pays for unasked. While the first run

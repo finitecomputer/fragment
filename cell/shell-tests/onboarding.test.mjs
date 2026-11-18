@@ -49,7 +49,7 @@ function platform() {
       if (!computer.agents.some((a) => a.fragment === m[1])) computer.agents.push({ fragment: m[1], identity: `npub1${labelOf(m[1])}` });
       return { agents: computer.agents };
     }
-    if (path === "/api/computers/c1/prewake") return computer;
+    if (path === "/api/computers/c1/wake") return computer;
     if (!(m = path.match(/^\/api\/f\/([^/]+)\/([^?]+)(?:\?(.*))?$/))) throw new Error(`no route: ${method} ${path}`);
     const [, name, rest, query] = m;
     assert.ok(row(name), `${method} ${path}: no such fragment`);

@@ -717,7 +717,7 @@ async function dropAlerts() {
 navigator.serviceWorker?.addEventListener("message", (event) => {
   const d = event.data;
   if (d?.fragment === KIND.openChat && typeof d.name === "string" && byName(d.name)?.kind === "chat") {
-    openChat(d.name);
+    pickChat(d.name);
     leaveSidebar();
   }
 });
@@ -911,7 +911,7 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
     onScreen: () => making.shownChat(state.making, state.current, state.page),
     reading: () => making.readChat(state.making, state.current, state.page) },
   menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
-  navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
+  navigation: { newChat, rename: (name) => rename(name), openChat: pickChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load,
 });
 // Continue: a conversation (an import, an archived chat) as a new chat with
@@ -933,7 +933,7 @@ const sessionArchive = createSessionArchive({
 const threads = createThreads({
   $, el, patch, api, seg, avatar,
   data: { byName, own, chats, titleOf, labelOf, agentFace, ownAgents, current: () => state.current, page: () => state.page },
-  navigation: { openChat, leaveSidebar },
+  navigation: { openChat: pickChat, leaveSidebar },
   rendered: () => renderChats(),
 });
 
@@ -1009,10 +1009,18 @@ function openChat(name, push = true, path = null) {
   renderDesktopEmpty();
   for (const lede of document.querySelectorAll(".app-prompts-lede")) namePromptsLede(lede);
   markSeen();
-  prewake();
   navigated();
   // home: a first run a failed read put off goes on from here too
   if (onboarding.putOff()) resumeFirstRun();
+}
+
+// A chat the person picked (its row, a thread's, History's, an alert's, a
+// link to it): opened, and a sign they mean to use their agent, so their
+// computer's start is raced (computer.js `prewake`). A chat the page opens
+// on its own (as it loads, after an archive) is no sign.
+function pickChat(name) {
+  openChat(name);
+  prewake();
 }
 
 // A chat's frame let go (the launcher's, to load it again), its stand-in
@@ -1282,7 +1290,7 @@ addEventListener("message", async (e) => {
   if (e.origin !== origin || from.contentWindow !== e.source) return;
   const name = fragmentAt(url, sender, origin);
   if (!name) return;
-  if (isChat(name)) openChat(name);
+  if (isChat(name)) pickChat(name);
   else openApp(name, `${url.pathname}${url.search}${url.hash}`);
 });
 // A page an action's answer names (FIN-458: an invite's app, a checkout),
@@ -1303,7 +1311,7 @@ function openPage(href) {
   const name = url.origin.startsWith(before) && url.origin.endsWith(after) ? url.origin.slice(before.length, url.origin.length - after.length) : null;
   if (!name || !FRAGMENT_NAME.test(name)) return location.assign(url.href);
   if (!byName(name)) return;
-  if (isChat(name)) openChat(name);
+  if (isChat(name)) pickChat(name);
   else openApp(name, `${url.pathname}${url.search}${url.hash}`);
 }
 // A fragment's name, when `url` is a page of one on this deployment: its
@@ -1385,8 +1393,6 @@ addEventListener("message", async (event) => {
 // origin, through a ticket that lands on the agent's page (docs/computers.md, Ports) ----
 async function openScreen(agent) {
   if (!state.computer || !agent) return;
-  // a sign they mean to use it: its start raced as its port's ticket is asked
-  prewake();
   try {
     const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/?agent=${encodeURIComponent(agent)}` });
     const frame = frameOf(t.url, `${titleOf(agent)}'s screen`);
@@ -1877,7 +1883,7 @@ const historyPage = createHistoryPage($("history-page"), {
   agentsOf, agents: () => state.agents, titleOf,
   archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key), search: (q) => sessionArchive.search(q) },
   continueControl: (source) => continuing.continueControl(source),
-  openChat, leaveSidebar,
+  openChat: pickChat, leaveSidebar,
 });
 function openHistory(push = true) {
   if (push) at(HISTORY);
@@ -2192,15 +2198,16 @@ addEventListener("message", (event) => {
   const name = frameOfWindow(event.source)?.dataset.fragment;
   if (name && byName(name)?.kind === "chat" && byName(name).archived) setArchived(name, false);
 });
-// A chat's page says its person typed there (`active`): the chat in front,
-// with one of their agents in it, keeps their computer's pre-wake
-// (computer.js `prewake`). A chat behind another, or one without their
-// agent, keeps nothing awake.
+// A chat's page says its person began typing there (`active`): a sign they
+// mean to use their agent (computer.js `prewake`), taken only from a chat
+// of their own (its page's code is theirs: another's could send it on a
+// timer), in front, with one of their agents in it.
 addEventListener("message", (event) => {
   if (event.data?.fragment !== KIND.active) return;
   const frame = frameOfWindow(event.source);
   const name = frame?.dataset.fragment;
-  if (name && name === state.current && !frame.hidden && !$("frames").hidden && agentsOf(name).some((id) => state.agents.has(id))) prewake();
+  const chat = name === state.current ? byName(name) : null;
+  if (chat && own(chat) && !frame.hidden && !$("frames").hidden && agentsOf(name).some((id) => state.agents.has(id))) prewake();
 });
 addEventListener("message", (event) => {
   const d = event.data;

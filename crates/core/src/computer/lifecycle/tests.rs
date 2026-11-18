@@ -66,28 +66,19 @@ fn a_prewake_stops_after_a_minute_unless_something_arrives() {
 }
 
 /// Goal: an agent added to a fragment wakes its sleeping computer and
-/// holds it a minute, as a pre-wake does (someone may be about to speak
-/// there): nothing following, it sleeps after that minute, not twenty;
-/// awake, a join only holds it a minute more, and a record after it the
-/// idle wait; a computer that won't wake is not started by it (only its
-/// owner lifts that).
+/// holds it as a record does; awake, it only holds it longer; a
+/// computer that won't wake is not started by it (only its owner lifts
+/// that).
 #[test]
 fn an_agent_joining_a_fragment_wakes_it() {
     let mut l = Lifecycle::new();
     let s = l.apply(Event::Wake { why: Wake::Joined }, T);
     assert_eq!(s.actions, vec![Action::Start { generation: 1 }]);
     l.apply(Event::Ready { generation: 1 }, T + 2_000);
-    assert_eq!(l.held_until_ms(), T + PREWAKE_MS);
-    let s = l.apply(Event::Alarm, T + PREWAKE_MS);
-    assert!(s.actions.contains(&Action::Sleep { generation: 1 }), "nothing followed the join: {s:?}");
-    let mut l = Lifecycle::new();
-    l.apply(Event::Wake { why: Wake::Joined }, T);
-    l.apply(Event::Ready { generation: 1 }, T + 2_000);
-    let s = l.apply(Event::Wake { why: Wake::Joined }, T + 30_000);
+    assert_eq!(l.held_until_ms(), T + IDLE_MS);
+    let s = l.apply(Event::Wake { why: Wake::Joined }, T + 60_000);
     assert!(s.actions.is_empty(), "awake, a join only holds it: {s:?}");
-    assert_eq!(l.held_until_ms(), T + 30_000 + PREWAKE_MS);
-    l.apply(Event::Wake { why: Wake::Record }, T + 40_000);
-    assert_eq!(l.held_until_ms(), T + 40_000 + IDLE_MS, "what was said there holds it the idle wait");
+    assert_eq!(l.held_until_ms(), T + 60_000 + IDLE_MS);
     let mut failed = Lifecycle { phase: Phase::Failed { why: "pull failed".into(), since_ms: T - 1_000 }, ..Lifecycle::new() };
     let s = failed.apply(Event::Wake { why: Wake::Joined }, T);
     assert!(s.actions.is_empty() && s.refused.is_some(), "{s:?}");

@@ -73,7 +73,7 @@ export const MESSAGES = Object.freeze({
     kind: "active",
     from: "a chat → the shell",
     fields: "{}",
-    says: "The person began typing in its composer (the first keystroke after a pause, as its typing presence turns on): while it is the chat in front and one of their agents is in it, the shell races their computer's pre-wake (`POST /api/computers/{id}/prewake`, held a minute).",
+    says: "The person began typing in its composer (the first keystroke after a pause, as its typing presence turns on): taken only from a chat of the person's own, in front, with one of their agents in it, the shell races their computer's pre-wake (`POST /api/computers/{id}/prewake`, held a minute).",
   },
   forgetDraft: {
     kind: "forget-draft",
