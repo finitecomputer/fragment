@@ -51,11 +51,13 @@ fn read() -> Option<(u64, u64)> {
 /// hold the computer it saves, and its end save it again. With no
 /// counters to read, it says so once and gives none.
 pub async fn watch<M>(inbox: mpsc::Sender<M>, wrap: fn(Input) -> M, every: Duration, mut held: watch::Receiver<bool>, mut stop: watch::Receiver<bool>) {
-    let mut last = read().map(|c| (c, crate::log::now_ms()));
+    // a slice's start as the engine's clock reads it, its length as a
+    // monotonic one does (a guest clock set back would shrink it)
+    let mut last = read().map(|c| (c, crate::log::now_ms(), std::time::Instant::now()));
     crate::ev!("load.counters", { "read": last.is_some() });
     let mut every = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     // bounded by the bridge's life: one read per slice, ended by `stop`
-    while let Some((was, at)) = last {
+    while let Some((was, at, since)) = last {
         tokio::select! {
             _ = every.tick() => {}
             _ = crate::net::stopped(&mut stop) => return,
@@ -63,9 +65,9 @@ pub async fn watch<M>(inbox: mpsc::Sender<M>, wrap: fn(Input) -> M, every: Durat
         // held now, or at any moment since the last look (a change)
         let holding = held.has_changed().unwrap_or(false) | *held.borrow_and_update();
         let Some(c) = read() else { continue };
-        let now = crate::log::now_ms();
-        last = Some((c, now));
-        let slice = Input::Slice { from: at, over: (!holding).then(|| over(was, c, now.saturating_sub(at))) };
+        last = Some((c, crate::log::now_ms(), std::time::Instant::now()));
+        let ms = since.elapsed().as_millis() as u64;
+        let slice = Input::Slice { from: at, over: (!holding).then(|| over(was, c, ms)) };
         if inbox.send(wrap(slice)).await.is_err() {
             return;
         }
