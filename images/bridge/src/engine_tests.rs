@@ -54,7 +54,13 @@ fn runtime_work_holds_until_it_ends_and_is_never_restored() {
 
 /// A slice of the computer's counters from `from`, over a floor or not.
 fn slice(e: &mut Engine, from: u64, over: bool) -> Option<bool> {
-    keepalive(&e.step(Input::Slice { from, over }, from + limits::LOAD_SLICE_MS))
+    keepalive(&e.step(Input::Slice { from, over: Some(over) }, from + limits::LOAD_SLICE_MS))
+}
+
+/// A slice of the computer's counters from `from` under the platform's
+/// hold: a save's, which says nothing.
+fn saving(e: &mut Engine, from: u64) -> Option<bool> {
+    keepalive(&e.step(Input::Slice { from, over: None }, from + limits::LOAD_SLICE_MS))
 }
 
 /// Goal (the plan to a sandbox per agent, P6): work an agent leaves running
@@ -64,7 +70,8 @@ fn slice(e: &mut Engine, from: u64, over: bool) -> Option<bool> {
 /// go once the window holds none, and holds again at the next. Bound: it
 /// lets go at the bound, working or not, and a later turn's end gives a
 /// new one; and a window no slice renews (the counters went quiet) lets
-/// go. Invalid: work with no turn ended in this life holds nothing, nor
+/// go. A save's slices say nothing: they start no hold, and end none.
+/// Invalid: work with no turn ended in this life holds nothing, nor
 /// the slice the turn's own work ran in. Restart: a new life holds none of
 /// an earlier life's, so a wake's own start never holds a computer woken
 /// for a look; its own turns give it one.
@@ -92,7 +99,20 @@ fn work_left_running_holds_within_its_bound() {
     }
     t += limits::LOAD_SLICES as u64 * s;
     assert_eq!(slice(&mut e, t, false), Some(false), "the window holds no slice over");
+    // a save on a quiet computer starts no hold (its own work)
+    assert_eq!(saving(&mut e, t), None);
+    assert!(!e.keepalive(), "a save holds nothing");
     assert_eq!(slice(&mut e, t + s, true), Some(true));
+    // a save longer than the window while it works: its slices say
+    // nothing, and the hold stays through it (Codex on #1349)
+    let mut u = t + 2 * s;
+    for _ in 0..2 * limits::LOAD_SLICES {
+        assert_eq!(saving(&mut e, u), None, "held through the save");
+        u += s;
+    }
+    assert!(e.keepalive());
+    assert_eq!(slice(&mut e, u, true), None, "work again, still held");
+    t = u - s;
     // the counters went quiet: the window runs out on its own
     assert_eq!(keepalive(&e.step(Input::Tick, t + s + window)), None);
     assert_eq!(keepalive(&e.step(Input::Tick, t + 2 * s + window)), Some(false), "no slice renews it");
