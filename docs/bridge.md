@@ -94,11 +94,24 @@ with its default. What an image sets:
 
 ## State, and what it never does twice
 
-Its state (`state.json`, written whole before a step's effects) is a
-cache. The authority on which turns started is the chat's `work`
-channel, so `/data` restored from any earlier save, or lost, costs reads
-and runs nothing twice. A state of another format is set aside for a
-fresh one; one that contradicts itself is refused.
+Its state is a cache. The authority on which turns started is the
+chat's `work` channel, so `/data` restored from any earlier save, or
+lost, costs reads and runs nothing twice. A state of another format is
+set aside for a fresh one; one that contradicts itself is refused.
+
+It lives in `/data/bridge` (`store.rs`) as two files. `state.json` is
+the whole state, in the format every earlier bridge read. `state.log`
+holds what each step changed since then, one line per step, appended and
+synced before the step's effects. The bridge writes `state.json` whole
+again, with a fresh log, as it starts, once the log fills, and after a
+hold. Under a hold it writes `state.json` whole, with an empty log,
+before it answers, then `state.json` alone at each step while held, as
+before the log, the empty log naming an earlier `state.json`. So a save
+holds the state whole in `state.json`, which is all an older bridge
+reads. A log whose
+first line names another `state.json` (an older bridge wrote one since,
+or a save copied the two at different moments) is read as none. A crash
+mid-append leaves a torn last line, and the log is read up to it.
 
 - **One life per turn.** Each bridge process is a life: 128 random bits,
   never written to `/data`. A turn runs only in the life whose claim (its
@@ -451,8 +464,8 @@ never reaches another agent's core.
   relayed message"). What the agent says there goes to their app once
   posted: its replies but the interim ones, with their files, and a
   card's question with its choices. An unlink stops the mirror and keeps
-  the chat; a link again is that chat. `state.json` holds nothing of
-  SimpleX.
+  the chat; a link again is that chat. The bridge's state holds nothing
+  of SimpleX.
 - **Working shows as 🚀 on their message** (Paul, 2026-11-11): SimpleX
   carries no typing, so while the agent's turn runs on a message from
   their app (the engine's `working`: its own turn phases, whatever the
