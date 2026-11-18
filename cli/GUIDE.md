@@ -1073,14 +1073,18 @@ reads each back from the fragment and checks its sha256, and only then
 writes the note and removes the files. Anything that fails leaves every
 file where it was. The note says where they went, how to bring them
 back, and each file's size and sha256. `--back` brings each file into
-place, checked against the note, never over a file that is there; the
-note goes last. The fragment keeps its copy, so a computer that goes
+place, checked against the note, never over a file that is there, and a
+folder's folders, the empty ones too, with their permissions; the note
+goes last. The fragment keeps its copy, so a computer that goes
 back to an earlier save can still bring it back; remove it there only
 once nobody needs it. Either one cut off finishes when run again.
 Refused: a fragment that is not members-only, not an app's (a chat, a
 brain), or that you only view; a link, a folder holding one, a folder
-of more than 10,000 files, and anything in the runtime's own home
-(`$HERMES_HOME`: its memory, skills and sessions) or holding it. What
+of more than 10,000 files, a file whose name says it may hold a
+password or key (`.env`, a private key) or a folder holding one, and
+anything in the runtime's own home (`$HERMES_HOME`: its memory, skills
+and sessions) or holding it. One move or back works in a folder at a
+time. A file that changes after its copy is made stays where it is. What
 is stored is paid from the fragment's owner's ledger, as any fragment's
 blobs are (Your ledger).
 

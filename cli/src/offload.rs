@@ -21,6 +21,13 @@
 //! back to an earlier save (docs/computers.md) can come back with the note
 //! and without the file, and the note must still lead to it.
 //!
+//! **One at a time, never over a file.** A move or a back holds its
+//! folder's lock (`flock` on the folder) throughout, so a back never runs
+//! between a move's note and its removal. Every file it writes is made
+//! new under a random hidden name (`create_new`, private) and linked into
+//! place, so neither a note nor a file brought back ever replaces one, and
+//! each file is checked unchanged again just before it is removed.
+//!
 //! **Replay and restart.** A move cut off before its note leaves its
 //! files where they were (and a copy in the fragment, harmless); run again,
 //! it moves them under a new folder. One cut off after its note, its files
@@ -51,6 +58,9 @@ pub const NOTE_SUFFIX: &str = ".offloaded.md";
 /// subfolder at a time (and one of dependencies or a cache, which its tools
 /// make again, is deleted instead).
 pub const FILES_MAX: usize = 10_000;
+/// The parts one file is moved in, at most (20 GB in parts of 100 MB is
+/// 200): a note naming more is no move's.
+const PARTS_MAX: u64 = 100_000;
 /// Where the note's record begins and ends.
 const RECORD_OPEN: &str = "\n```json\n";
 const RECORD_CLOSE: &str = "\n```\n";
@@ -71,7 +81,20 @@ struct Record {
     from: String,
     /// Each file's parts are this long, its last one at most.
     part_bytes: u64,
+    /// A folder's folders, its own first, each with its permission bits:
+    /// made again as they were, the empty ones too. None for a file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dirs: Vec<Folder>,
     files: Vec<Moved>,
+}
+
+/// One folder of a folder moved: its path from the note's folder, and its
+/// permission bits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Folder {
+    path: String,
+    mode: u32,
 }
 
 /// One file moved: its path from the note's folder (the name moved first),
@@ -130,6 +153,12 @@ fn note_text(r: &Record, note: &Path, name: &str, when: &str) -> String {
     let head = head.to_string();
     out.push_str(RECORD_OPEN.trim_start_matches('\n'));
     out.push_str(&head[..head.len() - 1]);
+    if !r.dirs.is_empty() {
+        let dirs: Vec<String> = r.dirs.iter().map(|d| serde_json::to_string(d).expect("a folder's record is JSON")).collect();
+        out.push_str(",\"dirs\":[\n");
+        out.push_str(&dirs.join(",\n"));
+        out.push_str("\n]");
+    }
     out.push_str(",\"files\":[\n");
     let lines: Vec<String> = r.files.iter().map(|f| serde_json::to_string(f).expect("a file's record is JSON")).collect();
     out.push_str(&lines.join(",\n"));
@@ -143,7 +172,14 @@ fn record_of(text: &str) -> Result<Record> {
     let start = text.rfind(RECORD_OPEN).ok_or_else(|| anyhow!("it holds no record"))? + RECORD_OPEN.len();
     let end = text[start..].find(RECORD_CLOSE).ok_or_else(|| anyhow!("its record has no end"))? + start;
     let r: Record = serde_json::from_str(&text[start..end]).context("its record")?;
-    if r.part_bytes == 0 || r.files.is_empty() || r.files.iter().any(|f| !blob::valid_sha(&f.sha256)) {
+    let plain = |p: &str| !p.is_empty() && Path::new(p).components().all(|c| matches!(c, Component::Normal(_)));
+    let fits = r.part_bytes > 0
+        && (1..=FILES_MAX).contains(&r.files.len())
+        && r.dirs.len() <= FILES_MAX
+        && r.files.iter().all(|f| blob::valid_sha(&f.sha256) && f.mode <= 0o777 && plain(&f.path) && f.size.div_ceil(r.part_bytes) <= PARTS_MAX)
+        && r.dirs.iter().all(|d| d.mode <= 0o777 && plain(&d.path))
+        && r.files.iter().try_fold(0u64, |n, f| n.checked_add(f.size)).is_some();
+    if !fits {
         bail!("its record is not one a move writes");
     }
     Ok(r)
@@ -159,12 +195,17 @@ struct Local {
     modified: SystemTime,
 }
 
-fn local(abs: PathBuf, rel: String, m: &fs::Metadata) -> Result<Local> {
+/// A file's or a folder's permission bits.
+fn mode_of(m: &fs::Metadata) -> u32 {
     #[cfg(unix)]
     let mode = std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o777;
     #[cfg(not(unix))]
-    let mode = 0o644;
-    Ok(Local { abs, rel, size: m.len(), mode, modified: m.modified()? })
+    let mode = if m.is_dir() { 0o755 } else { 0o644 };
+    mode
+}
+
+fn local(abs: PathBuf, rel: String, m: &fs::Metadata) -> Result<Local> {
+    Ok(Local { abs, rel, size: m.len(), mode: mode_of(m), modified: m.modified()? })
 }
 
 /// What a path to move is: the folder its note goes in, the name moved,
@@ -175,6 +216,7 @@ struct Planned {
     note: PathBuf,
     folder: bool,
     files: Vec<Local>,
+    dirs: Vec<Folder>,
 }
 
 fn name_of(p: &Path) -> Result<String> {
@@ -193,7 +235,11 @@ fn place(path: &Path) -> Result<(PathBuf, String)> {
 /// The files under `dir` (a folder being moved), each by its path from
 /// `root`'s folder; refused whole when one is a link or not a file, or
 /// past `FILES_MAX`.
-fn walk(dir: &Path, rel: &str, out: &mut Vec<Local>) -> Result<()> {
+fn walk(dir: &Path, rel: &str, out: &mut Vec<Local>, dirs: &mut Vec<Folder>) -> Result<()> {
+    dirs.push(Folder { path: rel.to_string(), mode: mode_of(&fs::symlink_metadata(dir)?) });
+    if dirs.len() > FILES_MAX {
+        bail!(coded(Code::InvalidUsage, format!("{} holds more than {FILES_MAX} folders: move them one at a time", dir.display())));
+    }
     let mut entries: Vec<_> = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?.collect::<std::io::Result<_>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
@@ -201,8 +247,11 @@ fn walk(dir: &Path, rel: &str, out: &mut Vec<Local>) -> Result<()> {
         let (abs, rel) = (e.path(), format!("{rel}/{name}"));
         let m = fs::symlink_metadata(&abs)?;
         if m.is_dir() {
-            walk(&abs, &rel, out)?;
+            walk(&abs, &rel, out, dirs)?;
         } else if m.is_file() {
+            if crate::home::rules::secret_name(&name) {
+                bail!(coded(Code::InvalidUsage, format!("{} may hold a password or key: a folder holding one is not moved (move the files beside it instead)", abs.display())));
+            }
             out.push(local(abs, rel, &m)?);
             if out.len() > FILES_MAX {
                 bail!(coded(Code::InvalidUsage, format!("{} holds more than {FILES_MAX} files: move its folders one at a time (a folder of dependencies or a cache, which its tools make again, is deleted instead)", dir.display())));
@@ -237,21 +286,24 @@ fn plan(path: &Path, keep: Option<&Path>) -> Result<Planned> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && note.exists() => bail!(coded(Code::InvalidUsage, format!("{} was moved already: its note is {}", abs.display(), note.display()))),
         m => m.with_context(|| format!("reading {}", abs.display()))?,
     };
-    let mut files = Vec::new();
+    let (mut files, mut dirs) = (Vec::new(), Vec::new());
     let folder = m.is_dir();
     if m.is_file() {
+        if crate::home::rules::secret_name(&name) {
+            bail!(coded(Code::InvalidUsage, format!("{} may hold a password or key: it is not moved", abs.display())));
+        }
         files.push(local(abs.clone(), name.clone(), &m)?);
     } else if folder {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         crate::sync::refuse_dir(&abs, home.as_deref()).map_err(|e| coded(Code::InvalidUsage, e.to_string().replace("refusing to sync", "refusing to move it").replace("Point --dir at the folder you mean, by its full path", "Name the folder you mean, by its full path")))?;
-        walk(&abs, &name, &mut files)?;
+        walk(&abs, &name, &mut files, &mut dirs)?;
         if files.is_empty() {
             bail!(coded(Code::InvalidUsage, format!("{} holds no files: nothing to move", abs.display())));
         }
     } else {
         bail!(coded(Code::InvalidUsage, format!("{} is a link or not a file: move what it points at by its own path", abs.display())));
     }
-    Ok(Planned { dir, name, note, folder, files })
+    Ok(Planned { dir, name, note, folder, files, dirs })
 }
 
 /// The folder in the fragment a move made now goes under: when, then a
@@ -332,7 +384,8 @@ pub struct Offloaded {
     pub bytes: u64,
     /// A move cut off after its note, whose files were removed now.
     pub resumed: bool,
-    /// Folders left in place: something new is in them.
+    /// Files and folders left in place: a file that changed after its copy
+    /// was made, a folder something new is in.
     pub kept: Vec<String>,
 }
 
@@ -347,22 +400,44 @@ fn sha_of(path: &Path) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
-/// Writes `text` at `path` whole or not at all: beside it first, synced,
-/// then renamed over it, and its folder synced.
-fn write_whole(path: &Path, text: &str) -> Result<()> {
-    let dir = path.parent().expect("a note has a folder");
-    let tmp = dir.join(format!(".{}.writing", name_of(path)?));
-    let wrote = File::create(&tmp).and_then(|mut f| {
-        f.write_all(text.as_bytes())?;
-        f.sync_all()
-    });
-    // a disk too full for the note keeps no part of one
-    let wrote = wrote.and_then(|()| fs::rename(&tmp, path));
-    if let Err(e) = wrote {
-        fs::remove_file(&tmp).ok();
-        return Err(anyhow::Error::new(e).context(format!("writing {}; nothing was removed (a disk with no room for it needs a little room made first)", path.display())));
+/// A new file in `dir` under a random hidden name, made exclusively and
+/// private: never one that was there, nor through a link.
+fn fresh(dir: &Path) -> Result<(PathBuf, File)> {
+    loop {
+        let path = dir.join(format!(".offload-{:016x}", rand::random::<u64>()));
+        let mut open = fs::OpenOptions::new();
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+        match open.open(&path) {
+            Ok(f) => return Ok((path, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(anyhow::Error::new(e).context(format!("writing in {}", dir.display()))),
+        }
     }
+}
+
+/// Writes `text` as the note at `path` whole or not at all: into a fresh
+/// file, synced, then linked into place (never over a note there), and its
+/// folder synced. A disk too full for it keeps no part of it.
+fn publish(path: &Path, text: &str) -> Result<()> {
+    let dir = path.parent().expect("a note has a folder");
+    let (tmp, mut f) = fresh(dir).with_context(|| format!("writing {}; nothing was removed", path.display()))?;
+    let wrote = f.write_all(text.as_bytes()).and_then(|()| f.sync_all()).and_then(|()| fs::hard_link(&tmp, path));
+    fs::remove_file(&tmp).ok();
+    wrote.with_context(|| format!("writing {}; nothing was removed (a disk with no room for it needs a little room made first)", path.display()))?;
     sync_dir(dir)
+}
+
+/// The lock of the folder a move or a back works in, held while it works:
+/// one at a time (another is refused at once, never waited on).
+fn lock(dir: &Path) -> Result<File> {
+    let f = File::open(dir).with_context(|| format!("opening {}", dir.display()))?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(fs::TryLockError::WouldBlock) => bail!(coded(Code::Conflict, format!("another fragment offload is working in {}: run this again once it is done", dir.display()))),
+        Err(fs::TryLockError::Error(e)) => Err(anyhow::Error::new(e).context(format!("locking {}", dir.display()))),
+    }
 }
 
 fn sync_dir(dir: &Path) -> Result<()> {
@@ -372,10 +447,15 @@ fn sync_dir(dir: &Path) -> Result<()> {
 /// Removes the planned files, then their folders from the deepest, each
 /// only once empty: the folders that kept something new are named.
 fn remove(p: &Planned) -> Result<Vec<String>> {
+    let mut kept = Vec::new();
     for l in &p.files {
+        // changed since it was read (and its copy made): it stays
+        if !unchanged(l) {
+            kept.push(l.abs.display().to_string());
+            continue;
+        }
         fs::remove_file(&l.abs).with_context(|| format!("removing {} (its copy is in place)", l.abs.display()))?;
     }
-    let mut kept = Vec::new();
     if p.folder {
         let mut dirs: Vec<PathBuf> = p.files.iter().flat_map(|l| l.abs.ancestors().skip(1).take_while(|a| a.starts_with(p.dir.join(&p.name))).map(Path::to_path_buf)).collect();
         dirs.sort();
@@ -423,6 +503,7 @@ fn check_into(c: &Client, into: &str) -> Result<String> {
 /// Moves `path` (a file, or a folder and all in it) into `into`.
 pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
     let p = plan(path, runtime_home().as_deref())?;
+    let _held = lock(&p.dir)?;
     if fs::symlink_metadata(&p.note).is_ok() {
         return resume(c, &p);
     }
@@ -430,10 +511,13 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
     let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
     let part_bytes = crate::session::upload_max(&list, c.agent().is_some());
     let (at, when) = at_now(&p.dir);
-    let mut r = Record { fragment: into.clone(), at, from: p.dir.join(&p.name).display().to_string(), part_bytes, files: Vec::new() };
+    let mut r = Record { fragment: into.clone(), at, from: p.dir.join(&p.name).display().to_string(), part_bytes, dirs: p.dirs.clone(), files: Vec::new() };
     // every path it writes is a repo path, and its own
     let mut paths = std::collections::BTreeSet::new();
     for l in &p.files {
+        if l.size.div_ceil(part_bytes) > PARTS_MAX {
+            bail!(coded(Code::TooLarge, format!("{} is too large to move in parts of {}", l.abs.display(), size(part_bytes))));
+        }
         let probe = Moved { path: l.rel.clone(), size: l.size, sha256: String::new(), mode: l.mode };
         for (path, _) in r.parts(&probe) {
             RepoPath::parse(&path).map_err(|e| coded(Code::InvalidUsage, format!("{} cannot go into a fragment as {e}", l.abs.display())))?;
@@ -477,18 +561,19 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
         head = commit(c, &mut held, &author, head, &message, &batch)?;
     }
     let head = head.ok_or_else(|| anyhow!("{into}'s main has no head after the move's commit"))?;
-    manifest(c, &mut held, &author, head.clone())?;
+    manifest(c, &mut held, &author, head)?;
     crate::sync::refresh_pins(c, &into, MAIN);
 
-    // proven: each file read back at the commit that holds it
+    // proven: each file read back from main as it is now, which a back reads
     let mut read = Held::new(&into, Wants::Read);
+    let main = read.get(c)?.branch_head(MAIN)?.ok_or_else(|| anyhow!("{into}'s main has no head after the move's commit"))?;
     for f in &r.files {
-        read_back(c, &mut read, &r, &head, f, None).with_context(|| format!("checking {}'s copy; nothing was removed", f.path))?;
+        read_back(c, &mut read, &r, &main, f, None).with_context(|| format!("checking {}'s copy; nothing was removed", f.path))?;
     }
     if let Some(l) = p.files.iter().find(|l| !unchanged(l)) {
         bail!(coded(Code::Conflict, format!("{} changed while it was moved; nothing was removed (a copy of it as it was is in {into}, under {}/): move it once it is done changing", l.abs.display(), r.at)));
     }
-    write_whole(&p.note, &note_text(&r, &p.note, &p.name, &when))?;
+    publish(&p.note, &note_text(&r, &p.note, &p.name, &when))?;
     let kept = remove(&p)?;
     Ok(Offloaded { fragment: into, at: r.at.clone(), note: p.note.display().to_string(), files: r.files.len(), bytes: r.bytes(), resumed: false, kept })
 }
@@ -544,20 +629,38 @@ fn note_of(path: &Path) -> Result<PathBuf> {
 /// Brings back what the note at (or for) `path` moved, beside the note.
 pub fn back(c: &Client, path: &Path) -> Result<Back> {
     let note = note_of(path)?;
+    let dir = note.parent().expect("a note has a folder").to_path_buf();
+    let _held = lock(&dir)?;
     let text = match fs::read_to_string(&note) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(coded(Code::NotFound, format!("no {}: nothing moved from here to bring back", note.display()))),
         Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", note.display()))),
     };
     let r = record_of(&text).with_context(|| format!("reading {}", note.display()))?;
-    let dir = note.parent().expect("a note has a folder").to_path_buf();
     let name = name_of(&note)?.trim_end_matches(NOTE_SUFFIX).to_string();
-    // each file under the name the note is for, by names alone
+    // each path under the name the note is for; each file's folders, the
+    // note's own, or ones it names
+    let named: std::collections::BTreeSet<&str> = r.dirs.iter().map(|d| d.path.as_str()).collect();
+    let under = |p: &str| Path::new(p).components().next() == Some(Component::Normal(name.as_ref()));
+    for p in r.dirs.iter().map(|d| &d.path).chain(r.files.iter().map(|f| &f.path)) {
+        if !under(p) {
+            bail!("{} names {p}, which is not under {name}", note.display());
+        }
+    }
     for f in &r.files {
-        let rel = Path::new(&f.path);
-        let plain = rel.components().all(|c| matches!(c, Component::Normal(_)));
-        if !plain || rel.components().next() != Some(Component::Normal(name.as_ref())) {
-            bail!("{} names {}, which is not under {name}", note.display(), f.path);
+        let folders: Vec<&Path> = Path::new(&f.path).ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()).collect();
+        if folders.iter().any(|a| !named.contains(a.to_str().unwrap_or_default())) {
+            bail!("{} names {}, in a folder it does not name", note.display(), f.path);
+        }
+    }
+    // its folders, where they are already, are folders (never a link out)
+    for d in &r.dirs {
+        let at = dir.join(&d.path);
+        match fs::symlink_metadata(&at) {
+            Ok(m) if m.is_dir() => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => bail!(coded(Code::Conflict, format!("{} is there already, and is not a folder: move it aside, then bring this back; nothing was changed", at.display()))),
+            Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", at.display()))),
         }
     }
     // what is in place already: its bytes are the note's, or nothing moves
@@ -574,13 +677,27 @@ pub fn back(c: &Client, path: &Path) -> Result<Back> {
     }
     let mut held = Held::new(&r.fragment, Wants::Read);
     let head = held.get(c)?.branch_head(MAIN)?.ok_or_else(|| coded(Code::NotFound, format!("{} has no files: its copy is gone", r.fragment)))?;
+    // its folders made again as they were, parents first: private as they
+    // are made, then their own bits
+    for d in &r.dirs {
+        let at = dir.join(&d.path);
+        let mut make = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut make, 0o700);
+        match make.create(&at) {
+            Ok(()) => {
+                set_mode(&at, d.mode)?;
+                sync_dir(at.parent().expect("under the note's folder"))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) => {}
+            Err(e) => return Err(anyhow::Error::new(e).context(format!("making {}; the note stays", at.display()))),
+        }
+    }
     let mut bytes = 0;
     for f in &todo {
         let target = dir.join(&f.path);
         let into = target.parent().expect("under the note's folder");
-        fs::create_dir_all(into).with_context(|| format!("making {}", into.display()))?;
-        let tmp = into.join(format!(".{}.offload-back", name_of(&target)?));
-        let mut out = File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+        let (tmp, mut out) = fresh(into)?;
         let got = read_back(c, &mut held, &r, &head, f, Some(&mut out)).and_then(|()| {
             out.sync_all()?;
             set_mode(&tmp, f.mode)?;
@@ -609,7 +726,7 @@ pub fn print(o: &Offloaded) {
     let how = if o.resumed { "Finished moving" } else { "Moved" };
     println!("{how} {} files ({}) into {}, under {}/. A note is in their place: {}", o.files, size(o.bytes), o.fragment, o.at, o.note);
     for k in &o.kept {
-        println!("  kept {k}: something new is in it");
+        println!("  kept {k}: it changed while it was moved, or something new is in it");
     }
 }
 
@@ -691,6 +808,8 @@ mod tests {
         let root = tempdir("roundtrip");
         let photos = root.join("photos");
         fs::create_dir_all(photos.join("trip/empty")).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(photos.join("trip"), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
         fs::write(photos.join("a.md"), b"# a").unwrap();
         fs::write(photos.join("trip/b.jpg"), bytes(MIB + 5, 1)).unwrap();
         fs::write(photos.join("trip/c.mov"), bytes(5 * MIB + 3, 2)).unwrap();
@@ -718,6 +837,9 @@ mod tests {
         let b = back(&c, &note).unwrap();
         assert_eq!((b.files, b.already), (4, 0));
         assert_eq!(tree(&photos), before, "byte for byte");
+        assert!(photos.join("trip/empty").is_dir(), "an empty folder comes back too");
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&fs::metadata(photos.join("trip")).unwrap().permissions()) & 0o777, 0o700, "and a folder's bits");
         #[cfg(unix)]
         assert_eq!(std::os::unix::fs::PermissionsExt::mode(&fs::metadata(photos.join("trip/run.sh")).unwrap().permissions()) & 0o777, 0o755);
         assert!(!note.exists(), "the note goes last");
@@ -871,8 +993,9 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), b"a", "nothing removed");
     }
 
-    /// Goal: a note's record reads back as written, and a note edited out
-    /// of shape, or naming a file outside its own name, is refused.
+    /// Goal: a note's record reads back as written; one edited out of
+    /// shape, naming a path that climbs, or parts past `PARTS_MAX` (which
+    /// a back would hold all at once) is refused before anything is read.
     #[test]
     fn a_notes_record() {
         let r = Record {
@@ -880,30 +1003,134 @@ mod tests {
             at: "2026-11-18T103102Z-00ff/data/work".into(),
             from: "/data/work/odd `name'".into(),
             part_bytes: 4,
-            files: vec![Moved { path: "odd `name'".into(), size: 9, sha256: "a".repeat(64), mode: 0o644 }],
+            dirs: vec![Folder { path: "odd `name'".into(), mode: 0o700 }],
+            files: vec![Moved { path: "odd `name'/f".into(), size: 9, sha256: "a".repeat(64), mode: 0o644 }],
         };
         let text = note_text(&r, Path::new("/data/work/odd `name'.offloaded.md"), "odd `name'", "2026-11-18 at 10:31 UTC");
         assert_eq!(record_of(&text).unwrap(), r);
         assert!(text.contains(r#"fragment offload --back '/data/work/odd `name'\''.offloaded.md'"#), "{text}");
         assert_eq!(r.parts(&r.files[0]).iter().map(|(p, n)| (p.rsplit('.').next().unwrap().to_string(), *n)).collect::<Vec<_>>(), [("part-0001-of-0003".into(), 4), ("part-0002-of-0003".into(), 4), ("part-0003-of-0003".into(), 1)]);
-        assert!(record_of(&text.replace("\"size\":9", "\"size\":9,\"x\":1")).is_err(), "an unknown field");
-        assert!(record_of("# Moved to storage\n").is_err());
+        for bad in [
+            text.replace("\"size\":9", "\"size\":9,\"x\":1"),
+            text.replace("\"size\":9", "\"size\":18446744073709551615"),
+            text.replace("\"mode\":420", "\"mode\":4095"),
+            text.replace("odd `name'/f", "odd `name'/../../etc/f"),
+            "# Moved to storage\n".to_string(),
+        ] {
+            assert!(record_of(&bad).is_err(), "{bad}");
+        }
         let empty = Moved { path: "e".into(), size: 0, sha256: "a".repeat(64), mode: 0 };
         assert_eq!(r.parts(&empty), [(format!("{}/e", r.at), 0)], "an empty file is one part");
     }
 
-    /// Goal: back brings back only under the note's own name.
+    /// Goal: back brings back only under the note's own name, into folders
+    /// the note names.
     #[test]
     fn back_stays_under_its_name() {
         let (_mock, c) = host();
         let root = tempdir("escape");
-        let r = Record { fragment: NAME.into(), at: "x".into(), from: "/x".into(), part_bytes: 4, files: vec![Moved { path: "a/../../etc".into(), size: 1, sha256: "a".repeat(64), mode: 0 }] };
+        let file = |path: &str| Moved { path: path.into(), size: 1, sha256: "a".repeat(64), mode: 0 };
         let note = root.join("a.offloaded.md");
-        fs::write(&note, note_text(&r, &note, "a", "now")).unwrap();
-        let e = back(&c, &note).unwrap_err();
-        assert!(format!("{e:#}").contains("not under a"), "{e:#}");
-        let other = Record { files: vec![Moved { path: "b".into(), ..r.files[0].clone() }], ..r };
-        fs::write(&note, note_text(&other, &note, "a", "now")).unwrap();
-        assert!(format!("{:#}", back(&c, &note).unwrap_err()).contains("not under a"));
+        for (files, says) in [(vec![file("b")], "not under a"), (vec![file("a/x/y")], "does not name")] {
+            let r = Record { fragment: NAME.into(), at: "x".into(), from: "/x".into(), part_bytes: 4, dirs: vec![Folder { path: "a".into(), mode: 0o755 }], files };
+            fs::write(&note, note_text(&r, &note, "a", "now")).unwrap();
+            let e = back(&c, &note).unwrap_err();
+            assert!(format!("{e:#}").contains(says), "{e:#}");
+        }
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1, "nothing made");
+    }
+
+    /// Goal: a folder replaced by a link before its back is refused, and
+    /// nothing is written where the link points.
+    #[cfg(unix)]
+    #[test]
+    fn back_never_follows_a_link() {
+        let (_mock, c) = host();
+        let root = tempdir("link");
+        let dir = root.join("work");
+        fs::create_dir_all(dir.join("inner")).unwrap();
+        fs::write(dir.join("inner/a.txt"), b"a").unwrap();
+        offload(&c, &dir, NAME).unwrap();
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+        let e = back(&c, &dir).unwrap_err();
+        assert!(format!("{e:#}").contains("is not a folder"), "{e:#}");
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "nothing written through the link");
+        assert!(root.join("work.offloaded.md").exists());
+    }
+
+    /// Goal: a file whose name says it may hold a password or key is never
+    /// moved, alone or in a folder; nothing is sent.
+    #[test]
+    fn a_secret_is_never_moved() {
+        let (mock, c) = host();
+        let root = tempdir("secret");
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.py"), b"print(1)").unwrap();
+        fs::write(project.join(".env"), b"KEY=x").unwrap();
+        for p in [project.clone(), project.join(".env")] {
+            let e = offload(&c, &p, NAME).unwrap_err();
+            assert!(format!("{e:#}").contains("may hold a password or key"), "{e:#}");
+        }
+        assert!(mock.paths(NAME, "main").is_empty() && project.join(".env").exists() && project.join("main.py").exists());
+    }
+
+    /// Goal: one move or back works in a folder at a time: while another
+    /// holds it, both are refused at once, nothing changed.
+    #[test]
+    fn one_at_a_time_in_a_folder() {
+        let (mock, c) = host();
+        let root = tempdir("lock");
+        let file = root.join("a.bin");
+        fs::write(&file, b"a").unwrap();
+        {
+            let _other = lock(&root).unwrap();
+            for e in [offload(&c, &file, NAME).unwrap_err(), back(&c, &file).unwrap_err()] {
+                assert!(format!("{e:#}").contains("another fragment offload is working"), "{e:#}");
+            }
+            assert!(mock.paths(NAME, "main").is_empty() && file.exists());
+        }
+        offload(&c, &file, NAME).unwrap();
+        assert!(!file.exists());
+    }
+
+    /// Goal: a file changed after its copy was made is never removed: it
+    /// stays, named among what was kept. Method: the plan, then a write,
+    /// then its removal.
+    #[test]
+    fn a_file_changed_after_its_copy_stays() {
+        let root = tempdir("changed");
+        let dir = root.join("d");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), b"a").unwrap();
+        fs::write(dir.join("b.txt"), b"b").unwrap();
+        let p = plan(&dir, None).unwrap();
+        fs::write(dir.join("b.txt"), b"bigger now").unwrap();
+        let kept = remove(&p).unwrap();
+        assert!(!dir.join("a.txt").exists());
+        assert_eq!(fs::read(dir.join("b.txt")).unwrap(), b"bigger now");
+        assert!(kept.iter().any(|k| k.ends_with("b.txt")) && kept.iter().any(|k| k.ends_with("/d")), "{kept:?}");
+    }
+
+    /// Goal: files named as a back's and a note's own were once
+    /// (`.<name>.offload-back`, `.<name>.writing`) come back beside the
+    /// file they were named for: a temporary file's name is random, never
+    /// one there.
+    #[test]
+    fn names_beside_come_back() {
+        let (_mock, c) = host();
+        let root = tempdir("beside");
+        let dir = root.join("d");
+        fs::create_dir_all(&dir).unwrap();
+        let files: [(&str, &[u8]); 3] = [("report", b"r"), (".report.offload-back", b"hidden"), (".d.offloaded.md.writing", b"w")];
+        for (n, b) in files {
+            fs::write(dir.join(n), b).unwrap();
+        }
+        let before = tree(&dir);
+        offload(&c, &dir, NAME).unwrap();
+        back(&c, &dir).unwrap();
+        assert_eq!(tree(&dir), before);
     }
 }

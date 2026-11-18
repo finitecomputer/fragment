@@ -62,9 +62,9 @@ only then removes it here, leaving a note in its place
 (`talk.mp4.offloaded.md`) that says where it went. If it fails, nothing
 was removed: read why, fix it, and run it again. Cut off, run it again and
 it finishes. A disk with no room at all can't take the note: delete a
-cache first (step 1). A folder holding links, or more than 10,000 files,
-is refused: move its folders one at a time, or delete it if tools make it
-again.
+cache first (step 1). A folder holding links, a `.env` or a key, or more
+than 10,000 files, is refused: move its folders one at a time, or delete
+it if tools make it again.
 
 To bring something back, once there is room for it:
 

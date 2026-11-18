@@ -13,7 +13,7 @@ pub(crate) mod files;
 mod layout;
 mod plan;
 mod routines;
-mod rules;
+pub(crate) mod rules;
 mod skills;
 pub mod source;
 pub(crate) mod survey;
