@@ -187,7 +187,7 @@ pub fn refused_budget() -> String {
     )
 }
 
-/// What the bridge keeps across restarts (`/data/bridge/state.json`): a
+/// What the bridge keeps across restarts (`/data/bridge`, store.rs): a
 /// cache of where to read from and what it has in hand, never the
 /// authority on which turns have run (the journal is).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

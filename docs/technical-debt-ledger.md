@@ -1101,3 +1101,22 @@ unfinished design, not debt.
 - **Delete when:** each batch's commit is made again from main as the
   indexes' is (keeping the newer entry), or the archive moves to an app
   whose mutation writes both.
+
+## An older bridge reads the state's snapshot, not its log
+
+- **Shortcut:** the bridge appends each step's change to `state.log`
+  beside `state.json` (`images/bridge/src/store.rs`). A bridge from
+  before the log reads `state.json` alone. A save under an answered hold
+  holds the state whole in `state.json`, because the answer waits for
+  the log to be written into it. A rollback from such a save loses
+  nothing. Two kinds of `/data` can still hold steps in the log only: a
+  save whose hold went unanswered (the DO saves anyway after
+  `HOLD_WAIT_MS`), and a `/data` a container kept without a save (a
+  self-hosted node after a crash). An older bridge starts from the
+  snapshot, as of the last compaction, at most the log's room behind.
+- **Risk:** that older bridge goes back to the snapshot, as a restore
+  of an earlier save does. It reads those chats again and runs nothing
+  twice (P1), since the journal is the authority. It misreads nothing:
+  the snapshot is in the format it wrote.
+- **Delete when:** no computer can be pinned to an image whose bridge
+  predates the log.
