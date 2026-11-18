@@ -8597,8 +8597,10 @@ fn apps_archive_delete_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page
         b.eval(page, &format!("({}?.click(), true)", control(name, "unarchive")))?;
         b.until(page, &live(name), wait);
     }
-    let back = b.until(page, &format!("{} && {} && document.querySelector('#brains-page .apps-archived')?.hidden", live(&mine), live(&theirs)), wait);
-    s.ok("Unarchive brings each back to the list", back, b.eval(page, "document.getElementById('brains-page')?.innerText ?? null")?);
+    // settled: each its Archive again, pressable, never left saying Archiving…
+    let settled = |name: &str| format!("{} && {}?.textContent === 'Archive' && !{}.disabled", live(name), control(name, "archive"), control(name, "archive"));
+    let back = b.until(page, &format!("{} && {} && document.querySelector('#brains-page .apps-archived')?.hidden", settled(&mine), settled(&theirs)), wait);
+    s.ok("Unarchive brings each back to the list, its Archive pressable again", back, b.eval(page, "document.getElementById('brains-page')?.innerText ?? null")?);
 
     // Delete: asked again under the row, its name typed back
     let form = format!("document.querySelector({})", js(&format!("#brains-page [data-delete-confirm=\"{mine}\"]")));

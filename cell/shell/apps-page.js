@@ -195,10 +195,16 @@ export function createAppsPage(page, h, shelf = "apps") {
     if (text) said.set(name, text);
     else said.delete(name);
   };
-  const beginBusy = (name, kind) => {
+  const beginBusy = (name, kind, to) => {
     const token = ++operation;
-    busy.set(name, { kind, token, started: Date.now() });
+    busy.set(name, { kind, token, started: Date.now(), to });
     return token;
+  };
+  // an archive or unarchive in flight, said by which it is: the list may
+  // move its row before the call's reload is done
+  const archiving = (name) => {
+    const b = busy.get(name);
+    return b?.kind === "archive" ? (b.to ? "Archiving…" : "Unarchiving…") : null;
   };
   const endBusy = (name, token) => {
     if (busy.get(name)?.token === token) busy.delete(name);
@@ -498,7 +504,7 @@ export function createAppsPage(page, h, shelf = "apps") {
       preview.append(img);
       head.append(preview);
     }
-    if (f.archived) head.append(button(doing === "archive" ? "Unarchiving…" : "Unarchive", "unarchive", () => setArchived(name, false), !!doing));
+    if (f.archived) head.append(button(archiving(name) ?? "Unarchive", "unarchive", () => setArchived(name, false), !!doing));
     else if (dockable(f)) {
       const dock = h.el("button", "app-dock");
       dock.type = "button";
@@ -524,7 +530,7 @@ export function createAppsPage(page, h, shelf = "apps") {
     tools.append(tab(owns(f) ? "Sharing" : "People", "sharing"));
     if (owns(f) && !f.archived) tools.append(tab("Address", "address"));
     const ends = h.el("span", "app-row-ends");
-    if (!f.archived) ends.append(button(doing === "archive" ? "Archiving…" : "Archive", "archive", () => setArchived(name, true), !!doing));
+    if (!f.archived) ends.append(button(archiving(name) ?? "Archive", "archive", () => setArchived(name, true), !!doing));
     if (owns(f)) {
       const ask = button("Delete", "delete", () => askDelete(name), !!doing);
       ask.setAttribute("aria-expanded", String(confirming.get(name) === "delete"));
@@ -566,7 +572,7 @@ export function createAppsPage(page, h, shelf = "apps") {
     const words = said.get(name);
     if (words) { const p = h.el("p", "app-row-said", words); p.setAttribute("role", "status"); item.append(p); }
     const edit = editing.get(name);
-    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null, reach.get(name) ?? null, confirming.get(name) ?? null]);
+    item.dataset.shows = JSON.stringify([f, doing ?? null, archiving(name), words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null, reach.get(name) ?? null, confirming.get(name) ?? null]);
     item.dataset.art = artReadiness(item);
     return item;
   }
@@ -803,7 +809,7 @@ export function createAppsPage(page, h, shelf = "apps") {
   }
 
   async function setArchived(name, archived) {
-    const operation = beginBusy(name, "archive");
+    const operation = beginBusy(name, "archive", archived);
     say(name, "");
     render();
     try {
