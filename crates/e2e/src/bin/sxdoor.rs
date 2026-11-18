@@ -722,6 +722,15 @@ fn main() -> Result<()> {
             println!("replay {id}: {r}");
             Ok(())
         }
+        "unpause" => {
+            let a = hosted()?;
+            let st = state();
+            let keys = owner(&st)?;
+            let conn = s(&st, "connector")?;
+            let r = a.signed(&keys, "POST", &format!("/api/f/{conn}/pause"), Some(&json!({ "op": args.get(1).context("an op")?, "paused": false })))?;
+            println!("{r}");
+            Ok(())
+        }
         "get" => {
             let a = hosted()?;
             let st = state();
