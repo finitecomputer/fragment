@@ -33,7 +33,8 @@
 //! sets it back can hide its own changes from its own next save), and a
 //! filesystem mounted under the work having none (one found copies).
 
-/// Where the stamps are kept, relative to `/data`: left out of the home's
+/// Where the stamps are kept, relative to `/data`: root's alone (a tool run
+/// as the guest's user cannot touch one), and left out of the home's
 /// record, so a restore of it brings back none.
 pub const WORK_STAMPS: &str = "/.work-stamps/";
 
@@ -59,7 +60,7 @@ macro_rules! tick_after {
 /// the tick past it. Exit 2: this image's `find` cannot compare change
 /// times (`-newercm`, GNU findutils'), so no save of it keeps its work.
 pub const STAMP_NEXT: &str = concat!(
-    "cd \"$1\" && mkdir -p .work-stamps && cd .work-stamps && find . -maxdepth 0 -newercm . >/dev/null 2>&1 || exit 2\n",
+    "cd \"$1\" && mkdir -p -m 700 .work-stamps && cd .work-stamps && find . -maxdepth 0 -newercm . >/dev/null 2>&1 || exit 2\n",
     "rm -f \"next-$2\" && touch \"next-$2\" || exit 1\n",
     tick_after!("next-$2"),
 );
@@ -73,7 +74,7 @@ pub const STAMP_TAKEN: &str = "cd \"$1/.work-stamps\" && test -f \"next-$2\" || 
 /// before its check and its gate: that record's stamp, the only one, then
 /// the tick past it.
 pub const STAMP_RESTORED: &str = concat!(
-    "cd \"$1\" && rm -rf .work-stamps && mkdir .work-stamps && cd .work-stamps && find . -maxdepth 0 -newercm . >/dev/null 2>&1 || exit 2\n",
+    "cd \"$1\" && rm -rf .work-stamps && mkdir -m 700 .work-stamps && cd .work-stamps && find . -maxdepth 0 -newercm . >/dev/null 2>&1 || exit 2\n",
     "touch \"$2\" || exit 1\n",
     tick_after!("$2"),
 );

@@ -799,24 +799,17 @@ mod tests {
         assert_eq!(ids(&s)[0], "m0");
     }
 
-    /// Goal (P9): a work's record kept unchanged by later saves is theirs
-    /// too: a save pushed out, or one that failed, lets go of it only once
-    /// no kept save holds it, so its delete never takes what a wake
-    /// restores; a wipe names it once. The work's last record of a running
-    /// container is its own newest save's, else the save it came up from,
-    /// never an unusable one's. Valid, invalid (a record a kept save holds,
-    /// let go of: kept), replay (let go of twice: deleted once), restart
-    /// (stored and read back).
+    /// Goal (P9): a record several kept saves hold (a work's, kept
+    /// unchanged by a later save) is let go of only once no kept save
+    /// holds it: a save pushed out, or one that failed, never deletes what
+    /// a wake restores; a wipe names it once. Valid, invalid (a record a
+    /// kept save holds, let go of: kept), replay (let go of twice: deleted
+    /// once), restart (stored and read back).
     #[test]
-    fn a_kept_work_record_outlives_the_saves_that_let_go_of_it() {
-        let save = |home: &str, work: &str| vec![json!({ "id": home, "dir": "/data" }), json!({ "id": work, "dir": "/data/work" })];
+    fn a_record_kept_saves_hold_outlives_the_saves_that_let_go_of_it() {
         let ids = |l: &[Value]| l.iter().map(|r| r["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
-        let work = |s: &Saves, g: u64| s.work_of(g).map(|r| r["id"].as_str().unwrap().to_string());
         let mut s = Saves::default();
-        assert_eq!(work(&s, 1), None, "no save");
         s.saved(1, save("h1", "w1"), T, true);
-        assert_eq!(work(&s, 1).as_deref(), Some("w1"));
-        assert_eq!(work(&s, 2), None, "another start came up from none of them");
         // three more saves keep w1, unchanged
         for (i, h) in ["h2", "h3", "h4"].into_iter().enumerate() {
             assert!(s.saved(1, save(h, "w1"), T + 1 + i as i64, true).is_empty());
@@ -833,21 +826,43 @@ mod tests {
         s.saved(1, save("h6", "w2"), T + 10, true);
         s.saved(1, save("h7", "w2"), T + 11, true);
         assert_eq!(ids(s.forgetting()), ["h1", "h5", "h2", "h3"]);
-        assert_eq!(work(&s, 1).as_deref(), Some("w2"));
         s.saved(1, save("h8", "w2"), T + 12, true);
         assert_eq!(ids(s.forgetting()), ["h1", "h5", "h2", "h3", "h4", "w1"]);
-        // the next life came up from h8: its work's last record is h8's
+    }
+
+    /// A save of a home and its work, as the DO takes one.
+    fn save(home: &str, work: &str) -> Vec<Value> {
+        vec![json!({ "id": home, "dir": "/data" }), json!({ "id": work, "dir": "/data/work" })]
+    }
+
+    /// Goal (P9): the work's last record of a running container, which its
+    /// next save keeps when nothing under the work changed, is its own
+    /// newest save's, else the one it came up from; never one of another
+    /// start's, nor an unusable save's.
+    #[test]
+    fn the_works_last_record_is_its_own_newest_saves_or_the_one_it_came_up_from() {
+        let work = |s: &Saves, g: u64| s.work_of(g).map(|r| r["id"].as_str().unwrap().to_string());
+        let mut s = Saves::default();
+        assert_eq!(work(&s, 1), None, "no save");
+        s.saved(1, save("h1", "w1"), T, true);
+        assert_eq!(work(&s, 1).as_deref(), Some("w1"));
+        assert_eq!(work(&s, 2), None, "another start came up from none of them");
+        s.saved(1, save("h2", "w2"), T + 1, true);
+        // the next life came up from h2: its work's last record is h2's
         s.starting(2, RestoreSource::Backup);
-        assert!(s.came_up(2, RestoreSource::Backup, Some("h8"), Some(IMAGE), T + 20).is_some());
+        assert!(s.came_up(2, RestoreSource::Backup, Some("h2"), Some(IMAGE), T + 20).is_some());
         assert_eq!(work(&s, 2).as_deref(), Some("w2"));
-        assert_eq!(work(&s, 1).as_deref(), Some("w2"), "the life before's own newest save");
         // its own save, a new work: that one
-        s.saved(2, save("h9", "w3"), T + 21, true);
+        s.saved(2, save("h3", "w3"), T + 21, true);
         assert_eq!(work(&s, 2).as_deref(), Some("w3"));
-        // an unusable save's work is never kept
-        s.saved(2, save("h10", "w3"), T + 22, true);
-        assert!(s.unusable("h10"));
+        // a save of its own found unusable: none kept
+        s.saved(2, save("h4", "w3"), T + 22, true);
+        assert!(s.unusable("h4"));
         assert_eq!(work(&s, 2), None);
+        // a save of only its home (from before the work's own record): none
+        let mut s = Saves::default();
+        s.saved(1, rec("h1"), T, true);
+        assert_eq!(work(&s, 1), None);
     }
 
     #[test]
