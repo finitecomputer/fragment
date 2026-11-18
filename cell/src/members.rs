@@ -122,6 +122,7 @@ fn member_json(r: &Value) -> CellResult<Member> {
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
         owner: r["owner"].as_str().map(str::to_string),
         email: None,
+        app: None,
     })
 }
 

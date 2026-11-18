@@ -1573,11 +1573,13 @@ pub struct Member {
     /// Who granted it: the owner, or their agent for them (an invite's maker).
     pub added_by: String,
     pub added_at: i64,
-    /// `person` or `agent`.
+    /// `person` or `agent`; left out of an app member (`app`), as older
+    /// clients read this as one of the two alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub kind: Option<IdentityKind>,
-    /// An agent member's owner, who reads what it reads.
+    /// An agent member's owner, who reads what it reads; an app member's
+    /// owner, who reads nothing through it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub owner: Option<String>,
@@ -1587,6 +1589,20 @@ pub struct Member {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub email: Option<String>,
+    /// A member that is another fragment, an app (add-only: absent from a
+    /// person, an agent, and an older platform).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub app: Option<MemberApp>,
+}
+
+/// An app member (`fragment_core::app_member`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct MemberApp {
+    /// The app's fragment name.
+    pub name: String,
 }
 
 /// `GET /api/f/<name>/members` (viewer).

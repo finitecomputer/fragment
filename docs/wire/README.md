@@ -743,11 +743,20 @@ out.
 | --- | --- | --- | --- |
 | `addedAt` | `integer` | required |  |
 | `addedBy` | `string` | required | Who granted it: the owner, or their agent for them (an invite's maker). |
+| `app` | [`MemberApp`](#memberapp) or `null` | optional | A member that is another fragment, an app (add-only: absent from a person, an agent, and an older platform). |
 | `email` | `string` or `null` | optional | A person member's email, as the share sheet shows it (decision 48): in `GET members` to the owner and their agent for them, and in no other list (add-only: absent from an older platform). |
-| `kind` | [`IdentityKind`](#identitykind) or `null` | optional | `person` or `agent`. |
-| `owner` | `string` or `null` | optional | An agent member's owner, who reads what it reads. |
+| `kind` | [`IdentityKind`](#identitykind) or `null` | optional | `person` or `agent`; left out of an app member (`app`), as older clients read this as one of the two alone. |
+| `owner` | `string` or `null` | optional | An agent member's owner, who reads what it reads; an app member's owner, who reads nothing through it. |
 | `principal` | `string` | required | The member's identity (an npub). |
 | `role` | [`Role`](#role) | required |  |
+
+### `MemberApp`
+
+out. An app member (`fragment_core::app_member`).
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `name` | `string` | required | The app's fragment name. |
 
 ### `MemberList`
 

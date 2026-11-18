@@ -1656,6 +1656,18 @@
             "description": "Who granted it: the owner, or their agent for them (an invite's maker).",
             "type": "string"
           },
+          "app": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemberApp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A member that is another fragment, an app (add-only: absent from a\nperson, an agent, and an older platform)."
+          },
           "email": {
             "default": null,
             "description": "A person member's email, as the share sheet shows it (decision\n48): in `GET members` to the owner and their agent for them, and in\nno other list (add-only: absent from an older platform).",
@@ -1674,11 +1686,11 @@
               }
             ],
             "default": null,
-            "description": "`person` or `agent`."
+            "description": "`person` or `agent`; left out of an app member (`app`), as older\nclients read this as one of the two alone."
           },
           "owner": {
             "default": null,
-            "description": "An agent member's owner, who reads what it reads.",
+            "description": "An agent member's owner, who reads what it reads; an app member's\nowner, who reads nothing through it.",
             "type": [
               "string",
               "null"
@@ -1697,6 +1709,20 @@
           "role",
           "addedBy",
           "addedAt"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "MemberApp": {
+        "description": "An app member (`fragment_core::app_member`).",
+        "properties": {
+          "name": {
+            "description": "The app's fragment name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
         ],
         "type": "object",
         "x-fragment-direction": "out"

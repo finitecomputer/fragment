@@ -13,6 +13,7 @@
 pub mod access;
 pub mod across;
 pub mod address;
+pub mod app_member;
 pub mod backoff;
 pub mod blob;
 pub mod body;

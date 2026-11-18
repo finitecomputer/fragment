@@ -369,6 +369,20 @@ appoints control who may use them.
     They may grant themselves access, but administer no personal
     fragment, read no secret, and act as no one else.
 
+### Apps as members
+
+A fragment may be a member of another. An agent is the special case, its
+person's delegate; any other is an app, only a member, and no "bot".
+
+72. **An app shows no one more than they can already open.** It is a
+    member of a fragment, as a viewer or an editor, only while everyone
+    who can see or edit it is a member there too, its editors at least at
+    its role (`fragment_core::app_member`). People count by name, an
+    agent as its person; a link or public never counts, so an app is
+    members only while a member anywhere. The fragment it is in keeps the
+    audience it approved: the app's audience grows only by its yes, and a
+    removal there always works, pausing the app until the rule holds.
+
 ### Carried from the ROADMAP
 
 - **R4. Sharing is the platform's.** The share sheet and accepting an
