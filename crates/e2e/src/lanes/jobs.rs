@@ -324,23 +324,35 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         moved["output"] == json!({ "status": 302, "location": "http://127.0.0.1:1/private" }) && upstream.hits("/moved").len() == 1,
         &moved,
     );
-    // the platform's call marker (cell fragment/calls.rs), forged by the
+    // the platform's call marker (cell fragment/calls.rs), forged by a
     // fragment's own code: its job's fetch reaches the platform as any
-    // client's does, the router passes the marker to no fragment (marked,
-    // the fragment would answer its status `no call`), and no outside path
-    // names a call (`/call/…`)
-    let forge = |id: &str, path: &str, body: Option<Value>| {
-        let input = json!({ "url": format!("{}{path}", api.base), "method": if body.is_some() { "POST" } else { "GET" }, "headers": { "x-fragment-call": "1" }, "body": body });
-        let r = api.op(&owner, &name, "forge", id, input)?;
-        anyhow::Ok(settle(api, &owner, &name, started(&r), &["succeeded", "held"], long))
+    // client's does. Its inbox, the one door that passes a client's own
+    // headers on (unsigned, by its token), passes none of the platform's:
+    // the forged delivery is a delivery (marked, the fragment would answer
+    // it `no call`). And no outside path names a call.
+    let (forger, made) = jobs_fragment(s, api, &owner, "forger", |_| {})?;
+    let forger_token = made["inboxToken"].as_str().unwrap_or("").to_string();
+    let forge = |id: &str, url: String, headers: Value, body: Value| {
+        let r = api.op(&owner, &forger, "forge", id, json!({ "url": url, "method": "POST", "headers": headers, "body": body }))?;
+        anyhow::Ok(settle(api, &owner, &forger, started(&r), &["succeeded", "held"], long))
     };
-    let status = forge("forge-status", &format!("/api/f/{name}/status"), None)?;
-    let finish = forge("forge-finish", &format!("/api/f/{name}/call/job/finish"), Some(json!({ "run": id, "attempt": 1, "error": "forged" })))?;
+    let delivered = forge(
+        "forge-inbox",
+        format!("{}/api/f/{forger}/inbox", api.base),
+        json!({ "x-fragment-call": "1", "x-fragment-inbox-token": forger_token }),
+        json!({ "source": "forged", "payload": { "items": ["marked"] } }),
+    )?;
+    let finish = forge("forge-finish", format!("{}/call/job/finish", api.base), json!({ "x-fragment-call": "1" }), json!({ "run": 1, "attempt": 1, "error": "forged" }))?;
     let said = |v: &Value| v["output"]["text"].as_str().unwrap_or("").to_string();
+    let kept = records(api, &owner, &forger, "inbox");
     s.ok(
-        "a fragment's own job cannot forge a platform call: the call marker it sends is dropped (its private status, unsigned, is 401), and no path names a call (404)",
-        status["output"]["status"] == 401 && finish["output"]["status"] == 404 && ![&status, &finish].iter().any(|v| said(v).contains("no call")),
-        json!({ "status": status, "finish": finish }),
+        "a fragment's own job cannot forge a platform call: the call marker it sends its own inbox is dropped (the delivery is a record), and no path names a call (404)",
+        delivered["output"]["status"] == 200
+            && kept.len() == 1
+            && kept[0]["body"]["source"] == "forged"
+            && finish["output"]["status"] == 404
+            && ![&delivered, &finish].iter().any(|v| said(v).contains("no call")),
+        json!({ "delivered": delivered, "finish": finish, "inbox": kept }),
     );
 
     // held, then replayed after the cause is fixed
