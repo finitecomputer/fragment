@@ -386,7 +386,7 @@ impl Saves {
     /// `records` are no longer a save's (a save pushed out, or what a
     /// failed save took before it failed): the DO deletes each no kept save
     /// still holds (`forgetting`), and each is kept here until that worked
-    /// (`forgot`). A record one save kept from another (its work's, unchanged:
+    /// (`forgot`). A record several saves hold (a work's, kept unchanged:
     /// `work_of`) is deleted only once no kept save holds it. Answers those
     /// pushed past `FORGETTING_MAX`, oldest first, which no one will delete.
     pub fn let_go(&mut self, mut records: Vec<Value>) -> Vec<Value> {
@@ -399,10 +399,10 @@ impl Saves {
         lost
     }
 
-    /// The records let go of and not deleted yet, oldest first.
-    pub fn forgetting(&self) -> &[Value] {
-        assert!(!self.forgetting.iter().any(|r| self.holds(r)), "a record a kept save holds is never deleted");
-        &self.forgetting
+    /// The records let go of and not deleted yet, oldest first, but any a
+    /// kept save holds (`let_go` admits none such): never deleted.
+    pub fn forgetting(&self) -> Vec<Value> {
+        self.forgetting.iter().filter(|r| !self.holds(r)).cloned().collect()
     }
 
     /// Whether a kept save holds `record`.
@@ -814,20 +814,26 @@ mod tests {
         for (i, h) in ["h2", "h3", "h4"].into_iter().enumerate() {
             assert!(s.saved(1, save(h, "w1"), T + 1 + i as i64, true).is_empty());
         }
-        assert_eq!(ids(s.forgetting()), ["h1"], "the save pushed out lets go of its home alone: w1 is the kept saves'");
+        assert_eq!(ids(&s.forgetting()), ["h1"], "the save pushed out lets go of its home alone: w1 is the kept saves'");
         // a failed save that kept w1 lets go of its home alone; replayed, nothing more
         s.let_go(save("h5", "w1"));
         s.let_go(save("h5", "w1"));
-        assert_eq!(ids(s.forgetting()), ["h1", "h5"]);
+        assert_eq!(ids(&s.forgetting()), ["h1", "h5"]);
         assert_eq!(ids(&s.every_record()), ["h4", "w1", "h3", "h2", "h1", "h5"], "a wipe names it once");
         // restart: stored and read back
         let mut s: Saves = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         // its work changed: w2; w1 goes once the last save holding it does
         s.saved(1, save("h6", "w2"), T + 10, true);
         s.saved(1, save("h7", "w2"), T + 11, true);
-        assert_eq!(ids(s.forgetting()), ["h1", "h5", "h2", "h3"]);
+        assert_eq!(ids(&s.forgetting()), ["h1", "h5", "h2", "h3"]);
         s.saved(1, save("h8", "w2"), T + 12, true);
-        assert_eq!(ids(s.forgetting()), ["h1", "h5", "h2", "h3", "h4", "w1"]);
+        assert_eq!(ids(&s.forgetting()), ["h1", "h5", "h2", "h3", "h4", "w1"]);
+        // invalid: a stored list of records to delete that names one a kept
+        // save holds (`let_go` admits none) never hands it out to delete
+        let mut v = serde_json::to_value(&s).unwrap();
+        v["forgetting"].as_array_mut().unwrap().push(json!({ "id": "w2", "dir": "/data/work" }));
+        let odd: Saves = serde_json::from_value(v).unwrap();
+        assert_eq!(ids(&odd.forgetting()), ["h1", "h5", "h2", "h3", "h4", "w1"]);
     }
 
     /// A save of a home and its work, as the DO takes one.
