@@ -140,6 +140,11 @@ pub enum Action {
     /// End its sleep: a snapshot (when its save worked: a cache of it), the
     /// signal, the wait, the destroy; then report `Asleep`.
     Stop { generation: u64, saved: bool },
+    /// Look whether the container of the stop under way is gone, and report
+    /// `Asleep` if it is: a look (`STOP_LOOK_MS`) finds a stop whose end its
+    /// isolate took with it, which no exit report ends (its container's,
+    /// heard during a stop, is that stop's own to report).
+    Look { generation: u64 },
     /// Meter awake time from `from_ms` to `to_ms` to the owner.
     Meter { from_ms: i64, to_ms: i64 },
 }

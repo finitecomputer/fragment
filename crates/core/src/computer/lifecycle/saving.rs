@@ -264,9 +264,10 @@ mod tests {
     /// (`a_save_that_never_answers_fails_at_its_deadline`).
     /// Goal (Codex on #1375): a stop's deadline is minutes, for its
     /// snapshot, yet one whose end its isolate lost is found within a minute,
-    /// as when the deadline was one: its alarm looks every `STOP_LOOK_MS`,
-    /// and a new isolate's look (the cell's `adopt`) reports it asleep, its
-    /// container gone. A wake that came during the stop starts then, and the
+    /// as when the deadline was one: its alarm looks every `STOP_LOOK_MS`
+    /// whether its container is gone (`Action::Look`), even once a new
+    /// isolate adopted it as it went down, whose exit no report ends (Codex's
+    /// second round). A wake that came during the stop starts then, and the
     /// sleep is metered to that look, no later. Valid (a look finds it gone),
     /// replay (a look that finds it still stopping changes nothing, and looks
     /// again), the bound (asked again at its deadline). Method: the
@@ -285,21 +286,23 @@ mod tests {
         // a wake as it stops: a start once it ends
         let s = l.apply(Event::Wake { why: Wake::Record }, stop + 2_000);
         assert!(s.actions.is_empty() && s.alarm_ms == Some(stop + STOP_LOOK_MS), "{s:?}");
-        // a look that finds it still stopping (its snapshot runs on)
+        // a look that finds it still stopping (its snapshot runs on, or a
+        // new isolate adopted it as it went down): nothing more
         let before = l.clone();
         let s = l.apply(Event::Alarm, stop + STOP_LOOK_MS);
-        assert!(s.actions.is_empty() && l == before, "nothing changes: {s:?}");
+        assert!(s.actions == vec![Action::Look { generation: g }] && l == before, "a look, nothing else: {s:?}");
         assert_eq!(s.alarm_ms, Some(stop + 2 * STOP_LOOK_MS), "it looks again");
-        // its end lost with its isolate: the next look's isolate finds its
-        // container gone, before the alarm's own event (`take_over`)
+        // its end lost with its isolate: the next look finds its container
+        // gone and reports it asleep (`Action::Look`)
         let found = stop + 2 * STOP_LOOK_MS;
+        assert_eq!(l.apply(Event::Alarm, found).actions, vec![Action::Look { generation: g }]);
         let s = l.apply(Event::Asleep { generation: g }, found);
         assert!(s.actions.iter().any(|a| matches!(a, Action::Meter { to_ms, .. } if *to_ms == found)), "metered to the look: {s:?}");
         assert_eq!(l.apply(Event::Alarm, found).actions, vec![Action::Start { generation: g + 1 }], "the wake's start");
         // the bound: never found, its stop is asked again at its deadline
         let mut l = before;
         let s = l.apply(Event::Alarm, stop + SLEEP_DEADLINE_MS - 1);
-        assert!(s.actions.is_empty() && s.alarm_ms == Some(stop + SLEEP_DEADLINE_MS), "its last look is its deadline: {s:?}");
+        assert!(s.actions == vec![Action::Look { generation: g }] && s.alarm_ms == Some(stop + SLEEP_DEADLINE_MS), "its last look is its deadline: {s:?}");
         assert_eq!(l.apply(Event::Alarm, stop + SLEEP_DEADLINE_MS).actions, vec![Action::Stop { generation: g, saved: true }]);
     }
 

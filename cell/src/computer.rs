@@ -1235,6 +1235,11 @@ impl ComputerCell {
                 Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
                 Action::Unhold { generation } => self.unhold(generation).await,
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved, until_ms).await),
+                Action::Look { generation } => {
+                    if !self.container_running().await {
+                        reported.push(Event::Asleep { generation });
+                    }
+                }
                 Action::Meter { from_ms, to_ms } => {
                     // kept until the owner's ledger has it: a flush that fails
                     // is tried again at the next interval, or the next wake

@@ -263,6 +263,13 @@ fn simulated_interleavings_keep_the_invariants() {
                             pending.push(Event::Exited { generation: *g });
                         }
                     }
+                    Action::Look { generation: g } => {
+                        assert!(matches!(l.saving, Some(Saving::Stop { .. })) && *g == l.generation(), "only a stop under way is looked at");
+                        // its container gone (its own report lost, or not yet heard)
+                        if rng(&mut seed).is_multiple_of(2) {
+                            pending.push(Event::Asleep { generation: *g });
+                        }
+                    }
                 }
             }
             assert!(pending.len() < 64, "the DO's reports are bounded by the actions it is handed");
