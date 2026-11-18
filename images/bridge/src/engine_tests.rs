@@ -1335,7 +1335,7 @@ fn a_question_is_answered_by_the_next_message() {
 
     // valid: the asker's next message is the answer
     let told = said(&mut e, &a, &v, 5, "npub1paul", json!({ "text": "Tomatoes, at dawn" }), T0 + 6);
-    assert_eq!(commands(&told), vec![Command::Tell { turn: turn.clone(), seq: 5, by: "npub1paul".into(), by_name: "paul".into(), text: "Tomatoes, at dawn".into(), attached: None }]);
+    assert_eq!(commands(&told), vec![Command::Tell { turn: turn.clone(), seq: 5, by: "npub1paul".into(), by_name: "paul".into(), text: "Tomatoes, at dawn".into(), attached: None, files: vec![], voice: false }]);
     assert!(posts(&told).is_empty(), "no turn of its own");
     assert!(told.dirty && !e.state().turns[&turn].asking);
     // replay: behind the cursor, nothing
@@ -1405,6 +1405,61 @@ fn attached(a: &Agent, names: &[&str]) -> Option<Attached> {
     Some(Attached { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), by_name: "paul".into(), refs: names.iter().map(|n| serde_json::from_value(photo(n)).expect("a ref")).collect() })
 }
 
+/// A voice memo, as a message's record names it.
+fn memo(name: &str) -> Value {
+    json!({ "sha256": "d".repeat(64), "size": 1, "type": "audio/webm", "name": name })
+}
+
+/// Goal (Austin, 2026-11-17: a voice memo answering a question in words
+/// was never heard, and one heard as nothing left the question stuck,
+/// its retry queued behind it): a memo alone (no words, every file audio)
+/// answers a question as a voice answer, which its runtime hears or not,
+/// so the question stays open: the asker's next message answers it again,
+/// until the turn goes on (its next event); then a message is queued, as
+/// after any answer. Words typed with a memo are a written answer, as
+/// they were (Hermes would answer a clarify heard in audio with the
+/// audio's words alone). Replay: the memo again tells nothing.
+#[test]
+fn a_question_is_answered_with_a_voice_memo() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "what should I call it?" }), T0)).expect("started").turn;
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 1);
+    let refs = |names: &[&str]| names.iter().map(|n| serde_json::from_value(memo(n)).expect("a ref")).collect::<Vec<_>>();
+    let heard = |refs| Some(Attached { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), by_name: "paul".into(), refs });
+    let spoken = said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [memo("voice-memo.webm")] }), T0 + 2);
+    assert_eq!(commands(&spoken), vec![Command::Tell { turn: turn.clone(), seq: 2, by: "npub1paul".into(), by_name: "paul".into(), text: String::new(), attached: heard(refs(&["voice-memo.webm"])), files: vec![], voice: true }], "a voice answer");
+    assert!(e.state().turns[&turn].asking && e.state().turns[&turn].hearing, "its question open while it is heard");
+    assert_eq!(said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [memo("voice-memo.webm")] }), T0 + 3), Step::default(), "replay: nothing");
+    // heard as nothing, the runtime says nothing: the asker tries again, in words
+    let again = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "Fernando" }), T0 + 4);
+    assert_eq!(commands(&again), vec![Command::Tell { turn: turn.clone(), seq: 3, by: "npub1paul".into(), by_name: "paul".into(), text: "Fernando".into(), attached: None, files: vec![], voice: false }], "the retry answers it");
+    assert!(!e.state().turns[&turn].asking && !e.state().turns[&turn].hearing, "a written answer closes it");
+    // a memo heard: the turn goes on, and the question with it
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 5);
+    said(&mut e, &a, &v, 4, "npub1paul", json!({ "attachments": [memo("one.webm"), memo("two.ogg")] }), T0 + 6);
+    assert!(e.state().turns[&turn].hearing, "every file audio: a voice answer");
+    let step = ToolStep { tool: "terminal".into(), args: "{}".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None };
+    ev(&mut e, Event::Step { turn: turn.clone(), step }, T0 + 7);
+    assert!(!e.state().turns[&turn].asking && !e.state().turns[&turn].hearing, "heard: the turn went on");
+    let next = said(&mut e, &a, &v, 5, "npub1paul", json!({ "text": "and another thing" }), T0 + 8);
+    assert!(commands(&next).is_empty() && started(&next).is_none(), "asked no longer: queued");
+    // words with a memo, or a memo with a photo: a written answer
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 9);
+    let typed = said(&mut e, &a, &v, 6, "npub1paul", json!({ "text": "Basilio", "attachments": [memo("voice-memo.webm")] }), T0 + 10);
+    assert!(matches!(&commands(&typed)[..], [Command::Tell { voice: false, text, .. }] if text == "Basilio"), "words typed with it: {:?}", commands(&typed));
+    assert!(!e.state().turns[&turn].asking, "answered");
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 11);
+    let mixed = said(&mut e, &a, &v, 7, "npub1paul", json!({ "attachments": [memo("voice-memo.webm"), photo("plant.png")] }), T0 + 12);
+    assert!(matches!(&commands(&mixed)[..], [Command::Tell { voice: false, .. }]), "a photo with it: {:?}", commands(&mixed));
+    // a memo past Hermes' media cap is never hosted: its file's line, a written answer
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 13);
+    let big = json!({ "sha256": "e".repeat(64), "size": limits::HERMES_MEDIA_MAX_BYTES + 1, "type": "audio/wav", "name": "long.wav" });
+    let large = said(&mut e, &a, &v, 8, "npub1paul", json!({ "attachments": [big] }), T0 + 14);
+    assert!(matches!(&commands(&large)[..], [Command::Tell { voice: false, .. }]) && !e.state().turns[&turn].asking, "too large to hear: {:?}", commands(&large));
+}
+
 /// Goal: a question in words is answered with files too (photos sent as
 /// the answer), with words or none: the asker's message is the answer, its
 /// files with it for the driver to download and name in its words, never
@@ -1419,12 +1474,12 @@ fn a_question_is_answered_with_files() {
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "which photo?" }), T0)).expect("started").turn;
     ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 1);
     let only = said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [photo("a.png"), photo("b.png")] }), T0 + 2);
-    assert_eq!(commands(&only), vec![Command::Tell { turn: turn.clone(), seq: 2, by: "npub1paul".into(), by_name: "paul".into(), text: String::new(), attached: attached(&a, &["a.png", "b.png"]) }], "files alone answer it");
+    assert_eq!(commands(&only), vec![Command::Tell { turn: turn.clone(), seq: 2, by: "npub1paul".into(), by_name: "paul".into(), text: String::new(), attached: attached(&a, &["a.png", "b.png"]), files: vec![], voice: false }], "files alone answer it");
     assert!(posts(&only).is_empty() && only.dirty && !e.state().turns[&turn].asking, "no turn of its own");
     assert_eq!(said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [photo("a.png"), photo("b.png")] }), T0 + 3), Step::default(), "replay: nothing");
     ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 4);
     let both = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "this one", "attachments": [photo("c.png")] }), T0 + 5);
-    assert_eq!(commands(&both), vec![Command::Tell { turn: turn.clone(), seq: 3, by: "npub1paul".into(), by_name: "paul".into(), text: "this one".into(), attached: attached(&a, &["c.png"]) }], "words and files");
+    assert_eq!(commands(&both), vec![Command::Tell { turn: turn.clone(), seq: 3, by: "npub1paul".into(), by_name: "paul".into(), text: "this one".into(), attached: attached(&a, &["c.png"]), files: vec![], voice: false }], "words and files");
     let next = said(&mut e, &a, &v, 4, "npub1paul", json!({ "attachments": [photo("d.png")] }), T0 + 6);
     assert!(commands(&next).is_empty() && started(&next).is_none(), "asked no longer: queued");
     let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 7);
@@ -2399,7 +2454,7 @@ fn an_asks_turn_that_asks_back_is_told_to_go_on() {
     let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Which garden?"), Some(&talk), T0)).expect("rowan's turn");
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 1, text: "Which one do you mean?".into() }, T0 + 1);
     let s = ev(&mut e, Event::Asked { turn: t.turn.clone() }, T0 + 2);
-    assert_eq!(commands(&s), vec![Command::Tell { turn: t.turn.clone(), seq: ASKED_BACK_SEQ, by: "npub1juniper".into(), by_name: "Juniper".into(), text: ASKED_BACK.into(), attached: None }], "told to go on, in words");
+    assert_eq!(commands(&s), vec![Command::Tell { turn: t.turn.clone(), seq: ASKED_BACK_SEQ, by: "npub1juniper".into(), by_name: "Juniper".into(), text: ASKED_BACK.into(), attached: None, files: vec![], voice: false }], "told to go on, in words");
     assert!(!kinds(&s).contains(&"turn.asked".to_string()), "waiting for no one: {:?}", s.effects);
     assert!(e.state().turns[&t.turn].active() && !e.state().turns[&t.turn].asking, "still running");
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 2, text: "The back one, I think.".into() }, T0 + 3);
