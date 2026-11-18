@@ -264,7 +264,11 @@ pub struct OrgStatus {}
 /// fail its next `times` grants
 /// before it takes them (`fail-grants {times}`, at most
 /// `TEST_FAIL_GRANTS_MAX`, 0 to end it: a ledger not reached once the
-/// router recorded an org's grant, which its retry completes).
+/// router recorded an org's grant, which its retry completes), or say the
+/// rows its SQLite has written since this activation began, as SQLite
+/// counts them (`total_changes()`: its head, tables, meta and alarm alike),
+/// and whether it holds a head yet (`writes`, answering `{rows, head}`: a
+/// read changes none).
 /// Read as its fields (`TestHookFields`), not as serde's internally tagged
 /// reading, which buffers each to find its `op`: about 17 KB of the cell's Wasm.
 #[derive(Debug, Serialize, Deserialize)]
@@ -288,6 +292,7 @@ pub enum TestHook {
     FailGrants {
         times: u32,
     },
+    Writes,
 }
 
 /// A `TestHook` as it is read: every op's fields, flat, and the lever's
@@ -324,6 +329,7 @@ enum TestOp {
     ForgetGate,
     GateHeard,
     FailGrants,
+    Writes,
 }
 
 impl TryFrom<TestHookFields> for TestHook {
@@ -346,6 +352,7 @@ impl TryFrom<TestHookFields> for TestHook {
             TestOp::ForgetGate => TestHook::ForgetGate,
             TestOp::GateHeard => TestHook::GateHeard,
             TestOp::FailGrants => TestHook::FailGrants { times: need(f.times, "times")? },
+            TestOp::Writes => TestHook::Writes,
         })
     }
 }
@@ -1019,6 +1026,11 @@ impl LedgerCell {
                 reply(json!({ "entries": entries }))
             }
             TestHook::Totals => reply(self.mutate(|l, _, _| Ok(l.totals())).await?),
+            TestHook::Writes => {
+                let rows: Vec<Value> = self.sql().exec("SELECT total_changes() AS rows, (SELECT COUNT(*) FROM head) AS head", None)?.to_array()?;
+                let row = rows.first().ok_or_else(|| CellError::host("total_changes() answered no row"))?;
+                reply(json!({ "rows": row["rows"], "head": row["head"] == 1 }))
+            }
             // the book it charges with: its release's (it keeps none)
             TestHook::Book => reply(json!({ "book": self.cfg.book })),
             TestHook::LegacySeat { seat, seq } => {
