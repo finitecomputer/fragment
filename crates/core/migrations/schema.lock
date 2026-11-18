@@ -29,12 +29,14 @@ step Principal 2 listed 09e5aab70c4f7f61
 step Principal 3 memberships_dock 607987fd7686be8b
 step Principal 4 memberships_pinned e55965f09c24b2e1
 step Ledger 1 baseline 6d5c6ebad64a53b2
+step Ledger 2 uses b9ed112a7c91d546
 step Computer 1 baseline 0f429c07654198e6
 step Computer 2 agent_accounts 55b329a8b0da4bbd
 step Computer 3 key_hour 6c22fff2c2414701
 step Computer 4 key_caps 3a6f4f9976a3efe3
 step Computer 5 grants_forward_only 88b35e74ad3f41fe
 step Computer 6 grants_owed a3e6ebc05fade9e1
+step Computer 7 uses_owed 0c7771bd82064913
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 step Vault 1 baseline ecff84048657043f
@@ -207,6 +209,7 @@ Ledger index entries_at: CREATE INDEX entries_at ON entries (at_ms)
 Ledger table head: CREATE TABLE head (id INTEGER PRIMARY KEY CHECK (id = 1), ledger TEXT NOT NULL)
 Ledger table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Ledger table spend: CREATE TABLE spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment))
+Ledger table uses: CREATE TABLE uses (month INTEGER NOT NULL, agent TEXT NOT NULL, provider TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, agent, provider))
 Ledger table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
 
 Computer table agents: CREATE TABLE agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL)
@@ -218,7 +221,6 @@ Computer table own_keys: CREATE TABLE own_keys (provider TEXT PRIMARY KEY, seale
 Computer table own_signins: CREATE TABLE own_signins (nonce TEXT PRIMARY KEY, provider TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL)
 Computer table sessions: CREATE TABLE sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL)
 Computer table tickets: CREATE TABLE tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL)
-Computer table uses: CREATE TABLE uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent))
 Computer table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
 
 SearchIndex table chunk_words: CREATE VIRTUAL TABLE chunk_words USING fts5( title, heading, context, body, content = '', contentless_delete = 1, tokenize = 'unicode61 remove_diacritics 2')

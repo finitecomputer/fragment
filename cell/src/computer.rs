@@ -33,7 +33,10 @@
 //!   computer keeps no copy of); a connection's token
 //!   from WorkOS Pipes, asked for each request; an operator
 //!   key, metered; an own key its owner gave, sealed here. Each call a
-//!   provider answered is counted by agent and month (`uses`).
+//!   provider answered is counted by agent and month in its owner's
+//!   ledger (`fragment_core::ledger::uses`), sent after the answer. The
+//!   months it counted itself before (its step 7) it owes that ledger,
+//!   handed over after a request it answers (`hand_over_uses`).
 //! - **Its agents' new fragments** (`computer/joined`, from a fragment an
 //!   agent of its was added to): the agent's own fragment posts `joined`
 //!   on its `tasks`, and the fragment that added it then wakes the
@@ -56,13 +59,14 @@ use fragment_core::computer::{
     alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
+use fragment_core::ledger::uses::{self, Used};
 use fragment_core::ledger::{MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind, Reason};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -102,11 +106,12 @@ const FRAME_COOKIE: &str = "fragment_computer_frame";
 const WIPE_PAGES_PER_CALL: usize = 10;
 /// The Durable Object class a sealed own key names (`keys::scope`).
 const SEAL_CLASS: &str = "Computer";
-/// Months of uses kept (this one and the twelve before it).
-const USES_MONTHS_KEPT: u32 = 13;
-/// Use rows one month holds at most (providers × agents, with room for
-/// agents that came and went).
-const USES_ROWS_MAX: u64 = 4 * (catalog::PROVIDERS_MAX as u64) * AGENTS_MAX;
+/// After a hand-over of its owed uses failed (its owner's ledger did not
+/// answer), how long before a request tries again.
+const USES_RETRY_MS: i64 = 60_000;
+/// The `meta` keys of the months of uses it owes (its step 7):
+/// `uses_owed:<month's index>`.
+const USES_OWED: &str = "uses_owed:";
 /// How long a connection's state, as Pipes said it, is believed: the
 /// guest reads its credentials every few seconds, and asking WorkOS that
 /// often is not ours to do. The person's own read of their connections
@@ -172,7 +177,7 @@ const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
-/// How far the `clock` lever moves a computer's uses' months, either way:
+/// How far the `clock` lever moves a computer's key hours, either way:
 /// a month's worth.
 const CLOCK_OFFSET_MAX_MS: u64 = 31 * 24 * 3600 * 1000;
 /// The lever's `hang-backups`: the guest's `sandbox-shim`, which its saves'
@@ -465,6 +470,10 @@ pub struct ComputerCell {
     armed: RefCell<Option<(u64, Vec<String>)>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
+    /// When a request next hands over the uses it owes (`hand_over_uses`):
+    /// at once in a new activation; never again once one ran (a lever's
+    /// plant asks again); a minute on after one failed. In memory only.
+    uses_due_ms: std::cell::Cell<i64>,
 }
 
 impl DurableObject for ComputerCell {
@@ -490,6 +499,7 @@ impl DurableObject for ComputerCell {
             armed: RefCell::new(None),
             relays: RefCell::default(),
             schema,
+            uses_due_ms: std::cell::Cell::new(0),
         }
     }
 
@@ -612,21 +622,6 @@ struct Asked {
     connection: bool,
 }
 
-/// `computer/used`'s body: an agent's calls a provider answered, at `at`,
-/// each with what it was charged.
-#[derive(Deserialize)]
-struct UsedAsk {
-    agent: String,
-    at: i64,
-    uses: Vec<Used>,
-}
-
-#[derive(Deserialize)]
-struct Used {
-    provider: String,
-    micros: i64,
-}
-
 /// `computer/own-key`'s body: the owner's own key for `provider`, or none.
 #[derive(Deserialize)]
 struct OwnKeyAsk {
@@ -722,16 +717,20 @@ struct TestLever {
     /// `alive-check`'s: its start's guest stopped as it starts.
     #[serde(default)]
     freeze: Option<bool>,
-    /// `clock`'s: how far its uses' months are moved.
+    /// `clock`'s: how far its key hours are moved.
     #[serde(default, rename = "offsetMs")]
     offset_ms: Option<i64>,
     /// `legacy-grants`': the agent fragment whose row it reads or writes.
     #[serde(default)]
     agent: Option<String>,
     /// `legacy-grants`': the row it makes owed, as step 6 keeps it:
-    /// `connections` as stored, `accounts` provider → id.
+    /// `connections` as stored, `accounts` provider → id. `legacy-uses`':
+    /// the month's rows it makes owed, as step 7 keeps them.
     #[serde(default)]
     row: Option<Value>,
+    /// `legacy-uses`': the month (`YYYY-MM`) it makes owed.
+    #[serde(default)]
+    month: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1298,6 +1297,60 @@ impl ComputerCell {
             Some(unasked) => self.asked(unasked).await,
             None => self.view().await,
         }
+    }
+
+    /// The months of uses it owes its owner's ledger (its step 7), handed
+    /// over after this request, never in its way: once an activation, and
+    /// again a minute after one that failed (`uses_due_ms`).
+    fn uses_later(&self) {
+        if js::now_ms() < self.uses_due_ms.get() {
+            return;
+        }
+        self.uses_due_ms.set(i64::MAX);
+        // SAFETY: as FragmentCell::later's: the object is never destroyed
+        // while a promise it gave the runtime runs, and `waitUntil` holds
+        // this one until it settles.
+        let cell: &'static ComputerCell = unsafe { &*(self as *const ComputerCell) };
+        self.state.wait_until(cell.hand_over_uses());
+    }
+
+    /// Each month of uses it owes, handed to its owner's ledger
+    /// (`uses::TakeUses`, under `<computer>:<month>`, its rows sent as step 7
+    /// kept them, unread here: the ledger reads them), and forgotten once the
+    /// ledger took it: taken once by its id, so one sent again (its answer
+    /// lost, this object gone between) adds nothing twice. A month the
+    /// ledger refuses (its person wiped, or rows it will never take) is said
+    /// aloud whole and forgotten; one it did not answer stays owed.
+    async fn hand_over_uses(&self) {
+        if let Err(e) = self.try_hand_over_uses().await {
+            console_error!("{}", json!({ "computer": "uses-owed", "error": e.message }));
+            self.uses_due_ms.set(js::now_ms() + USES_RETRY_MS);
+        }
+    }
+
+    async fn try_hand_over_uses(&self) -> CellResult<()> {
+        let owed = self.rows("SELECT key, value FROM meta WHERE key LIKE 'uses_owed:%' ORDER BY key", vec![])?;
+        if owed.is_empty() || self.wiped.get() {
+            return Ok(());
+        }
+        let (id, owner) = (self.must(MetaKey::Id)?, self.must(MetaKey::Owner)?);
+        let mut left = owed.len();
+        // bounded by the months step 7 found (13 kept)
+        for r in owed {
+            let (Some(key), Some(value)) = (r["key"].as_str(), r["value"].as_str()) else { continue };
+            let month = key.strip_prefix(USES_OWED).and_then(|m| m.parse().ok()).map(Month).ok_or_else(|| CellError::host(format!("an owed month {key:?}")))?;
+            let take_id = serde_json::to_string(&format!("{id}:{}", month.0)).expect("a string serializes");
+            let take = format!(r#"{{"id":{take_id},"month":{},"rows":{value}}}"#, month.0);
+            match crate::ledger::asked(&self.env, &owner, <uses::TakeUses as crate::ledger::Route>::PATH, take).await {
+                Ok(_) => {}
+                Err(e) if e.refused.is_some() => console_error!("{}", json!({ "computer": id, "uses_refused": month.label(), "why": e.message, "rows": value })),
+                Err(e) => return Err(e.into()),
+            }
+            self.exec("DELETE FROM meta WHERE key = ?", vec![key.into()])?;
+            left -= 1;
+            console_log!("{}", json!({ "computer": id, "uses_owed": left, "handed": month.label() }));
+        }
+        Ok(())
     }
 
     /// Sends the awake intervals the ledger has not taken to the owner's
@@ -2338,21 +2391,6 @@ impl ComputerCell {
         String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a sign-in's verifier that is not text"))
     }
 
-    /// A month's uses: each agent's calls to each provider and their charges.
-    fn uses(&self, month: Month) -> CellResult<ComputerUses> {
-        let rows = self.rows("SELECT provider, agent, calls, micros FROM uses WHERE month = ? ORDER BY provider, agent", vec![i64::from(month.0).into()])?;
-        let uses = rows
-            .iter()
-            .map(|r| ProviderUse {
-                provider: r["provider"].as_str().unwrap_or_default().to_string(),
-                agent: r["agent"].as_str().unwrap_or_default().to_string(),
-                calls: r["calls"].as_u64().unwrap_or(0),
-                micros: r["micros"].as_i64().unwrap_or(0),
-            })
-            .collect();
-        Ok(ComputerUses { computer: self.must(MetaKey::Id)?, month: month.label(), uses })
-    }
-
     /// The clock's offset a test fleet set (the `clock` lever); none elsewhere.
     fn offset_ms(&self) -> CellResult<i64> {
         if !self.cfg.test_hooks {
@@ -2361,17 +2399,15 @@ impl ComputerCell {
         Ok(self.meta(MetaKey::ClockOffset)?.and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
-    /// Counts an agent's calls a provider answered, in `at`'s month, and
-    /// forgets months past `USES_MONTHS_KEPT`. A month already holding
-    /// `USES_ROWS_MAX` rows takes no new one (its calls are logged). A
-    /// shared key's charge counts in its hour too: whether one reached its cap.
-    fn count_uses(&self, b: &UsedAsk) -> CellResult<bool> {
-        if b.at <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
+    /// Counts a shared key's charge in its hour (`fragment_core::key_hour`):
+    /// whether one reached its cap. What its agents used is their owner's
+    /// ledger's (`uses::count`), not counted here.
+    fn count_key_hour(&self, b: &Used) -> CellResult<bool> {
+        if b.at_ms <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
             return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
         }
         let offset = self.offset_ms()?;
-        let (at, now) = (b.at.saturating_add(offset), js::now_ms() + offset);
-        let month = Month::of(at);
+        let (at, now) = (b.at_ms.saturating_add(offset), js::now_ms() + offset);
         let mut capped = false;
         for u in &b.uses {
             let Some(provider) = self.cfg.providers.get(&u.provider).filter(|_| u.micros >= 0) else {
@@ -2386,20 +2422,7 @@ impl ComputerCell {
                     vec![u.provider.as_str().into(), key_hour::slot_of(at.min(now)).into(), u.micros.into()],
                 )?;
             }
-            let m = i64::from(month.0);
-            let held = self.rows("SELECT COUNT(*) AS n FROM uses WHERE month = ?", vec![m.into()])?;
-            let exists = !self.rows("SELECT 1 FROM uses WHERE month = ? AND provider = ? AND agent = ?", vec![m.into(), u.provider.as_str().into(), b.agent.as_str().into()])?.is_empty();
-            if !exists && held.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= USES_ROWS_MAX {
-                console_error!("{}", json!({ "computer": "uses-full", "month": month.label(), "provider": u.provider, "agent": b.agent }));
-                continue;
-            }
-            self.exec(
-                "INSERT INTO uses (month, provider, agent, calls, micros) VALUES (?, ?, ?, 1, ?) ON CONFLICT (month, provider, agent) DO UPDATE SET calls = calls + 1, micros = micros + excluded.micros",
-                vec![m.into(), u.provider.as_str().into(), b.agent.as_str().into(), u.micros.into()],
-            )?;
         }
-        let oldest = i64::from(month.0.saturating_sub(USES_MONTHS_KEPT - 1));
-        self.exec("DELETE FROM uses WHERE month < ?", vec![oldest.into()])?;
         self.exec("DELETE FROM key_hour WHERE slot < ?", vec![key_hour::oldest(now).into()])?;
         Ok(capped)
     }
@@ -2568,7 +2591,10 @@ impl ComputerCell {
     /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
     /// past its time; `legacy-grants {agent, row?}` makes an agent's row from
     /// before the grants' move owed, as step 6 keeps one its fragment had not
-    /// taken (`fragment_core::grants::Owed`), then reads what is owed.
+    /// taken (`fragment_core::grants::Owed`), then reads what is owed;
+    /// `legacy-uses {month?, row?}` makes a month of uses owed as step 7
+    /// keeps one (`row`: its `[{agent, provider, calls, micros}]`), handed
+    /// over from the next request on, then reads every month owed.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         if b.op == "schema" {
@@ -2736,7 +2762,29 @@ impl ComputerCell {
                 let row = self.owed()?.0.remove(agent).map(|(_, row)| row.value());
                 Ok(json!({ "computer": id, "agent": agent, "row": row }))
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in, always-on or legacy-grants"))),
+            "legacy-uses" => {
+                // a month of uses from before the move, owed as step 7 keeps
+                // one (`[{agent, provider, calls, micros}]`), when named:
+                // handed over from the next request on, as by a computer
+                // that slept since the deploy; then every month owed
+                if let Some(rows) = b.row.as_ref().filter(|r| r.is_array()) {
+                    let month = b.month.as_deref().and_then(Month::parse).ok_or_else(|| CellError::invalid("legacy-uses names its month, YYYY-MM"))?;
+                    let key = format!("{USES_OWED}{}", month.0);
+                    self.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![key.into(), rows.to_string().into()])?;
+                }
+                self.uses_due_ms.set(0);
+                let owed = self.rows("SELECT key, value FROM meta WHERE key LIKE 'uses_owed:%' ORDER BY key", vec![])?;
+                let mut months = serde_json::Map::new();
+                for r in owed {
+                    let month = r["key"].as_str().and_then(|k| k.strip_prefix(USES_OWED)).and_then(|m| m.parse().ok()).map(Month);
+                    let rows = r["value"].as_str().and_then(|v| crate::json_text::<Value>(v).ok());
+                    if let (Some(month), Some(rows)) = (month, rows) {
+                        months.insert(month.label(), rows);
+                    }
+                }
+                Ok(json!({ "computer": id, "owed": months }))
+            }
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in, always-on, legacy-grants or legacy-uses"))),
         }
     }
 
@@ -2751,6 +2799,7 @@ impl ComputerCell {
         }
         if !wipe && path != "/computer/test" {
             self.schema.ready()?;
+            self.uses_later();
         }
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
@@ -2830,10 +2879,10 @@ impl ComputerCell {
                 json_response(&self.credentials(b).await?)
             }
             "computer/used" => {
-                let b: UsedAsk = body_json(&mut req).await?;
+                let b: Used = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
                 // a key's charge that reaches its cap: its owner's pages read again
-                if self.count_uses(&b)? {
+                if self.count_key_hour(&b)? {
                     self.tell_owner().await;
                 }
                 json_response(&json!({ "ok": true }))
@@ -3175,8 +3224,6 @@ impl ComputerCell {
                 let next: String = url::form_urlencoded::byte_serialize(format!("/p/{port}{path}").as_bytes()).collect();
                 json_response(&PortTicket { url: format!("{origin}/__ticket?t={ticket}&next={next}"), expires_at })
             }
-            (Method::Get, ["uses"]) => json_response(&self.uses(Month::of(js::now_ms() + self.offset_ms()?))?),
-            (Method::Get, ["uses", month]) => json_response(&self.uses(Month::parse(month).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?)?),
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), segments[2..].join("/")))),
         }
     }
@@ -4048,8 +4095,11 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// it within the minute; a person out of credit is refused, and a ledger
 /// that does not answer refuses nothing: decision 62). After the answer is
 /// handed back, each operator key's call the provider answered (under
-/// 500) is charged to the owner (`charge_keys`) and counted as the agent's
-/// (`computer/used`), in `wait_until`, never in the answer's way.
+/// 500) is charged to the owner (`charge_keys`), and every call the
+/// provider answered is counted as the agent's in its owner's ledger
+/// (`uses::Used`; a shared key's charge in its hour here too,
+/// `computer/used`), in `wait_until`, never in the answer's way: a count
+/// lost is no call slowed (Paul, 2026-11-18).
 async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
@@ -4186,17 +4236,21 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, &call))).collect();
         // each call the provider answered is the agent's (decision 37), a key's at its price
         // a Vault's secret is no catalog row to count (its own uses are Later: FIN-466)
-        let uses: Vec<Value> = plan
+        let uses: Vec<uses::Use> = plan
             .wanted
             .iter()
             .filter(|p| cfg.providers.named(&p.provider, p.connection).is_some())
             .map(|p| {
                 let usage = used.iter().find(|(k, _)| *k == p).map(|(_, u)| u);
                 let micros = usage.map_or(0, |u| book.price(u).map_or(0, |priced| priced.charge));
-                json!({ "provider": p.provider, "micros": micros })
+                uses::Use { provider: p.provider.clone(), micros }
             })
             .collect();
         let at = js::now_ms();
+        // counted in its owner's ledger; a shared key's charge in its hour
+        // too, which its computer keeps
+        let charged = uses.iter().any(|u| u.micros > 0);
+        let counted = Used { agent, at_ms: at, uses };
         let rows: Vec<MeterRow> = used
             .into_iter()
             .map(|(_, usage)| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage, fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
@@ -4206,12 +4260,24 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
             if !rows.is_empty() {
                 crate::meter::charge(&env, &owner, rows).await;
             }
-            if uses.is_empty() {
+            if counted.uses.is_empty() {
                 return;
             }
-            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": at, "uses": uses })).await {
-                console_error!("{}", json!({ "egress": "swap", "used": e.message }));
-            }
+            // side by side: a ledger slow to count never holds back the
+            // hour a shared key's cap is checked against
+            let hour = async {
+                if charged {
+                    if let Err(e) = crate::routed::ask_bytes(&env, "COMPUTER", &computer, "computer/used", &counted).await {
+                        console_error!("{}", json!({ "egress": "swap", "key_hour": e.message }));
+                    }
+                }
+            };
+            let count = async {
+                if let Err(e) = crate::ledger::ask(&env, &owner, &counted).await {
+                    console_error!("{}", json!({ "egress": "swap", "used": e.message }));
+                }
+            };
+            futures_util::future::join(hour, count).await;
         });
     }
     // one line per swap (lesson 14), naming the providers, never a tag or a value

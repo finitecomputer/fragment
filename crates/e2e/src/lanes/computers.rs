@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 use super::jobs::{events, records};
 use super::ledger::{charged, entries, quiet, usage};
 use crate::api::{Api, Call, Socket};
-use super::credentials::{grant_checks, model_checks, placeholder, swap_checks, vault_checks, Swapping, GRANT_CHECKS, MODEL_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
+use super::credentials::{grant_checks, model_checks, placeholder, swap_checks, uses_checks, vault_checks, Swapping, GRANT_CHECKS, MODEL_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
@@ -135,7 +135,7 @@ struct Runs {
 }
 
 fn runs(s: &Suite, api: &Api, owner: &crate::Keys, owner_id: &str, id: &str) -> Runs {
-    let uses = api.signed(owner, "GET", &format!("/api/computers/{id}/uses"), None).ok().and_then(|r| r.body["uses"].as_array().map(|l| l.iter().filter_map(|u| u["calls"].as_u64()).sum())).unwrap_or(0);
+    let uses = api.signed(owner, "GET", "/api/ledger/uses", None).ok().and_then(|r| r.body["uses"].as_array().map(|l| l.iter().filter_map(|u| u["calls"].as_u64()).sum())).unwrap_or(0);
     Runs { model_calls: s.ai.chats().len(), model_rows: entries(api, owner_id, "aig:").len(), key_rows: entries(api, owner_id, &format!("key:{id}:")).len(), uses }
 }
 
@@ -150,12 +150,17 @@ pub(super) fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::
     api.unsigned("POST", "/api/test/computer", Some(&body))
 }
 
-/// Pins computer `id`'s uses to this month for the lane (its `clock` lever,
-/// run on from the 15th), so the uses the lane makes and its reads of the
-/// month's are in one month however late in a month it runs: its month.
-pub(super) fn pin_month(api: &Api, id: &str) -> Result<String> {
-    let r = lever_with(api, id, json!({ "op": "clock", "offsetMs": super::ledger::mid_month_offset_ms() }))?;
+/// Pins computer `id` and its owner's ledger to this month for the lane
+/// (their `clock` levers, run on from the 15th), so the uses the lane
+/// makes, which its owner's ledger counts, its reads of the month's, and
+/// its key hours, which the computer counts, are in one month however late
+/// in a month it runs: its month.
+pub(super) fn pin_month(api: &Api, id: &str, owner_id: &str) -> Result<String> {
+    let offset = super::ledger::mid_month_offset_ms();
+    let r = lever_with(api, id, json!({ "op": "clock", "offsetMs": offset }))?;
     anyhow::ensure!(r.status == 200, "the computer's clock moves: {r}");
+    let l = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "clock", "offsetMs": offset })))?;
+    anyhow::ensure!(l.status == 200, "its owner's ledger's clock moves: {l}");
     Ok(r.body["month"].as_str().unwrap_or_default().to_string())
 }
 
@@ -1918,7 +1923,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
-    let month = pin_month(api, &id)?;
+    let month = pin_month(api, &id, &api.identity(&owner)?)?;
     // The stub's scripted runtime (images/stub) answers its commands ("tool
     // please", "slow…", "fetch …", "think …") and echoes the rest; the
     // deployment's own image (our Hermes) answers as its real model does.
@@ -2175,6 +2180,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
         replies_so_far += grant_checks(s, api, &swapping, &fetched)?;
     }
+    // its uses from before the move, owed to its owner's ledger (M16)
+    uses_checks(s, api, &owner, &id, &agent_name, &month)?;
 
     // the model intercept: the agent's call is the platform's model route, its owner paying
     if scripted {
@@ -2355,7 +2362,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let theirs = placeholder(s, &id, &maple_name, "perplexity");
         let said = fetched(s, 24, &format!("fetch http://api.perplexity.ai/search with {theirs}"))?;
         replies_so_far += 1;
-        let uses = || api.signed(&owner, "GET", &format!("/api/computers/{id}/uses"), None).map(|r| r.body).unwrap_or(Value::Null);
+        let uses = || api.signed(&owner, "GET", "/api/ledger/uses", None).map(|r| r.body).unwrap_or(Value::Null);
         let maples = |u: &Value| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == "perplexity" && x["agent"] == maple_name.as_str() && x["calls"] == 1));
         let counted = s.eventually(Duration::from_secs(20), || maples(&uses()));
         s.ok("another agent's placeholder on the same computer is that agent's: its call is counted as the second agent's", said.starts_with("fetched 200") && counted, json!({ "said": said, "uses": uses() }));

@@ -1134,8 +1134,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
       }
       // Every read that can change Settings' Computer known from its start,
       // in every document of this page (`add_agent_ui` holds them): the
-      // computer's (`/api/computers…`, but Settings' own `/uses`, which it
-      // draws only once answered) and the list's read, which `load` (shell.js)
+      // computer's (`/api/computers…`) and the list's read, which `load` (shell.js)
       // awaits with the computer's before it draws either. `hold()` holds
       // the computer's asked from then on and, once each read already on
       // its way has had its body read (`api` reads every answer's) and a
@@ -1145,7 +1144,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         const kind = (u, o) => {
           const p = new URL(String(u instanceof Request ? u.url : u), location.href).pathname;
           const get = (o?.method ?? (u instanceof Request ? u.method : 'GET')).toUpperCase() === 'GET';
-          return p === '/api/fragments' && get ? 'list' : p.startsWith('/api/computers') && !p.endsWith('/uses') ? 'computer' : null;
+          return p === '/api/fragments' && get ? 'list' : p.startsWith('/api/computers') ? 'computer' : null;
         };
         const open = new Set(), queued = [];
         let holding = false;
@@ -4155,7 +4154,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     };
     let id = computer["computer"].as_str().unwrap_or("").to_string();
     // the uses below, and the page's month of them, in one month
-    super::computers::pin_month(api, &id)?;
+    super::computers::pin_month(api, &id, computer["agents"][0]["owner"].as_str().unwrap_or_default())?;
     // the person connects Google (as another account than their sign-in here),
     // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
@@ -4185,7 +4184,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         s.eventually(std::time::Duration::from_secs(60), || replies() > n);
     }
     let counted = s.eventually(wait, || {
-        shell(api, session, "GET", &format!("/api/computers/{id}/uses"), None, &[]).is_ok_and(|r| r.body["uses"].as_array().is_some_and(|l| l.len() >= 2))
+        shell(api, session, "GET", "/api/ledger/uses", None, &[]).is_ok_and(|r| r.body["uses"].as_array().is_some_and(|l| l.len() >= 2))
     });
     b.reload(page)?;
     let row = |p: &str| format!("#settings-connections [data-provider={p:?}]");
@@ -4241,8 +4240,21 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         &got,
     );
     b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
-    // the lane's pictures so far are there: `dir` would start it afresh
+    // the lane's pictures so far are there: `dir` would start it afresh;
+    // this month's use, read from the person's ledger, on the cards and,
+    // by agent, in a key's sheet, at 1280 and 390 px
     let _ = b.screenshot(page, &s.scratch.join("shell-ui/desktop-connections.png"));
+    sheet_of(b, page, &row("perplexity"))?;
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui/desktop-connections-sheet.png"));
+    close_sheets(b, page)?;
+    b.viewport(page, 390, 844, true)?;
+    b.eval(page, &format!("(document.querySelector('{}').scrollIntoView(), true)", row("perplexity")))?;
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui/phone-390-connections.png"));
+    sheet_of(b, page, &row("perplexity"))?;
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui/phone-390-connections-sheet.png"));
+    close_sheets(b, page)?;
+    b.viewport(page, 1280, 800, false)?;
+    b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
     // a press narrows that agent from that provider, and the page says so
     b.eval(page, &format!("document.querySelector('{} [data-agent={lead:?}]').click(), true", row("perplexity")))?;
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);

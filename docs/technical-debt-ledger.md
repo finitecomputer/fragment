@@ -88,6 +88,29 @@ unfinished design, not debt.
   computers something touched, so its silence alone is not enough: say
   so if cutting on it.
 
+## A computer owes its owner's ledger its months of uses
+
+- **Shortcut:** what a person's agents used of each provider moved from
+  each computer's `uses` to the person's ledger
+  (`fragment_core::ledger::uses`; M16). The Computer's step 7 dropped
+  `uses`, keeping each month it held in the computer's `meta`
+  `uses_owed:<month>`, as the ledger reads a hand-over's rows. After a
+  request it answers, once an activation (`ComputerCell::uses_later`),
+  the computer hands each month to its owner's ledger (`uses::TakeUses`,
+  under `<computer>:<month>`), which takes it once by that id and keeps
+  the id in its `meta` (`uses_taken:<id>`); the computer forgets each
+  month the ledger took or refused, logging how many it still owes
+  (`uses_owed`). The test lever `legacy-uses` makes a month owed.
+- **Risk:** a computer nothing touches keeps owing, and its person's
+  Settings shows those months short until it hands them over. Dropped
+  instead, up to 13 months of a person's usage would be lost.
+- **Delete when:** a sweep has asked every computer and found none owing
+  (no `uses_owed:` row; the sweep FIN-527 asks for the grants' rows can
+  ask both). Then a Computer step deletes those `meta` rows, and
+  `uses_later`, `hand_over_uses`, `TakeUses`, `/take-uses` and the lever
+  go; a Ledger step may drop its `uses_taken:` rows. The log sees only
+  computers something touched, so its silence alone is not enough.
+
 ## A chat wiped while its seed runs can keep its template's repo
 
 - **Shortcut:** a chat's create answers before its repo is made

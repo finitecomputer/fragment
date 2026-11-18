@@ -679,8 +679,12 @@ provider's own hosts.
   (`grants::Owed`): an agent's next ask carries its row, taken whole by a
   fragment holding none of its own and ignored by one that does
   (`grants::answered`), then forgotten.
-- Each call a provider answered is counted in the computer's `uses`; an
-  operator key's is charged to its agent's owner (docs/ledger.md).
+- Each call a provider answered is counted as its agent's in the owner's
+  ledger (docs/ledger.md, "Usage"), after the answer; an operator key's
+  is charged to its agent's owner too. A computer from before kept its
+  own `uses`; its step 7 keeps the months it held as owed (`meta`
+  `uses_owed:<month>`), each handed to the owner's ledger after a
+  request the computer answers, taken once, then forgotten.
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
   each secret bound to an agent, with a host, is one of its credentials,
   kind `own`, named by the secret, with no variable. Its hosts join the
@@ -688,7 +692,7 @@ provider's own hosts.
   its guest reads its view). The intercept asks the Vault for it per
   request, plans it beside the catalog's rows, and names each value it
   filled in the answer (`{{name}}`); a Nostr key's is a signature the
-  Vault makes. A Vault's calls are not counted in `uses`.
+  Vault makes. A Vault's calls are not counted in usage.
 
 ### An agent's own model
 
