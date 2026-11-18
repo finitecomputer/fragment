@@ -13,11 +13,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY bridge bridge
 COPY hermes/boot hermes/boot
 COPY simplex-door simplex-door
+# its own workspace (simplex-door/Cargo.toml), the bridge a path crate of it
 RUN --mount=type=cache,id=images-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=sxdoor-target,target=/src/target \
+    --mount=type=cache,id=sxdoor-target,target=/src/simplex-door/target \
     find bridge simplex-door -type f -exec touch {} + \
- && cargo build --release --locked -p fragment-simplex-door \
- && cp target/release/simplex-door /simplex-door
+ && cargo build --release --locked --manifest-path simplex-door/Cargo.toml \
+ && cp simplex-door/target/release/simplex-door /simplex-door
 
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 RUN apt-get -o Acquire::Retries=3 update \

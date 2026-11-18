@@ -104,8 +104,9 @@ export class App extends DurableObject {
     if (job.via !== "channel") return { ignored: "only its inbox's trigger" };
     const p = record?.body?.payload;
     if (p?.kind !== "message" || typeof p.shared !== "string" || !p.shared) return { ignored: "not a message" };
-    if (!(await job.call("seen", { shared: p.shared })).fresh) return { ignored: "taken already", shared: p.shared };
+    // unbound, nothing is taken: a message delivered again once bound is new
     if (!job.door) return { ignored: "not linked" };
+    if (!(await job.call("seen", { shared: p.shared })).fresh) return { ignored: "taken already", shared: p.shared };
     const text = typeof p.text === "string" ? [...p.text].slice(0, TEXT_MAX).join("") : "";
     if (!text) return { ignored: "no text" };
     const published = await job.publish("chat", { text, to: [job.door.to], relayed: job.door.relayed, simplex: { item: p.item, shared: p.shared, at: p.atMs ?? null } }, "message");
