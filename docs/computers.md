@@ -491,9 +491,10 @@ its life ends, whichever is first.
   nothing asked): `beganMs` the start made (a sleep under way delays it),
   `upMs` its container took an exec (snapshot and restore only), `dataMs`
   the restore's gate opened, `readyMs` it came up, `heardMs` its guest
-  first read its view (our image's boot, just before its bridge), `turnMs`
-  its first keepalive (its bridge has a turn queued or running). The
-  bridge's own follow is not visible to the DO, and is left out.
+  first read its view (our image's boot reads it first, then its bridge),
+  `turnMs` its first keepalive (its bridge has a turn queued or running).
+  When its bridge follows its chats is not visible to the DO, so it is
+  left out.
 
 The line is in memory until it is written: a deploy or a crash of the
 platform during a start, or before its first turn, loses that start's line.

@@ -1246,8 +1246,11 @@ impl ComputerCell {
         let asked = js::now_ms();
         if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Starting { .. }) {
             self.may_start(json!(why)).await?;
-            // what the start it brings counts its time from
-            self.starts.borrow_mut().asked(Woke::Wake(why), &self.lifecycle()?.phase, asked);
+            // what the start it brings counts its time from (a read that
+            // fails costs the line its ask, never the wake)
+            if let Ok(life) = self.lifecycle() {
+                self.starts.borrow_mut().asked(Woke::Wake(why), &life.phase, asked);
+            }
         }
         // a wake that started nothing says why
         if let Some(why) = self.drive(Event::Wake { why }).await? {
@@ -1305,7 +1308,9 @@ impl ComputerCell {
             let asked = js::now_ms();
             self.may_start(json!("restart")).await?;
             self.update_saves(|s| s.restart_fresh())?;
-            self.starts.borrow_mut().asked(Woke::Restart, &self.lifecycle()?.phase, asked);
+            if let Ok(restarting) = self.lifecycle() {
+                self.starts.borrow_mut().asked(Woke::Restart, &restarting.phase, asked);
+            }
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": life.generation(), "phase": life.phase }));
         }
         // its answer, the view as its start was owed (`drive_events`); one
@@ -1532,7 +1537,7 @@ impl ComputerCell {
         // what the start runs is what it looked at: the version it comes up on
         let reference = self.look().await?;
         let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
-        let fell_back = self.lifecycle()?.fell_back();
+        let fell_back = self.lifecycle().is_ok_and(|l| l.fell_back());
         let (plan, save, facts) = self.update_saves(|s| {
             let plan = s.plan(snapshots);
             // its line's: why a whole restore, and whether it runs another image
