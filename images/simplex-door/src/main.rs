@@ -50,6 +50,8 @@ const ASK_WAIT: Duration = Duration::from_secs(30);
 const DEBOUNCE_MS: u64 = 1000;
 /// The databases' versions are read this often.
 const WATCH_MS: u64 = 250;
+/// A change of the core's server statistics alone is saved this late.
+const SLOW_SAVE_MS: u64 = 10 * 60_000;
 /// A forced sync's answer is waited for this long before the door sends.
 const FORCED_SYNC_WAIT: Duration = Duration::from_secs(60);
 
@@ -105,6 +107,8 @@ struct Door {
     /// Where its start is, and the last thing that failed (its health says both).
     phase: Mutex<String>,
     last_error: Mutex<Value>,
+    /// Frames the core sent unasked (its events), counted.
+    events: AtomicU64,
 }
 
 impl Door {
@@ -209,6 +213,7 @@ async fn main() {
         saving: tokio::sync::Mutex::new(()),
         phase: Mutex::new("start".into()),
         last_error: Mutex::new(Value::Null),
+        events: AtomicU64::new(0),
     });
 
     // the Durable Object's HTTP API first, so it can see the runner come up
@@ -352,7 +357,10 @@ async fn main() {
     loop {
         tokio::select! {
             ev = ev_rx.recv() => match ev {
-                Some(Event::Frame(text)) => on_event(&door, &text).await,
+                Some(Event::Frame(text)) => {
+                    door.events.fetch_add(1, Ordering::SeqCst);
+                    on_event(&door, &text).await
+                }
                 Some(Event::Closed) | None => {
                     log!("core": "closed");
                     std::process::exit(1);
@@ -464,6 +472,23 @@ async fn on_event(door: &Arc<Door>, text: &str) {
                 tokio::spawn(async move { sync(&d, c).await });
             }
         }
+        Resp::FileReady { file } => {
+            // the contact sent a file: received over XFTP, through the relay
+            let d = door.clone();
+            door.stat("file_ready", json!({ "file": file }));
+            tokio::spawn(async move {
+                let r = d.ask(&Cmd::Receive { file }).await.map(|(r, _)| format!("{r:?}")).unwrap_or_else(|e| e);
+                d.stat("file_receive_asked", json!({ "file": file, "answer": r }));
+            });
+        }
+        Resp::FileDone { file, path } => {
+            let size = std::fs::metadata(door.dir.join("files").join(&path)).map(|m| m.len()).ok();
+            log!("fileDone": file, "path": path, "size": size);
+            door.stat("file_done", json!({ "file": file, "path": path, "size": size }));
+        }
+        Resp::FileFailed { file } => door.stat("file_failed", json!({ "file": file })),
+        Resp::FileSent { file } => door.stat("file_sent", json!({ "file": file })),
+        Resp::FileUnsent { file } => door.stat("file_unsent", json!({ "file": file })),
         Resp::AnotherClient { contact: c } => {
             log!("anotherClient": c);
             door.stat("another_client", json!({ "contact": c }));
@@ -519,8 +544,13 @@ async fn deliveries(door: Arc<Door>, mut rx: mpsc::UnboundedReceiver<wire::Item>
     }
 }
 
-/// A save about a second after each change the core commits (either
-/// database's `data_version` moved), or the door's own state changed.
+/// A save about a second after each change that matters: the chat
+/// database's (messages, contacts), the agent database's when the core
+/// said something meanwhile (a message's ratchet step, a connection's
+/// change: each comes with an event), or the door's own state. The agent
+/// database alone, with no event, is the core's server statistics
+/// (`servers_stats`, rewritten every 10 s while idle: measured), saved at
+/// most every `SLOW_SAVE_MS`.
 async fn saves(door: Arc<Door>) {
     let watch = loop {
         match save::Watch::open(&door.dir) {
@@ -532,8 +562,11 @@ async fn saves(door: Arc<Door>) {
         }
     };
     let mut seen = watch.versions();
+    let mut events_saved = door.events.load(Ordering::SeqCst);
+    let mut last_save = Instant::now();
     // the first save of each start: what it restored, or the new profile
     let mut due: Option<Instant> = Some(Instant::now());
+    let mut slow_due: Option<Instant> = None;
     loop {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(WATCH_MS)) => {}
@@ -543,16 +576,26 @@ async fn saves(door: Arc<Door>) {
         }
         let now = watch.versions();
         if now != seen {
+            let chat = now[0] != seen[0];
+            let events = door.events.load(Ordering::SeqCst) != events_saved;
             seen = now;
-            due.get_or_insert_with(|| Instant::now() + Duration::from_millis(DEBOUNCE_MS));
+            if chat || events {
+                due.get_or_insert_with(|| Instant::now() + Duration::from_millis(DEBOUNCE_MS));
+            } else {
+                slow_due.get_or_insert_with(|| last_save + Duration::from_millis(SLOW_SAVE_MS));
+            }
         }
-        if due.is_some_and(|d| Instant::now() >= d) {
+        let fast = due.is_some_and(|d| Instant::now() >= d);
+        let slow = slow_due.is_some_and(|d| Instant::now() >= d);
+        if fast || slow {
             due = None;
-            // what the save itself sees moving is not a change of the core's
-            match door.save("change").await {
+            slow_due = None;
+            events_saved = door.events.load(Ordering::SeqCst);
+            match door.save(if fast { "change" } else { "slow" }).await {
                 Ok(v) => {
                     log!("save": v);
                     door.stat("save", v);
+                    last_save = Instant::now();
                 }
                 Err(e) => {
                     log!("save": "failed", "error": e);
@@ -628,6 +671,29 @@ async fn handle(door: Arc<Door>, req: Request<Incoming>) -> Response<Body> {
             door.sent_n.fetch_add(1, Ordering::SeqCst);
             door.dirty.notify_one();
             answer(200, json!({ "items": items }))
+        }
+        ("POST", "/send-file") => {
+            // the spike's file each way: `bytes` of noise as a file to the contact
+            let n = read_json(req).await["bytes"].as_u64().unwrap_or(200_000).min(20_000_000) as usize;
+            let Some(contact) = door.state.lock().expect("state").contact else {
+                return answer(409, json!({ "error": "not linked" }));
+            };
+            let path = door.dir.join("tmp").join(format!("spike-{}.bin", now_ms()));
+            let mut bytes = vec![0u8; n];
+            let mut x: u64 = now_ms() | 1;
+            for b in bytes.iter_mut() {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                *b = x as u8;
+            }
+            if let Err(e) = std::fs::write(&path, &bytes) {
+                return answer(500, json!({ "error": e.to_string() }));
+            }
+            match door.ask(&Cmd::SendFile { contact, path: path.to_string_lossy().into(), kind: wire::Kind::File }).await {
+                Ok((resp, _)) => answer(200, json!({ "answer": format!("{resp:?}"), "bytes": n })),
+                Err(e) => answer(502, json!({ "error": e })),
+            }
         }
         ("POST", "/sync") => {
             let Some(contact) = door.state.lock().expect("state").contact else {
