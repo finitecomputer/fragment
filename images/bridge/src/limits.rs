@@ -318,6 +318,12 @@ pub const KEEPALIVE_PING_MS: u64 = 15_000;
 /// last did: a forgotten loop costs at most this much awake time (the plan
 /// to a sandbox per agent, Q9, 2026-11-18).
 pub const LEFT_RUNNING_HOLD_MS: u64 = 2 * 60 * 60 * 1000;
+/// A card with an option for the computer (a sign-in's code, whose login
+/// lives in this life's process) holds the computer at most this long
+/// while it is open, or to its expiry if sooner: a person signs in and
+/// pastes a code within minutes, and one left open costs no more awake
+/// time than this (the plan to a sandbox per agent, P4).
+pub const COMPUTER_CARD_HOLD_MS: u64 = 10 * 60 * 1000;
 /// The computer's counters are read this often (load.rs): a slice.
 pub const LOAD_SLICE_MS: u64 = 20_000;
 /// It is working while one of its last this many slices was over a floor:

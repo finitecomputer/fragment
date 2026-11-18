@@ -1066,6 +1066,73 @@ fn a_card_answered_on_its_computer_never_in_a_record() {
     assert!(refused(&answer(&mut e, &turn, "code", "the-code-123", 6, T0 + 40), 6, "This was already answered, or it expired."));
 }
 
+/// Goal (the plan to a sandbox per agent, P4): a card with an option for
+/// the computer (a sign-in's code, which a later life refuses) holds the
+/// computer while it is open, up to `COMPUTER_CARD_HOLD_MS` or its expiry,
+/// whichever is first. Valid: answered, its turn runs on and ends, and
+/// lets go. Bound: one left open lets go at the bound, still answerable;
+/// a short card holds to its expiry, its turn running on from there. Invalid: a card any later turn can take
+/// holds nothing. Stop: a turn stopped under its card lets go. Restart:
+/// a new life holds nothing of it (its turn is lost, its code refused).
+#[test]
+fn a_card_only_this_life_can_take_holds_its_computer() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let hold = limits::COMPUTER_CARD_HOLD_MS;
+    let code = || vec![PromptOption { id: "code".into(), label: "Paste the code".into(), style: None, words: true, computer: true }];
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "sign me in" }), T0)).expect("started").turn;
+    // a long card: the bound comes first
+    let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options: code(), ttl_ms: Some(limits::PROMPT_TTL_MS_MAX) }, T0 + 10);
+    assert_eq!(keepalive(&p), None);
+    assert!(e.keepalive(), "a card only this life can take holds it");
+    assert_eq!(keepalive(&e.step(Input::Tick, T0 + 10 + hold - 1)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, T0 + 10 + hold)), Some(false), "at the bound it lets go");
+    // still answerable: answered, the turn runs on and ends
+    let taken = e.step(Input::ComputerAnswer { agent: a.fragment.clone(), turn: turn.clone(), prompt: "signin".into(), option: "code".into(), words: "the-code".into(), reply: 1 }, T0 + 20 + hold);
+    assert!(taken.effects.contains(&Effect::ComputerAnswered { reply: 1, taken: Ok(()) }), "{:?}", taken.effects);
+    assert_eq!(keepalive(&taken), Some(true), "running again");
+    e.step(Input::Fenced { turn: turn.clone(), prompt: "signin".into(), answer: ClaimAnswer::Ours { seq: Some(2) } }, T0 + 21 + hold);
+    assert!(e.keepalive());
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), T0 + 22 + hold)), Some(false));
+
+    // a short card: its expiry comes first
+    let t2 = T0 + 2 * hold;
+    let turn = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "sign me in" }), t2)).expect("started").turn;
+    assert_eq!(keepalive(&ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options: code(), ttl_ms: Some(30_000) }, t2)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, t2 + 29_999)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, t2 + 30_000)), None, "held to its expiry, as its runtime goes on without the answer");
+    assert_eq!(e.state().turns[&turn].phase, Phase::Running);
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn, outcome: Outcome::Idle }), t2 + 30_001)), Some(false));
+
+    // invalid: a card a later turn can take holds nothing
+    let t3 = t2 + hold;
+    let turn = started(&said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "risky" }), t3)).expect("started").turn;
+    let allow = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false, computer: false }];
+    assert_eq!(keepalive(&ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p1".into(), text: "ok?".into(), options: allow, ttl_ms: None }, t3)), Some(false));
+    e.step(heard(Event::End { turn, outcome: Outcome::Idle }), t3 + 1);
+
+    // stop: a turn stopped under its card lets go
+    let t4 = t3 + hold;
+    let turn = started(&said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "sign me in" }), t4)).expect("started").turn;
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options: code(), ttl_ms: None }, t4);
+    assert!(e.keepalive());
+    said(&mut e, &a, &v, 5, "npub1paul", json!({ "kind": "stop" }), t4 + 1);
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn: turn.clone(), outcome: Outcome::Stopped }), t4 + 2)), Some(false), "stopped");
+
+    // restart under an open card: the next life holds nothing of it
+    let t5 = t4 + hold;
+    let turn = started(&said(&mut e, &a, &v, 6, "npub1paul", json!({ "text": "sign me in" }), t5)).expect("started").turn;
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options: code(), ttl_ms: None }, t5);
+    assert!(e.keepalive());
+    let settings = Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 };
+    let mut next = Engine::new(e.state().clone(), settings, "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    next.step(Input::Agents(vec![a.clone()]), t5 + 1);
+    next.recover(t5 + 1);
+    next.step(heard(Event::Connected(true)), t5 + 1);
+    assert!(!next.keepalive(), "its turn is lost, and its card holds nothing");
+}
+
 /// Goal: an unanswered prompt expires: its card says so, and the runtime is
 /// told it got no answer. An answer after that is ignored.
 #[test]

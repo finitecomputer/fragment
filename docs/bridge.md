@@ -231,7 +231,10 @@ masked field, and:
   gets its words once the card's closure is on `work`; the closure says it
   was answered by the agent's owner, nothing of what. A record answering
   it is ignored, live or late. A card whose turn is gone (a restart) takes
-  it no more, saying so: its person sends a message to start again.
+  it no more, saying so: its person sends a message to start again. So
+  such a card holds the computer while it is open, at most
+  `COMPUTER_CARD_HOLD_MS` (10 minutes) or to its expiry if sooner
+  (`Prompt::holds_until`): a sleep comes only after that.
 
 The value is never logged or kept, here or on the platform, which only
 carries the port's bytes. Something on the computer itself (the agent's
@@ -242,7 +245,8 @@ only fail.
 ## A card outlives its turn
 
 Waiting on a person (a card, or a question in words) never holds the
-computer, so a sleep or a restart may cut a turn under its card. The
+computer, but for a card only this life can take ("An answer for the
+computer"), so a sleep or a restart may cut a turn under its card. The
 turn ends as lost; its cards stay answerable until `expiresAt`. An owner's
 answer that no running turn of this life holds is late, and the engine
 resolves it from the chat's journal, read back to the card (`cards.rs`):
@@ -274,7 +278,8 @@ it.
 ## Runtime work outside a turn
 
 The keepalive is held while a turn is queued or runs (not while it waits
-on a person), and while a runtime says it has work of its own (`Working`):
+on a person, but for a card only this life can take), and while a
+runtime says it has work of its own (`Working`):
 in our image, delegated children still running after their parent
 replied.
 
@@ -570,9 +575,10 @@ reaches it (`withheld`).
   expiring, ends the turn, its login with it, and no session begins; the
   URL is taken only once said whole (a pipe's reads are not its lines).
   The login's verifier lives only in
-  its process (PKCE), so a sign-in never outlives its turn: after a sleep
-  or a restart its card's code is refused, saying so, and the next
-  message asks anew.
+  its process (PKCE), so a sign-in never outlives its turn: its card holds
+  the computer for at most `COMPUTER_CARD_HOLD_MS`, and after a sleep or
+  a restart its card's code is refused, saying so, and the next message
+  asks anew.
 - **Its model and effort** are its agent's own: its `agent.json`'s
   `"claude": {"model", "effort"}` (`ClaudeSettings`), read with its
   runtime, in Claude Code's own names (`opus`, `sonnet`, `haiku`, `fable`
