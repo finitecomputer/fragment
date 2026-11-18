@@ -1254,8 +1254,9 @@ fn refresh_stored_prompts(home: &Path, why: &str, overlapped: &dyn Fn() -> bool)
     if overlapped() {
         return ev!("prompts.stamp_deferred", { "why": why, "because": "held" });
     }
-    if let Err(e) = write_stamp(&stamp, &inputs) {
-        ev!("prompts.stamp_failed", { "why": why, "error": e.to_string() });
+    match write_stamp(&stamp, &inputs) {
+        Ok(()) => ev!("prompts.stamped", { "why": why }),
+        Err(e) => ev!("prompts.stamp_failed", { "why": why, "error": e.to_string() }),
     }
 }
 

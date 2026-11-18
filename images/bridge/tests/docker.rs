@@ -4368,8 +4368,8 @@ print(len(was))
 /// refresh's request lands in it: it leaves the stamp unwritten, so the
 /// next start asks again, rather than stamp inputs a save may not hold.
 /// Method: a wait of 1 ms (`HERMES_BOOT_REFRESH_MS`), a turn (so there are
-/// databases to ask), the stamp removed, a restart; the stamp, and the
-/// boot's word on it.
+/// databases to ask), the stamp removed, a restart; the boot's word on
+/// its stamp.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_boot_refresh_that_outlives_its_wait_leaves_its_stamp() {
@@ -4385,15 +4385,16 @@ async fn a_boot_refresh_that_outlives_its_wait_leaves_its_stamp() {
     assert!(c.exec(&["rm", "-f", stamp]), "the stamp removed: the next start's inputs read as changed");
     let from = fragment_bridge::log::now_ms();
     c.restart();
-    let deferred = || c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).any(|e| e["at"].as_u64().is_some_and(|at| at >= from) && e["event"] == "prompts.stamp_deferred" && e["why"] == "boot");
+    // the boot's own word on its stamp (a skills round may stamp too: its own)
+    let said = |what: &str| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).any(|e| e["at"].as_u64().is_some_and(|at| at >= from) && e["event"] == what && e["why"] == "boot");
     let t = Instant::now();
-    // bounded: one of them within a minute of the restart
-    while !(deferred() || c.exec(&["test", "-e", stamp])) {
+    // bounded: the boot's refresh ends within a minute of the restart
+    while !(said("prompts.stamp_deferred") || said("prompts.stamped")) {
         assert!(t.elapsed() < Duration::from_secs(60), "the boot's refresh never ended: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     let words = c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n");
-    assert!(deferred() && !c.exec(&["test", "-e", stamp]), "a refresh past its wait leaves the stamp: {words}");
+    assert!(said("prompts.stamp_deferred") && !said("prompts.stamped"), "a refresh past its wait leaves the stamp: {words}");
 }
 
 /// Goal (Austin, 2026-11-17: a skill's change, as a hint's, would reach
