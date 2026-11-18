@@ -121,7 +121,7 @@ back in time without changing what happens.
 | Fact | Its one authority | A cache of it |
 |---|---|---|
 | What was said | the chat's `chat` channel | the runtime's transcript |
-| Which turns started, which calls they asked for, what they did, how they ended, each card's answer | the chat's `work` channel, the journal (docs/chat-records.md) | the bridge's `state.json` |
+| Which turns started, which calls they asked for, what they did, how they ended, each card's answer | the chat's `work` channel, the journal (docs/chat-records.md) | the bridge's state (`/data/bridge`) |
 | The agent's self (`SOUL.md`, memories, skills) | the agent fragment's repo | the profile's checkout |
 | The runtime's context and the agent's working files | `/data`, as of its newest save | the snapshot, for one image |
 | Which save is current, and what a wake restored | the Computer DO | |
@@ -682,12 +682,11 @@ provider's own hosts.
   person through their computer's routes. The computer asks the agent's
   fragment for them at each request it swaps and each read of a view,
   and keeps none: a provider taken away is refused from the next request.
-  A computer from before held them itself (`agents.connections`,
-  `agent_accounts`): an agent's first ask after the deploy carries that
-  row, taken whole by a fragment holding none of its own and ignored by
-  one that does (`grants::answered`), then marked moved and sent no more.
-  The release is forward only (the Computer's step 5): the release before
-  refuses every computer, so it never writes those rows again.
+  A computer from before held them itself; the rows its agents'
+  fragments had not taken when its step 6 dropped them it owes
+  (`grants::Owed`): an agent's next ask carries its row, taken whole by a
+  fragment holding none of its own and ignored by one that does
+  (`grants::answered`), then forgotten.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
@@ -838,8 +837,15 @@ payment card fill still asks. A card is its owner's alone to answer
 
 Every turn also tells the agent that a file attached in the chat is
 already on its computer, at the path the attachment note names, scratch
-until it copies it into its work (`hermes::FILES`); and that a reply line
-`MEDIA:<absolute path>` attaches a file there (`hermes::SENDING`).
+until it copies it into its work (`hermes::FILES`); that a voice memo
+arrives already transcribed, its words the quote above Hermes' audio
+note, its file only for work on the recording (`hermes::VOICE`); and that a
+reply line `MEDIA:<absolute path>` attaches a file there
+(`hermes::SENDING`). Hermes keeps the system prompt a chat's session
+began with and replays it on every later turn, so a change to these
+reaches an open chat at its next new session (its `/new`), or when
+Hermes next compresses it or its model changes; a new chat has it at
+once.
 
 ### Its name, in our Hermes image
 

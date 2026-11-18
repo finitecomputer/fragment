@@ -1330,10 +1330,10 @@ pub(super) fn own_signin_moved_checks(s: &mut Suite, api: &Api, w: &Swapping, fe
 /// without the stub or the fakes skips them.
 pub(super) const GRANT_CHECKS: &[&str] = &[
     "what an agent may use is its owner's alone to change: an agent's own key is refused (403), as is one acting for its owner (400), and its fragment's own route for it answers no one from outside (404); the agent may use what it did",
-    "what its owner sets is its agent fragment's, which says so on its events; its computer's row keeps none (marked moved)",
+    "what its owner sets is its agent fragment's, which says so on its events; its computer owes none",
     "a provider taken away is refused at the agent's very next request, reaching no provider; given back, its next request goes",
-    "a computer's row from before the move (narrowed, an account picked) is honoured at the agent's next request by a fragment that holds none: taken whole, the row marked moved",
-    "taken once: a row its computer sends later (every provider) is ignored by a fragment holding grants of its own, the agent's next request refused, reaching no provider",
+    "a computer's row from before the move, still owed (narrowed, an account picked), is honoured at the agent's next request by a fragment that holds none: taken whole, and owed no more",
+    "taken once: a row its computer sends later (every provider) is ignored by a fragment holding grants of its own, the agent's next request refused, reaching no provider, and owed no more",
 ];
 
 /// The checks; answers how many turns of the agent's they took. Run while
@@ -1349,11 +1349,10 @@ pub(super) fn grant_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let allow = |who: &crate::Keys, query: &str, list: Value| api.signed(who, "PUT", &format!("{path}{query}"), Some(&json!({ "connections": list })));
     let agent_of = |r: &crate::api::Reply| r.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == w.agent)).cloned().unwrap_or(Value::Null);
     let view = || api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None).map(|r| agent_of(&r));
-    // the computer's own row, as the release before the move reads and writes it
+    // what the computer owes the agent's fragment from before the move (Computer step 6)
     let row = |written: Option<Value>| api.unsigned("POST", "/api/test/computer", Some(&json!({ "computer": w.id, "op": "legacy-grants", "agent": w.agent, "row": written })));
     let told = || events(api, w.owner, w.agent).into_iter().rev().find(|e| e["kind"] == "agent.grants").unwrap_or(Value::Null);
     let google = |s: &Suite| format!("fetch http://{SWAP_CONNECTION_HOST}/drive/v3/files with {}", placeholder(s, w.id, w.agent, SWAP_CONNECTION));
-    let moved = fragment_core::grants::MOVED;
 
     let before = view()?;
     let (agent_keys, _) = api.own_agent(w.owner)?;
@@ -1376,7 +1375,7 @@ pub(super) fn grant_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
         agent_of(&set)["connections"] == json!([SWAP_CONNECTION])
             && event["data"]["grants"]["connections"] == json!([SWAP_CONNECTION])
             && event["data"]["moved"] == false
-            && kept.body["row"] == json!({ "connections": moved, "accounts": {} }),
+            && kept.body["row"].is_null(),
         json!({ "set": set.status, "event": event, "row": kept.body }),
     );
 
@@ -1411,7 +1410,7 @@ pub(super) fn grant_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
             && refused.starts_with("fetched 403")
             && refused.contains("may not use google")
             && unreached
-            && kept.body["row"]["connections"] == moved
+            && kept.body["row"].is_null()
             && shown["connections"] == json!(["elevenlabs"])
             && shown["accounts"][SEVERAL] == "data_installation_e2e_old"
             && event["data"]["moved"] == true,
@@ -1431,7 +1430,7 @@ pub(super) fn grant_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
             && refused.starts_with("fetched 403")
             && refused.contains("may not use google")
             && unreached
-            && kept.body["row"]["connections"] == moved
+            && kept.body["row"].is_null()
             && shown["connections"] == json!(["elevenlabs"])
             && shown["accounts"][SEVERAL] == "data_installation_e2e_old",
         json!({ "refused": refused, "row": kept.body, "shown": shown }),
