@@ -1,18 +1,24 @@
 //! An app as a member of another fragment (docs/api.md, "An app as a
 //! member"; decision 72): `fragment_core::app_member` holds the rule, and
-//! this its two ends. For now an app joins only while it is its owner's
-//! alone, added by them to a fragment they own, so its audience is its
-//! owner, who holds the target.
+//! this its two ends. Its owner adds it to a fragment they own; for now its
+//! people stay as they are while it is in anywhere (asking each fragment it
+//! is in before its audience grows comes next).
 //!
 //! - **The target asks the app** (`add_app`): `PUT members/<the app's
 //!   name>`, its owner's, or their agent's for them. The app answers in one
-//!   turn (`app_asked`): it is their own, members only, with no one else
-//!   in it and no invite waiting, and it records that it is joining, at
-//!   the ask's version. The target then holds the answer to the rule in its
-//!   own turn, and writes the app's row or tells the app it is out.
-//! - **While it is a member anywhere** the app stays members only and
-//!   invites no one (`stays_members_only`, `stays_alone`), beside reach's
-//!   refusals (reach.rs).
+//!   turn (`app_asked`): it is their own, members only, with no invite
+//!   waiting, and it records that it is joining, at the ask's version. The
+//!   target then holds its audience to the rule in its own turn, keeps it
+//!   as the app's approved list (`app_audience`), and writes the app's row
+//!   or tells the app it is out.
+//! - **A narrowing pauses** (`apps_held`, at every change to who is in):
+//!   never refused, a removal or a lowered role that leaves an app's list
+//!   short pauses it in the same turn (`member_apps.paused`), and a paused
+//!   app holds no role here (fragment.rs `standing`) until the list is
+//!   held again: the person back, or the app taken out.
+//! - **While it is a member anywhere** the app stays members only, invites
+//!   no one and raises no one (`stays_members_only`, `stays_alone`), beside
+//!   reach's refusals (reach.rs).
 //! - **The two are told as a person's list is** (members.rs
 //!   `tell_index`): a target's change goes to the app by its name (its role
 //!   there, or out: removed, refused, or the target deleted), and an app
@@ -57,11 +63,11 @@ impl FragmentCell {
         }
     }
 
-    /// Anyone else let in (an invite), refused while it is a member
-    /// anywhere: for now an app in another is its owner's alone.
+    /// Anyone let in (an invite), or raised, refused while it is a member
+    /// anywhere: for now an app in another keeps its people as they are.
     pub(crate) fn stays_alone(&self) -> CellResult<()> {
         match self.member_of_any()? {
-            Some(target) => Err(CellError::new(ErrorCode::Forbidden, format!("{} is in {}, so for now it's yours alone.", self.app_title()?, label(&target)))),
+            Some(target) => Err(CellError::new(ErrorCode::Forbidden, format!("{} is in {}, so for now its people stay as they are.", self.app_title()?, label(&target)))),
             None => Ok(()),
         }
     }
@@ -86,24 +92,28 @@ impl FragmentCell {
         if self.incarnation().ok() != Some(incarnation) || self.must(MetaKey::Owner)? != owner {
             return Err(CellError::new(ErrorCode::Conflict, "it changed while its app was asked: ask again"));
         }
-        // bounded: an app's audience is its members and their owners
+        // its list so far (none at a join) and its answer, held here; bounded:
+        // an app's audience is its members and their owners
+        let approved = self.app_audience(&answer.npub)?;
         let mut held = BTreeMap::new();
-        for (person, _) in &answer.audience {
+        for person in approved.keys().chain(answer.audience.iter().map(|(p, _)| p)) {
             held.insert(person.clone(), self.member_role(person)?);
         }
-        // its owner's alone: no yes here waits on the app (that list comes
-        // with the audience's growing)
         let audience: Audience = answer.audience.iter().cloned().collect();
-        if let Err(refused) = app_member::join(role, &Audience::new(), audience, |p| held.get(p).copied().flatten()) {
-            // the app recorded its joining: it is told it is out, at a newer version
-            self.app_change(name, None)?;
-            self.flush_index().await;
-            let person = match &refused {
-                app_member::Refusal::Audience(short) => fragment_core::npub::display(&short.person),
-                _ => String::new(),
-            };
-            return Err(CellError::new(ErrorCode::Forbidden, refused.line(&answer.title, &title, &person)));
-        }
+        let list = match app_member::join(role, &approved, audience, |p| held.get(p).copied().flatten()) {
+            Ok(list) => list,
+            Err(refused) => {
+                // the app recorded its joining: told it is out (a role
+                // change: its role here as it was), at a newer version
+                self.app_change(name, self.member_role(&answer.npub)?)?;
+                self.flush_index().await;
+                let person = match &refused {
+                    app_member::Refusal::Audience(short) => self.named_for_owner(&short.person).await,
+                    _ => String::new(),
+                };
+                return Err(CellError::new(ErrorCode::Forbidden, refused.line(&answer.title, &title, &person)));
+            }
+        };
         let current = self.member_role(&answer.npub)?;
         self.room_for(u64::from(current.is_none()))?;
         self.exec(
@@ -115,6 +125,13 @@ impl FragmentCell {
             "INSERT INTO member_apps (principal, name, owner, incarnation) VALUES (?, ?, ?, ?) ON CONFLICT (principal) DO NOTHING",
             vec![answer.npub.as_str().into(), name.into(), owner.as_str().into(), SqlStorageValue::Integer(answer.incarnation)],
         )?;
+        // bounded as its audience is
+        for (person, power) in &list {
+            self.exec(
+                "INSERT INTO app_audience (app, person, power) VALUES (?, ?, ?) ON CONFLICT (app, person) DO UPDATE SET power = excluded.power",
+                vec![answer.npub.as_str().into(), person.as_str().into(), power.as_str().into()],
+            )?;
+        }
         self.app_change(name, Some(role))?;
         self.sharing_changed()?;
         let data = json!({ "principal": answer.npub, "role": role, "kind": "app", "app": name, "owner": owner });
@@ -152,6 +169,7 @@ impl FragmentCell {
     fn app_out(&self, principal: &str) -> CellResult<()> {
         self.exec("DELETE FROM members WHERE principal = ?", vec![principal.into()])?;
         self.exec("DELETE FROM member_apps WHERE principal = ?", vec![principal.into()])?;
+        self.exec("DELETE FROM app_audience WHERE app = ?", vec![principal.into()])?;
         self.drop_subscriptions(principal)?;
         self.close_sockets(&format!("p:{principal}"), "membership revoked");
         self.sharing_changed()
@@ -179,9 +197,9 @@ impl FragmentCell {
         }
         app_member::members_only(self.visibility()?).map_err(|r| refused(r.line(&title, &a.title, "")))?;
         let audience = app_member::audience(&owner, &self.member_list()?.members);
-        let invited = self.count_of("SELECT COUNT(*) AS n FROM invites WHERE expires_at > ?", vec![SqlStorageValue::Integer(js::now_ms())])?;
-        if app_member::others(&owner, &audience).is_some() || invited > 0 {
-            return Err(refused(format!("{title} is shared. For now an app joins only while it's yours alone.")));
+        // whoever accepts one would join unasked: none waits
+        if self.count_of("SELECT COUNT(*) AS n FROM invites WHERE expires_at > ?", vec![SqlStorageValue::Integer(js::now_ms())])? > 0 {
+            return Err(refused(format!("{title} has an invite waiting. For now an app joins once each is answered.")));
         }
         // its joining, as it answers: from now on it stays members only and
         // its owner's alone; an ask older than what the target told it
@@ -238,6 +256,46 @@ impl FragmentCell {
     fn app_change(&self, name: &str, role: Option<Role>) -> CellResult<()> {
         let role = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
         self.index_rows("SELECT ? AS principal, ? AS role", vec![name.into(), role])
+    }
+
+    /// The audience this fragment approved for the app member `principal`
+    /// (none before it joins).
+    fn app_audience(&self, principal: &str) -> CellResult<Audience> {
+        let rows = self.rows("SELECT person, power FROM app_audience WHERE app = ?", vec![principal.into()])?;
+        Ok(rows.iter().filter_map(|r| Some((r["person"].as_str()?.to_string(), Role::parse(r["power"].as_str()?)?))).collect())
+    }
+
+    /// Each app member held to the list it approved, at a change to who
+    /// is in (members.rs `sharing_changed`), in that change's turn: one
+    /// left short is paused, naming whom it waits on, and one held again
+    /// resumes. Its sockets open again at what it now holds.
+    pub(crate) fn apps_held(&self) -> CellResult<()> {
+        let apps = self.rows(
+            "SELECT a.principal, a.name, a.paused, m.role FROM member_apps a JOIN members m USING (principal) ORDER BY a.principal",
+            vec![],
+        )?;
+        // bounded: its app members are members, at most MEMBERS_MAX
+        for app in &apps {
+            let (Some(principal), Some(name), Some(role)) = (app["principal"].as_str(), app["name"].as_str(), app["role"].as_str().and_then(Role::parse)) else { continue };
+            let short = app_member::short(&self.app_audience(principal)?, role, |p| self.member_role(p).ok().flatten());
+            let paused = short.as_ref().map(|s| s.person.as_str());
+            if paused == app["paused"].as_str() {
+                continue;
+            }
+            self.exec("UPDATE member_apps SET paused = ? WHERE principal = ?", vec![paused.map_or(SqlStorageValue::Null, Into::into), principal.into()])?;
+            match &short {
+                Some(s) => self.event("app.paused", &s.paused(name, &fragment_core::npub::display(&s.person)), json!({ "principal": principal, "app": name, "person": s.person })),
+                None => self.event("app.resumed", &format!("the app {name} reads here again"), json!({ "principal": principal, "app": name })),
+            }
+            self.reopen_sockets(&format!("p:{principal}"), "its standing here changed");
+        }
+        Ok(())
+    }
+
+    /// Someone as this fragment's owner sees them: their email, else their npub.
+    async fn named_for_owner(&self, person: &str) -> String {
+        let named = crate::share::profiles(&self.env, vec![person.to_string()]).await;
+        named.get(person).and_then(|p| p.email.clone()).unwrap_or_else(|| fragment_core::npub::display(person))
     }
 
     /// Its life: its making's time.

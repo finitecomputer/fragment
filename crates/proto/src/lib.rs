@@ -1603,6 +1603,12 @@ pub struct Member {
 pub struct MemberApp {
     /// The app's fragment name.
     pub name: String,
+    /// Paused: someone who can see it is no longer held here as they must
+    /// be (their npub), so it reads nothing here until they are, or until
+    /// they leave the app (add-only: absent while it is not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub paused: Option<String>,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
@@ -2824,7 +2830,7 @@ mod tests {
         let person = Member { principal: "npub1robin".into(), role: Role::Viewer, added_by: "npub1me".into(), added_at: 1, kind: Some(IdentityKind::Person), owner: None, email: None, app: None };
         let as_before = serde_json::json!({ "principal": "npub1robin", "role": "viewer", "addedBy": "npub1me", "addedAt": 1, "kind": "person" });
         assert_eq!(serde_json::to_value(&person).unwrap(), as_before, "no app: the form an older client reads, unchanged");
-        let app = Member { principal: "npub1board".into(), kind: None, owner: Some("npub1me".into()), app: Some(MemberApp { name: "board-k3x9".into() }), ..person };
+        let app = Member { principal: "npub1board".into(), kind: None, owner: Some("npub1me".into()), app: Some(MemberApp { name: "board-k3x9".into(), paused: None }), ..person };
         let shown = serde_json::json!({ "principal": "npub1board", "role": "viewer", "addedBy": "npub1me", "addedAt": 1, "owner": "npub1me", "app": { "name": "board-k3x9" } });
         assert_eq!(serde_json::to_value(&app).unwrap(), shown);
         assert_eq!(serde_json::from_value::<Member>(shown).unwrap(), app);

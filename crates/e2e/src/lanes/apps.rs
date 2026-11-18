@@ -1,9 +1,12 @@
-//! An app as a member of another fragment (decision 72), for now its
-//! owner's alone: an owner adds an app of theirs to a fragment of theirs,
-//! the app stays members only and invites no one while it is in, and
-//! removing it, deleting it or deleting the fragment it is in lets it go.
+//! An app as a member of another fragment (decision 72): an owner adds an
+//! app of theirs to a fragment of theirs while everyone it shows is held
+//! there; a removal or a lowered role there pauses it until they are held
+//! again; while it is in, it stays members only and its people stay as
+//! they are; and removing it, deleting it or deleting the fragment it is
+//! in lets it go.
 
 use anyhow::Result;
+use fragment_core::npub;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -48,8 +51,8 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     let invited = api.signed(&owner, "POST", &format!("/api/f/{board}/invites"), Some(&json!({ "email": "apps-carol@e2e.test", "role": "viewer" })))?;
     let shared = put(&owner, &tracker, &board, "viewer")?;
     s.ok(
-        "an app with an invite waiting is refused (403): for now an app joins only while it is its owner's alone",
-        invited.status == 200 && shared.status == 403 && shared.message().contains("only while it's yours alone"),
+        "an app with an invite waiting is refused (403): whoever accepted it would join unasked",
+        invited.status == 200 && shared.status == 403 && shared.message() == format!("{} has an invite waiting. For now an app joins once each is answered.", label(&board)),
         format!("{invited} {shared}"),
     );
     api.signed(&owner, "DELETE", &format!("/api/f/{board}/invites/apps-carol@e2e.test"), None)?;
@@ -83,16 +86,61 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     let in_line = |r: &Reply, tail: &str| r.status == 403 && r.message() == format!("{} is in {}, {tail}", label(&board), label(&tracker));
     s.ok(
         "while in, the app's link and its invites are refused (403), each naming where it is",
-        in_line(&open, "so it stays members only.") && in_line(&invite, "so for now it's yours alone."),
+        in_line(&open, "so it stays members only.") && in_line(&invite, "so for now its people stay as they are."),
         format!("{open} {invite}"),
     );
     let editor = put(&owner, &tracker, &board, "editor")?;
     s.ok("its role there changes, asked again", editor.status == 200 && editor.body["role"] == "editor" && app_row(&tracker)?.is_some_and(|m| m["role"] == "editor"), &editor);
 
-    // ---- a restart of every object: still in, still held
+    // ---- its people: Carol edits the board, Dana views it; held to them here
+    let (carol, dana) = (api.person()?, api.person()?);
+    let (carol_id, dana_id) = (npub::encode(carol.pubkey_hex()), npub::encode(dana.pubkey_hex()));
+    api.signed(&owner, "DELETE", &format!("/api/f/{tracker}/members/{board}"), None)?;
+    api.share(&board, &carol_id, "editor")?;
+    api.share(&board, &dana_id, "viewer")?;
+    let short = put(&owner, &tracker, &board, "editor")?;
+    let named = [&carol, &dana].iter().any(|k| short.message() == format!("{} can see {} but isn't in {}. Add them here first.", Api::email_of(k), label(&board), label(&tracker)));
+    s.ok("an app whose people are not all here is refused (403), naming one by their email", short.status == 403 && named && app_row(&tracker)?.is_none(), &short);
+    api.share(&tracker, &carol_id, "editor")?;
+    api.share(&tracker, &dana_id, "viewer")?;
+    let held = put(&owner, &tracker, &board, "editor")?;
+    s.ok("held here, its editor an editor, it joins as an editor, not paused", held.status == 200 && held.body["app"].get("paused").is_none(), &held);
+    let raised = api.share(&board, &dana_id, "editor")?;
+    s.ok("while in, raising one of its people is refused (403)", raised.status == 403 && in_line(&raised, "so for now its people stay as they are."), &raised);
+    let paused = |who: &str| -> Result<bool> { Ok(app_row(&tracker)?.is_some_and(|m| m["app"]["paused"] == who)) };
+
+    // ---- a narrowing: never refused, it pauses the app in the same turn
+    let lowered = api.share(&tracker, &carol_id, "viewer")?;
+    s.ok("lowering its editor to a viewer here works, and pauses it, naming them", lowered.status == 200 && paused(&carol_id)?, &lowered);
+    let again = api.share(&tracker, &carol_id, "viewer")?;
+    s.ok("(the same lowering again: still paused, on the same person)", again.status == 200 && paused(&carol_id)?, &again);
+    let gone = api.signed(&owner, "DELETE", &format!("/api/f/{tracker}/members/{dana_id}"), None)?;
+    let row = app_row(&tracker)?;
+    s.ok(
+        "removing someone who sees it works too, and it stays paused, still a member at its role",
+        gone.status == 200 && row.as_ref().is_some_and(|m| m["role"] == "editor" && (m["app"]["paused"] == carol_id.as_str() || m["app"]["paused"] == dana_id.as_str())),
+        format!("{gone} {row:?}"),
+    );
+    let raise = put(&owner, &tracker, &board, "editor")?;
+    s.ok("asked again while its list is short, it is refused (403), and stays paused", raise.status == 403 && app_row(&tracker)?.is_some_and(|m| !m["app"]["paused"].is_null()), &raise);
+
+    // ---- a restart of every object: still in, still held, still paused
     s.reload()?;
     let open = visibility(&owner, &board, "link")?;
-    s.ok("after a restart the app is still in, and its link still refused", app_row(&tracker)?.is_some() && in_line(&open, "so it stays members only."), &open);
+    s.ok(
+        "after a restart the app is still in and still paused, and its link still refused",
+        app_row(&tracker)?.is_some_and(|m| !m["app"]["paused"].is_null()) && in_line(&open, "so it stays members only."),
+        &open,
+    );
+    api.share(&tracker, &carol_id, "editor")?;
+    let one = app_row(&tracker)?;
+    api.share(&tracker, &dana_id, "viewer")?;
+    let both = app_row(&tracker)?;
+    s.ok(
+        "each held again, it resumes once the last is",
+        one.as_ref().is_some_and(|m| m["app"]["paused"] == dana_id.as_str()) && both.as_ref().is_some_and(|m| m["app"].get("paused").is_none()),
+        format!("{one:?} {both:?}"),
+    );
 
     // ---- removed: told in the removal's own turn, its link its own again
     let removed = api.signed(&owner, "DELETE", &format!("/api/f/{tracker}/members/{board}"), None)?;

@@ -757,6 +757,7 @@ out. An app member (`fragment_core::app_member`).
 | field | type | | |
 | --- | --- | --- | --- |
 | `name` | `string` | required | The app's fragment name. |
+| `paused` | `string` or `null` | optional | Paused: someone who can see it is no longer held here as they must be (their npub), so it reads nothing here until they are, or until they leave the app (add-only: absent while it is not). |
 
 ### `MemberList`
 

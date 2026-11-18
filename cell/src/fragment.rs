@@ -867,7 +867,8 @@ impl FragmentCell {
             agent: i64,
         }
         let rows: Vec<Row> = self.typed(
-            "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent",
+            "SELECT (SELECT role FROM members m WHERE principal = ? AND NOT EXISTS (SELECT 1 FROM member_apps a WHERE a.principal = m.principal AND a.paused IS NOT NULL)) AS role,
+               EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent",
             vec![principal.into(), principal.into()],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");

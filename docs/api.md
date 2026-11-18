@@ -662,21 +662,31 @@ Decline, and the page a sign-in to its fragment shows first
 
 A fragment may be a member of another, as a viewer or an editor (decision
 72): an app, such as a dashboard over its owner's other fragments. It
-shows no one more than they can already open (`fragment_core::app_member`).
-For now it is its owner's alone: its owner (or their agent for them) adds
-an app they own to a fragment they own, `PUT members/{the app's name}`.
+shows no one more than they can already open (`fragment_core::app_member`):
+everyone who can see it is a member here, and its editors at least at its
+role. Its owner (or their agent for them) adds an app they own to a
+fragment they own, `PUT members/{the app's name}`.
 
 - The fragment asks the app, which answers in one turn and records that
-  it is joining: it must be its owner's, `members` visibility, with no one
-  else in it and no invite waiting, and an agent fragment never joins.
-  Each refusal is 403 with one line naming the fix, such as "Board is
-  shared by link. Make it members only first."; owning one, 400.
+  it is joining: it must be its owner's, `members` visibility, with no
+  invite waiting, and an agent fragment never joins. Its people, an agent
+  as its person, are held to this fragment's members, and kept as the
+  audience it approved. Each refusal is 403 with one line naming the fix,
+  such as "Board is shared by link. Make it members only first." or
+  "robin@example.com can see Board but isn't in Tracker. Add them here
+  first."; owning one, 400.
+- A removal or a lowered role here is never refused. One that leaves an
+  app short of anyone it approved pauses it in the same turn: its row's
+  `app.paused` names whom it waits on (an `app.paused` event says so), and
+  it holds no role here until they are held again (`app.resumed`), or
+  they leave it, or it is taken out. Asked again at a role while short,
+  it is refused.
 - Its row in `GET members` leaves out `kind` and names `app: {name}` and
   its `owner`, who reads nothing through it. It is no guest in its owner's
   row's `sharing`, and has no list of its own.
-- While it is a member anywhere, the app's `link` or `public` visibility
-  and its invites are 403 ("Board is in tracker, so it stays members
-  only.").
+- While it is a member anywhere, the app's `link` or `public` visibility,
+  its invites, and anyone new or raised there are 403 ("Board is in
+  tracker, so it stays members only.").
 - `DELETE members/{its name or npub}` takes it out. Deleting the app takes
   it out of each fragment it is in, and deleting a fragment lets each app
   in it go. Each side is told as a person's list is, by the same outbox

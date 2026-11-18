@@ -103,6 +103,16 @@ pub struct Short {
     pub holds: Option<Role>,
 }
 
+impl Short {
+    /// What a paused app's row says: who it waits on, and why.
+    pub fn paused(&self, app: &str, person: &str) -> String {
+        match self.holds {
+            None => format!("Paused. {person} can see {app} but is no longer here."),
+            Some(_) => format!("Paused. {person} can edit {app} but only views here."),
+        }
+    }
+}
+
 /// The first on `approved` the target does not hold at what they need,
 /// with the app at `app_role` there; `holds` answers each person's own
 /// role in the target (its owner's is `Owner`; no agent of theirs lends
@@ -222,7 +232,7 @@ mod tests {
     }
 
     fn app(principal: &str, role: Role) -> Member {
-        Member { app: Some(fragment_proto::MemberApp { name: "board--x".into() }), ..member(principal, role, None, Some(OWNER)) }
+        Member { app: Some(fragment_proto::MemberApp { name: "board--x".into(), paused: None }), ..member(principal, role, None, Some(OWNER)) }
     }
 
     fn people(of: &[(&str, Role)]) -> Audience {
@@ -357,8 +367,9 @@ mod tests {
         let mut members = vec![(OWNER, Owner), (ROBIN, Viewer)];
         grow(&mut approved, Viewer, ROBIN, Viewer, target(&members)(ROBIN)).expect("yes, recorded first");
         members.retain(|(p, _)| *p != ROBIN);
-        let paused = short(&approved, Viewer, target(&members));
-        assert_eq!(paused.map(|s| s.person), Some(ROBIN.to_string()), "paused in the target's own turn");
+        let paused = short(&approved, Viewer, target(&members)).expect("paused in the target's own turn");
+        assert_eq!(paused.person, ROBIN);
+        assert_eq!(paused.paused("Dashboard", "Robin"), "Paused. Robin can see Dashboard but is no longer here.");
         // the app takes Robin out, or cancels the growth it never wrote
         shrink(&mut approved, ROBIN, None);
         assert_eq!(short(&approved, Viewer, target(&members)), None, "resumed");
@@ -370,7 +381,8 @@ mod tests {
         grow(&mut approved, Editor, SAM, Editor, target(&members)(SAM)).expect("yes");
         assert_eq!(short(&approved, Editor, target(&members)), None, "nothing shown: the app never took Sam");
         members[1].1 = Viewer;
-        assert!(short(&approved, Editor, target(&members)).is_some(), "lowering Sam pauses it, early: never a leak");
+        let paused = short(&approved, Editor, target(&members)).expect("lowering Sam pauses it, early: never a leak");
+        assert_eq!(paused.paused("Dashboard", "Sam"), "Paused. Sam can edit Dashboard but only views here.");
         shrink(&mut approved, SAM, None);
         assert_eq!(short(&approved, Editor, target(&members)), None, "the app's cancel on restart resumes it");
 

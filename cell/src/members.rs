@@ -122,7 +122,7 @@ fn member_json(r: &Value) -> CellResult<Member> {
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
         owner: r["owner"].as_str().or(r["app_owner"].as_str()).map(str::to_string),
         email: None,
-        app: r["app"].as_str().map(|name| MemberApp { name: name.to_string() }),
+        app: r["app"].as_str().map(|name| MemberApp { name: name.to_string(), paused: r["paused"].as_str().map(str::to_string) }),
     })
 }
 
@@ -253,6 +253,7 @@ impl FragmentCell {
     /// Who is in, or who may open it, changed: the owner's row in their
     /// list is sent again, with the sharing as it is when it goes.
     pub(crate) fn sharing_changed(&self) -> CellResult<()> {
+        self.apps_held()?;
         let owner = self.must(MetaKey::Owner)?;
         self.index_change(&owner, Some(Role::Owner))
     }
@@ -535,7 +536,7 @@ impl FragmentCell {
     /// agent): the API's list, and a page's (`__members`, serve.rs).
     pub(crate) fn member_list(&self) -> CellResult<MemberList> {
         let rows = self.rows(
-            "SELECT m.principal, m.role, m.added_by, m.added_at, m.kind, m.owner, a.name AS app, a.owner AS app_owner
+            "SELECT m.principal, m.role, m.added_by, m.added_at, m.kind, m.owner, a.name AS app, a.owner AS app_owner, a.paused
              FROM members m LEFT JOIN member_apps a USING (principal) ORDER BY m.added_at, m.principal",
             vec![],
         )?;
@@ -664,6 +665,13 @@ impl FragmentCell {
             }));
         }
         self.connector_role(body.role)?;
+        // anyone new who is not its owner's own (a test's lever), or a
+        // person raised: what an app that is in anywhere takes from no one
+        // for now (app_members.rs)
+        let owners = target.id == self.must(MetaKey::Owner)? || target.owner.as_deref() == Some(self.must(MetaKey::Owner)?.as_str());
+        if (current.is_none() && !owners) || (current.is_some_and(|c| body.role > c) && self.entity_of(&target.id)?.is_some()) {
+            self.stays_alone()?;
+        }
         if current.is_some() && body.role < Role::Editor && self.chat_agent()?.as_deref() == Some(target.id.as_str()) {
             return Err(refusal(true, CHAT_AGENT_STAYS_EDITOR));
         }

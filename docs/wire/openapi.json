@@ -1719,6 +1719,14 @@
           "name": {
             "description": "The app's fragment name.",
             "type": "string"
+          },
+          "paused": {
+            "default": null,
+            "description": "Paused: someone who can see it is no longer held here as they must\nbe (their npub), so it reads nothing here until they are, or until\nthey leave the app (add-only: absent while it is not).",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
