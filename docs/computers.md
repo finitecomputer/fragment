@@ -674,12 +674,11 @@ provider's own hosts.
   person through their computer's routes. The computer asks the agent's
   fragment for them at each request it swaps and each read of a view,
   and keeps none: a provider taken away is refused from the next request.
-  A computer from before held them itself (`agents.connections`,
-  `agent_accounts`): an agent's first ask after the deploy carries that
-  row, taken whole by a fragment holding none of its own and ignored by
-  one that does (`grants::answered`), then marked moved and sent no more.
-  The release is forward only (the Computer's step 5): the release before
-  refuses every computer, so it never writes those rows again.
+  A computer from before held them itself; the rows its agents'
+  fragments had not taken when its step 6 dropped them it owes
+  (`grants::Owed`): an agent's next ask carries its row, taken whole by a
+  fragment holding none of its own and ignored by one that does
+  (`grants::answered`), then forgotten.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
