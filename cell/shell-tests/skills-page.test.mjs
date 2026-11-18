@@ -254,6 +254,13 @@ test("a skills fragment without the catalog (no longer on the template) still sh
   assert.deepEqual(t.opened, [["app", "skills--z8w6"]]);
   t.find("skills-tab")[1].onclick();
   assert.match(t.find("skills-empty")[0].children[0].textContent, /The library isn't in this skills fragment/);
+  // one that answers, but no catalog, is a failed read: Try again
+  const bad = page({ catalog: { skills: {} } });
+  bad.p.open();
+  await settle();
+  bad.answerReads();
+  await settle();
+  assert.equal(bad.find("skills-empty")[0].children[0].textContent, "Couldn't load your skills.");
 });
 
 test("asked twice while it has none, the shell makes one skills fragment, and names the one the computers pick", async () => {

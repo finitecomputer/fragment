@@ -445,9 +445,10 @@ export function createSkillsPage(page, h) {
       await Promise.allSettled([...writes]);
       // the catalog is the release's, beneath the fragment's files: one
       // that no longer follows the template has none, and keeps the On tab
-      const [listing, read] = await Promise.all([h.api("GET", `/api/f/${h.seg(name)}/files`), h.api("GET", `/api/f/${h.seg(name)}/file?path=${encodeURIComponent(CATALOG)}`).catch((e) => (e?.status === 404 ? null : Promise.reject(e)))]);
+      const [listing, read] = await Promise.all([h.api("GET", `/api/f/${h.seg(name)}/files`), h.api("GET", `/api/f/${h.seg(name)}/file?path=${encodeURIComponent(CATALOG)}`).catch((e) => (e?.status === 404 ? { skills: [] } : Promise.reject(e)))]);
       if (mine !== visit) return;
-      const catalog = Array.isArray(read?.skills) ? read : { skills: [] };
+      const catalog = read;
+      if (!Array.isArray(catalog?.skills)) throw new Error("no catalog");
       got = { name, catalog, ...readListing(listing.files) };
       render();
       // the managed skills' descriptions, a few at a time, drawn as they come
