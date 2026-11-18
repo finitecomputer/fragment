@@ -398,8 +398,11 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
             &[set_cookie(SESSION_COOKIE, &token, "/", crate::registry::SESSION_TTL_MS / 1000, secure(url)), spent],
         ),
         // WorkOS signed the browser in again as whoever it last was: that
-        // session ends there, and the next sign-in asks who is signing in
-        calls::Exchanged::Held { workos_sid } => redirect(&workos_logout(workos.api, &workos_sid, &cfg.platform()), &[spent]),
+        // session ends there, and the next sign-in asks who is signing in.
+        // The switch stays bound, unspent (`answered_from_held`): its page's
+        // Continue, pressed while this answer was under way, comes back with
+        // the same state.
+        calls::Exchanged::Held { workos_sid } => redirect(&workos_logout(workos.api, &workos_sid, &cfg.platform()), &[]),
     }
 }
 
