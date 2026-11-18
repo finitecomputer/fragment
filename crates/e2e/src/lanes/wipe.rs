@@ -234,6 +234,10 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
         // the repo a fragment made before 2026-10-07 kept: named as the
         // fragment's host was, without its owner
         let old = app_name.clone();
+        // the lever names the fragment's own old name alone: naming another
+        // fragment's repo, its end would delete that one
+        let other = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "repo", "repo": repos[0] })))?;
+        s.ok("the lever refuses another fragment's repo (400): it names only this fragment's own old name", other.status == 400, &other);
         s.fake.seed_repo(&old, &[("index.html", b"<p>the old app</p>\n")]);
         let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "repo", "repo": old })))?;
         s.ok("their app's repo is one named as before repos were their owner's (a lever)", r.status == 200 && r.body["repo"] == old.as_str(), &r);
