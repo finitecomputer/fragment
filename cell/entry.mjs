@@ -128,23 +128,8 @@ export class Files extends WorkerEntrypoint {
 // none of a thrown Error's own fields, so platform.mjs's `searchIndex`
 // throws it on the app's side, its fields whole.
 export class Search extends WorkerEntrypoint {
-  async #answer(op, body) {
-    const { fragment } = this.ctx.props;
-    const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `call/search/${op}`, JSON.stringify(body)));
-    const answer = await resp.json().catch(() => ({}));
-    if (resp.ok) return { answer };
-    return {
-      error: {
-        message: answer.message || `search.${op} answered ${resp.status}`,
-        code: answer.error ?? null,
-        status: resp.status,
-        // a write's: whether it emptied an index of another embeddings space
-        // first, the newer fence that refused it, and the wait a 429 asks for
-        cleared: answer.cleared === true,
-        fence: answer.fence ?? null,
-        retry_after_ms: answer.retry_after_ms ?? null,
-      },
-    };
+  #answer(op, body) {
+    return asked(this, `call/search/${op}`, body, `search.${op}`);
   }
 
   upsert(source) { return this.#answer("upsert", source); }
@@ -157,19 +142,35 @@ export class Search extends WorkerEntrypoint {
   status() { return this.#answer("status", {}); }
 }
 
+// A capability's call to its fragment's supervisor, answered `{answer}`,
+// or a refusal as a plain `{error}` (SEARCH's and FRAGMENTS').
+async function asked(cap, path, body, what) {
+  const { fragment } = cap.ctx.props;
+  const resp = await cap.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(cap.env, path, JSON.stringify(body)));
+  const answer = await resp.json().catch(() => ({}));
+  if (resp.ok) return { answer };
+  return {
+    error: {
+      message: answer.message || `${what} answered ${resp.status}`,
+      code: answer.error ?? null,
+      status: resp.status,
+      // a search write's: whether it emptied an index of another embeddings
+      // space first, the newer fence that refused it, and the wait a 429 asks for
+      cleared: answer.cleared === true,
+      fence: answer.fence ?? null,
+      retry_after_ms: answer.retry_after_ms ?? null,
+    },
+  };
+}
+
 // The app acting in another fragment (acting.rs), handed to its facet as
 // `env.FRAGMENTS` bound to one fragment by `props`, as SEARCH is: as that
 // fragment's own principal, its agent, whom the target checks as it would
 // the agent's own request. It answers as SEARCH does, `{answer}` or a
 // plain `{error}`, which platform.mjs's `otherFragments` throws.
 export class Fragments extends WorkerEntrypoint {
-  async #answer(act, name, channel, body) {
-    const { fragment } = this.ctx.props;
-    const path = `call/fragments/${act}/${encodeURIComponent(name)}/${encodeURIComponent(channel)}`;
-    const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, path, JSON.stringify(body ?? {})));
-    const answer = await resp.json().catch(() => ({}));
-    if (resp.ok) return { answer };
-    return { error: { message: answer.message || `fragments.${act} answered ${resp.status}`, code: answer.error ?? null, status: resp.status } };
+  #answer(act, name, channel, body) {
+    return asked(this, `call/fragments/${act}/${encodeURIComponent(name)}/${encodeURIComponent(channel)}`, body ?? {}, `fragments.${act}`);
   }
 
   post(name, channel, record) { return this.#answer("post", name, channel, record); }

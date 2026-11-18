@@ -185,6 +185,14 @@ class FileEffects {
   }
 }
 
+// A capability's answer (entry.mjs `asked`), or its refusal thrown here
+// with its fields whole.
+async function answered(pending) {
+  const { answer, error } = await pending;
+  if (error) throw Object.assign(new Error(error.message), error);
+  return answer;
+}
+
 function authorMethod(name) {
   return !name.startsWith("__") && !RESERVED_OP_NAMES.has(name) && typeof AuthorApp.prototype[name] === "function";
 }
@@ -488,11 +496,6 @@ export class App extends AuthorApp {
   // `{error}`: an Error crossing Workers RPC keeps no field of its own).
   get searchIndex() {
     const cap = this.env.SEARCH;
-    const answered = async (pending) => {
-      const { answer, error } = await pending;
-      if (error) throw Object.assign(new Error(error.message), error);
-      return answer;
-    };
     return {
       upsert: (source) => answered(cap.upsert(source)),
       delete: (source) => answered(cap.delete(source)),
@@ -505,11 +508,6 @@ export class App extends AuthorApp {
   // fragment's agent (acting.rs): a refusal throws as `searchIndex`'s does.
   get otherFragments() {
     const cap = this.env.FRAGMENTS;
-    const answered = async (pending) => {
-      const { answer, error } = await pending;
-      if (error) throw Object.assign(new Error(error.message), error);
-      return answer;
-    };
     return {
       post: (name, channel, record) => answered(cap.post(String(name), String(channel), record)),
       draft: (name, channel, draft) => answered(cap.draft(String(name), String(channel), draft)),
