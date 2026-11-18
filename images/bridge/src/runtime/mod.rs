@@ -348,22 +348,21 @@ pub struct TurnStart {
     /// (crate::note), by the driver, before the runtime hears of the turn;
     /// `None` when that turn ended any other way. Every runtime is handed
     /// it: Relay as the inbound's read-only `context`, the scripted agent
-    /// echoes it. It also says what the agent no longer remembers of this
-    /// chat (`forgotten`).
+    /// echoes it. It also tells the chat, when the runtime forgot it
+    /// (`forgotten`).
     pub note: Option<String>,
     /// How old its message is, in plain words, when it is handed long after
     /// it was said (crate::note, `age`): the driver puts it first in
     /// `note`, before a card's or a cut turn's. Its own field, as `note`
     /// set by the engine means a card's, in the cut note's place.
     pub age: Option<String>,
-    /// The agent's turns in this chat that another life ran since the
-    /// `/data` this life restored (their claims answered 409: a rollback
-    /// sent the cursor back), the newest at most `NOTE_FORGOTTEN_MAX`, and
-    /// how many more: in no memory of the runtime's, so the note says what
-    /// they were (crate::note, "forgotten"). Said once, at the agent's
-    /// first turn in the chat after them.
-    pub forgotten: Vec<String>,
-    pub forgotten_more: u32,
+    /// Another life ran a turn of the agent's in this chat after the
+    /// `/data` this life woke with was saved, or woke with none (its claim
+    /// and its lost end answered 409: a rollback or a loss sent the cursor
+    /// back): in no memory of the runtime's, so the note tells the chat
+    /// (crate::note, `recap`). Said once a life, at the agent's first turn
+    /// in the chat after it.
+    pub forgotten: bool,
     /// Its text is a command of the runtime's menu (`/<name> <args>`), said
     /// to it as it is; a message's never is.
     pub command: bool,
