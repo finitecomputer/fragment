@@ -818,7 +818,7 @@ mod tests {
         let hours = fragment_bridge::limits::LEFT_RUNNING_HOLD_MS / 3_600_000;
         assert_eq!(hours * 3_600_000, fragment_bridge::limits::LEFT_RUNNING_HOLD_MS, "a bound in whole hours");
         let held = format!("keeps your computer awake up to {hours} hours after your turn; an idle server does not");
-        for said in ["A sleep or a restart ends every process you started (a server, a background command, a loop, crontab, `hermes cron`), and nothing starts it again", "a schedule on yourself, kept through every restart and sleep", "What should run without you (frequent checks, or for others) is an app", &held] {
+        for said in ["A sleep or a restart ends every process you started (a server, a background command, a loop), and nothing starts it again: never rely on crontab or `hermes cron`", "a schedule on yourself, kept through every restart and sleep", "What should run without you (frequent checks, or for others) is an app", &held] {
             assert!(page.contains(said), "computer.md says {said}");
         }
         let guide = include_str!("../../../../cli/GUIDE.md").split_whitespace().collect::<Vec<_>>().join(" ");
