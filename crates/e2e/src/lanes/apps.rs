@@ -245,7 +245,7 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- a member's app, on two yeses: the fragment's owner invites it by
     // name, and its owner, a member there, accepts
     let (team, _) = made(s, &owner, "apps-team")?;
-    let bob_id = npub::encode(bob.pubkey_hex());
+    let bob_id = api.identity(&bob)?;
     let row_in = |target: &str, app: &str| -> Result<Option<Value>> { Ok(members(target)?.into_iter().find(|m| m["app"]["name"] == app)) };
     let invite_app = |app: &str| api.signed(&owner, "POST", &format!("/api/f/{team}/invites"), Some(&json!({ "app": app, "role": "viewer" })));
     let outside = invite_app(&bobs)?;
