@@ -134,7 +134,7 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- a growth asked before a restart: Erin, a member there, invited here
     let erin = api.person()?;
-    let erin_id = npub::encode(erin.pubkey_hex());
+    let erin_id = api.identity(&erin)?;
     let invite_erin = || api.signed(&owner, "POST", &format!("/api/f/{board}/invites"), Some(&json!({ "email": Api::email_of(&erin), "role": "viewer" })));
     let no = invite_erin()?;
     s.ok(
