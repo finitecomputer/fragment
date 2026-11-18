@@ -815,19 +815,15 @@ async fn team_of(api: &Api, agents: &[Agent], home: &Path) -> (Vec<Result<fragme
     (faces, team)
 }
 
-/// Each agent's profile written (`write_profile`), all at once: each is a
-/// directory of its own, and its reads are its own.
-async fn write_profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
-    futures_util::future::join_all(agents.iter().map(|a| write_profile(api, a, home, ids, route, credential_env, team))).await;
-}
-
-/// The profiles of agents that left this computer retired, at a boot:
-/// moved aside, never deleted. Only a boot retires one, before its
-/// gateway: no Hermes runs yet that could be winding down a turn in it.
-fn retire_profiles(agents: &[Agent], home: &Path, ids: Option<(u32, u32)>) {
+/// Each agent's profile at a boot, all at once (each is a directory of its
+/// own, and its reads are its own), and the profiles of agents that left
+/// this computer retired: moved aside, never deleted. Only a boot retires
+/// one: no Hermes runs yet that could be winding down a turn in it.
+async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
     let profiles_root = home.join("profiles");
     let _ = std::fs::create_dir_all(&profiles_root);
     chown(&profiles_root, ids);
+    futures_util::future::join_all(agents.iter().map(|a| write_profile(api, a, home, ids, route, credential_env, team))).await;
     if let Ok(entries) = std::fs::read_dir(&profiles_root) {
         for e in entries.filter_map(Result::ok) {
             let marker = std::fs::read_to_string(e.path().join(".fragment-agent")).unwrap_or_default();
@@ -1167,53 +1163,33 @@ fn start_gateway(home: &Path) -> Option<u32> {
 ///   alone, Hermes would pause the chat until its sender sent `/discard`,
 ///   or, before its admissions, join the next message to the cut request.
 ///
-/// Each database on disk: the home's, and each profile's, whichever agents
-/// the platform names now (a profile about to be retired is settled too,
-/// unharmed), so it starts first thing in a boot, before the agents are read.
-///
 /// As the `hermes` user, so the files keep their owner.
-fn end_previous_life(home: &Path) {
+fn end_previous_life(agents: &[Agent], home: &Path) {
     let receipt = home.join(".clean_shutdown");
     if let Err(e) = std::fs::write(&receipt, "") {
         ev!("boot.receipt_failed", { "error": e.to_string() });
     }
     chown(&receipt, hermes_ids());
     let mut dbs: Vec<PathBuf> = vec![home.join("state.db")];
-    if let Ok(profiles) = std::fs::read_dir(home.join("profiles")) {
-        dbs.extend(profiles.filter_map(Result::ok).map(|e| e.path().join("state.db")));
-    }
-    dbs.retain(|p| p.is_file());
-    dbs.sort();
+    dbs.extend(agents.iter().map(|a| hermes::profile_dir(home, &a.fragment).join("state.db")));
+    dbs.retain(|p| p.exists());
     if dbs.is_empty() {
         return;
     }
     let t = Instant::now();
-    // each database on its own: one that does not open costs only itself
     let script = r#"import sqlite3, sys
-failed = 0
 for p in sys.argv[1:]:
-    try:
-        c = sqlite3.connect(p, timeout=5)
-        try:
-            names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-            for t in ('session_turn_leases', 'compression_locks'):
-                if t in names:
-                    c.execute('DELETE FROM ' + t)
-            c.commit()
-        finally:
-            c.close()
-    except Exception as e:
-        failed += 1
-        print(p + ': ' + str(e), file=sys.stderr)
-print(failed)
+    c = sqlite3.connect(p, timeout=5)
+    names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    for t in ('session_turn_leases', 'compression_locks'):
+        if t in names:
+            c.execute('DELETE FROM ' + t)
+    c.commit()
+    c.close()
 "#;
     let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", script]).args(&dbs).output();
     match out {
-        Ok(o) if o.status.success() => {
-            let failed = String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok();
-            let error = String::from_utf8_lossy(&o.stderr).chars().take(300).collect::<String>();
-            ev!("boot.leases_cleared", { "dbs": dbs.len(), "failed": failed, "error": (!error.is_empty()).then_some(error), "ms": t.elapsed().as_millis() as u64 })
-        }
+        Ok(o) if o.status.success() => ev!("boot.leases_cleared", { "dbs": dbs.len(), "ms": t.elapsed().as_millis() as u64 }),
         Ok(o) => ev!("boot.leases_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).chars().take(300).collect::<String>() }),
         Err(e) => ev!("boot.leases_failed", { "error": e.to_string() }),
     }
@@ -1223,7 +1199,7 @@ print(failed)
     let ms = t.elapsed().as_millis() as u64;
     match out {
         Ok(o) if o.status.success() => match hermes::cut_turns_settled(&String::from_utf8_lossy(&o.stdout)) {
-            Ok(hermes::Settled { lost, dropped, closed, failed }) => ev!("boot.cut_turns_settled", { "dbs": dbs.len(), "lost": lost, "dropped": dropped, "closed": closed, "failed": failed, "error": (failed > 0).then(|| String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>()), "ms": ms }),
+            Ok((lost, dropped, closed)) => ev!("boot.cut_turns_settled", { "dbs": dbs.len(), "lost": lost, "dropped": dropped, "closed": closed, "ms": ms }),
             Err(why) => ev!("boot.cut_turns_failed", { "error": why, "ms": ms }),
         },
         // a chat would stay paused behind its cut turn: said loudly
@@ -1403,14 +1379,6 @@ async fn boot_main() {
     let ids = hermes_ids();
     // the agents' Python environment, made or mended beside the start
     tokio::task::spawn_blocking(move || python_env(ids));
-    // The previous start's leftovers, ended off the boot's path (its Hermes
-    // Python takes about half a second) from the boot's first moment, beside
-    // the platform's reads and the profiles' writes, which touch no
-    // database; waited for before the gateway starts.
-    let ending = {
-        let home = home.clone();
-        tokio::task::spawn_blocking(move || end_previous_life(&home))
-    };
     let api = Api::new(&env("FRAGMENT_API").unwrap_or_else(|| "http://api.fragment.internal".into())).unwrap_or_else(|e| fail(&e));
     let model = env("FRAGMENT_MODEL").unwrap_or_else(|| "http://model.fragment.internal".into());
 
@@ -1454,6 +1422,14 @@ async fn boot_main() {
     let mut credential_env = computer.credential_env.clone();
     let mut route = hermes::Route::new(&model, computer.models.as_ref());
     ev!("boot.model_ids", { "given": computer.models.is_some(), "ids": route.ids });
+    // The previous start's leftovers, ended off the boot's path (its Hermes
+    // Python takes about half a second), beside the profiles' writes, which
+    // touch no database; waited for before the gateway starts.
+    let ending = {
+        let (agents, home) = (hermes_agents.clone(), home.clone());
+        tokio::task::spawn_blocking(move || end_previous_life(&agents, &home))
+    };
+
     let lean: Vec<String> = std::fs::read_to_string(format!("{OPT}/lean-plugins.txt")).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
     let _ = std::fs::create_dir_all("/etc/hermes");
     // HERMES_BOOT_CARD_TIMEOUT_S: a test's shorter card (and Hermes' wait on it)
@@ -1479,27 +1455,15 @@ async fn boot_main() {
     // Hermes skips an external dir it does not find, until the profile's
     // config changes. What it holds is installed off the boot's path.
     managed_dir();
-    write_profiles(&api, &hermes_agents, &home, ids, &route, &credential_env, &team).await;
+    profiles(&api, &hermes_agents, &home, ids, &route, &credential_env, &team).await;
     ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
-    let ended = match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), ending).await {
-        Ok(Ok(())) => true,
-        Ok(Err(e)) => {
-            ev!("boot.end_previous_life_failed", { "error": e.to_string() });
-            true
-        }
+    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), ending).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => ev!("boot.end_previous_life_failed", { "error": e.to_string() }),
         // SQLite's own waits make this a wedged database: the gateway starts
         // anyway, as it would find it
-        Err(_) => {
-            ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX });
-            false
-        }
-    };
-    // Only once the last life ended, whose sweep names every profile's
-    // database on disk: one moved aside under it would cut it short. A sweep
-    // still running leaves them to the next start.
-    if ended {
-        retire_profiles(&hermes_agents, &home, ids);
+        Err(_) => ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
     }
     // the skills settled (`managed_dir`, above) and the cut turns too: a
     // chat's stored prompt rebuilt from today's inputs at its next turn

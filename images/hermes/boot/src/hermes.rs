@@ -1218,10 +1218,8 @@ pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
 /// with no admission naming it, as a release before admissions (v0.21)
 /// left a cut turn, is closed with the same boundary, so the first boot of
 /// an upgrade closes what the last of the old image cut. Idempotent: a
-/// settled turn and a closed tail are passed over. Each database on its own:
-/// one that does not open or settle is said on stderr and counted, and the
-/// rest are settled all the same. Prints `{"lost": n, "dropped": n,
-/// "closed": n, "failed": n}`.
+/// settled turn and a closed tail are passed over. Prints `{"lost": n,
+/// "dropped": n, "closed": n}`.
 pub const SETTLE_CUT_TURNS: &str = r#"import json, sys
 from pathlib import Path
 from hermes_state import SessionDB
@@ -1229,14 +1227,9 @@ from hermes_state_runtime import begin_runtime_epoch, cancel_session_input, list
 from gateway.session_ingress_media import release_admission_media
 from gateway.session_results import close_discarded_turn
 from gateway.session_unattended_unknown import is_unattended
-lost = dropped = closed = failed = 0
+lost = dropped = closed = 0
 for p in sys.argv[1:]:
-    try:
-        db = SessionDB(Path(p))
-    except Exception as e:
-        failed += 1
-        print(p + ": " + repr(e), file=sys.stderr)
-        continue
+    db = SessionDB(Path(p))
     try:
         epoch = begin_runtime_epoch(db, instance_id="fragment-boot")
         recover_session_inputs(db, epoch=epoch)
@@ -1261,35 +1254,21 @@ for p in sys.argv[1:]:
                 release_admission_media(db, row["admission_id"])
             if db._execute_write(lambda conn: close_discarded_turn(db, conn, {"target_session_id": root})):
                 closed += 1
-    except Exception as e:
-        failed += 1
-        print(p + ": " + repr(e), file=sys.stderr)
     finally:
         db.close()
-print(json.dumps({"lost": lost, "dropped": dropped, "closed": closed, "failed": failed}))
+print(json.dumps({"lost": lost, "dropped": dropped, "closed": closed}))
 "#;
 
 /// What `SETTLE_CUT_TURNS` printed: the lost turns it settled, the
 /// messages it dropped unrun, and the tails it closed with no admission
 /// (its last line), or why that is not its answer.
-pub fn cut_turns_settled(out: &str) -> Result<Settled, String> {
+pub fn cut_turns_settled(out: &str) -> Result<(u64, u64, u64), String> {
     let line = out.lines().rev().find(|l| !l.trim().is_empty()).ok_or("it printed nothing")?;
     let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("{line:?}: {e}"))?;
-    match (v["lost"].as_u64(), v["dropped"].as_u64(), v["closed"].as_u64(), v["failed"].as_u64()) {
-        (Some(lost), Some(dropped), Some(closed), Some(failed)) => Ok(Settled { lost, dropped, closed, failed }),
+    match (v["lost"].as_u64(), v["dropped"].as_u64(), v["closed"].as_u64()) {
+        (Some(lost), Some(dropped), Some(closed)) => Ok((lost, dropped, closed)),
         _ => Err(format!("not its answer: {line}")),
     }
-}
-
-/// What `SETTLE_CUT_TURNS` did: the lost turns it settled, the messages it
-/// dropped unrun, the tails it closed, and the databases it could not
-/// settle (each said on its stderr; the rest are settled all the same).
-#[derive(Debug, PartialEq, Eq)]
-pub struct Settled {
-    pub lost: u64,
-    pub dropped: u64,
-    pub closed: u64,
-    pub failed: u64,
 }
 
 /// Where the boot keeps the digest of what the sessions' stored system
@@ -1450,9 +1429,8 @@ mod tests {
     /// (Run against the real Hermes in the bridge's tests/docker.rs.)
     #[test]
     fn the_settlers_answer() {
-        assert_eq!(cut_turns_settled("{\"lost\": 1, \"dropped\": 0, \"closed\": 2, \"failed\": 1}\n"), Ok(Settled { lost: 1, dropped: 0, closed: 2, failed: 1 }));
-        assert_eq!(cut_turns_settled("a warning Hermes logged\n{\"lost\": 0, \"dropped\": 0, \"closed\": 0, \"failed\": 0}\n\n"), Ok(Settled { lost: 0, dropped: 0, closed: 0, failed: 0 }));
-        assert!(cut_turns_settled("{\"lost\": 0, \"dropped\": 0, \"closed\": 0}\n").is_err(), "an answer without its failures is not its answer");
+        assert_eq!(cut_turns_settled("{\"lost\": 1, \"dropped\": 0, \"closed\": 2}\n"), Ok((1, 0, 2)));
+        assert_eq!(cut_turns_settled("a warning Hermes logged\n{\"lost\": 0, \"dropped\": 0, \"closed\": 0}\n\n"), Ok((0, 0, 0)));
         for bad in ["", "\n", "Traceback (most recent call last):", "{\"lost\": 1}", "{\"lost\": -1, \"dropped\": 0, \"closed\": 0}"] {
             assert!(cut_turns_settled(bad).is_err(), "{bad:?}");
         }

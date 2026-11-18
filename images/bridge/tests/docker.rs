@@ -770,7 +770,7 @@ const HOP_MS: u64 = 50;
 /// message waiting as it starts, as a wake's is. Each wake answers; each
 /// prints its steps since its start. Each wake ends the last life and
 /// writes each profile before its gateway starts; one whose agent left
-/// while it slept is retired only after the last life's sweep.
+/// while it slept is retired, never swept.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_cold_wake_by_its_steps() {
@@ -804,9 +804,9 @@ async fn a_cold_wake_by_its_steps() {
         let before = |name: &str, agent: Option<&str>| at_event(&events, name, agent).is_some_and(|at| Some(at) < gateway);
         assert!(before("boot.cut_turns_settled", None) && before("profile.written", Some("juniper--k3x9")) && before("profile.written", Some("rowan--k3x9")), "wake {wake}: the last life ended, each profile written, then the gateway");
     }
-    // Unassigned while asleep: the wake's sweep of the last life takes rowan's
-    // database too (it starts before the agents are read), and only then is
-    // its profile retired, before the gateway; juniper answers.
+    // Unassigned while asleep: its profile is retired before the gateway and
+    // its database is not the last life's sweep's (the agents' only), so
+    // nothing of it can hold up juniper's; juniper answers.
     c.sigterm();
     fake.remove_agent("rowan");
     let message = fake.say(&chat, &person("paul"), json!({ "text": "rowan left" }));
@@ -817,8 +817,8 @@ async fn a_cold_wake_by_its_steps() {
     let swept = at_event(&events, "boot.cut_turns_settled", None);
     let retired = at_event(&events, "boot.profile_retired", Some("rowan--k3x9"));
     let gateway = at_event(&events, "boot.ready", None);
-    assert!(swept.is_some() && swept < retired && retired < gateway, "swept, then rowan's profile retired, then the gateway: {swept:?} {retired:?} {gateway:?}");
-    assert_eq!(events[swept.unwrap()]["dbs"], 3, "the home's database, juniper's and rowan's: {}", events[swept.unwrap()]);
+    assert!(swept.is_some_and(|s| Some(s) < gateway) && retired.is_some_and(|r| Some(r) < gateway), "rowan's profile retired and the last life swept, then the gateway: {swept:?} {retired:?} {gateway:?}");
+    assert_eq!(events[swept.unwrap()]["dbs"], 2, "the home's database and juniper's: {}", events[swept.unwrap()]);
     assert_eq!(events[retired.unwrap()]["ok"], true);
 }
 
@@ -3747,7 +3747,7 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
 /// with no pause notice, the cut turn ends lost once, its command never
 /// runs again and the model never calls it again. A departed agent's
 /// profile whose database no longer opens (sorted before the agent's own)
-/// costs only itself: every other database is still settled.
+/// holds up nothing: the sweep is the agents' own databases.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_turn_cut_by_a_crash_or_a_deploy_never_wedges_its_chat() {
