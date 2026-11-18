@@ -193,13 +193,14 @@ impl FragmentCell {
             self.exec("UPDATE ended SET search = 1 WHERE incarnation = ?", vec![SqlStorageValue::Integer(incarnation)])?;
         }
         // every member's list, and any a change still waits for (a member
-        // removed whose list was not told yet); an app member, and each
-        // fragment this one is an app in, by its name (app_members.rs), where
+        // removed whose list was not told yet); an app member or one asked
+        // in, and each fragment this one is an app in, by its name, each
+        // way its own (app_members.rs `TO_APP`, `FROM_APP`), where
         // step 10 made their tables (an object that refuses its schema still
         // ends, its tables as they are)
         let apps = match self.rows("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'member_of'", vec![])?.is_empty() {
             true => "",
-            false => "UNION SELECT name FROM member_apps UNION SELECT name FROM member_of WHERE role IS NOT NULL",
+            false => "UNION SELECT 'app:' || name FROM member_apps UNION SELECT 'app:' || name FROM app_asks UNION SELECT 'in:' || name FROM member_of WHERE role IS NOT NULL",
         };
         self.exec(
             &format!(

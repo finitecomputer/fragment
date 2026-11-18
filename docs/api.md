@@ -670,7 +670,10 @@ an app they own to a fragment they own, `PUT members/{the app's name}`.
   it is joining: it must be its owner's, `members` visibility, with no one
   else in it and no invite waiting, and an agent fragment never joins.
   Each refusal is 403 with one line naming the fix, such as "Board is
-  shared by link. Make it members only first."; owning one, 400.
+  shared by link. Make it members only first."; owning one, 400. The
+  fragment takes the answer only while its ask is the newest (no later
+  ask, removal or end of the app since); an answer it does not take
+  (that, a refusal, no room) leaves the app told what it holds there now.
 - Its row in `GET members` leaves out `kind` and names `app: {name}` and
   its `owner`, who reads nothing through it. It is no guest in its owner's
   row's `sharing`, and has no list of its own.

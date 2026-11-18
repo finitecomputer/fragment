@@ -261,11 +261,12 @@ impl FragmentCell {
     /// it was not taken (`fragment_core::ended::list_told`): the list's
     /// refusal, or a failure a later try may pass.
     pub(crate) async fn tell_index(&self, principal: &str, change: &IndexChange) -> Result<(), Failure> {
-        // an app, or a fragment an app is in, takes it by its name
-        // (app_members.rs): one with no life has nothing to take
-        if fragment_proto::valid_fragment_name(principal) {
-            let told = AppTold(IndexChange { role: change.role, ..IndexChange::gone(change.fragment.clone(), change.incarnation, change.version) });
-            return match crate::fragment::call(&self.env, principal, &told).await {
+        // an app, or a fragment an app is in, takes it by its name, each way
+        // its own (app_members.rs): one with no life has nothing to take
+        let to = |key: &str| principal.strip_prefix(key).filter(|name| fragment_proto::valid_fragment_name(name));
+        if let Some((name, from_app)) = to(crate::app_members::TO_APP).map(|n| (n, false)).or_else(|| to(crate::app_members::FROM_APP).map(|n| (n, true))) {
+            let told = AppTold { from_app, change: IndexChange { role: change.role, ..IndexChange::gone(change.fragment.clone(), change.incarnation, change.version) } };
+            return match crate::fragment::call(&self.env, name, &told).await {
                 Ok(()) => Ok(()),
                 Err(e) if e.code == ErrorCode::NotFound => Ok(()),
                 Err(e) if e.release_refused.is_some() => fragment_core::ended::list_told(None, &e.message),
@@ -331,8 +332,8 @@ impl FragmentCell {
                 }
             };
             let mut change = IndexChange { role, ..IndexChange::gone(name.clone(), incarnation, version) };
-            // an app's: its role alone (app_members.rs)
-            if fragment_proto::valid_fragment_name(&principal) {
+            // an app's, or to a fragment an app is in: its role alone (app_members.rs)
+            if principal.starts_with(crate::app_members::TO_APP) || principal.starts_with(crate::app_members::FROM_APP) {
                 batch.push((principal, version, attempts, Some(change)));
                 continue;
             }
@@ -910,7 +911,7 @@ impl FragmentCell {
             Err(e) => {
                 // what this call wrote, unless a yes met it meanwhile
                 self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
-                if let Some(was) = before.first() {
+                if let (Some(was), None) = (before.first(), self.member_of_any()?) {
                     let field = |k: &str| was[k].as_str().unwrap_or_default().to_string();
                     let int = |k: &str| was[k].as_i64().unwrap_or_default();
                     write(&field("role"), int("expires_at"), &field("created_by"), int("created_at"))?;

@@ -54,6 +54,18 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     );
     api.signed(&owner, "DELETE", &format!("/api/f/{board}/invites/apps-carol@e2e.test"), None)?;
 
+    // ---- a fragment with no room: refused, and the app is let go at once
+    let (full, _) = made(s, &owner, "apps-full")?;
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": full, "op": "members", "fill": fragment_proto::limits::MEMBERS_MAX })))?;
+    let no_room = put(&owner, &full, &board, "viewer")?;
+    let open = visibility(&owner, &board, "link")?;
+    s.ok(
+        "a fragment at its member cap refuses the app (400), and the app, told at once, is not held to it: its link opens",
+        no_room.status == 400 && no_room.message().contains("at most") && open.status == 200,
+        format!("{no_room} {open}"),
+    );
+    visibility(&owner, &board, "members")?;
+
     // ---- in, as a viewer: its row names the app and its owner, no kind
     let joined = put(&owner, &tracker, &board, "viewer")?;
     let again = put(&owner, &tracker, &board, "viewer")?;

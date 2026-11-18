@@ -157,11 +157,14 @@ impl Call for AppAsked {
 
 /// A change between an app and a target, as a list takes one
 /// (`IndexChange`, by the fragment that sends it): the target's word on the
-/// app's role there (none: it is out), or the app's, at its life's end,
-/// that it is gone. 404 from a fragment with no life: nothing to take.
+/// app's role there (none: it is out); or, `from_app`, the app's, at its
+/// life's end, that it is gone. 404 from a fragment with no life: nothing
+/// to take.
 #[derive(Serialize, Deserialize)]
-#[serde(transparent)]
-pub(crate) struct AppTold(pub crate::principal::calls::IndexChange);
+pub(crate) struct AppTold {
+    pub from_app: bool,
+    pub change: crate::principal::calls::IndexChange,
+}
 
 impl Call for AppTold {
     const PATH: &'static str = "/call/app/told";
