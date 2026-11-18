@@ -19,8 +19,9 @@
 // / query / status` write and ask the fragment's own search index
 // (docs/api.md, "A fragment's search") as the fragment itself, its owner
 // paying; camel case, so no operation (`a-z`, `0-9`, `_`) can shadow it.
-// `this.otherFragments.post / draft / records / follow` act in another
-// fragment as this one's agent (docs/api.md, "Acting in another fragment").
+// `this.otherFragments.draft / records` act in another fragment as this
+// one's agent (docs/api.md, "Acting in another fragment"), and a job's
+// `job.otherFragments.post / records / follow` as steps.
 //
 // A job's method gets (input, job) and runs as a Workflow: each `await
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
@@ -337,6 +338,19 @@ class Job {
     return this.#step("publish", { channel, kind, body: JSON.parse(text) });
   }
 
+  // Another fragment, acted in as this fragment's agent (acting.rs), as
+  // steps: a post carries the run's hop depth and is made once; a read is
+  // recorded. A refusal there throws a StepError whose message begins with
+  // its status.
+  get otherFragments() {
+    const act = (act, name, channel, body) => this.#step("fragments", { act, name: String(name), channel: String(channel), body: JSON.parse(JSON.stringify(body ?? {})) });
+    return {
+      post: (name, channel, record) => act("post", name, channel, record),
+      records: (name, channel, page = {}) => act("records", name, channel, page),
+      follow: (name, channel) => act("follow", name, channel, {}),
+    };
+  }
+
   // Files at `main`, as steps: reads are recorded, writes are one commit
   // each; `{ expect }` names the blob sha the file must have (`stat`'s
   // `sha`), or null for "must not exist", and a mismatch fails the step.
@@ -506,13 +520,12 @@ export class App extends AuthorApp {
 
   // Another fragment, acted in through the FRAGMENTS capability as this
   // fragment's agent (acting.rs): a refusal throws as `searchIndex`'s does.
+  // A post is a job's step (`job.otherFragments`).
   get otherFragments() {
     const cap = this.env.FRAGMENTS;
     return {
-      post: (name, channel, record) => answered(cap.post(String(name), String(channel), record)),
       draft: (name, channel, draft) => answered(cap.draft(String(name), String(channel), draft)),
       records: (name, channel, page = {}) => answered(cap.records(String(name), String(channel), page)),
-      follow: (name, channel) => answered(cap.follow(String(name), String(channel))),
     };
   }
 

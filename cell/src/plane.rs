@@ -690,6 +690,12 @@ impl FragmentCell {
                 serde_json::to_string(&modules).expect("modules serialize").into(),
             ],
         )?;
+        // code acts elsewhere as its agent only if it went live while its
+        // owner and its agent alone could edit it (acting.rs)
+        match self.others_edit()? {
+            false => self.set_meta(MetaKey::ActsAs, &loader_id)?,
+            true => self.del_meta(MetaKey::ActsAs)?,
+        }
         let installed = Installed { operations: &manifest.operations, channels: &manifest.channels, triggers: &manifest.triggers };
         store_installed(&self.sql(), &installed)?;
         self.sync_schedules(&manifest.triggers)?;

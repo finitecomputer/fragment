@@ -1132,26 +1132,37 @@ at its pin; writes land on `main` as commits the cell makes.
 
 ### Acting in another fragment
 
-An agent's fragment acts in other fragments as its agent, from anything
-async, through its `FRAGMENTS` capability (`this.otherFragments`):
+An agent's fragment acts in other fragments as its agent. From anything
+async, through its `FRAGMENTS` capability (`this.otherFragments`, each one
+of the app's capability calls; a refusal throws with its `code` and
+`status`):
 
-- `post(name, channel, {id, body})` → `{record, replayed}`, as `POST
-  /api/f/{name}/channels/{channel}` (`PostRecord`);
-- `draft(name, channel, {turn, text})` → `{ok}`, as `PUT …/draft`;
+- `draft(name, channel, {turn, text})` → `{ok}`, as `PUT
+  /api/f/{name}/channels/{channel}/draft`;
 - `records(name, channel, {after?, before?, limit?})` → a `ChannelPage`,
   as `GET …/channels/{channel}`;
 - `follow(name, channel)` → `{id, channel, follow}`, as `POST
   …/subscriptions` `{channel, follow: true}`: its `followed` triggers hear
   the channel's records.
 
+In a job, as steps (`job.otherFragments`; a refusal is a `StepError`
+whose message begins with its status):
+
+- `post(name, channel, {id, body})` → `{record, replayed}`, as `POST
+  …/channels/{channel}` (`PostRecord`): its record's runs there are a hop
+  deeper than the job's, as a job's publish's are, so fragments triggering
+  one another stop at `HOP_DEPTH_MAX`;
+- `records(…)`, as above, its answer kept;
+- `follow(name, channel)` → `{id, channel, follow}`, as `POST
+  …/subscriptions` `{channel, follow: true}`: its `followed` triggers hear
+  the channel's records.
+
 Each is checked there exactly as the agent's own signed request (its
 membership and role, its owner's hold, a `relayed` record's door), so it
-opens nothing the agent could not do. A fragment that is no agent's is
-refused (403); a refusal throws with its `code` and `status`. Each is one
-of the app's capability calls. A post's record triggers its runs a hop
-deeper than the app's call that made it (a job's run or a query: the
-deepest under way), as a job's publish does, so fragments triggering one
-another stop at `HOP_DEPTH_MAX`.
+opens nothing the agent could not do. A fragment that is no agent's acts
+nowhere (403), nor does one anyone but its owner and its agent may edit,
+nor code put live while someone else could (403: its owner or its agent
+deploys again).
 
 ### Blobs
 
@@ -1677,6 +1688,9 @@ steps:
   <fragment>-<life>-r<run>-s<step>` (the same on every try) unless the job
   set one.
 - `job.publish(channel, body, kind)`: a record.
+- `job.otherFragments.post(name, channel, {id, body})`, `records` and
+  `follow`: an agent's fragment's acts in another fragment (Acting in
+  another fragment).
 - `job.sleep(ms | "N seconds|minutes|hours|days")`, up to 30 days.
 - `job.members()`, `job.people(ids)` (at most 64), `job.presence()`: as the
   page reads `__members`, `__people` and its presence.

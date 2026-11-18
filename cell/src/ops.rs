@@ -311,7 +311,6 @@ impl FragmentCell {
             OpKind::Query => {
                 // a query publishes nothing, so it is told no channels
                 let meta = json!({ "principal": npub::display(inv.asker.unwrap_or(inv.principal)), "agent": agent, "role": inv.role });
-                let _at = self.at_depth(inv.depth);
                 match facet.query(inv.op, &input_text, &meta).await? {
                     Answer::Ran(q) => bounded(Answered { result: q.result, replayed: false }),
                     Answer::Refused(why) => Err(refused(why, inv.op)),

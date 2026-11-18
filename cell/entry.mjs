@@ -166,17 +166,17 @@ async function asked(path, body, what) {
 // The app acting in another fragment (acting.rs), handed to its facet as
 // `env.FRAGMENTS` bound to one fragment by `props`, as SEARCH is: as that
 // fragment's own principal, its agent, whom the target checks as it would
-// the agent's own request. It answers as SEARCH does, `{answer}` or a
-// plain `{error}`, which platform.mjs's `otherFragments` throws.
+// the agent's own request. A draft and a read: a post is a job's step
+// (`job.otherFragments`), which carries its run's hop depth. It answers as
+// SEARCH does, `{answer}` or a plain `{error}`, which platform.mjs's
+// `otherFragments` throws.
 export class Fragments extends WorkerEntrypoint {
   #answer(act, name, channel, body) {
     return asked.call(this, `call/fragments/${act}/${encodeURIComponent(name)}/${encodeURIComponent(channel)}`, body ?? {}, `fragments.${act}`);
   }
 
-  post(name, channel, record) { return this.#answer("post", name, channel, record); }
   draft(name, channel, draft) { return this.#answer("draft", name, channel, draft); }
   records(name, channel, page) { return this.#answer("records", name, channel, page); }
-  follow(name, channel) { return this.#answer("follow", name, channel, {}); }
 }
 
 // One run of an operation (docs/api.md, Jobs and triggers). Each round asks

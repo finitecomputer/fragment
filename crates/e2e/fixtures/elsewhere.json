@@ -1,7 +1,9 @@
 {
   "operations": {
     "act": { "kind": "query", "role": "editor" },
+    "send": { "kind": "job" },
     "relay": { "kind": "job" },
+    "follow": { "kind": "job" },
     "seen": { "kind": "mutation" },
     "seen_log": { "kind": "query" }
   },
