@@ -39,6 +39,18 @@ pub fn vacuum(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A consistent copy of `src` at `dst` by SQLite's online backup (its
+/// pages copied in one step, a read transaction: the core's writer is not
+/// paused in WAL mode). About 4x cheaper than `VACUUM INTO` at a lite
+/// container's CPU (measured locally at 1/16 CPU: 40 ms against 150-200 ms
+/// for both databases), which rebuilds every b-tree.
+pub fn backup(src: &Path, dst: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_file(dst);
+    let c = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(|e| format!("{}: {e}", src.display()))?;
+    c.busy_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
+    c.backup(rusqlite::MAIN_DB, dst, None).map_err(|e| format!("the backup of {}: {e}", src.display()))
+}
+
 /// The save: `state` first (so its cursor is never ahead of the databases
 /// copied after it), then each database copied into `work` and packed.
 pub fn make(dir: &Path, work: &Path, state: &[u8]) -> Result<(Vec<u8>, Timing), String> {
@@ -51,7 +63,7 @@ pub fn make(dir: &Path, work: &Path, state: &[u8]) -> Result<(Vec<u8>, Timing), 
             continue;
         }
         let dst = work.join(db);
-        vacuum(&src, &dst)?;
+        backup(&src, &dst)?;
         files.push((db.to_string(), std::fs::read(&dst).map_err(|e| e.to_string())?));
         let _ = std::fs::remove_file(&dst);
     }
@@ -71,7 +83,7 @@ pub fn pack(files: &[(String, Vec<u8>)]) -> Result<(Vec<u8>, u64), String> {
         raw.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
         raw.extend_from_slice(bytes);
     }
-    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(1));
     gz.write_all(&raw).map_err(|e| e.to_string())?;
     Ok((gz.finish().map_err(|e| e.to_string())?, raw.len() as u64))
 }

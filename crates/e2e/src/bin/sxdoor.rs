@@ -289,7 +289,35 @@ fn setup() -> Result<()> {
     Ok(())
 }
 
+fn connect() -> Result<()> {
+    let a = hosted()?;
+    let st = state();
+    let keys = owner(&st)?;
+    let conn = s(&st, "connector")?;
+    let t0 = Instant::now();
+    let run = op(&a, &keys, &conn, "connect", json!({ "platform": a.base, "name": "Juniper" }))?;
+    println!("connect: {} in {:.1?}: {}", run["status"], t0.elapsed(), run["output"]);
+    Ok(())
+}
+
+/// A staged link (a door save: door.json and the two databases, packed)
+/// adopted by the connector's door: its next start runs on it.
+fn adopt(file: &str) -> Result<()> {
+    let a = hosted()?;
+    let st = state();
+    let conn = s(&st, "connector")?;
+    let bytes = std::fs::read(file)?;
+    let t0 = Instant::now();
+    let r = admin(&a, &conn, "adopt", "POST", Some(bytes))?;
+    println!("adopt: {} in {:.1?}: {}", r.status, t0.elapsed(), r.body);
+    Ok(())
+}
+
 fn connector(name_label: &str) -> Result<()> {
+    connector_made(name_label, true)
+}
+
+fn connector_made(name_label: &str, connecting: bool) -> Result<()> {
     let a = hosted()?;
     let mut st = state();
     let keys = owner(&st)?;
@@ -302,6 +330,10 @@ fn connector(name_label: &str) -> Result<()> {
     save_state(&st)?;
     let r = a.signed(&keys, "PUT", &format!("/api/f/{conn}/secrets/SIMPLEX_DOOR_SECRET"), Some(&json!({ "value": secret, "hosts": ["door.fragment.internal"] })))?;
     anyhow::ensure!(r.status == 200, "its secret: {r}");
+    println!("connector {conn}");
+    if !connecting {
+        return Ok(());
+    }
     let t0 = Instant::now();
     let run = op(&a, &keys, &conn, "connect", json!({ "platform": a.base, "name": "Juniper" }))?;
     println!("connect: {} in {:.1?}: {}", run["status"], t0.elapsed(), run["output"]);
@@ -556,7 +588,7 @@ fn copy() -> Result<()> {
     let t0 = Instant::now();
     let (mut copied, mut skipped) = (0, 0);
     for (i, batch) in messages.chunks(40).enumerate() {
-        let r = a.op(&keys, &conn, "copy", &format!("copy-{old}-{i}"), json!({ "from": old, "records": batch }))?;
+        let r = a.op(&keys, &conn, "copy", &format!("copy-{old}-{i}{}", std::env::var("SXDOOR_COPY_RUN").unwrap_or_default()), json!({ "from": old, "records": batch }))?;
         anyhow::ensure!(r.status == 200, "copy batch {i}: {r}");
         copied += r.body["result"]["copied"].as_i64().unwrap_or(0);
         skipped += r.body["result"]["skipped"].as_i64().unwrap_or(0);
@@ -631,13 +663,28 @@ fn ping(port: u16, key: &str) -> Result<()> {
     Ok(())
 }
 
+fn computer_call(method: &str, what: &str) -> Result<()> {
+    let a = hosted()?.patient(Duration::from_secs(900));
+    let st = state();
+    let keys = owner(&st)?;
+    let computer = s(&st, "computer")?;
+    let t0 = Instant::now();
+    let body = if what == "image-stub" { Some(json!({ "image": "stub" })) } else { Some(json!({})) };
+    let path = match what { "image-stub" => format!("/api/computers/{computer}/image"), w => format!("/api/computers/{computer}/{w}") };
+    let r = a.signed(&keys, method, &path, body.as_ref())?;
+    println!("{what}: {} in {:.1?}: phase {} image {} {}", r.status, t0.elapsed(), r.body["phase"], r.body["image"], r.body["why"]);
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(step) = args.first() else { bail!("a step: person-up, person-connect, person-send, person-items, person-cmd") };
     match step.as_str() {
         "person-up" => person_up(args.get(1).context("a name")?, args.get(2).context("a port")?.parse()?),
         "setup" => setup(),
-        "connector" => connector(args.get(1).map(String::as_str).unwrap_or("e2e-sxd-simplex")),
+        "connector" => connector_made(args.get(1).map(String::as_str).unwrap_or("e2e-sxd-simplex"), !args.get(2).is_some_and(|a| a == "noconnect")),
+        "connect" => connect(),
+        "adopt" => adopt(args.get(1).context("a staged save")?),
         "link" => link(args.get(1).context("the person's port")?.parse()?, args.get(2).map(String::as_str).unwrap_or("connector")),
         "bind" => bind(),
         "burst" => burst(args.get(1).context("a port")?.parse()?, args.get(2).context("n")?.parse()?, args.get(3).context("a prefix")?, args.get(4).is_some_and(|e| e == "echo"), args.get(5).map(|g| g.parse()).transpose()?.unwrap_or(0)),
@@ -645,6 +692,15 @@ fn main() -> Result<()> {
         "computer-link" => computer_link(args.get(1).context("the person's port")?.parse()?),
         "computer-page" => computer_page(args.get(1).context("a path")?),
         "copy" => copy(),
+        "records" => {
+            let a = hosted()?;
+            let st = state();
+            let keys = owner(&st)?;
+            let name = match args.get(2) { Some(n) => n.clone(), None => s(&st, "connector")? };
+            println!("{}", serde_json::to_string(&records(&a, &keys, &name, args.get(1).map(String::as_str).unwrap_or("chat"))?)?);
+            Ok(())
+        }
+        "computer" => computer_call(if args.get(1).is_some_and(|a| a == "image-stub") { "PUT" } else { "POST" }, args.get(1).context("sleep, wake, restart or image-stub")?),
         "ping" => ping(args.get(1).context("a port")?.parse()?, args.get(2).map(String::as_str).unwrap_or("connector0")),
         "connector0" => {
             // the hold's own connector, never bound: its door alone

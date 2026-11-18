@@ -52,6 +52,8 @@ const DEBOUNCE_MS: u64 = 1000;
 const WATCH_MS: u64 = 250;
 /// A change of the core's server statistics alone is saved this late.
 const SLOW_SAVE_MS: u64 = 10 * 60_000;
+/// Saves are at least this far apart.
+const MIN_GAP_MS: u64 = 3000;
 /// A forced sync's answer is waited for this long before the door sends.
 const FORCED_SYNC_WAIT: Duration = Duration::from_secs(60);
 
@@ -172,7 +174,7 @@ impl Door {
             return Err(format!("the save {seq} was refused: {} {}", r.status, String::from_utf8_lossy(&r.body)));
         }
         let n = self.saves.fetch_add(1, Ordering::SeqCst) + 1;
-        let v = json!({ "seq": seq, "why": why, "vacuumMs": timing.vacuum_ms, "packMs": timing.pack_ms, "putMs": put_ms, "totalMs": t0.elapsed().as_millis() as u64, "rawBytes": timing.raw_bytes, "packedBytes": timing.packed_bytes, "saves": n, "sha": sha });
+        let v = json!({ "seq": seq, "why": why, "copy": "backup", "vacuumMs": timing.vacuum_ms, "packMs": timing.pack_ms, "putMs": put_ms, "totalMs": t0.elapsed().as_millis() as u64, "rawBytes": timing.raw_bytes, "packedBytes": timing.packed_bytes, "saves": n, "sha": sha });
         *self.last_save.lock().expect("last") = v.clone();
         Ok(v)
     }
@@ -585,7 +587,10 @@ async fn saves(door: Arc<Door>) {
                 slow_due.get_or_insert_with(|| last_save + Duration::from_millis(SLOW_SAVE_MS));
             }
         }
-        let fast = due.is_some_and(|d| Instant::now() >= d);
+        // while busy, at most one save each `MIN_GAP_MS`: each costs the
+        // core CPU it needs for the messages themselves (measured on lite:
+        // 53 saves of 3.4 s each during a burst of 100 each way)
+        let fast = due.is_some_and(|d| Instant::now() >= d) && last_save.elapsed() >= Duration::from_millis(MIN_GAP_MS);
         let slow = slow_due.is_some_and(|d| Instant::now() >= d);
         if fast || slow {
             due = None;
