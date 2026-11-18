@@ -1031,6 +1031,7 @@ impl FragmentCell {
             FaceOf::PATH => reply::<FaceOf>(self.face_of()),
             ReachOf::PATH => reply::<ReachOf>(self.reach_of()),
             AgentMade::PATH => reply::<AgentMade>(self.agent_with_person(decode(body)?).await),
+            calls::AgentJoined::PATH => reply::<calls::AgentJoined>(self.agent_joined(decode(body)?).await),
             InviteAnswer::PATH => {
                 let answer: InviteAnswer = decode(body)?;
                 reply::<InviteAnswer>(match answer.yes {

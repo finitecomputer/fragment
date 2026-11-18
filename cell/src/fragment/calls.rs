@@ -132,6 +132,30 @@ impl Call for AgentMade {
     type Answer = ();
 }
 
+/// Agent `identity`, this agent fragment's, was added to `fragment`, its
+/// membership made at `at` (runs_on.rs `flush_joined`): when it runs on a
+/// computer, its `tasks` say so (once by the membership: a retry posts
+/// nothing twice). Answers the computer it runs on, for its caller to wake;
+/// none for an agent that runs on none, or is not this fragment's.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AgentJoined {
+    pub identity: String,
+    pub fragment: String,
+    pub at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct JoinedAnswer {
+    pub computer: Option<String>,
+    /// Whether its `tasks` say so: false where it declares none to post to.
+    pub posted: bool,
+}
+
+impl Call for AgentJoined {
+    const PATH: &'static str = "/call/agent-joined";
+    type Answer = JoinedAnswer;
+}
+
 /// The invite waiting on `email` here, answered by the person `identity`,
 /// who signs in as it, verified (registry/invites.rs): `yes`, they accept
 /// it (or, for an invite from before invites waited for a yes, signed in
