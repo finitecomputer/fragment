@@ -36,12 +36,16 @@ What every brain answers:
   fragment call <brain> search --input '{"q": "tariff", "wiki": "garden", "limit": 20}'
   ```
 
-  answers ranked sections, best first: `{"results": [{rank, path, wiki,
-  title, heading, ancestry, snippet}], "pending"}`. `q` is plain words (1
-  to 256 characters, at most 16 words), each a prefix match and all of them
-  required; search syntax means nothing. `limit` is 1 to 50 (10 unless
-  you ask); `wiki` narrows it to one wiki. `pending` above 0 means the
-  index is still taking in a sync: ask again in a moment.
+  answers ranked sections, best first, found by their words and by their
+  meaning: `{"results": [{rank, path, wiki, title, heading, ancestry,
+  snippet, signals}], "semantic", "indexing", "waiting_ms", "hint"?}`.
+  `q` is plain words or a question, 1 to 256 characters; search syntax
+  means nothing. `limit` is 1 to 50 (10 unless you ask); `wiki` narrows
+  it to one wiki. A hit's `signals` say what found it (its words, its
+  meaning, or both); `semantic` `off` means words alone answered: ask with
+  the words a page would use. `indexing: true` means results may be
+  incomplete, and `hint` says what finishes it. Ask again in a moment, or
+  after `waiting_ms` when it is above 0.
 - **`guide`**: the brain's own AGENTS.md, how to ingest into it and keep
   it. Read it before you write:
 
