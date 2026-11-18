@@ -23,8 +23,6 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 
-/// Set by the `Files` and `Search` capabilities (entry.mjs); the router never sets or passes it.
-pub const CAP_HEADER: &str = "x-fragment-cap";
 /// Commits tried against a `main` that keeps moving.
 const WRITE_ATTEMPTS: usize = 5;
 /// Write keys (a commit or a push happens once per key) and own commits
@@ -244,18 +242,12 @@ impl FragmentCell {
         Ok(head.map(|h| json!({ "path": path, "size": h.size, "sha": h.blob_sha, "commit": h.last_commit_sha })))
     }
 
-    /// `POST /cap/files/<op>`: the app facet's `Files` capability.
-    pub(crate) async fn cap_files(&self, op: &str, body: &Value) -> CellResult<Response> {
-        self.name()?;
-        let path = body["path"].as_str().unwrap_or("");
-        match op {
-            "read" => match self.read_main(path).await? {
-                Some(bytes) => Ok(Response::from_bytes(bytes)?),
-                None => Err(CellError::new(ErrorCode::NotFound, format!("no file {path}"))),
-            },
-            "list" => Ok(Response::from_json(&self.list_main(body["prefix"].as_str().unwrap_or(""))?)?),
-            "stat" => Ok(Response::from_json(&self.stat_main(path).await?)?),
-            _ => Err(CellError::new(ErrorCode::NotFound, format!("no capability files.{op}"))),
+    /// The app facet's `Files` capability's read (calls.rs `FilesRead`):
+    /// a file's bytes at `main`, 404 when there is none.
+    pub(crate) async fn files_read(&self, path: &str) -> CellResult<Response> {
+        match self.read_main(path).await? {
+            Some(bytes) => Ok(Response::from_bytes(bytes)?),
+            None => Err(CellError::new(ErrorCode::NotFound, format!("no file {path}"))),
         }
     }
 }

@@ -376,8 +376,15 @@ pub const DISCOVER_EVERY_MS: u64 = 5 * 60 * 1000;
 /// this, under the platform's 5 s.
 pub const SHUTDOWN_MS_MAX: u64 = 3_000;
 
-/// The state file is at most this many bytes (cursors and open turns only).
+/// The state file is at most this many bytes (cursors and open turns only),
+/// and so is its log (store.rs).
 pub const STATE_FILE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// The state's log may hold at least this many bytes before the state is
+/// written whole again, or the snapshot's size if more (store.rs, `room`):
+/// thousands of steps of a few hundred bytes each, between compactions of
+/// a state of a few KiB.
+pub const STATE_LOG_FLOOR_BYTES: usize = 1024 * 1024;
 
 /// The engine's inbox holds at most this many inputs; a follower waits for
 /// room (back pressure, never a drop).
@@ -394,6 +401,7 @@ const _: () = assert!(RECONNECT_MS_MIN < RECONNECT_MS_MAX);
 const _: () = assert!(PROMPT_TTL_MS_MIN <= PROMPT_TTL_MS_DEFAULT && PROMPT_TTL_MS_DEFAULT <= PROMPT_TTL_MS_MAX);
 const _: () = assert!(SHUTDOWN_MS_MAX < 5_000, "the platform kills the guest 5 s after SIGTERM");
 const _: () = assert!(QUEUED_PER_CHAT_MAX < TURNS_OPEN_MAX);
+const _: () = assert!(STATE_LOG_FLOOR_BYTES < STATE_FILE_MAX_BYTES, "a small state's log has room before its bound");
 const _: () = assert!(LIVE_PING_MS > HTTP_TIMEOUT_MS);
 const _: () = assert!(CARD_READ_MS_MAX > HTTP_TIMEOUT_MS, "one hung call fits a card's read");
 const _: () = assert!(2 * KEEPALIVE_PING_MS < 60_000, "a cut keepalive is opened again well within the platform's idle hold (20 minutes)");

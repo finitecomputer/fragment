@@ -63,6 +63,48 @@ const DEPTH_MAX: usize = 8;
 /// about this.
 pub const ABSENT_EVERY_MS: u64 = 60_000;
 
+/// The skill files Hermes indexes into a system prompt under `dirs` (the
+/// SKILL.md and DESCRIPTION.md files, links followed, as its skills-index
+/// snapshot watches them; it passes over some folders this walks, such as
+/// a skill's `scripts/`, which only asks a refresh it did not need), each
+/// its path and bytes, for `hermes::prompt_inputs`; and whether a bound cut
+/// it short. Each dir gives at most `FILES_MAX` files (an install's own
+/// bound, so the managed set is watched whole beside the platform's), each
+/// of at most `FILE_MAX_BYTES` (a larger one counts as its size alone),
+/// `DEPTH_MAX` deep. A directory that cannot be read counts as empty.
+pub fn indexed(dirs: &[&Path]) -> (Vec<(String, Vec<u8>)>, bool) {
+    let mut out = Vec::new();
+    let mut cut = false;
+    for root in dirs {
+        let mut found = 0;
+        let mut pending: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+        'walk: while let Some((dir, depth)) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let mut entries: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            entries.sort();
+            for path in entries {
+                let Ok(meta) = std::fs::metadata(&path) else { continue };
+                if meta.is_dir() {
+                    if depth < DEPTH_MAX {
+                        pending.push((path, depth + 1));
+                    } else {
+                        cut = true;
+                    }
+                } else if path.file_name().is_some_and(|n| n == "SKILL.md" || n == "DESCRIPTION.md") {
+                    if found >= FILES_MAX {
+                        cut = true;
+                        break 'walk;
+                    }
+                    found += 1;
+                    let bytes = if meta.len() <= FILE_MAX_BYTES as u64 { std::fs::read(&path).unwrap_or_default() } else { meta.len().to_string().into_bytes() };
+                    out.push((path.display().to_string(), bytes));
+                }
+            }
+        }
+    }
+    (out, cut)
+}
+
 /// Where the platform skill is: in the image, read-only to the agents.
 pub const PLATFORM_DIR: &str = "/opt/fragment/skills";
 /// Hermes' skills, moved out of its sync source at the image's build.
@@ -474,6 +516,45 @@ pub fn managed_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (the prompt refresh's inputs, hermes::prompt_inputs): what the
+    /// skills index is built from is read, and nothing else: each SKILL.md
+    /// and DESCRIPTION.md (in any order: the digest sorts), a larger one than an install takes
+    /// by its size alone, each dir's own budget, a cut said, and a dir that
+    /// is not there counting as empty.
+    #[test]
+    fn the_files_a_skills_index_is_built_from() {
+        let root = std::env::temp_dir().join(format!("hermes-boot-indexed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (managed, view) = (root.join("managed"), root.join("view"));
+        let put = |path: &Path, bytes: &[u8]| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        };
+        put(&managed.join("notes/garden-log/SKILL.md"), b"name: garden-log");
+        put(&managed.join("notes/DESCRIPTION.md"), b"notes");
+        put(&managed.join("notes/garden-log/scripts/log.py"), b"print(1)");
+        put(&managed.join("notes/garden-log/README.md"), b"not indexed");
+        put(&managed.join("big/SKILL.md"), &vec![b'x'; FILE_MAX_BYTES + 1]);
+        put(&view.join("fragment/SKILL.md"), b"name: fragment");
+        let (found, cut) = indexed(&[&managed, &view, &root.join("gone")]);
+        let mut paths: Vec<String> = found.iter().map(|(p, _)| p.strip_prefix(&root.display().to_string()).unwrap_or(p).to_string()).collect();
+        paths.sort();
+        let bytes_of = |end: &str| found.iter().find(|(p, _)| p.ends_with(end)).map(|(_, b)| b.clone()).unwrap_or_default();
+        assert_eq!(paths, ["/managed/big/SKILL.md", "/managed/notes/DESCRIPTION.md", "/managed/notes/garden-log/SKILL.md", "/view/fragment/SKILL.md"], "{paths:?}");
+        assert_eq!(bytes_of("/big/SKILL.md"), (FILE_MAX_BYTES + 1).to_string().into_bytes(), "a file past an install's bound counts as its size");
+        assert_eq!(bytes_of("/garden-log/SKILL.md"), b"name: garden-log");
+        assert!(!cut, "nothing cut");
+        // each dir its own budget: a full managed set leaves the view watched
+        for i in 0..FILES_MAX {
+            put(&managed.join(format!("many/s{i:04}/SKILL.md")), b"name: s");
+        }
+        let (found, cut) = indexed(&[&managed, &view]);
+        assert!(cut, "the managed set past its budget is cut, and said");
+        assert_eq!(found.iter().filter(|(p, _)| p.starts_with(&managed.display().to_string())).count(), FILES_MAX);
+        assert!(found.iter().any(|(p, _)| p.ends_with("/view/fragment/SKILL.md")), "the view keeps its own budget");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn frag(name: &str, kind: &str, owned: bool) -> FragmentEntry {
         FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }

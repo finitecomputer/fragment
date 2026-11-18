@@ -22,7 +22,8 @@
 //! carries, never embedded again, so its asker pays once.
 //!
 //! The fragment's own app writes and asks its index through its `Search`
-//! capability (`cap_search`; entry.mjs, platform.mjs's `this.search`), as
+//! capability (`app_upsert`, `app_query`; fragment/calls.rs, entry.mjs,
+//! platform.mjs's `this.searchIndex`), as
 //! the fragment itself: no role, and its owner pays for its questions too.
 //!
 //! A source named by one of the fragment's paths is forgotten when a move
@@ -331,7 +332,7 @@ impl FragmentCell {
         self.search_remove(d).await
     }
 
-    async fn search_remove(&self, d: wire::Delete) -> CellResult<Response> {
+    pub(crate) async fn search_remove(&self, d: wire::Delete) -> CellResult<Response> {
         if d.source.is_empty() || d.source.len() > wire::SOURCE_MAX_BYTES {
             return Err(CellError::invalid(format!("source is 1 to {} bytes", wire::SOURCE_MAX_BYTES)));
         }
@@ -385,7 +386,7 @@ impl FragmentCell {
         self.search_state().await
     }
 
-    async fn search_state(&self) -> CellResult<Response> {
+    pub(crate) async fn search_state(&self) -> CellResult<Response> {
         let semantic = if self.search_space().is_some() { "on" } else { "off" };
         let mut status: serde_json::Value = if self.search_indexed()? {
             let mut s: serde_json::Value = self.search_index(&self.search_scope()?, "status", &json!({})).await?;
@@ -502,21 +503,18 @@ impl FragmentCell {
         }
     }
 
-    /// `POST /cap/search/<op>`: the app facet's `Search` capability. The
-    /// app is the fragment itself, so its own index is its to write and
+    /// A write through the app facet's `Search` capability (calls.rs).
+    /// The app is the fragment itself, so its own index is its to write and
     /// ask, with no role checked, and everything it embeds is paid by the
-    /// fragment's owner (its code cannot vouch for whoever called it).
-    pub(crate) async fn cap_search(&self, op: &str, body: &[u8]) -> CellResult<Response> {
-        fn read<T: DeserializeOwned>(op: &str, body: &[u8]) -> CellResult<T> {
-            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("search.{op}: {e}")))
-        }
-        match op {
-            "upsert" => self.search_write(By::App, read(op, body)?).await,
-            "delete" => self.search_remove(read(op, body)?).await,
-            "query" => self.search_found(By::App, false, read(op, body)?, Question::Embed).await,
-            "status" => self.search_state().await,
-            _ => Err(CellError::new(ErrorCode::NotFound, format!("no capability search.{op}"))),
-        }
+    /// fragment's owner (its code cannot vouch for whoever called it); its
+    /// delete and status are the API's own (`search_remove`, `search_state`).
+    pub(crate) async fn app_upsert(&self, up: wire::Upsert) -> CellResult<Response> {
+        self.search_write(By::App, up).await
+    }
+
+    /// A question through the app facet's `Search` capability (calls.rs).
+    pub(crate) async fn app_query(&self, q: wire::Query) -> CellResult<Response> {
+        self.search_found(By::App, false, q, Question::Embed).await
     }
 
     /// The sources a move of main deleted (`removed`): forgotten by the
