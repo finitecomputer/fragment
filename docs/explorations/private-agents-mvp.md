@@ -3,7 +3,9 @@
 Proposal, 2026-11-09, updated 2026-11-13 with what the proof of concept
 built and found. It follows the research note "Rented Enclaves Can Make
 Fragment Credibly Private" and its review. Nothing here is decided until
-Paul says so; the decisions it needs are listed near the end.
+Paul says so; the decisions it needs are listed near the end. A choice
+marked **Interim (Austin, date)** is a working choice, made so the work
+can go on. It holds until Paul reviews it and may be revisited.
 
 What each run measured and showed is in
 [`private-pod-findings.md`](private-pod-findings.md). Which clouds rent
@@ -127,6 +129,38 @@ The ways forward are a question for Paul (decision 2):
 3. the original route: the cell on workerd through `wrangler dev`, with
    master's Docker computers.
 
+**Interim decision (Austin, 2026-11-18; open to Paul's review):** a fourth
+way, a narrowed form of the first. Computers run in gVisor (`runsc`, its
+`systrap` platform, which needs no KVM) inside the pod's VM, on celld's
+Docker engine. This holds until Paul decides otherwise or a test below
+fails. It was chosen after a five-model design review:
+
+- **Why a sandbox, not plain Docker:** the agent is root in its computer
+  (docs/computers.md, "Root in our Hermes image"). Inside the VM, the
+  encryption does nothing against it; only the kernel boundary keeps it
+  from the disk key, OpenBao and the platform. gVisor gives the agent a
+  user-space kernel of its own instead of the VM's whole syscall surface.
+- **Why celld's Docker engine:** it already runs containers under
+  `CELLD_CONTAINER_RUNTIME=runsc`, fences them on the host side of its
+  bridges from the node, the metadata address and private ranges, and
+  enforces `enableInternet: false` on Linux (futurepaul/celld `selfhost`,
+  `crates/celld/container_docker.rs`). Only `set_intercepts` and
+  `snapshot` reject.
+- **What it needs:** egress intercepts (`set_intercepts`). sandcastle's
+  Docker double has a relay for these over a unix socket, which can be
+  reused with the container's network off. Snapshots stay off
+  (`FRAGMENT_COMPUTER_SNAPSHOTS=off`): a snapshot is only a cache of a
+  save (docs/computers.md, "Saves and what a wake restores").
+- **What it costs:** a weaker wall than krun's VM per computer. A gVisor
+  escape reaches the same VM as the keys. That residual goes on the
+  owner's trust page.
+- **What would change it:** gVisor failing Hermes or Chromium in a TDX
+  guest, or Paul requiring a hardware wall. The stronger route is a second
+  confidential VM that runs only computers, whose quote the pod checks
+  before it sends a computer anything.
+- **Still open:** whether a pod's computers have internet (below,
+  decision 2).
+
 ### Keys: the owner holds the only one
 
 There is no key service in the MVP.
@@ -205,6 +239,34 @@ slots come from its models file (self-host's seam 3).
   Private deployment, which includes our own limiter.
 - Voice notes, decisions, speech and embeddings either run on a private
   slot or answer "not available in a private pod".
+
+**Interim decision (Austin, 2026-11-18; open to Paul's review):** build
+the sidecar from Tinfoil's own verifier (`tinfoil-rs`'s `tinfoil-verifier`
+and `EnclaveHttpClient`, or `tinfoil-proxy` as the reference), not one of
+our own. It verifies the Finite Private enclave, pins TLS to the attested
+key, and only then forwards. Like the owner's CLI checking the pod before
+it sends the disk key, the sidecar checks the model before it sends a
+prompt. Its binary and its pin policy live in the measured root, so the
+pod's own quote covers them. This holds until Paul decides otherwise.
+What the review found it needs:
+
+- **Wiring:** the unchanged cell cannot call loopback. A slot's
+  `base_url` is `https` on a dotted host with no port, or loopback `http`
+  only under `FRAGMENT_EGRESS_LOCAL=allow`, which also lets jobs fetch
+  loopback and private addresses (`crates/core/src/catalog.rs`
+  `row_url`; `cell/src/config.rs`). And celld under public-only egress
+  never opens loopback. The fix is the celld change the identity door
+  already waits on: one named local service a Worker `fetch` may reach
+  (docs/self-host.md, seam 4's "Egress").
+- **The key:** the deployment's limiter admits a Finite Private key and
+  reports each call's key, model and token counts to finite.computer, not
+  its text. One revocable key per pod; the trust page says what Finite
+  sees.
+- **The other slots:** voice, decisions and image steps already fail
+  closed on celld, and embeddings refuse while the tiers are private.
+  They stay off for the MVP.
+- **Still open:** which Finite Private releases a pod accepts (below,
+  decision 8).
 
 ### Network
 
@@ -416,6 +478,11 @@ older snapshot; nothing detects the rollback. It cannot read it.
    virtualization. Which way forward: celld's Docker engine gaining
    egress intercepts and snapshots, a Docker engine allowed for this
    case, or the `wrangler dev` route of decision 1's alternative?
+   *Interim (Austin, 2026-11-18):* gVisor on celld's Docker engine, with
+   intercepts added and snapshots off ("Computers are the open problem").
+   Still open: do a pod's computers have internet? The brief for this
+   plan says the agent's web traffic leaves the pod; self-host's e2e runs
+   them with none.
 3. **A decision entry** allowing Google Cloud as an outside service for
    confidential compute, which Cloudflare cannot do (decision 1).
 4. **Owner unlock after every restart** as the MVP's cost.
@@ -423,6 +490,16 @@ older snapshot; nothing detects the rollback. It cannot read it.
    are public. Is the repo, or at least the image's inputs, public?
 6. **Spend.** One TDX VM for M1 to M5 and a Finite Private key.
 7. **The first owner** and the region.
+8. **Which model releases a pod accepts.** *Interim (Austin, 2026-11-18):*
+   the sidecar is Tinfoil's verifier ("Models"). Still open: Finite
+   Private published five measured releases from 11-08 to 11-18, and each
+   changes the measurement. Pinning one release in the image keeps the
+   claim but stops a pod's models at each release until its owner unlocks
+   a new image. Following every signed release keeps it working but lets a
+   new release read prompts before the owner approves, against "No new
+   release can touch your data until your own CLI unlocks it". A list of
+   releases the owner sends sits between the two, and needs the attested
+   settings channel M2 lacks. Also: whose key and bill.
 
 ## Not yet verified
 
