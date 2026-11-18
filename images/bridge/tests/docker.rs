@@ -306,6 +306,7 @@ async fn the_hermes_image() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(fake.with(|w| w.calls.is_empty()), "the gate holds: {:?}", fake.with(|w| w.calls.clone()));
     let gate = Instant::now();
+    let marker_at = fragment_bridge::log::now_ms();
     assert!(c.exec(&["touch", "/run/computer/restored"]));
     fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     eprintln!("hermes: marker to the bridge following: {} ms ({} ms since docker run)", gate.elapsed().as_millis(), t.elapsed().as_millis());
@@ -323,6 +324,7 @@ async fn the_hermes_image() {
         panic!("no reply; the fake holds\n{records}\nthe container said:\n{}", logs.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
     }
     eprintln!("hermes: first message to reply: {} ms ({} ms since the marker)", asked.elapsed().as_millis(), gate.elapsed().as_millis());
+    eprintln!("hermes: cold steps since the marker: {}", cold_steps(&c.logs(), marker_at, &fake, &chat, &first, &model));
     fake.until(30_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t1)).await;
     // No supervised service of upstream's starts over (its `profile-gateways`,
     // left in, restarted every second: images/hermes/Dockerfile): every slot
@@ -717,6 +719,98 @@ fn restore_and_check(tag: &str, save: &std::path::Path) -> (i32, String, Vec<ser
     let report = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/fragment/bin/hermes-boot", "sqlite-report", "/data"]);
     let files = report.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     (code, said, files)
+}
+
+/// A cold start's steps to its first reply, each in ms since `from` (ms
+/// since the epoch): the image's own events since then, by their `at`; the
+/// message; the model's first call after it; the reply. A step not found
+/// is `-`.
+fn cold_steps(logs: &str, from: u64, fake: &Fake, chat: &str, message: &serde_json::Value, model: &Model) -> String {
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", chat, "chat", message["seq"].as_u64().unwrap());
+    let events = events_since(logs, from);
+    let first = |name: &str, of_turn: bool| events.iter().find(|e| e["event"] == name && (!of_turn || e["turn"] == turn)).and_then(|e| e["at"].as_u64());
+    let said = message["at"].as_u64();
+    let reply = fake.with(|w| w.records(chat, "chat").iter().find(|r| r["body"]["turn"] == turn && r["body"].get("kind").is_none()).and_then(|r| r["at"].as_u64()));
+    let asked = said.and_then(|m| model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/chat/completions") && c.at >= m).map(|c| c.at).min());
+    let steps = [
+        ("message", said),
+        ("boot", first("boot.main", false)),
+        ("configured", first("boot.configured", false)),
+        ("last life ended", first("boot.cut_turns_settled", false)),
+        ("gateway told", first("boot.ready", false)),
+        ("profiles rewritten", first("boot.profiles_rewritten", false)),
+        ("bridge following", first("follow.live", false)),
+        ("turn claimed", first("turn.claiming", true)),
+        ("gateway up", first("relay.connected", false)),
+        ("turn handed", first("relay.inbound", true)),
+        ("model asked", asked),
+        ("first reply", reply),
+    ];
+    steps.iter().map(|(name, at)| format!("{name} {}", at.map_or("-".into(), |at| (at as i64 - from as i64).to_string()))).collect::<Vec<_>>().join(", ")
+}
+
+/// The image's events logged since `from` (ms since the epoch), in order.
+fn events_since(logs: &str, from: u64) -> Vec<serde_json::Value> {
+    logs.lines().filter_map(|l| serde_json::from_str(l.trim()).ok()).filter(|e: &serde_json::Value| e["at"].as_u64().is_some_and(|at| at >= from)).collect()
+}
+
+/// Where in `events` each agent's profile was written, and where the
+/// gateway was told to start: (the profiles' positions, the gateway's).
+fn profiles_and_gateway(events: &[serde_json::Value], agents: &[&str]) -> (Vec<Option<usize>>, Option<usize>) {
+    let written = agents.iter().map(|a| events.iter().position(|e| e["event"] == "profile.written" && e["agent"] == *a)).collect();
+    (written, events.iter().position(|e| e["event"] == "boot.ready"))
+}
+
+/// Each call's hop to the platform in `a_cold_wake_by_its_steps`: a guess
+/// (the hop from a container to the cell is not measured), so the boot's
+/// calls in a row cost what calls over a network do.
+const HOP_MS: u64 = 50;
+
+/// Goal (a wake's own seconds): a cold Hermes' first reply, timed step by
+/// step: a first start (no profile on disk yet), then snapshot wakes, each
+/// a SIGTERM and a start with the disk as the last life left it and no
+/// restore pending (a container snapshot keeps files, not processes), its
+/// message waiting as it starts, as a wake's is. Each wake answers; each
+/// prints its steps since its start. A first start writes each profile
+/// before its gateway starts; a snapshot's wake starts its gateway on the
+/// profiles the last life left and writes each again after.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_cold_wake_by_its_steps() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    // two agents, as many people have: the boot's work is per agent
+    let fake = Fake::start("0.0.0.0:0", &["juniper", "rowan"]).await;
+    fake.with(|w| w.hop_ms = HOP_MS);
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let answered = |message: &serde_json::Value| {
+        let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", message["seq"].as_u64().unwrap());
+        let chat = chat.clone();
+        move |w: &support::fake::World| w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == turn)
+    };
+    let first = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
+    let from = fragment_bridge::log::now_ms();
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    fake.until(180_000, "the first start's reply", answered(&first)).await;
+    eprintln!("hermes: a first start, its steps since docker run: {}", cold_steps(&c.logs(), from, &fake, &chat, &first, &model));
+    let agents = ["juniper--k3x9", "rowan--k3x9"];
+    // no profile on disk yet: each is written before the gateway starts
+    let (written, gateway) = profiles_and_gateway(&events_since(&c.logs(), from), &agents);
+    assert!(gateway.is_some() && written.iter().all(|w| w.is_some() && *w < gateway), "a first start writes each profile, then starts the gateway: {written:?} {gateway:?}");
+    for wake in 1..=5 {
+        let (_, code) = c.sigterm();
+        assert_eq!(code, 0, "a clean stop before wake {wake}");
+        let message = fake.say(&chat, &person("paul"), json!({ "text": format!("wake {wake}") }));
+        let from = fragment_bridge::log::now_ms();
+        c.start();
+        fake.until(180_000, "a snapshot wake's reply", answered(&message)).await;
+        eprintln!("hermes: snapshot wake {wake}, its steps since its start: {}", cold_steps(&c.logs(), from, &fake, &chat, &message, &model));
+        // the last life's profiles: the gateway starts on them, each written again after
+        let events = events_since(&c.logs(), from);
+        let (written, gateway) = profiles_and_gateway(&events, &agents);
+        assert!(gateway.is_some() && written.iter().all(|w| w.is_some() && *w > gateway), "a snapshot's wake starts the gateway, then writes each profile again: {written:?} {gateway:?}");
+        assert!(events.iter().any(|e| e["event"] == "boot.profiles_rewritten" && e["agents"] == 2), "both owed");
+    }
 }
 
 /// The Hermes image, running against the fake API and the scripted model,

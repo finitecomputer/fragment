@@ -680,7 +680,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     chown(&dir, ids);
     work_dirs(&dir, a, ids);
     // Which agent this profile is: what retiring it later reads.
-    let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
+    let _ = std::fs::write(dir.join(hermes::PROFILE_MARKER), &a.fragment);
     let face = read_face(api, a).await;
     let main = write_config(api, a, &dir, ids, route, credential_env, high_on, &face, team).await;
     // who the agent is and its credentials, for Hermes and its terminal (the
@@ -784,10 +784,7 @@ fn write_identity(a: &Agent, dir: &Path, ids: Option<(u32, u32)>, face: &Result<
 /// `HERMES_BOOT_MODEL_MS`, so a rename, a new role or a new job reaches its
 /// teammates' next turns.
 async fn team_of(api: &Api, agents: &[Agent], home: &Path) -> (Vec<Result<fragment_bridge::api::Face, ()>>, Vec<hermes::Teammate>) {
-    let mut faces = Vec::with_capacity(agents.len());
-    for a in agents {
-        faces.push(read_face(api, a).await);
-    }
+    let faces = futures_util::future::join_all(agents.iter().map(|a| read_face(api, a))).await;
     let team = agents
         .iter()
         .zip(&faces)
@@ -801,19 +798,22 @@ async fn team_of(api: &Api, agents: &[Agent], home: &Path) -> (Vec<Result<fragme
     (faces, team)
 }
 
-/// Each agent's profile at a boot, and the profiles of agents that left
-/// this computer retired: moved aside, never deleted. Only a boot retires
-/// one: no Hermes runs yet that could be winding down a turn in it.
-async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
+/// Each agent's profile written (`write_profile`), all at once: each is a
+/// directory of its own, and its reads are its own.
+async fn write_profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
+    futures_util::future::join_all(agents.iter().map(|a| write_profile(api, a, home, ids, route, credential_env, team))).await;
+}
+
+/// The profiles of agents that left this computer retired, at a boot:
+/// moved aside, never deleted. Only a boot retires one, before its
+/// gateway: no Hermes runs yet that could be winding down a turn in it.
+fn retire_profiles(agents: &[Agent], home: &Path, ids: Option<(u32, u32)>) {
     let profiles_root = home.join("profiles");
     let _ = std::fs::create_dir_all(&profiles_root);
     chown(&profiles_root, ids);
-    for a in agents {
-        write_profile(api, a, home, ids, route, credential_env, team).await;
-    }
     if let Ok(entries) = std::fs::read_dir(&profiles_root) {
         for e in entries.filter_map(Result::ok) {
-            let marker = std::fs::read_to_string(e.path().join(".fragment-agent")).unwrap_or_default();
+            let marker = std::fs::read_to_string(e.path().join(hermes::PROFILE_MARKER)).unwrap_or_default();
             if !marker.is_empty() && !agents.iter().any(|a| a.fragment == marker) {
                 let to = PathBuf::from("/data/hermes-retired").join(format!("{}-{}", e.file_name().to_string_lossy(), fragment_bridge::log::now_ms()));
                 let _ = std::fs::create_dir_all("/data/hermes-retired");
@@ -882,11 +882,13 @@ fn write_ready(agents: &[Agent], home: &Path) {
 
 /// The chat each agent's route names (bots.rs, `profile_routes`): a chat
 /// it is in (`route_chat`, from its own list, as the bridge lists what it
-/// follows). Bounded: one list an agent, at most `AGENTS_MAX` of them.
+/// follows). Bounded: one list an agent, at most `AGENTS_MAX` of them,
+/// asked all at once.
 async fn route_chats(api: &Api, agents: &[Agent]) -> BTreeMap<String, String> {
+    let lists = futures_util::future::join_all(agents.iter().map(|a| api.fragments(&a.fragment))).await;
     let mut routed = BTreeMap::new();
-    for a in agents {
-        match api.fragments(&a.fragment).await {
+    for (a, list) in agents.iter().zip(lists) {
+        match list {
             Ok(list) => {
                 if let Some(chat) = bots::route_chat(&a.fragment, &list) {
                     routed.insert(a.fragment.clone(), chat);
@@ -1126,16 +1128,23 @@ fn start_gateway(home: &Path) -> Option<u32> {
 ///   alone, Hermes would pause the chat until its sender sent `/discard`,
 ///   or, before its admissions, join the next message to the cut request.
 ///
+/// Each database on disk: the home's, and each profile's, whichever agents
+/// the platform names now (a profile about to be retired is settled too,
+/// unharmed), so it starts first thing in a boot, before the agents are read.
+///
 /// As the `hermes` user, so the files keep their owner.
-fn end_previous_life(agents: &[Agent], home: &Path) {
+fn end_previous_life(home: &Path) {
     let receipt = home.join(".clean_shutdown");
     if let Err(e) = std::fs::write(&receipt, "") {
         ev!("boot.receipt_failed", { "error": e.to_string() });
     }
     chown(&receipt, hermes_ids());
     let mut dbs: Vec<PathBuf> = vec![home.join("state.db")];
-    dbs.extend(agents.iter().map(|a| hermes::profile_dir(home, &a.fragment).join("state.db")));
-    dbs.retain(|p| p.exists());
+    if let Ok(profiles) = std::fs::read_dir(home.join("profiles")) {
+        dbs.extend(profiles.filter_map(Result::ok).map(|e| e.path().join("state.db")));
+    }
+    dbs.retain(|p| p.is_file());
+    dbs.sort();
     if dbs.is_empty() {
         return;
     }
@@ -1258,6 +1267,14 @@ async fn boot_main() {
     let ids = hermes_ids();
     // the agents' Python environment, made or mended beside the start
     tokio::task::spawn_blocking(move || python_env(ids));
+    // The previous start's leftovers, ended off the boot's path (its Hermes
+    // Python takes about half a second) from the boot's first moment, beside
+    // the platform's reads and the profiles' writes, which touch no
+    // database; waited for before the gateway starts.
+    let ending = {
+        let home = home.clone();
+        tokio::task::spawn_blocking(move || end_previous_life(&home))
+    };
     let api = Api::new(&env("FRAGMENT_API").unwrap_or_else(|| "http://api.fragment.internal".into())).unwrap_or_else(|e| fail(&e));
     let model = env("FRAGMENT_MODEL").unwrap_or_else(|| "http://model.fragment.internal".into());
 
@@ -1298,17 +1315,19 @@ async fn boot_main() {
         tokio::time::sleep(Duration::from_millis(backoff.next_ms())).await;
     };
     let hermes_agents = agents::hermes(&agents);
+    // A snapshot's wake (no restore pending) finds each profile as its last
+    // life wrote it: the gateway starts on those, and each is written again
+    // just after (`owed`), as it is while awake (agents read every
+    // AGENTS_EVERY_MS, models every MODEL_EVERY_MS). Safe stale: its
+    // credentials are placeholders the platform fills on the way out, and an
+    // agent unassigned while asleep is in no ready file, so nothing runs as
+    // it. A full wake (a restore), a first start, and an agent with no whole
+    // profile yet are written before the gateway, as ever.
+    let restore_pending = env("RESTORE_PENDING").as_deref() == Some("1");
+    let (mut owed, now): (Vec<Agent>, Vec<Agent>) = hermes_agents.iter().cloned().partition(|a| !restore_pending && hermes::profile_whole(&home, &a.fragment));
     let mut credential_env = computer.credential_env.clone();
     let mut route = hermes::Route::new(&model, computer.models.as_ref());
     ev!("boot.model_ids", { "given": computer.models.is_some(), "ids": route.ids });
-    // The previous start's leftovers, ended off the boot's path (its Hermes
-    // Python takes about half a second), beside the profiles' writes, which
-    // touch no database; waited for before the gateway starts.
-    let ending = {
-        let (agents, home) = (hermes_agents.clone(), home.clone());
-        tokio::task::spawn_blocking(move || end_previous_life(&agents, &home))
-    };
-
     let lean: Vec<String> = std::fs::read_to_string(format!("{OPT}/lean-plugins.txt")).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
     let _ = std::fs::create_dir_all("/etc/hermes");
     // HERMES_BOOT_CARD_TIMEOUT_S: a test's shorter card (and Hermes' wait on it)
@@ -1333,9 +1352,10 @@ async fn boot_main() {
     // config changes. What it holds is installed off the boot's path.
     managed_dir();
     // every agent is its teammates', whatever runs it
-    let (_, mut team) = team_of(&api, &agents, &home).await;
-    profiles(&api, &hermes_agents, &home, ids, &route, &credential_env, &team).await;
-    ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
+    let mut team = if now.is_empty() { Vec::new() } else { team_of(&api, &agents, &home).await.1 };
+    retire_profiles(&hermes_agents, &home, ids);
+    write_profiles(&api, &now, &home, ids, &route, &credential_env, &team).await;
+    ev!("boot.configured", { "agents": agents.len(), "owed": owed.len(), "ms": t0.elapsed().as_millis() as u64 });
 
     match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), ending).await {
         Ok(Ok(())) => {}
@@ -1434,6 +1454,15 @@ async fn boot_main() {
                 return;
             }
             let _busy = Busy::new(&quiet);
+            // the profiles the gateway started on (a snapshot's wake), written
+            // again at the first pass, before anything else waits on the platform
+            if !owed.is_empty() {
+                let t = Instant::now();
+                (_, team) = team_of(&api, &agents, &home).await;
+                write_profiles(&api, &owed, &home, ids, &route, &credential_env, &team).await;
+                ev!("boot.profiles_rewritten", { "agents": owed.len(), "ms": t.elapsed().as_millis() as u64 });
+                owed.clear();
+            }
             // The computer's agents may change while it runs (docs/computers.md).
             if last_agents.elapsed() >= Duration::from_millis(AGENTS_EVERY_MS) {
                 last_agents = Instant::now();

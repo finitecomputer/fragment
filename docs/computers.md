@@ -795,6 +795,13 @@ What our Hermes image guarantees beyond the contract:
   refresh is off, and Node's compile cache is outside `/data`. A Claude
   agent's idle `claude` is stopped before the hold is answered
   (docs/bridge.md, "The Claude runtime").
+- **A snapshot's wake starts the gateway on the profiles the last life
+  left** (each whole: its marker, config, credentials and identity), and
+  writes each again just after; a full wake, a first start and a profile
+  not whole yet are written before it. Stale for that moment is safe: its
+  credentials are placeholders, and an agent unassigned while asleep is in
+  no ready file. The Docker lane's `a_cold_wake_by_its_steps` times each
+  step of a wake.
 - **A turn a restart cut** is settled in its Hermes session before the
   gateway starts, as Hermes' own `/discard` settles it, so the next
   message is a turn of its own and the chat is never paused behind it

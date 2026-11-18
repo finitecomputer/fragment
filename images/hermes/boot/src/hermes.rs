@@ -1164,6 +1164,23 @@ pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
     home.join("profiles").join(wire::profile(agent_fragment))
 }
 
+/// The file naming which agent a profile is (what retiring it reads).
+pub const PROFILE_MARKER: &str = ".fragment-agent";
+
+/// The files a profile's write leaves last of all (the boot's
+/// `write_profile`: its marker, then its config, its credentials, its
+/// identity), so a profile with each of them is one a life wrote whole.
+const PROFILE_WRITTEN: [&str; 4] = ["config.yaml", ".env", CREDENTIALS_FILE, "profile.yaml"];
+
+/// Whether `agent_fragment`'s profile is on disk whole, as its last life
+/// wrote it: its marker names it and each file its write leaves is there.
+/// A snapshot's wake starts the gateway on such a profile and writes it
+/// again after.
+pub fn profile_whole(home: &Path, agent_fragment: &str) -> bool {
+    let dir = profile_dir(home, agent_fragment);
+    std::fs::read_to_string(dir.join(PROFILE_MARKER)).is_ok_and(|m| m == agent_fragment) && PROFILE_WRITTEN.iter().all(|f| dir.join(f).is_file())
+}
+
 /// Settles each turn a restart cut, in Hermes' own sessions, before the
 /// gateway starts (docs/computers.md, Durability, P5), run by Hermes' Python as
 /// the hermes user with each `state.db` to look in as its arguments.
@@ -1885,6 +1902,33 @@ mod tests {
     /// profile (the scratch's `cache` with it); kept when each is the link
     /// (each boot); an empty one or a link elsewhere replaced; one with
     /// something in it set aside whole, and nothing of it carried over.
+    /// Valid: a profile with its marker and every file its write leaves is
+    /// whole. Invalid: none on disk; a write cut before its identity; a
+    /// marker naming another agent; a directory where a file should be.
+    #[test]
+    fn a_profile_is_whole_once_its_write_left_every_file() {
+        let home = std::env::temp_dir().join(format!("hermes-profile-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(!profile_whole(&home, "juniper--k3x9"), "none on disk");
+        let dir = profile_dir(&home, "juniper--k3x9");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(PROFILE_MARKER), "juniper--k3x9").unwrap();
+        for f in &PROFILE_WRITTEN[..3] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        assert!(!profile_whole(&home, "juniper--k3x9"), "a write cut before its identity");
+        std::fs::write(dir.join("profile.yaml"), "x").unwrap();
+        assert!(profile_whole(&home, "juniper--k3x9"));
+        assert!(profile_whole(&home, "juniper--k3x9"), "replay: reading changes nothing");
+        std::fs::write(dir.join(PROFILE_MARKER), "rowan--k3x9").unwrap();
+        assert!(!profile_whole(&home, "juniper--k3x9"), "another agent's marker");
+        std::fs::write(dir.join(PROFILE_MARKER), "juniper--k3x9").unwrap();
+        std::fs::remove_file(dir.join(".env")).unwrap();
+        std::fs::create_dir(dir.join(".env")).unwrap();
+        assert!(!profile_whole(&home, "juniper--k3x9"), "a directory is no file");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn a_profiles_home_and_scratch_are_links_into_its_work() {
         assert_eq!(home_dir("juniper--k3x9"), PathBuf::from("/data/work/juniper--k3x9/home"));
