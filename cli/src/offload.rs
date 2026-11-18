@@ -58,8 +58,8 @@ pub const NOTE_SUFFIX: &str = ".offloaded.md";
 /// subfolder at a time (and one of dependencies or a cache, which its tools
 /// make again, is deleted instead).
 pub const FILES_MAX: usize = 10_000;
-/// The parts one file is moved in, at most (20 GB in parts of 100 MB is
-/// 200): a note naming more is no move's.
+/// The parts one move's files are in, at most (20 GB in parts of 100 MB
+/// is 200, and a part a small file): a note naming more is no move's.
 const PARTS_MAX: u64 = 100_000;
 /// Where the note's record begins and ends.
 const RECORD_OPEN: &str = "\n```json\n";
@@ -173,10 +173,13 @@ fn record_of(text: &str) -> Result<Record> {
     let end = text[start..].find(RECORD_CLOSE).ok_or_else(|| anyhow!("its record has no end"))? + start;
     let r: Record = serde_json::from_str(&text[start..end]).context("its record")?;
     let plain = |p: &str| !p.is_empty() && Path::new(p).components().all(|c| matches!(c, Component::Normal(_)));
-    let fits = r.part_bytes > 0
+    // its longest path in the fragment, a part's, is a repo path
+    let in_fragment = |f: &Moved| RepoPath::parse(&format!("{}/{}.part-{PARTS_MAX}-of-{PARTS_MAX}", r.at, f.path)).is_ok();
+    let parts = r.files.iter().try_fold(0u64, |n, f| (r.part_bytes > 0).then(|| n.checked_add(f.size.div_ceil(r.part_bytes).max(1))).flatten());
+    let fits = parts.is_some_and(|n| n <= PARTS_MAX)
         && (1..=FILES_MAX).contains(&r.files.len())
         && r.dirs.len() <= FILES_MAX
-        && r.files.iter().all(|f| blob::valid_sha(&f.sha256) && f.mode <= 0o777 && plain(&f.path) && f.size.div_ceil(r.part_bytes) <= PARTS_MAX)
+        && r.files.iter().all(|f| blob::valid_sha(&f.sha256) && f.mode <= 0o777 && plain(&f.path) && in_fragment(f))
         && r.dirs.iter().all(|d| d.mode <= 0o777 && plain(&d.path))
         && r.files.iter().try_fold(0u64, |n, f| n.checked_add(f.size)).is_some();
     if !fits {
@@ -193,6 +196,9 @@ struct Local {
     size: u64,
     mode: u32,
     modified: SystemTime,
+    /// Its device, inode and change time (unix): a file replaced, or
+    /// written with its time put back, is another.
+    id: (u64, u64, i64, i64),
 }
 
 /// A file's or a folder's permission bits.
@@ -204,8 +210,20 @@ fn mode_of(m: &fs::Metadata) -> u32 {
     mode
 }
 
+/// A file's identity beside its size and time (`Local::id`).
+fn id_of(m: &fs::Metadata) -> (u64, u64, i64, i64) {
+    #[cfg(unix)]
+    let id = {
+        use std::os::unix::fs::MetadataExt;
+        (m.dev(), m.ino(), m.ctime(), m.ctime_nsec())
+    };
+    #[cfg(not(unix))]
+    let id = (0, 0, 0, 0);
+    id
+}
+
 fn local(abs: PathBuf, rel: String, m: &fs::Metadata) -> Result<Local> {
-    Ok(Local { abs, rel, size: m.len(), mode: mode_of(m), modified: m.modified()? })
+    Ok(Local { abs, rel, size: m.len(), mode: mode_of(m), modified: m.modified()?, id: id_of(m) })
 }
 
 /// What a path to move is: the folder its note goes in, the name moved,
@@ -214,7 +232,6 @@ struct Planned {
     dir: PathBuf,
     name: String,
     note: PathBuf,
-    folder: bool,
     files: Vec<Local>,
     dirs: Vec<Folder>,
 }
@@ -287,13 +304,12 @@ fn plan(path: &Path, keep: Option<&Path>) -> Result<Planned> {
         m => m.with_context(|| format!("reading {}", abs.display()))?,
     };
     let (mut files, mut dirs) = (Vec::new(), Vec::new());
-    let folder = m.is_dir();
     if m.is_file() {
         if crate::home::rules::secret_name(&name) {
             bail!(coded(Code::InvalidUsage, format!("{} may hold a password or key: it is not moved", abs.display())));
         }
         files.push(local(abs.clone(), name.clone(), &m)?);
-    } else if folder {
+    } else if m.is_dir() {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         crate::sync::refuse_dir(&abs, home.as_deref()).map_err(|e| coded(Code::InvalidUsage, e.to_string().replace("refusing to sync", "refusing to move it").replace("Point --dir at the folder you mean, by its full path", "Name the folder you mean, by its full path")))?;
         walk(&abs, &name, &mut files, &mut dirs)?;
@@ -303,7 +319,7 @@ fn plan(path: &Path, keep: Option<&Path>) -> Result<Planned> {
     } else {
         bail!(coded(Code::InvalidUsage, format!("{} is a link or not a file: move what it points at by its own path", abs.display())));
     }
-    Ok(Planned { dir, name, note, folder, files, dirs })
+    Ok(Planned { dir, name, note, files, dirs })
 }
 
 /// The folder in the fragment a move made now goes under: when, then a
@@ -389,9 +405,10 @@ pub struct Offloaded {
     pub kept: Vec<String>,
 }
 
-/// A file unchanged since it was read: its size and its time.
+/// A file unchanged since it was read: the same file (`Local::id`), its
+/// size and its time.
 fn unchanged(l: &Local) -> bool {
-    fs::symlink_metadata(&l.abs).is_ok_and(|m| m.is_file() && m.len() == l.size && m.modified().ok() == Some(l.modified))
+    fs::symlink_metadata(&l.abs).is_ok_and(|m| m.is_file() && m.len() == l.size && m.modified().ok() == Some(l.modified) && id_of(&m) == l.id)
 }
 
 fn sha_of(path: &Path) -> Result<String> {
@@ -456,34 +473,18 @@ fn remove(p: &Planned) -> Result<Vec<String>> {
         }
         fs::remove_file(&l.abs).with_context(|| format!("removing {} (its copy is in place)", l.abs.display()))?;
     }
-    if p.folder {
-        let mut dirs: Vec<PathBuf> = p.files.iter().flat_map(|l| l.abs.ancestors().skip(1).take_while(|a| a.starts_with(p.dir.join(&p.name))).map(Path::to_path_buf)).collect();
-        dirs.sort();
-        dirs.dedup();
-        for d in dirs.iter().rev() {
-            if fs::remove_dir(d).is_err() && d.exists() {
-                kept.push(d.display().to_string());
-            }
-        }
-        // a folder that held only folders
-        walk_empty(&p.dir.join(&p.name), &mut kept);
-    }
-    sync_dir(&p.dir)?;
-    Ok(kept)
-}
-
-/// Removes the empty folders left under `d` (and `d`, once empty).
-fn walk_empty(d: &Path, kept: &mut Vec<String>) {
-    if let Ok(entries) = fs::read_dir(d) {
-        for e in entries.flatten() {
-            if e.file_type().is_ok_and(|t| t.is_dir()) {
-                walk_empty(&e.path(), kept);
-            }
-        }
-        if fs::remove_dir(d).is_err() && d.exists() && !kept.contains(&d.display().to_string()) {
+    // the folders it read, the deepest first (a child sorts after its
+    // parent), each only once empty: one made since stays, and so does
+    // the folder holding it
+    let mut dirs: Vec<&str> = p.dirs.iter().map(|d| d.path.as_str()).collect();
+    dirs.sort_unstable();
+    for d in dirs.iter().rev().map(|d| p.dir.join(d)) {
+        if fs::remove_dir(&d).is_err() && d.exists() {
             kept.push(d.display().to_string());
         }
     }
+    sync_dir(&p.dir)?;
+    Ok(kept)
 }
 
 /// The fragment a move goes into: one the caller edits, an app's (never
@@ -512,12 +513,12 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
     let part_bytes = crate::session::upload_max(&list, c.agent().is_some());
     let (at, when) = at_now(&p.dir);
     let mut r = Record { fragment: into.clone(), at, from: p.dir.join(&p.name).display().to_string(), part_bytes, dirs: p.dirs.clone(), files: Vec::new() };
+    if p.files.iter().map(|l| l.size.div_ceil(part_bytes).max(1)).sum::<u64>() > PARTS_MAX {
+        bail!(coded(Code::TooLarge, format!("{} is too large to move in parts of {}: move less at once", r.from, size(part_bytes))));
+    }
     // every path it writes is a repo path, and its own
     let mut paths = std::collections::BTreeSet::new();
     for l in &p.files {
-        if l.size.div_ceil(part_bytes) > PARTS_MAX {
-            bail!(coded(Code::TooLarge, format!("{} is too large to move in parts of {}", l.abs.display(), size(part_bytes))));
-        }
         let probe = Moved { path: l.rel.clone(), size: l.size, sha256: String::new(), mode: l.mode };
         for (path, _) in r.parts(&probe) {
             RepoPath::parse(&path).map_err(|e| coded(Code::InvalidUsage, format!("{} cannot go into a fragment as {e}", l.abs.display())))?;
@@ -647,10 +648,10 @@ pub fn back(c: &Client, path: &Path) -> Result<Back> {
             bail!("{} names {p}, which is not under {name}", note.display());
         }
     }
-    for f in &r.files {
-        let folders: Vec<&Path> = Path::new(&f.path).ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()).collect();
+    for p in r.dirs.iter().map(|d| &d.path).chain(r.files.iter().map(|f| &f.path)) {
+        let folders: Vec<&Path> = Path::new(p).ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()).collect();
         if folders.iter().any(|a| !named.contains(a.to_str().unwrap_or_default())) {
-            bail!("{} names {}, in a folder it does not name", note.display(), f.path);
+            bail!("{} names {p}, in a folder it does not name", note.display());
         }
     }
     // its folders, where they are already, are folders (never a link out)
@@ -677,18 +678,16 @@ pub fn back(c: &Client, path: &Path) -> Result<Back> {
     }
     let mut held = Held::new(&r.fragment, Wants::Read);
     let head = held.get(c)?.branch_head(MAIN)?.ok_or_else(|| coded(Code::NotFound, format!("{} has no files: its copy is gone", r.fragment)))?;
-    // its folders made again as they were, parents first: private as they
-    // are made, then their own bits
+    // its folders made again, parents first, private while files come
+    // into them; their own bits once all are in (below), so a back cut off
+    // and run again sets them too
     for d in &r.dirs {
         let at = dir.join(&d.path);
         let mut make = fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut make, 0o700);
         match make.create(&at) {
-            Ok(()) => {
-                set_mode(&at, d.mode)?;
-                sync_dir(at.parent().expect("under the note's folder"))?;
-            }
+            Ok(()) => sync_dir(at.parent().expect("under the note's folder"))?,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) => {}
             Err(e) => return Err(anyhow::Error::new(e).context(format!("making {}; the note stays", at.display()))),
         }
@@ -708,6 +707,9 @@ pub fn back(c: &Client, path: &Path) -> Result<Back> {
         got.with_context(|| format!("bringing back {}; the note stays", f.path))?;
         sync_dir(into)?;
         bytes += f.size;
+    }
+    for d in r.dirs.iter().rev() {
+        set_mode(&dir.join(&d.path), d.mode).with_context(|| format!("setting {}'s permissions; the note stays", d.path))?;
     }
     fs::remove_file(&note).with_context(|| format!("removing {}", note.display()))?;
     sync_dir(&dir)?;
@@ -817,6 +819,10 @@ mod tests {
         #[cfg(unix)]
         fs::set_permissions(photos.join("trip/run.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let before = tree(&photos);
+        #[cfg(unix)]
+        let before_mode = std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&photos).unwrap().permissions()) & 0o777;
+        #[cfg(unix)]
+        assert_ne!(before_mode, 0o700, "a folder's bits other than a back's private ones");
 
         let o = offload(&c, &photos, NAME).unwrap();
         assert_eq!((o.files, o.bytes, o.resumed), (4, before.iter().map(|(_, b)| b.len() as u64).sum(), false));
@@ -834,8 +840,16 @@ mod tests {
         assert!(at("photos/trip/c.mov").is_none() && at("photos/trip/c.mov.part-0003-of-0003").is_some(), "{:?}", mock.paths(NAME, "main"));
         assert_eq!(mock.file_at(NAME, "main", "fragment.json").as_deref(), Some(&b"{\n  \"files\": { \"page\": true }\n}\n"[..]), "its page is the files view");
 
+        // a back cut off after making a folder, private, before its bits
+        #[cfg(unix)]
+        {
+            fs::DirBuilder::new().create(&photos).unwrap();
+            fs::set_permissions(&photos, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        }
         let b = back(&c, &note).unwrap();
         assert_eq!((b.files, b.already), (4, 0));
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&photos).unwrap().permissions()) & 0o777, before_mode, "its own bits, run again");
         assert_eq!(tree(&photos), before, "byte for byte");
         assert!(photos.join("trip/empty").is_dir(), "an empty folder comes back too");
         #[cfg(unix)]
@@ -1015,6 +1029,8 @@ mod tests {
             text.replace("\"size\":9", "\"size\":18446744073709551615"),
             text.replace("\"mode\":420", "\"mode\":4095"),
             text.replace("odd `name'/f", "odd `name'/../../etc/f"),
+            // a path past a repo path's, which every part would repeat
+            text.replace("2026-11-18T103102Z-00ff/data/work", &"x".repeat(32 * 1024)),
             "# Moved to storage\n".to_string(),
         ] {
             assert!(record_of(&bad).is_err(), "{bad}");
@@ -1031,8 +1047,14 @@ mod tests {
         let root = tempdir("escape");
         let file = |path: &str| Moved { path: path.into(), size: 1, sha256: "a".repeat(64), mode: 0 };
         let note = root.join("a.offloaded.md");
-        for (files, says) in [(vec![file("b")], "not under a"), (vec![file("a/x/y")], "does not name")] {
-            let r = Record { fragment: NAME.into(), at: "x".into(), from: "/x".into(), part_bytes: 4, dirs: vec![Folder { path: "a".into(), mode: 0o755 }], files };
+        let folder = |path: &str| Folder { path: path.into(), mode: 0o755 };
+        for (dirs, files, says) in [
+            (vec![folder("a")], vec![file("b")], "not under a"),
+            (vec![folder("a")], vec![file("a/x/y")], "does not name"),
+            // a folder whose own folder it leaves out (a link, there)
+            (vec![folder("a"), folder("a/link/new")], vec![file("a/f")], "does not name"),
+        ] {
+            let r = Record { fragment: NAME.into(), at: "x".into(), from: "/x".into(), part_bytes: 4, dirs, files };
             fs::write(&note, note_text(&r, &note, "a", "now")).unwrap();
             let e = back(&c, &note).unwrap_err();
             assert!(format!("{e:#}").contains(says), "{e:#}");
@@ -1106,12 +1128,22 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("a.txt"), b"a").unwrap();
         fs::write(dir.join("b.txt"), b"b").unwrap();
+        fs::write(dir.join("c.txt"), b"c").unwrap();
         let p = plan(&dir, None).unwrap();
         fs::write(dir.join("b.txt"), b"bigger now").unwrap();
+        // replaced by as many other bytes, its time put back
+        let was = fs::metadata(dir.join("c.txt")).unwrap().modified().unwrap();
+        fs::remove_file(dir.join("c.txt")).unwrap();
+        fs::write(dir.join("c.txt"), b"C").unwrap();
+        File::options().write(true).open(dir.join("c.txt")).unwrap().set_modified(was).unwrap();
+        // and a folder made since
+        fs::create_dir_all(dir.join("new")).unwrap();
         let kept = remove(&p).unwrap();
         assert!(!dir.join("a.txt").exists());
         assert_eq!(fs::read(dir.join("b.txt")).unwrap(), b"bigger now");
-        assert!(kept.iter().any(|k| k.ends_with("b.txt")) && kept.iter().any(|k| k.ends_with("/d")), "{kept:?}");
+        assert_eq!(fs::read(dir.join("c.txt")).unwrap(), b"C");
+        assert!(dir.join("new").is_dir(), "a folder it never read stays");
+        assert!(kept.iter().any(|k| k.ends_with("b.txt")) && kept.iter().any(|k| k.ends_with("c.txt")) && kept.iter().any(|k| k.ends_with("/d")), "{kept:?}");
     }
 
     /// Goal: files named as a back's and a note's own were once
