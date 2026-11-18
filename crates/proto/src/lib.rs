@@ -1025,7 +1025,7 @@ impl Visibility {
     /// keys: FIN-352); anything else anyone with its share link (decision 48).
     pub fn made_from(template: Option<&str>) -> Visibility {
         match template {
-            Some("chat" | "agent" | "sessions" | "telegram") => Visibility::Members,
+            Some("chat" | "agent" | "sessions" | "telegram" | "simplex") => Visibility::Members,
             _ => Visibility::Link,
         }
     }

@@ -6,7 +6,7 @@
 # webpki's roots, as the root workspace's).
 [workspace]
 resolver = "2"
-members = ["bridge", "hermes/boot"]
+members = ["bridge", "hermes/boot", "simplex-door"]
 
 [workspace.package]
 edition = "2021"

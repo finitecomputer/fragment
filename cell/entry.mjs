@@ -10,6 +10,9 @@ import { connect } from "cloudflare:sockets";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError } from "@cloudflare/sandbox";
 import { readAgain } from "./backup-reads.mjs";
 import * as rs from "./build/index.js";
+// SPIKE (spike/simplex-door): the SimpleX door's object and its container's egress
+import { sxdoorAdmin } from "./door.mjs";
+export { SimplexDoor, DoorEgress } from "./door.mjs";
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
 // R2, whose ranged reads (a restore's) that storage failed are asked again
@@ -22,7 +25,12 @@ export class DirectoryBackupGateway extends SandboxGateway {
   }
 }
 
-export default rs.default;
+// SPIKE (spike/simplex-door): the door's admin routes first (door.mjs), the rest Rust's
+export default class extends rs.default {
+  async fetch(request) {
+    return (await sxdoorAdmin(request, this.env)) ?? super.fetch(request);
+  }
+}
 
 export class Fragment extends DurableObject {
   constructor(ctx, env) {

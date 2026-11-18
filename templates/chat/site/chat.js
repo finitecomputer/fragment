@@ -1005,7 +1005,10 @@ export function mount(root) {
     // a message an agent relays from its owner through a door (shown as theirs: `speaker`)
     const r = body.relayed;
     const relayed = !turn && r && typeof r === "object" && doorId(r.via) && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal, via: r.via } : null;
-    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
+    // SPIKE (spike/simplex-door): a record copied from another chat, as it was there
+    const c = body.copied;
+    const copied = !turn && c && typeof c === "object" && typeof c.by === "string" && c.by.startsWith("npub1") && Number.isFinite(c.at) ? { by: c.by, at: c.at, via: typeof c.via === "string" ? c.via : null } : null;
+    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed, copied });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
@@ -1577,7 +1580,10 @@ export function mount(root) {
   function messageNode(entry) {
     // a relayed message shows as its owner's, saying how they sent it
     const owner = relayedOwner(entry);
-    const m = owner ? { ...entry, principal: owner, via: doorName(entry.relayed.via) } : entry;
+    // SPIKE (spike/simplex-door): a copy shows as its speaker's, at its
+    // time, only when the chat's owner posted it (its connector's copy)
+    const copied = entry.copied && state.members.some((x) => x.principal === entry.principal && x.role === "owner") ? entry.copied : null;
+    const m = copied ? { ...entry, principal: copied.by, at: copied.at, via: `${copied.via ? doorName(copied.via) : "SimpleX"}, before` } : owner ? { ...entry, principal: owner, via: doorName(entry.relayed.via) } : entry;
     const w = who(m.principal);
     const mine = m.principal === state.me?.principal;
     const key = `m:${m.seq}`;

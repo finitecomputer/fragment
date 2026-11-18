@@ -1,0 +1,31 @@
+# SPIKE (branch spike/simplex-door, never merged): the SimpleX door's
+# runner. One per door container: SimpleX's core beside it, its databases
+# saved to the door's Durable Object after every change (cell/door.mjs).
+[package]
+name = "fragment-simplex-door"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "simplex-door"
+path = "src/main.rs"
+
+[dependencies]
+fragment-bridge = { path = "../bridge" }
+bytes.workspace = true
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+futures-util.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+libc = "0.2"
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+webpki-roots.workspace = true

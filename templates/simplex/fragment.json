@@ -1,0 +1,32 @@
+{
+  "kind": "chat",
+  "channels": {
+    "chat": { "read": "viewer", "post": "viewer" },
+    "work": {
+      "read": "viewer", "post": "viewer", "from": "agent",
+      "listed": {
+        "kinds": ["turn.start", "turn.step", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"],
+        "fields": ["asks", "outcome"]
+      },
+      "newest": ["turn.helpers"]
+    }
+  },
+  "inbox": { "header": "x-simplex-door-secret", "secret": "SIMPLEX_DOOR_SECRET" },
+  "operations": {
+    "state": { "kind": "query", "role": "owner", "description": "The door connected, the invitation waiting, and how much history was copied here: {connected, error, invitation, copied}." },
+    "connect": { "kind": "job", "role": "owner", "input": { "type": "object", "required": ["platform"], "properties": { "platform": { "type": "string", "maxLength": 200 }, "name": { "type": "string", "maxLength": 64 } }, "additionalProperties": false }, "description": "Starts this chat's SimpleX door (its own small container) and tells it where this chat's inbox is, with the secret its deliveries carry (SIMPLEX_DOOR_SECRET)." },
+    "link": { "kind": "job", "role": "owner", "description": "A one-time SimpleX invitation from the door, for its owner's app to scan." },
+    "status": { "kind": "job", "role": "owner", "description": "The door's own state: its start, its saves, its link." },
+    "known": { "kind": "mutation", "role": "owner" },
+    "invited": { "kind": "mutation", "role": "owner" },
+    "copy": { "kind": "mutation", "role": "owner", "input": { "type": "object", "required": ["from", "records"], "properties": { "from": { "type": "string", "maxLength": 100 }, "records": { "type": "array", "maxItems": 50 } } }, "description": "Its owner copies their old SimpleX chat here, once, before it is bound: each record as it was (who said it, when), marked copied, each once." },
+    "seen": { "kind": "mutation", "input": { "type": "object", "required": ["shared"], "properties": { "shared": { "type": "string", "maxLength": 200 } } } },
+    "intake": { "kind": "job" },
+    "mirror": { "kind": "job" }
+  },
+  "triggers": [
+    { "channel": "inbox", "run": "intake" },
+    { "channel": "chat", "from": "agent", "run": "mirror" }
+  ],
+  "meta": { "title": "SimpleX", "description": "A chat with your agent that you also reach from your SimpleX app, end to end encrypted to the platform's door." }
+}

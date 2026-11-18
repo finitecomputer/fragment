@@ -1381,6 +1381,11 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
             // whose Worker is live finishes without them (rollout.rs)
             let keys: Vec<&String> = container.as_object().context("the container is an object")?.keys().collect();
             anyhow::ensure!(keys.iter().all(|k| ["class_name", "scheduling_policy", "images"].contains(&k.as_str())), "cell/wrangler.jsonc's container names {keys:?}: one with settings wrangler applies after the upload is no deploy rollout.rs finishes");
+            // SPIKE (spike/simplex-door): the SimpleX door's container, built
+            // from the tree, its paths absolute as the rendered config needs
+            if let Some(door) = c["containers"].get_mut(1) {
+                door["images"]["door"] = json!({ "dockerfile": root.join("images/simplex-door/Dockerfile"), "build_context": root.join("images") });
+            }
         }
         None => {
             c.remove("containers");

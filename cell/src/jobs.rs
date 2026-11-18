@@ -77,6 +77,8 @@ pub const JOB_HEADER: &str = "x-fragment-job";
 pub const HOPS_HEADER: &str = "x-fragment-hops";
 /// What a fetch that is not a GET or a HEAD names its step by (`step_fetch`).
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
+/// SPIKE (spike/simplex-door): where a SimpleX connector's jobs reach its door.
+const DOOR_ORIGIN: &str = "https://door.fragment.internal/";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
 /// The attempt (replays count) at which a change of the app's code under
@@ -955,7 +957,14 @@ impl FragmentCell {
     }
 
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
-        let url = egress::check(&f.url, self.cfg.egress_local, &self.cfg.egress_allow).map_err(permanent)?;
+        // SPIKE (spike/simplex-door): a SimpleX connector's own door, its
+        // Durable Object (cell/door.mjs), in place of the internet; no
+        // other fragment reaches it
+        let door_call = f.url.starts_with(DOOR_ORIGIN);
+        if door_call && self.blessed().map_err(|e| StepFail::Retry(e.message))?.as_deref() != Some("simplex") {
+            return Err(permanent("door.fragment.internal is a SimpleX connector's own door"));
+        }
+        let url = if door_call { url::Url::parse(&f.url).map_err(|e| permanent(e.to_string()))? } else { egress::check(&f.url, self.cfg.egress_local, &self.cfg.egress_allow).map_err(permanent)? };
         // a connector bound as a door that is shut sends nothing (doors.rs)
         if let Some(why) = self.door_shut().map_err(|e| StepFail::Retry(e.message))? {
             return Err(permanent(why));
@@ -1028,10 +1037,22 @@ impl FragmentCell {
             }
             init.with_body(Some(JsValue::from_str(&body)));
         }
-        let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(redact(e.to_string())))?;
         let host = url.host_str().unwrap_or("").to_string();
         let max = limits::FETCH_RESPONSE_MAX_BYTES;
-        let answer = crate::cs::fetch_all(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS), max).await.map_err(|e| StepFail::Retry(redact(format!("{host}: {}", e.message))))?;
+        let answer = if door_call {
+            // SPIKE: to `/job/<path>` of the door named by this fragment
+            let name = self.name().map_err(|e| StepFail::Retry(e.message))?;
+            init.headers.set("x-door-name", &name).map_err(|e| permanent(e.to_string()))?;
+            let req = Request::new_with_init(&format!("http://door/job{}", url.path()), &init).map_err(|e| permanent(redact(e.to_string())))?;
+            let ns = self.env.durable_object("SIMPLEX_DOOR").map_err(|e| StepFail::Retry(e.to_string()))?;
+            let stub = ns.id_from_name(&name).and_then(|id| id.get_stub()).map_err(|e| StepFail::Retry(e.to_string()))?;
+            let mut resp = stub.fetch_with_request(req).await.map_err(|e| StepFail::Retry(redact(format!("the door: {e}"))))?;
+            let (body, cut) = crate::cs::read_answer(&mut resp, max).await.map_err(|e| StepFail::Retry(e.message))?;
+            crate::cs::Answer { status: resp.status_code(), headers: resp.headers().clone(), body, cut }
+        } else {
+            let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(redact(e.to_string())))?;
+            crate::cs::fetch_all(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS), max).await.map_err(|e| StepFail::Retry(redact(format!("{host}: {}", e.message))))?
+        };
         let status = answer.status;
         if status == 429 || status >= 500 {
             return Err(StepFail::Retry(format!("{host} answered {status}")));
