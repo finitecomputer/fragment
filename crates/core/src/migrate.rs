@@ -117,6 +117,7 @@ pub const FRAGMENT: Class = Class {
         step!("installed_forward_only", "fragment/0006_installed_forward_only.sql"),
         step!("making", "fragment/0007_making.sql"),
         step!("newest", "fragment/0008_newest.sql"),
+        step!("inbox_forward_only", "fragment/0009_inbox_forward_only.sql"),
     ],
     variants: &[Variant {
         name: "members",
@@ -155,7 +156,7 @@ pub const PRINCIPAL: Class = Class {
 
 pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
 
-pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql")], variants: &[], kept: &["wiped"] };
+pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql"), step!("grants_forward_only", "computer/0005_grants_forward_only.sql"), step!("grants_owed", "computer/0006_grants_owed.sql")], variants: &[], kept: &["wiped"] };
 
 /// A fragment life's search index: its end releases its storage whole
 /// (`deleteAll`), so it keeps nothing.

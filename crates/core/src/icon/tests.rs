@@ -149,8 +149,8 @@ fn the_check_is_a_decision_decide_takes() {
     assert!(wire["questions"]["subject"]["instructions"].as_str().unwrap().contains("a red apple"));
 }
 
-/// The subject: GLM's first line, unquoted and unstopped; nothing named
-/// (an empty answer, as GLM gave once while reasoning past its tokens, or
+/// The subject: the model's first line, unquoted and unstopped; nothing named
+/// (an empty answer, as GLM-5.3 Flash gave once while reasoning past its tokens, or
 /// a paragraph) is `None`.
 #[test]
 fn a_subject_is_one_short_line() {
@@ -171,16 +171,16 @@ fn the_subject_question_carries_the_app_and_the_hint() {
     let q = subject_input("dice", Some("Roll dice with friends."), Some("make it purple"));
     let asked = q["messages"][1]["content"].as_str().unwrap();
     assert!(asked.starts_with("App: dice. Roll dice with friends.") && asked.ends_with("Its maker asks for: make it purple"), "{asked}");
-    assert_eq!(q["reasoning_effort"], "low");
+    assert_eq!((q["chat_template_kwargs"].clone(), q.get("reasoning_effort")), (json!({ "enable_thinking": false }), None), "Gemma thinks unless told not to");
     let long = subject_input("x", Some(&"é".repeat(5000)), None);
     assert!(long["messages"][1]["content"].as_str().unwrap().chars().count() <= ABOUT_MAX_CHARS);
     assert!(image_input("a brass key", 7)["prompt"].as_str().unwrap().ends_with("The object: a brass key."));
 }
 
-/// A hint's object is the subject: GLM is asked to keep it and what it
+/// A hint's object is the subject: the model is asked to keep it and what it
 /// says of it, never under its own rules (no screen, no writing), which
 /// swapped a computer asked for with writing on its screen for a cassette
-/// tape. With no hint, GLM chooses under its own.
+/// tape (GLM-5.3 Flash, 2026-11-08). With no hint, the model chooses under its own.
 #[test]
 fn a_hints_object_is_kept_and_none_is_chosen() {
     let hinted = subject_input("Chinese practice", None, Some("a beige 1984 computer with 中文 on its screen, no bear"));

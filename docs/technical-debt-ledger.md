@@ -42,28 +42,51 @@ unfinished design, not debt.
   provider and tells the provider a switch (Core 1.0's `prompt=login`),
   proven on preview as the self-host rule asks of a cell change.
 
-## A computer's lifecycle writes its old flags too
+## A computer's lifecycle reads its old flags
 
 - **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle
   phase into the phases that own it (`fragment_core::computer::Phase`:
   `Asleep`'s `retry`, `Sleeping`'s `owner`, `restarting` and
-  `owes_start`, `Failed`'s `since_ms`). The previous release reads only
-  the old fields (`wake_after_sleep`, `retry_at_ms`, `failed_ms`,
-  `owner_sleep`, `restarting`), so every stored lifecycle still carries
-  them too, written from the phase (`Legacy`), and `Lifecycle::read` fills
-  a phase stored by that release from them. Each step asserts the two
-  agree.
-- **Risk:** none while they agree. A rollback reads the same computer;
-  only `Starting`'s `destroying` is new to it, so a rolled-back release
-  counts a failing start's own destroy as a crash again (one more strike,
-  as before #1004's note in memory, which it still has).
-- **Delete when:** writing them, once no deployment can roll back to a
-  release before this one (production runs a release after it): step two
-  stops writing them (`Legacy::of`, the per-step assertion). Reading them
-  (`Legacy::fill`) goes too once every stored lifecycle has been written
-  by this release or a later one: a computer that has not woken since
-  keeps the old fields until its next event, so that last cut waits for
-  a sweep that touches every computer, or for no computer being older.
+  `owes_start`, `Failed`'s `since_ms`). A lifecycle a release before it
+  stored, and nothing has rewritten since, keeps those only in its old
+  flags (`wake_after_sleep`, `retry_at_ms`, `failed_ms`, `owner_sleep`,
+  `restarting`), so `Lifecycle::read` still fills its phase from them
+  (`computer/lifecycle/legacy.rs`), and the Computer DO logs
+  `lifecycle_old_flags` each time it does. Nothing writes them (#1284).
+- **Risk:** none while it reads them. Such a row can outlast its alarms:
+  before FIN-395 C a takeover that failed used up an alarm without a
+  write or another alarm, so a `Sleeping` row can wait until something
+  touches its computer. Read without its flags, its owner's restart or a
+  start its stop owed would be lost.
+- **Delete when:** a sweep has read every computer's lifecycle and found
+  none filled, or production has logged no `lifecycle_old_flags` line for
+  14 days. The log sees only computers something touched, so cutting on
+  it leaves one dormant since before FIN-395 C to lose that start, which
+  its owner can make again: say so when cutting.
+
+## A computer owes its agents' fragments the grant rows they had not taken
+
+- **Shortcut:** what an agent may use of its owner's (its narrowed
+  providers, its account at each connection of several) moved from its
+  computer to its agent fragment (`meta` `grants`, `fragment_core::grants`;
+  #1309). The Computer's step 6 dropped the old rows (`agents.connections`,
+  `agent_accounts`), keeping each one its fragment had not yet taken in
+  the computer's `meta` `grants_owed` (`grants::Owed`), bound to the agent
+  it was kept for. Each ask carries the agent's owed row (`taken`,
+  `ComputerCell::grants_of`; `hand_over` before an agent leaves), a
+  fragment holding none of its own takes it whole and ignores it after,
+  and the computer forgets it, logging how many it still owes
+  (`grants_owed`). The test levers `legacy-grants` (an owed row) and
+  `forget-grants` (a fragment holding none) make an agent as before the
+  move.
+- **Risk:** a computer nothing touches keeps owing; only its next ask
+  hands its rows over. Dropped instead, an agent narrowed before the move
+  would be answered every provider.
+- **Delete when:** a sweep has asked every computer and found none owing
+  (no `grants_owed` row). Then a Computer step deletes the `meta` row,
+  and `taken`, `Owed`, `hand_over` and both levers go. The log sees only
+  computers something touched, so its silence alone is not enough: say
+  so if cutting on it.
 
 ## A chat wiped while its seed runs can keep its template's repo
 
@@ -196,13 +219,58 @@ unfinished design, not debt.
 ## The Hermes image patches Hermes' own boot
 
 - **Shortcut:** hermes-boot runs the gateway itself, so the image removes
-  upstream's `/etc/cont-init.d/02-reconcile-profiles`
-  (images/hermes/Dockerfile), failing the build if another script names
-  `container_boot`.
-- **Risk:** a Hermes that starts a gateway some other way runs two.
+  upstream's `/etc/cont-init.d/02-reconcile-profiles` and, since v0.23,
+  its `profile-gateways` s6 service: an `s6-svscan` over the per-profile
+  gateways only that reconciler registers, which without it fails and
+  restarts every second (images/hermes/Dockerfile). The build fails if
+  either is not there to remove, if another script names
+  `container_boot`, or if another service runs `s6-svscan`.
+- **Risk:** a Hermes that starts a gateway some other way runs two; one
+  that moves the per-profile scan elsewhere restarts it in a loop.
 - **Delete when:** upstream lets a container whose main program is the
-  gateway skip its reconciler (or ships a preloadable, unsupervised
-  gateway main program), proven by the real-Hermes lane without it.
+  gateway skip its reconciler and its per-profile gateways (or ships a
+  preloadable, unsupervised gateway main program), proven by
+  `the_hermes_image` (no s6 slot starts over) and the real-Hermes lane
+  with both left in.
+
+## The Hermes image removes Hermes' login script
+
+- **Shortcut:** upstream's `/etc/profile.d/hermes.sh` (v0.23) puts Hermes'
+  venv and its `bin` ahead of a login shell's PATH. An agent's terminal
+  runs every command in one, so `python` and `pip` were Hermes' own, not
+  the computer's Python environment, and `hermes` bypassed the image's
+  shim that refuses `hermes cron`. The image deletes the script
+  (images/hermes/Dockerfile), failing the build if it is not there or
+  another login script names `/opt/hermes`. Hermes' terminal appends the
+  gateway's PATH entries a login profile dropped, so Hermes loses nothing.
+- **Risk:** a later Hermes that needs its login script for a tool of its
+  own finds it missing; its terminal's own PATH repair is all that stands
+  in.
+- **Delete when:** upstream's login script leaves an existing Python
+  environment and `/usr/local/bin` ahead of its own, proven by
+  `an_agent_runs_hermes_by_name` (the image's `hermes`, `hermes cron`
+  refused) and `the_computers_python_keeps_what_its_agents_install`
+  (`which python pip`) with the script left in.
+
+## The Hermes image removes Hermes' own Chrome for Testing
+
+- **Shortcut:** Hermes' package manager ships Chrome for Testing (its
+  `chromium`, `/opt/hermes/tools/chromium-1248`, 405 MB) and bakes its path
+  into `/etc/hermes/chromium-executable-path`. Nothing here runs it: each
+  profile names the image's Chromium (`browser.executable_path`), which
+  passes Cloudflare's bot check where Chrome for Testing fails, and its
+  directory stands where Playwright looks for its own Chromium. The image
+  deletes both (images/hermes/Dockerfile), failing the build unless the
+  directory held Chrome for Testing at that path; Hermes' package manager
+  then reports `chromium` outdated.
+- **Risk:** a Hermes path that falls back to its packaged Chromium (a
+  profile without `browser.executable_path`) finds none, and an agent's
+  `hermes` repair could download all 405 MB again into Hermes' store.
+- **Delete when:** upstream's image ships no browser of its own beside a
+  configured one, or its store stops sharing Playwright's directory names,
+  proven by `playwright_runs_the_system_chromium_and_the_small_tools_run`
+  and `a_regular_browser_is_shared_by_the_desktop_and_tools` without the
+  deletion.
 
 ## Hermes' Relay carries no structure for a turn's end or a routine's silence
 
@@ -228,36 +296,67 @@ unfinished design, not debt.
   TUI gateway, and the image uses them, proven by
   `two_agents_two_desktops`.
 
-## The Hermes image adapts Bot Desktop's browser ownership
+## The image's Chromium hides Hermes' automation mark
 
-- **Shortcut:** upstream's dock and tools launch Chromium on CDP port 0,
-  which sets `navigator.webdriver`, and cannot find one on another port,
-  so images/hermes/desktop_browser.py and source replacements guarded by
-  images/hermes/boot/src/desktop.rs run the base's Chromium on a nonzero
-  port through Hermes' start, dock and stop paths.
-- **Risk:** private upstream code changes (the build fails); rolling
-  back past it needs the pre-upgrade save.
-- **Delete when:** a pinned upstream desktop supports regular Chromium
-  with a nonzero CDP port, starts and reattaches it through its own
-  lease fence, and owns its shutdown apart from tool cleanup; then the
-  adapter and replacements go together once
-  `a_regular_browser_is_shared_by_the_desktop_and_tools` and
-  `two_agents_two_desktops` pass against it.
+- **Shortcut:** Hermes starts the desktop's browser (browser_exec's and the
+  Browser icon's) on DevTools port 0, the only port for which Chromium
+  writes the `DevToolsActivePort` file Hermes finds it by, and Chromium
+  marks a port-0 browser automated (`navigator.webdriver` true). The
+  image's Chromium (images/hermes/boot/src/hermes.rs `CHROMIUM_REGULAR`)
+  starts every launch with `--disable-blink-features=AutomationControlled`,
+  which turns that mark off.
+- **Risk:** a launch that passes its own `--disable-blink-features` comes
+  later and wins, and a page sees an automated browser again; a bot check
+  that reads more than `navigator.webdriver` sees no difference this
+  hides.
+- **Delete when:** a pinned Hermes finds its desktop browser on a nonzero
+  port, or Chromium stops marking a port-0 browser, proven by
+  `a_regular_browser_is_shared_by_the_desktop_and_tools` with the flag
+  gone.
 
-## The Hermes image carries two Chromiums
+## The image brings the agent's browser tab to the front
 
-- **Shortcut:** Hermes v0.21.7's browser tools bring Chrome for Testing
-  r1208 (`/opt/hermes/tools/chromium-1208`, 364 MB) beside the system
-  Chromium (`/usr/bin/chromium`, 376 MB), which the desktop, Hermes'
-  browser (desktop_browser.py) and an agent's own Playwright run
-  (images/hermes/Dockerfile). r1208 fails Cloudflare's bot check where
-  the system Chromium passes (Paul's prod agent, 2026-10-28).
-- **Risk:** 364 MB of every image, and a browser an agent could still
-  reach by its path.
-- **Delete when:** the image moves to Hermes v0.22, which drops the
-  browser tools (FIN-305): then the image removes r1208, and the
-  build's Playwright check (both runtimes print a page with the system
-  Chromium) still passes.
+- **Shortcut:** Hermes' browser_exec opens each page after the first in a
+  background tab and brings tabs to the front only on a cloud browser, so
+  as not to switch the tab a person looks at in their own Chrome. On the
+  Bot Desktop that hid the page the agent worked on from the person
+  watching its screen, and a file input clicked there opened no file
+  dialog. hermes-boot changes that one line of
+  `tools/browser_use_cli.py` at the image's build
+  (images/hermes/boot/src/desktop.rs `front_tabs`): on the agent's own
+  desktop browser, tabs come to the front. An exact match: an upstream
+  change fails the build.
+- **Risk:** a capture of a hidden tab brings it to the front, which can
+  switch the tab a person was looking at while they watched without
+  taking over (a person who takes over holds the lease, and browser_exec
+  is refused).
+- **Delete when:** a pinned Hermes brings the Bot Desktop browser's tabs
+  to the front itself, proven by
+  `a_regular_browser_is_shared_by_the_desktop_and_tools` (its second page
+  `visible`) without the change.
+
+## The desktop's idle stop, not Hermes, ends the agent's browser
+
+- **Shortcut:** Hermes' desktop stop ends the desktop's process group or
+  its display under the browser, so the cookies Chromium had not yet
+  written (it writes them every 30 s) were lost; and Hermes' janitor
+  closes a browser browser_exec started once its tool goes unused,
+  counting a Take over but not a person watching. So hermes-boot's idle
+  stop is the only one: Hermes' own idle stops (its gateway's and its
+  desktop launcher's `idle_watch`) are off, `idle_stop_minutes: 0`. It
+  closes the browser first with CDP's `Browser.close`, Chromium's normal
+  shutdown, once CDP names that agent's own browser (its profile resolves
+  to its work's), else with a SIGTERM
+  (images/hermes/boot/src/desktop.rs `close_browser`). And the managed
+  overlay gives the janitor a day (`BROWSER_IDLE_S`).
+- **Risk:** a desktop stopped another way (`hermes computer-use screen
+  stop`, which nothing of ours runs but tests) still loses a page's last
+  30 s of cookies; a browser that will not close in 10 s is stopped with
+  its desktop as before.
+- **Delete when:** a pinned Hermes closes its desktop's browser cleanly
+  before it stops the desktop, and its janitor counts the desktop's own
+  activity, proven by `the_agents_browser_lives_as_long_as_its_desktop`
+  without them.
 
 ## Each agent's Hermes profile config is rewritten at every boot
 
@@ -269,15 +368,21 @@ unfinished design, not debt.
   boot merges them into the profile's config, proven by a setting that
   survives a wake.
 
-## Hermes' direct FAL client reads process credentials, not profile scope
+## A Stop over Hermes' Relay reaches its turn through the image
 
-- **Shortcut:** Hermes' `_submit_fal_request` uses the SDK's global
-  client, keyed from the process, so the image's `tool_keys.py` gives it
-  an explicit-key client per request
-  (`tool_profiles_select_offered_operator_keys`).
-- **Risk:** a change to that private function bypasses it.
-- **Delete when:** Hermes' direct native image path uses an explicit SDK
-  client from its active profile scope, including the result worker.
+- **Shortcut:** Hermes v0.23.2's Relay Stop (`interrupt_inbound`, the
+  bridge's Stop) only sets its adapter's busy-guard event, which nothing
+  watches for a natively admitted turn (every relayed message since
+  v0.22), so the turn ran on. The image's `relay_stop.py` (installed at
+  preload) also stops that session's running turn through the authority
+  that admitted it (`SessionAuthority.interrupt`), as Hermes' own
+  controls stop a native turn.
+- **Risk:** it wraps a private method (`RelayAdapter.on_interrupt`) and
+  finds the session in the authorities' private state; an upstream change
+  could bypass it.
+- **Delete when:** upstream's relay Stop interrupts a natively admitted
+  turn, proven by the Stop in `a_step_says_how_its_call_ended` and in
+  `hermes_waits_out_model_preflight_deploying` without it.
 
 ## Hermes' tool workers can take an ended thread's interrupt
 
@@ -603,6 +708,25 @@ unfinished design, not debt.
   then `scope_images` and `remove` go. Moving `WRANGLER_VERSION` checks
   it.
 
+## A killed celld node's VMs are found by celld's naming
+
+- **Shortcut:** a `celld dev` node reaps its krun engine's VMs when it
+  stops and when it starts again on its project, but a run killed outright
+  (a signal's `kill_started`) gives it no chance, and the engine keeps a VM
+  until told. crates/devstack/src/celld.rs (`Engine::remove`) destroys the
+  project's by the name celld gives them: its node is `dev-` and 12 hex of
+  the SHA-256 of the project's canonical path (the fork's dev.rs), each
+  container `celld-`, 6 hex of the SHA-256 of the node, `-` (its
+  container.rs `node_prefix`).
+- **Risk:** a celld that names them otherwise leaves a killed run's VMs on
+  the engine (its `vms_max` is 16), where its next start does not reap
+  them: each e2e run is a project of its own.
+- **Delete when:** celld reaps a dev node's containers by itself when its
+  supervisor dies, or names them by a label devstack sets; then `remove`
+  and its naming go. devstack's `a_projects_containers_are_named_as_celld_names_them`
+  pins the naming as the fork has it; a celld that moves it must move
+  that test too.
+
 ## A local node's port is a front door of ours, past wrangler's proxy
 
 - **Shortcut:** wrangler's proxy pools connections the runtime closes
@@ -901,7 +1025,7 @@ unfinished design, not debt.
 ## Files depend on code.storage, a hosted service with no self-hosted twin
 
 - **Shortcut:** files live in code.storage through its REST API
-  (cell/src/cs.rs, cli/src/sync.rs); the only twin is the fake.
+  (cell/src/cs.rs, cli/src/sync/); the only twin is the fake.
 - **Risk:** not self-hostable; one outage stops every fragment's files.
 - **Delete when:** a self-hostable service answers the same REST subset
   with the fake's rules as its conformance suite and the e2e passing on
@@ -979,3 +1103,47 @@ unfinished design, not debt.
 - **Delete when:** each batch's commit is made again from main as the
   indexes' is (keeping the newer entry), or the archive moves to an app
   whose mutation writes both.
+
+## The computer's view carries two fixed routes beside the list
+
+- **Shortcut:** the view's `models` keeps `cheap`, `medium`, `fallback`,
+  `vision` and `routes.{cheap,medium}` (fragment_core::models
+  `VIEW_ROUTES`, `Models::ids_by_name`): each the route of that name,
+  else the deployment's default, and the default's fallback and vision.
+  An image's bridge decodes them as required fields.
+- **Risk:** the only place code names a route; an older image runs an
+  agent on a route of any other name on the default, silently.
+- **Delete when:** every deployment's pinned image (production, preview,
+  each self-hosted box's) reads the view's list of routes; then the view
+  drops the two and their fields.
+
+## Model configs of the four-slot shape are read through a converter
+
+- **Shortcut:** xtask reads a deployment's `models` naming `cheap`,
+  `medium`, `fallback` and `vision` as the routes they meant
+  (fragment_core::models `legacy`, deploy.rs `models_cell`); the e2e's
+  configs and most of core's model tests are of that shape.
+- **Risk:** two shapes of one config; an error names `models.slots.<x>`
+  for a file that wrote `models.<x>`.
+- **Delete when:** fragment-deploy's `preview.jsonc` and
+  `production.jsonc`, deploy/example.jsonc, docs/self-host.md and the
+  e2e's configs name routes; then `legacy` goes and its tests read lists.
+
+## An older bridge reads the state's snapshot, not its log
+
+- **Shortcut:** the bridge appends each step's change to `state.log`
+  beside `state.json` (`images/bridge/src/store.rs`). A bridge from
+  before the log reads `state.json` alone. A save under an answered hold
+  holds the state whole in `state.json`, because the answer waits for
+  the log to be written into it. A rollback from such a save loses
+  nothing. Two kinds of `/data` can still hold steps in the log only: a
+  save whose hold went unanswered (the DO saves anyway after
+  `HOLD_WAIT_MS`), and a `/data` a container kept without a save (a
+  self-hosted node after a crash). An older bridge starts from the
+  snapshot, as of the last compaction, at most the log's room behind.
+- **Risk:** that older bridge goes back to the snapshot, as a restore
+  of an earlier save does. It reads those chats again and runs nothing
+  twice (P1), since the journal is the authority. It misreads nothing:
+  the snapshot is in the format it wrote.
+- **Delete when:** no computer can be pinned to an image whose bridge
+  predates the log.

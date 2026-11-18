@@ -147,11 +147,11 @@ computers) returns once this product works.
     counting each call by agent and month. Gmail needs Google's
     verification (CASA) past 100 people.
 23. **Models through the platform's route,** on AI Gateway with zero data
-    retention and its logs off. Tiers: `cheap` (the default) and `medium`;
-    `high` is off until Cloudflare raises Unified Billing's Opus limit,
+    retention and its logs off. Routes are the deployment's list (61);
+    Opus stays off until Cloudflare raises Unified Billing's Opus limit,
     with no key of our own on AI Gateway and no sharding to get round
     it (a person's own key is 60's). `vision` is for image calls and is
-    no tier. A call that fails before answering is made once more on its
+    no route. A call that fails before answering is made once more on its
     fallback; an answer that began is final. A call that answers nothing
     is the runtime's to give up on. Jobs ask typed decisions on the Clef
     family.
@@ -304,12 +304,15 @@ computers) returns once this product works.
     (`models::CLIENT_KEYS`) and the slot's `body`. An OpenRouter slot is
     priced at its ceiling (`max_price`), refused without one; a slot on
     another API at the list price it names (`price`). The platform's own
-    key trouble falls back like a 5xx. A tier slot's `label` names the
-    route Settings offers for it (Private, Standard), picked per agent as
-    its tier. A private tier's every slot must be private, and never
-    falls back to one that is not. Finite Private
-    is priced as Workers AI's GLM-5.3 Flash, so a person pays the same
-    whichever answered.
+    key trouble falls back like a 5xx. The routes people pick are the
+    config's ordered list (Paul, 2026-11-17: "we don't want to hardcode
+    what they all mean"): each a name agents store, a label Settings
+    shows (Private, Standard), its slot, vision and Deep, one the
+    default; nothing in code reads a route's name for its meaning. A
+    private route's every slot must be private, and never falls back to
+    one that is not. Finite Private
+    is priced as Workers AI's GLM-5.3 Flash was ($0.15 in, $0.50 out a
+    million tokens; retired there on 2026-11-20).
 
 ### Billing never stops an agent
 

@@ -41,13 +41,13 @@ const TRIGGERS_JSON: &[u8] = br#"{
   "channels": { "pings": { "read": "viewer", "post": "editor" } },
   "triggers": [{ "cron": "0 0 1 1 *", "run": "tick" }, { "files": "notes/**", "run": "filed" }]
 }"#;
-/// GLM-5.3 Flash: the cheap tier's model and the route's vision model
+/// DeepSeek V4.1 Flash: the cheap tier's model and the route's vision model
 /// (fragment_core::models::CHEAP_MODEL, VISION_MODEL_DEFAULT).
-const CHEAP: &str = "@cf/zai-org/glm-5.3-flash";
+const CHEAP: &str = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 const VISION: &str = CHEAP;
-/// The route's fallback, DeepSeek V4 Flash
+/// The route's fallback, Inkling 2 Small
 /// (fragment_core::models::FALLBACK_MODEL_DEFAULT).
-const FALLBACK: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
+const FALLBACK: &str = "@cf/thinkingmachines/inkling-2-small";
 /// The model route, as an agent calls it (its computer's model intercept).
 const MODEL_ROUTE: &str = "/api/models/v1/chat/completions";
 /// The ids the model route takes (`fragment_core::models::Models::listed`).
@@ -133,10 +133,10 @@ pub(super) fn ids_masked(text: &str) -> String {
 /// (prompt 40, cached 10, completion 30), ids masked: usage dropped from
 /// each chunk with choices, its last line OpenAI's last chunk.
 const STREAMED_WORKERS_AI: &str = "\
-    data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
-    data: {\"choices\":[{\"delta\":{\"content\":\"echo: hello\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
-    data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
-    data: {\"choices\":[],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":0,\"prompt_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":0}}\n\n\
+    data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/deepseek-ai/deepseek-v4.1-flash-1017\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{\"content\":\"echo: hello\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/deepseek-ai/deepseek-v4.1-flash-1017\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/deepseek-ai/deepseek-v4.1-flash-1017\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/deepseek-ai/deepseek-v4.1-flash-1017\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":0,\"prompt_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":0}}\n\n\
     data: {\"choices\":[],\"id\":\"fake#\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":30,\"neurons\":1.8,\"prompt_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":10},\"total_tokens\":70}}\n\n\
     data: [DONE]\n\n";
 
@@ -868,9 +868,11 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     );
     gate_waits_on_no_ledger(s, api, &hand, &owner_id)?;
     cap_mid_stream(s, api, wait)?;
+    reads_write_nothing(s, api, &operator)?;
+    racing_calls(s, api, wait)?;
     fallback(s, api, &hand, &owner_id, wait)?;
     let r = api.signed(&hand, "POST", route, Some(&json!({ "model": "high", "messages": [{ "role": "user", "content": "hi" }] })))?;
-    s.ok("the high tier is refused, saying why (decision 23)", r.status == 400 && r.message().contains("high tier is off"), &r);
+    s.ok("a model that is no route's and no model's id (high) is refused, naming those it may (400)", r.status == 400 && r.message().contains("GET /v1/models lists them"), &r);
     by_id(s, api, &hand, &owner, &owner_id, wait)?;
     vision(s, api, wait)?;
     transcription(s, api, wait)?;
@@ -1010,7 +1012,7 @@ fn by_id(s: &mut Suite, api: &Api, hand: &Keys, owner: &Keys, owner_id: &str, wa
         &r,
     );
     let r = api.call(Call { method: "POST", url: format!("{}{MODEL_ROUTE}", api.base), body: Some(say(GLM).to_string().into_bytes()), content_type: Some("application/json"), keys: Some(hand), extra: vec![("x-fragment-tier", "cheapest".into())], ..Call::default() })?;
-    s.ok("a tier said that is none is refused (400)", r.status == 400 && r.message().contains("x-fragment-tier names a tier"), &r);
+    s.ok("a route said that is none is refused, naming the routes (400)", r.status == 400 && r.message().contains("x-fragment-tier names one of this deployment's routes: cheap, medium"), &r);
     let r = api.signed(hand, "GET", MODELS_ROUTE, None)?;
     let listed: Vec<&str> = r.body["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
     s.ok(
@@ -1097,10 +1099,105 @@ fn cap_mid_stream(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     Ok(())
 }
 
+/// What a ledger has written (the `writes` lever): its rows since its
+/// activation began, as SQLite counts them, and whether it holds a head.
+fn writes(api: &Api, identity: &str) -> Result<Value> {
+    let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "writes" })))?;
+    anyhow::ensure!(r.status == 200 && r.body["rows"].is_u64(), "the writes lever on {identity}: {r}");
+    Ok(r.body)
+}
+
+/// A read writes nothing (F14): a ledger's first call makes it, writing
+/// its head; after that its gate (`may-spend`) and its status read the
+/// head as last written and answer, writing no row, head or alarm. Its
+/// person has no fragment, so nothing of theirs is metered while it is
+/// counted, and is a guest, whose creates their ledger's gate refuses,
+/// asked each time (a create's gate keeps no answer).
+fn reads_write_nothing(s: &mut Suite, api: &Api, operator: &Keys) -> Result<()> {
+    let reader = api.person()?;
+    let reader_id = api.identity(&reader)?;
+    let unmade = writes(api, &reader_id)?;
+    let first = ledger(api, &reader);
+    let made = writes(api, &reader_id)?;
+    s.ok(
+        "a ledger's first call, a read of its status, makes it: its head written, a new person's default plan (a seat here)",
+        unmade["head"] == false && made["head"] == true && made["rows"].as_u64() > unmade["rows"].as_u64() && first["plan"] == "seat",
+        json!({ "unmade": unmade, "made": made, "first": first }),
+    );
+    let guest = api.signed(operator, "POST", &format!("/api/ledger/{reader_id}/plan"), Some(&json!({ "id": "reader-guest", "plan": "guest" })))?;
+    anyhow::ensure!(guest.status == 200, "the reader made a guest: {guest}");
+    let name = s.named(api, &reader, "ledger-reader")?;
+    let before = writes(api, &reader_id)?;
+    let mut answers = Vec::new();
+    // bounded: three of each
+    for _ in 0..3 {
+        let create = api.create(&reader, &name)?;
+        answers.push((create.status, create.error().to_string(), ledger(api, &reader)));
+    }
+    let after = writes(api, &reader_id)?;
+    let refused = answers.iter().all(|(status, error, _)| *status == 403 && error == "forbidden");
+    let same = answers.iter().all(|(_, _, read)| *read == answers[0].2) && answers[0].2["plan"] == "guest";
+    s.ok(
+        "then its reads write nothing: three creates its gate refuses (`may-spend`) and three reads of its status leave every row as it was, each answering as the first",
+        refused && same && after["rows"] == before["rows"] && after["head"] == true,
+        json!({ "before": before, "after": after, "answers": answers.iter().map(|(status, _, read)| json!([status, read])).collect::<Vec<_>>() }),
+    );
+    // its alarm lost (a sweep that failed, its retry unset too): the sweep
+    // rolls each month, and a month's credit pays a debt, so a read sets it
+    // again, as a change would
+    let lost = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": reader_id, "op": "lose-alarm" })))?;
+    let without = writes(api, &reader_id)?;
+    let read = ledger(api, &reader);
+    let with = writes(api, &reader_id)?;
+    s.ok(
+        "a ledger whose alarm was lost has it set again by its next read, so its sweep still rolls each month; the read answers as before",
+        lost.status == 200 && without["alarm"] == false && with["alarm"] == true && read == answers[0].2,
+        json!({ "without": without, "with": with, "read": read }),
+    );
+    Ok(())
+}
+
+/// Two paid calls racing (F14: the gate reads, writing nothing): a
+/// payer's agent's two model calls at once, the gate cold, the payer's
+/// ledger asked beside each, are each charged once, and the balance moves
+/// by both charges and nothing else.
+fn racing_calls(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    let payer = api.person()?;
+    let payer_id = api.identity(&payer)?;
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&payer, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &payer) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the payer's: {r}");
+    let before = ledger(api, &payer);
+    forget_gate(api, &payer_id)?;
+    let call = || api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()));
+    let (a, b) = std::thread::scope(|t| {
+        let a = t.spawn(call);
+        let b = t.spawn(call);
+        (a.join().expect("a racing call's thread"), b.join().expect("a racing call's thread"))
+    });
+    let (a, b) = (a?, b?);
+    let aig = || entries(api, &payer_id, "aig:");
+    let both = s.eventually(wait, || aig().len() == 2);
+    let charges: Vec<i64> = aig().iter().filter_map(charged).collect();
+    let after = ledger(api, &payer);
+    s.ok(
+        "two paid calls racing, the gate cold and the payer's ledger asked beside each: each is charged once, and the balance moves by both charges and nothing else",
+        a.status == 200
+            && b.status == 200
+            && both
+            && charges.len() == 2
+            && charges.iter().all(|c| *c > 0)
+            && m(&before, "balanceMicros") - m(&after, "balanceMicros") == charges.iter().sum::<i64>(),
+        json!({ "calls": [a.status, b.status], "charges": charges, "before": before, "after": after }),
+    );
+    Ok(())
+}
+
 /// The route's fallback (Paul, 2026-10-08): a call whose model fails before
 /// answering (Workers AI's 502 "could not route request to AI model", as
 /// GLM-5.3 Flash answered every call for five minutes on 2026-10-09) is
-/// made once more, the same, on the fallback model, DeepSeek V4 Flash, and
+/// made once more, the same, on the fallback model, Inkling 2 Small, and
 /// charged once at the fallback's prices; when the fallback fails too, its
 /// failure is the call's, after two tries and no more, and nothing is
 /// charged; a refusal of the request is never tried again.
@@ -1119,7 +1216,7 @@ fn fallback(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str, wait: Duratio
         new.len() == before + 1 && new.iter().filter(|e| charged(e) == Some(fell)).count() == 1
     });
     s.ok(
-        "a call whose model is down is made once more, the same, on the fallback model (DeepSeek V4 Flash), which answers it",
+        "a call whose model is down is made once more, the same, on the fallback model (Inkling 2 Small), which answers it",
         r.status == 200
             && r.body["choices"][0]["message"]["content"] == "echo: hello"
             && tried(s, calls) == [CHEAP, FALLBACK]
@@ -1189,7 +1286,7 @@ fn png_url(bytes: usize) -> String {
 }
 
 /// The model route's `vision` (Paul, 2026-10-05): the deployment's vision
-/// model, GLM-5.3 Flash unless its config names another, for a runtime's
+/// model, DeepSeek V4.1 Flash unless its config names another, for a runtime's
 /// calls about an image (Hermes' screenshots: the hermes lane drives one),
 /// metered on the payer's ledger as any call; and a call as large as
 /// Hermes' shrunk screenshot fits the route, one past its cap refused
@@ -1215,7 +1312,7 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let priced = charge(&tokens(VISION, 1_200, 0, 40));
     let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(priced)));
     s.ok(
-        "`vision` runs the deployment's vision model (GLM-5.3 Flash by default), the image as it was sent, and is charged on its payer's ledger",
+        "`vision` runs the deployment's vision model (DeepSeek V4.1 Flash by default), the image as it was sent, and is charged on its payer's ledger",
         r.status == 200 && shown && settled,
         json!({ "status": r.status, "model": call.as_ref().map(|c| c.model.clone()), "entries": aig().len() - before }),
     );

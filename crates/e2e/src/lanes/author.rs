@@ -786,6 +786,89 @@ fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Re
     Ok(())
 }
 
+/// `fragment archive`, `unarchive` and `rm` (Paul, 2026-11-17): archiving
+/// is the caller's own list's, and unarchiving brings it back; `rm` is its
+/// owner's alone, a script's as before (no terminal, no question), and at
+/// a terminal only once its name is typed back.
+fn archive_rm_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Result<()> {
+    let row = |name: &str| -> Result<Value> {
+        let r = api.signed(keys, "GET", "/api/fragments", None)?;
+        Ok(r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name).cloned()).unwrap_or(Value::Null))
+    };
+    let name = s.named(api, keys, "cli-shelved")?;
+    s.cli_json(api, home, &["create", &name, "--template", "blank", "--json"])?;
+    let archived = s.cli_json(api, home, &["archive", &name, "--json"])?;
+    let listed = row(&name)?;
+    let unarchived = s.cli_json(api, home, &["unarchive", &name, "--json"])?;
+    let back = row(&name)?;
+    s.ok(
+        "fragment archive archives it in the caller's own list, and fragment unarchive brings it back",
+        archived == json!({ "name": name, "archived": true }) && listed["archived"] == true && unarchived == json!({ "name": name, "archived": false }) && back["archived"] != true && back["name"] == name.as_str(),
+        json!({ "archived": archived, "listed": listed, "unarchived": unarchived, "back": back }),
+    );
+
+    // someone else's CLI: refused, and nothing deleted
+    let other = s.dir("cli-home-other");
+    s.login(api, &other);
+    let out = s.cli(api, &other, &["rm", &name, "--yes", "--json"]);
+    let refused: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let kept = api.status(keys, &name)?;
+    s.ok(
+        "fragment rm by anyone but its owner is refused, and deletes nothing",
+        out.status.code() == Some(1) && ["forbidden", "not_found"].contains(&refused["error"]["code"].as_str().unwrap_or_default()) && kept.status == 200,
+        json!({ "refused": refused, "status": kept.status }),
+    );
+
+    // a script (no terminal) is not asked, as before
+    let gone = s.cli_json(api, home, &["rm", &name, "--json"])?;
+    let after = api.status(keys, &name)?;
+    s.ok(
+        "fragment rm from a script (no terminal) deletes its owner's fragment unasked, as before: 404 after, out of their list",
+        gone == json!({ "deleted": true, "name": name }) && after.status == 404 && row(&name)?.is_null(),
+        json!({ "rm": gone, "status": after.status }),
+    );
+
+    // at a terminal (util-linux `script` gives the CLI one): only its name
+    // typed back deletes it
+    if !cfg!(target_os = "linux") {
+        return Ok(());
+    }
+    let asked = s.named(api, keys, "cli-asked")?;
+    s.cli_json(api, home, &["create", &asked, "--template", "blank", "--json"])?;
+    let at_terminal = |typed: &str| -> Result<(Option<i32>, String)> {
+        let mut child = std::process::Command::new("script")
+            .args(["-qec", &format!("'{}' rm {asked}", s.cli.display()), "/dev/null"])
+            .env("HOME", home)
+            .env("FRAGMENT_HOST", &api.base)
+            .env_remove("FRAGMENT_OUTPUT")
+            .env_remove("XDG_CONFIG_HOME")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child.stdin.take().expect("its stdin is piped").write_all(typed.as_bytes())?;
+        let out = child.wait_with_output()?;
+        Ok((out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned()))
+    };
+    let (wrong_exit, wrong) = at_terminal("Cli asked\n")?;
+    let still = api.status(keys, &asked)?;
+    let (right_exit, right) = at_terminal(&format!("{asked}\n"))?;
+    let after = api.status(keys, &asked)?;
+    s.ok(
+        "fragment rm at a terminal asks for its name typed back: anything else deletes nothing (exit 2); its name deletes it, saying the repo's history stays",
+        wrong_exit == Some(2)
+            && wrong.contains(&format!("Type {asked} to delete it"))
+            && wrong.contains("nothing deleted")
+            && still.status == 200
+            && right_exit == Some(0)
+            && right.contains(&format!("deleted {asked} for everyone in it"))
+            && right.contains("repo's history stays")
+            && after.status == 404,
+        json!({ "wrong": [wrong_exit, wrong, still.status], "right": [right_exit, right, after.status] }),
+    );
+    Ok(())
+}
+
 pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("cli", &[]) {
         return Ok(());
@@ -835,6 +918,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let keys = s.cli_keys(&home).expect("the CLI logged in");
     apps_cli(s, api, &home, &keys)?;
+    archive_rm_cli(s, api, &home, &keys)?;
     let (name, c) = chat(s, api, &keys, "cli")?;
     let r = s.cli_json(api, &home, &["call", &name, "say", "--input", r#"{"text":"from the cli"}"#, "--id", "cli-1", "--json"])?;
     s.ok("fragment call runs an operation", r["result"]["id"] == 1 && r["replayed"] == false, &r);

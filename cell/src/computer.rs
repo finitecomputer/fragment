@@ -27,15 +27,16 @@
 //!   names the agent (`swap::TagKey`). A request to a provider's host has
 //!   its placeholders swapped for the credentials (`egress_swap`,
 //!   decisions 22 and 37), which this cell resolves: for the agent the tag
-//!   names, among those that run here now (any of its owner's providers,
-//!   unless its owner narrowed them: decision 44); a connection's token
+//!   names, among those that run here now, as its fragment says at each
+//!   request what it may use (any of its owner's providers, unless they
+//!   narrowed them: decision 44; `fragment_core::grants`, which this
+//!   computer keeps no copy of); a connection's token
 //!   from WorkOS Pipes, asked for each request; an operator
 //!   key, metered; an own key its owner gave, sealed here. Each call a
 //!   provider answered is counted by agent and month (`uses`).
-//! - **Its agents' new fragments** (`computer/joined`, from a fragment an
-//!   agent of its was added to): the agent's own fragment posts `joined`
-//!   on its `tasks`, and the fragment that added it then wakes the
-//!   computer (`Wake::Joined`; docs/computers.md).
+//! - **Its agents' new fragments**: the fragment an agent of its was added
+//!   to tells the agent's own fragment, which posts `joined` on its `tasks`
+//!   and names this computer, and then wakes it (`Wake::Joined`; runs_on.rs).
 //! - **A wipe of its owner** (docs/api.md, Operators: `computer/wipe`)
 //!   marks it wiped before anything else, destroys its container, deletes
 //!   every save from R2 (each record, then whatever else is under its saves'
@@ -51,14 +52,15 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
-use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
+use fragment_core::ledger::{MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
+use fragment_core::grants::{self, Grants};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind, Reason};
 use futures_util::StreamExt;
@@ -274,6 +276,7 @@ const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep
 const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold and the disk's read after it fit the one alarm they run in");
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
+const _: () = assert!(ALARM_WALL_MS + ALARM_OTHER_MS < ALARM_LATE_MS, "an alarm held up behind one alarm's run is on time, metered as it was");
 /// The largest request body the egress signs and hands on (it is hashed
 /// for NIP-98 first, so it is read whole). A blob's upload is not read: it
 /// streams through (`egress_api`), at most the router's
@@ -347,6 +350,10 @@ enum MetaKey {
     /// The test lever's takeover destroys still to fail
     /// (`fail-takeover-destroys`).
     FailTakeOverDestroys,
+    /// The rows from before the grants' move its agents' fragments had not
+    /// taken when step 6 dropped them (`fragment_core::grants::Owed`): each
+    /// handed over at its agent's next ask, then forgotten. None owed, no row.
+    GrantsOwed,
 }
 
 impl MetaKey {
@@ -373,6 +380,7 @@ impl MetaKey {
             MetaKey::FailStarts => "fail_starts",
             MetaKey::StallTakeOver => "stall_take_over",
             MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
+            MetaKey::GrantsOwed => "grants_owed",
         }
     }
 }
@@ -542,6 +550,9 @@ fn wiped_computer() -> CellError {
 #[derive(Deserialize)]
 struct WakeBody {
     why: Wake,
+    /// When the record (or the join's notice) that brings it was posted.
+    #[serde(default)]
+    at: Option<i64>,
 }
 
 /// `computer/export`: its owner's export asks for the save it copies.
@@ -578,15 +589,9 @@ struct Unassign {
     identity: Option<String>,
 }
 
-/// What an agent may have swapped in, as `agents.connections` keeps it.
-fn stored_connections(text: &str, fragment: &str) -> CellResult<Option<Vec<String>>> {
-    crate::json_text(text).map_err(|e| CellError::host(format!("{fragment}'s stored connections {text:?}: {e}")))
-}
-
-/// Whether an agent narrowed to `narrowed` may use `provider`.
-fn may_use(narrowed: &Option<Vec<String>>, provider: &str) -> bool {
-    narrowed.as_ref().is_none_or(|list| list.iter().any(|p| p == provider))
-}
+/// A view whose agents' grants are not yet asked of their fragments: each
+/// reads as none until `asked` fills them in, and none goes out unasked.
+struct Unasked(ComputerView);
 
 /// `computer/credentials`' body: the placeholders a request to `host`
 /// carries, each its provider and tag (the egress planned them).
@@ -654,15 +659,6 @@ struct OwnKeysAsk {
     accounts: Option<BTreeMap<String, Vec<Held>>>,
 }
 
-/// `computer/joined`'s body: the agent `identity` was added to `fragment`,
-/// its membership made at `at` (which keys the notice: runs_on.rs).
-#[derive(Deserialize)]
-struct JoinedAsk {
-    identity: String,
-    fragment: String,
-    at: i64,
-}
-
 #[derive(Deserialize)]
 struct Pin {
     image: String,
@@ -719,6 +715,13 @@ struct TestLever {
     /// `clock`'s: how far its uses' months are moved.
     #[serde(default, rename = "offsetMs")]
     offset_ms: Option<i64>,
+    /// `legacy-grants`': the agent fragment whose row it reads or writes.
+    #[serde(default)]
+    agent: Option<String>,
+    /// `legacy-grants`': the row it makes owed, as step 6 keeps it:
+    /// `connections` as stored, `accounts` provider → id.
+    #[serde(default)]
+    row: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -765,9 +768,16 @@ impl ComputerCell {
 
     fn lifecycle(&self) -> CellResult<Lifecycle> {
         match self.meta(MetaKey::Lifecycle)? {
-            // this release's, or the previous one's (`Lifecycle::read`, which
-            // reads its bytes, as `crate::json_text` does)
-            Some(text) => Lifecycle::read(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
+            Some(text) => {
+                let (life, old) = Lifecycle::read(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}")))?;
+                // its phase filled from the flags a release before FIN-395 C
+                // kept: the debt goes once these lines stop
+                // (docs/technical-debt-ledger.md)
+                if old {
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lifecycle_old_flags": life.phase }));
+                }
+                Ok(life)
+            }
             None => Ok(Lifecycle::new()),
         }
     }
@@ -861,7 +871,7 @@ impl ComputerCell {
 
     /// `drive_with`, its answer taken as its start is owed when `answer` is
     /// asked for (an owner's restart: `drive_events`).
-    async fn drive_answering(&self, first: Option<Event>, asked: bool, mut answer: Option<&mut Option<ComputerView>>) -> CellResult<Option<String>> {
+    async fn drive_answering(&self, first: Option<Event>, asked: bool, mut answer: Option<&mut Option<Unasked>>) -> CellResult<Option<String>> {
         let told = self.notices()?;
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
@@ -1037,7 +1047,7 @@ impl ComputerCell {
     /// first, so an owner's restart answers `starting` on every path, its
     /// owner's notification however slow (Codex on #1053: the alarm could
     /// make the start and its `Ready` while the request awaited that).
-    async fn drive_events(&self, first: Option<Event>, mut answer: Option<&mut Option<ComputerView>>) -> CellResult<Option<String>> {
+    async fn drive_events(&self, first: Option<Event>, mut answer: Option<&mut Option<Unasked>>) -> CellResult<Option<String>> {
         let mut queue: Vec<Event> = first.into_iter().collect();
         if let Some(exited) = self.take_over().await? {
             // the event that brought this isolate up applies after the exit
@@ -1081,7 +1091,7 @@ impl ComputerCell {
             }
             if let Some(slot) = answer.as_deref_mut().filter(|slot| slot.is_none()) {
                 if life.starting(js::now_ms()) {
-                    *slot = Some(self.view()?);
+                    *slot = Some(self.view_unasked()?);
                 }
             }
             self.alarm_at(step.alarm_ms).await?;
@@ -1262,7 +1272,7 @@ impl ComputerCell {
         let life = self.lifecycle()?;
         if !life.restarts(asked) {
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": asked, "made": "already", "generation": life.generation() }));
-            return self.view();
+            return self.view().await;
         }
         if !matches!(life.phase, Phase::Starting { .. }) {
             // the start under way is the restart's, asked of no ledger again
@@ -1274,7 +1284,10 @@ impl ComputerCell {
         // that never was (a sleep under way, now the restart's) as it ends
         let mut answer = None;
         self.drive_answering(Some(Event::Restart { generation: asked }), false, Some(&mut answer)).await?;
-        answer.map_or_else(|| self.view(), Ok)
+        match answer {
+            Some(unasked) => self.asked(unasked).await,
+            None => self.view().await,
+        }
     }
 
     /// Sends the awake intervals the ledger has not taken to the owner's
@@ -1292,27 +1305,21 @@ impl ComputerCell {
         let intervals: Vec<(i64, i64)> = rows.iter().filter_map(|r| Some((r["from_ms"].as_i64()?, r["to_ms"].as_i64()?))).collect();
         let Some((first, _)) = intervals.first().copied() else { return Ok(()) };
         let last = intervals.last().map_or(first, |(from, _)| *from);
-        let meter_rows = intervals
-            .iter()
-            .filter(|(from, to)| to > from)
-            .map(|(from, to)| MeterRow {
-                reference: format!("awake:{id}:{from}"),
-                usage: Usage::Awake { instance: fragment_core::price::INSTANCE.into(), ms: (to - from) as u64 },
-                fragment: None,
-                agent: None,
-                computer: Some(id.clone()),
-                at_ms: *to,
-            })
-            .collect::<Vec<_>>();
-        if !meter_rows.is_empty() {
-            let meter = Meter { batch: format!("awake:{id}:{first}-{last}"), rows: meter_rows };
+        let (meter, too_long) = awake_batch(&id, &intervals);
+        if let Some(meter) = meter {
             let metered = crate::ledger::ask(&self.env, &owner, &meter).await.map_err(CellError::from)?;
             for r in &metered.refused {
                 // a row the ledger refused changed nothing there: it is logged, not kept
                 console_error!("{}", json!({ "computer": id, "awake": meter.rows.get(r.index as usize).map(|m| &m.reference), "refused": r.why }));
             }
         }
-        self.exec("DELETE FROM awake WHERE from_ms >= ? AND from_ms <= ?", vec![first.into(), last.into()])
+        self.exec("DELETE FROM awake WHERE from_ms >= ? AND from_ms <= ?", vec![first.into(), last.into()])?;
+        // charged nothing (`AWAKE_ROW_MAX_MS`): logged once, as it was
+        // deleted with its batch, to find the path that metered it
+        for (from_ms, to_ms) in too_long {
+            console_error!("{}", json!({ "computer": id, "payer": owner, "awake_not_charged": { "from_ms": from_ms, "to_ms": to_ms } }));
+        }
+        Ok(())
     }
 
     /// The hosts the swap intercepts: every provider's in the catalog (an
@@ -1976,37 +1983,118 @@ impl ComputerCell {
         }
     }
 
+    /// Its agents as it keeps them, unasked what each may use: none, until
+    /// `asked` asks each one's fragment.
     fn agents(&self) -> CellResult<Vec<ComputerAgent>> {
-        let rows = self.rows("SELECT fragment, identity, owner, connections FROM agents ORDER BY added_at", vec![])?;
+        let rows = self.rows("SELECT fragment, identity, owner FROM agents ORDER BY added_at", vec![])?;
         assert!(rows.len() as u64 <= AGENTS_MAX, "a computer runs at most AGENTS_MAX agents");
-        let mut agents = Vec::with_capacity(rows.len());
+        let unasked = Grants::none();
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
+                let label = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
+                ComputerAgent {
+                    identity: r["identity"].as_str().unwrap_or_default().to_string(),
+                    owner: r["owner"].as_str().unwrap_or_default().to_string(),
+                    model_providers: vec![],
+                    accounts: unasked.accounts.clone(),
+                    fragment,
+                    label,
+                    connections: unasked.connections.clone(),
+                    credentials: vec![],
+                    key: None,
+                }
+            })
+            .collect())
+    }
+
+    /// The view, each agent's grants asked of its fragment (`grants_of`):
+    /// one that does not answer is logged, and shown as it is used
+    /// meanwhile, with no provider.
+    async fn asked(&self, Unasked(mut view): Unasked) -> CellResult<ComputerView> {
         let own = self.own_key_names()?;
-        // at most an agent's row a provider, for each agent
-        let mut picks: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-        for r in self.rows("SELECT agent, provider, account FROM agent_accounts", vec![])? {
-            let (agent, provider, account) = (r["agent"].as_str(), r["provider"].as_str(), r["account"].as_str());
-            if let (Some(agent), Some(provider), Some(account)) = (agent, provider, account) {
-                picks.entry(agent.to_string()).or_default().insert(provider.to_string(), account.to_string());
+        let asked = futures_util::future::join_all(view.agents.iter().map(|a| self.grants_of(&a.fragment, &a.identity, None))).await;
+        let id = view.computer.clone();
+        for (agent, grants) in view.agents.iter_mut().zip(asked) {
+            let grants = grants.unwrap_or_else(|e| {
+                console_error!("{}", json!({ "computer": id, "agent": agent.fragment, "grants": "unasked", "error": e.message }));
+                Grants::none()
+            });
+            agent.model_providers = self.cfg.providers.model_providers(&own, grants.connections.as_deref());
+            agent.connections = grants.connections;
+            agent.accounts = grants.accounts;
+        }
+        Ok(view)
+    }
+
+    /// What agent fragment `fragment` (its agent `identity`) may use, asked
+    /// of it, with its owner's change when they make one (its fields:
+    /// runs_on.rs `grants`). While this computer owes it the row it kept
+    /// before the move (`owed`), the ask carries it (`taken`); once
+    /// answered, it is forgotten. A fragment holding grants of its own
+    /// ignores a row, so one sent late or again changes nothing
+    /// (`grants::answered`). A row kept for another agent of that name (its
+    /// fragment made again since) is no one's to take, and goes.
+    async fn grants_of(&self, fragment: &str, identity: &str, change: Option<(&str, Value)>) -> CellResult<Grants> {
+        let owed = self.owed()?.0.remove(fragment);
+        let taken = owed.as_ref().filter(|(kept_for, _)| kept_for == identity).map(|(_, row)| row.value());
+        let mut ask = json!({ "computer": self.must(MetaKey::Id)?, "identity": identity, "taken": taken });
+        if let Some((owner, change)) = change {
+            ask["owner"] = json!(owner);
+            for (k, v) in change.as_object().into_iter().flatten() {
+                ask[k] = v.clone();
             }
         }
-        for r in rows {
-            let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
-            let label = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
-            // a stored value that does not read is a host fault, never "all"
-            let connections = stored_connections(r["connections"].as_str().unwrap_or_default(), &fragment)?;
-            agents.push(ComputerAgent {
-                identity: r["identity"].as_str().unwrap_or_default().to_string(),
-                owner: r["owner"].as_str().unwrap_or_default().to_string(),
-                model_providers: self.cfg.providers.model_providers(&own, connections.as_deref()),
-                accounts: picks.remove(&fragment).unwrap_or_default(),
-                fragment,
-                label,
-                connections,
-                credentials: vec![],
-                key: None,
-            });
+        let grants = self.ask_grants(fragment, &ask).await?;
+        if owed.is_some() {
+            self.forget_owed(fragment)?;
         }
-        Ok(agents)
+        Ok(grants)
+    }
+
+    async fn ask_grants(&self, fragment: &str, ask: &Value) -> CellResult<Grants> {
+        let grants: Grants = crate::routed::ask_object(&self.env, "FRAGMENT", fragment, "computer/grants", ask).await?;
+        Some(grants).filter(Grants::valid).ok_or_else(|| CellError::host(format!("{fragment} answered grants no agent may hold")))
+    }
+
+    /// The rows it owes its agents' fragments (`MetaKey::GrantsOwed`).
+    fn owed(&self) -> CellResult<grants::Owed> {
+        match self.meta(MetaKey::GrantsOwed)? {
+            Some(stored) => grants::Owed::read(&stored, AGENTS_MAX as usize).map_err(|e| CellError::host(format!("its owed grants: {e}"))),
+            None => Ok(grants::Owed::default()),
+        }
+    }
+
+    /// `fragment`'s owed row forgotten (read again: an ask may have answered
+    /// meanwhile); the last one, its row too. Logged with how many are left
+    /// (`grants_owed`), so production says when none is.
+    fn forget_owed(&self, fragment: &str) -> CellResult<()> {
+        let mut owed = self.owed()?;
+        if owed.0.remove(fragment).is_none() {
+            return Ok(());
+        }
+        match owed.stored() {
+            Some(stored) => self.set_meta(MetaKey::GrantsOwed, &stored)?,
+            None => self.delete_meta(MetaKey::GrantsOwed)?,
+        }
+        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "grants_owed": owed.0.len(), "forgot": fragment }));
+        Ok(())
+    }
+
+    /// Hands `fragment`'s owed row to its fragment before its agent leaves
+    /// here: its fragment keeps what it may use, should it run here again.
+    /// A fragment gone, or made again since, has no one to take it, and
+    /// `unassign` forgets it.
+    async fn hand_over(&self, fragment: &str) -> CellResult<()> {
+        if !self.owed()?.0.contains_key(fragment) {
+            return Ok(());
+        }
+        let Ok(identity) = self.runs(fragment) else { return Ok(()) };
+        match self.grants_of(fragment, &identity, None).await {
+            Err(e) if !matches!(e.code, ErrorCode::NotFound | ErrorCode::Forbidden) => Err(e),
+            _ => Ok(()),
+        }
     }
 
     /// Its bridge said its image does SimpleX: of the image its running
@@ -2048,7 +2136,7 @@ impl ComputerCell {
     /// operator key the deployment holds, an own key its owner gave; none
     /// its owner narrowed it from), each a placeholder naming the agent.
     async fn guest_view(&self) -> CellResult<ComputerView> {
-        let mut view = self.view()?;
+        let mut view = self.view().await?;
         // what its owner is told is theirs (its guest reads `restored`)
         view.notices = vec![];
         // what its XFTP relay carries: its bridge sends its core's files through it
@@ -2083,7 +2171,7 @@ impl ComputerCell {
         let own = self.own_key_names()?;
         for agent in &mut view.agents {
             for p in catalog.providers() {
-                if !may_use(&agent.connections, &p.name) {
+                if !grants::allows(agent.connections.as_deref(), &p.name) {
                     continue;
                 }
                 let available = match p.kind {
@@ -2175,13 +2263,6 @@ impl ComputerCell {
         let connected = held.iter().any(|a| a.state == ProviderState::Connected);
         drop(accounts);
         self.note_state(provider, if connected { ProviderState::Connected } else { state });
-    }
-
-    /// The account `agent` uses at `provider`, as its owner picked it (none:
-    /// the default).
-    fn pick(&self, agent: &str, provider: &str) -> CellResult<Option<String>> {
-        let rows = self.rows("SELECT account FROM agent_accounts WHERE agent = ? AND provider = ?", vec![agent.into(), provider.into()])?;
-        Ok(rows.first().and_then(|r| r["account"].as_str()).map(str::to_string))
     }
 
     /// The providers the owner gave an own key for.
@@ -2313,7 +2394,15 @@ impl ComputerCell {
         Ok(capped)
     }
 
-    fn view(&self) -> CellResult<ComputerView> {
+    /// Its view: what its owner is told of it, and its agents, each with
+    /// what it may use, asked of its fragment.
+    /// Boxed: its callers (about twenty routes) each hold a pointer to it,
+    /// not its state machine inlined (4 KB of the cell's Wasm).
+    fn view(&self) -> futures_util::future::LocalBoxFuture<'_, CellResult<ComputerView>> {
+        Box::pin(async move { self.asked(self.view_unasked()?).await })
+    }
+
+    fn view_unasked(&self) -> CellResult<Unasked> {
         let id = self.must(MetaKey::Id)?;
         let life = self.lifecycle()?;
         let (phase, why) = match &life.phase {
@@ -2337,7 +2426,7 @@ impl ComputerCell {
             },
         };
         let images = self.images()?;
-        Ok(ComputerView {
+        Ok(Unasked(ComputerView {
             computer: id,
             owner: self.must(MetaKey::Owner)?,
             image: self.must(MetaKey::Image)?,
@@ -2359,7 +2448,7 @@ impl ComputerCell {
             simplex: does_simplex(self.meta(MetaKey::Simplex)?.as_deref(), &life, &saves, &images),
             relay: None,
             relay_targets: None,
-        })
+        }))
     }
 
     /// Where its saves are in R2: entry.mjs's `DirectoryBackup` prefix,
@@ -2447,7 +2536,7 @@ impl ComputerCell {
     async fn wipe_view(&self) -> CellResult<Value> {
         let made = self.meta(MetaKey::Id)?.is_some();
         let phase = match made {
-            true => Some(self.view()?.phase),
+            true => Some(self.view_unasked()?.0.phase),
             false => None,
         };
         let saves = self.saves()?;
@@ -2467,7 +2556,9 @@ impl ComputerCell {
     /// with `freeze` its guest stopped so it never does (#362); `always-on
     /// {on}` is its owner's plan changing (the plan itself does not reach a
     /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
-    /// past its time.
+    /// past its time; `legacy-grants {agent, row?}` makes an agent's row from
+    /// before the grants' move owed, as step 6 keeps one its fragment had not
+    /// taken (`fragment_core::grants::Owed`), then reads what is owed.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         if b.op == "schema" {
@@ -2569,7 +2660,7 @@ impl ComputerCell {
                     self.delete_meta(MetaKey::Simplex)?;
                     self.tell_owner().await;
                 }
-                let view = self.view()?;
+                let view = self.view().await?;
                 Ok(json!({ "computer": id, "simplex": view.simplex }))
             }
             "clock" => {
@@ -2583,7 +2674,7 @@ impl ComputerCell {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
                 self.drive(Event::AlwaysOn { on }).await?;
                 console_log!("{}", json!({ "computer": id, "lever": "always-on", "on": on }));
-                Ok(json!({ "computer": id, "alwaysOn": on, "view": self.view()? }))
+                Ok(json!({ "computer": id, "alwaysOn": on, "view": self.view().await? }))
             }
             "kill" => {
                 // the container this isolate signals is the one it watches
@@ -2619,7 +2710,23 @@ impl ComputerCell {
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in or always-on"))),
+            "legacy-grants" => {
+                // an agent's row from before the move that its fragment had
+                // not taken when step 6 dropped the old rows: owed, as that
+                // step keeps it (`{connections, accounts}`), when named; then
+                // what is owed, or none
+                let agent = b.agent.as_deref().ok_or_else(|| CellError::invalid("legacy-grants names its agent"))?;
+                let identity = self.runs(agent)?;
+                if let Some(written) = &b.row {
+                    let row = grants::Row::of(written).ok_or_else(|| CellError::invalid("a row is its connections as stored and its accounts"))?;
+                    let mut owed = self.owed()?;
+                    owed.0.insert(agent.to_string(), (identity, row));
+                    self.set_meta(MetaKey::GrantsOwed, &owed.stored().expect("one owed"))?;
+                }
+                let row = self.owed()?.0.remove(agent).map(|(_, row)| row.value());
+                Ok(json!({ "computer": id, "agent": agent, "row": row }))
+            }
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in, always-on or legacy-grants"))),
         }
     }
 
@@ -2648,7 +2755,7 @@ impl ComputerCell {
             "computer/view" => {
                 // its owner reading it (the shell, as it opens): a deploy since its last look is news
                 self.look_and_tell().await;
-                json_response(&self.view()?)
+                json_response(&self.view().await?)
             }
             // an operator's view of it (orgs.rs, the person page): the whole
             // references of the image it runs and of the one its next start
@@ -2680,8 +2787,12 @@ impl ComputerCell {
             "computer/wake" => {
                 let b: WakeBody = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
+                // work for its guest, unless taken up already (docs/computers.md, Lifecycle)
+                if let Some(at_ms) = b.at.filter(|_| matches!(b.why, Wake::Record | Wake::Joined)) {
+                    self.drive(Event::Posted { at_ms }).await?;
+                }
                 self.wake(b.why).await?;
-                json_response(&self.view()?)
+                json_response(&self.view().await?)
             }
             // its owner's seat, as the registry pushes it (registry/orgs.rs)
             "computer/always-on" => {
@@ -2693,7 +2804,7 @@ impl ComputerCell {
                     // says what always on means for it)
                     self.tell_owner().await;
                 }
-                json_response(&self.view()?)
+                json_response(&self.view().await?)
             }
             // an operator's pin (orgs.rs); its owner's is `PUT …/image`
             "computer/pin" => {
@@ -2760,10 +2871,6 @@ impl ComputerCell {
                     self.states_told.set(self.states_told.get() + 1);
                 }
                 json_response(&json!({ "providers": self.own_key_names()? }))
-            }
-            "computer/joined" => {
-                let b: JoinedAsk = body_json(&mut req).await?;
-                json_response(&self.joined(b).await?)
             }
             "computer/redeem" => {
                 let b: Redeem = body_json(&mut req).await?;
@@ -2885,7 +2992,7 @@ impl ComputerCell {
                 let list = match self.owned_by(&who) {
                     Ok(()) => {
                         self.look_and_tell().await;
-                        vec![self.view()?]
+                        vec![self.view().await?]
                     }
                     Err(e) if e.code == ErrorCode::NotFound => vec![],
                     Err(e) => return Err(e),
@@ -2900,14 +3007,14 @@ impl ComputerCell {
         self.owned_by(&who)?;
         self.look_and_tell().await;
         match (req.method(), rest) {
-            (Method::Get, []) => json_response(&self.view()?),
+            (Method::Get, []) => json_response(&self.view().await?),
             (Method::Post, ["wake"]) => {
                 self.wake(Wake::Owner).await?;
-                json_response(&self.view()?)
+                json_response(&self.view().await?)
             }
             (Method::Post, ["sleep"]) => {
                 self.drive(Event::Sleep).await?;
-                json_response(&self.view()?)
+                json_response(&self.view().await?)
             }
             (Method::Post, ["restart"]) => {
                 // no body restarts whatever runs; a start named is restarted once
@@ -2923,7 +3030,7 @@ impl ComputerCell {
                 }
                 // its owner's other pages read it again, and tell it no more
                 self.tell_owner().await;
-                json_response(&self.view()?)
+                json_response(&self.view().await?)
             }
             (Method::Post, ["notices", "later"]) => {
                 let b: UpdateLater = body_json(&mut req).await?;
@@ -2935,28 +3042,37 @@ impl ComputerCell {
                 }
                 // its owner's other pages read it again, and tell it no more
                 self.tell_owner().await;
-                json_response(&self.view()?)
+                json_response(&self.view().await?)
             }
             (Method::Post, ["key-caps", provider]) => {
                 self.set_key_cap(provider, body_json(&mut req).await?).await?;
-                json_response(&self.view()?)
+                json_response(&self.view().await?)
             }
             (Method::Put, ["agents", fragment]) => {
+                // a computer full refuses before the agent fragment takes it,
+                // which then names it as its computer; asked again after, as
+                // another assign may have come in meanwhile
+                let full = |cell: &ComputerCell| -> CellResult<()> {
+                    let n = cell.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![(*fragment).into()])?;
+                    match n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
+                        true => Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents"))),
+                        false => Ok(()),
+                    }
+                };
+                full(self)?;
                 // the agent fragment takes the computer first (its owner must
                 // be the computer's), and its key becomes the agent's identity
                 let took = crate::fragment::ask(&self.env, fragment, "computer/assign", &json!({ "computer": self.must(MetaKey::Id)?, "owner": who })).await?;
                 let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
-                let n = self.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![(*fragment).into()])?;
-                if n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
-                    return Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents")));
-                }
-                // a new agent may use every connection its owner has (decision
-                // 44); assigned again, it keeps what its owner narrowed it to
+                full(self)?;
+                // what it may use is its fragment's (a new agent's every
+                // connection its owner has: decision 44), kept as it was when
+                // assigned again
                 self.exec(
-                    "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, 'null') ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
+                    "INSERT INTO agents (fragment, identity, owner, added_at) VALUES (?, ?, ?, ?) ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
                     vec![(*fragment).into(), identity.into(), who.as_str().into(), js::now_ms().into()],
                 )?;
-                let view = self.view()?;
+                let view = self.view().await?;
                 // it comes in where its person is (decision 64), once both the
                 // fragment and the computer hold it, so its computer hears each
                 // join; a replay joins nothing twice
@@ -2964,6 +3080,9 @@ impl ComputerCell {
                 json_response(&view)
             }
             (Method::Delete, ["agents", fragment]) => {
+                // what it may use stays its fragment's: a row still owed from
+                // before the move is handed over before the agent goes
+                self.hand_over(fragment).await?;
                 // an agent fragment gone (deleted: its own delete unassigns it,
                 // ended.rs) has nothing to say: its computer runs it no more
                 match crate::fragment::ask(&self.env, fragment, "computer/unassign", &json!({ "computer": self.must(MetaKey::Id)?, "owner": who })).await {
@@ -2994,14 +3113,13 @@ impl ComputerCell {
                         return Err(CellError::invalid(format!("no provider {c:?} on this deployment (its providers: {offered:?})")));
                     }
                 }
-                self.runs(fragment)?;
-                let text = serde_json::to_string(&connections).map_err(|e| CellError::host(e.to_string()))?;
-                assert_eq!(stored_connections(&text, fragment)?, connections, "connections read back as they are written");
-                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), (*fragment).into()])?;
+                let identity = self.runs(fragment)?;
+                let set = self.grants_of(fragment, &identity, Some((&who, json!({ "connections": connections })))).await?;
+                assert_eq!(set.connections, connections, "its fragment holds the providers as its owner named them");
                 // its owner's other pages read it again (the agent's page:
                 // which model it runs)
                 self.tell_owner().await;
-                json_response(&self.view()?)
+                json_response(&self.view().await?)
             }
             (Method::Put, ["agents", fragment, "accounts", provider]) => {
                 // a body that forgot the field is not a reset to the default
@@ -3021,17 +3139,13 @@ impl ComputerCell {
                         return Err(CellError::invalid("an account is its id, as GET /api/connections lists it"));
                     }
                 }
-                self.runs(fragment)?;
-                match &account {
-                    Some(account) => self.exec(
-                        "INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?) ON CONFLICT (agent, provider) DO UPDATE SET account = excluded.account",
-                        vec![(*fragment).into(), (*provider).into(), account.as_str().into()],
-                    )?,
-                    None => self.exec("DELETE FROM agent_accounts WHERE agent = ? AND provider = ?", vec![(*fragment).into(), (*provider).into()])?,
-                }
+                let identity = self.runs(fragment)?;
+                let change = json!({ "provider": provider, "account": account });
+                let set = self.grants_of(fragment, &identity, Some((&who, change))).await?;
+                assert_eq!(set.account(provider), account.as_deref(), "its fragment holds the account as its owner picked it");
                 // its owner's other pages read it again
                 self.tell_owner().await;
-                json_response(&self.view()?)
+                json_response(&self.view().await?)
             }
             (Method::Post, ["ports", port, "ticket"]) => {
                 let port: u16 = port.parse().ok().filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("a port is 1-65535"))?;
@@ -3076,7 +3190,7 @@ impl ComputerCell {
                 self.set_meta(MetaKey::CreatedAt, &js::now_ms().to_string())?;
             }
         }
-        let made = self.view()?;
+        let made = self.view().await?;
         // its seat's push asked for, or the making failed (made again, it asks again)
         crate::orgs::computer_made(&self.env, who).await?;
         json_response(&made)
@@ -3091,9 +3205,10 @@ impl ComputerCell {
         };
         assert!(gone.len() <= 1, "a computer runs a fragment once");
         if !gone.is_empty() {
-            self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![fragment.into()])?;
+            // a row still owed has no one to take it now
+            self.forget_owed(fragment)?;
         }
-        let view = self.view()?;
+        let view = self.view().await?;
         if !gone.is_empty() {
             // its owner's pages read its agents again (an agent
             // fragment's delete unassigns it unseen: ended.rs)
@@ -3102,12 +3217,11 @@ impl ComputerCell {
         Ok(view)
     }
 
-    /// Refuses an agent fragment that does not run here.
-    fn runs(&self, fragment: &str) -> CellResult<()> {
-        if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![fragment.into()])?.is_empty() {
-            return Err(CellError::new(ErrorCode::NotFound, format!("{fragment} does not run on this computer")));
-        }
-        Ok(())
+    /// The agent of an agent fragment that runs here, or refuses.
+    fn runs(&self, fragment: &str) -> CellResult<String> {
+        let rows = self.rows("SELECT identity FROM agents WHERE fragment = ?", vec![fragment.into()])?;
+        let identity = rows.first().and_then(|r| r["identity"].as_str()).map(str::to_string);
+        identity.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{fragment} does not run on this computer")))
     }
 
     /// Pins `image`, its owner's or an operator's: the next start takes it.
@@ -3123,7 +3237,7 @@ impl ComputerCell {
         // owner is told an update is ready
         self.set_meta(MetaKey::Image, image)?;
         self.look_and_tell().await;
-        self.view()
+        self.view().await
     }
 
     /// The secrets to swap in for a request's placeholders (`b`, a request
@@ -3136,13 +3250,13 @@ impl ComputerCell {
     /// removed since) is refused. An agent may use every provider its owner
     /// has unless its owner narrowed it to a list (decision 44: a person's
     /// agents are not fenced from each other, so the list is a role's
-    /// specialization, not a wall).
+    /// specialization, not a wall), as its fragment answers for each request.
     async fn credentials(&self, b: CredentialsAsk) -> CellResult<Value> {
         if b.placeholders.is_empty() || b.placeholders.len() > swap::PLACEHOLDERS_MAX {
             return Err(CellError::invalid(format!("ask for 1 to {} placeholders", swap::PLACEHOLDERS_MAX)));
         }
         let id = self.must(MetaKey::Id)?;
-        let rows = self.rows("SELECT fragment, owner, identity, connections FROM agents ORDER BY added_at", vec![])?;
+        let rows = self.rows("SELECT fragment, owner, identity FROM agents ORDER BY added_at", vec![])?;
         let fragments: Vec<String> = rows.iter().filter_map(|r| r["fragment"].as_str().map(str::to_string)).collect();
         let keys = crate::keys::tag_keys(&self.env).await?;
         let mut agent: Option<&str> = None;
@@ -3168,18 +3282,24 @@ impl ComputerCell {
         let row = rows.iter().find(|r| r["fragment"] == agent).expect("the agent named is one of the rows read");
         let owner = row["owner"].as_str().unwrap_or_default().to_string();
         let identity = row["identity"].as_str().unwrap_or_default().to_string();
-        let narrowed = stored_connections(row["connections"].as_str().unwrap_or_default(), agent)?;
+        // asked of its fragment at each use, when a catalog's provider is
+        // asked for: one its owner took away is refused from their next
+        // request on (its time logged)
+        let catalogued = b.placeholders.iter().any(|p| self.cfg.providers.named(&p.provider, p.connection).is_some());
+        let asked_at = js::now_ms();
+        let grants = if catalogued { self.grants_of(agent, &identity, None).await? } else { Grants::none() };
+        let grants_ms = catalogued.then(|| js::now_ms() - asked_at);
         let mut secrets = vec![];
         // a Vault's secret (a key's name no catalog key has) is its egress's to ask
         // the agent's person's Vault for, this agent's now that its tag says so
         for p in b.placeholders.iter().filter(|p| self.cfg.providers.named(&p.provider, p.connection).is_some()) {
             let provider = self.cfg.providers.named(&p.provider, p.connection).expect("a catalog's, filtered so");
-            if !may_use(&narrowed, &provider.name) {
-                let list = narrowed.as_deref().unwrap_or_default();
+            if !grants.may_use(&provider.name) {
+                let list = grants.connections.as_deref().unwrap_or_default();
                 return Err(CellError::new(
                     ErrorCode::Forbidden,
                     format!(
-                        "{agent} may not use {}: its owner narrowed it to {} on their computer (null lets it use every provider its owner has)",
+                        "{agent} may not use {}: its owner narrowed it to {} (null lets it use every provider its owner has)",
                         provider.name,
                         if list.is_empty() { "none".to_string() } else { list.join(", ") }
                     ),
@@ -3192,7 +3312,7 @@ impl ComputerCell {
                         Some(Takes::Account(a)) => Some((a, b.host.as_str())),
                         _ => None,
                     };
-                    self.connection_token(&owner, &provider.name, agent, at).await?
+                    self.connection_token(&owner, &provider.name, agent, grants.account(&provider.name), at).await?
                 }
                 // its call is held to its owner's cap on the key here, gated on
                 // their standing and charged after (`egress_swap`)
@@ -3207,27 +3327,7 @@ impl ComputerCell {
             }
             secrets.push(json!({ "provider": provider.name, "tag": p.tag, "connection": p.connection, "secret": secret }));
         }
-        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets }))
-    }
-
-    /// The agent `b.identity` was added to `b.fragment` (runs_on.rs, from
-    /// that fragment's outbox): when it runs here, its own fragment posts
-    /// `joined` on its `tasks` (once by the membership: a retry posts
-    /// nothing twice), so a guest that is awake lists its fragments again.
-    /// Answers `{runs}`: whether it runs here, and so whether there is a
-    /// computer to wake (its caller wakes it, on its own: a member's change
-    /// never waits for a start). Here is no one's computer, or the
-    /// identity no agent of it: nothing to tell.
-    async fn joined(&self, b: JoinedAsk) -> CellResult<Value> {
-        if !fragment_core::npub::is_identity(&b.identity) || !fragment_proto::valid_fragment_name(&b.fragment) || b.at <= 0 {
-            return Err(CellError::invalid("a join names an identity, a fragment and when it joined"));
-        }
-        let Some(id) = self.meta(MetaKey::Id)? else { return Ok(json!({ "runs": false })) };
-        let rows = self.rows("SELECT fragment FROM agents WHERE identity = ?", vec![b.identity.as_str().into()])?;
-        let Some(agent) = rows.first().and_then(|r| r["fragment"].as_str()).map(str::to_string) else { return Ok(json!({ "runs": false })) };
-        let posted = crate::fragment::ask(&self.env, &agent, "computer/joined", &json!({ "computer": id, "fragment": b.fragment, "at": b.at })).await?;
-        console_log!("{}", json!({ "computer": id, "joined": b.fragment, "agent": agent, "posted": posted["posted"] }));
-        Ok(json!({ "runs": true, "computer": id, "agent": agent, "posted": posted["posted"] }))
+        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "grantsMs": grants_ms }))
     }
 
     /// `owner`'s token for `provider`: WorkOS Pipes', for the WorkOS user
@@ -3243,7 +3343,7 @@ impl ComputerCell {
     /// account names that very host (`AccountHost::of_metadata`): a host
     /// under the suffix is anyone's (a Salesforce org anyone makes), so a
     /// token goes to its own account's alone.
-    async fn connection_token(&self, owner: &str, provider: &str, agent: &str, at: Option<(&AccountHost, &str)>) -> CellResult<String> {
+    async fn connection_token(&self, owner: &str, provider: &str, agent: &str, pick: Option<&str>, at: Option<(&AccountHost, &str)>) -> CellResult<String> {
         // only one its states say is connected, as the guest's view lists
         // them: one its owner disconnected stays refused, whatever Pipes
         // may hold for it since (an import landed late: registry/
@@ -3256,7 +3356,7 @@ impl ComputerCell {
         let account = match self.cfg.providers.get(provider).is_some_and(|p| p.several()) {
             true => {
                 let held = self.accounts.borrow().get(provider).cloned().unwrap_or_default();
-                match fragment_core::connection_accounts::chosen(self.pick(agent, provider)?.as_deref(), &held) {
+                match fragment_core::connection_accounts::chosen(pick, &held) {
                     Ok(id) => Some(id.to_string()),
                     Err(Unchosen::NeedsReauthorization) => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} again: the account {agent} uses needs authorizing again"))),
                     Err(Unchosen::NotConnected) => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} first: no account is connected"))),
@@ -3953,9 +4053,12 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     let mut signed = false;
     // whose ledger a key's call goes on, and as which agent
     let mut payer: Option<(String, String, String)> = None;
+    // how long the computer waited on the agent's fragment for what it may use
+    let mut grants_ms = None;
     if !found.is_empty() {
         let asked: Vec<Value> = found.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag, "connection": p.connection })).collect();
         let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "placeholders": asked })).await?;
+        grants_ms = answer["grantsMs"].as_i64();
         for s in answer["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
             let (provider, tag, secret) = (s["provider"].as_str().unwrap_or_default(), s["tag"].as_str().unwrap_or_default(), s["secret"].as_str().unwrap_or_default());
             // its kind: a connection's and a Vault secret's may share a name and a tag
@@ -4088,7 +4191,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // one line per swap (lesson 14), naming the providers, never a tag or a value
     if !plan.is_empty() {
         let names: Vec<String> = plan.wanted.iter().map(Placeholder::named).collect();
-        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status }));
+        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status, "grantsMs": grants_ms }));
     }
     match sent {
         Ok(resp) if !filled.is_empty() => hidden(resp, &filled).await,

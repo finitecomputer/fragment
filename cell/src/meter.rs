@@ -33,26 +33,24 @@
 //! fragment asks through the gate (ledger.rs `may`): its isolate asks the
 //! owner's ledger at most once a minute, rather than on every write.
 
-use fragment_core::ledger::{Meter, MeterBatch, MeterRow, Metered, Refused, Spend};
+use fragment_core::ledger::{Meter, MeterBatch, MeterRow, Refused, Spend};
 use fragment_core::price::{StorageClass, Usage};
 use fragment_proto::ledger::{PutCap, SetFragmentCap, Why};
 use fragment_proto::{ErrorCode, Role};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{Acked, Owned};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::ledger::{self, MaySpend};
-use crate::{js, routed};
+use crate::js;
 
 /// The queue a fragment's meter batches travel on (wrangler.jsonc; a
 /// branch deployment's is named for its branch), and its binding.
 pub const QUEUE: &str = "fragment-ledger";
 pub const QUEUE_BINDING: &str = "METERS";
-/// Set on the internal routes below by platform code; the router never
-/// sets or passes it.
-pub const METER_HEADER: &str = "x-fragment-meter";
 /// A row into the outbox, once by its reference: `(ref, row)`.
 pub(crate) const OUTBOX_INSERT: &str = "INSERT OR IGNORE INTO meter_rows (ref, row, batch) VALUES (?, ?, NULL)";
 /// A batch not acknowledged this long after it was sent is sent again.
@@ -74,18 +72,6 @@ const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 
 const _: () = assert!(BATCH_ROWS as usize <= fragment_core::ledger::BATCH_ROWS_MAX, "a fragment's batch is one the ledger takes");
-
-/// What the consumer tells the fragment its batch came to.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Acked {
-    pub seq: i64,
-    pub batch: String,
-    /// The ledger's answer, or why it never takes the batch (a guest
-    /// pays for nothing: their fragments are not billed).
-    pub metered: Option<Metered>,
-    pub refused: Option<String>,
-}
 
 #[derive(Deserialize)]
 struct Minute {
@@ -297,17 +283,16 @@ impl FragmentCell {
         Ok(json!({ "counted": counted, "rows": rows, "batches": batches, "key": self.meter_key()? }))
     }
 
-    /// `POST meter/acked`: the consumer's word on batch `seq`. Its rows go
+    /// The consumer's word on batch `seq` (`calls::Acked`). Its rows go
     /// (the ledger has them, or never takes them), and the next batch is
     /// due. A batch of another life of this name, or one acknowledged
     /// before, changes nothing.
-    pub(crate) async fn meter_acked(&self, acked: &Acked) -> CellResult<Value> {
+    pub(crate) async fn meter_acked(&self, acked: &Acked) -> CellResult<()> {
         let key = self.meter_key()?;
         if acked.batch != format!("frag:{key}:{}", acked.seq) {
-            return Ok(json!({ "acked": 0, "why": "another life's batch" }));
+            return Ok(());
         }
         self.test_countdown(MetaKey::TestFailMeterAcks, "the batch's acknowledgement was lost")?;
-        let rows = self.count_of("SELECT COUNT(*) AS n FROM meter_rows WHERE batch = ?", vec![SqlStorageValue::Integer(acked.seq)])?;
         self.exec("DELETE FROM meter_rows WHERE batch = ?", vec![SqlStorageValue::Integer(acked.seq)])?;
         self.exec("DELETE FROM meter_batches WHERE id = ?", vec![SqlStorageValue::Integer(acked.seq)])?;
         match (&acked.metered, &acked.refused) {
@@ -318,7 +303,7 @@ impl FragmentCell {
             _ => {}
         }
         self.schedule().await?;
-        Ok(json!({ "acked": rows }))
+        Ok(())
     }
 
     /// `PUT /api/f/<name>/cap {id, micros}` (the owner): the fragment's
@@ -337,12 +322,9 @@ impl FragmentCell {
         json_response(&json!({ "fragment": name, "capMicros": body.micros.unwrap_or(fragment_core::ledger::CAP_DEFAULT), "default": body.micros.is_none() }))
     }
 
-    /// `POST meter/whose {principal}`: the fragment's owner, and whether
-    /// `principal` is a member (the model route: a call names a fragment its
-    /// agent is in).
-    pub(crate) fn whose(&self, principal: &str) -> CellResult<Value> {
-        let owner = self.must(MetaKey::Owner)?;
-        Ok(json!({ "owner": owner, "member": self.member_role(principal)?.is_some() }))
+    /// Whose it is (`calls::Whose`).
+    pub(crate) fn whose(&self, principal: &str) -> CellResult<Owned> {
+        Ok(Owned { owner: self.must(MetaKey::Owner)?, member: self.member_role(principal)?.is_some() })
     }
 
     /// Whether the fragment takes writes now (decision 27): refused, 402,
@@ -439,13 +421,7 @@ async fn consume_one(raw: RawMessage, env: &Env) {
         return;
     }
     let acked = Acked { seq: b.seq, batch: b.meter.batch.clone(), metered, refused };
-    let body = serde_json::to_string(&acked).expect("an acknowledgement serializes");
-    let heard = async {
-        let req = routed::internal_request("meter/acked", &body)?;
-        let resp = crate::routed::send(env, "FRAGMENT", &b.source, req).await?;
-        Ok::<u16, CellError>(resp.status_code())
-    };
-    match heard.await {
+    match crate::fragment::pass(env, &b.source, &acked).await.map(|resp| resp.status_code()) {
         // a fragment deleted since has nothing to forget
         Ok(200 | 404) => raw.ack(),
         _ => raw.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(RETRY_DELAY_S).build()),

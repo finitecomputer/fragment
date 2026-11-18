@@ -1596,41 +1596,6 @@ pub struct MemberList {
     pub members: Vec<Member>,
 }
 
-/// A model tier (docs/cloudflare-v1.md, decision 23): what an agent's
-/// `model`, a fragment's `agent.model`, a job's `ai.text` `model`, and a
-/// model call's `model` name. The platform maps each to its model where
-/// the deployment runs it (`fragment_core::models::Models`): unnamed,
-/// `cheap` is GLM-5.3 Flash and `medium` GLM-5.3, both on Workers AI;
-/// Finite's own runs both on Finite Private's GLM-5.3 Flash (decision 61).
-/// `high` (Opus) is a name the platform
-/// refuses, saying why, until Cloudflare raises Unified Billing's Opus
-/// limit; a model id is never one (a model call may name a tier's model by
-/// its id instead: `fragment_core::models::Models::named`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Tier {
-    Cheap,
-    Medium,
-    High,
-}
-
-impl Tier {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Tier::Cheap => "cheap",
-            Tier::Medium => "medium",
-            Tier::High => "high",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Tier> {
-        [Tier::Cheap, Tier::Medium, Tier::High].into_iter().find(|t| t.as_str() == s)
-    }
-}
-
-/// The tier agents and AI steps run on unless they name another.
-pub const DEFAULT_TIER: Tier = Tier::Cheap;
-
 /// What an identity is (docs/cloudflare-v1.md, R15). A fragment's own key
 /// stays the fragment's and is not registered. An agent has a designated
 /// owner, a person.
@@ -3001,12 +2966,6 @@ mod tests {
         }
         assert!(!Via::Call.triggered() && !Via::Job.triggered());
         assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered() && Via::Installed.triggered() && Via::Woke.triggered());
-        for t in [Tier::Cheap, Tier::Medium, Tier::High] {
-            assert_eq!(Tier::parse(t.as_str()), Some(t));
-            assert_eq!(serde_json::to_value(t).unwrap(), t.as_str());
-        }
-        assert_eq!(Tier::parse("z-ai/glm-5.3-flashx"), None, "a tier is named, never a model id");
-        assert_eq!(DEFAULT_TIER.as_str(), "cheap");
     }
 
     /// Every refusal reason is on the wire as its snake_case name and reads

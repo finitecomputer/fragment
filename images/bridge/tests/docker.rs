@@ -324,6 +324,26 @@ async fn the_hermes_image() {
     }
     eprintln!("hermes: first message to reply: {} ms ({} ms since the marker)", asked.elapsed().as_millis(), gate.elapsed().as_millis());
     fake.until(30_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t1)).await;
+    // No supervised service of upstream's starts over (its `profile-gateways`,
+    // left in, restarted every second: images/hermes/Dockerfile): every slot
+    // s6 wants up has stayed up between two looks 3 s apart, and the
+    // gateway is the boot's own, not a service's.
+    let slots = || c.exec_out(&["sh", "-c", "for s in /run/service/*; do printf '%s ' \"${s##*/}\"; /command/s6-svstat -o wantedup,up,updownfor \"$s\"; done"]);
+    let (first, _) = (slots(), tokio::time::sleep(Duration::from_secs(3)).await);
+    let second = slots();
+    let read = |text: &str| -> BTreeMap<String, (String, String, u64)> {
+        text.lines().filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            Some((f.first()?.to_string(), (f.get(1)?.to_string(), f.get(2)?.to_string(), f.get(3)?.parse().ok()?)))
+        }).collect()
+    };
+    let (before, after) = (read(&first), read(&second));
+    assert!(!after.is_empty() && !after.contains_key("profile-gateways"), "upstream's slots, no profile-gateways: {second}");
+    for (slot, (wanted, up, since)) in &after {
+        if wanted == "true" {
+            assert!(up == "true" && before.get(slot).is_some_and(|b| *since >= b.2 + 2), "{slot} stays up, never restarting: {first} then {second}");
+        }
+    }
     fake.with(|w| {
         let reply = answered(w, &t1).unwrap();
         assert!(reply["text"].as_str().unwrap().contains("hello hermes"), "the scripted model's answer: {reply}");
@@ -417,11 +437,12 @@ async fn the_hermes_image() {
     // what Hermes itself finds for the profile: its own first, then the
     // managed set and the platform skill (the image's: its CLI's own)
     let hermes_finds = || {
-        let found = c.exec_out(&[
+        let (code, found) = c.exec_code(&[
             "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper--k3x9", "HOME=/data/hermes/profiles/juniper--k3x9/home",
-            "/opt/hermes/.venv/bin/python", "-c", "import json, os; os.chdir('/opt/hermes'); from tools.skills_tool import _find_all_skills; print(json.dumps({s['name']: s['description'] for s in _find_all_skills(skip_disabled=True)}))",
+            "/opt/hermes/.venv/bin/python", "-c", "import json, os; os.chdir('/opt/hermes'); from tools.skills_tool import find_all_skills; print(json.dumps({s['name']: s['description'] for s in find_all_skills(skip_disabled=True)}))",
         ]);
-        serde_json::from_str::<serde_json::Value>(found.trim().lines().last().unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"))
+        assert_eq!(code, 0, "Hermes' own skill listing ran: {found}");
+        serde_json::from_str::<serde_json::Value>(found.lines().rfind(|l| l.starts_with('{')).unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"))
     };
     let found = hermes_finds();
     assert!(c.exec(&[
@@ -447,7 +468,8 @@ async fn the_hermes_image() {
     for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
         assert!(found[name].is_string(), "the release's managed {name} is visible: {found}");
     }
-    for name in ["pdf", "docx", "powerpoint", "xlsx", "systematic-debugging", "test-driven-development", "arxiv"] {
+    // v0.23 bundles Word, PowerPoint and Excel as one skill, microsoft-office
+    for name in ["pdf", "microsoft-office", "systematic-debugging", "test-driven-development", "arxiv"] {
         assert!(found[name].is_string(), "Hermes' bundled {name} is visible to this agent profile: {found}");
     }
     assert!(found["systematic-debugging"].as_str().is_some_and(|d| d.contains("Juniper's own")), "agent-owned skills win over bundled names: {found}");
@@ -1671,17 +1693,14 @@ fn settle(took: Duration) -> Duration {
 /// h]`, as its X server has it (`xwininfo`, as the hermes user).
 fn window(c: &Container, profile: &str, title: &str) -> Option<[usize; 4]> {
     let env = format!("/data/hermes/profiles/{profile}/bot-desktop/env");
-    let script = format!("set -a; . {env}; xwininfo -root -tree");
-    let tree = c.exec_out(&["/command/s6-setuidgid", "hermes", "bash", "-c", &script]);
-    // `0x200003 "Example Domain - …": ("chromium-browser" "Chromium-browser")  1004x748+10+10  +10+10`
-    let line = tree.lines().find(|l| l.contains(&format!("\"{title}")))?;
-    let mut fields = line.split_whitespace().rev();
-    let at = fields.next()?.trim_start_matches('+');
-    let size = fields.next()?;
-    let (x, y) = at.split_once('+')?;
-    let (w, rest) = size.split_once('x')?;
-    let h = rest.split('+').next()?;
-    Some([x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?])
+    // By its UTF-8 name (_NET_WM_NAME): browser_exec marks the tab it
+    // drives (`🐴 Example Domain - Chromium`), a name WM_NAME, which
+    // xwininfo prints, cannot carry
+    let script = format!("set -a; . {env}; for w in $(xprop -root _NET_CLIENT_LIST | grep -o '0x[0-9a-f]*'); do case \"$(xprop -id $w _NET_WM_NAME)\" in *\"$1\"*) xwininfo -id $w; break;; esac; done");
+    let info = c.exec_out(&["/command/s6-setuidgid", "hermes", "bash", "-c", &script, "window", title]);
+    // `Absolute upper-left X:  10`, `… Y:  10`, `Width: 1004`, `Height: 748`
+    let field = |name: &str| info.lines().find_map(|l| l.trim().strip_prefix(name)).and_then(|v| v.trim().parse::<usize>().ok());
+    Some([field("Absolute upper-left X:")?, field("Absolute upper-left Y:")?, field("Width:")?, field("Height:")?])
 }
 
 /// The share of `rect`'s pixels in `frame` (`width` wide) that are
@@ -1706,14 +1725,18 @@ fn chromium(c: &Container) -> String {
     c.exec_out(&["sh", "-c", "for p in $(pgrep -f -- '/(chrome(-headless-shell)?|chromium) ' | head -1); do tr '\\0' ' ' < /proc/$p/cmdline; done"])
 }
 
-/// Inspect the real desktop browser through the adapter's ownership check.
+/// The desktop browser on `profile`'s own browser profile, as Hermes'
+/// browser_exec finds it to attach (`browser_launcher.running_instance`:
+/// the profile's live Chromium and the DevTools endpoint it answers on):
+/// `{pid, port, argv}`, or null.
 fn desktop_browser(c: &Container, profile: &str) -> serde_json::Value {
-    const SCRIPT: &str = r#"import json, sys
-sys.path.insert(0, '/opt/hermes')
+    const SCRIPT: &str = r#"import json, os, sys
+import psutil
+os.chdir('/opt/hermes'); sys.path.insert(0, '/opt/hermes')
 from tools.bot_desktop import browser
-from tools.bot_desktop.fragment_browser import _owned_process, _endpoint
-p = _owned_process(browser.profile_dir())
-print(json.dumps({'pid': p.pid, 'port': _endpoint(p), 'argv': p.cmdline()} if p else None))
+from tools.browser_launcher import running_instance
+found = running_instance(str(browser.profile_dir()))
+print(json.dumps({'pid': found[2], 'port': found[0], 'argv': psutil.Process(found[2]).cmdline()} if found else None))
 "#;
     let (code, out) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", &format!("HERMES_HOME=/data/hermes/profiles/{profile}"), "/opt/hermes/.venv/bin/python", "-c", SCRIPT]);
     assert_eq!(code, 0, "the desktop browser's identity: {out}");
@@ -1723,9 +1746,9 @@ print(json.dumps({'pid': p.pid, 'port': _endpoint(p), 'argv': p.cmdline()} if p 
 /// Run the Browser icon through the desktop's own launcher and environment.
 fn open_browser_icon(c: &Container, profile: &str) {
     const SCRIPT: &str = r#"import ctypes, os, sys, time
-sys.path.insert(0, '/opt/hermes')
+os.chdir('/opt/hermes'); sys.path.insert(0, '/opt/hermes')
 from tools.bot_desktop import browser, runtime
-from tools.bot_desktop.fragment_browser import _owned_process, _endpoint
+from tools.browser_launcher import running_instance
 panel = runtime.state_dir() / 'xdg/xfce4/panel'
 number = (panel / '.hermes-browser-launcher').read_text().strip()
 os.environ.update(runtime.published_env())
@@ -1738,13 +1761,8 @@ gio.g_app_info_launch.restype = ctypes.c_int
 icon = gio.g_desktop_app_info_new_from_filename(str(panel / f'launcher-{number}/hermes.desktop').encode())
 assert icon and gio.g_app_info_launch(icon, None, None, None), 'the desktop entry launches'
 for _ in range(200):
-    p = _owned_process(browser.profile_dir())
-    if p is not None:
-        try:
-            _endpoint(p)
-            break
-        except (OSError, ValueError):
-            pass
+    if running_instance(str(browser.profile_dir())) is not None:
+        break
     time.sleep(.1)
 else:
     raise AssertionError('the Browser icon did not start Chromium within 20s')
@@ -1919,7 +1937,8 @@ async fn the_hermes_desktop() {
         !looked.is_empty() && looked.iter().all(|(m, a, ok)| m == "vision" && a.as_deref() == Some("juniper--k3x9") && *ok),
         "the capture's screenshot goes to the route's vision model, as the agent: {looked:?}"
     );
-    assert!(tools.contains(&"browser_navigate") && !tools.contains(&"browser_exec"), "Hermes' built-in browser tools: {tools:?}");
+    let exec_listed = search.contains("browser_exec");
+    assert!((tools.contains(&"browser_exec") || exec_listed) && !tools.contains(&"browser_navigate"), "Hermes' browser_exec, directly or through tool_search, and no built-in browser_* tools: {tools:?}");
 
     // its browser, on its desktop, seen by the viewer that has watched
     // since before the desktop started
@@ -1934,10 +1953,11 @@ async fn the_hermes_desktop() {
     let started = chromium(&c);
     eprintln!("desktop: the browser's window at {rect:?} in the watcher's frame; chromium {started}; the container holds {} MiB", anon_mib(&c));
     assert!(started.contains(" --no-sandbox --disable-dev-shm-usage "), "the image's Chromium, with the flags a container needs: {started}");
-    // and the desktop's Browser icon, a person's after Take over, starts the same
+    // and the desktop's Browser icon, a person's after Take over, starts the
+    // same Chromium on the same profile (Hermes' own `dock_argv`)
     let panel = "/data/hermes/profiles/juniper--k3x9/bot-desktop/xdg/xfce4/panel";
     let icon = c.exec_out(&["sh", "-c", &format!("cat {panel}/launcher-$(cat {panel}/.hermes-browser-launcher)/hermes.desktop")]);
-    assert!(icon.lines().any(|l| l.starts_with("Exec=\"/opt/hermes/.venv/bin/python\" \"/opt/hermes/tools/bot_desktop/fragment_browser.py\" ")), "the Browser icon starts the shared desktop Chromium: {icon}");
+    assert!(icon.lines().any(|l| l.starts_with("Exec=\"/opt/fragment/bin/chromium\" \"--user-data-dir=/data/hermes/profiles/juniper--k3x9/bot-desktop/browser-profile\" ")), "the Browser icon starts the shared desktop Chromium: {icon}");
 
     // The desktop restarts under its viewers (stopped as `hermes
     // computer-use screen stop` stops it): each viewer's stream ends with
@@ -1982,11 +2002,13 @@ async fn the_hermes_desktop() {
     );
 }
 
-/// Goal: the first native browser tool starts regular Chromium on its own
-/// screen, with webdriver off; the Browser icon and later tool connections
-/// share that process and cookies. Closing a tool connection leaves it up;
-/// stopping its desktop closes it and keeps its cookies. A human-first
-/// restart, a browser crash and a whole computer restart reuse the same jar.
+/// Goal: the agent's first browser_exec starts regular Chromium on its own
+/// screen, and the page sees `navigator.webdriver` false; each page it
+/// opens comes to the front of that screen; the Browser icon
+/// shares that process and its cookies. A turn's end leaves it up;
+/// stopping its desktop closes it and keeps its cookies. A person's
+/// Browser icon first (`navigator.webdriver` false there too), a browser
+/// crash and a whole computer restart reuse the same jar.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_regular_browser_is_shared_by_the_desktop_and_tools() {
@@ -1996,52 +2018,167 @@ async fn a_regular_browser_is_shared_by_the_desktop_and_tools() {
     assert!(!desktop_up(&c, profile), "no desktop or browser starts at boot");
     let navigate = tool_said(&fake, &chat, &c, "browse: https://example.com").await;
     let first = desktop_browser(&c, profile);
-    assert!(first.is_object(), "the native browse starts its desktop browser: {navigate}");
+    assert!(first.is_object(), "browser_exec starts its desktop browser: {navigate}");
     let argv: Vec<&str> = first["argv"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
     assert!(argv[0].ends_with("/chromium"), "regular Chromium, not the testing bundle: {argv:?}");
-    assert!(argv.contains(&"--test-type") && argv.contains(&"--no-sandbox") && argv.contains(&"--disable-dev-shm-usage"), "the container and desktop UI flags: {argv:?}");
-    assert!(first["port"].as_u64().is_some_and(|p| p > 0), "a nonzero CDP port: {first}");
-    for unwanted in ["--enable-automation", "--remote-debugging-port=0", "--remote-debugging-pipe", "--headless", "--disable-blink-features"] {
+    for wanted in ["--test-type", "--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled", "--user-data-dir=/data/hermes/profiles/juniper--k3x9/bot-desktop/browser-profile"] {
+        assert!(argv.contains(&wanted), "{wanted}: {argv:?}");
+    }
+    assert!(first["port"].as_u64().is_some_and(|p| p > 0), "a live DevTools endpoint: {first}");
+    for unwanted in ["--enable-automation", "--remote-debugging-pipe", "--headless"] {
         assert!(!argv.iter().any(|arg| arg.starts_with(unwanted)), "no {unwanted}: {argv:?}");
     }
-    let ordinary = tool_said(&fake, &chat, &c, "inspect browser: navigator.webdriver === false ? 'ordinary-browser' : 'automation-enabled'").await;
-    assert!(ordinary.contains("ordinary-browser"), "the native tool sees webdriver false: {ordinary}");
+    // Hermes' janitor leaves the browser it started to the desktop's idle
+    // stop: the managed overlay's day, read as the gateway reads it
+    let idle = hermes_python(&c, &[], "import json\nfrom tools.browser_session import BROWSER_SESSION_INACTIVITY_TIMEOUT as t\nprint(json.dumps({'idle': t}))");
+    assert_eq!(idle["idle"], json!(86_400), "the janitor's bound is the overlay's day (hermes-boot's BROWSER_IDLE_S): {idle}");
+    let webdriver = "inspect browser: navigator.webdriver === false ? 'ordinary-browser' : 'automation-enabled'";
+    let ordinary = tool_said(&fake, &chat, &c, webdriver).await;
+    assert!(ordinary.contains("ordinary-browser"), "the page sees webdriver false: {ordinary}");
     let cookie = tool_said(&fake, &chat, &c, "inspect browser: document.cookie = 'fragment_browser_probe=kept; Max-Age=3600; SameSite=Lax'; document.cookie").await;
     assert!(cookie.contains("fragment_browser_probe=kept"), "a real persistent cookie: {cookie}");
+    // A second page opens in a tab of its own (browser_exec's `new_tab`),
+    // which comes to the front: its screen shows what the agent works on,
+    // and a file input it clicks there opens the desktop's file dialog.
+    tool_said(&fake, &chat, &c, "browse: https://example.com/?second").await;
+    let shown = tool_said(&fake, &chat, &c, "inspect browser: document.visibilityState + ' ' + location.search").await;
+    assert!(shown.contains("visible ?second"), "the agent's tab is the one its screen shows: {shown}");
 
     let base = fragment_bridge::net::Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
     let _viewer = Viewer::open(&base, "watcher", profile, Duration::from_secs(30)).await.unwrap();
     open_browser_icon(&c, profile);
-    assert_eq!(desktop_browser(&c, profile)["pid"], first["pid"], "the icon reuses the tool's browser");
-    let port = first["port"].to_string();
-    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "agent-browser", "--session", "close-probe", "--cdp", &port, "get", "title"]));
-    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "agent-browser", "--session", "close-probe", "close"]));
-    assert_eq!(desktop_browser(&c, profile)["pid"], first["pid"], "tool cleanup only disconnects");
+    assert_eq!(desktop_browser(&c, profile)["pid"], first["pid"], "the icon reuses the tool's browser, which outlived the turns that used it");
 
+    // This stop is Hermes' own, at once, which ends the browser with its
+    // display: it waits for Chromium to write the cookie (every 30 s). The
+    // boot's idle stop closes the browser first and needs no wait
+    // (`the_agents_browser_lives_as_long_as_its_desktop`).
+    cookie_on_disk(&c, profile, "fragment_browser_probe").await;
     let stopped = c.exec_code(&["env", "HERMES_HOME=/data/hermes", "/command/s6-setuidgid", "hermes", "hermes", "-p", profile, "computer-use", "screen", "stop"]);
     assert_eq!(stopped.0, 0, "desktop stop: {stopped:?}");
+    let t = Instant::now();
+    // bounded: Chromium leaves with its display
+    while !desktop_browser(&c, profile).is_null() && t.elapsed() < Duration::from_secs(20) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     assert!(desktop_browser(&c, profile).is_null(), "desktop stop closes its Chromium");
     let _back = Viewer::open(&base, "watcher", profile, Duration::from_secs(30)).await.unwrap();
-    open_browser_icon(&c, profile); // Human starts this browser before any tool.
+    open_browser_icon(&c, profile); // A person starts this browser before any tool.
     let human_first = desktop_browser(&c, profile);
     assert_ne!(human_first["pid"], first["pid"], "a fresh browser after the stop");
     let read_cookie = "inspect browser: document.cookie.includes('fragment_browser_probe=kept') ? 'cookie-kept' : 'cookie-missing'";
     tool_said(&fake, &chat, &c, "browse: https://example.com").await;
     let cookie = tool_said(&fake, &chat, &c, read_cookie).await;
-    assert!(cookie.contains("cookie-kept"), "the tools attach to the human's browser with its cookie: {cookie}");
+    assert!(cookie.contains("cookie-kept"), "the tools attach to the person's browser with its cookie: {cookie}");
     assert_eq!(desktop_browser(&c, profile)["pid"], human_first["pid"]);
+    let ordinary = tool_said(&fake, &chat, &c, webdriver).await;
+    assert!(ordinary.contains("ordinary-browser"), "a browser a person started shows webdriver false too: {ordinary}");
 
-    // The old port file is deliberately bogus. Discovery uses the live
-    // profile owner and verifies CDP's PID, never this stale metadata.
-    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &format!("printf '1\\n/devtools/browser/stale\\n' > /data/work/{profile}/browser-profile/DevToolsActivePort")]));
-    assert_eq!(desktop_browser(&c, profile)["pid"], human_first["pid"]);
     assert!(c.exec(&["kill", "-KILL", &human_first["pid"].to_string()]));
     tool_said(&fake, &chat, &c, "browse: https://example.com").await;
-    assert_ne!(desktop_browser(&c, profile)["pid"], human_first["pid"], "a crash starts a new browser, not the stale endpoint");
+    let after = desktop_browser(&c, profile);
+    assert!(after.is_object() && after["pid"] != human_first["pid"], "a crash starts a new browser, not the stale endpoint: {after}");
     c.restart();
     let navigated = tool_said(&fake, &chat, &c, "browse: https://example.com").await;
     let cookie = tool_said(&fake, &chat, &c, read_cookie).await;
     assert!(cookie.contains("cookie-kept"), "the cookie survives a computer restart: {cookie}; {navigated}");
+}
+
+/// A page server on the computer (127.0.0.1:8770): `/set?v=<v>` sets the
+/// cookie `fresh=<v>` (an hour), and `/get` names the cookie it was sent in
+/// its title.
+const COOKIE_SERVER: &str = r#"from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path.startswith('/set?v='):
+            v = self.path.split('=', 1)[1]
+            body, cookie = f'<title>set {v}</title>set'.encode(), f'fresh={v}; Max-Age=3600; Path=/'
+        else:
+            body, cookie = f"<title>cookie {self.headers.get('cookie') or 'none'}</title>".encode(), None
+        self.send_response(200)
+        if cookie:
+            self.send_header('set-cookie', cookie)
+        self.send_header('content-type', 'text/html'); self.send_header('content-length', str(len(body))); self.end_headers(); self.wfile.write(body)
+ThreadingHTTPServer(('127.0.0.1', 8770), H).serve_forever()
+"#;
+
+/// Goal: the agent's browser lives exactly as long as its desktop. Unwatched,
+/// the desktop stops at its idle bound (here 15 s) and its browser is closed
+/// first as a person would close it, so a cookie a page set moments before
+/// is kept: Chromium writes its cookies every 30 s, and a desktop stopped
+/// under it lost them (a site that rotates its sign-in cookie signs the
+/// agent out). Watched (a viewer, no Take over), the desktop stays up past
+/// its bound, and so does the browser browser_exec started: Hermes' own
+/// janitor counts only its tool's calls and a Take over, never a viewer.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn the_agents_browser_lives_as_long_as_its_desktop() {
+    use support::rfb::Viewer;
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("browser-life", &["juniper"]);
+    let c = Container::run_on(Runtime::Hosted, &tag, fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SCREEN_IDLE_MS", "15000")]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let profile = "juniper--k3x9";
+    // the idle stop is the boot's alone: Hermes' own watchers, its gateway's
+    // and its desktop launcher's, which stop it with no close, are off
+    let hermes_idle = hermes_python(&c, &["HERMES_HOME=/data/hermes/profiles/juniper--k3x9"], "import json\nfrom tools.bot_desktop import runtime\nprint(json.dumps({'idle': runtime.idle_stop_seconds()}))");
+    assert_eq!(hermes_idle["idle"], json!(0.0), "Hermes' idle stop is off: {hermes_idle}");
+    assert!(c.exec(&["sh", "-c", &format!("cat > /tmp/cookie_server.py <<'SERVER'\n{COOKIE_SERVER}SERVER\nsetsid python3 /tmp/cookie_server.py > /tmp/cookie_server.log 2>&1 < /dev/null &")]));
+    async fn gone(c: &Container, profile: &str, what: &str) {
+        let t = Instant::now();
+        // bounded: its idle bound, a look every 3.75 s, and Hermes' own stop
+        while desktop_up(c, profile) && t.elapsed() < Duration::from_secs(90) {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert!(!desktop_up(c, profile), "{what}: the unwatched desktop stops: {}", c.logs().lines().filter(|l| l.contains("screen.")).collect::<Vec<_>>().join("\n"));
+        assert!(desktop_browser(c, profile).is_null(), "{what}: and its browser with it");
+    }
+
+    // unwatched: a cookie set, then the desktop's idle stop at once
+    let set = tool_said(&fake, &chat, &c, "browse: http://127.0.0.1:8770/set?v=fresh-1").await;
+    assert!(set.contains("set fresh-1"), "the page set its cookie: {set}");
+    gone(&c, profile, "after the cookie").await;
+    let read = tool_said(&fake, &chat, &c, "browse: http://127.0.0.1:8770/get").await;
+    assert!(read.contains("cookie fresh=fresh-1"), "a cookie set moments before the idle stop is kept: {read}");
+
+    // watched: the agent's browser outlives its idle bound and Hermes' janitor's tick
+    let base = fragment_bridge::net::Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
+    let mut viewer = Viewer::open(&base, "watcher", profile, Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("the screen: {e}\n{}", c.logs()));
+    tool_said(&fake, &chat, &c, "browse: http://127.0.0.1:8770/get").await;
+    let first = desktop_browser(&c, profile);
+    assert!(first.is_object(), "browser_exec's browser, watched: {first}");
+    let t = Instant::now();
+    // bounded: 75 s, past the idle bound and two of the janitor's 30 s ticks
+    while t.elapsed() < Duration::from_secs(75) {
+        let _ = tokio::time::timeout(Duration::from_secs(2), viewer.frame()).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(desktop_up(&c, profile), "a watched desktop stays up");
+    assert_eq!(desktop_browser(&c, profile)["pid"], first["pid"], "and the browser the agent left on it, while a person watches");
+    drop(viewer);
+    gone(&c, profile, "once no one watches").await;
+}
+
+/// Waits (at most 60 s) until `profile`'s desktop browser has written its
+/// cookie `name` to its profile on disk, read without its lock
+/// (`immutable`), as a running Chromium holds it.
+async fn cookie_on_disk(c: &Container, profile: &str, name: &str) {
+    let jar = format!("/data/work/{profile}/browser-profile/Default");
+    let count = format!("for f in {jar}/Network/Cookies {jar}/Cookies; do [ -f \"$f\" ] && sqlite3 \"file:$f?immutable=1\" \"select count(*) from cookies where name = '{name}'\"; done");
+    let t = Instant::now();
+    // bounded: two of Chromium's commits
+    loop {
+        let found = c.exec_out(&["/command/s6-setuidgid", "hermes", "sh", "-c", &count]);
+        if found.lines().any(|l| l.trim().parse::<u32>().is_ok_and(|n| n > 0)) {
+            return;
+        }
+        assert!(t.elapsed() < Duration::from_secs(60), "{name} never reached {jar}'s cookies: {found:?}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 /// Hermes' own reading of `profile`'s Bot Desktop lease, as its
@@ -2118,7 +2255,11 @@ for p in psutil.process_iter(["pid", "cmdline"]):
     argv = p.info["cmdline"] or []
     held = next((a.split("=", 1)[1] for a in argv if a.startswith("--user-data-dir=")), None)
     if held and os.path.realpath(held) == jar and not any(a.startswith("--type=") for a in argv):
-        port = next((a.split("=", 1)[1] for a in argv if a.startswith("--remote-debugging-port=")), None)
+        # Hermes' launches ask for DevTools port 0; Chromium names its port here
+        try:
+            port = open(os.path.join(jar, "DevToolsActivePort")).readline().strip()
+        except OSError:
+            port = None
         if port:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             pages = json.load(opener.open(f"http://127.0.0.1:{port}/json/list", timeout=5))
@@ -2226,37 +2367,12 @@ async fn two_agents_two_desktops() {
     assert_eq!((jv.name.as_str(), fv.name.as_str()), ("hermes:juniper--k3x9", "hermes:fred--k3x9"), "each socket shows its own agent's desktop");
     let xvnc = c.exec_out(&["sh", "-c", "pgrep -x Xvnc | wc -l"]);
     assert_eq!(xvnc.trim(), "2", "two desktops, two X servers");
-    // Both icons start a browser; the agents attach to their own profile's
-    // live PID and port even if another profile's old port file is present.
+    // Both icons start a browser, each on its own agent's profile.
     open_browser_icon(&c, "juniper--k3x9");
     open_browser_icon(&c, "fred--k3x9");
     let (jb, fb) = (desktop_browser(&c, "juniper--k3x9"), desktop_browser(&c, "fred--k3x9"));
     assert_ne!(jb["port"], fb["port"], "two agents never share a CDP port");
     assert_ne!(jb["pid"], fb["pid"], "two browser processes");
-    const GUARDS: &str = r#"import os, sys, tempfile
-from pathlib import Path
-sys.path.insert(0, '/opt/hermes')
-from tools.bot_desktop.fragment_browser import _owned_process, _check_version
-with tempfile.TemporaryDirectory(dir='/tmp') as directory:
-    profile = Path(directory)
-    # A saved SingletonLock whose PID now belongs to another agent is stale.
-    os.symlink('previous-host-' + sys.argv[1], profile / 'SingletonLock')
-    assert _owned_process(profile) is None, 'a foreign PID is never adopted'
-    version = profile / 'Last Version'
-    version.write_text('999.0.0.0')
-    try:
-        _check_version(profile)
-    except RuntimeError as error:
-        assert 'newer Chromium image' in str(error)
-    else:
-        raise AssertionError('a newer profile must refuse before Chromium starts')
-    assert version.read_text() == '999.0.0.0', 'refusal never rewrites the profile'
-"#;
-    let (code, out) = c.exec_code(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", GUARDS, &fb["pid"].to_string()]);
-    assert_eq!(code, 0, "browser ownership and profile-version guards: {out}");
-    let stale = format!("printf '{}\\n/devtools/browser/stale\\n' > /data/work/juniper--k3x9/browser-profile/DevToolsActivePort", fb["port"]);
-    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &stale]));
-    assert_eq!(desktop_browser(&c, "juniper--k3x9")["pid"], jb["pid"], "another agent's stale port cannot redirect attachment");
 
     // Take over of juniper's screen is juniper's lease
     let mut driving = Control::open(&base, "driver", "juniper--k3x9").await.unwrap();
@@ -2285,7 +2401,7 @@ with tempfile.TemporaryDirectory(dir='/tmp') as directory:
     eprintln!("two desktops: juniper, held: {}", jsaid.chars().take(400).collect::<String>());
     assert!(jsaid.contains("human_has_control"), "juniper's computer_use refuses while a person holds its screen: {jsaid}");
     let refused = tool_said(&fake, &jchat, &c, "inspect browser: document.title").await;
-    assert!(refused.to_lowercase().contains("human has taken over"), "the native browser tool retains the desktop's lease fence: {refused}");
+    assert!(refused.to_lowercase().contains("human has taken over"), "browser_exec keeps the desktop's lease fence: {refused}");
     let fturn = look(&fchat, "fred--k3x9");
     within(&fake, &fchat, &c, 240_000, "fred's look", |w| reply(w, &fchat, &fturn).is_some()).await;
     let fsaid = fake.with(|w| reply(w, &fchat, &fturn)).unwrap_or_default();
@@ -2304,7 +2420,7 @@ with tempfile.TemporaryDirectory(dir='/tmp') as directory:
     let jsaid = fake.with(|w| reply(w, &jchat, &jturn)).unwrap_or_default();
     assert!(!jsaid.contains("human_has_control"), "given back, juniper's computer_use works: {jsaid}");
     let unheld = tool_said(&fake, &jchat, &c, "browse: https://example.com").await;
-    assert_eq!(desktop_browser(&c, "juniper--k3x9")["pid"], jb["pid"], "the native tool attaches after Give back: {unheld}");
+    assert_eq!(desktop_browser(&c, "juniper--k3x9")["pid"], jb["pid"], "browser_exec attaches after Give back: {unheld}");
 
     // idle: juniper's desktop, unwatched and unused, stops; fred's, watched, does not
     let marker = "/data/work/juniper--k3x9/browser-profile/fragment-marker";
@@ -2419,6 +2535,43 @@ async fn an_agents_home_is_the_same_on_either_runtime() {
         assert_eq!(h.written_real, format!("{home}/fragment-home.txt"), "on {on}, its file tools' `~` is the same home: {h:#?}");
     }
     assert_eq!(docker.modes, hosted.modes, "Hermes leaves its home's modes alike on both");
+}
+
+/// Goal: an agent's terminal's `HOME` is its profile's own `home` where
+/// Hermes takes the computer for no container, as on Cloudflare Containers,
+/// production's runtime, and in a container alike. Since v0.23 Hermes reads
+/// a served profile's home mode from that profile's own terminal policy,
+/// which takes nothing from the environment (its `tools/terminal_scope.py`:
+/// an omitted key is its default, `auto`), so the image's environment pin
+/// (`hermes::RUNTIME_ENV`) reached no agent's turn: there, every agent's
+/// commands ran with the gateway's `HOME`, `/data/hermes`, one shared by
+/// all (master's CI, 2026-11-17). Method: Hermes' own decision for a turn
+/// of the profile's, its scope bound as the gateway binds it, with its
+/// container guess forced each way. Forced, because this box's Docker
+/// marks every container (the containerd snapshotter names the root
+/// mount), so its hosted rung shows only the container's way
+/// (`an_agents_home_is_the_same_on_either_runtime` shows both on a runner).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_agents_terminal_home_is_its_own_where_hermes_sees_no_container() {
+    let (_fake, _model, _chat, c) = hermes_running().await;
+    const SCRIPT: &str = r#"import json
+from hermes_platform.host import runtime as host
+from agent.runtime_scope import bind_profile_scope
+from hermes_constants import get_subprocess_home
+profile = '/data/hermes/profiles/juniper--k3x9'
+homes = {}
+for container in (True, False):
+    host._container_detected = container
+    with bind_profile_scope(profile, hydrate_secrets=False):
+        homes['container' if container else 'none'] = get_subprocess_home({'HERMES_HOME': profile, 'HOME': '/data/hermes'})
+print(json.dumps(homes))
+"#;
+    let homes = hermes_python(&c, &[], SCRIPT);
+    eprintln!("terminal home: {homes}");
+    for runtime in ["container", "none"] {
+        assert_eq!(homes[runtime], "/data/hermes/profiles/juniper--k3x9/home", "where Hermes sees {runtime}, an agent's terminal's HOME is its profile's own home, never the gateway's: {homes}");
+    }
 }
 
 /// The image's last `held` event: what its last hold copied, and kept hot.
@@ -2860,6 +3013,74 @@ async fn a_question_in_words_says_whose_answer_it_waits_for() {
     });
 }
 
+/// Goal (Austin, 2026-11-17: a voice memo sent as the answer to a question
+/// in words was never transcribed, so the agent transcribed it itself):
+/// real Hermes' open clarify answered with a voice memo is answered with
+/// what the memo says, transcribed once through the route, and the answer
+/// starts no turn of its own. Method: the question, then a memo (a WAV that
+/// says its words, as the scripted model reads them) said as the answer;
+/// the route's transcriptions, and the turn's reply after, which quotes
+/// the clarify's answer.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_question_in_words_is_answered_by_a_voice_memo() {
+    use sha2::Digest;
+    let (fake, model, chat, c) = hermes_running().await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "clarify: What should I call the plant?" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let asked = |w: &support::fake::World| w.bodies(&chat, "work", "turn.asked").into_iter().filter(|a| a["turn"] == turn).collect::<Vec<_>>();
+    within(&fake, &chat, &c, 120_000, "the question, and whose answer it waits for", |w| !asked(w).is_empty()).await;
+    let words = "call it fernando the fern";
+    let audio = support::model::memo(words);
+    let sha = fragment_bridge::records::hex(&sha2::Sha256::digest(&audio));
+    fake.with(|w| w.fragments.get_mut(&chat).expect("the chat").blobs.insert(sha.clone(), ("audio/wav".into(), bytes::Bytes::from(audio.clone()))));
+    let heard_before = model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/audio/transcriptions")).count();
+    fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": audio.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    within(&fake, &chat, &c, 120_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    let heard = model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/audio/transcriptions")).count() - heard_before;
+    assert_eq!(heard, 1, "the memo transcribed once, through the route");
+    fake.with(|w| {
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.last().is_some_and(|r| r.contains(words)), "the memo's words answered the clarify: {replies:?}");
+        assert_eq!(asked(w).len(), 1, "asked once");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the answer started no turn of its own (hello, then this one)");
+    });
+}
+
+/// Goal (the council on this change, 2026-11-17): a voice memo Hermes hears
+/// no words in leaves its clarify open, and says nothing, so the bridge
+/// keeps the question open too: the asker's retry, in words, answers it,
+/// and no turn of its own is started. Method: the question, a memo that
+/// says nothing (the scripted model hears it so), then the words; the
+/// turn's reply quotes the clarify's answer.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_voice_memo_heard_as_nothing_leaves_the_question_to_answer_again() {
+    use sha2::Digest;
+    let (fake, _model, chat, c) = hermes_running().await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "clarify: What should I call the plant?" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let asked = |w: &support::fake::World| w.bodies(&chat, "work", "turn.asked").into_iter().filter(|a| a["turn"] == turn).collect::<Vec<_>>();
+    within(&fake, &chat, &c, 120_000, "the question, and whose answer it waits for", |w| !asked(w).is_empty()).await;
+    let audio = support::model::memo("");
+    let sha = fragment_bridge::records::hex(&sha2::Sha256::digest(&audio));
+    fake.with(|w| w.fragments.get_mut(&chat).expect("the chat").blobs.insert(sha.clone(), ("audio/wav".into(), bytes::Bytes::from(audio.clone()))));
+    fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": audio.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    // Hermes heard it as nothing, and keeps its clarify
+    let t = Instant::now();
+    while !c.logs().contains("voice transcription produced no usable text") && !c.exec_out(&["sh", "-c", "grep -rl 'voice transcription produced no usable text' /data/hermes/logs /data/hermes/profiles/*/logs 2>/dev/null | head -1"]).contains("log") {
+        assert!(t.elapsed() < Duration::from_secs(90), "Hermes never kept its clarify for a memo with no words");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    fake.say(&chat, &person("paul"), json!({ "text": "Fernando" }));
+    within(&fake, &chat, &c, 120_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    fake.with(|w| {
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.last().is_some_and(|r| r.contains("Fernando")), "the retry answered the clarify: {replies:?}");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the retry started no turn of its own (hello, then this one)");
+    });
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: a step read as its raw
 /// tool name and its arguments cut at 40 characters): real Hermes' steps
 /// say what they do. Its terminal, write_file and execute_code calls are
@@ -2954,10 +3175,13 @@ async fn words_before_a_tool_call_are_a_reply() {
 /// reply. Nor is its review's memory call a step (the review of #664: it
 /// was, when it ended before its turn did): Hermes runs the review as a
 /// fork sharing the turn's session and context, whose calls the image's
-/// plugin tells from the turn's own. Method: short turns until one is
-/// reviewed, the scripted model saving one thing when asked to review; each
-/// answer shows an image its provider serves slowly, so its turn ends only
-/// after the review saved (its notice comes first).
+/// plugin tells from the turn's own. Since v0.23 Hermes holds a review's
+/// message until its turn's response has landed (its gateway's
+/// `_make_bg_review_callbacks`), so the notice may follow that turn's end,
+/// and is that turn's either way. Method: short turns until one is reviewed, the
+/// scripted model saving one thing when asked to review; each answer shows
+/// an image its provider serves slowly, so the review saves while its turn
+/// is still delivering.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_memory_review_is_a_notice() {
@@ -2997,7 +3221,7 @@ async fn a_memory_review_is_a_notice() {
         assert!(turns.iter().any(|t| n["turn"] == t.as_str()), "the notice is a turn's it reviewed: {n}");
         let work: Vec<serde_json::Value> = w.records(&chat, "work").into_iter().map(|r| r["body"].clone()).collect();
         let at = |kind: &str| work.iter().position(|b| b["kind"] == kind && b["turn"] == n["turn"]);
-        assert!(matches!((at("turn.notice"), at("turn.end")), (Some(notice), Some(end)) if notice < end), "the review saved while its turn was still running: {work:?}");
+        assert!(at("turn.notice").is_some() && at("turn.end").is_some(), "the reviewed turn ended, and its notice was told: {work:?}");
         let steps = w.bodies(&chat, "work", "turn.step");
         assert!(steps.is_empty(), "no step: its turns call nothing, and the review's call is none of theirs: {steps:?}");
         let said = w.bodies(&chat, "chat", "reply");
@@ -3250,7 +3474,7 @@ async fn nothing_technical_asks_its_owner() {
     let calls = x.model.calls.lock().unwrap();
     assert!(!calls.iter().any(|m| m.body["messages"].to_string().contains("APPROVE, DENY, or ESCALATE")), "no guardian");
     let told = calls.iter().filter(|m| m.path.ends_with("/chat/completions")).filter(|m| m.body["messages"][0]["role"] == "system").map(|m| m.body["messages"][0]["content"].to_string()).find(|s| s.contains("Never ask them to approve a command, a file, a path or code"));
-    assert!(told.as_ref().is_some_and(|s| s.contains("already on your computer") && s.contains("into the file dialog on your desktop with computer_use")), "and that a file attached in the chat is on its computer, and how to upload it (hermes::FILES)");
+    assert!(told.as_ref().is_some_and(|s| s.contains("already on your computer") && s.contains("upload_file(selector, full path)") && s.contains("file dialog with computer_use")), "and that a file attached in the chat is on its computer, and how to upload it (hermes::FILES)");
     assert!(told.as_ref().is_some_and(|s| s.contains("put MEDIA: and its absolute path on a line of its own")), "and how it attaches a file in the chat (hermes::SENDING)");
     assert!(told.is_some_and(|s| s.contains("with the clarify tool and its choices")), "every turn's system prompt says how to ask (the image's platform_hints.relay)");
 }
@@ -3261,7 +3485,7 @@ async fn nothing_technical_asks_its_owner() {
 /// of choices waits ends the turn stopped, its card closed `stopped`, no
 /// choice made for its owner; the bridge's answer to the clarify (`skip`:
 /// Hermes' clarify never reads an interrupt) starts no turn of its own; and
-/// the chat's next message is answered.
+/// the chat's next message is answered, at once and after a restart.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_stop_lets_its_clarify_go() {
@@ -3273,6 +3497,11 @@ async fn a_stop_lets_its_clarify_go() {
     fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
     // well inside the card's hour
     within(&fake, &chat, &c, 60_000, "the stopped turn's end", |w| !of(w, &turn, "turn.end").is_empty()).await;
+    // and the chat answers on at once, no restart between (the hermes e2e
+    // lane, 2026-11-16: a Stop that also bumped Hermes' run generation left
+    // the chat waiting behind its stopped turn)
+    let after = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "and after the stop" })));
+    within(&fake, &chat, &c, 120_000, "the message after the stop", |w| !of(w, &after, "turn.end").is_empty()).await;
     let card = fake.with(|w| of(w, &turn, "turn.prompt")[0].clone());
     c.restart();
     // A stopped card cannot lend its answer to a fresh turn after restart.
@@ -3286,8 +3515,9 @@ async fn a_stop_lets_its_clarify_go() {
         // Hermes may answer once more, its model told the question was
         // skipped: never a choice made for the person
         assert!(replies(&turn).iter().all(|r| r.contains("\"status\": \"skipped\"") && !r.contains("\"user_response\": \"")), "no choice made: {:?}", replies(&turn));
+        assert!(replies(&after).iter().any(|r| r.contains("and after the stop")), "answered after the Stop: {:?}", replies(&after));
         assert!(replies(&next).iter().any(|r| r.contains("good morning")), "{:?}", replies(&next));
-        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 3, "hello, the stopped one and good morning: `skip` is no turn");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 4, "hello, the stopped one, the one after it and good morning: `skip` is no turn");
     });
 }
 
@@ -3378,7 +3608,7 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
     let redone: Vec<String> = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter_map(|c| support::model::answer(&c.body).1).map(|call| call.to_string()).filter(|call| call.contains("clarify")).collect();
     let logs = c.logs();
-    let closed = logs.lines().find(|l| l.contains("boot.cut_turns_closed") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's closer").to_string();
+    let closed = logs.lines().find(|l| l.contains("boot.cut_turns_settled") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's closer").to_string();
     let saw = x.model_saw(calls_before);
     fake.with(|w| {
         assert_eq!(x.ends(w, &risky).len(), 1, "the cut turn ends once");
@@ -3401,6 +3631,57 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     let (asked_after, _) = asked_with(&calls, "and after that").expect("a request for the message after");
     assert!(!asked_after.contains("cut short"), "the turn after is told nothing: {asked_after:?}");
     eprintln!("cut: {closed}\ncut: the boundary the model saw: {before:?}\ncut: the message: {asked:?}");
+}
+
+/// Goal (never break agents; Hermes v0.22's durable admissions): a turn cut
+/// by a crash (SIGKILL: no hold, nothing saved) or by a stop and start (a
+/// deploy's SIGTERM, the same `/data`) never wedges its chat, and nothing of
+/// it runs again. Left alone, Hermes pauses a chat behind a turn a restart
+/// cut until its sender sends `/discard`, and answers each message with a
+/// notice saying so; the boot settles that turn as `/discard` does
+/// (`hermes::SETTLE_CUT_TURNS`). Method: the scripted model runs a long
+/// command, cut while it runs; then the chat's next message is answered,
+/// with no pause notice, the cut turn ends lost once, its command never
+/// runs again and the model never calls it again.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_turn_cut_by_a_crash_or_a_deploy_never_wedges_its_chat() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    for (how, signal) in [("crash", "KILL"), ("deploy", "TERM")] {
+        let cut = x.say(&format!("run: sleep 300 # {how}"));
+        within(fake, chat, &c, 120_000, "the long command runs", |_| c.exec(&["pgrep", "-f", "^sleep 300$"])).await;
+        let calls_before = x.model.calls.lock().unwrap().len();
+        assert!(Command::new(docker()).args(["kill", "--signal", signal, &c.id]).output().expect("docker runs").status.success());
+        let _ = Command::new(docker()).args(["wait", &c.id]).output();
+        fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+        c.start();
+        let next = x.say(&format!("good morning after the {how}"));
+        within(fake, chat, &c, 240_000, "the next message's turn to end", |w| !x.ends(w, &next).is_empty()).await;
+        let after = x.say(&format!("and after the {how}"));
+        within(fake, chat, &c, 120_000, "the turn after's end", |w| !x.ends(w, &after).is_empty()).await;
+        let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
+        let redone: Vec<String> = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter_map(|c| support::model::answer(&c.body).1).map(|call| call.to_string()).filter(|call| call.contains("sleep 300")).collect();
+        let saw = x.model_saw(calls_before);
+        let logs = c.logs();
+        let settled = logs.lines().rev().find(|l| l.contains("boot.cut_turns_settled") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's settler").to_string();
+        eprintln!("{how}: {settled}");
+        assert!(settled.contains("boot.cut_turns_settled"), "{how}: the boot settled its cut turns: {settled}");
+        assert!(!c.exec(&["pgrep", "-f", "^sleep 300$"]), "{how}: the cut command does not run again");
+        fake.with(|w| {
+            assert_eq!(x.ends(w, &cut).len(), 1, "{how}: the cut turn ends once");
+            assert_eq!(x.ends(w, &cut)[0]["error"], "lost when the computer restarted", "{how}");
+            assert!(redone.is_empty(), "{how}: the model never runs the cut command again: {redone:?}; it saw {saw:#?}");
+            let said: Vec<String> = w.bodies(chat, "chat", "reply").iter().map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+            assert!(!said.iter().any(|t| t.contains("paused") || t.contains("/discard")), "{how}: no pause notice: {said:?}");
+            for turn in [&next, &after] {
+                assert!(x.reply(w, turn).is_some_and(|r| r["text"].as_str().unwrap_or("").contains(how)), "{how}: answered: {:?}; it saw {saw:#?}", x.reply(w, turn));
+            }
+        });
+        let (asked, (before_role, before)) = asked_with(&calls, &format!("good morning after the {how}")).unwrap_or_else(|| panic!("{how}: a model request for the next message; it saw {saw:#?}"));
+        assert!(!asked.contains(&format!("[paul] run: sleep 300 # {how}\n")), "{how}: the cut request is never joined to it: {asked:?}");
+        assert_eq!(before_role, "assistant", "{how}: the cut turn is closed before it: {before:?}");
+    }
 }
 
 /// Goal (durability phase 4): a turn cut by a restart while its tool runs
@@ -3467,6 +3748,55 @@ async fn a_turn_cut_while_its_tool_runs_is_continued_once() {
     for said in ["Your previous turn in this chat was cut short", &format!("It was answering: “run: {command}”"), &unended, "[New message]\n[your computer] I restarted while you were working"] {
         assert!(asked.contains(said), "{said:?} in the model's request: {asked:?}");
     }
+}
+
+/// Goal (Codex on #1305): a chat Hermes compressed answers on after a
+/// turn a crash cut, never paused. A compressed chat's admissions are its
+/// compression lineage's root's, while Hermes lists its newest session,
+/// the lineage's tip: the boot settles the root's lost turn
+/// (`hermes::SETTLE_CUT_TURNS`). Every chat v0.21 compressed is such a
+/// lineage. Method: a few turns, `/compress` rotating (its new session the
+/// old one's compression child, as v0.21 compressed), then a long command
+/// cut by a SIGKILL and a start; the next message is answered with no pause
+/// notice.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_compressed_chat_answers_on_after_a_cut_turn() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    // long turns, so Hermes' summary is shorter than what it replaces
+    let filler = "the garden's beds, their soil and what grows in each, noted at length; ".repeat(60);
+    for n in 0..3 {
+        let t = x.say(&format!("a fact to keep, number {n}: {filler}"));
+        within(fake, chat, &c, 120_000, "a turn before the compression", |w| !x.ends(w, &t).is_empty()).await;
+    }
+    // compressed as Hermes before v0.23 always did, and still does unless
+    // `compression.in_place`: into a child session, the old one its root
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "printf 'compression:\\n  in_place: false\\n' >> /data/hermes/profiles/juniper--k3x9/config.yaml"]));
+    let said = fake.say(chat, &person("paul"), json!({ "kind": "command", "command": "compress", "args": "" }));
+    let compress = fragment_bridge::records::turn_id("juniper--k3x9", chat, "chat", said["seq"].as_u64().unwrap());
+    within(fake, chat, &c, 180_000, "/compress's end", |w| !x.ends(w, &compress).is_empty()).await;
+    let children = || c.exec_out(&["/opt/hermes/.venv/bin/python", "-c", "import sqlite3; c = sqlite3.connect('file:/data/hermes/profiles/juniper--k3x9/state.db?mode=ro', uri=True); print(c.execute(\"SELECT COUNT(*) FROM sessions WHERE parent_session_id IS NOT NULL\").fetchone()[0])"]).trim().parse::<u64>().unwrap_or(0);
+    let rows = c.exec_out(&["/opt/hermes/.venv/bin/python", "-c", "import sqlite3; c = sqlite3.connect('file:/data/hermes/profiles/juniper--k3x9/state.db?mode=ro', uri=True); print(c.execute('SELECT id, parent_session_id, end_reason, session_key FROM sessions').fetchall())"]);
+    assert!(children() >= 1, "Hermes compressed the chat into a child session (else this proves nothing): {rows}");
+    let cut = x.say("run: sleep 300 # compressed");
+    within(fake, chat, &c, 120_000, "the long command runs", |_| c.exec(&["pgrep", "-f", "^sleep 300$"])).await;
+    assert!(Command::new(docker()).args(["kill", "--signal", "KILL", &c.id]).output().expect("docker runs").status.success());
+    let _ = Command::new(docker()).args(["wait", &c.id]).output();
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    c.start();
+    let next = x.say("good morning after the compression");
+    within(fake, chat, &c, 240_000, "the next message's turn to end", |w| !x.ends(w, &next).is_empty()).await;
+    let logs = c.logs();
+    let settled = logs.lines().rev().find(|l| l.contains("boot.cut_turns_settled") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's settler").to_string();
+    eprintln!("compressed: {settled}");
+    assert!(settled.contains("boot.cut_turns_settled") && settled.contains("\"lost\":1"), "the boot settled the root's lost turn: {settled}");
+    fake.with(|w| {
+        assert_eq!(x.ends(w, &cut).len(), 1, "the cut turn ends once");
+        let said: Vec<String> = w.bodies(chat, "chat", "reply").iter().map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(!said.iter().any(|t| t.contains("paused") || t.contains("/discard")), "no pause notice: {said:?}");
+        assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning after the compression")), "answered: {:?}", x.reply(w, &next));
+    });
 }
 
 /// The id of `card`'s option labelled `label` (Hermes may add "
@@ -3689,7 +4019,9 @@ async fn a_late_approval_over_budget_is_visibly_unavailable() {
 
 /// Goal: offered operator placeholders select Hermes' real backends;
 /// removing them restores its defaults. Two FAL scopes submit interleaved,
-/// then their result workers run outside either scope, retaining each key.
+/// then their result workers run outside either scope, retaining each key
+/// (Hermes' own direct client, one per profile and key since v0.23); a
+/// call with no scoped key signs with its own profile's `.env` placeholder.
 /// Only the vendor HTTP transport is faked, never the SDK or profile writer.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
@@ -3716,9 +4048,6 @@ async fn tool_profiles_select_offered_operator_keys() {
     }
     let checked = hermes_python(&c, &["HERMES_HOME=/data/hermes/profiles/juniper--k3x9"], r#"
 import json, sys
-sys.path.insert(0, '/opt/fragment')
-import tool_keys
-tool_keys.install()
 from hermes_cli.config import load_config
 from agent.secret_scope import set_secret_scope, reset_secret_scope
 from tools.tool_backend_helpers import read_selection
@@ -3728,7 +4057,7 @@ cfg = load_config()
 assert cfg['web']['backend'] == cfg['web']['search_backend'] == cfg['web']['extract_backend'] == 'firecrawl'
 assert cfg['image_gen']['provider'] == 'fal' and cfg['image_gen']['model'] == 'fal-ai/flux-2/klein/9b'
 assert cfg['tts']['provider'] == 'elevenlabs'
-assert cfg['browser']['cloud_provider'] == 'local' and cfg['browser']['backend'] == 'off'
+assert cfg['browser']['cloud_provider'] == 'local' and cfg['browser']['executable_path'] == '/opt/fragment/bin/chromium'
 assert all(available(e) for e in ('edge-tts', 'firecrawl', 'fal', 'tts-premium'))
 import fal_client, httpx
 real = fal_client.SyncClient
@@ -3761,17 +4090,14 @@ assert seen == ['Key fck_fal_' + 'a' * 32, 'Key fck_fal_' + 'b' * 32]
 for handle in handles:
     assert handle.get() == {'images': []}
 assert seen[2:] == ['Key fck_fal_' + 'a' * 32] * 2 + ['Key fck_fal_' + 'b' * 32] * 2
-assert all(c._client.is_closed for c in clients)
+assert len(clients) == 2, 'one client per key, never one per call'
 token = set_secret_scope({})
 try:
-    try:
-        images._submit_fal_request(cfg['image_gen']['model'], {'prompt': 'test'})
-        raise AssertionError('missing scoped key was accepted')
-    except ValueError:
-        pass
+    images._submit_fal_request(cfg['image_gen']['model'], {'prompt': 'test'})
 finally:
     reset_secret_scope(token)
-assert len(seen) == 6
+assert seen[6:] == ['Key fck_fal_' + 'a' * 32], 'no scoped key: its own profile\'s placeholder, from its .env'
+assert len(seen) == 7
 print(json.dumps({'selections': True, 'extras': True, 'scoped_fal': True}))
 "#);
     assert_eq!(checked, json!({"selections": true, "extras": true, "scoped_fal": true}));
@@ -3962,11 +4288,137 @@ async fn a_voice_memo_is_transcribed_through_the_route() {
     assert_eq!((h.body["model"].clone(), h.body["language"].clone(), h.body["audio_bytes"].clone()), (json!("whisper"), serde_json::Value::Null, json!(audio.len())), "the route's whisper, the memo whole, no language forced");
     let asked = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).any(|c| c.body["messages"].to_string().contains(words));
     assert!(asked, "the turn's model call carries what the memo said: {:#?}", calls.iter().map(|c| c.body["messages"].to_string().chars().take(400).collect::<String>()).collect::<Vec<_>>());
+    // what the turn's model is told (Austin, 2026-11-17: his agent
+    // transcribed memos again itself): its system prompt says a memo arrives
+    // transcribed (hermes::VOICE), and its message is the shape VOICE
+    // describes, the words quoted just above Hermes' audio note, then the
+    // bridge's note naming the same recording. A Hermes that moves the
+    // quote makes VOICE false, and fails here.
+    let memo_call = handed(&model, "juniper--k3x9", words).into_iter().next().expect("the memo's turn's model call");
+    let messages = memo_call.body["messages"].as_array().cloned().unwrap_or_default();
+    let system = messages.first().filter(|m| m["role"] == "system").map(content_text).unwrap_or_default();
+    assert!(system.contains("A voice memo arrives already transcribed: the quoted words just above the note that the user sent audio"), "its system prompt says a memo is already transcribed (hermes::VOICE): {}", system.chars().take(2000).collect::<String>());
+    let user = messages.iter().rev().find(|m| m["role"] == "user").map(content_text).unwrap_or_default();
+    let quoted = user.find(&format!("\"{words}\"\n[User sent audio: "));
+    let noted = user.find("sent a file: 'memo.wav' (audio/wav). It is on your computer at: /tmp/bridge-media/");
+    assert!(matches!((quoted, noted), (Some(q), Some(n)) if q < n), "its message quotes the words just above Hermes' audio note, then the bridge's note: {user}");
     let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == t).collect::<Vec<_>>());
     eprintln!("memo: replies {replies:?}");
     assert_eq!(replies.len(), 1, "one reply, no transcript echoed as a message of its own: {replies:?}");
     assert!(!replies[0]["text"].as_str().unwrap_or("").contains('🎙'), "{replies:?}");
     assert_eq!(c.exec_out(&["sh", "-c", "find /data -iname '*faster_whisper*' -o -iname 'ctranslate2*' | head -3"]).trim(), "", "no local Whisper installed for it");
+}
+
+/// Goal (Austin, 2026-11-17: `VOICE` would reach only new chats, as every
+/// hint before it did): a chat open before an image whose relay hint
+/// changed gets the new hint at its next turn after the computer starts on
+/// it, its conversation kept; a plain restart asks nothing again. Method:
+/// a turn, then the session's stored system prompt made an older image's
+/// (no VOICE) and the boot's stamp that image's hint, a restart, the next
+/// turn's model call; then a second restart, and the boot's events.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_open_chat_gets_a_changed_hint_after_a_restart() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let turn_of = |said: serde_json::Value| fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let before = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "remember the green gate" })));
+    fake.until(180_000, "the turn before the restart", |w| ended(w, &before)).await;
+    // the older image's: its stored prompts without VOICE, its stamp its hint
+    // (Hermes keeps a session's prompt in `system_prompts`, by its SHA-256,
+    // which the session's `system_prompt_hash` names)
+    const OLDER: &str = r#"import hashlib, re, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+old = lambda s: re.sub(r"\n\nA voice memo arrives already transcribed:.*?type it\.", "", s, flags=re.S)
+stored = "SELECT s.id, COALESCE(sp.prompt, s.system_prompt) FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash WHERE COALESCE(sp.prompt, s.system_prompt) LIKE '%A voice memo arrives already transcribed%'"
+rows = db.execute(stored).fetchall()
+for i, p in rows:
+    o = old(p)
+    h = hashlib.sha256(o.encode("utf-8")).hexdigest()
+    db.execute("INSERT OR IGNORE INTO system_prompts (hash, prompt) VALUES (?, ?)", (h, o))
+    db.execute("UPDATE sessions SET system_prompt_hash = ?, system_prompt = CASE WHEN system_prompt IS NULL THEN NULL ELSE ? END WHERE id = ?", (h, o, i))
+db.commit()
+print(len(rows), len(db.execute(stored).fetchall()))
+was = open(sys.argv[2]).read().strip()
+assert len(was) == 64 and int(was, 16) >= 0, "the stamp is today's inputs' digest: " + was
+open(sys.argv[2], "w").write("0" * 64)
+print(len(was))
+"#;
+    let older = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", OLDER, "/data/hermes/profiles/juniper--k3x9/state.db", "/data/hermes/.fragment_prompt_inputs"]);
+    let counts: Vec<u64> = older.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+    assert!(matches!(counts[..], [made, 0, stamped] if made > 0 && stamped > 0), "the chat's stored prompt and the stamp made the older image's: {older}");
+    c.restart();
+    let after = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "what gate was it" })));
+    fake.until(180_000, "the turn after the restart", |w| ended(w, &after)).await;
+    let call = handed(&model, "juniper--k3x9", "what gate was it").into_iter().next().expect("the turn's model call");
+    let messages = call.body["messages"].as_array().cloned().unwrap_or_default();
+    let system = messages.first().filter(|m| m["role"] == "system").map(content_text).unwrap_or_default();
+    assert!(system.contains("A voice memo arrives already transcribed"), "the open chat's prompt rebuilt with today's hint: {}", system.chars().take(2000).collect::<String>());
+    assert!(messages.iter().any(|m| m["role"] == "user" && content_text(m).contains("remember the green gate")), "its conversation kept: {messages:#?}");
+    // a restart on the same hint asks nothing: one refresh in both starts
+    c.restart();
+    let again = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "and again" })));
+    fake.until(180_000, "the turn after the second restart", |w| ended(w, &again)).await;
+    let refreshed = c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "prompts.refreshed" && e["why"] == "boot").count();
+    assert_eq!(refreshed, 1, "one refresh, at the first start on the changed hint: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
+}
+
+/// Goal (Austin, 2026-11-17: a skill's change, as a hint's, would reach
+/// only new chats): a managed skill added to its owner's set while a chat
+/// is open is in that chat's prompt at its next turn, no restart, its
+/// conversation kept; the turn before it had none. Method: an owner's
+/// skills fragment with one skill, installed every 2 s; a turn; a second
+/// skill added to the fragment; its install, then the refresh it asks for
+/// (`prompts.refreshed`, why `skills`); the next turn's model call.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_open_chat_lists_a_managed_skill_added_while_it_runs() {
+    const GARDEN: &str = "---\nname: garden-log\ndescription: Keep the garden's daily log of what was sown and watered.\n---\n# Garden log\n";
+    const SEEDS: &str = "---\nname: seed-swap\ndescription: Trade spare seeds with the neighbours' garden club each spring.\n---\n# Seed swap\n";
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let skills = fake.skills("skills", &[("skills/notes/garden-log/SKILL.md", GARDEN)]);
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SKILLS_MS", "2000")]);
+    fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let installed = |path: &str| c.exec(&["test", "-f", &format!("/data/hermes/managed-skills/{path}")]);
+    let t = Instant::now();
+    while !installed("notes/garden-log/SKILL.md") {
+        assert!(t.elapsed() < Duration::from_secs(60), "the first skill never installed:\n{}", c.logs());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let turn_of = |said: serde_json::Value| fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let before = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "remember the green gate" })));
+    fake.until(180_000, "the turn before the new skill", |w| ended(w, &before)).await;
+    let system_of = |said: &str| {
+        let call = handed(&model, "juniper--k3x9", said).into_iter().next().unwrap_or_else(|| panic!("the turn's model call for {said}"));
+        call.body["messages"].as_array().and_then(|m| m.first().filter(|m| m["role"] == "system").map(content_text)).unwrap_or_default()
+    };
+    let first = system_of("remember the green gate");
+    assert!(first.contains("garden-log") && !first.contains("seed-swap"), "the chat's prompt lists the set it began with: {}", first.chars().take(4000).collect::<String>());
+    // the owner's set gains a skill while the chat is open (the first
+    // install's own refresh, if the gateway had a database by then, is
+    // counted before it)
+    let refreshed = |c: &Container| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "prompts.refreshed" && e["why"] == "skills").count();
+    let base = refreshed(&c);
+    fake.with(|w| w.fragments.get_mut(&skills).expect("the skills fragment").files.insert("skills/notes/seed-swap/SKILL.md".into(), bytes::Bytes::from_static(SEEDS.as_bytes())));
+    let t = Instant::now();
+    while !(installed("notes/seed-swap/SKILL.md") && refreshed(&c) > base) {
+        assert!(t.elapsed() < Duration::from_secs(60), "the new skill's install never asked a refresh:\n{}", c.logs().lines().filter(|l| l.contains("skills.") || l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let after = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "what gate was it" })));
+    fake.until(180_000, "the turn after the new skill", |w| ended(w, &after)).await;
+    let call = handed(&model, "juniper--k3x9", "what gate was it").into_iter().next().expect("the turn's model call");
+    let messages = call.body["messages"].as_array().cloned().unwrap_or_default();
+    let system = messages.first().filter(|m| m["role"] == "system").map(content_text).unwrap_or_default();
+    assert!(system.contains("seed-swap"), "the open chat's prompt lists the new skill: {}", system.chars().take(4000).collect::<String>());
+    assert!(messages.iter().any(|m| m["role"] == "user" && content_text(m).contains("remember the green gate")), "its conversation kept: {messages:#?}");
+    // and an install that changes nothing asks nothing more
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(refreshed(&c), base + 1, "one refresh for the one change: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
 }
 
 // ---- teammates asking each other (route A: images/hermes/plugins/fragment-ask) ----
@@ -4282,6 +4734,110 @@ async fn an_old_bot_chat_is_rebuilt_without_bot_mode() {
     assert!(tools.contains("fragment_ask") && !tools.contains("message_agent"), "fragment_ask, not message_agent: {tools}");
     assert!(call.body["messages"].to_string().contains("hello from before"), "its history kept");
     assert!(!c.exec(&["test", "-L", "/data/hermes/profiles/juniper--k3x9/hooks/fragment-bot-chat"]), "the older image's Bot Mode hook link is gone");
+}
+
+/// Every session and message in a computer's Hermes databases, read as root
+/// (Hermes keeps them owner-only).
+fn hermes_rows(c: &Container) -> (u64, u64) {
+    let out = c.exec_out(&["/opt/hermes/.venv/bin/python", "-c", "import glob, sqlite3\ns = m = 0\nfor p in glob.glob('/data/hermes/state.db') + glob.glob('/data/hermes/profiles/*/state.db'):\n    c = sqlite3.connect('file:' + p + '?mode=ro', uri=True)\n    s += c.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]\n    m += c.execute('SELECT COUNT(*) FROM messages').fetchone()[0]\nprint(s, m)"]);
+    let mut n = out.split_whitespace().filter_map(|w| w.parse().ok());
+    (n.next().unwrap_or(0), n.next().unwrap_or(0))
+}
+
+/// Goal (never break agents: a computer upgrades in place, Hermes and
+/// all): a computer an older image ran (`FRAGMENT_DOCKER_OLD_HERMES_TAG`:
+/// production's, its Hermes older; skipped without it) wakes on this image
+/// from a save taken under a deploy, one of juniper's commands still
+/// running, and goes on. Its `/data` checks; every session and message is
+/// kept (Hermes migrates its `state.db` forward, and an older Hermes may
+/// refuse it after: no rollback, docs/technical-debt-ledger.md); its
+/// agents' work is kept; the cut turn ends lost once, is closed before the
+/// next message (an older Hermes had no admissions: its open tail is
+/// closed all the same) and never runs again; and each agent answers on in
+/// its chat with its history, with no pause notice. Method: juniper runs a
+/// command that writes into her work and maple answers, on the older image;
+/// then juniper's long command runs while the computer is held and saved,
+/// and this image wakes from that save.
+#[tokio::test]
+#[ignore = "needs Docker and an older image: FRAGMENT_DOCKER_OLD_HERMES_TAG=<tag> cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_computer_upgrades_hermes_in_place() {
+    let Ok(old) = std::env::var("FRAGMENT_DOCKER_OLD_HERMES_TAG") else {
+        eprintln!("skip: no FRAGMENT_DOCKER_OLD_HERMES_TAG (an older image) to upgrade from");
+        return;
+    };
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["juniper", "maple"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let jchat = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let mchat = fake.chat_named("maple-chat--z8w6", &["maple"]);
+    let say = |chat: &str, agent: &str, text: &str| -> String {
+        let said = fake.say(chat, &person("paul"), json!({ "text": text }));
+        fragment_bridge::records::turn_id(&format!("{agent}--k3x9"), chat, "chat", said["seq"].as_u64().unwrap())
+    };
+    let ends = |w: &support::fake::World, chat: &str, turn: &str| -> Vec<serde_json::Value> { w.bodies(chat, "work", "turn.end").into_iter().filter(|e| e["turn"] == turn).collect() };
+    let reply = |w: &support::fake::World, chat: &str, turn: &str| -> String { w.bodies(chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join("\n") };
+
+    // the older image: a turn of each agent's, juniper's writing into her work
+    let c = Container::run(&old, fake.addr.port(), model.addr.port(), &[]);
+    fake.until(180_000, "the older image's bridge to follow", |w| w.live_sockets() >= 4).await;
+    let wrote = say(&jchat, "juniper", "run: echo kept-before > /data/work/juniper--k3x9/before.txt && echo wrote-before");
+    within(&fake, &jchat, &c, 180_000, "juniper's turn before", |w| !ends(w, &jchat, &wrote).is_empty()).await;
+    let hello = say(&mchat, "maple", "hello maple from before");
+    within(&fake, &mchat, &c, 180_000, "maple's turn before", |w| !ends(w, &mchat, &hello).is_empty()).await;
+    let cut = say(&jchat, "juniper", "run: sleep 300 # the upgrade");
+    within(&fake, &jchat, &c, 120_000, "the long command runs", |_| c.exec(&["pgrep", "-f", "^sleep 300$"])).await;
+    let (sessions_before, messages_before) = hermes_rows(&c);
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; {}", told(&fake, &jchat, &c)));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("hermes-upgrade");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("deploy.tar");
+    save_data(&c, &left_out, &save);
+    c.sigterm();
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+
+    // this image, from that save
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
+    let tar = std::fs::File::open(&save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    assert_eq!(code, 0, "the save checks on this image: {checked}");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    let calls_before = model.calls.lock().unwrap().len();
+    let jnext = say(&jchat, "juniper", "hello juniper after the upgrade");
+    within(&fake, &jchat, &c, 240_000, "juniper's turn after", |w| !ends(w, &jchat, &jnext).is_empty()).await;
+    let mnext = say(&mchat, "maple", "hello maple after the upgrade");
+    within(&fake, &mchat, &c, 240_000, "maple's turn after", |w| !ends(w, &mchat, &mnext).is_empty()).await;
+
+    let logs = c.logs();
+    let settled = logs.lines().rev().find(|l| l.contains("boot.cut_turns_settled") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's settler").to_string();
+    eprintln!("upgrade: {settled}");
+    assert!(settled.contains("boot.cut_turns_settled"), "the boot settled the cut turns: {settled}");
+    let calls: Vec<support::model::Call> = model.calls.lock().unwrap()[calls_before..].to_vec();
+    let redone: Vec<String> = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter_map(|c| support::model::answer(&c.body).1).map(|call| call.to_string()).filter(|call| call.contains("sleep 300")).collect();
+    assert!(redone.is_empty(), "the cut command is never called again: {redone:?}");
+    assert!(!c.exec(&["pgrep", "-f", "^sleep 300$"]), "nor run");
+    fake.with(|w| {
+        assert_eq!(ends(w, &jchat, &cut).len(), 1, "the cut turn ends once");
+        assert_eq!(ends(w, &jchat, &cut)[0]["error"], "lost when the computer restarted");
+        for (chat, turn) in [(&jchat, &jnext), (&mchat, &mnext)] {
+            let said = reply(w, chat, turn);
+            assert!(said.contains("after the upgrade") && !said.contains("paused") && !said.contains("/discard"), "answered, never paused: {said:?}");
+        }
+    });
+    let (asked, (before_role, before)) = asked_with(&calls, "hello juniper after the upgrade").expect("juniper's request after");
+    assert_eq!(before_role, "assistant", "the cut turn is closed before the next message: {before:?}");
+    assert!(!asked.contains("[paul] run: sleep 300 # the upgrade\n"), "the cut request is never joined to it: {asked:?}");
+    let juniper = calls_of(&model, "juniper--k3x9", "hello juniper after the upgrade").into_iter().find(|m| m.body.get("tools").is_some()).expect("juniper's turn after");
+    assert!(juniper.body["messages"].to_string().contains("wrote-before"), "juniper's history kept");
+    let maple = calls_of(&model, "maple--k3x9", "hello maple after the upgrade").into_iter().find(|m| m.body.get("tools").is_some()).expect("maple's turn after");
+    assert!(maple.body["messages"].to_string().contains("hello maple from before"), "maple's history kept");
+    assert_eq!(c.exec_out(&["cat", "/data/work/juniper--k3x9/before.txt"]).trim(), "kept-before", "juniper's work kept");
+    let (sessions, messages) = hermes_rows(&c);
+    assert!(sessions >= sessions_before && messages > messages_before, "every session and message kept: {sessions_before} sessions and {messages_before} messages before, {sessions} and {messages} after");
 }
 
 /// `turn`'s `n`th sign-in card in `chat` (claude.rs, `SIGN_IN_CARD`), once
@@ -4857,12 +5413,13 @@ async fn simplex_on_the_hermes_image() {
 
 /// Goal (#627; the review of #664): a step says how its call ended, as
 /// real Hermes observed it (its `post_tool_call`; its progress text is
-/// off): done, or failed with its exit code, blocked before it ran, timed
-/// out past Hermes' own deadline, stopped by its owner; each with Hermes'
-/// preview of the call, never its output. Method: a command
-/// each, in a computer whose Hermes gives a call 4 s
-/// (`HERMES_CONCURRENT_TOOL_TIMEOUT_S`, its own setting); a call carrying
-/// Hermes' context-compression marker is one it refuses to run. And the
+/// off): done, or failed with its exit code, blocked before it ran, past
+/// its time (the terminal's own timeout, its exit code 124: since v0.23
+/// Hermes' generic tool deadline never cuts a terminal call short of the
+/// terminal's own), stopped by its owner; each with Hermes' preview of the
+/// call, never its output. Method: a command each, the timed-out one given
+/// 4 s (the call's `timeout`); a call carrying Hermes' context-compression
+/// marker is one it refuses to run. And the
 /// image's plugin keeps a turn's steps however many runs start after it,
 /// while it calls tools.
 #[tokio::test]
@@ -4872,7 +5429,7 @@ async fn a_step_says_how_its_call_ended() {
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     let model = Model::start("0.0.0.0:0").await;
     let chat = fake.chat("talk", &["juniper"]);
-    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "4")]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
     within(&fake, &chat, &c, 120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     // the plugin's memory of the person's turns keeps one still calling
     // tools past many newer runs (tests/activity_turns.py)
@@ -4890,8 +5447,8 @@ async fn a_step_says_how_its_call_ended() {
     };
     let marked = "echo ⟪HERMES-CONTEXT-COMPRESSION: 12 of 40 chars";
     // Hermes' preview of a command of two: its first, and how many more
-    for (command, preview, status, excerpt) in [("echo done-$((40+2))", "echo done-$((40+2))", "completed", "Exit code: 0"), ("echo failed-$((40+2)); exit 7", "echo failed-$((40+2)) + 1 command", "failed", "Exit code: 7"), (marked, marked, "blocked", ""), ("sleep 9", "sleep 9", "timed_out", "")] {
-        let turn = asked(&fake, &chat, &c, &format!("run: {command}"), ended).await;
+    for (asked_as, preview, status, excerpt) in [("run: echo done-$((40+2))", "echo done-$((40+2))", "completed", "Exit code: 0"), ("run: echo failed-$((40+2)); exit 7", "echo failed-$((40+2)) + 1 command", "failed", "Exit code: 7"), (&format!("run: {marked}"), marked, "blocked", ""), ("run within 4s: sleep 9", "sleep 9", "failed", "Exit code: 124")] {
+        let turn = asked(&fake, &chat, &c, asked_as, ended).await;
         check(preview, &steps(&turn), status, excerpt);
     }
     // its owner's Stop while the first of two runs: that one is killed (as
@@ -5133,9 +5690,9 @@ async fn playwright_runs_the_system_chromium_and_the_small_tools_run() {
     let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && { sudo playwright uninstall --all; echo \"uninstall=$?\"; } && { timeout 60 playwright uninstall; echo \"mine=$?\"; }").await;
     assert!(said.contains("uninstall=1") && said.contains("mine=1") && said.contains("would remove Hermes' own tools"), "{said}");
     let store = c.exec_out(&["ls", "/opt/hermes/tools"]);
-    assert!(store.lines().any(|l| l == "chromium-1208") && store.lines().any(|l| l.starts_with("ffmpeg-9")), "Hermes' Chrome for Testing and FFmpeg are kept: {store}");
+    assert!(store.lines().any(|l| l.starts_with("ffmpeg-9")), "Hermes' FFmpeg is kept: {store}");
     let browsers = c.exec_out(&["sh", "-c", "ls /opt/hermes/tools | grep chromium"]);
-    assert_eq!(browsers.lines().count(), 3, "Chrome for Testing's, and Playwright's two names for the system Chromium; none downloaded: {browsers}");
+    assert_eq!(browsers.lines().count(), 2, "Playwright's two names for the system Chromium, no Chrome for Testing; none downloaded: {browsers}");
 }
 
 /// Goal: a deck builds in an agent's own terminal on the Hermes image as

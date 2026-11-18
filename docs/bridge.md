@@ -94,11 +94,24 @@ with its default. What an image sets:
 
 ## State, and what it never does twice
 
-Its state (`state.json`, written whole before a step's effects) is a
-cache. The authority on which turns started is the chat's `work`
-channel, so `/data` restored from any earlier save, or lost, costs reads
-and runs nothing twice. A state of another format is set aside for a
-fresh one; one that contradicts itself is refused.
+Its state is a cache. The authority on which turns started is the
+chat's `work` channel, so `/data` restored from any earlier save, or
+lost, costs reads and runs nothing twice. A state of another format is
+set aside for a fresh one; one that contradicts itself is refused.
+
+It lives in `/data/bridge` (`store.rs`) as two files. `state.json` is
+the whole state, in the format every earlier bridge read. `state.log`
+holds what each step changed since then, one line per step, appended and
+synced before the step's effects. The bridge writes `state.json` whole
+again, with a fresh log, as it starts, once the log fills, and after a
+hold. Under a hold it writes `state.json` whole, with an empty log,
+before it answers, then `state.json` alone at each step while held, as
+before the log, the empty log naming an earlier `state.json`. So a save
+holds the state whole in `state.json`, which is all an older bridge
+reads. A log whose
+first line names another `state.json` (an older bridge wrote one since,
+or a save copied the two at different moments) is read as none. A crash
+mid-append leaves a torn last line, and the log is read up to it.
 
 - **One life per turn.** Each bridge process is a life: 128 random bits,
   never written to `/data`. A turn runs only in the life whose claim (its
@@ -109,6 +122,10 @@ fresh one; one that contradicts itself is refused.
   once; one whose life ended first is lost, and the chat is told.
 - **A claim waits** for the runtime (`Connected`) and for no hold, so a
   turn waits unclaimed, for whichever life comes next.
+- **In the journal's order.** A chat's turns are claimed in the order
+  their causes were said (`Turn::said_at`, the platform's time, the same
+  in every life), admission breaking ties. A new life that reads an
+  agent's `tasks` before its chat claims them as the life before did.
 - **Every turn has both records**, its start and its end, including a
   refused turn and one stopped while it waited. A turn leaves the state
   only once both are answered. A life that ends first leaves them to the
@@ -138,9 +155,14 @@ the cut request. Two parts close this:
   Built from the chat's journal alone, it is the same in every life and
   said once. A journal that does not answer in time gives no note: a turn
   is never held back for one. Relay hands it as the inbound's `context`.
-- Before the gateway starts, our image's `hermes-boot` closes each cut
-  turn in its Hermes session (`hermes::CLOSE_CUT_TURNS`), so the next
-  message is a user message of its own.
+- Before the gateway starts, our image's `hermes-boot` settles each cut
+  turn in its Hermes session as Hermes' own `/discard` does
+  (`hermes::SETTLE_CUT_TURNS`): never run again, with Hermes' failed-turn
+  boundary in the same transaction. Hermes (since v0.22) admits each
+  relayed message durably and, left alone, pauses a chat behind a turn a
+  restart cut until its sender sends `/discard`, which a person's chat
+  never sends. So the next message is a user message of its own, and the
+  chat is never paused.
 
 ### A cut turn is continued once
 
@@ -158,10 +180,17 @@ A turn a restart cut is picked up again by itself, once, so nobody types
   state; one another life ran after the `/data` this life restored (its
   claim answered 409) by `work` (a card still open, or a `turn.asked`:
   `note::waited`), read once its lost end lands as this life's, in a task
-  of its own within `NOTE_READ_MS_MAX`. No claim waits on that read, and
+  of its own within `NOTE_READ_MS_MAX`. No lane waits on that read, and
   one that fails or runs out continues the turn, unless its asker stopped
   it meanwhile or this life closed its card for a late answer (that answer
   is its next turn).
+- **First**: until a cut turn is settled (its lost end answered and, for
+  one another life ran, its read answered), its chat claims nothing
+  (`engine.rs`, `settling`). Its continuation runs before anything said
+  after it and is the one turn told of the cut; and a newer turn never
+  holds the chat, on a card of its own, while the cut one still looks
+  open. The end is first in the chat's lane anyway, so a chat waits at
+  most the read's `NOTE_READ_MS_MAX`, and no other chat waits.
 - **What it is**: a turn queued in the cut turn's place, with its cause,
   asker and depth, its id the cut turn's `records::continuation_id`, so
   its claim makes it one run in any life. The computer says it
@@ -401,8 +430,8 @@ never reaches another agent's core.
   relayed message"). What the agent says there goes to their app once
   posted: its replies but the interim ones, with their files, and a
   card's question with its choices. An unlink stops the mirror and keeps
-  the chat; a link again is that chat. `state.json` holds nothing of
-  SimpleX.
+  the chat; a link again is that chat. The bridge's state holds nothing
+  of SimpleX.
 - **Working shows as 🚀 on their message** (Paul, 2026-11-11): SimpleX
   carries no typing, so while the agent's turn runs on a message from
   their app (the engine's `working`: its own turn phases, whatever the
@@ -578,8 +607,12 @@ reaches it (`withheld`).
 
 Relay is the connector protocol of Hermes' gateway (decision 21); the
 bridge is its connector (`runtime/relay/`). Hermes' side, as read from
-v0.21.7's `gateway/relay/` (its code wins over its contract document;
-the wire is v0.21.5's), contract version 1. Relay is marked
+v0.23.2's `gateway/relay/` (its code wins over its contract document;
+the wire is v0.21.5's), contract version 1. Since v0.22 the gateway
+admits a relayed message durably (its session authority) and ACKs its
+frame once that admission commits; a reply to the chat's live turn (a
+clarify's typed answer) is offered to that turn first (v0.23,
+`gateway/session_ingress_live_turn.py`). Relay is marked
 experimental: a Hermes upgrade reads it again, and the real-Hermes lane
 (`tests/docker.rs`) runs against it.
 

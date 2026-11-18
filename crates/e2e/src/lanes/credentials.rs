@@ -15,6 +15,7 @@ use anyhow::Result;
 use base64::Engine;
 use serde_json::{json, Value};
 
+use super::jobs::events;
 use super::ledger::{charged, entries, forget_gate, usage};
 use crate::api::Api;
 use crate::{Suite, ORG_CONNECTION, ORG_CONNECTION_HOST, SEVERAL, SEVERAL_HOST, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
@@ -1153,5 +1154,123 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     for name in ["e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic", "e2e-oauth", "e2e-nostr-handed"] {
         api.signed(w.owner, "DELETE", &format!("/api/vault/{name}"), None)?;
     }
+    Ok(turns)
+}
+
+/// What an agent may use of its owner's is its agent fragment's
+/// (`fragment_core::grants`): the checks `grant_checks` makes, as a run
+/// without the stub or the fakes skips them.
+pub(super) const GRANT_CHECKS: &[&str] = &[
+    "what an agent may use is its owner's alone to change: an agent's own key is refused (403), as is one acting for its owner (400), and its fragment's own route for it answers no one from outside (404); the agent may use what it did",
+    "what its owner sets is its agent fragment's, which says so on its events; its computer owes none",
+    "a provider taken away is refused at the agent's very next request, reaching no provider; given back, its next request goes",
+    "a computer's row from before the move, still owed (narrowed, an account picked), is honoured at the agent's next request by a fragment that holds none: taken whole, and owed no more",
+    "taken once: a row its computer sends later (every provider) is ignored by a fragment holding grants of its own, the agent's next request refused, reaching no provider, and owed no more",
+];
+
+/// The checks; answers how many turns of the agent's they took. Run while
+/// the agent may use every provider, its owner's google connected; left so.
+pub(super) fn grant_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let mut turns = 0;
+    let mut say = |s: &Suite, n: u32, text: &str| -> Result<String> {
+        turns += 1;
+        fetched(s, n, text)
+    };
+    let owner_id = api.identity(w.owner)?;
+    let path = format!("/api/computers/{}/agents/{}/connections", w.id, w.agent);
+    let allow = |who: &crate::Keys, query: &str, list: Value| api.signed(who, "PUT", &format!("{path}{query}"), Some(&json!({ "connections": list })));
+    let agent_of = |r: &crate::api::Reply| r.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == w.agent)).cloned().unwrap_or(Value::Null);
+    let view = || api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None).map(|r| agent_of(&r));
+    // what the computer owes the agent's fragment from before the move (Computer step 6)
+    let row = |written: Option<Value>| api.unsigned("POST", "/api/test/computer", Some(&json!({ "computer": w.id, "op": "legacy-grants", "agent": w.agent, "row": written })));
+    let told = || events(api, w.owner, w.agent).into_iter().rev().find(|e| e["kind"] == "agent.grants").unwrap_or(Value::Null);
+    let google = |s: &Suite| format!("fetch http://{SWAP_CONNECTION_HOST}/drive/v3/files with {}", placeholder(s, w.id, w.agent, SWAP_CONNECTION));
+
+    let before = view()?;
+    let (agent_keys, _) = api.own_agent(w.owner)?;
+    let by_agent = allow(&agent_keys, "", json!([]))?;
+    let for_owner = allow(&agent_keys, &format!("?for={owner_id}"), json!([]))?;
+    let inside = json!({ "computer": w.id, "identity": w.identity, "owner": owner_id, "change": { "connections": [] } });
+    let inside = api.signed(w.owner, "POST", &format!("/api/f/{}/computer/grants", w.agent), Some(&inside))?;
+    let after = view()?;
+    s.ok(
+        GRANT_CHECKS[0],
+        before["connections"].is_null() && by_agent.status == 403 && for_owner.status == 400 && inside.status == 404 && after["connections"].is_null(),
+        json!({ "agent": by_agent.status, "for": for_owner.status, "inside": inside.status, "after": after["connections"] }),
+    );
+
+    let set = allow(w.owner, "", json!([SWAP_CONNECTION]))?;
+    let kept = row(None)?;
+    let event = told();
+    s.ok(
+        GRANT_CHECKS[1],
+        agent_of(&set)["connections"] == json!([SWAP_CONNECTION])
+            && event["data"]["grants"]["connections"] == json!([SWAP_CONNECTION])
+            && event["data"]["moved"] == false
+            && kept.body["row"].is_null(),
+        json!({ "set": set.status, "event": event, "row": kept.body }),
+    );
+
+    let went = say(s, 180, &google(s))?;
+    let off = allow(w.owner, "", json!(["elevenlabs"]))?;
+    let seen = s.upstream.seen().len();
+    let refused = say(s, 181, &google(s))?;
+    let unreached = s.upstream.seen().len() == seen;
+    let back = allow(w.owner, "", Value::Null)?;
+    let again = say(s, 182, &google(s))?;
+    s.ok(
+        GRANT_CHECKS[2],
+        went.starts_with("fetched 200") && off.status == 200 && refused.starts_with("fetched 403") && refused.contains("may not use google") && unreached && back.status == 200 && again.starts_with("fetched 200"),
+        json!({ "went": went, "refused": refused, "again": again }),
+    );
+
+    // an agent fragment as before the move: it holds none
+    let forgot = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": w.agent, "op": "forget-grants" })))?;
+    let picks = json!({ SEVERAL: "data_installation_e2e_old" });
+    let old = json!({ "connections": "[\"elevenlabs\"]", "accounts": picks });
+    let wrote = row(Some(old.clone()))?;
+    let seen = s.upstream.seen().len();
+    let refused = say(s, 183, &google(s))?;
+    let unreached = s.upstream.seen().len() == seen;
+    let kept = row(None)?;
+    let shown = view()?;
+    let event = told();
+    s.ok(
+        GRANT_CHECKS[3],
+        forgot.status == 200
+            && wrote.body["row"] == old
+            && refused.starts_with("fetched 403")
+            && refused.contains("may not use google")
+            && unreached
+            && kept.body["row"].is_null()
+            && shown["connections"] == json!(["elevenlabs"])
+            && shown["accounts"][SEVERAL] == "data_installation_e2e_old"
+            && event["data"]["moved"] == true,
+        json!({ "wrote": wrote.body, "refused": refused, "row": kept.body, "shown": shown, "event": event }),
+    );
+
+    // the row again, as an ask read before the take would carry it
+    let wrote = row(Some(json!({ "connections": "null", "accounts": {} })))?;
+    let seen = s.upstream.seen().len();
+    let refused = say(s, 184, &google(s))?;
+    let unreached = s.upstream.seen().len() == seen;
+    let kept = row(None)?;
+    let shown = view()?;
+    s.ok(
+        GRANT_CHECKS[4],
+        wrote.status == 200
+            && refused.starts_with("fetched 403")
+            && refused.contains("may not use google")
+            && unreached
+            && kept.body["row"].is_null()
+            && shown["connections"] == json!(["elevenlabs"])
+            && shown["accounts"][SEVERAL] == "data_installation_e2e_old",
+        json!({ "refused": refused, "row": kept.body, "shown": shown }),
+    );
+
+    // as it was: every provider, each connection's default account
+    let back = allow(w.owner, "", Value::Null)?;
+    let unpicked = api.signed(w.owner, "PUT", &format!("/api/computers/{}/agents/{}/accounts/{SEVERAL}", w.id, w.agent), Some(&json!({ "account": null })))?;
+    anyhow::ensure!(back.status == 200 && unpicked.status == 200, "the agent given every provider again, its pick cleared: {back}; {unpicked}");
     Ok(turns)
 }

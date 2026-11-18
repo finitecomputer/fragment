@@ -1,14 +1,14 @@
 //! The model route (docs/cloudflare-v1.md, decision 23; "Lessons from
 //! cloudflare/agents" 7 and 8; spike S4): one OpenAI-shaped chat
-//! completion on a tier's model, metered on its payer's ledger.
+//! completion on a route's model, metered on its payer's ledger.
 //!
 //! Every call asks the gate first (ledger.rs `may`, decision 62): its
 //! payer's standing as this isolate heard it within the minute, so it waits
 //! on no ledger in the common case, and only a person out of credit (or a
 //! capped caller past a fragment's cap) is refused; a ledger that does not
 //! answer refuses nothing. Then it is made, bounded
-//! (`fragment_core::models`: the tier's model, the capped `max_tokens`,
-//! GLM's `reasoning_effort` clamped, none of the client's headers), and
+//! (`fragment_core::models`: the route's model, the capped `max_tokens`,
+//! its `reasoning_effort` clamped, none of the client's headers), and
 //! charged after its answer, never in its way: its last, cumulative usage
 //! (input less what was cached) as one meter row under a reference of its
 //! own (`aig:<hex>`), sent to the payer's ledger on the ledger's queue
@@ -20,17 +20,14 @@
 //! is kept: only the usage, on the ledger, and the call's timing on its
 //! `model.settled` line (`first_ms`, `ms`, `calls`).
 //!
-//! A tier's call whose model fails before answering anything (not reached,
-//! 429, or a 5xx; on an OpenAI-compatible API, where the key is the
-//! platform's, also 401, 402, 403 or 404: `fragment_core::models::falls_back`,
-//! a 401 or 402 logged aloud as `model.platform-key`) is made once more, the
-//! same, on its slot's own fallback (`fragment_core::models::Models::
-//! fallback_of`, `Tries`), however the call named the slot: a tier's, its
-//! route's (the deployment's `models.fallback` unless it names another:
-//! DeepSeek V4 Flash unless named, behind the cheap tier's GLM-5.3 Flash);
-//! `vision`'s, `fallback` only when that slot says its model reads images
-//! (`images: true`; the default fallback, DeepSeek, reads none); any other
-//! slot's, the one it names, if any. It is logged as `model.fallback`, and
+//! A call whose model fails before answering anything (not reached, 429,
+//! or a 5xx; on an OpenAI-compatible API, where the key is the platform's,
+//! also 401, 402, 403 or 404: `fragment_core::models::falls_back`, a 401 or
+//! 402 logged aloud as `model.platform-key`) is made once more, the same,
+//! on its slot's own fallback (`fragment_core::models::Models::
+//! fallback_of`, `Tries`), however the call named the slot: the one its
+//! slot's config names, if any (an image only to one that reads images:
+//! `fallback_for_input`). It is logged as `model.fallback`, and
 //! charged as the fallback's. Not a race: the fallback is called only
 //! after the model failed. An answer that began is final, and the
 //! fallback's failure is passed through as any. A transcription has none.
@@ -54,20 +51,21 @@
 //!   whole call's wherever a chunk carries it (`Stream::on`). The e2e's is
 //!   the same fake's OpenAI-compatible face.
 //!
-//! A job's text step makes a tier's call the same way, streamed, falling
+//! A job's text step makes a route's call the same way, streamed, falling
 //! back the same, unmetered here (`streamed`: ai.rs meters it).
 //!
 //! Who calls: an agent, `POST /api/models/v1/chat/completions` (`route`),
 //! signed by the agent (its computer's model intercept signs it), `for`
 //! naming whom it acts for and `fragment` the turn's fragment; `complete`
 //! is the call itself. The payer is the agent's owner (decision 36).
-//! A call names a tier, `vision`: the deployment's vision model, for a
-//! runtime's calls about an image (Hermes' screenshots), or `fallback`: the
-//! deployment's fallback model, for a runtime's own switch when its model
-//! stalls (Hermes' `fallback_providers`), each metered the same way; or
-//! one of those slots by its model's own id (`Models::named`: the slot of
-//! the tier its `x-fragment-tier` says, when that slot runs it, else the
-//! first that does), which `GET /api/models/v1/models` lists (`list_route`).
+//! A call names a route (the deployment's `models.routes`, by its name),
+//! `vision`: its route's vision model, for a runtime's calls about an
+//! image (Hermes' screenshots), or `fallback`: its route's fallback, for a
+//! runtime's own switch when its model stalls (Hermes'
+//! `fallback_providers`), each metered the same way; or a slot by its
+//! model's own id (`Models::named`: the slot of the route its
+//! `x-fragment-tier` says, when that slot runs it, else the first that
+//! does), which `GET /api/models/v1/models` lists (`list_route`).
 //! A fragment someone else owns is asked whether it is still open under its
 //! cap first (decision 26).
 //!
@@ -89,18 +87,18 @@ use fragment_core::ledger::{MeterRow, Spend};
 use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
 use fragment_core::price::Usage;
 use fragment_core::{decide, embed, multipart, transcribe};
-use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind, Tier};
+use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind};
 use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{Call, Whose};
 use crate::ledger::{self, FragmentOpen, MaySpend};
-use crate::{js, read_body, routed};
+use crate::{js, read_body};
 
 /// A call's request (`fragment_core::models`): Hermes' shrunk screenshot
 /// and its prompt fit.
@@ -121,9 +119,8 @@ pub struct InFragment<'a> {
     pub by_owner: bool,
 }
 
-/// One model call: who pays, which agent makes it, where, on which tier
-/// (or the vision model), the client's OpenAI-shaped body, and whether it
-/// streams.
+/// One model call: who pays, which agent makes it, where, on which route's
+/// slot, the client's OpenAI-shaped body, and whether it streams.
 pub struct ModelCall<'a> {
     /// The person whose ledger pays: the agent's owner.
     pub payer: &'a str,
@@ -131,9 +128,10 @@ pub struct ModelCall<'a> {
     pub agent: Option<&'a str>,
     pub fragment: Option<InFragment<'a>>,
     pub named: Named,
-    /// The tier its caller runs on (its `x-fragment-tier`): whose route's
-    /// `vision` and `fallback` it runs (`Models::route_for`).
-    pub tier: Option<Tier>,
+    /// The route its caller runs on (its `x-fragment-tier`), by its place
+    /// in `Models::routes`: whose `vision` and `fallback` it runs
+    /// (`Models::route_for`).
+    pub route: Option<usize>,
     pub body: Value,
     pub stream: bool,
 }
@@ -179,7 +177,7 @@ struct Charge {
     fragment: Option<String>,
     /// The model whose answer the call's is (the fallback's, when it fell back).
     model: &'static str,
-    /// What the call named: a tier, `vision`, `whisper` or `decide`.
+    /// What the call named: a route, an alias, a slot, `whisper` or `decide`.
     name: &'static str,
     /// When its first try was made: its log line says how long it took.
     t0: i64,
@@ -282,9 +280,9 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     if body_bytes > MODEL_BODY_MAX_BYTES {
         return Err(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES));
     }
-    let model = cfg.models.capped_for(call.named, call.tier).map_err(refused)?;
+    let model = cfg.models.capped_for(call.named, call.route);
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
-    let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str(), after).await?;
+    let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), cfg.models.name_of(call.named), after).await?;
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
     // as its slot falls back, however the call named it (#589's review)
     let fallback = cfg.models.fallback_for_input(bounded.model.slot, &bounded.input);
@@ -394,7 +392,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     Ok(resp)
 }
 
-/// A job's text step's call (ai.rs): one bounded, streamed call of a tier,
+/// A job's text step's call (ai.rs): one bounded, streamed call of a route,
 /// where the deployment runs it, unmetered, falling back as `complete`'s
 /// does, the same request (its tools too) to the fallback model.
 pub(crate) struct Streamed {
@@ -416,7 +414,7 @@ pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str,
     assert!(bounded.stream, "a step's call streams: its answer is read as it comes");
     let cfg = Config::from_env(env);
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
-    // a step names its tier: it falls back within that tier's route
+    // a step names its route: it falls back as that route's slot does
     let fallback = cfg.models.fallback_for_input(bounded.model.slot, &bounded.input);
     let (answer, model, calls) = tried(env, cfg, bounded, fallback, &meta).await;
     let answer = answer?;
@@ -577,37 +575,29 @@ async fn bounded_text(resp: &mut Response) -> String {
     String::from_utf8_lossy(&bytes).chars().take(REFUSAL_MAX_CHARS).collect()
 }
 
-/// The answer a `whose` asks a fragment for: its owner, and whether the
-/// agent naming it is in it.
-#[derive(Deserialize)]
-pub(crate) struct Whose {
-    pub owner: String,
-    pub member: bool,
-}
-
 /// `POST /api/models/v1/chat/completions[?fragment=<name>]`: an agent's
 /// model call, signed by the agent (`for` names whom it acts for), its
-/// `model` one of the route's names (a tier, `vision`, `fallback`) or a
-/// model's id, read with the tier its `x-fragment-tier` says
+/// `model` one of the route's names (a route's, `vision`, `fallback`) or a
+/// model's id, read with the route its `x-fragment-tier` says
 /// (`Models::named`). Its owner pays; `fragment` (one the agent is in) is
 /// where the turn is, for that fragment's cap.
 pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Background) -> CellResult<Response> {
     let body = read_body(&mut req, MODEL_BODY_MAX_BYTES).await?;
     let caller = caller(env, &req, url, &body).await?;
     let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-    let tier = match req.headers().get(bounds::TIER_HEADER)? {
-        None => None,
-        Some(t) => Some(Tier::parse(t.trim()).ok_or_else(|| CellError::invalid(format!("{} names a tier: cheap or medium", bounds::TIER_HEADER)))?),
-    };
     let models = &Config::from_env(env).models;
+    let route = match req.headers().get(bounds::TIER_HEADER)? {
+        None => None,
+        Some(t) => Some(models.route_named(t.trim()).ok_or_else(|| CellError::invalid(format!("{} names {}", bounds::TIER_HEADER, models.unknown_route().message())))?),
+    };
     let named = match v.get("model") {
-        None | Some(Value::Null) => models.named(None, tier),
-        Some(Value::String(m)) => models.named(Some(m), tier),
+        None | Some(Value::Null) => models.named(None, route),
+        Some(Value::String(m)) => models.named(Some(m), route),
         Some(_) => Err(models.unknown()),
     };
     let named = named.map_err(|e| CellError::invalid(e.message()))?;
     let stream = v.get("stream") == Some(&Value::Bool(true));
-    let call = ModelCall { payer: &caller.owner, agent: Some(&caller.agent), fragment: caller.in_fragment(), named, tier, body: v, stream };
+    let call = ModelCall { payer: &caller.owner, agent: Some(&caller.agent), fragment: caller.in_fragment(), named, route, body: v, stream };
     complete(env, call, after).await
 }
 
@@ -657,12 +647,11 @@ async fn caller(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<
     if !valid_fragment_name(&name) {
         return Err(CellError::invalid("`fragment` is a fragment's name, <label>--<suffix>"));
     }
-    let ask = routed::internal_request("meter/whose", &json!({ "principal": agent.id }).to_string())?;
-    let mut answer = crate::routed::send(env, "FRAGMENT", &name, ask).await?;
+    let mut answer = crate::fragment::pass(env, &name, &Whose { principal: agent.id.clone() }).await?;
     if answer.status_code() != 200 {
         return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}")));
     }
-    let whose: Whose = answer.read_json().await?;
+    let whose: <Whose as Call>::Answer = answer.read_json().await?;
     if !whose.member {
         return Err(CellError::new(ErrorCode::Forbidden, format!("a model call names a fragment its agent is in, and it is not in {name}")));
     }
@@ -743,7 +732,7 @@ pub(crate) enum Embedding {
 /// `inputs` (bounded: `embed::bound`) embedded on the deployment's
 /// embeddings slot, metered to `payer` as a model call is (`gate`, then
 /// charged after its answer at its input tokens); refused, 403, on a
-/// deployment that embeds nothing (`Models::embeddings_refused`: its tiers
+/// deployment that embeds nothing (`Models::embeddings_refused`: its routes
 /// are private and its slot is not). An answer that is not
 /// the slot's (another count, another length) is charged, as it was paid
 /// for, and refused 502: a vector of another space is never passed on.

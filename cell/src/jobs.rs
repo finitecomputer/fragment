@@ -3,19 +3,19 @@
 //! A **run** is one execution of an operation outside a request: a job
 //! someone called, or a mutation or job a trigger started. Each run is a
 //! Workflow instance (`Job` in entry.mjs) that drives it one step at
-//! a time by calling back into this supervisor:
+//! a time by calling back into this supervisor (fragment/calls.rs):
 //!
-//!   POST /job/advance {run, attempt, count, failed?}   re-run the job's body
+//!   `JobAdvance` {run, attempt, count, failed?}   re-run the job's body
 //!        in the app facet over the answers of its first `count` steps, up
 //!        to its next step
-//!   POST /job/effect  {run, attempt, index, kind, args}   perform that step
+//!   `JobEffect`  {run, attempt, index, kind, args}   perform that step
 //!        (call an operation, fetch with secrets added here, publish, …)
 //!        and keep its answer
-//!   POST /job/finish  {run, attempt, error}     the Workflow gave up
+//!   `JobFinish`  {run, attempt, error}     the Workflow gave up
 //!
-//! Every callback names the fragment's incarnation, checked before the
-//! callback decodes into its struct below; a step's kind and args decode
-//! into `fragment_core::steps::Step`, and a run's row into `RunRow`.
+//! Every callback names the fragment's incarnation, checked with its run
+//! (`current_run`); a step's kind and args decode into
+//! `fragment_core::steps::Step`, and a run's row into `RunRow`.
 //!
 //! Each step's answer is kept here (`steps`, by run, attempt, and index)
 //! before the Workflow hears that the step is done, and the job's body
@@ -51,6 +51,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use fragment_core::inbox::Answer;
+use fragment_core::manifest::{InboxCheck, InboxDecl};
 use fragment_core::secrets::placeholders;
 use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
 use fragment_core::{cron::Cron, egress, glob, npub};
@@ -64,13 +66,12 @@ use worker::wasm_bindgen::JsValue;
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{JobAdvance, JobEffect, JobFinish};
 use crate::fragment::{json_response, missing, Caller, FragmentCell, MetaKey};
 use crate::ops::{Invocation, JOB_ID_PREFIX};
 use crate::{js, keys};
 use fragment_core::gather::Gathered;
 
-/// Set by the Workflow on its callbacks; the router never sets or passes it.
-pub const JOB_HEADER: &str = "x-fragment-job";
 /// How far a fetch carries the chain it is part of (another fragment's inbox reads it).
 pub const HOPS_HEADER: &str = "x-fragment-hops";
 /// What a fetch that is not a GET or a HEAD names its step by (`step_fetch`).
@@ -241,26 +242,6 @@ fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Value, Option
     }
 }
 
-/// `POST /job/advance`
-#[derive(Deserialize)]
-struct AdvanceCall {
-    run: i64,
-    attempt: u32,
-    /// Steps taken so far: the cell kept each one's answer.
-    count: u32,
-    /// The last step, when it ran out of retries: its answer is the error
-    /// only the Workflow saw.
-    #[serde(default)]
-    failed: Option<FailedStep>,
-}
-
-#[derive(Deserialize)]
-struct FailedStep {
-    index: u32,
-    kind: String,
-    error: String,
-}
-
 /// A `steps` row: one step's answer as the cell kept it.
 #[derive(Deserialize)]
 struct StepRow {
@@ -288,34 +269,12 @@ impl StepRow {
     }
 }
 
-/// `POST /job/effect`: the step as the Workflow carries it, whose kind and
-/// args decode into a `Step` (a step that does not is the job's failure).
-#[derive(Deserialize)]
-struct EffectCall {
-    run: i64,
-    attempt: u32,
-    index: u32,
-    kind: String,
-    args: Value,
-    /// The Workflow's try of this step, from 1 (its step context's
-    /// `attempt`), when it says: a text step's timing reports it.
-    #[serde(default, rename = "try")]
-    tried: Option<u32>,
-}
-
-/// `POST /job/finish`
-#[derive(Deserialize)]
-struct FinishCall {
-    run: i64,
-    attempt: u32,
-    error: String,
-}
-
 /// What admits a delivery to a fragment's inbox: its inbox token, or, when
-/// its code names an inbox secret (`InboxSecret`), that header holding it.
+/// its code names an inbox (`InboxSecret`), its secret, by the delivery's
+/// headers.
 pub(crate) enum Admits {
     Token(String),
-    Secret { header: String, name: String, given: String },
+    Code { inbox: InboxDecl, headers: Headers },
 }
 
 impl FragmentCell {
@@ -496,9 +455,14 @@ impl FragmentCell {
         started
     }
 
-    /// The run a Workflow callback is for, if it is still that attempt and
-    /// unfinished (a replay or a finish makes older instances stop).
-    fn current_run(&self, run: i64, attempt: u32) -> CellResult<Option<RunRow>> {
+    /// The run a Workflow callback is for, if it is of this fragment's
+    /// life (a Workflow from a deleted fragment's earlier life stops), and
+    /// still that attempt and unfinished (a replay or a finish makes older
+    /// instances stop).
+    fn current_run(&self, incarnation: &str, run: i64, attempt: u32) -> CellResult<Option<RunRow>> {
+        if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(incarnation) {
+            return Ok(None);
+        }
         let rows = self.rows(
             &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ? AND attempt = ? AND status IN ('queued', 'running')"),
             vec![SqlStorageValue::Integer(run), SqlStorageValue::Integer(attempt.into())],
@@ -513,12 +477,6 @@ impl FragmentCell {
             current.status = RunStatus::Running;
         }
         Ok(Some(current))
-    }
-
-    /// Whether a callback is from this fragment's life: a Workflow from a
-    /// deleted fragment's earlier life stops.
-    fn this_life(&self, incarnation: &str) -> CellResult<bool> {
-        Ok(self.meta(MetaKey::CreatedAt)?.as_deref() == Some(incarnation))
     }
 
     /// Records a run's outcome (once: a second report is ignored).
@@ -571,38 +529,18 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// A callback from a run's Workflow (`/job/<route>`); one from an
-    /// earlier life of the fragment is told to stop.
-    pub(crate) async fn job_callback(&self, route: &str, body: &[u8]) -> CellResult<Value> {
-        fn decode<'a, T: Deserialize<'a>>(body: &'a [u8]) -> CellResult<T> {
-            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("a job callback: {e}")))
+    /// The Workflow gave up (`JobFinish`): the run is held with its error.
+    pub(crate) fn job_finish(&self, call: JobFinish) -> CellResult<()> {
+        if let Some(run) = self.current_run(&call.incarnation, call.run, call.attempt)? {
+            self.finish_run(&run, Err(call.error))?;
         }
-        /// Every callback names the fragment's life it is from.
-        #[derive(Deserialize)]
-        struct Life {
-            incarnation: String,
-        }
-        if !self.this_life(&decode::<Life>(body)?.incarnation)? {
-            return Ok(json!({ "stop": true }));
-        }
-        match route {
-            "advance" => self.advance(decode(body)?).await,
-            "effect" => self.job_effect(decode(body)?).await,
-            "finish" => {
-                let call: FinishCall = decode(body)?;
-                if let Some(run) = self.current_run(call.run, call.attempt)? {
-                    self.finish_run(&run, Err(call.error))?;
-                }
-                Ok(json!({ "ok": true }))
-            }
-            _ => Err(CellError::new(ErrorCode::NotFound, format!("no route /job/{route}"))),
-        }
+        Ok(())
     }
 
-    /// `POST /job/advance`
-    async fn advance(&self, call: AdvanceCall) -> CellResult<Value> {
+    /// The Workflow's advance (`JobAdvance`).
+    pub(crate) async fn job_advance(&self, call: JobAdvance) -> CellResult<Value> {
         let (run_id, attempt, count) = (call.run, call.attempt, call.count);
-        let Some(run) = self.current_run(run_id, attempt)? else { return Ok(json!({ "stop": true })) };
+        let Some(run) = self.current_run(&call.incarnation, run_id, attempt)? else { return Ok(json!({ "stop": true })) };
         let fail = |why: String| -> CellResult<Value> {
             self.finish_run(&run, Err(why.clone()))?;
             Ok(json!({ "failed": why }))
@@ -810,14 +748,15 @@ impl FragmentCell {
         Ok(stored_json(row, "input"))
     }
 
-    /// `POST /job/effect`: one step, performed and its answer kept (a
-    /// value, or a lasting failure the job sees) before the reply; a
-    /// passing failure is a 502, which the Workflow retries. A step that
-    /// already has a kept answer (its reply was lost) is not performed again;
-    /// one kept as another kind (a job that did not reach its steps in the
-    /// same order) is the next advance's to refuse, in the app's platform code.
-    async fn job_effect(&self, call: EffectCall) -> CellResult<Value> {
-        let Some(run) = self.current_run(call.run, call.attempt)? else { return Ok(json!({ "stop": true })) };
+    /// The Workflow's effect (`JobEffect`): one step, performed and its
+    /// answer kept (a value, or a lasting failure the job sees) before the
+    /// reply; a passing failure is a 502, which the Workflow retries. A
+    /// step that already has a kept answer (its reply was lost) is not
+    /// performed again; one kept as another kind (a job that did not reach
+    /// its steps in the same order) is the next advance's to refuse, in the
+    /// app's platform code.
+    pub(crate) async fn job_effect(&self, call: JobEffect) -> CellResult<Value> {
+        let Some(run) = self.current_run(&call.incarnation, call.run, call.attempt)? else { return Ok(json!({ "stop": true })) };
         let index = call.index;
         if index as usize >= limits::JOB_STEPS_MAX {
             return Err(CellError::invalid(format!("step {index}: a job takes at most {} steps", limits::JOB_STEPS_MAX)));
@@ -1611,21 +1550,39 @@ impl FragmentCell {
     /// the cap a post is refused, so overload is a 429, not memory.
     pub(crate) async fn inbox(&self, given: Admits, hops: u32, body: &[u8]) -> CellResult<Response> {
         self.name()?;
-        match given {
+        let answer = match given {
             Admits::Token(token) => {
                 if !crate::serve::eq_ct(&token, &self.must(MetaKey::InboxToken)?) {
                     return Err(CellError::new(ErrorCode::Forbidden, "bad inbox token (x-fragment-inbox-token, or ?t=)"));
                 }
+                None
             }
-            Admits::Secret { header, name, given } => {
-                let refused = || CellError::new(ErrorCode::Forbidden, format!("bad inbox secret ({header}): this inbox takes a delivery only with its secret there"));
-                let stored = self.stored_secret(&name)?.ok_or_else(refused)?;
-                let value = self.open_secret(&name, &stored.sealed).await?;
-                if given.is_empty() || !crate::serve::eq_ct(&given, &String::from_utf8_lossy(&value)) {
-                    return Err(refused());
+            Admits::Code { inbox, headers } => {
+                let name = inbox.check.secret();
+                // nothing is taken before its secret is set
+                let key = match self.stored_secret(name)? {
+                    Some(stored) => Some(self.open_secret(name, &stored.sealed).await?),
+                    None => None,
+                };
+                let read = |h: &str| headers.get(h).ok().flatten();
+                match &inbox.check {
+                    InboxCheck::Header { header, .. } => {
+                        let refused = || CellError::new(ErrorCode::Forbidden, format!("bad inbox secret ({header}): this inbox takes a delivery only with its secret there"));
+                        let key = key.ok_or_else(refused)?;
+                        let given = read(header).unwrap_or_default();
+                        if given.is_empty() || !crate::serve::eq_ct(&given, &String::from_utf8_lossy(&key)) {
+                            return Err(refused());
+                        }
+                    }
+                    InboxCheck::Hmac(h) => {
+                        let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("bad inbox signature ({}): this inbox takes a delivery only signed by its secret{why}", h.header));
+                        let key = key.ok_or_else(|| refused(""))?;
+                        h.check(&key, &read, body, js::now_ms() / 1000).map_err(|why| refused(&format!(": {}", why.message())))?;
+                    }
                 }
+                inbox.answer
             }
-        }
+        };
         // a delivery to the inbox is a write
         self.writable().await?;
 
@@ -1652,7 +1609,35 @@ impl FragmentCell {
         // triggers is the sender's error to see, never a silent 200
         let record = self.append("inbox", "inbox", "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
         let runs = self.published(&record, true, hops, &mut js::Laps::start()).await?;
-        json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs }))
+        let answered = match answer {
+            Some(op) => self.inbox_answer(&op, &record, hops).await?,
+            None => Answer::Platform,
+        };
+        match answered {
+            Answer::Platform => json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs })),
+            Answer::Json(text) => crate::json_response::json_bytes(text.into_bytes()),
+            Answer::Text(text) => {
+                let h = Headers::new();
+                h.set("content-type", "text/plain; charset=utf-8")?;
+                h.set("cache-control", "no-store")?;
+                h.set("x-content-type-options", "nosniff")?;
+                Ok(Response::ok(text)?.with_headers(h))
+            }
+        }
+    }
+
+    /// Its `answer` query, asked with a delivery it stored as its triggers
+    /// are (as the fragment, an editor), its result bounded as any query's
+    /// (`RESULT_MAX_BYTES`): what it says back.
+    async fn inbox_answer(&self, op: &str, record: &ChannelRecord, depth: u32) -> CellResult<Answer> {
+        let decl = self.declared(op)?;
+        // its install checked it, and stored both in one step
+        assert!(decl.kind == OpKind::Query, "an inbox's answer is a query (manifest::parse)");
+        let own = self.own_key()?;
+        let input = json!({ "channel": record.channel, "record": record });
+        let inv = Invocation { principal: &own, asker: None, role: Role::Editor, op, decl, id: format!("record:inbox:{}:{op}", record.seq), input, depth, via: Via::Channel, trigger: Some("inbox".into()) };
+        let result: Value = crate::json_text(self.invoke(inv).await?.result.get()).map_err(|e| CellError::host(format!("{op}'s result is not JSON: {e}")))?;
+        fragment_core::inbox::answer(&result).map_err(|why| CellError::new(ErrorCode::AppFailed, format!("{op}: {why}")))
     }
 
     /// A secret as it is stored: sealed, and the hosts it may go to.

@@ -219,7 +219,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{call:?}"),
     );
     let r = run("t-high", "summarize_high", json!({ "text": "the high tier" }))?;
-    s.ok("a step on the high tier is refused, saying why (decision 23)", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("high tier is off")), &r);
+    s.ok("a step naming no route of the deployment's (high) is refused, naming its routes", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("model names one of this deployment's routes: cheap, medium")), &r);
 
     let r = run("i1", "draw", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.jpg" }))?;
     s.ok(
@@ -273,7 +273,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     let tried: Vec<String> = s.ai.calls()[calls..].iter().map(|c| c.model.clone()).collect();
     s.ok(
         "a text step whose model answers 503 is answered by the fallback model, once, and costs the fallback's call",
-        r["output"]["text"] == "echo: again" && r["output"]["model"] == "@cf/deepseek-ai/deepseek-v4-flash-0731" && tried == ["@cf/zai-org/glm-5.3", "@cf/deepseek-ai/deepseek-v4-flash-0731"] && cost(&r) > 0,
+        r["output"]["text"] == "echo: again" && r["output"]["model"] == "@cf/thinkingmachines/inkling-2-small" && tried == ["@cf/zai-org/glm-5.3", "@cf/thinkingmachines/inkling-2-small"] && cost(&r) > 0,
         json!({ "run": r, "tried": tried }),
     );
     s.ai.fail_next(&[503]);

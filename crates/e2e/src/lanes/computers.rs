@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 use super::jobs::{events, records};
 use super::ledger::{charged, entries, quiet, usage};
 use crate::api::{Api, Call, Socket};
-use super::credentials::{model_checks, placeholder, swap_checks, vault_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
+use super::credentials::{grant_checks, model_checks, placeholder, swap_checks, vault_checks, Swapping, GRANT_CHECKS, MODEL_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
@@ -433,10 +433,10 @@ const CRASH_CHECKS: [&str; 10] = [
     "the lever answers its saves: the newest, the one its last start restored",
     "a think turn and a key's fetch turn run once each, before the crash",
     "awake, their end is saved: a save newer than the sleep's",
-    "the lever's kill (SIGKILL to the guest's PID 1) is a crash: it comes back at once, from the save after its last turn",
-    "a crash wakes it from its last save, and nothing that started runs again (P1)",
-    "its wake says what it restored: after the kill, a rollback is counted",
-    "a turn cut by a crash ends once, as an error, and its model was called once (P1)",
+    "the lever's kill (SIGKILL to the guest's PID 1) between its turns, all it did saved, is a sleep: it stays asleep, nothing told and no rollback counted",
+    "the next message wakes it from its last save, and nothing that started runs again (P1)",
+    "its wake says what it restored: the save after its last turn, after a sleep, no rollback",
+    "a turn cut by a crash (the kill as it runs) comes back at once and counts a rollback; the turn ends once, as an error, and its model was called once (P1)",
     "the cut turn is continued once, by the computer, told what the crash cut, from the journal; the messages after it are answered, told nothing (P5, phase 4)",
 ];
 
@@ -502,28 +502,40 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     s.eventually(SAVED_AFTER_WORK, || newest_save(api, c.id)["atMs"].as_i64().is_some_and(|at| at > last_at));
     let save = newest_save(api, c.id)["id"].as_str().unwrap_or("").to_string();
     s.ok(CRASH_CHECKS[4], !save.is_empty() && save != slept, format!("the sleep's save {slept}, its turns' {save}"));
-    // the crash
+    // the kill between its turns, all it did saved: a sleep (docs/computers.md,
+    // "A stop nothing asked for, while idle, is a sleep"). A crash would
+    // say starting at once, its turns' hold still running
     let generation = restored["generation"].as_u64().unwrap_or(0);
     let killed = lever(api, c.id, "kill")?;
-    let back = |after: u64| {
-        let v = view();
-        v["phase"] == "awake" && v["restored"]["generation"].as_u64().is_some_and(|g| g > after)
-    };
-    let came_back = killed.status == 200 && s.eventually(c.wake, || back(generation));
-    let restored = view()["restored"].clone();
+    let mut slept = Value::Null;
+    let asleep = killed.status == 200
+        && s.eventually(c.wake, || {
+            slept = view();
+            slept["phase"] != "awake"
+        })
+        && slept["phase"] == "asleep";
     s.ok(
         CRASH_CHECKS[5],
-        came_back && killed.body["killed"] == generation && restored["from"] == "backup" && restored["save"] == save.as_str() && restored["after"] == "exit",
-        format!("{killed} / {restored}"),
+        asleep && killed.body["killed"] == generation && slept["restored"]["generation"] == restored["generation"] && slept["rollbacks"].as_u64() == Some(rollbacks) && notice(&slept, "went_back").is_null(),
+        format!("{killed} / {slept}"),
     );
-    // one more message: turns of a chat run in order, so by its end every
-    // turn the restore made it read again was run again or fenced
+    // one more message wakes it: turns of a chat run in order, so by its end
+    // every turn its start made it read again was run again or fenced
     let after = say(52, "after the crash")?;
     let answered = s.eventually(c.wake, || replied(seq_of(&after)).is_some());
     let again = runs(s, api, c.owner, c.owner_id, c.id);
     s.ok(CRASH_CHECKS[6], answered && again == ran, format!("before the crash {ran:?}, after it {again:?}"));
     let v = view();
-    s.ok(CRASH_CHECKS[7], v["restored"]["rollback"] == true && v["rollbacks"].as_u64() == rollbacks.checked_add(1), &v);
+    let woke = &v["restored"];
+    s.ok(
+        CRASH_CHECKS[7],
+        woke["generation"].as_u64().is_some_and(|g| g > generation) && woke["from"] == "backup" && woke["save"] == save.as_str() && woke["after"] == "sleep" && woke["rollback"] == false && v["rollbacks"].as_u64() == Some(rollbacks),
+        &v,
+    );
+    let back = |after: u64| {
+        let v = view();
+        v["phase"] == "awake" && v["restored"]["generation"].as_u64().is_some_and(|g| g > after)
+    };
     // a turn cut by a crash: its model call is held, and the guest killed under it
     let generation = v["restored"]["generation"].as_u64().unwrap_or(0);
     let called = s.ai.chats().len();
@@ -533,6 +545,8 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let in_flight = s.eventually(c.wake, || s.ai.chats().len() > called);
     let killed = lever(api, c.id, "kill")?;
     let came_back = in_flight && killed.status == 200 && s.eventually(c.wake, || back(generation));
+    let crashed = view();
+    let rolled_back = crashed["restored"]["after"] == "exit" && crashed["restored"]["rollback"] == true && crashed["rollbacks"].as_u64() == rollbacks.checked_add(1);
     let ends = || work_of(&records(api, c.owner, c.chat, "work"), &cut_turn).into_iter().filter(|r| r["body"]["kind"] == "turn.end").collect::<Vec<_>>();
     let ended = came_back && s.eventually(c.wake, || !ends().is_empty());
     let next = say(54, "and after the cut")?;
@@ -540,8 +554,8 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let ends = ends();
     s.ok(
         CRASH_CHECKS[8],
-        ended && ends.len() == 1 && ends[0]["body"]["outcome"] == "error" && replied(seq_of(&cut)).is_none() && s.ai.chats().len() == called + 1,
-        format!("{} model calls since; {}", s.ai.chats().len() - called, json!(work_of(&records(api, c.owner, c.chat, "work"), &cut_turn))),
+        rolled_back && ended && ends.len() == 1 && ends[0]["body"]["outcome"] == "error" && replied(seq_of(&cut)).is_none() && s.ai.chats().len() == called + 1,
+        format!("{} model calls since; {}; {}", s.ai.chats().len() - called, json!(work_of(&records(api, c.owner, c.chat, "work"), &cut_turn)), crashed["restored"]),
     );
     // the cut turn is continued in its place, before the next message: said
     // by the computer and told once what the crash cut (P5; the stub echoes
@@ -968,6 +982,15 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     let made = api.create_with(c.owner, json!({ "name": name, "template": "telegram" }))?;
     anyhow::ensure!(made.status == 200, "making the Telegram connector: {made}");
     s.owned(&made.body, c.owner);
+    if s.on_celld() {
+        // a self-hosted stack's connectors are SimpleX alone (devstack's
+        // `celld::connectors`: Telegram's webhook needs inbound internet):
+        // the policy refuses its door, saying so, and nothing after it runs
+        let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
+        s.ok("a self-hosted stack links no Telegram: its owner's binding of the connector as their agent's door is refused, 403, as a connector the deployment does not allow", r.status == 403 && r.text.contains("does not allow"), &r);
+        s.skip("the Telegram connector end to end (its setup, pairing, door, replies, a release later)", "a self-hosted stack does not allow Telegram, whose webhook needs inbound internet (docs/self-host.md); its asked replies are not asked for");
+        return Ok(0);
+    }
     // its secrets as its owner's page sets them (`__secrets`), toward the fake's host
     for (key, value) in [("TELEGRAM_BOT_TOKEN", TOKEN), ("TELEGRAM_WEBHOOK_SECRET", HOOK)] {
         let r = api.signed(c.owner, "PUT", &format!("/api/f/{name}/secrets/{key}"), Some(&json!({ "value": value, "hosts": ["127.0.0.1"] })))?;
@@ -1463,16 +1486,16 @@ export class App extends DurableObject {
 }
 
 fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
-    use fragment_core::models::{DEEPSEEK_FLASH, GLM_FLASH, MEDIUM_MODEL};
+    use fragment_core::models::{DEEPSEEK_FLASH, INKLING_SMALL, MEDIUM_MODEL};
     let said = fetched(s, 80, "models")?;
     let (listed, given) = said.strip_prefix("models: ").and_then(|r| r.split_once("; given: ")).unwrap_or_default();
     let given: Value = serde_json::from_str(given).unwrap_or(Value::Null);
     // each tier's route as the guest reads it (2026-10-24): the node's labels, its fallback's and vision's ids
-    let route = |label: &str| json!({ "label": label, "private": false, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH });
+    let route = |label: &str| json!({ "label": label, "private": false, "fallback": INKLING_SMALL, "vision": DEEPSEEK_FLASH });
     let routes = json!({ "cheap": route(crate::RECOMMENDED_LABEL), "medium": route(crate::STANDARD_LABEL) });
     s.ok(
         "the intercept lists the route's models' ids (GET /v1/models, naming no agent, as Hermes' /model asks it), each once, and they are the ids its view names by the route's names (GET /api/computer's models), each tier's route beside them",
-        listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "images": [], "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH, "routes": routes }),
+        listed == format!("{DEEPSEEK_FLASH}, {MEDIUM_MODEL}, {INKLING_SMALL}") && given == json!({ "images": [], "cheap": DEEPSEEK_FLASH, "medium": MEDIUM_MODEL, "fallback": INKLING_SMALL, "vision": DEEPSEEK_FLASH, "routes": routes }),
         &said,
     );
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
@@ -1582,7 +1605,12 @@ fn made_while_its_seat_sync_fails(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&person, "PUT", "/api/seat", Some(&json!({ "sleeps": true })))?;
     let off = r.status == 200 && s.eventually(Duration::from_secs(20), || view(api)["alwaysOn"] == false);
     let slept = api.signed(&person, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
-    s.ok("it woke as an always-on computer does; let sleep, it sleeps at the end", awake && off && slept.body["phase"] == "asleep", json!([view(api), slept.body]));
+    // let sleep with nothing open, on celld it may be sleeping already as its
+    // owner asks (a sleep on celld's krun engine takes longer than one in
+    // local Docker): its owner's sleep then answers `sleeping`, and it
+    // sleeps. Elsewhere the sleep answers `asleep`, as before
+    let asleep = slept.body["phase"] == "asleep" || (s.on_celld() && slept.body["phase"] == "sleeping" && s.eventually(WAKE, || view(api)["phase"] == "asleep"));
+    s.ok("it woke as an always-on computer does; let sleep, it sleeps at the end", awake && off && asleep, json!([view(api), slept.body]));
     Ok(())
 }
 
@@ -1948,6 +1976,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         heard && notices[0]["principal"] == agent_npub.as_str() && notices[0]["body"] == json!({ "kind": "joined", "fragment": chat_name }),
         json!(notices),
     );
+    // made an editor of its own fragment as it was assigned (before its
+    // computer held it): its home, no join, so nothing is posted for it
+    let home = told(api, &owner, &agent_name, &agent_name);
+    s.ok("its own fragment is no join: nothing is posted for it", home.is_empty(), json!(home));
     // awake, the guest follows the chat as the agent
     let woke = s.eventually(wake, || phase(api, &owner, &id) == "awake");
     s.ok("and wakes its computer, unasked", woke, phase(api, &owner, &id));
@@ -2106,7 +2138,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(VAULT_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
+        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(VAULT_CHECKS).chain(GRANT_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
@@ -2145,6 +2177,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("narrowed, it is refused a provider its owner has", said.starts_with("fetched 403") && said.contains("may not use google") && s.upstream.seen().len() == seen_before, &said);
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
+        replies_so_far += grant_checks(s, api, &swapping, &fetched)?;
     }
 
     // the model intercept: the agent's call is the platform's model route, its owner paying
@@ -2192,7 +2225,11 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     }
 
     // a turn's keepalive across a deploy; then a sleep, and a fresh container
-    if scripted && fakes {
+    if s.on_celld() {
+        for label in KEEPALIVE_CHECKS {
+            s.skip(label, "a reload of `celld dev` restarts its node, which reaps its VMs, where a deploy keeps a computer's container (as a running celld node's does: its generation swaps); the reload here is no deploy (docs/self-host.md, seam 2)");
+        }
+    } else if scripted && fakes {
         replies_so_far += keepalive_across_a_reload(s, api, &owner, &id, &|n, text| say(n, text), &|seq| {
             let turn = turn_of(&agent_name, &chat_name, "chat", seq);
             agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str())
@@ -2649,11 +2686,20 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // a second review: an event during that destroy acted as if it were
     // done). (A) a request takes it over, its destroy held while an alarm
     // comes: one strike, the container gone, its exit reported again nothing
-    let (ready, held) = last_start_destroying(s, api, &owner, &id)?;
-    let stall = lever_with(api, &id, json!({ "op": "stall-takeover", "ms": 10_000 }))?;
-    s.crash()?;
-    let fresh = s.start(false)?;
-    let api = &fresh;
+    let a_label = "a start's last strike, its isolate gone before it destroyed its container (the node crashed in that gap): a new isolate and host destroy that container, an alarm coming as they do waiting for it, and count the start failed once; its exit, reported again, counts nothing";
+    // on celld, (B) and (C) find the container gone too, and still count
+    let fresh = if s.on_celld() {
+        s.skip(a_label, "a celld node that starts again reaps the VMs it left (it cannot know which of its cells come back to it), so after a crash of the node no container is left to take over (docs/self-host.md, seam 2)");
+        None
+    } else {
+        let (ready, held) = last_start_destroying(s, api, &owner, &id)?;
+        let stall = lever_with(api, &id, json!({ "op": "stall-takeover", "ms": 10_000 }))?;
+        s.crash()?;
+        Some((s.start(false)?, ready, held, stall))
+    };
+    let api = fresh.as_ref().map_or(api, |(fresh, ..)| fresh);
+    if let Some((_, ready, held, stall)) = &fresh {
+    let (ready, held, stall) = (*ready, held, stall);
     let found = saves_of(api, &id);
     let generation = found["generation"].as_u64().unwrap_or(0);
     let soon = lever_with(api, &id, json!({ "op": "alarm-in", "ms": 3_000 }))?;
@@ -2662,7 +2708,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let replayed = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
     let again = saves_of(api, &id);
     s.ok(
-        "a start's last strike, its isolate gone before it destroyed its container (the node crashed in that gap): a new isolate and host destroy that container, an alarm coming as they do waiting for it, and count the start failed once; its exit, reported again, counts nothing",
+        a_label,
         ready
             && stall.status == 200
             && found["running"] == true
@@ -2676,6 +2722,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             && again["failures"] == 3,
         json!({ "held": held, "found": found, "first": first, "again": again }),
     );
+    }
     // (B) the same, its destroy failing: the alarm that waited for it takes
     // the computer over itself, at once, and counts that strike
     let (ready, _) = last_start_destroying(s, api, &owner, &id)?;
@@ -2738,8 +2785,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let api = s.start(false)?;
     // from here its computer's sidecar drops any query it would send public
     // DNS: a run must not need it (#1017, where public DNS did not answer
-    // after this crash and every save of the boot failed)
-    let dropping = s.drop_public_dns()?;
+    // after this crash and every save of the boot failed). celld's krun
+    // engine has no sidecar: it answers the intercepted names itself
+    let dropping = if s.on_celld() { vec![] } else { s.drop_public_dns()? };
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
     // its own turn's replies
@@ -2782,12 +2830,13 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its owner lets it sleep: it is awake only while something is open", off, view(&api));
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
-    let asked = s.public_dns_asked(&dropping)?;
-    s.ok(
-        "after the crash its computer asked public DNS nothing: the hosts the platform intercepts are answered at once, and its sleep's save went on with public DNS dropped",
-        !dropping.is_empty() && asked == 0 && r.body["phase"] == "asleep",
-        json!({ "sidecars": dropping.len(), "asked": asked }),
-    );
+    let dns = "after the crash its computer asked public DNS nothing: the hosts the platform intercepts are answered at once, and its sleep's save went on with public DNS dropped";
+    if s.on_celld() {
+        s.skip(dns, "celld's krun engine has no networking sidecar to watch: its egress answers the intercepted names itself, and with the internet off resolves no other (docs/self-host.md, seam 2)");
+    } else {
+        let asked = s.public_dns_asked(&dropping)?;
+        s.ok(dns, !dropping.is_empty() && asked == 0 && r.body["phase"] == "asleep", json!({ "sidecars": dropping.len(), "asked": asked }));
+    }
     made_while_its_seat_sync_fails(s, &api)?;
 
     // at zero credit agents stop, and no wake starts (decision 27): an

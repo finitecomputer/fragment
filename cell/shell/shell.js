@@ -20,6 +20,7 @@ import { createSchedulesPage } from "./schedules-page.js";
 import { createMovePage } from "./move-page.js";
 import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
+import { closeOnOutsidePress } from "./dialog.js";
 import { createViewer } from "./viewer.js";
 import { seatGives } from "./billing.js";
 import { createChatList, newestChat } from "./chat-list.js";
@@ -764,7 +765,7 @@ addEventListener("message", (e) => {
   if (Number.isFinite(e.data?.height)) frame.style.height = `${e.data.height}px`;
   if (e.data?.share === "done") sheet.close();
 });
-sheet.onclick = (e) => { if (e.target === sheet) sheet.close(); };
+closeOnOutsidePress(sheet);
 sheet.onclose = () => {
   sheet.replaceChildren();
   load().catch(() => {});
@@ -1546,14 +1547,14 @@ function stepMaking(event) {
 // The view a chat being made was started from, back in its place, its
 // address with it (in place of the chat's `/` it was given)
 function restoreView({ page, current }) {
-  const path = { Settings: SETTINGS, Apps: APPS, Brains: BRAINS, History: HISTORY, Schedules: SCHEDULES, Move: MOVE }[page] ?? "/";
+  const path = { Settings: SETTINGS, Apps: APPS, Brains: BRAINS, History: HISTORY, Schedules: SCHEDULES, Upgrade: MOVE }[page] ?? "/";
   if (location.pathname !== path) history.replaceState(null, "", path);
   if (page === "Settings") openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (page === "Apps") openApps(false);
   else if (page === "Brains") openBrains(false);
   else if (page === "History") openHistory(false);
   else if (page === "Schedules") openSchedules(false);
-  else if (page === "Move") openMove(false);
+  else if (page === "Upgrade") openMove(false);
   else if (byName(current)) openChat(current, false);
   else {
     renderHeading();
@@ -1946,9 +1947,10 @@ const movePage = createMovePage($("move-page"), {
 });
 function openMove(push = true) {
   if (push) at(MOVE);
-  if (state.page !== "Move") newView();
+  if (state.page !== "Upgrade") newView();
   hideNotice();
-  state.page = "Move";
+  // its name, the page's title: the move is the agent's upgrade
+  state.page = "Upgrade";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
   $("settings-page").hidden = true;

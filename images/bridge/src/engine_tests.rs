@@ -1052,8 +1052,9 @@ fn an_open_card_releases_its_computer_until_it_expires() {
 
 /// Goal: a restart keeps every admission: a turn the runtime held is ended
 /// (one life per turn: its runtime died with the life before), a queued one
-/// is claimed by the new life once its runtime can take it, and runs, and
-/// catching up on the same records starts nothing. (A turn handed and never
+/// is claimed by the new life once its runtime can take it and the cut
+/// turn's continuation has run before it (FIN-501), and runs, and catching
+/// up on the same records starts nothing. (A turn handed and never
 /// taken is ended too: `a_restart_ends_what_was_handed`.)
 #[test]
 fn a_restart_starts_nothing_twice() {
@@ -1078,8 +1079,12 @@ fn a_restart_starts_nothing_twice() {
     assert_eq!(p[0].1, json!({ "kind": "turn.end", "turn": first, "outcome": "error", "error": LOST }));
     assert!(started(&r).is_none(), "nothing runs before its runtime can take it");
     let c = e2.step(heard(Event::Connected(true)), T0 + 10);
-    assert_eq!(posts(&c)[0].1["life"], next_life, "claimed by the new life");
-    let next = started(&answered(&mut e2, c, T0 + 10)).expect("the queued one runs");
+    assert!(posts(&c).is_empty(), "nothing claimed while the cut turn's end is unanswered: {c:?}");
+    let landed = e2.step(Input::Posted { turn: first.clone(), id: records::work_id(&first, "end"), kept: true }, T0 + 10);
+    let cont = records::continuation_id(&first);
+    assert_eq!((posts(&landed)[0].1["turn"].as_str(), &posts(&landed)[0].1["life"]), (Some(cont.as_str()), &json!(next_life)), "its continuation claimed first, in its place, by the new life");
+    assert!(started(&answered(&mut e2, landed, T0 + 10)).is_some_and(|t| t.continues.as_deref() == Some(first.as_str())), "the continuation runs");
+    let next = started(&ev(&mut e2, Event::End { turn: cont, outcome: Outcome::Idle }, T0 + 10)).expect("then the queued one runs");
     assert_eq!(next.text, "two");
     // the backlog again: nothing new
     for seq in 1..=2 {
@@ -1330,7 +1335,7 @@ fn a_question_is_answered_by_the_next_message() {
 
     // valid: the asker's next message is the answer
     let told = said(&mut e, &a, &v, 5, "npub1paul", json!({ "text": "Tomatoes, at dawn" }), T0 + 6);
-    assert_eq!(commands(&told), vec![Command::Tell { turn: turn.clone(), seq: 5, by: "npub1paul".into(), by_name: "paul".into(), text: "Tomatoes, at dawn".into(), attached: None }]);
+    assert_eq!(commands(&told), vec![Command::Tell { turn: turn.clone(), seq: 5, by: "npub1paul".into(), by_name: "paul".into(), text: "Tomatoes, at dawn".into(), attached: None, files: vec![], voice: false }]);
     assert!(posts(&told).is_empty(), "no turn of its own");
     assert!(told.dirty && !e.state().turns[&turn].asking);
     // replay: behind the cursor, nothing
@@ -1400,6 +1405,61 @@ fn attached(a: &Agent, names: &[&str]) -> Option<Attached> {
     Some(Attached { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), by_name: "paul".into(), refs: names.iter().map(|n| serde_json::from_value(photo(n)).expect("a ref")).collect() })
 }
 
+/// A voice memo, as a message's record names it.
+fn memo(name: &str) -> Value {
+    json!({ "sha256": "d".repeat(64), "size": 1, "type": "audio/webm", "name": name })
+}
+
+/// Goal (Austin, 2026-11-17: a voice memo answering a question in words
+/// was never heard, and one heard as nothing left the question stuck,
+/// its retry queued behind it): a memo alone (no words, every file audio)
+/// answers a question as a voice answer, which its runtime hears or not,
+/// so the question stays open: the asker's next message answers it again,
+/// until the turn goes on (its next event); then a message is queued, as
+/// after any answer. Words typed with a memo are a written answer, as
+/// they were (Hermes would answer a clarify heard in audio with the
+/// audio's words alone). Replay: the memo again tells nothing.
+#[test]
+fn a_question_is_answered_with_a_voice_memo() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "what should I call it?" }), T0)).expect("started").turn;
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 1);
+    let refs = |names: &[&str]| names.iter().map(|n| serde_json::from_value(memo(n)).expect("a ref")).collect::<Vec<_>>();
+    let heard = |refs| Some(Attached { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), by_name: "paul".into(), refs });
+    let spoken = said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [memo("voice-memo.webm")] }), T0 + 2);
+    assert_eq!(commands(&spoken), vec![Command::Tell { turn: turn.clone(), seq: 2, by: "npub1paul".into(), by_name: "paul".into(), text: String::new(), attached: heard(refs(&["voice-memo.webm"])), files: vec![], voice: true }], "a voice answer");
+    assert!(e.state().turns[&turn].asking && e.state().turns[&turn].hearing, "its question open while it is heard");
+    assert_eq!(said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [memo("voice-memo.webm")] }), T0 + 3), Step::default(), "replay: nothing");
+    // heard as nothing, the runtime says nothing: the asker tries again, in words
+    let again = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "Fernando" }), T0 + 4);
+    assert_eq!(commands(&again), vec![Command::Tell { turn: turn.clone(), seq: 3, by: "npub1paul".into(), by_name: "paul".into(), text: "Fernando".into(), attached: None, files: vec![], voice: false }], "the retry answers it");
+    assert!(!e.state().turns[&turn].asking && !e.state().turns[&turn].hearing, "a written answer closes it");
+    // a memo heard: the turn goes on, and the question with it
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 5);
+    said(&mut e, &a, &v, 4, "npub1paul", json!({ "attachments": [memo("one.webm"), memo("two.ogg")] }), T0 + 6);
+    assert!(e.state().turns[&turn].hearing, "every file audio: a voice answer");
+    let step = ToolStep { tool: "terminal".into(), args: "{}".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell, evidence: None };
+    ev(&mut e, Event::Step { turn: turn.clone(), step }, T0 + 7);
+    assert!(!e.state().turns[&turn].asking && !e.state().turns[&turn].hearing, "heard: the turn went on");
+    let next = said(&mut e, &a, &v, 5, "npub1paul", json!({ "text": "and another thing" }), T0 + 8);
+    assert!(commands(&next).is_empty() && started(&next).is_none(), "asked no longer: queued");
+    // words with a memo, or a memo with a photo: a written answer
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 9);
+    let typed = said(&mut e, &a, &v, 6, "npub1paul", json!({ "text": "Basilio", "attachments": [memo("voice-memo.webm")] }), T0 + 10);
+    assert!(matches!(&commands(&typed)[..], [Command::Tell { voice: false, text, .. }] if text == "Basilio"), "words typed with it: {:?}", commands(&typed));
+    assert!(!e.state().turns[&turn].asking, "answered");
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 11);
+    let mixed = said(&mut e, &a, &v, 7, "npub1paul", json!({ "attachments": [memo("voice-memo.webm"), photo("plant.png")] }), T0 + 12);
+    assert!(matches!(&commands(&mixed)[..], [Command::Tell { voice: false, .. }]), "a photo with it: {:?}", commands(&mixed));
+    // a memo past Hermes' media cap is never hosted: its file's line, a written answer
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 13);
+    let big = json!({ "sha256": "e".repeat(64), "size": limits::HERMES_MEDIA_MAX_BYTES + 1, "type": "audio/wav", "name": "long.wav" });
+    let large = said(&mut e, &a, &v, 8, "npub1paul", json!({ "attachments": [big] }), T0 + 14);
+    assert!(matches!(&commands(&large)[..], [Command::Tell { voice: false, .. }]) && !e.state().turns[&turn].asking, "too large to hear: {:?}", commands(&large));
+}
+
 /// Goal: a question in words is answered with files too (photos sent as
 /// the answer), with words or none: the asker's message is the answer, its
 /// files with it for the driver to download and name in its words, never
@@ -1414,12 +1474,12 @@ fn a_question_is_answered_with_files() {
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "which photo?" }), T0)).expect("started").turn;
     ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 1);
     let only = said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [photo("a.png"), photo("b.png")] }), T0 + 2);
-    assert_eq!(commands(&only), vec![Command::Tell { turn: turn.clone(), seq: 2, by: "npub1paul".into(), by_name: "paul".into(), text: String::new(), attached: attached(&a, &["a.png", "b.png"]) }], "files alone answer it");
+    assert_eq!(commands(&only), vec![Command::Tell { turn: turn.clone(), seq: 2, by: "npub1paul".into(), by_name: "paul".into(), text: String::new(), attached: attached(&a, &["a.png", "b.png"]), files: vec![], voice: false }], "files alone answer it");
     assert!(posts(&only).is_empty() && only.dirty && !e.state().turns[&turn].asking, "no turn of its own");
     assert_eq!(said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [photo("a.png"), photo("b.png")] }), T0 + 3), Step::default(), "replay: nothing");
     ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 4);
     let both = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "this one", "attachments": [photo("c.png")] }), T0 + 5);
-    assert_eq!(commands(&both), vec![Command::Tell { turn: turn.clone(), seq: 3, by: "npub1paul".into(), by_name: "paul".into(), text: "this one".into(), attached: attached(&a, &["c.png"]) }], "words and files");
+    assert_eq!(commands(&both), vec![Command::Tell { turn: turn.clone(), seq: 3, by: "npub1paul".into(), by_name: "paul".into(), text: "this one".into(), attached: attached(&a, &["c.png"]), files: vec![], voice: false }], "words and files");
     let next = said(&mut e, &a, &v, 4, "npub1paul", json!({ "attachments": [photo("d.png")] }), T0 + 6);
     assert!(commands(&next).is_empty() && started(&next).is_none(), "asked no longer: queued");
     let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 7);
@@ -1695,8 +1755,11 @@ fn a_quote_rides_along() {
     let mut e2 = Engine::new(serde_json::from_str(&saved).expect("deserializes"), Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
     e2.step(Input::Agents(vec![a.clone()]), T0 + 2);
     e2.recover(T0 + 2);
-    let c = e2.step(heard(Event::Connected(true)), T0 + 2);
-    let next = started(&answered(&mut e2, c, T0 + 2)).expect("the waiting one runs");
+    e2.step(heard(Event::Connected(true)), T0 + 2);
+    // the cut turn's continuation first (FIN-501), then the waiting one
+    let landed = e2.step(Input::Posted { turn: t.turn.clone(), id: records::work_id(&t.turn, "end"), kept: true }, T0 + 2);
+    let cont = started(&answered(&mut e2, landed, T0 + 2)).expect("the continuation runs");
+    let next = started(&ev(&mut e2, Event::End { turn: cont.turn, outcome: Outcome::Idle }, T0 + 2)).expect("the waiting one runs");
     assert_eq!((next.text.as_str(), next.reply_to, next.quote), ("that one", Some(1), None), "the driver reads the quote");
 }
 
@@ -2391,7 +2454,7 @@ fn an_asks_turn_that_asks_back_is_told_to_go_on() {
     let t = started(&read(&mut e, &rowan, "talk--k3x9", question(1, "Which garden?"), Some(&talk), T0)).expect("rowan's turn");
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 1, text: "Which one do you mean?".into() }, T0 + 1);
     let s = ev(&mut e, Event::Asked { turn: t.turn.clone() }, T0 + 2);
-    assert_eq!(commands(&s), vec![Command::Tell { turn: t.turn.clone(), seq: ASKED_BACK_SEQ, by: "npub1juniper".into(), by_name: "Juniper".into(), text: ASKED_BACK.into(), attached: None }], "told to go on, in words");
+    assert_eq!(commands(&s), vec![Command::Tell { turn: t.turn.clone(), seq: ASKED_BACK_SEQ, by: "npub1juniper".into(), by_name: "Juniper".into(), text: ASKED_BACK.into(), attached: None, files: vec![], voice: false }], "told to go on, in words");
     assert!(!kinds(&s).contains(&"turn.asked".to_string()), "waiting for no one: {:?}", s.effects);
     assert!(e.state().turns[&t.turn].active() && !e.state().turns[&t.turn].asking, "still running");
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 2, text: "The back one, I think.".into() }, T0 + 3);
@@ -2426,8 +2489,8 @@ fn a_state_owing_an_answer_is_one_an_older_bridge_sets_aside() {
     assert_ne!(owing["version"], json!(2), "an older bridge sets it aside, never checks it");
     let dir = std::env::temp_dir().join(format!("bridge-state-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(crate::driver::state_path(&dir), owing.to_string()).unwrap();
-    assert_eq!(crate::driver::load(&dir).unwrap(), *e.state(), "this bridge reads it back");
+    std::fs::write(crate::store::state_path(&dir), owing.to_string()).unwrap();
+    assert_eq!(crate::store::load(&dir).unwrap(), *e.state(), "this bridge reads it back");
     // let go once posted: format 2 again, all an older bridge needs
     let s = answered(&mut e, end, T0);
     assert!(e.state().turns.is_empty(), "{:?}", s.effects);
@@ -2435,8 +2498,8 @@ fn a_state_owing_an_answer_is_one_an_older_bridge_sets_aside() {
     assert_eq!(older["version"], json!(2));
     assert!(!older.to_string().contains("\"ret\"") && !older.to_string().contains("\"to\""), "nothing an older bridge's check refuses");
     older["version"] = json!(2);
-    std::fs::write(crate::driver::state_path(&dir), older.to_string()).unwrap();
-    assert_eq!(crate::driver::load(&dir).unwrap(), *e.state(), "and reads its own format too");
+    std::fs::write(crate::store::state_path(&dir), older.to_string()).unwrap();
+    assert_eq!(crate::store::load(&dir).unwrap(), *e.state(), "and reads its own format too");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2522,13 +2585,16 @@ enum Answer {
 struct Journal {
     records: BTreeMap<(String, String), Vec<Record>>,
     ids: HashMap<(String, String), (String, Value, u64)>,
+    /// The platform's clock as records are appended (`Record::at`, ms):
+    /// 0, unknown, unless a test sets it.
+    at: i64,
 }
 
 impl Journal {
     fn append(&mut self, fragment: &str, channel: &str, principal: &str, body: Value) -> u64 {
         let list = self.records.entry((fragment.to_string(), channel.to_string())).or_default();
         let seq = list.len() as u64 + 1;
-        list.push(Record { channel: channel.to_string(), seq, at: 0, principal: principal.to_string(), kind: "message".into(), body });
+        list.push(Record { channel: channel.to_string(), seq, at: self.at, principal: principal.to_string(), kind: "message".into(), body });
         seq
     }
 
@@ -2644,6 +2710,9 @@ struct World {
     /// empty, unless `reads_hang`.
     reads: VecDeque<Effect>,
     reads_hang: bool,
+    /// The followers read each agent's `tasks` before the chat (a new
+    /// life's channels replay in no set order).
+    tasks_first: bool,
     now: u64,
 }
 
@@ -2670,6 +2739,7 @@ impl World {
             given_up: Vec::new(),
             reads: VecDeque::new(),
             reads_hang: false,
+            tasks_first: false,
             now: T0,
         }
     }
@@ -2826,16 +2896,15 @@ impl World {
             return;
         }
         for a in self.agents.clone() {
-            let cursor = self.engine().cursor(&a.fragment, CHAT, records::CHAT);
-            let unread: Vec<Record> = self.journal.channel(CHAT, records::CHAT).iter().filter(|r| r.seq > cursor).cloned().collect();
-            for r in unread {
-                self.step(Input::Record { agent: a.fragment.clone(), fragment: CHAT.into(), record: r, view: Some(self.view.clone()), since: 0 });
-            }
-            // its own `tasks` (where its answers come)
-            let cursor = self.engine().cursor(&a.fragment, &a.fragment, records::TASKS);
-            let unread: Vec<Record> = self.journal.channel(&a.fragment, records::TASKS).iter().filter(|r| r.seq > cursor).cloned().collect();
-            for r in unread {
-                self.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: r, view: None, since: 0 });
+            let channels = if self.tasks_first { [records::TASKS, records::CHAT] } else { [records::CHAT, records::TASKS] };
+            for channel in channels {
+                // the chat, and its own `tasks` (where its answers come)
+                let (fragment, view) = if channel == records::CHAT { (CHAT.to_string(), Some(self.view.clone())) } else { (a.fragment.clone(), None) };
+                let cursor = self.engine().cursor(&a.fragment, &fragment, channel);
+                let unread: Vec<Record> = self.journal.channel(&fragment, channel).iter().filter(|r| r.seq > cursor).cloned().collect();
+                for r in unread {
+                    self.step(Input::Record { agent: a.fragment.clone(), fragment: fragment.clone(), record: r, view: view.clone(), since: 0 });
+                }
             }
         }
     }
@@ -3049,6 +3118,16 @@ impl World {
         let at: Vec<&Option<(String, String)>> = self.notes.iter().filter(|(t, _)| t == turn).map(|(_, n)| n).collect();
         assert_eq!(at.len(), 1, "{turn} ran once");
         at[0].as_ref().map(|(_, text)| text.clone())
+    }
+
+    /// The seq on the chat's `work` of `turn`'s record of `kind`.
+    fn on_work(&self, turn: &str, kind: &str) -> Option<u64> {
+        self.journal.channel(CHAT, records::WORK).iter().find(|r| r.body["turn"] == turn && r.body["kind"] == kind).map(|r| r.seq)
+    }
+
+    /// How many runs were told of the cut turn `cut` (P5: said once).
+    fn told_of(&self, cut: &str) -> usize {
+        self.notes.iter().filter(|(_, n)| n.as_ref().is_some_and(|(t, _)| t == cut)).count()
     }
 
     /// A step of a turn the runtime holds, as the runtime reports it.
@@ -3438,7 +3517,8 @@ fn a_rollback_starts_nothing_twice() {
 
 /// Goal : a message admitted and never started before a crash is run by
 /// the next life, whether that life wakes with the state the crash left (it
-/// queued there), a state from before it was said, or none.
+/// queued there), a state from before it was said, or none: after the turn
+/// the crash cut, continued in its place (FIN-501).
 #[test]
 fn said_before_a_crash_and_never_started_runs_in_the_next_life() {
     for wake in ["latest", "before", "none"] {
@@ -3457,6 +3537,10 @@ fn said_before_a_crash_and_never_started_runs_in_the_next_life() {
         };
         w.crash(false);
         w.start(state);
+        w.answer_all();
+        let c = records::continuation_id(&t1);
+        assert_eq!((w.runs_of(&c), w.runs_of(&t2)), (1, 0), "{wake}: one's continuation first");
+        w.end(&c, Outcome::Idle);
         w.answer_all();
         assert_eq!(w.runs_of(&t2), 1, "{wake}: the next life runs it");
         w.end(&t2, Outcome::Idle);
@@ -3757,15 +3841,113 @@ fn a_rolled_back_life_continues_a_cut_turn_as_its_own_state_would() {
     }
 }
 
-/// Goal (FIN-220, #966): a cut turn's journal read holds nothing up. Every
-/// claim answers at once, and while the read is out (it hangs) the chat's
-/// next message is claimed and runs. Its answer, when it comes, decides the
-/// continuation: one that says the turn did not wait (a read that failed
-/// or ran past its bound says so too) continues it once, after the turn
-/// already running; a read that never answers before a crash continues
+/// Goal (FIN-505): after a rollback, a chat's turns are claimed in the
+/// order what caused them was said (the journal's, the same in every
+/// life), whatever order its channels replay in. A newer turn (another
+/// agent's answer, on the agent's own `tasks`, read before the chat) is
+/// claimed only once the cut turn said before it has ended as lost, so its
+/// card looks open no longer, and once its continuation, if any, has run:
+/// a newer turn waiting on a card of its own never holds the chat in front
+/// of a cut turn. Method: the turn said and cut after the state the next
+/// life wakes with; the answer said after the crash; the next life reads
+/// `tasks` first.
+#[test]
+fn a_cut_turn_ends_before_a_newer_turn_is_claimed_whatever_channel_replays_first() {
+    for (how, continued) in [("running", 1), ("waiting on its card", 0)] {
+        let mut w = World::new(&["juniper"]);
+        w.tasks_first = true;
+        w.start(None);
+        let before = w.latest();
+        w.journal.at = 1_000;
+        let t = w.say("npub1paul", "ask rowan to approve the plan");
+        w.answer_all();
+        if how == "waiting on its card" {
+            w.ask(&t);
+            w.answer_all();
+        }
+        w.crash(false);
+        // rowan's answer, on juniper's own `tasks`, said after the crash
+        w.journal.at = 2_000;
+        let lead = w.lead().clone();
+        let asked = Cause { fragment: "pair--k3x9".into(), channel: records::CHAT.into(), seq: 1 };
+        let seq = w.journal.append(&lead.fragment, records::TASKS, &lead.identity, records::answer(CHAT, "Approved.", "npub1rowan", "rowan", &asked, "rowan-turn", &Outcome::Idle, 1, false));
+        let newer = records::turn_id(&lead.fragment, &lead.fragment, records::TASKS, seq);
+        w.start(before);
+        w.answer_all();
+        assert_eq!((w.runs_of(&t), w.ends(&t)), (1, vec![json!({ "kind": "turn.end", "turn": t, "outcome": "error", "error": LOST })]), "{how}: never run again, ended once, as lost");
+        let c = records::continuation_id(&t);
+        assert_eq!(w.runs_of(&c), continued, "{how}");
+        if continued == 1 {
+            assert!(w.starts(&newer).is_empty(), "{how}: the newer turn waits behind the continuation");
+            w.end(&c, Outcome::Idle);
+            w.answer_all();
+            assert!(w.on_work(&c, "turn.start").expect("its claim") < w.on_work(&newer, "turn.start").expect("its claim"), "{how}: the continuation claimed first");
+        }
+        assert_eq!(w.runs_of(&newer), 1, "{how}: then the newer turn");
+        assert!(w.on_work(&t, "turn.end").expect("its end") < w.on_work(&newer, "turn.start").expect("its claim"), "{how}: the cut turn ended before the newer turn was claimed");
+        assert_eq!(w.told_of(&t), 1, "{how}: the cut told once, to the turn after it");
+        w.end(&newer, Outcome::Idle);
+        w.settle();
+        w.check().unwrap_or_else(|e| panic!("{how}: {e}"));
+    }
+}
+
+/// Goal (FIN-501): a cut turn is continued before anything said after it,
+/// and the cut is told once, by its continuation, whatever state the next
+/// life wakes with. A message said while the turn ran (queued behind it)
+/// is claimed only once the continuation is queued: after the lost end
+/// lands as this life's, and, in a life rolled back to before the turn's
+/// claim, after the journal read that judges it answers too. The
+/// continuation runs first, told of the cut; the message after it is told
 /// nothing.
 #[test]
-fn a_cut_turns_read_holds_no_claim() {
+fn a_message_said_behind_a_cut_turn_runs_after_its_continuation_told_nothing() {
+    for wake in ["latest", "before", "none"] {
+        let mut w = World::new(&["juniper"]);
+        w.start(None);
+        let before = w.latest();
+        let t = w.say("npub1paul", "deploy the site");
+        w.answer_all();
+        let next = w.say("npub1paul", "and the blog");
+        w.answer_all();
+        assert_eq!(w.runs_of(&next), 0, "{wake}: it waits behind the turn running");
+        let state = match wake {
+            "latest" => w.latest(),
+            "before" => before,
+            _ => None,
+        };
+        w.crash(false);
+        w.start(state);
+        w.answer_all();
+        let c = records::continuation_id(&t);
+        assert_eq!((w.runs_of(&c), w.runs_of(&next)), (1, 0), "{wake}: the continuation first, in the cut turn's place");
+        w.end(&c, Outcome::Idle);
+        w.answer_all();
+        assert_eq!(w.runs_of(&next), 1, "{wake}: then the message");
+        assert!(w.note_of(&c).is_some_and(|n| n.contains("“deploy the site”")), "{wake}: the continuation is told of the cut");
+        assert_eq!(w.note_of(&next), None, "{wake}: the message after it is told nothing");
+        assert_eq!(w.told_of(&t), 1, "{wake}: the cut told once");
+        w.end(&next, Outcome::Idle);
+        w.settle();
+        w.check_settled(&[t, next]).unwrap_or_else(|e| panic!("{wake}: {e}"));
+    }
+}
+
+/// Goal (FIN-501; FIN-220, #966): a cut turn's journal read holds no lane,
+/// and its own chat's claims only until it answers. 30964cbae made the
+/// read hold no claim at all because #959's read, in the claim lane and
+/// with no bound, held the cut turn's end and every claim after it. This
+/// one is asked once its lost end has landed, runs in a task of its own,
+/// and answers within `NOTE_READ_MS_MAX` (a read that fails or runs past
+/// it answers `waited: false`), so a chat waits on it that long at most,
+/// and no other chat waits. Meanwhile (it hangs) a message said there is
+/// admitted and left unclaimed. Its answer decides the continuation,
+/// queued in the cut turn's place: it runs first, told of the cut; the
+/// message after it is told nothing. A read that never answers before a
+/// crash continues nothing, and the message runs in the next life, told of
+/// the cut once.
+#[test]
+fn a_cut_turns_read_holds_its_chat_until_it_answers() {
     let mut w = World::new(&["juniper"]);
     w.start(None);
     let before = w.latest();
@@ -3777,21 +3959,28 @@ fn a_cut_turns_read_holds_no_claim() {
     w.answer_all();
     assert_eq!((w.ends(&t).len(), w.reads.len()), (1, 1), "its lost end posted, its read out");
     let c = records::continuation_id(&t);
-    assert_eq!(w.runs_of(&c), 0, "nothing continued while the read is out");
     let next = w.say("npub1paul", "and the blog");
     w.answer_all();
-    assert_eq!(w.runs_of(&next), 1, "the chat's next message is claimed and runs meanwhile");
-    w.end(&next, Outcome::Idle);
-    w.answer_all();
-    // the read answers: not waiting (or it failed, which says the same)
+    assert_eq!((w.runs_of(&c), w.starts(&next).len()), (0, 0), "while the read is out: nothing continued, nothing claimed");
+    assert!(w.engine().state().turns.get(&next).is_some_and(|x| x.phase == Phase::Queued), "the message admitted, queued");
+    // the read answers: not waiting (or it failed, or ran past its bound,
+    // which say the same)
     w.reads_hang = false;
     w.answer_all();
-    assert_eq!(w.runs_of(&c), 1, "continued once its read says it did not wait");
+    assert_eq!((w.runs_of(&c), w.runs_of(&next)), (1, 0), "continued once, in the cut turn's place, before the message");
     w.end(&c, Outcome::Idle);
+    w.answer_all();
+    assert_eq!(w.runs_of(&next), 1, "then the message");
+    assert!(w.note_of(&c).is_some_and(|n| n.contains("“deploy the site”")), "the continuation is told of the cut");
+    assert_eq!(w.note_of(&next), None, "the message is told nothing");
+    assert_eq!(w.told_of(&t), 1, "the cut told once");
+    w.end(&next, Outcome::Idle);
     w.settle();
     w.check().unwrap();
 
-    // a read that never answers before a crash: nothing continued, then or after
+    // a read that never answers before a crash: nothing continued, then or
+    // after; the message said meanwhile runs in the next life, told of the
+    // cut as the turn after it
     let mut w = World::new(&["juniper"]);
     w.start(None);
     let before = w.latest();
@@ -3801,12 +3990,18 @@ fn a_cut_turns_read_holds_no_claim() {
     w.start(before);
     w.reads_hang = true;
     w.answer_all();
+    let next = w.say("npub1paul", "and the blog");
+    w.answer_all();
     let state = w.latest();
     w.crash(false);
     w.reads_hang = false;
     w.start(state);
     w.answer_all();
     assert_eq!(w.runs_of(&records::continuation_id(&t)), 0, "its read died with its life");
+    assert_eq!(w.runs_of(&next), 1, "the message runs in the next life");
+    assert!(w.note_of(&next).is_some_and(|n| n.contains("“deploy the site”")), "told of the cut, the turn after it");
+    assert_eq!(w.told_of(&t), 1, "the cut told once");
+    w.end(&next, Outcome::Idle);
     w.settle();
     w.check().unwrap();
 }

@@ -77,8 +77,9 @@ const _: () = assert!(skills::ABSENT_EVERY_MS < SKILLS_EVERY_MS && skills::ABSEN
 /// SIGTERM: children are told, then the boot is gone within this.
 const STOP_MS_MAX: u64 = 2_500;
 /// Ending the previous start (`end_previous_life`: its leases cleared, its
-/// cut turns closed) is waited for at most this long before the gateway
-/// starts; it takes about half a second.
+/// cut turns closed), then the stored prompts' refresh when their inputs
+/// changed (`refresh_stored_prompts`), are each waited for at most this
+/// long before the gateway starts; each takes about half a second.
 const END_PREVIOUS_LIFE_MS_MAX: u64 = 30_000;
 /// Bot Mode's hook in a profile, as images before route A linked it (to
 /// `/opt/fragment/hooks/fragment-bot-chat`, which this image does not hold).
@@ -229,11 +230,25 @@ fn sqlite_report(args: &[String]) -> ! {
 struct Quiet {
     paused: std::sync::atomic::AtomicBool,
     busy: std::sync::atomic::AtomicUsize,
+    /// The holds begun, counted at each one's start: a round that writes
+    /// what a hold copies tells by it whether one began while it ran.
+    holds: std::sync::atomic::AtomicU64,
 }
 
 impl Quiet {
     fn paused(&self) -> bool {
         self.paused.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn holds(&self) -> u64 {
+        self.holds.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Paused for a hold (each poll of it says so again): a hold begun.
+    fn pause(&self) {
+        if !self.paused.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.holds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
@@ -257,7 +272,9 @@ impl Drop for Busy {
 /// The hold is looked at this often.
 const HOLD_POLL_MS: u64 = 100;
 /// Rounds under way are waited for this long at most: none writes a
-/// database, so the copy goes on after it.
+/// database once the hold is asked (a skills round's prompt refresh,
+/// which does, is skipped under a hold: `spawn_skills`), so the copy goes
+/// on after it.
 const QUIET_WAIT_MS: u64 = 8_000;
 /// A copy is given this long (the platform waits 20 s for the answer).
 const COPY_MS_MAX: u64 = 15_000;
@@ -293,7 +310,7 @@ async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
             continue;
         }
         let first = *since.get_or_insert_with(Instant::now);
-        quiet.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+        quiet.pause();
         // answered: the platform clears the answer before it holds again
         if Path::new(held::HELD).exists() || failed_at.is_some_and(|t| t.elapsed() < Duration::from_millis(COPY_RETRY_MS)) {
             continue;
@@ -404,14 +421,6 @@ fn pre_init() -> ! {
     ev!("boot.pre_init");
     let _ = std::fs::remove_dir_all(RUN);
     std::fs::create_dir_all(RUN).unwrap_or_else(|e| fail(&format!("{RUN}: {e}")));
-    // The image's Chromium (hermes::CHROMIUM), written at build: stage2
-    // skips its own search, and Hermes starts it for its browser and its
-    // desktop's Browser icon alike.
-    if let Ok(p) = std::fs::read_to_string(format!("{OPT}/browser-path")) {
-        if !p.trim().is_empty() && env("AGENT_BROWSER_EXECUTABLE_PATH").is_none() {
-            std::env::set_var("AGENT_BROWSER_EXECUTABLE_PATH", p.trim());
-        }
-    }
     // What Hermes would guess from whether it sees a container, the same
     // on every runtime (hermes::RUNTIME_ENV); s6 hands it on to `main`.
     for (name, value) in hermes::RUNTIME_ENV {
@@ -517,7 +526,7 @@ fn screen_start(agent: Option<&str>) -> ! {
 /// At image build: what the boot reads instead of finding it each time, and
 /// the platform skill (skills.rs), from the image's own `fragment` CLI.
 fn build_info() -> ! {
-    desktop::install_browser(Path::new("/opt/hermes")).unwrap_or_else(|e| fail(&e));
+    desktop::front_tabs(Path::new("/opt/hermes")).unwrap_or_else(|e| fail(&e));
     let plugins = hermes::lean_plugins(Path::new("/opt/hermes/plugins"));
     std::fs::write(format!("{OPT}/lean-plugins.txt"), plugins.join("\n")).unwrap_or_else(|e| fail(&e.to_string()));
     // The desktop image already contains regular distro Chromium. Its PM
@@ -529,7 +538,6 @@ fn build_info() -> ! {
     }
     std::fs::write(hermes::CHROMIUM, hermes::chromium_script(&full)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
     std::fs::set_permissions(hermes::CHROMIUM, std::fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
-    std::fs::write(format!("{OPT}/browser-path"), hermes::CHROMIUM).unwrap_or_else(|e| fail(&e.to_string()));
     let cli = Command::new(FRAGMENT_CLI).arg("skill").output().unwrap_or_else(|e| fail(&format!("{FRAGMENT_CLI} skill: {e}")));
     if !cli.status.success() {
         fail(&format!("{FRAGMENT_CLI} skill: {}", String::from_utf8_lossy(&cli.stderr)));
@@ -632,7 +640,7 @@ fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
 /// browser profile that is a directory already stays where it is.
 fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
     let work = hermes::work_dir(&a.fragment);
-    let browser = work.join("browser-profile");
+    let browser = hermes::browser_dir(&a.fragment);
     if let Err(e) = std::fs::create_dir_all(&browser) {
         ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() });
         return;
@@ -940,6 +948,14 @@ fn stop_idle_desktops(agents: &[Agent], home: &Path, idle_ms: u64, stopping: &St
         let (agent, home, stopping) = (a.fragment.clone(), home.to_path_buf(), stopping.clone());
         tokio::spawn(async move {
             let t = Instant::now();
+            // Its browser closes first, as a person closes it (its cookies
+            // written), unless a person holds the desktop: Hermes' stop then
+            // refuses, and the browser is theirs.
+            if !desktop::held_by_a_person(&profile) {
+                if let Some(closed) = desktop::close_browser(&profile, &hermes::browser_dir(&agent), Path::new("/proc")).await {
+                    ev!("screen.browser_closed", { "agent": agent, "closed": closed, "ms": t.elapsed().as_millis() as u64 });
+                }
+            }
             match stop_desktop(&agent, &home).await {
                 Ok((code, said)) => ev!("screen.idle_stopped", { "agent": agent, "idleMs": idle, "code": code, "said": said, "ms": t.elapsed().as_millis() as u64 }),
                 Err(e) => ev!("screen.idle_stop_failed", { "agent": agent, "idleMs": idle, "error": e }),
@@ -1059,7 +1075,7 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
         return None;
     }
     let reader = skills::reader(agents, owner)?.clone();
-    let (api, owner, found) = (api.clone(), owner.to_string(), found.clone());
+    let (api, owner, found, held) = (api.clone(), owner.to_string(), found.clone(), quiet.clone());
     let busy = Busy::new(quiet);
     Some(tokio::spawn(async move {
         let _busy = busy;
@@ -1069,7 +1085,29 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
         match done {
             Ok(d) => {
                 let platform = settle_platform();
-                ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "platform": platform, "ms": t.elapsed().as_millis() as u64 })
+                ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "platform": platform, "ms": t.elapsed().as_millis() as u64 });
+                // a skill added, changed or gone: the open chats list it at
+                // their next turn (nothing asked when the set is the same).
+                // Never under a hold: its databases are being copied, and a
+                // request after their copy, with its stamp kept, would be
+                // lost at the restore; the stamp left, the next round or
+                // the boot asks.
+                if held.paused() {
+                    ev!("prompts.refresh_deferred", { "why": "skills", "because": "held" });
+                } else {
+                    // a hold begun while it ran (one slower than the hold's
+                    // wait for rounds under way, a database long locked)
+                    // may have copied its databases before the request: its
+                    // stamp is left then, and the next round asks again
+                    let since = held.holds();
+                    let overlapped = move || held.paused() || held.holds() != since;
+                    let refreshing = tokio::task::spawn_blocking(move || refresh_stored_prompts(&home(), "skills", &overlapped));
+                    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => ev!("prompts.refresh_failed", { "why": "skills", "error": e.to_string() }),
+                        Err(_) => ev!("prompts.refresh_failed", { "why": "skills", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
+                    }
+                }
             }
             Err(e) => ev!("skills.failed", { "error": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
         }
@@ -1121,10 +1159,11 @@ fn start_gateway(home: &Path) -> Option<u32> {
 ///   turn, a compression) are cleared: their holder's PID names a live
 ///   process of this start (PIDs repeat in a fresh namespace: the gateway
 ///   is PID 7 each time), so Hermes would wait out its five-minute TTL.
-/// - Each turn a restart cut is closed in its session, with Hermes' own
-///   failed-turn boundary (`hermes::CLOSE_CUT_TURNS`, docs/computers.md,
-///   Durability, P5): left open, Hermes would join the next message to the
-///   cut request, and its model would do it again.
+/// - Each turn a restart cut is settled in its session as Hermes' own
+///   `/discard` settles it, with its failed-turn boundary
+///   (`hermes::SETTLE_CUT_TURNS`, docs/computers.md, Durability, P5): left
+///   alone, Hermes would pause the chat until its sender sent `/discard`,
+///   or, before its admissions, join the next message to the cut request.
 ///
 /// As the `hermes` user, so the files keep their owner.
 fn end_previous_life(agents: &[Agent], home: &Path) {
@@ -1158,17 +1197,101 @@ for p in sys.argv[1:]:
     }
     // after the leases: a write Hermes guards with them
     let t = Instant::now();
-    let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", hermes::CLOSE_CUT_TURNS]).args(&dbs).env("HOME", home).env("HERMES_HOME", home).current_dir("/").output();
+    let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", hermes::SETTLE_CUT_TURNS]).args(&dbs).env("HOME", home).env("HERMES_HOME", home).current_dir("/").output();
     let ms = t.elapsed().as_millis() as u64;
     match out {
-        Ok(o) if o.status.success() => match hermes::cut_turns_closed(&String::from_utf8_lossy(&o.stdout)) {
-            Ok((sessions, closed)) => ev!("boot.cut_turns_closed", { "dbs": dbs.len(), "sessions": sessions, "closed": closed, "ms": ms }),
+        Ok(o) if o.status.success() => match hermes::cut_turns_settled(&String::from_utf8_lossy(&o.stdout)) {
+            Ok((lost, dropped, closed)) => ev!("boot.cut_turns_settled", { "dbs": dbs.len(), "lost": lost, "dropped": dropped, "closed": closed, "ms": ms }),
             Err(why) => ev!("boot.cut_turns_failed", { "error": why, "ms": ms }),
         },
-        // the next message would be joined to a cut request: said loudly
+        // a chat would stay paused behind its cut turn: said loudly
         Ok(o) => ev!("boot.cut_turns_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>(), "ms": ms }),
         Err(e) => ev!("boot.cut_turns_failed", { "error": e.to_string(), "ms": ms }),
     }
+}
+
+/// When what the sessions' system prompts are built from (the relay hint
+/// and the skill files Hermes indexes: `hermes::prompt_inputs`) is not what
+/// this home last stamped (`hermes::PROMPT_STAMP`), every session in its
+/// databases (the gateway's, each profile's) is asked to rebuild its stored
+/// prompt on its next turn (`hermes::REFRESH_PROMPTS`), then the inputs are
+/// stamped. `why` says which moment asks: the boot, its skills settled,
+/// before the gateway takes a turn, or an install of the managed skills
+/// while it runs (`spawn_skills`). A failure is said and leaves the stamp,
+/// so the next one asks again; the chats keep the prompts they had; so does
+/// a hold that may have copied the databases before the request
+/// (`overlapped`, asked before the stamp is written).
+fn refresh_stored_prompts(home: &Path, why: &str, overlapped: &dyn Fn() -> bool) {
+    let stamp = home.join(hermes::PROMPT_STAMP);
+    let (indexed, cut) = skills::indexed(&[&skills::managed_dir(), Path::new(skills::PLATFORM_VIEW)]);
+    if cut {
+        ev!("prompts.inputs_cut", { "why": why, "skill_files": indexed.len(), "per_dir_max": skills::FILES_MAX });
+    }
+    let inputs = hermes::prompt_inputs(&hermes::relay_hint(), &indexed);
+    if !hermes::inputs_changed(read_stamp(&stamp).as_deref(), &inputs) {
+        return;
+    }
+    let mut dbs: Vec<PathBuf> = vec![home.join("state.db")];
+    if let Ok(profiles) = std::fs::read_dir(home.join("profiles")) {
+        let mut found: Vec<PathBuf> = profiles.filter_map(|e| e.ok().map(|e| e.path().join("state.db"))).collect();
+        found.sort();
+        dbs.extend(found);
+    }
+    dbs.retain(|p| p.is_file());
+    if !dbs.is_empty() {
+        let t = Instant::now();
+        let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", hermes::REFRESH_PROMPTS]).args(&dbs).env("HOME", home).env("HERMES_HOME", home).current_dir("/").output();
+        let ms = t.elapsed().as_millis() as u64;
+        match out {
+            Ok(o) if o.status.success() => match hermes::prompts_refreshed(&String::from_utf8_lossy(&o.stdout)) {
+                Ok(asked) => ev!("prompts.refreshed", { "why": why, "dbs": asked, "skill_files": indexed.len(), "ms": ms }),
+                Err(error) => return ev!("prompts.refresh_failed", { "why": why, "error": error, "ms": ms }),
+            },
+            Ok(o) => return ev!("prompts.refresh_failed", { "why": why, "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>(), "ms": ms }),
+            Err(e) => return ev!("prompts.refresh_failed", { "why": why, "error": e.to_string(), "ms": ms }),
+        }
+    }
+    if overlapped() {
+        return ev!("prompts.stamp_deferred", { "why": why, "because": "held" });
+    }
+    if let Err(e) = write_stamp(&stamp, &inputs) {
+        ev!("prompts.stamp_failed", { "why": why, "error": e.to_string() });
+    }
+}
+
+/// The stamp (`hermes::PROMPT_STAMP`) as the last refresh left it: a
+/// regular file's first bytes alone, never a link, a fifo or a directory
+/// followed or waited on (its home is the hermes user's to write), which
+/// read as no stamp: opened without following a link or waiting on a fifo,
+/// then known a regular file by what was opened, never by its name.
+fn read_stamp(stamp: &Path) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(stamp).ok()?;
+    if !f.metadata().ok()?.file_type().is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    f.take(256).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// The stamp written whole and never through a link: a fresh file beside
+/// it (made new: whatever stood at its name, removed first, is not
+/// followed), then renamed over it, which replaces a link rather than
+/// writing where it points. The hermes user's, as its home is.
+fn write_stamp(stamp: &Path, inputs: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let fresh = stamp.with_extension("new");
+    match std::fs::remove_file(&fresh) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&fresh)?;
+    f.write_all(inputs.as_bytes())?;
+    drop(f);
+    chown(&fresh, hermes_ids());
+    std::fs::rename(&fresh, stamp)
 }
 
 /// The computer's Python environment (`python.rs`), made or mended off the
@@ -1317,7 +1440,7 @@ async fn boot_main() {
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
     // each agent's route, in the gateway's config (bots.rs, `profile_routes`)
     let routes = bots::profile_routes(&hermes_agents, &route_chats(&api, &hermes_agents).await);
-    let managed = hermes::managed_config(&lean, card_timeout_s, screen_idle_ms) + &routes;
+    let managed = hermes::managed_config(&lean, card_timeout_s) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));
@@ -1343,6 +1466,17 @@ async fn boot_main() {
         // SQLite's own waits make this a wedged database: the gateway starts
         // anyway, as it would find it
         Err(_) => ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
+    }
+    // the skills settled (`managed_dir`, above) and the cut turns too: a
+    // chat's stored prompt rebuilt from today's inputs at its next turn
+    let refreshing = {
+        let home = home.clone();
+        tokio::task::spawn_blocking(move || refresh_stored_prompts(&home, "boot", &|| false))
+    };
+    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => ev!("prompts.refresh_failed", { "why": "boot", "error": e.to_string() }),
+        Err(_) => ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
     }
     write_ready(&agents, &home);
     let mut bridge = spawn_bridge(card_timeout_s);

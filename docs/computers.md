@@ -44,8 +44,8 @@ an image may rely on this:
 - **It stays awake** while a port tab is open or the guest holds its
   keepalive socket, and `IDLE_MS` (20 minutes) after neither does. An
   always-on seat's computer never sleeps (decision 25; docs/billing.md).
-- **It is saved** when its work ends (its last keepalive closes and 30 s
-  pass with none opened again), every 15 minutes while a keepalive stays
+- **It is saved** when its work ends (its last keepalive or its last
+  port tab closes, and 30 s pass with no keepalive opened again), every 15 minutes while a keepalive stays
   open, and at every sleep (below, "Saves and what a wake restores").
 - **A sleep** is, in order: the hold, the save, a container snapshot
   (only after a save that worked), SIGTERM, up to 5 s for the guest to
@@ -60,6 +60,19 @@ an image may rely on this:
   outside `/data`. That start is owed, made by its alarm (asleep or
   won't wake, the start alone), so the restart answers `starting` on
   every path, and its owner's page follows it to awake.
+- **A stop nothing asked for, while idle, is a sleep.** A host may stop
+  a container for its own reasons (its maintenance, a host short of
+  memory). One that stops while its computer is awake with nothing open
+  (no keepalive, no port tab), no save under way, all this life did in a
+  save it made since it came up, and no message or join it was woken for
+  that its guest has not taken up, has slept: no strike, no rollback,
+  nothing told, and nothing starts it again, though the hold after its
+  last work had not run out. Its next wake restores that save. A message
+  or a join's notice posted after its guest last opened a keepalive, with
+  none open then or since, is work not taken up (a record's wake carries
+  when it was posted; a guest at work queues what comes), and a
+  life with no save of its own may have been woken for work it has not
+  begun, so either stop is a crash (below), as is every other.
 - **A crash** (the container stopped on its own) starts it again while
   something wants it; a guest that died holding its keepalive is started
   again however long its turn ran, and its next life ends what was cut.
@@ -108,7 +121,7 @@ back in time without changing what happens.
 | Fact | Its one authority | A cache of it |
 |---|---|---|
 | What was said | the chat's `chat` channel | the runtime's transcript |
-| Which turns started, which calls they asked for, what they did, how they ended, each card's answer | the chat's `work` channel, the journal (docs/chat-records.md) | the bridge's `state.json` |
+| Which turns started, which calls they asked for, what they did, how they ended, each card's answer | the chat's `work` channel, the journal (docs/chat-records.md) | the bridge's state (`/data/bridge`) |
 | The agent's self (`SOUL.md`, memories, skills) | the agent fragment's repo | the profile's checkout |
 | The runtime's context and the agent's working files | `/data`, as of its newest save | the snapshot, for one image |
 | Which save is current, and what a wake restored | the Computer DO | |
@@ -539,8 +552,8 @@ every door and relay asks. An image's own declarations grant nothing.
 `http://model.fragment.internal` is the platform's model routes as the
 agent (docs/api.md, Models), with the route's bounds and gate:
 
-- `POST /v1/chat/completions`: OpenAI's shape, `model` a tier (`cheap`,
-  `medium`; `high` only while it is on, decision 23), `vision`,
+- `POST /v1/chat/completions`: OpenAI's shape, `model` a route of the
+  deployment's by its name (`cheap`, `medium` on Finite's), `vision`,
   `fallback`, or a model by its id;
 - `GET /v1/models`: OpenAI's list of the ids a call may name, answered by
   the intercept itself, naming no agent and metering nothing;
@@ -560,32 +573,36 @@ Any other path is 404, unmetered.
   further than the computer. The intercept names no fragment, so a call
   bills its agent's owner (decision 36); one its owner's ledger refuses
   gets the ledger's reason (402, 403), and no call is made.
-- `x-fragment-tier: cheap` or `medium` (optional) is the caller's tier,
-  by which a model's id, `fallback` and `vision` run as its tier's route.
+- `x-fragment-tier: <route>` (optional; a route's name, any other 400) is
+  the caller's route, by which a model's id, `fallback` and `vision` run
+  as its route's.
 - **A model by its id.** The view's `models` names each slot's model id
   (`ModelIds`), as the deployment names them now. A guest names its
   models by those ids and reads them again while awake: a change of the
   deployment's `models` is a deploy, no new image, and an id no slot runs
   is refused (400). The route's names keep working.
-- **Each tier's route.** The view's `models.routes` names each tier's
-  label, whether it is private, and its fallback's and vision model's ids.
+- **Each route.** The view's `models.routes` names the routes `cheap` and
+  `medium` (each the route of that name, else the deployment's default:
+  what an image older than the list reads): its label, whether it is
+  private, and its fallback's and vision model's ids.
 - **A slot's own fallback.** A call that fails before answering is made
   once more on its slot's fallback, however it named the slot, and never
   a third time. A call that streams nothing is the runtime's own to give
   up on.
-- **A slot's `private`.** A private tier is a private route: every slot
-  its agents' calls reach (its fallback, its vision, its Deep, and the
-  route's four's `fallback`, which an image that reads no route names for
-  its stall) is private, or the deploy is refused. Not private yet: voice
+- **A slot's `private`.** A route on a private slot is a private route:
+  every slot its agents' calls reach (its fallback, its vision, its Deep,
+  and the view's `fallback`, the default route's, which an image that
+  reads no route names for its stall) is private, or the deploy is
+  refused. Not private yet: voice
   notes (`whisper`), decisions, the runtime's speech, the vendors its
   tools call (web search, `x_search`, image generation), and an owner's
   own model.
-- **Fast and Deep** (decision 65). Each tier runs Fast, its own slot, for
+- **Fast and Deep** (decision 65). Each route runs Fast, its own slot, for
   its agents' turns, and Deep for their delegates. `models.routes` carries
-  each tier's `reasoning` (Fast's effort) and `deep` (`{id, reasoning?,
+  each route's `reasoning` (Fast's effort) and `deep` (`{id, reasoning?,
   fallback?}`), absent when the deployment names none; an image copies
   them into each profile, and one that reads neither runs delegates on
-  Fast. A delegate names its Deep by its id with its tier said, so a
+  Fast. A delegate names its Deep by its id with its route said, so a
   private child stays on its private slot when Standard runs the same id.
 - **Native images** (decision 65). `models.images` lists the model ids
   the deployment declares image-capable; an image gives those models
@@ -656,7 +673,16 @@ provider's own hosts.
   (decision 44); its owner may narrow it to a list, a specialization
   rather than a wall. Where a connection takes several accounts, each
   agent uses the one its owner picked, else the oldest connected; its
-  placeholder is the same.
+  placeholder is the same. Both are the agent fragment's (`meta`
+  `grants`, `fragment_core::grants`), changed only by its owner in
+  person through their computer's routes. The computer asks the agent's
+  fragment for them at each request it swaps and each read of a view,
+  and keeps none: a provider taken away is refused from the next request.
+  A computer from before held them itself; the rows its agents'
+  fragments had not taken when its step 6 dropped them it owes
+  (`grants::Owed`): an agent's next ask carries its row, taken whole by a
+  fragment holding none of its own and ignored by one that does
+  (`grants::answered`), then forgotten.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
@@ -772,8 +798,10 @@ What our Hermes image guarantees beyond the contract:
   refresh is off, and Node's compile cache is outside `/data`. A Claude
   agent's idle `claude` is stopped before the hold is answered
   (docs/bridge.md, "The Claude runtime").
-- **A turn a restart cut** is closed in its Hermes session before the
-  gateway starts, so the next message is a turn of its own (P5).
+- **A turn a restart cut** is settled in its Hermes session before the
+  gateway starts, as Hermes' own `/discard` settles it, so the next
+  message is a turn of its own and the chat is never paused behind it
+  (P5; `hermes::SETTLE_CUT_TURNS`).
 - **Its agents change while it runs**, nothing restarted: one assigned
   is served within seconds; one unassigned stops at once, its profile
   retired at the next start.
@@ -782,8 +810,11 @@ What our Hermes image guarantees beyond the contract:
   and stopped after 10 minutes unused. Take over is that desktop's lease,
   which Hermes' tools obey until Give back. Its agents run as one user
   (decision 44), so only the lease and the platform skill keep an agent
-  off another's desktop. The desktop and the browser tools share one
-  regular Chromium and one saved profile per agent. A link opened on the
+  off another's desktop. The desktop's Browser icon and the agent's
+  `browser_exec` share one regular Chromium and one saved profile per
+  agent, which shows pages `navigator.webdriver` false, as a person's own
+  browser does. It stays up as long as its desktop, whose idle stop closes
+  it first, as a person would, its cookies written. A link opened on the
   desktop (a terminal's sign-in, `xdg-open`) opens there too: it is the
   desktop's default web browser, so no dialog asks which (FIN-351).
 
@@ -802,8 +833,22 @@ payment card fill still asks. A card is its owner's alone to answer
 
 Every turn also tells the agent that a file attached in the chat is
 already on its computer, at the path the attachment note names, scratch
-until it copies it into its work (`hermes::FILES`); and that a reply line
-`MEDIA:<absolute path>` attaches a file there (`hermes::SENDING`).
+until it copies it into its work (`hermes::FILES`); that a voice memo
+arrives already transcribed, its words the quote above Hermes' audio
+note, its file only for work on the recording (`hermes::VOICE`); and that a
+reply line `MEDIA:<absolute path>` attaches a file there
+(`hermes::SENDING`). Hermes keeps the system prompt a chat's session
+began with and replays it on every later turn (rebuilding it only at a
+compression, a model change or `/new`), so whenever what it is built
+from changes (the relay hint, or a skill file Hermes indexes into it: the
+platform skill's, a bundled one, the owner's managed set;
+`hermes::prompt_inputs`), every session is asked to rebuild its prompt
+once, on its next turn, as Hermes' own `hermes sessions refresh-prompts`
+does (`hermes::REFRESH_PROMPTS`): at boot, its skills settled, against
+what the computer last stamped (`hermes::PROMPT_STAMP`), and after each
+install of the managed skills while it runs. An open chat has the change
+at its next turn, its conversation kept, at one prompt-cache miss; the
+same inputs ask nothing.
 
 ### Its name, in our Hermes image
 
@@ -916,8 +961,7 @@ for Testing fails.
   downloads nothing. sudo keeps `PLAYWRIGHT_BROWSERS_PATH`, so a browser
   `sudo playwright install` adds is where an agent's own launch looks,
   and `PLAYWRIGHT_SKIP_BROWSER_GC`: that directory is Hermes' tool store,
-  and Playwright's install would collect Hermes' own Chrome for Testing
-  and FFmpeg from it (`uninstall`, which always collects, is refused
+  and Playwright's install would collect Hermes' own FFmpeg from it (`uninstall`, which always collects, is refused
   there). As
   the agent's user, `playwright install` (either runtime's) answers at
   once (`playwright-node`, the Node both run Playwright's CLI on):
@@ -928,9 +972,9 @@ for Testing fails.
   none.
 - **`unzip`, `zip`, `jq` and `sqlite3`**, Debian's. `sqlite3` runs with
   Debian's SQLite library, not the newer one upstream puts first.
-- The image still carries Hermes' Chrome for Testing
-  (docs/technical-debt-ledger.md, "The Hermes image carries two
-  Chromiums").
+- Hermes' own Chrome for Testing is not in the image: every browser
+  here runs the system Chromium, which passes Cloudflare's bot check where
+  Chrome for Testing fails.
 
 ### Claude Code in our Hermes image
 
@@ -966,5 +1010,12 @@ gates it.
 
 Awake time, operator keys' calls and model calls are metered to the
 computer's owner, and its saves are not (docs/ledger.md, "Who pays").
+Awake time is time the computer was shown up: from its start's `Ready`
+(or, for a start put to sleep before it, that sleep), in the intervals
+the DO hears, each alarm's at least every five minutes and each step of
+a sleep's. An event that comes when nothing was heard of a running
+computer for `ALARM_LATE_MS` (twenty minutes: its alarms went unheard)
+meters it only to the last moment it was shown up, never the silence
+(FIN-511).
 At zero credit no wake starts, and a computer already awake runs on
 until it sleeps (decision 27).

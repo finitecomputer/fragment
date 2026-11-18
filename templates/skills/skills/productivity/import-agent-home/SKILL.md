@@ -1,6 +1,6 @@
 ---
 name: import-agent-home
-description: Become an agent your owner kept on another platform, from a copy of its home (a zip they attach or link, a folder, or a move's stage) — its chats into History, its personality, memories, skills and routines into you, its files into an app. Use when your owner asks you to bring an old agent over, or import an agent's home or its zip, or bring their old sites over from finite.site, or when a routine says to bring yourself over from finite.computer with a stage.
+description: Become an agent your owner kept on another platform, from a copy of its home (a zip they attach or link, a folder, or a move's stage) — its chats into History, its personality, memories, skills and routines into you, its files into an app. Use when your owner asks you to bring an old agent over, or import an agent's home or its zip, or bring their old sites over from finite.site, or point an old finite.site address at its new one, or when a routine says to bring yourself over from finite.computer with a stage.
 ---
 
 # Bring an agent's home over
@@ -63,10 +63,15 @@ yourself over from finite.computer: … stage `<stage>`"), Finite is moving
 you, and your owner already said yes. Follow "From a move's stage" below
 in place of "Get the zip", and open the stage first, before anything
 else. Never ask your owner to accept an offer, attach a zip or send a
-link: there is nothing for them to do.
+link: there is nothing for them to do. To your owner, a move is your
+upgrade: you are their same agent, in a more secure home. Call it that
+("my upgrade"), never a migration or a new agent. Promise only what
+comes (step 8 says what didn't), and your key here is new: never say it
+is the same.
 
 **Only the old sites.** When your owner asks for their old agent's sites
-from finite.site (after its import, or with none), do only that: the
+from finite.site, or to point an old site's address at its new one
+(after its import, or with none), do only that: the
 finite-computer profile's "Sites on finite.site"
 (`${HERMES_SKILL_DIR}/profiles/finite-computer.md`), with the rules
 above, after loading `apps-finite`. Their answers are which sites (else
@@ -142,6 +147,8 @@ while the move runs. Your terminal reaches it as you
 **No answers come with a move.** Your name is already the old agent's:
 leave it. Keep its picture, as if your owner had said to keep the old
 name and picture (step 4 and the profile). Keep every site private.
+The stage holds no sites: bring them from finite.site, as the profile
+says ("Sites on finite.site").
 
 **Open it at once.** It must be opened within two hours of the message,
 or the move is paused for Finite's team. Run this as one command, then
@@ -155,8 +162,9 @@ jq '.manifest | {layout, zip_bytes, zip_sha256, left_more, left: (.left // [] | 
 
 - **Refused** (403, 404 or 409): the stage isn't yours to read now. If
   `progress.md` says you already sent `done`, the move is finished. If
-  not, tell your owner in one sentence that bringing their old agent over
-  is paused and Finite's team will pick it up, and stop.
+  not, tell your owner in one sentence that your upgrade is paused and
+  Finite's team will pick it up, and stop. Don't say nothing is lost: a
+  stage you can't read may be gone.
 - **Another error:** wait a minute and run it again, up to five times.
   Still failing: tell your owner it's paused, as above, and stop.
 - **Room:** `/tmp` needs the manifest's `zip_bytes` free, with room to
@@ -232,10 +240,10 @@ curl -fsS -X POST -H "x-fragment-agent: $FRAGMENT_AS_AGENT" -H "content-type: ap
   "http://api.fragment.internal/api/migrations/stages/$stage/done"
 ```
 
-That pauses the move for Finite's team, and nothing of the old agent is
-lost. Tell your owner in a sentence or two: you couldn't finish bringing
-their old agent over, why in plain words, and that Finite's team will
-pick it up. Ask them to do nothing.
+That pauses the move for Finite's team. Tell your owner in a sentence or
+two: you couldn't finish your upgrade, why in plain words, and that
+Finite's team will pick it up. Ask them to do nothing. Don't promise
+nothing is lost: you can't tell whether its stage is still kept.
 
 Below, `<source>` is `~/home-import/home.zip`, the stage's
 `/tmp/home-import-<the stage>/home.zip`, or the path you were given, and `<L>` is
@@ -344,8 +352,18 @@ keep the old ones (`fragment agent --name "<name>"`, and
 
 ## 5. Memories
 
-Copy out the `memories` files. Entries are separated by lines holding
-only `§`. If there is a `memory_store`, read its facts with `sqlite3` too.
+Copy out the `memories` files, and the `memory_store` if there is one.
+**Keep them whole first, always**, before you weigh anything: copy each
+as it is into one folder of your own, which no cleanup deletes:
+
+```sh
+mkdir -p "$HOME/old-agent/memories" && cp -R -- "$HOME/home-import/home/<its path>" "$HOME/old-agent/memories/"
+```
+
+Then save one memory: the old agent's memories are kept whole in
+`~/old-agent/memories/`, to read when they help. Weigh the rest from that
+copy. Entries are separated by lines holding only `§`. Read a
+`memory_store`'s facts with `sqlite3`.
 
 Weigh each entry:
 - **Still true and useful:** save it with your `memory` tool, rewritten
@@ -354,8 +372,8 @@ Weigh each entry:
 - **About how the old platform worked:** drop it.
 - **Stale or duplicated:** drop it.
 
-Your memory is small. Keep what matters most, and put long knowledge in a
-brain if your owner has one.
+Your memory is small. Keep what matters most: the rest stays in the
+copy. Long knowledge can go in a brain too, if your owner has one.
 
 ## 6. Skills
 
@@ -433,10 +451,13 @@ times as they are; don't convert them yourself.
 
 ## 8. Tell your owner
 
-Finish with one message, in plain words:
+Finish with one message, in plain words. In a move, its first line says
+you're upgraded and here, then the rest:
 - **Where things are**, each with its link: the files app and whatever
   the profile made. The old chats are in their History (how many, as
-  the import printed), where search finds them by what was said.
+  the import printed), where search finds them by what was said. The old
+  memories are kept whole on your computer, in its `old-agent` folder
+  (`report.md` names the path).
 - **What came over:** your personality, how many memories, the skills (by
   name), and the routines (when they run, in your owner's time).
 - **What didn't, and why**, a sentence each:
@@ -458,4 +479,4 @@ delete `~/home-import/home.zip`, `~/home-import/home/` and
 `~/home-import/skills/`, and in a move your stage's own
 `/tmp/home-import-<the stage>/` (never another folder in `/tmp`): everything is in its place now, and your
 computer saves your whole home each time it sleeps. Keep `report.md`,
-`progress.md` and `stage.json`.
+`progress.md`, `stage.json` and `~/old-agent/`.

@@ -65,7 +65,7 @@ otherwise); the registry's, the move's and the mail lever are no route.
 | `POST /api/test/keys` | `{fragment, op, plaintext \| sealed}` |
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
-| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?}` |
+| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?}` |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -732,7 +732,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`; none 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent) | its app's database, for an export (`__dump`, cell/platform.mjs). No `table`: `{schema: [{type, name, table, sql}], tables}`, the platform's own tables left out. A `table`: `{table, offset, rows, next}`, at most 1000 rows and about 4 MiB from `offset`, each a JSON object (a blob `{"$base64"}`); not in the schema 404. No app code: 404 `no_code` |
-| `POST /api/f/{name}/inbox` | the inbox token, or the secret its code's `inbox` names (Apps) | the token in `x-fragment-inbox-token` or `?t=`, or, when its code names an inbox secret, that header holding it (and no token: 403 otherwise); JSON `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; `INBOX_PENDING_MAX` pending 429 |
+| `POST /api/f/{name}/inbox` | the inbox token, or the secret its code's `inbox` names (Apps) | the token in `x-fragment-inbox-token` or `?t=`, or, when its code names an inbox, its secret in its header or its HMAC signature (and no token: 403 otherwise, saying why a signature is refused); JSON `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`, or its `answer` query's. Bad token 403; `INBOX_PENDING_MAX` pending 429 |
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record POSTed to `url` as `{type: "record", fragment, channel, record}` (unsigned: the URL is the capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go). `{channel, wake: true}` in place of `url`, from a computer's egress alone (400 from anywhere else), wakes its computer instead (docs/computers.md) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
@@ -1027,15 +1027,43 @@ agent, or carrying code, keeps the last good code and says to fork it.
   name looks: a bundler's output folder, whose names change with their
   bytes, is the one to name. A fragment on a blessed template declares
   none (its release's own built names are kept for good).
-- `inbox` (optional): `{"header": "x-telegram-bot-api-secret-token",
-  "secret": "TELEGRAM_WEBHOOK_SECRET"}`: the inbox takes a delivery only
-  with that header (lower case; never `x-fragment-*`, `cookie`, `host`,
-  `authorization` or `content-type`) holding the fragment's secret of
-  that name, compared in constant time; the inbox token then admits
+- `inbox` (optional): how its inbox knows a delivery, by one of its
+  secrets, in one of two ways:
+  - `{"header": "x-telegram-bot-api-secret-token", "secret":
+    "TELEGRAM_WEBHOOK_SECRET"}`: that header holds the fragment's secret
+    of that name, compared in constant time.
+  - `{"hmac": {"secret": "SLACK_SIGNING_SECRET", "header":
+    "x-slack-signature", "prefix": "v0=", "signed":
+    "v0:{x-slack-request-timestamp}:{body}", "fresh":
+    "x-slack-request-timestamp", "within_s": 300}}`: `header` holds
+    `prefix` (optional, at most `inbox::PREFIX_MAX_BYTES`) and then the
+    hex HMAC-SHA256, under the secret, of `signed` (at most
+    `inbox::SIGNED_MAX_BYTES`) with `{body}` the delivery's raw bytes and
+    `{<fresh>}` that header's value, compared in constant time. With
+    `fresh`, only while that header's Unix seconds, in digits alone, are
+    at most `within_s` (1 to `inbox::WITHIN_MAX_S`) from now; the two come
+    together. `signed` is `<text>{body}`, or with `fresh`
+    `<text>{<fresh>}<text>{body}`, its text after the time starting with
+    no digit (the text before is optional): what is signed has one
+    reading, so no bytes can move between its pieces to make an old,
+    captured delivery's time new. A webhook signing its body alone is
+    `"signed": "{body}"` (GitHub's, with `"prefix": "sha256="`; Linear's).
+
+  A header it names is lower case, never `x-fragment-*`, `cookie`,
+  `host`, `authorization` or `content-type`. The inbox token then admits
   nothing, and nothing is taken before the secret is set. So a delivery
   is forged only by whoever may set that secret (its editors; on a
-  connector, its owner alone), never by a reader of the inbox token. A
-  fragment on a blessed template declares none.
+  connector, its owner alone), never by a reader of the inbox token.
+  `answer` (optional) names a query of its own an editor may ask: once a
+  delivery is stored and its triggers' runs started, it is asked as they
+  are (as the fragment, an editor, with `{channel, record}`), and its
+  result is the delivery's answer: `null` answers `{ok, seq, runs}`, and
+  `{body}` answers its body, a string as `text/plain` and any other JSON
+  as JSON, at most `RESULT_MAX_BYTES` (a webhook's handshake, such as
+  echoing Slack's `challenge`); anything else, or a query that fails, is
+  the delivery's error, the delivery stored all the same. Any other key,
+  here or in `hmac`, is refused at deploy. A fragment on a blessed
+  template declares none.
 
 `app.mjs` exports `class App extends DurableObject` with a method per
 operation, called `(input, call)`: `call.principal` (an identity, `anon:…`,
@@ -1215,7 +1243,7 @@ by channel and `seq`. A push service's 404 or 410 drops the subscription
 
 A job's AI steps bill the fragment's owner, capped when the run's
 principal is neither the owner nor an agent of theirs (Ledger). Text goes
-through the model route by tier (Models), images to a Workers AI image
+through the model route by route (Models), images to a Workers AI image
 model, decisions to the Clef family (Decisions). No app holds a key.
 
 Each paid step asks the gate before its call (docs/ledger.md, "The gate";
@@ -1228,8 +1256,9 @@ reason (402 `budget_used_up`). A run answers `costMicros`.
 
 - `job.ai.text({model?, prompt | messages, max_tokens?, reasoning_effort?,
   tools?, tool_choice?, draft?})` → `{text, message, finish_reason, model,
-  tier, usage, timing}`: `model` a tier, `cheap` (the default) or `medium`
-  (`high` refused); `max_tokens` at most 16384; `reasoning_effort` `low`
+  tier, usage, timing}`: `model` one of the deployment's routes by its
+  name (its default unnamed; any other refused, naming them), `tier` the
+  route it ran; `max_tokens` at most 16384; `reasoning_effort` `low`
   (the default, and what anything unknown becomes), `high` or `max`.
 - `job.ai.decide({model?, input, questions, media?})` → `{model, answers,
   usage}` (Decisions). An answer that does not answer what was asked is
@@ -1342,36 +1371,37 @@ It is charged after the answer at its input tokens (docs/ledger.md).
 
 ### Models (docs/cloudflare-v1.md, decisions 23 and 61)
 
-One OpenAI-shaped chat completion on a tier's model, metered on its
+One OpenAI-shaped chat completion on a route's model, metered on its
 payer's ledger (cell/src/models.rs, `fragment_core::models`). The route's
-names: the tiers `cheap` (the default) and `medium`; `high`, refused (400,
-saying why); `vision`, for a runtime's calls about an image; and
-`fallback`, a runtime's own switch when its model stalls. `vision` and
-`fallback` are metered as a tier's call and are no tier a job's step may
-name. Where each runs is the deployment's config (`FRAGMENT_MODELS`;
-decision 61): a Workers AI model through the deployment's AI Gateway, or a
+names: the deployment's routes (its config's `models.routes`, each by
+its name, one its default; `cheap` and `medium` on Finite's); `vision`,
+for a runtime's calls about an image; and `fallback`, a runtime's own
+switch when its model stalls. `vision` and `fallback` are the caller's
+route's (the default's when it says none), metered as any call, and no
+route a job's step may name. Where each runs is the deployment's config
+(`FRAGMENT_MODELS`; decision 61): a Workers AI model through the
+deployment's AI Gateway, or a
 model on an OpenAI-compatible API with the deployment's key and its slot's
 own `body`, the call's other fields than a chat completion's dropped
 (`models::CLIENT_KEYS`).
 
-**Fallback.** A tier's call whose model fails before answering (not
-reached, 429, 5xx; on an OpenAI-compatible API also 401, 402, 403, 404,
-none of them the caller's) is made once more on its route's fallback, and
+**Fallback.** A call whose model fails before answering (not reached,
+429, 5xx; on an OpenAI-compatible API also 401, 402, 403, 404, none of
+them the caller's) is made once more on its slot's fallback, and
 its answer is the call's, charged once (a 401 or 402 is logged,
 `model.platform-key`). An answer that began is final; a 400 or other 4xx is
 the call's. `vision` falls back only to a model whose slot says it reads
 images; transcriptions never. A slot may name its own `"fallback"`, its
 Deep (`"deep"`), `"reasoning"` and `"max_tokens"` (docs/computers.md,
-"Fast and Deep"); a caller may say its tier in `x-fragment-tier` (`cheap`
-or `medium`; any other 400).
+"Fast and Deep"); a caller may say its route in `x-fragment-tier` (one of
+the deployment's routes by its name; any other 400, naming them).
 
 **A model by its id.** A call may name a slot's model by its own id instead
-(`Models::named`): the caller's tier's slot that runs it, else its Deep,
-else the first slot that does (`cheap`, `medium`, `fallback`, `vision`),
-as if it named that slot. An id no slot runs is 400, the message listing
-those a call may name. One id is one model: a deployment whose two slots
-name one id at two places is refused. A job's step names a tier, never an
-id.
+(`Models::named`): the caller's route's slot that runs it, else its Deep,
+else the first route's slot that does, else the first slot by name, as if
+it named that slot. An id no slot runs is 400, the message listing those
+a call may name. One id is one model: a deployment whose two slots name
+one id at two places is refused. A job's step names a route, never an id.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
@@ -1381,7 +1411,7 @@ id.
 | `POST /api/models/v1/decide[?fragment=<name>]` | an agent (`for` its asker) | a decision, media inline (Decisions) → `{model, answers, usage}`. A blob 400 (the route reads no fragment's store). An answer that does not answer what was asked is charged and 502 `upstream_failed`. A computer's guest asks it as `POST /v1/decide` on its intercept |
 | `POST /api/models/v1/embeddings[?fragment=<name>]` | an agent (`for` its asker) | OpenAI's `{input, model?, dimensions?, encoding_format?}` → `{object: "list", data: [{object, index, embedding}], model, usage, space: {model, dimensions, version}}` (Embeddings). `POST /v1/embeddings` on a computer's intercept |
 
-The model is sent the body bounded: its tier's model, images as they came,
+The model is sent the body bounded: its route's model, images as they came,
 `max_tokens` at most 16384 (or its slot's), `reasoning_effort` clamped,
 usage asked for when it streams, none of the client's headers. Its payer is
 the agent's owner (decision 36). `fragment`, one the agent is a member of
@@ -1399,7 +1429,7 @@ answer is kept. Each charge logs `{"event": "model.settled", ref, logId,
 tier, model, usage, first_ms, ms, calls}`.
 
 **Embeddings** (`fragment_core::embed`) run on the deployment's
-`models.embeddings` slot, no chat slot (no tier names it, nothing falls
+`models.embeddings` slot, no chat slot (no route names it, nothing falls
 back to it); unnamed, `embed::MODEL_DEFAULT` on Workers AI. Every answer
 names its `space`, and every vector has the slot's `dimensions` and unit
 length;
@@ -1416,8 +1446,8 @@ the model rate-limits is 429 `rate_limited` with `retry_after_ms` (and
 `Retry-After`, in seconds): the model's own wait, else 60 s, held between
 1 s and 10 minutes; its writer waits that long, then writes again. A
 question it rate-limits is answered by its words alone. This route
-embeds an agent's input as given. A deployment whose
-tiers are private embeds only on a slot marked `private` (else 403). Refused 400 before anything is sent:
+embeds an agent's input as given. A deployment with a
+private route embeds only on a slot marked `private` (else 403). Refused 400 before anything is sent:
 `input` not a string or 1 to `embed::INPUTS_MAX` strings, an empty one, or
 one that may pass the slot's window (`embed::tokens_max`; nothing is cut);
 `model` other than `embeddings` or the slot's; `dimensions` other than the
