@@ -290,34 +290,44 @@ fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
     Ok((Some(cell), keys))
 }
 
-/// A deployment config's `models`: the cell's (`FRAGMENT_MODELS`, each
-/// slot's upstream less its key) and the store secret each slot on an
-/// OpenAI-compatible API names for its key. Such a slot names one; a
-/// Workers AI slot names none. Checked as the cell checks them
-/// (`fragment_core::models::Models::parse`), on no local address unless
-/// `local` (a local fleet's models file, whose egress reaches this
-/// machine). `cargo xtask dev --real-agent` reads one too (dev_agent.rs).
+/// A deployment config's `models`: the cell's (`FRAGMENT_MODELS`, its
+/// routes over its slots, each slot's upstream less its key) and the store
+/// secret each slot on an OpenAI-compatible API names for its key. Such a
+/// slot names one; a Workers AI slot names none. A config naming the four
+/// slots of before 2026-11-17 is read as the routes it meant
+/// (`fragment_core::models::legacy`: debt, docs/technical-debt-ledger.md).
+/// Checked as the cell checks them (`fragment_core::models::Models::parse`),
+/// on no local address unless `local` (a local fleet's models file, whose
+/// egress reaches this machine). `cargo xtask dev --real-agent` reads one
+/// too (dev_agent.rs).
 pub(crate) fn models_cell(models: &Value, local: bool) -> Result<(Value, SlotKeys)> {
-    let Some(slots) = models.as_object() else { bail!("models is an object: the slots it names ({}), each where it runs", fragment_core::models::SLOTS.join(", ")) };
-    let mut cell = serde_json::Map::new();
+    let mut cell = fragment_core::models::legacy(models).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut keys = vec![];
-    for (slot, row) in slots {
-        let mut row = row.clone();
+    let Some(top) = cell.as_object_mut() else { bail!("models is an object: its default, routes and slots") };
+    let mut rows: Vec<(String, String, &mut Value)> = vec![];
+    for (key, value) in top.iter_mut() {
+        if key == fragment_core::embed::EMBEDDINGS {
+            rows.push((key.clone(), key.clone(), value));
+        } else if let Some(slots) = value.as_object_mut().filter(|_| key == "slots") {
+            rows.extend(slots.iter_mut().map(|(name, row)| (format!("slots.{name}"), name.clone(), row)));
+        }
+    }
+    for (at, slot, row) in rows {
         let key = row.as_object_mut().and_then(|o| o.remove("key"));
         match (row["provider"].as_str(), key) {
-            (Some("openai"), Some(Value::String(k))) => keys.push((slot.clone(), k)),
-            (Some("openai"), Some(_)) => bail!("models.{slot}: its key is its secret's name in the store, a string"),
-            (Some("openai"), None) => bail!("models.{slot}: an OpenAI-compatible API names its key: its secret's name in the store (cargo xtask secret set <name> --config <file>)"),
-            (Some("workers_ai"), Some(_)) => bail!("models.{slot}: only an OpenAI-compatible API (provider openai) names a key"),
+            (Some("openai"), Some(Value::String(k))) => keys.push((slot, k)),
+            (Some("openai"), Some(_)) => bail!("models.{at}: its key is its secret's name in the store, a string"),
+            (Some("openai"), None) => bail!("models.{at}: an OpenAI-compatible API names its key: its secret's name in the store (cargo xtask secret set <name> --config <file>)"),
+            (Some("workers_ai"), Some(_)) => bail!("models.{at}: only an OpenAI-compatible API (provider openai) names a key"),
             (Some("workers_ai"), None) => {}
             (other, _) => bail!(
-                "models.{slot}: its provider is workers_ai (a Workers AI model, through the gateway) or openai (an OpenAI-compatible API), not {}",
+                "models.{at}: its provider is workers_ai (a Workers AI model, through the gateway) or openai (an OpenAI-compatible API), not {}",
                 other.map_or("none".to_string(), |p| format!("{p:?}"))
             ),
         }
-        cell.insert(slot.clone(), row);
     }
-    let cell = Value::Object(cell);
+    // the order a config's object named them in before (each slot's binding is its name's)
+    keys.sort();
     let text = cell.to_string();
     fragment_core::models::Models::parse(Some(&text), &fragment_core::price::PriceBook::defaults(), local).map_err(|e| anyhow::anyhow!("{e}"))?;
     if text.len() > WORKER_VAR_MAX_BYTES {
@@ -2443,9 +2453,11 @@ mod tests {
         let routing = json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } });
         let routed = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing });
         let flash = json!({ "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" });
-        assert_eq!(models, json!({ "cheap": routed, "medium": routed, "fallback": flash, "vision": flash }), "no key in the cell's variable, the routing in it");
+        let listed = fragment_core::models::legacy(&json!({ "cheap": routed, "medium": routed, "fallback": flash, "vision": flash })).unwrap();
+        assert_eq!(models, listed, "no key in the cell's variable, the routing in it, as routes over slots");
+        assert_eq!(models["routes"].as_array().map(|r| r.iter().map(|r| r["name"].clone()).collect::<Vec<_>>()), Some(vec![json!("cheap"), json!("medium")]));
         let parsed = fragment_core::models::Models::parse(Some(&models.to_string()), &fragment_core::price::PriceBook::defaults(), false).unwrap();
-        assert_eq!(parsed.cheap.model(), fragment_core::models::OPENROUTER_FLASH);
+        assert_eq!(parsed.slots[parsed.routes[parsed.default].slot].upstream.model(), fragment_core::models::OPENROUTER_FLASH);
         // the ceiling OpenRouter routes under is the one the price book charges, with OpenRouter's fee
         use fragment_core::price::{BP, CREDITS_FEE_BP_DEFAULT, OPENROUTER_FEE_BP};
         let row = parsed.priced(fragment_core::price::PriceBook::defaults()).models.into_iter().find(|m| m.model == fragment_core::models::OPENROUTER_FLASH).unwrap().price;
@@ -2498,30 +2510,31 @@ mod tests {
             let e = with(models.clone());
             assert!(e.contains(says), "{models}: {e}");
         };
-        refused(row(json!({ "provider": "anthropic" })), "models.cheap: its provider is workers_ai (a Workers AI model, through the gateway) or openai (an OpenAI-compatible API), not \"anthropic\"");
-        refused(json!({ "cheap": { "model": "glm-5-3-flash" } }), "models.cheap: its provider is workers_ai");
-        refused(json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": "glm-5-3-flash" } }), "models.cheap: an OpenAI-compatible API names its key");
-        refused(row(json!({ "key": 7 })), "models.cheap: its key is its secret's name in the store, a string");
+        refused(row(json!({ "provider": "anthropic" })), "models.slots.cheap: its provider is workers_ai (a Workers AI model, through the gateway) or openai (an OpenAI-compatible API), not \"anthropic\"");
+        refused(json!({ "cheap": { "model": "glm-5-3-flash" } }), "models.slots.cheap: its provider is workers_ai");
+        refused(json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": "glm-5-3-flash" } }), "models.slots.cheap: an OpenAI-compatible API names its key");
+        refused(row(json!({ "key": 7 })), "models.slots.cheap: its key is its secret's name in the store, a string");
         refused(row(json!({ "key": "~/.config/fragment/secrets/finite-private" })), "models.cheap.key is \"~/.config/fragment/secrets/finite-private\", which is no Secrets Store secret's name");
-        refused(json!({ "vision": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017", "key": "fragment-finite-private-key" } }), "models.vision: only an OpenAI-compatible API (provider openai) names a key");
-        refused(row(json!({ "base_url": "http://finite-private.finite.containers.tinfoil.dev/v1" })), "models.cheap: base_url:");
-        refused(row(json!({ "base_url": "http://127.0.0.1:4810/v1" })), "models.cheap: base_url:");
+        refused(json!({ "vision": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017", "key": "fragment-finite-private-key" } }), "models.slots.vision: only an OpenAI-compatible API (provider openai) names a key");
+        refused(row(json!({ "base_url": "http://finite-private.finite.containers.tinfoil.dev/v1" })), "models.slots.cheap: base_url:");
+        refused(row(json!({ "base_url": "http://127.0.0.1:4810/v1" })), "models.slots.cheap: base_url:");
         refused(row(json!({ "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1/" })), "without a query or a trailing /");
-        refused(row(json!({ "model": "glm-6" })), "models.cheap: the model \"glm-6\" is not in the price book");
+        refused(row(json!({ "model": "glm-6" })), "models.slots.cheap: the model \"glm-6\" is not in the price book");
         // a model on OpenRouter is priced at the ceiling its slot names: any id, none without one
         let openrouter = |max_price: Value| row(json!({ "base_url": "https://openrouter.ai/api/v1", "key": "fragment-openrouter-key", "model": "deepseek/deepseek-v4.1-flash", "body": { "provider": { "zdr": true, "max_price": max_price } } }));
         assert_eq!(with(openrouter(json!({ "prompt": 0.15, "completion": 0.5 }))), "", "an id the book has no row for, at its ceiling");
-        refused(row(json!({ "base_url": "https://openrouter.ai/api/v1", "model": "deepseek/deepseek-v4.1-flash", "body": { "provider": { "zdr": true } } })), "models.cheap: a model on OpenRouter is priced at the ceiling its calls route under: name it in body.provider.max_price");
-        refused(openrouter(json!({ "prompt": 0.15 })), "models.cheap: body.provider.max_price.completion is the dollars a million tokens");
+        refused(row(json!({ "base_url": "https://openrouter.ai/api/v1", "model": "deepseek/deepseek-v4.1-flash", "body": { "provider": { "zdr": true } } })), "models.slots.cheap: a model on OpenRouter is priced at the ceiling its calls route under: name it in body.provider.max_price");
+        refused(openrouter(json!({ "prompt": 0.15 })), "models.slots.cheap: body.provider.max_price.completion is the dollars a million tokens");
         for base_url in ["https://OPENROUTER.AI/api/v1", "https://openrouter.ai:443/api/v1", "https://eu.openrouter.ai/api/v1"] {
-            refused(row(json!({ "base_url": base_url, "model": "anthropic/claude-opus-5.5" })), "models.cheap: a model on OpenRouter is priced at the ceiling its calls route under");
+            refused(row(json!({ "base_url": base_url, "model": "anthropic/claude-opus-5.5" })), "models.slots.cheap: a model on OpenRouter is priced at the ceiling its calls route under");
         }
-        refused(json!({ "high": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }), "models.high: the high tier is off (decision 23)");
+        // a list of routes is checked as the cell checks it
+        refused(json!({ "routes": [], "default": "cheap", "slots": { "cheap": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } } }), "models.routes: 1 to 8 routes, the ones people pick, not 0");
         refused(json!([]), "models is an object");
         // a body: the API's own fields, rendered as named; one the cell refuses, refused here
         refused(row(json!({ "body": "zdr" })), "body is a JSON object of the fields every call to this API carries");
-        refused(row(json!({ "body": { "max_tokens": 64 } })), "models.cheap: body names max_tokens, which the route writes itself");
-        refused(row(json!({ "body": { "x": "a".repeat(4096) } })), "models.cheap: body is 4104 bytes of JSON, past 4096");
+        refused(row(json!({ "body": { "max_tokens": 64 } })), "models.slots.cheap: body names max_tokens, which the route writes itself");
+        refused(row(json!({ "body": { "x": "a".repeat(4096) } })), "models.slots.cheap: body is 4104 bytes of JSON, past 4096");
         let big = row(json!({ "body": { "x": "a".repeat(2500) } }))["cheap"].clone();
         refused(json!({ "cheap": big, "medium": big }), "past a Workers variable's 5000: shorten the slots' bodies");
         assert_eq!(with(row(json!({ "body": { "provider": { "zdr": true } } }))), "", "a body within its bounds");
@@ -2529,31 +2542,32 @@ mod tests {
         let listed = json!({ "input": 0.65, "cached_input": 0.13, "output": 1.45 });
         let tinfoil = |price: Value| json!({ "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "key": "fragment-tinfoil-api-key", "model": "deepseek-v4-1-flash", "price": price } });
         assert_eq!(with(tinfoil(listed.clone())), "", "an id the book has no row for, at the price its slot names");
-        refused(tinfoil(json!({ "input": 0.65 })), "models.fallback: price.output is the dollars a million tokens its API lists, from 0 to 1000, not nothing");
-        refused(tinfoil(json!({ "input": -1, "output": 1.45 })), "models.fallback: price.input is the dollars a million tokens its API lists, from 0 to 1000, not -1");
+        refused(tinfoil(json!({ "input": 0.65 })), "models.slots.fallback: price.output is the dollars a million tokens its API lists, from 0 to 1000, not nothing");
+        refused(tinfoil(json!({ "input": -1, "output": 1.45 })), "models.slots.fallback: price.input is the dollars a million tokens its API lists, from 0 to 1000, not -1");
         let mut priced_twice = openrouter(json!({ "prompt": 0.15, "completion": 0.5 }));
         priced_twice["cheap"]["price"] = listed.clone();
-        refused(priced_twice, "models.cheap: a model on OpenRouter is priced at its ceiling (body.provider.max_price), not a price of its own");
-        // a slot alone: rendered as named, the rest the cell's
+        refused(priced_twice, "models.slots.cheap: a model on OpenRouter is priced at its ceiling (body.provider.max_price), not a price of its own");
+        // a slot alone: rendered as the routes it meant, the rest the default config's
         let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
         let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
         v["models"] = json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } });
         let d = load(&config_file("models-fallback", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
         let vars = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].clone();
-        assert_eq!(vars["FRAGMENT_MODELS"], json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }).to_string());
+        let alone = json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } });
+        assert_eq!(vars["FRAGMENT_MODELS"], fragment_core::models::legacy(&alone).unwrap().to_string());
         // Tinfoil's, its price in the cell's variable and its key bound for its slot alone
         v["models"] = tinfoil(listed.clone());
         let d = load(&config_file("models-tinfoil", &v)).unwrap();
         let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
-        assert_eq!(models, json!({ "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": listed } }), "no key in the cell's variable, the price in it");
+        assert_eq!(models["slots"]["fallback"], json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": listed }), "no key in the cell's variable, the price in it");
         assert_eq!(bound(&d).unwrap().model_keys, [("fallback".to_string(), "fragment-tinfoil-api-key".to_string())]);
         // a private tier whose fallback is not private is refused before anything is made (Paul, 2026-10-22)
         let mut private = row(json!({ "private": true }));
         private["vision"] = private["cheap"].clone();
         private["fallback"] = json!({ "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" });
-        refused(private.clone(), "models.fallback: models.cheap is private, and its agents' failures and stalls reach fallback");
+        refused(private.clone(), "models.slots.fallback: the route cheap is private, and its agents' failures and stalls reach fallback");
         private["fallback"] = tinfoil(listed.clone())["fallback"].clone();
         private["fallback"]["private"] = json!(true);
         assert_eq!(with(private), "", "the private tier: every slot its calls reach private");

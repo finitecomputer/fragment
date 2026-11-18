@@ -1104,6 +1104,31 @@ unfinished design, not debt.
   indexes' is (keeping the newer entry), or the archive moves to an app
   whose mutation writes both.
 
+## The computer's view carries two fixed routes beside the list
+
+- **Shortcut:** the view's `models` keeps `cheap`, `medium`, `fallback`,
+  `vision` and `routes.{cheap,medium}` (fragment_core::models
+  `VIEW_ROUTES`, `Models::ids_by_name`): each the route of that name,
+  else the deployment's default, and the default's fallback and vision.
+  An image's bridge decodes them as required fields.
+- **Risk:** the only place code names a route; an older image runs an
+  agent on a route of any other name on the default, silently.
+- **Delete when:** every deployment's pinned image (production, preview,
+  each self-hosted box's) reads the view's list of routes; then the view
+  drops the two and their fields.
+
+## Model configs of the four-slot shape are read through a converter
+
+- **Shortcut:** xtask reads a deployment's `models` naming `cheap`,
+  `medium`, `fallback` and `vision` as the routes they meant
+  (fragment_core::models `legacy`, deploy.rs `models_cell`); the e2e's
+  configs and most of core's model tests are of that shape.
+- **Risk:** two shapes of one config; an error names `models.slots.<x>`
+  for a file that wrote `models.<x>`.
+- **Delete when:** fragment-deploy's `preview.jsonc` and
+  `production.jsonc`, deploy/example.jsonc, docs/self-host.md and the
+  e2e's configs name routes; then `legacy` goes and its tests read lists.
+
 ## An older bridge reads the state's snapshot, not its log
 
 - **Shortcut:** the bridge appends each step's change to `state.log`
