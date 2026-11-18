@@ -1188,19 +1188,32 @@ fn end_previous_life(home: &Path) {
         return;
     }
     let t = Instant::now();
+    // each database on its own: one that does not open costs only itself
     let script = r#"import sqlite3, sys
+failed = 0
 for p in sys.argv[1:]:
-    c = sqlite3.connect(p, timeout=5)
-    names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    for t in ('session_turn_leases', 'compression_locks'):
-        if t in names:
-            c.execute('DELETE FROM ' + t)
-    c.commit()
-    c.close()
+    try:
+        c = sqlite3.connect(p, timeout=5)
+        try:
+            names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            for t in ('session_turn_leases', 'compression_locks'):
+                if t in names:
+                    c.execute('DELETE FROM ' + t)
+            c.commit()
+        finally:
+            c.close()
+    except Exception as e:
+        failed += 1
+        print(p + ': ' + str(e), file=sys.stderr)
+print(failed)
 "#;
     let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", script]).args(&dbs).output();
     match out {
-        Ok(o) if o.status.success() => ev!("boot.leases_cleared", { "dbs": dbs.len(), "ms": t.elapsed().as_millis() as u64 }),
+        Ok(o) if o.status.success() => {
+            let failed = String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok();
+            let error = String::from_utf8_lossy(&o.stderr).chars().take(300).collect::<String>();
+            ev!("boot.leases_cleared", { "dbs": dbs.len(), "failed": failed, "error": (!error.is_empty()).then_some(error), "ms": t.elapsed().as_millis() as u64 })
+        }
         Ok(o) => ev!("boot.leases_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).chars().take(300).collect::<String>() }),
         Err(e) => ev!("boot.leases_failed", { "error": e.to_string() }),
     }
@@ -1210,7 +1223,7 @@ for p in sys.argv[1:]:
     let ms = t.elapsed().as_millis() as u64;
     match out {
         Ok(o) if o.status.success() => match hermes::cut_turns_settled(&String::from_utf8_lossy(&o.stdout)) {
-            Ok((lost, dropped, closed)) => ev!("boot.cut_turns_settled", { "dbs": dbs.len(), "lost": lost, "dropped": dropped, "closed": closed, "ms": ms }),
+            Ok(hermes::Settled { lost, dropped, closed, failed }) => ev!("boot.cut_turns_settled", { "dbs": dbs.len(), "lost": lost, "dropped": dropped, "closed": closed, "failed": failed, "error": (failed > 0).then(|| String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>()), "ms": ms }),
             Err(why) => ev!("boot.cut_turns_failed", { "error": why, "ms": ms }),
         },
         // a chat would stay paused behind its cut turn: said loudly

@@ -3745,19 +3745,32 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
 /// (`hermes::SETTLE_CUT_TURNS`). Method: the scripted model runs a long
 /// command, cut while it runs; then the chat's next message is answered,
 /// with no pause notice, the cut turn ends lost once, its command never
-/// runs again and the model never calls it again.
+/// runs again and the model never calls it again. A departed agent's
+/// profile whose database no longer opens (sorted before the agent's own)
+/// costs only itself: every other database is still settled.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_turn_cut_by_a_crash_or_a_deploy_never_wedges_its_chat() {
     let (x, c) = Expiry::start().await;
     let (fake, chat) = (&x.fake, x.chat.as_str());
-    for (how, signal) in [("crash", "KILL"), ("deploy", "TERM")] {
+    for (how, signal, broken) in [("crash", "KILL", false), ("deploy", "TERM", false), ("departed", "KILL", true)] {
         let cut = x.say(&format!("run: sleep 300 # {how}"));
         within(fake, chat, &c, 120_000, "the long command runs", |_| c.exec(&["pgrep", "-f", "^sleep 300$"])).await;
         let calls_before = x.model.calls.lock().unwrap().len();
         assert!(Command::new(docker()).args(["kill", "--signal", signal, &c.id]).output().expect("docker runs").status.success());
         let _ = Command::new(docker()).args(["wait", &c.id]).output();
         fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+        if broken {
+            // a profile the last life left of an agent since gone, its
+            // database not one: the sweep meets it before juniper's
+            let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("departed-{}", &c.id[..12]));
+            let profile = dir.join("aaa--k3x9");
+            std::fs::create_dir_all(&profile).unwrap();
+            std::fs::write(profile.join(".fragment-agent"), "aaa--k3x9").unwrap();
+            std::fs::write(profile.join("state.db"), "not a database").unwrap();
+            let cp = Command::new(docker()).args(["cp", &profile.display().to_string(), &format!("{}:/data/hermes/profiles/", c.id)]).output().expect("docker runs");
+            assert!(cp.status.success(), "{}", String::from_utf8_lossy(&cp.stderr));
+        }
         c.start();
         let next = x.say(&format!("good morning after the {how}"));
         within(fake, chat, &c, 240_000, "the next message's turn to end", |w| !x.ends(w, &next).is_empty()).await;
