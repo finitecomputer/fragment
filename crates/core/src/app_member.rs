@@ -17,7 +17,9 @@
 //!   transaction (`short`), so no check needs two fragments to agree at
 //!   one instant:
 //!   - the app joins, or its role there changes (`join`): the target asks
-//!     the app once, and the audience it answers becomes the list;
+//!     the app once, and the audience it answers joins the list, beside
+//!     every yes the target gave before (one the app may not have written
+//!     yet), all held to the role it is asked at;
 //!   - the app's audience would grow (`grow`): the target records the
 //!     person as it says yes, before the app writes them, and forgets them
 //!     (`shrink`) when the app does not, or drops them later;
@@ -153,15 +155,22 @@ pub fn members_only(visibility: Visibility) -> Result<(), Refusal> {
 }
 
 /// A target's answer to an app joining at `app_role`, or its role there
-/// changing, given the audience the app answered: the list to keep beside
-/// the app's row, or why not. Asked again, the same answer.
-pub fn join(app_role: Role, audience: Audience, holds: impl Fn(&str) -> Option<Role>) -> Result<Audience, Refusal> {
+/// changing, given the list it `approved` before (empty at a join) and the
+/// audience the app answered: the list to keep beside the app's row, or
+/// why not. The answer is added to the list, never put in its place: a
+/// yes the app has not written yet stays on it, held to the new role too.
+/// Asked again, the same answer.
+pub fn join(app_role: Role, approved: &Audience, audience: Audience, holds: impl Fn(&str) -> Option<Role>) -> Result<Audience, Refusal> {
     if !matches!(app_role, Role::Viewer | Role::Editor) {
         return Err(Refusal::Role(app_role));
     }
-    match short(&audience, app_role, holds) {
+    let mut list = approved.clone();
+    for (person, power) in audience {
+        count(&mut list, &person, power);
+    }
+    match short(&list, app_role, holds) {
         Some(s) => Err(Refusal::Audience(s)),
-        None => Ok(audience),
+        None => Ok(list),
     }
 }
 
@@ -264,21 +273,21 @@ mod tests {
     fn an_app_joins_only_while_the_target_holds_its_whole_audience() {
         let audience = people(&[(OWNER, Editor), (ROBIN, Viewer), (SAM, Editor)]);
         let all_edit = [(OWNER, Owner), (ROBIN, Viewer), (SAM, Editor)];
-        assert_eq!(join(Editor, audience.clone(), target(&all_edit)), Ok(audience.clone()), "everyone in, its editors editors: the list is its audience");
+        assert_eq!(join(Editor, &Audience::new(), audience.clone(), target(&all_edit)), Ok(audience.clone()), "everyone in, its editors editors: the list is its audience");
         let sam_views = [(OWNER, Owner), (ROBIN, Viewer), (SAM, Viewer)];
-        assert_eq!(join(Viewer, audience.clone(), target(&sam_views)), Ok(audience.clone()), "an app that views needs only members");
+        assert_eq!(join(Viewer, &Audience::new(), audience.clone(), target(&sam_views)), Ok(audience.clone()), "an app that views needs only members");
 
-        let refused = join(Editor, audience.clone(), target(&sam_views));
+        let refused = join(Editor, &Audience::new(), audience.clone(), target(&sam_views));
         assert_eq!(refused, Err(Refusal::Audience(Short { person: SAM.into(), power: Editor, holds: Some(Viewer) })), "an editor of it who only views here");
         assert_eq!(refused.unwrap_err().line("Dashboard", "Tracker", "Sam"), "Sam can edit Dashboard but only view Tracker.");
 
         let robin_out = [(OWNER, Owner), (SAM, Editor)];
-        let refused = join(Viewer, audience.clone(), target(&robin_out));
+        let refused = join(Viewer, &Audience::new(), audience.clone(), target(&robin_out));
         assert_eq!(refused, Err(Refusal::Audience(Short { person: ROBIN.into(), power: Viewer, holds: None })), "someone who sees it is not here");
         assert_eq!(refused.unwrap_err().line("Dashboard", "Tracker", "Robin"), "Robin can see Dashboard but isn't in Tracker. Add them here first.");
 
         for role in [Owner, Public] {
-            let refused = join(role, audience.clone(), target(&all_edit));
+            let refused = join(role, &Audience::new(), audience.clone(), target(&all_edit));
             assert_eq!(refused, Err(Refusal::Role(role)), "an app views or edits");
             assert_eq!(refused.unwrap_err().line("Dashboard", "Tracker", ""), "Dashboard can view or edit Tracker, never own it.");
         }
@@ -288,7 +297,7 @@ mod tests {
         assert_eq!(members_only(Visibility::Public).unwrap_err().line("Dashboard", "Tracker", ""), "Dashboard is public. Make it members only first.");
 
         // a replay: the target asks again (a retry), the app answers the same
-        assert_eq!(join(Editor, audience.clone(), target(&all_edit)), join(Editor, audience, target(&all_edit)));
+        assert_eq!(join(Editor, &Audience::new(), audience.clone(), target(&all_edit)), join(Editor, &Audience::new(), audience, target(&all_edit)));
     }
 
     /// Goal: an app's audience grows only through every target's yes, and
@@ -376,6 +385,17 @@ mod tests {
         let approved = people(&[(OWNER, Editor), (SAM, Editor)]);
         let members = [(OWNER, Owner), (SAM, Viewer)];
         assert_eq!(short(&approved, Viewer, target(&members)), None);
-        assert!(join(Editor, approved, target(&members)).is_err(), "raised to editor: asked again, and refused");
+        assert!(join(Editor, &approved, approved.clone(), target(&members)).is_err(), "raised to editor: asked again, and refused");
+
+        // a role change against a growth the app has not written: the yes
+        // to Robin stays on the list, so losing Robin still pauses it
+        let mut approved = people(&[(OWNER, Editor)]);
+        let mut members = vec![(OWNER, Owner), (ROBIN, Viewer)];
+        grow(&mut approved, Editor, ROBIN, Viewer, target(&members)(ROBIN)).expect("yes, before the app writes Robin");
+        let answered = people(&[(OWNER, Editor)]);
+        let approved = join(Viewer, &approved, answered, target(&members)).expect("lowered to viewer: asked again, and yes");
+        assert_eq!(approved, people(&[(OWNER, Editor), (ROBIN, Viewer)]), "the answer joins the list, never takes its place");
+        members.retain(|(p, _)| *p != ROBIN);
+        assert_eq!(short(&approved, Viewer, target(&members)).map(|s| s.person), Some(ROBIN.to_string()), "Robin removed: paused, though the app wrote Robin after the role changed");
     }
 }
