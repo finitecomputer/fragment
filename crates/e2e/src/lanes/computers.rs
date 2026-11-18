@@ -460,7 +460,7 @@ fn cancel_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str)
         json!({ "woke": woke, "saves": saving }),
     );
     let answered_before = replies().len();
-    say(40, "still there?")?;
+    say(41, "still there?")?;
     let mut cancelled = Value::Null;
     let awake = s.eventually(Duration::from_secs(15), || {
         cancelled = saves_of(api, c.id);
