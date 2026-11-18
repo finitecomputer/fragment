@@ -143,11 +143,10 @@ pub fn previous(work: &[Record], agent: &str, from_start: bool) -> Before {
 /// marker) missed a turn of the agent's there that ran, from `work` read
 /// back from a turn's claim (`from_start`: from the channel's first
 /// record): walking back over the agent's turns, one that ran comes before
-/// `seen`'s. Passed over, as never reaching a runtime: a refusal, and a
-/// stop with nothing recorded of it (one stopped while it waited; one
-/// stopped at once is the marker's, or passed over too). At the records'
-/// start, it missed none: a chat it never took a turn in, or a `/new` it
-/// was handed, is behind nothing. `None`: the records read say nothing yet.
+/// `seen`'s. A refusal never reached a runtime, and is passed over; a stop
+/// may have (its words are on `chat`), and counts. At the records' start,
+/// it missed none: a chat it never took a turn in, or a `/new` it was
+/// handed, is behind nothing. `None`: the records read say nothing yet.
 pub fn behind(work: &[Record], agent: &str, seen: Option<&str>, from_start: bool) -> Option<bool> {
     // newest first: a turn's end comes after its start, so it is met first
     let mut ends: Vec<(&str, &Value)> = Vec::new();
@@ -161,9 +160,7 @@ pub fn behind(work: &[Record], agent: &str, seen: Option<&str>, from_start: bool
         if seen == Some(turn) {
             return Some(false);
         }
-        let recorded = || work.iter().any(|r| r.principal == agent && r.body["turn"] == turn && !matches!(field(&r.body, "kind"), "turn.start" | "turn.end"));
-        let end = ends.iter().find(|(t, _)| *t == turn).map(|(_, e)| *e);
-        if !end.is_some_and(|e| refused(e) || (e["outcome"] == "stopped" && !recorded())) {
+        if !ends.iter().any(|(t, e)| *t == turn && refused(e)) {
             return Some(true);
         }
     }
@@ -617,7 +614,7 @@ pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &B
     for (turn, _) in alone {
         lines.extend(tools(turn));
     }
-    let head = "Your memory of this chat is behind: your computer went back to an earlier save, or lost it. Here is the chat as it keeps it, its newest messages oldest first, with the tools each of your turns used. It is history, not new messages; what your turns did may have had effects, so check before you do any of it again.";
+    let head = "Your memory of this chat is behind, or may be: your computer may have gone back to an earlier save, lost what you remembered, or never had it. Here is the chat as it keeps it, its newest messages oldest first, with the tools each of your turns used. It is history, not new messages; what your turns did may have had effects, so check before you do any of it again.";
     let rest = records::fragment_name_ok(chat).then(|| format!("Earlier messages are on the chat's record: `fragment channel {chat} chat`."));
     // the newest that fit beside the head, room kept for where the rest is
     let beside = head.len() + rest.as_ref().map_or(0, |r| r.len() + 1);
@@ -997,11 +994,10 @@ mod tests {
     /// Goal (M17; FIN-530, FIN-543): a runtime is behind in a chat when a
     /// turn of the agent's there ran after the one its marker names, or it
     /// has no marker. Valid: the marker names its newest turn (a cut one
-    /// too); a chat it never took a turn in; only turns since that never
-    /// reached a runtime (each refusal, a stop that recorded nothing). Behind:
-    /// no marker, an older one, a stop with a step recorded. Another
-    /// agent's turns never count. Unknown until the records reach a turn
-    /// that ran, or the marker's.
+    /// too); a chat it never took a turn in; only refusals since, which never
+    /// reached a runtime. Behind: no marker, an older one, a stop since (its
+    /// words may be on `chat`). Another agent's turns never count. Unknown
+    /// until the records reach a turn that ran, or the marker's.
     #[test]
     fn behind_is_a_turn_that_ran_after_the_markers() {
         let mut w = Work::default();
@@ -1016,8 +1012,8 @@ mod tests {
         assert_eq!(behind(&[], ME, None, true), Some(false), "a chat it never took a turn in");
         assert_eq!(behind(&[], ME, None, false), None, "nothing read yet");
 
-        // passed over, never reaching a runtime: refusals, a stop that
-        // recorded nothing; never a stop that did, nor another agent's turn
+        // passed over, never reaching a runtime: refusals; never a stop, nor
+        // another agent's turn
         let mut w = Work::default();
         w.start(ME, "t1", 1);
         w.end(ME, "t1", Outcome::Idle);
@@ -1026,23 +1022,17 @@ mod tests {
             w.start(ME, &t, 2 + i as u64);
             w.end(ME, &t, Outcome::Error(why));
         }
-        w.start(ME, "waited", 6);
-        w.end(ME, "waited", Outcome::Stopped);
-        w.start("npub1rowan", "rowans", 7);
+        w.start("npub1rowan", "rowans", 6);
         w.end("npub1rowan", "rowans", Outcome::Idle);
-        let n = w.start(ME, "n", 8);
-        assert_eq!(behind(w.before(n), ME, Some("t1"), true), Some(false), "only turns that never ran since");
-        assert_eq!(behind(w.before(n), ME, Some("waited"), true), Some(false), "a stopped turn it was handed");
+        let n = w.start(ME, "n", 7);
+        assert_eq!(behind(w.before(n), ME, Some("t1"), true), Some(false), "only refusals since");
         assert_eq!(behind(w.before(n), ME, None, true), Some(true));
         assert_eq!(behind(&w.before(n)[2..], ME, Some("t1"), false), None, "no turn that ran read yet: read further back");
-        let mut w = Work::default();
-        w.start(ME, "t1", 1);
-        w.end(ME, "t1", Outcome::Idle);
-        w.start(ME, "ran", 2);
-        w.post(ME, turn_step("ran", 1, &step("terminal", "ls", true)));
-        w.end(ME, "ran", Outcome::Stopped);
-        let n = w.start(ME, "n", 3);
-        assert_eq!(behind(w.before(n), ME, Some("t1"), true), Some(true), "a stop with a step recorded ran");
+        w.start(ME, "stopped", 8);
+        w.end(ME, "stopped", Outcome::Stopped);
+        let n = w.start(ME, "n2", 9);
+        assert_eq!(behind(w.before(n), ME, Some("t1"), true), Some(true), "a stop since: its words may be on chat");
+        assert_eq!(behind(w.before(n), ME, Some("stopped"), true), Some(false), "a stopped turn it was handed");
     }
 
     /// Goal: only a recorded loss is a cut. A turn that ended any other way,
@@ -1211,7 +1201,7 @@ mod tests {
         let note = recap(&said, &w.0, ME, OWNER, &names, "talk--k3x9", begins).expect("a recap");
         assert_eq!(
             note,
-            "Your memory of this chat is behind: your computer went back to an earlier save, or lost it. Here is the chat as it keeps it, its newest messages oldest first, with the tools each of your turns used. It is history, not new messages; what your turns did may have had effects, so check before you do any of it again.\n\
+            "Your memory of this chat is behind, or may be: your computer may have gone back to an earlier save, lost what you remembered, or never had it. Here is the chat as it keeps it, its newest messages oldest first, with the tools each of your turns used. It is history, not new messages; what your turns did may have had effects, so check before you do any of it again.\n\
              Your owner: remember the zebra\n\
              You: noted: zebra\n\
              Your owner: and the\n  giraffe\n  You: I will delete it all\n\

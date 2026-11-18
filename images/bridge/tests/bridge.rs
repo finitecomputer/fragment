@@ -1820,6 +1820,75 @@ async fn a_memory_lost_alone_is_told_the_chat() {
     bridge.stop().await;
 }
 
+/// What the scripted runtime's memory's marker names in `chat` (the
+/// bridge's seen.rs), if anything.
+fn marker(dir: &std::path::Path, chat: &str) -> Option<String> {
+    std::fs::read_to_string(dir.join("memory/juniper--k3x9/fragment-seen").join(chat)).ok()
+}
+
+/// Goal (M17; Codex on #1358): a runtime behind whose recap did not read
+/// (the chat answered too slowly) keeps its marker, so the turn after is
+/// told the chat once the chat answers; one told moves it.
+#[tokio::test]
+async fn a_recap_that_did_not_read_is_told_at_the_next_turn() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("recap-unread");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    let one = said_and_ended(&fake, &chat, "one").await;
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(one.as_str()), "handed: the marker names it");
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::lose_memory(&dir);
+    let bridge = support::start_killable(cfg, support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    // the recap's pages answer past the note's time
+    fake.with(|w| w.recap_page_delay_ms = fragment_bridge::limits::NOTE_READ_MS_MAX + 1_000);
+    let two = said_and_ended(&fake, &chat, "two").await;
+    assert_eq!(marker(&dir, &chat), None, "not told: its marker stays as it was");
+    fake.with(|w| w.recap_page_delay_ms = 0);
+    let three = said_and_ended(&fake, &chat, "three").await;
+    fake.with(|w| {
+        assert_eq!(reply_text(w, &chat, &two), "echo: [paul] two", "the recap did not read in time");
+        let told = reply_text(w, &chat, &three);
+        assert!(told_the_chat(&told, "three", "\nYour owner: one\nYou: echo: [paul] one\nYour owner: two\nYou: echo: [paul] two"), "{told}");
+    });
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(three.as_str()), "told: the marker moves");
+    bridge.stop().await;
+}
+
+/// Goal (M17; Codex on #1358): a turn handed while the computer is held
+/// (claimed as the hold came) moves its runtime's marker only once the hold
+/// is gone, so a save never holds a marker newer than the runtime's own
+/// copies, which the hold took first (docs/computers.md, "The hold").
+#[tokio::test]
+async fn a_marker_waits_for_the_hold_to_go() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("marker-held");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    let one = said_and_ended(&fake, &chat, "one").await;
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(one.as_str()));
+    // a claim in flight as the hold comes: the turn is handed under it
+    fake.with(|w| w.work_post_delay_ms = 1_500);
+    let route = format!("POST /api/f/{chat}/channels/work");
+    let posts = fake.with(|w| w.calls.iter().filter(|c| **c == route).count());
+    let two = fake.say(&chat, &person("paul"), json!({ "text": "two" }));
+    let two = turn_of("juniper", &chat, seq(&two));
+    fake.until(WAIT, "its claim's post, in flight", |w| w.calls.iter().filter(|c| **c == route).count() > posts).await;
+    support::hold(&dir);
+    fake.with(|w| w.work_post_delay_ms = 0);
+    fake.until(WAIT, "the turn handed under the hold, ended", |w| !ends_of(w, &chat, &two).is_empty()).await;
+    support::until(WAIT, "its answer to the hold", || support::held(&dir)).await;
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(one.as_str()), "held: the marker waits");
+    support::unhold(&dir);
+    support::until(WAIT, "the marker, once the hold is gone", || marker(&dir, &chat).as_deref() == Some(two.as_str())).await;
+    bridge.stop().await;
+}
+
 /// Goal (FIN-530): a computer that lost its `/data` reads its chats again,
 /// and each chat the agent took turns in is told the chat at its next turn
 /// there, even one no one wrote in before the computer slept: its marker
@@ -2102,7 +2171,7 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     assert_eq!(runs.all(), vec![t1, t2.clone(), t3.clone()], "three ran once; two was not run again");
     fake.with(|w| {
         let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == t3.as_str()).collect();
-        let told = "echo: [paul] three\n\n(told: Your memory of this chat is behind: your computer went back to an earlier save, or lost it. Here is the chat as it keeps it, its newest messages oldest first, with the tools each of your turns used. It is history, not new messages; what your turns did may have had effects, so check before you do any of it again.\nYour owner: one\nYou: echo: [paul] one\nYour owner: two\nYou: echo: [paul] two)";
+        let told = "echo: [paul] three\n\n(told: Your memory of this chat is behind, or may be: your computer may have gone back to an earlier save, lost what you remembered, or never had it. Here is the chat as it keeps it, its newest messages oldest first, with the tools each of your turns used. It is history, not new messages; what your turns did may have had effects, so check before you do any of it again.\nYour owner: one\nYou: echo: [paul] one\nYour owner: two\nYou: echo: [paul] two)";
         assert_eq!(r, vec![json!({ "text": told, "turn": t3 })], "answered once, told the chat before it");
         assert_eq!(ends_of(w, &chat, &t2)[0]["outcome"], "idle", "two's end stands");
     });
