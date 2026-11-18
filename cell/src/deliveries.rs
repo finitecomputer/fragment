@@ -82,7 +82,9 @@ const WAKE_PREFIX: &str = "computer:";
 struct Wake {
     id: i64,
     attempts: i64,
+    /// `computer:<id>`, or a follower's `fragment:<name>` (its subscription `sub`).
     computer: String,
+    sub: Option<i64>,
     channel: String,
     seq: i64,
     at: Option<i64>,
@@ -209,9 +211,9 @@ impl FragmentCell {
             let (id, attempts) = (row["id"].as_i64().expect("delivery_outbox.id"), row["attempts"].as_i64().expect("delivery_outbox.attempts"));
             match decode(row) {
                 Pending::Record { sub, channel, seq } => match self.record_delivery(sub, &channel, seq, &fragment, &incarnation) {
-                    Ok(Some(d)) if d.url.starts_with(WAKE_PREFIX) => {
+                    Ok(Some(d)) if d.url.starts_with(WAKE_PREFIX) || d.url.starts_with(crate::subscriptions::FOLLOW_PREFIX) => {
                         let at = self.record_at(&channel, seq);
-                        wakes.push(Wake { id, attempts, computer: d.url, channel, seq, at })
+                        wakes.push(Wake { id, attempts, computer: d.url, sub: d.sub, channel, seq, at })
                     }
                     Ok(Some(d)) => singles.push((id, attempts, d)),
                     Ok(None) => self.outbox_done(id),
@@ -268,6 +270,9 @@ impl FragmentCell {
     /// was posted (whether its guest has taken it up yet: docs/computers.md,
     /// Lifecycle), and says how it went in one line.
     async fn wake(&self, w: &Wake, fragment: &str) -> Woken {
+        if let Some(follower) = w.computer.strip_prefix(crate::subscriptions::FOLLOW_PREFIX) {
+            return self.deliver_follow(w, follower, fragment).await;
+        }
         let laps = js::Laps::start();
         let woken = match crate::computer::ask(&self.env, &w.computer, "computer/wake", &json!({ "why": "record", "at": w.at })).await {
             Ok(_) => Woken::Up,
@@ -281,6 +286,32 @@ impl FragmentCell {
             Woken::Later(why) => ("later", Some(why)),
         };
         laps.log("delivery.wake", json!({ "computer": w.computer, "fragment": fragment, "channel": w.channel, "seq": w.seq, "attempts": w.attempts, "outcome": outcome, "why": why }));
+        woken
+    }
+
+    /// A record to the fragment that follows its channel (the Finite Agent
+    /// spike), straight to it as a computer's wake goes, never through the
+    /// queue: it starts its own runs (jobs.rs `followed`).
+    async fn deliver_follow(&self, w: &Wake, follower: &str, fragment: &str) -> Woken {
+        let laps = js::Laps::start();
+        let read = || -> CellResult<(String, Value)> {
+            let sub = w.sub.ok_or_else(|| CellError::host("a follow names its subscription"))?;
+            let principal = self.rows("SELECT principal FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?.first().and_then(|r| r["principal"].as_str().map(str::to_string)).ok_or_else(|| CellError::host("the follow ended"))?;
+            let record = self.read_channel(&w.channel, w.seq - 1, 1)?.into_iter().find(|r| r.seq == w.seq).ok_or_else(|| CellError::host("the record is gone"))?;
+            Ok((principal, serde_json::to_value(&record).expect("a record serializes")))
+        };
+        let woken = match read() {
+            Err(e) => Woken::Refused(e.message),
+            Ok((principal, record)) => {
+                let call = crate::fragment::calls::Followed { principal, fragment: fragment.to_string(), channel: w.channel.clone(), record, depth: 0 };
+                match crate::fragment::call(&self.env, follower, &call).await {
+                    Ok(()) => Woken::Up,
+                    Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::NotFound) => Woken::Refused(e.message),
+                    Err(e) => Woken::Later(e.message),
+                }
+            }
+        };
+        laps.log("delivery.follow", json!({ "follower": follower, "fragment": fragment, "channel": w.channel, "seq": w.seq, "attempts": w.attempts }));
         woken
     }
 

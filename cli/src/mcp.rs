@@ -123,7 +123,7 @@ pub fn tool(op: &str, decl: &OpDecl, role: Role, write: bool) -> Result<Value, N
     let annotations = match decl.kind {
         OpKind::Query => json!({ "readOnlyHint": true, "openWorldHint": false }),
         OpKind::Mutation => json!({ "readOnlyHint": false, "idempotentHint": false, "openWorldHint": false }),
-        OpKind::Job => json!({ "readOnlyHint": false, "idempotentHint": false, "openWorldHint": true }),
+        OpKind::Job | OpKind::Live => json!({ "readOnlyHint": false, "idempotentHint": false, "openWorldHint": true }),
     };
     Ok(json!({ "name": op, "description": description, "inputSchema": schema, "annotations": annotations }))
 }

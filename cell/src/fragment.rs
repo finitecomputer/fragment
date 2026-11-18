@@ -123,6 +123,11 @@ pub struct FragmentCell {
     /// `after_answer` sends the rows queued, and arms the alarm for a send
     /// that waits.
     pub(crate) listed_moved: Cell<bool>,
+    /// Live operations' calls into the app running now (jobs.rs
+    /// `step_live`): the capabilities that spend or act for the fragment
+    /// (its model calls, its calls into other fragments, its computer's
+    /// commands) answer only while one runs.
+    pub(crate) live_calls: Cell<u32>,
     /// What a write leaves for after its answer is asked for, and has not
     /// begun (`later`).
     pub(crate) later_asked: Cell<bool>,
@@ -167,6 +172,7 @@ impl DurableObject for FragmentCell {
             meter_armed: Cell::new(-1),
             search_woke: Cell::new(false),
             listed_moved: Cell::new(false),
+            live_calls: Cell::new(0),
             later_asked: Cell::new(false),
             test_hold_install: Cell::new((false, false)),
             launching: futures_util::lock::Mutex::new(()),
@@ -1042,6 +1048,7 @@ impl FragmentCell {
             calls::Acked::PATH => reply::<calls::Acked>(self.meter_acked(&decode(body)?).await),
             Whose::PATH => reply::<Whose>(self.whose(&decode::<Whose>(body)?.principal)),
             Routine::PATH => reply::<Routine>(self.move_routine(decode(body)?).await),
+            calls::Followed::PATH => reply::<calls::Followed>(self.fire_followed(decode(body)?).await),
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no call {path}"))),
         }
     }
@@ -1097,6 +1104,16 @@ impl FragmentCell {
             let op = op.to_string();
             let body = req.bytes().await?;
             return self.cap_search(&op, &body).await;
+        }
+        if let Some(op) = path.strip_prefix("/cap/").filter(|op| op.starts_with("models/") || op.starts_with("fragments/") || op.starts_with("computer/")) {
+            // Only a live call's capabilities set the header (caps.rs)
+            if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("live") {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            self.facet_calls_lever()?;
+            let op = op.to_string();
+            let body = req.bytes().await?;
+            return self.cap_live(&op, body).await;
         }
         // Every route below is the router's: decoded once, from headers only it sets.
         let Routed { name: routed_name, url, signed, credential } = Routed::from_headers(req.headers())?;

@@ -1042,6 +1042,7 @@ value MoveState withdrawn
 value NoticeLevel info
 value NoticeLevel warn
 value OpKind job
+value OpKind live
 value OpKind mutation
 value OpKind query
 value PageErrorKind console

@@ -712,6 +712,29 @@ impl FragmentCell {
                 }
                 Err(CellError::host(format!("the facet's platform code answered {answer}")))
             }
+            // A live run is its one call, made again after a sleep it asked
+            // for or at once when it says so; its last answer ends it.
+            OpKind::Live => {
+                let live = || Ok(json!({ "step": NextStep { index: count, step: Step::Live {} } }));
+                match results.last() {
+                    None => live(),
+                    Some(r) if r.kind == "sleep" => live(),
+                    Some(r) => match &r.outcome {
+                        StepOutcome::Error(e) => fail(e.clone()),
+                        StepOutcome::Value(v) if v["again"] == true => live(),
+                        StepOutcome::Value(v) => match v["sleep"].as_u64() {
+                            Some(ms) => {
+                                self.keep_step(run_id, attempt, count, &StepResult { kind: "sleep".into(), outcome: StepOutcome::Value(Value::Null) })?;
+                                Ok(json!({ "step": NextStep { index: count, step: Step::Sleep { ms } } }))
+                            }
+                            None => {
+                                self.finish_run(&run, Ok(v["output"].clone()))?;
+                                Ok(json!({ "done": true }))
+                            }
+                        },
+                    },
+                }
+            }
             OpKind::Query => fail(format!("{op} is a query; queries do not run as jobs")),
         }
     }
@@ -896,7 +919,33 @@ impl FragmentCell {
                 }
             }
             Step::Presence {} => Ok(json!({ "here": self.present() })),
+            Step::Live {} => self.step_live(run).await,
         }
+    }
+
+    /// A live operation's one long call into the app (`OpKind::Live`),
+    /// held while it works: `{done, output}`, `{sleep: ms}` (call again
+    /// after), `{again: true}` (call again now), or its failure. While it
+    /// runs, the app's capabilities that spend or act answer it
+    /// (`live_calls`).
+    async fn step_live(&self, run: &RunRow) -> Result<Value, StepFail> {
+        let facet = self.facet().map_err(|e| StepFail::Retry(e.message))?;
+        let meta = json!({ "principal": npub::display(&run.principal), "role": run.role, "run": run.id, "attempt": run.attempt, "via": run.via.as_str(), "fragment": self.name().map_err(|e| StepFail::Retry(e.message))? });
+        let input = self.run_input(run.id).map_err(|e| StepFail::Retry(e.message))?;
+        self.live_calls.set(self.live_calls.get() + 1);
+        let answer = facet.call("__live", &[run.op.as_str().into(), input, meta]).await;
+        self.live_calls.set(self.live_calls.get() - 1);
+        // a call cut short (the facet was stopped, the object evicted) is
+        // tried again by the Workflow: the app's own state resumes it
+        let answer = answer.map_err(|e| StepFail::Retry(e.message))?;
+        if let Some(why) = answer["failed"].as_str() {
+            facet.stop_at_limit(why);
+            return Err(permanent(why.to_string()));
+        }
+        if answer["error"] == "unknown_operation" {
+            return Err(permanent(format!("the app has no method {:?}", run.op)));
+        }
+        Ok(answer)
     }
 
     /// `job.call(op, input)`: as the run's principal, with the step as its
@@ -906,7 +955,7 @@ impl FragmentCell {
         if run.role < decl.role {
             return Err(permanent(format!("{op} needs the {} role; this run acts as {}", decl.role.as_str(), run.role.as_str())));
         }
-        let child = decl.kind == OpKind::Job;
+        let child = matches!(decl.kind, OpKind::Job | OpKind::Live);
         let inv = Invocation {
             principal: &run.principal,
             asker: None,
@@ -1120,6 +1169,42 @@ impl FragmentCell {
             started.push(s.id);
         }
         Ok(started)
+    }
+
+    /// A record of another fragment's channel this one follows
+    /// (`calls::Followed`, the Finite Agent spike): its `followed`
+    /// triggers' runs, as the fragment, each keyed by the record, so a
+    /// delivery again starts none twice. A follow is its subscriber's own:
+    /// one naming another identity is refused.
+    pub(crate) async fn fire_followed(&self, f: crate::fragment::calls::Followed) -> CellResult<()> {
+        let [npub, agent] = self.metas([MetaKey::Npub, MetaKey::AgentIdentity])?;
+        if npub.as_deref() != Some(f.principal.as_str()) && agent.as_deref() != Some(f.principal.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a followed record goes to the fragment that follows"));
+        }
+        let ops: Vec<String> = self.triggers()?.iter().filter(|t| matches!(t.on, TriggerOn::Followed(_))).map(|t| t.run.clone()).collect();
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let read_only = self.read_only().await?;
+        let own = self.own_key()?;
+        let input = json!({ "fragment": f.fragment, "channel": f.channel, "record": f.record });
+        for op in &ops {
+            let call_id = format!("followed:{}:{}:{}:{op}", f.fragment, f.channel, f.record["seq"]);
+            let sha = crate::ops::input_sha(op, &fragment_proto::canonical_json(&input));
+            self.start_run(NewRun {
+                op,
+                via: Via::Followed,
+                trigger: Some(format!("{}/{}", f.fragment, f.channel)),
+                principal: &own,
+                role: Role::Editor,
+                depth: f.depth.saturating_add(1),
+                call: Some((&call_id, &sha)),
+                input: input.clone(),
+                owner_read_only: read_only.clone(),
+            })?;
+        }
+        self.later();
+        Ok(())
     }
 
     /// Starts the runs a move of `main` triggers, blocked when `read_only`

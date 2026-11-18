@@ -70,6 +70,10 @@ pub enum Step {
     /// hold them (`{id, principal, data}`, one a socket that shares any).
     #[serde(rename = "presence")]
     Presence {},
+    /// A live operation's one long call into the app (`OpKind::Live`),
+    /// made again after a sleep it asked for or a call that was cut.
+    #[serde(rename = "live")]
+    Live {},
 }
 
 /// The identities one `job.people` step names: a page's `__people` limit.
@@ -242,6 +246,7 @@ impl Step {
             Step::Members {} => "members",
             Step::People { .. } => "people",
             Step::Presence {} => "presence",
+            Step::Live {} => "live",
         }
     }
 }

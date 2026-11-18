@@ -734,6 +734,26 @@ struct Tab {
     open: bool,
 }
 
+/// An agent's command on the computer it uses (`computer/exec`, the
+/// Finite Agent spike): asked by the agent's fragment for its owner, who
+/// must own this computer.
+#[derive(Deserialize)]
+struct ExecAsk {
+    owner: String,
+    argv: Vec<String>,
+    #[serde(default)]
+    stdin: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    ms: u64,
+}
+
+/// How long an agent's command waits for its computer to wake: a start's
+/// deadline would hold the agent's turn far longer than any wake takes.
+const EXEC_WAKE_MS: i64 = 120_000;
+/// The longest an agent's command runs.
+const EXEC_MS_MAX: u64 = 10 * 60_000;
+
 fn sha_hex(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
@@ -2963,6 +2983,13 @@ impl ComputerCell {
                 }
                 json_response(&self.lever(&b).await?)
             }
+            "computer/exec" => {
+                let b: ExecAsk = body_json(&mut req).await?;
+                if self.must(MetaKey::Owner)? != b.owner {
+                    return Err(CellError::new(ErrorCode::Forbidden, "an agent runs commands on its owner's computer"));
+                }
+                self.exec_for(b).await
+            }
             "computer/tab" => {
                 let b: Tab = body_json(&mut req).await?;
                 let socket = Socket::Tab;
@@ -3470,6 +3497,44 @@ impl ComputerCell {
         self.state.accept_websocket_with_tags(&pair.server, &["keepalive", &generation]);
         self.drive(Event::Opened { socket: Socket::Keepalive }).await?;
         Ok(Response::from_websocket(pair.client)?)
+    }
+
+    /// An agent's command (`computer/exec`): a use, held as an open tab
+    /// holds it, woken first when asleep, run once it is awake, its output
+    /// streamed back as the command runs (entry.mjs `execStream`, which
+    /// closes the use as the command ends). One log line says how long the
+    /// wake took, for the spike's measures.
+    async fn exec_for(&self, b: ExecAsk) -> CellResult<Response> {
+        if b.argv.is_empty() || b.ms == 0 || b.ms > EXEC_MS_MAX {
+            return Err(CellError::invalid(format!("an exec names its argv and runs 1 to {EXEC_MS_MAX} ms")));
+        }
+        let t0 = js::now_ms();
+        let asleep = !matches!(self.lifecycle()?.phase, Phase::Awake { .. });
+        if asleep {
+            self.wake(Wake::Tab).await?;
+        }
+        self.drive(Event::Opened { socket: Socket::Tab }).await?;
+        let generation = loop {
+            if let Phase::Awake { generation, .. } = self.lifecycle()?.phase {
+                break generation;
+            }
+            if js::now_ms() - t0 > EXEC_WAKE_MS {
+                let _ = self.drive(Event::Closed { socket: Socket::Tab }).await;
+                return Err(CellError::new(ErrorCode::WontWake, "the computer did not wake for the agent's command"));
+            }
+            Delay::from(std::time::Duration::from_millis(100)).await;
+        };
+        console_log!("{}", json!({ "event": "computer.exec", "computer": self.meta(MetaKey::Id)?, "asleep": asleep, "ready_ms": js::now_ms() - t0 }));
+        let args = [JsValue::from_f64(generation as f64), js::to_js(&b.argv), b.stdin.map_or(JsValue::NULL, JsValue::from), b.cwd.map_or(JsValue::NULL, JsValue::from), JsValue::from_f64(b.ms as f64)];
+        let out = match self.call("execStream", &args).await {
+            Ok(out) => out,
+            Err(e) => {
+                let _ = self.drive(Event::Closed { socket: Socket::Tab }).await;
+                return Err(e);
+            }
+        };
+        let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("execStream answered no Response"))?;
+        Ok(Response::from(resp))
     }
 
     /// A request to one of its ports, from its owner (a session the router

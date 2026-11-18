@@ -1980,6 +1980,10 @@ pub enum OpKind {
     Mutation,
     /// Runs as a Workflow, one durable step at a time.
     Job,
+    /// Runs as a Workflow too, but as one long call into the app (its own
+    /// code keeps its own state, an engine's), called again when it asks
+    /// for a wake or its call is cut (spike: the Finite Agent).
+    Live,
 }
 
 impl OpKind {
@@ -1988,11 +1992,12 @@ impl OpKind {
             OpKind::Query => "query",
             OpKind::Mutation => "mutation",
             OpKind::Job => "job",
+            OpKind::Live => "live",
         }
     }
 
     pub fn parse(s: &str) -> Option<OpKind> {
-        [OpKind::Query, OpKind::Mutation, OpKind::Job].into_iter().find(|k| k.as_str() == s)
+        [OpKind::Query, OpKind::Mutation, OpKind::Job, OpKind::Live].into_iter().find(|k| k.as_str() == s)
     }
 }
 
@@ -2243,6 +2248,9 @@ pub enum TriggerOn {
     /// activation that a person or an agent made, never an alarm or the
     /// platform's own. At most once per activation. Always `true`.
     Woke(bool),
+    /// Each record of another fragment's channel this fragment follows (a
+    /// subscription it made there as a member). Always `true`.
+    Followed(bool),
 }
 
 impl TriggerOn {
@@ -2256,6 +2264,7 @@ impl TriggerOn {
             TriggerOn::Files(f) => ("files", f),
             TriggerOn::Installed(_) => ("installed", ""),
             TriggerOn::Woke(_) => ("woke", ""),
+            TriggerOn::Followed(_) => ("followed", ""),
         }
     }
 
@@ -2266,6 +2275,7 @@ impl TriggerOn {
             "files" => Some(TriggerOn::Files(target)),
             "installed" => Some(TriggerOn::Installed(true)),
             "woke" => Some(TriggerOn::Woke(true)),
+            "followed" => Some(TriggerOn::Followed(true)),
             _ => None,
         }
     }
@@ -2330,11 +2340,12 @@ pub enum Via {
     Files,
     Installed,
     Woke,
+    Followed,
     Unknown(String),
 }
 
 impl Via {
-    const KNOWN: [Via; 7] = [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed, Via::Woke];
+    const KNOWN: [Via; 8] = [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed, Via::Woke, Via::Followed];
 
     pub fn as_str(&self) -> &str {
         match self {
@@ -2345,6 +2356,7 @@ impl Via {
             Via::Files => "files",
             Via::Installed => "installed",
             Via::Woke => "woke",
+            Via::Followed => "followed",
             Via::Unknown(s) => s,
         }
     }

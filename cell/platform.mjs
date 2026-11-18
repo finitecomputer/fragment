@@ -413,8 +413,10 @@ class Job {
 // What an app may not do with its Durable Object, taken away before the
 // author's constructor runs (spike S1): an alarm
 // wedges the facet (every call answers `internal error` until the platform
-// Worker is deployed again), an async transaction or a KV write outside
-// SQL would bypass the mutation's own transaction and its cap, and a
+// Worker is deployed again), a KV write outside SQL would bypass the
+// mutation's own transaction and its cap (an async transaction, which an
+// embedded engine's storage needs, is left to it: spike, its cap not
+// checked at its commit), and a
 // facet of its own would hold a database outside the app's cap. Cron is
 // fragment.json's triggers; writes are a mutation's SQL. Each is replaced
 // on the object and on its prototype, which this isolate (the app's own,
@@ -423,7 +425,6 @@ const REFUSED = {
   setAlarm: "an app has no alarm: fragment.json's triggers run it on a schedule",
   getAlarm: "an app has no alarm: fragment.json's triggers run it on a schedule",
   deleteAlarm: "an app has no alarm: fragment.json's triggers run it on a schedule",
-  transaction: "a mutation is the app's transaction (its SQL commits with it)",
   put: "an app writes its SQLite (ctx.storage.sql), in a mutation",
   delete: "an app writes its SQLite (ctx.storage.sql), in a mutation",
   deleteAll: "an app writes its SQLite (ctx.storage.sql), in a mutation",
@@ -587,6 +588,38 @@ export class App extends AuthorApp {
     if (next) return { next };
     const text = JSON.stringify(out.value ?? null) ?? "null";
     if (overBytes(text, RESULT_MAX_BYTES)) return { failed: `a job's result is at most ${RESULT_MAX_BYTES} bytes` };
+    return { done: true, output: JSON.parse(text) };
+  }
+
+  // A live operation's one long call (OpKind::Live; the Finite Agent
+  // spike): the author's method runs with (input, live) and may keep
+  // working for as long as the call is held. `live.wakeIn(ms)` asks to be
+  // called again that long after it returns (the run sleeps meanwhile),
+  // `live.again()` at once (its call ran out of budget with work left).
+  // Neither: the run is done, with what the method returned.
+  async __live(name, input, meta) {
+    if (!authorMethod(name)) return { error: "unknown_operation" };
+    let sleep = null;
+    let again = false;
+    const live = {
+      ...meta,
+      wakeIn(ms) {
+        sleep = Math.max(1, Math.min(SLEEP_MAX_MS, Math.round(Number(ms) || 1)));
+      },
+      again() {
+        again = true;
+      },
+    };
+    let value;
+    try {
+      value = await AuthorApp.prototype[name].call(this, input, live);
+    } catch (e) {
+      return { failed: describe(e) };
+    }
+    if (again) return { again: true };
+    if (sleep !== null) return { sleep };
+    const text = JSON.stringify(value ?? null) ?? "null";
+    if (overBytes(text, RESULT_MAX_BYTES)) return { failed: `a live operation's result is at most ${RESULT_MAX_BYTES} bytes` };
     return { done: true, output: JSON.parse(text) };
   }
 

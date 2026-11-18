@@ -156,6 +156,43 @@ export class Search extends WorkerEntrypoint {
   status() { return this.#answer("status", {}); }
 }
 
+// The capabilities a live operation's call uses (the Finite Agent spike),
+// each bound to one fragment by `props` as FILES is, each answered by its
+// supervisor only while a live call of its runs (jobs.rs `step_live`):
+// `MODELS` the model route as the fragment (its owner pays; an agent
+// fragment's calls are its agent's), streamed back as the model answers;
+// `FRAGMENTS` another fragment's control API as this fragment itself
+// (`/api/…` there, its membership and role checked there); `COMPUTER` (`Commands`) a
+// command on the computer an agent fragment uses, its output streamed as
+// lines of JSON (`{"out"}`, then `{"exit"}`).
+class Capability extends WorkerEntrypoint {
+  ask(path, body) {
+    const { fragment } = this.ctx.props;
+    return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, path, body));
+  }
+}
+
+export class Models extends Capability {
+  // `body`: an OpenAI chat completion's JSON text; its answer as the model route answers it
+  chat(body) {
+    return this.ask("cap/models/chat", String(body));
+  }
+}
+
+export class Fragments extends Capability {
+  // `{name, method, path, body?}`: `path` is `/api/…` on fragment `name`
+  fetch(name, method, path, body) {
+    return this.ask("cap/fragments/fetch", JSON.stringify({ name, method, path, body: body ?? null }));
+  }
+}
+
+export class Commands extends Capability {
+  // `{argv, stdin?, cwd?, ms?}`: one command, its output streamed
+  exec(command) {
+    return this.ask("cap/computer/exec", JSON.stringify(command));
+  }
+}
+
 // One run of an operation (docs/api.md, Jobs and triggers). Each round asks
 // the supervisor to advance the job to its next step, then performs that
 // step through the supervisor, which keeps the step's answer before it
@@ -196,7 +233,9 @@ export class Job extends WorkflowEntrypoint {
           // a video's call waits while its model makes it (ai.rs `step_video`):
           // its try outlasts a making (Workflows advise 30 minutes at most), so
           // it is not tried again meanwhile
-          const tries = kind === "ai.video" ? { ...retrying, timeout: "15 minutes" } : retrying;
+          // a live operation's call is held while the app works (jobs.rs
+          // `step_live`): as long as a video's making, its try cut past it
+          const tries = kind === "ai.video" || kind === "live" ? { ...retrying, timeout: "15 minutes" } : retrying;
           const done = await step.do(`${kind} ${i}`, tries, (ctx) => post("effect", { index: i, kind, args, try: ctx?.attempt }));
           if (done.stop) return done;
         } catch (e) {
@@ -435,6 +474,41 @@ class ContainerHost {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  // An agent's command (computer.rs `exec_for`, the Finite Agent spike):
+  // its output streamed as lines of JSON, `{"out"}` as it comes (stdout
+  // and stderr together), then `{"exit"}` (or `{"error"}`); `stdin` text
+  // or null; killed past `ms`. The use it is ends with its stream: the
+  // tab the Computer DO opened for it closes.
+  execStream(generation, argv, stdin, cwd, ms) {
+    if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+    const c = this.#c;
+    const report = this.#report;
+    const kill = new AbortController();
+    const enc = new TextEncoder();
+    const line = (o) => enc.encode(JSON.stringify(o) + "\n");
+    const body = new ReadableStream({
+      async start(controller) {
+        const timer = setTimeout(() => kill.abort(), ms);
+        try {
+          const opts = { stderr: "combined", signal: kill.signal };
+          if (cwd) opts.cwd = cwd;
+          if (stdin !== null) opts.stdin = new Blob([stdin]).stream();
+          const proc = await c.exec(argv, opts);
+          const dec = new TextDecoder();
+          for await (const chunk of proc.stdout) controller.enqueue(line({ out: dec.decode(chunk, { stream: true }) }));
+          controller.enqueue(line({ exit: await proc.exitCode }));
+        } catch (e) {
+          controller.enqueue(line({ error: String((e && e.message) || e).slice(0, 300) }));
+        } finally {
+          clearTimeout(timer);
+          controller.close();
+          report("computer/tab", { open: false }).catch(() => {});
+        }
+      },
+    });
+    return new Response(body, { headers: { "content-type": "application/x-ndjson" } });
   }
 
   // Saves `dir`, leaving out what `exclude` names (gitignore patterns,

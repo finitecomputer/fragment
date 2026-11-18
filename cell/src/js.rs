@@ -112,7 +112,7 @@ fn app_env(ctx: &JsValue, fragment: &str) -> CellResult<Object> {
     set(&options, "props", props);
     let exports = get(ctx, "exports")?;
     let env = Object::new();
-    for (name, class) in [("FILES", "Files"), ("SEARCH", "Search")] {
+    for (name, class) in [("FILES", "Files"), ("SEARCH", "Search"), ("MODELS", "Models"), ("FRAGMENTS", "Fragments"), ("COMPUTER", "Commands")] {
         let cap = call(&exports, class, &[options.clone().into()]).map_err(|e| CellError::host(format!("ctx.exports.{class}: {}", js_message(&e))))?;
         set(&env, name, cap);
     }

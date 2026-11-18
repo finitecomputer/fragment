@@ -1,0 +1,9 @@
+{
+  "kind": "agent",
+  "meta": { "title": "Pi", "description": "The Finite Agent spike: pi-durable in an agent fragment's own code." },
+  "channels": { "tasks": { "read": "editor", "post": "editor" } },
+  "operations": {
+    "drive": { "kind": "live", "description": "Follow a chat ({follow: chat}), or take a followed record as a turn." }
+  },
+  "triggers": [{ "followed": true, "run": "drive" }]
+}

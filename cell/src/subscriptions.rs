@@ -15,6 +15,9 @@ use crate::deliveries::{Delivery, DeliveryKind};
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 
+/// A follow's target: `fragment:<name>`, never a URL anyone fetches.
+pub(crate) const FOLLOW_PREFIX: &str = "fragment:";
+
 /// The subscriptions one fragment holds, and a URL's length.
 const SUBS_MAX: u64 = 32;
 const SUB_URL_MAX_BYTES: usize = 1024;
@@ -39,6 +42,16 @@ impl FragmentCell {
     pub(crate) fn subscribe(&self, caller: &Caller, body: &Value) -> CellResult<Response> {
         let channel = body["channel"].as_str().unwrap_or("");
         let principal = self.subscriber(caller, channel)?;
+        // a fragment that follows (the Finite Agent spike): its records go
+        // to it, named here, which takes them only as its own identity's
+        if let Some(follower) = body["follow"].as_str() {
+            if !fragment_proto::valid_fragment_name(follower) {
+                return Err(CellError::invalid("follow names the following fragment"));
+            }
+            let url = format!("{FOLLOW_PREFIX}{follower}");
+            let id = self.add_subscription(&principal, channel, &url)?;
+            return json_response(&json!({ "id": id, "channel": channel, "follow": follower }));
+        }
         let url = body["url"].as_str().unwrap_or("");
         if url.len() > SUB_URL_MAX_BYTES {
             return Err(CellError::invalid(format!("a subscription URL is at most {SUB_URL_MAX_BYTES} bytes")));
@@ -117,11 +130,14 @@ impl FragmentCell {
         self.exec(
             "INSERT INTO delivery_outbox (kind, sub, channel, seq, next_at) SELECT 'record', id, channel, ?, ? FROM subs WHERE channel = ? \
              AND NOT (url LIKE 'computer:%' AND url IN (SELECT url FROM subs WHERE url LIKE 'computer:%' \
-               AND principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?)))",
+               AND principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?))) \
+             AND NOT (url LIKE 'fragment:%' AND principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?))",
             vec![
                 SqlStorageValue::Integer(record.seq),
                 SqlStorageValue::Integer(crate::js::now_ms()),
                 record.channel.as_str().into(),
+                record.channel.as_str().into(),
+                SqlStorageValue::Integer(record.seq),
                 record.channel.as_str().into(),
                 SqlStorageValue::Integer(record.seq),
             ],

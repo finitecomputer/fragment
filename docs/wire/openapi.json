@@ -2143,6 +2143,11 @@
             "const": "job",
             "description": "Runs as a Workflow, one durable step at a time.",
             "type": "string"
+          },
+          {
+            "const": "live",
+            "description": "Runs as a Workflow too, but as one long call into the app (its own\ncode keeps its own state, an engine's), called again when it asks\nfor a wake or its call is cut (spike: the Finite Agent).",
+            "type": "string"
           }
         ],
         "x-fragment-direction": "out"

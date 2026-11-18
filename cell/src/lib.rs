@@ -34,6 +34,7 @@ mod assets;
 mod auth;
 mod billing;
 mod blobs;
+mod caps;
 mod card;
 mod config;
 mod connections;

@@ -266,6 +266,24 @@ impl Call for Routine {
     type Answer = ();
 }
 
+/// A record of another fragment's channel, to the fragment that follows
+/// it there (subscriptions.rs `follow`; deliveries.rs): `principal` the
+/// follow's subscriber, which must be this fragment's own identity, and
+/// `depth` the record's hops, its runs one deeper.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Followed {
+    pub principal: String,
+    pub fragment: String,
+    pub channel: String,
+    pub record: Value,
+    pub depth: u32,
+}
+
+impl Call for Followed {
+    const PATH: &'static str = "/call/followed";
+    type Answer = ();
+}
+
 /// Fleets with levers only (`/api/test/fragment`): a lever on the fragment
 /// (ops.rs `test_fragment`), its body the test's.
 #[derive(Serialize, Deserialize)]

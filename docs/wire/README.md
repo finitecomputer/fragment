@@ -889,7 +889,7 @@ out. An operation as `fragment.json` declares it.
 
 out. 
 
-Values: `query`, `mutation`, `job`.
+Values: `query`, `mutation`, `job`, `live`.
 
 ### `PageError`
 

@@ -23,6 +23,7 @@ mod connections;
 mod delegation;
 mod export;
 mod faces;
+mod finite_agent;
 mod deliver;
 mod doc;
 mod door;
@@ -171,6 +172,7 @@ const LANES: &[Lane] = &[
     agent_ask::agent_ask,
     agent_app::agent_app,
     agent_restart::agent_restart,
+    finite_agent::finite_agent,
     checkout::checkout,
     sync::folder_sync,
     migrations::migrations,
@@ -203,7 +205,7 @@ const LANES: &[Lane] = &[
 pub const SHARDS: [&[&str]; 5] = [
     &[
         "keys", "levers", "delegation", "orgs", "admin-page", "computers", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask",
-        "agent-app", "agent-restart", "checkout",
+        "agent-app", "agent-restart", "finite-agent", "checkout",
     ],
     &["shell-ui"],
     &[

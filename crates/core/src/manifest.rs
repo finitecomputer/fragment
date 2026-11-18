@@ -282,12 +282,13 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
         Some("query") => OpKind::Query,
         Some("mutation") => OpKind::Mutation,
         Some("job") => OpKind::Job,
-        _ => return Err(format!("operations.{name}.kind must be \"query\", \"mutation\", or \"job\"")),
+        Some("live") => OpKind::Live,
+        _ => return Err(format!("operations.{name}.kind must be \"query\", \"mutation\", \"job\", or \"live\"")),
     };
     let role = match obj.get("role") {
         None => match kind {
             OpKind::Query => Role::Viewer,
-            OpKind::Mutation | OpKind::Job => Role::Editor,
+            OpKind::Mutation | OpKind::Job | OpKind::Live => Role::Editor,
         },
         Some(r) => r
             .as_str()
@@ -417,8 +418,8 @@ fn listed(name: &str, v: &Value) -> Result<ListedDecl, String> {
 fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
     let at = format!("triggers[{i}]");
     let obj = v.as_object().ok_or_else(|| format!("{at} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "woke" | "run" | "from")) {
-        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, woke, run, from)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "woke" | "followed" | "run" | "from")) {
+        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, woke, followed, run, from)"));
     }
     let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{at}.{k} must be a string"))).transpose();
     let flag = |k: &str| match obj.get(k) {
@@ -426,10 +427,10 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
         Some(Value::Bool(true)) => Ok(true),
         Some(_) => Err(format!("{at}.{k} must be true")),
     };
-    let (installed, woke) = (flag("installed")?, flag("woke")?);
-    let on = match (text("cron")?, text("channel")?, text("files")?, installed, woke) {
+    let (installed, woke, followed) = (flag("installed")?, flag("woke")?, flag("followed")?);
+    let on = match (text("cron")?, text("channel")?, text("files")?, installed, woke || followed) {
         (None, None, None, true, false) => TriggerOn::Installed(true),
-        (None, None, None, false, true) => TriggerOn::Woke(true),
+        (None, None, None, false, true) if !(woke && followed) => if woke { TriggerOn::Woke(true) } else { TriggerOn::Followed(true) },
         (Some(c), None, None, false, false) => {
             crate::cron::Cron::parse(&c).map_err(|e| format!("{at}.cron: {e}"))?;
             TriggerOn::Cron(c)
@@ -446,7 +447,7 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
             }
             TriggerOn::Files(f)
         }
-        _ => return Err(format!("{at} needs exactly one of cron, channel, files, installed, woke")),
+        _ => return Err(format!("{at} needs exactly one of cron, channel, files, installed, woke, followed")),
     };
     let run = text("run")?.ok_or_else(|| format!("{at} needs run: the operation it starts"))?;
     let decl = m.operations.get(&run).ok_or_else(|| format!("{at}.run names no declared operation: {run:?}"))?;

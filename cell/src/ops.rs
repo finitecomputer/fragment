@@ -289,7 +289,7 @@ impl FragmentCell {
             fragment_core::schema::validate(schema, &inv.input).map_err(|e| CellError::invalid(format!("input {e}")))?;
         }
         let input_sha = input_sha(inv.op, &input_text);
-        if inv.decl.kind == OpKind::Job {
+        if matches!(inv.decl.kind, OpKind::Job | OpKind::Live) {
             let started = self.start_run(NewRun {
                 op: inv.op,
                 via: inv.via,
@@ -325,7 +325,7 @@ impl FragmentCell {
                 });
                 self.mutate(&facet, &inv, &input_sha, &input_text, meta).await
             }
-            OpKind::Job => unreachable!("a job's call records a run above"),
+            OpKind::Job | OpKind::Live => unreachable!("a job's call records a run above"),
         }
     }
 

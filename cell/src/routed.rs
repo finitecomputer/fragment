@@ -227,6 +227,8 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::files::CAP_HEADER, "files")))
     } else if path.starts_with("cap/search/") {
         Ok(Some((crate::files::CAP_HEADER, "search")))
+    } else if path.starts_with("cap/models/") || path.starts_with("cap/fragments/") || path.starts_with("cap/computer/") {
+        Ok(Some((crate::files::CAP_HEADER, "live")))
     } else if path.starts_with("call/") {
         Ok(Some((crate::fragment::calls::HEADER, "1")))
     } else if path.starts_with("computer/") {
