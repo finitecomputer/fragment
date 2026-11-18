@@ -204,7 +204,9 @@ agent's turn, an AI step, a wake, a write, a create), and when someone
 else spends in a fragment, its owner's ledger is asked `fragment_open`
 (its cap), at the same time; if both refuse, the payer's refusal is
 the one said. Both go through one cached question: each isolate keeps
-each answer, a refusal too, for `STANDING_CACHE_MS`. Only the ledger's
+each answer, a refusal too, for `STANDING_CACHE_MS`. A ledger answers
+by reading alone and writes nothing, as it answers its status (F14); a
+ledger's first call, whatever it asks, makes it. Only the ledger's
 own refusal stops a spend. A ledger that does not answer, or answers
 otherwise, lets the spend start (`ledger.gate-unknown`) and is asked
 again next time.
