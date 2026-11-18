@@ -1424,6 +1424,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, &format!("({icon}?.dispatchEvent(new PointerEvent('pointerleave')), true)"))?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
     icon_ui(s, &mut b, &page, &groceries, &shots)?;
+    light_dismiss_ui(s, &mut b, &page)?;
     deploying_uploads_ui(s, &mut b, &page, &groceries, &shots)?;
     compose_elsewhere_ui(s, api, &mut b, &page, &session, &asked_in, &groceries)?;
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
@@ -3903,6 +3904,106 @@ fn deploying_uploads_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, 
     );
     b.eval(page, "(window.__held.restore(), history.back(), true)")?;
     b.until(page, "location.pathname !== '/settings'", wait);
+    Ok(())
+}
+
+/// A modal closed by a press outside it (cell/shell/dialog.js), as a hand
+/// presses: words selected across its field's edge, either way, and a
+/// press in its card's own padding, leave it open with what was typed (each
+/// closed it before, the words lost); a press outside closes it. The
+/// launcher, whose outside is its own empty space, and an app's icon
+/// sheet, whose is its backdrop. Each gesture's pointerdown and click, as
+/// the page heard them, are its proof it pressed what it meant to.
+fn light_dismiss_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let settle = |b: &mut Browser| b.eval(page, "new Promise((r) => setTimeout(() => r(true), 500))");
+    // a point, as the page reckons it (none: nothing to press there)
+    let at = |b: &mut Browser, expr: &str| -> Result<Option<(f64, f64)>> {
+        let p = b.eval(page, expr)?;
+        Ok(p[0].as_f64().zip(p[1].as_f64()))
+    };
+    let middle = |sel: &str| format!("(() => {{ const e = document.querySelector({}); if (!e) return null; const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()", js(sel));
+    // what each press reached since the last read, by its target's id, name or class
+    b.eval(
+        page,
+        "(() => { if (!window.__pressed) { window.__pressed = []; for (const t of ['pointerdown', 'click']) addEventListener(t, (e) => window.__pressed.push(`${t} ${e.target.id || e.target.name || e.target.className}`), true); } window.__pressed.length = 0; return true; })()",
+    )?;
+    let pressed = |b: &mut Browser| b.eval(page, "window.__pressed.splice(0)");
+    let gesture = |down: &str, click: &str| json!([format!("pointerdown {down}"), format!("click {click}")]);
+
+    let draft = "Plan a picnic for Saturday";
+    b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+    let open = b.until(page, "document.getElementById('search-dialog').open && document.activeElement === document.getElementById('workspace-search')", wait);
+    b.eval(page, &fill("#workspace-search", draft))?;
+    let field = at(b, &middle("#workspace-search"))?;
+    let empty = at(b, "(() => { const d = document.getElementById('search-dialog'), p = [10, innerHeight - 10]; return document.elementFromPoint(...p) === d ? p : null; })()")?;
+    let still = format!("(() => {{ const d = document.getElementById('search-dialog'); return d.open && !d.inert && document.getElementById('workspace-search').value === {}; }})()", js(draft));
+    pressed(b)?;
+    let (mut out, mut into, mut away) = (Value::Null, Value::Null, Value::Null);
+    let (mut kept_out, mut kept_in) = (false, false);
+    if let (Some(field), Some(empty)) = (field, empty) {
+        b.drag(page, field, empty)?;
+        settle(b)?;
+        (out, kept_out) = (pressed(b)?, b.eval(page, &still)? == true);
+        b.drag(page, empty, field)?;
+        settle(b)?;
+        (into, kept_in) = (pressed(b)?, b.eval(page, &still)? == true);
+        b.click_at(page, empty)?;
+        b.until(page, "!document.getElementById('search-dialog').open", wait);
+        away = pressed(b)?;
+    }
+    let closed = b.eval(page, "!document.getElementById('search-dialog').open")? == true;
+    s.ok(
+        "the launcher's words selected from its box onto its empty space, and from there into the box: it stays open with them; a press on that empty space closes it",
+        open && kept_out && kept_in && closed
+            && out == gesture("workspace-search", "search-dialog")
+            && into == gesture("search-dialog", "search-dialog")
+            && away == gesture("search-dialog", "search-dialog"),
+        json!({ "field": field, "empty": empty, "out": [out, kept_out], "into": [into, kept_in], "away": away, "closed": closed }),
+    );
+    b.eval(page, "(document.getElementById('search-dialog').open && document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    b.until(page, "!document.getElementById('search-dialog').open", wait);
+
+    let item = "[...document.querySelectorAll('#menu [role=menuitem]')].find((b) => b.textContent === 'Icon…')";
+    b.eval(page, "([...document.querySelectorAll('#stack .pane button[aria-label=More]')].pop()?.click(), true)")?;
+    let offered = b.until(page, &format!("!!{item}"), wait);
+    b.eval(page, &format!("({item}?.click(), true)"))?;
+    let sheet = offered && b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
+    let hint = "a lighthouse at dusk";
+    b.eval(page, &fill("dialog.icon-sheet input[name=hint]", hint))?;
+    // beside the card's middle: `x` in its padding (24 px), or left of it on the backdrop
+    let beside = |b: &mut Browser, x: &str| {
+        at(b, &format!("(() => {{ const d = document.querySelector('dialog.icon-sheet[open]'); if (!d) return null; const r = d.getBoundingClientRect(), p = [{x}, r.y + r.height / 2]; return r.x > 16 && document.elementFromPoint(...p) === d ? p : null; }})()"))
+    };
+    let padding = beside(b, "r.x + 8")?;
+    let backdrop = beside(b, "r.x / 2")?;
+    let field = at(b, &middle("dialog.icon-sheet input[name=hint]"))?;
+    let still = format!("document.querySelector('dialog.icon-sheet[open] input[name=hint]')?.value === {}", js(hint));
+    pressed(b)?;
+    let (mut padded, mut out, mut away) = (Value::Null, Value::Null, Value::Null);
+    let (mut kept_padded, mut kept_out) = (false, false);
+    if let (Some(padding), Some(field), Some(backdrop)) = (padding, field, backdrop) {
+        b.click_at(page, padding)?;
+        settle(b)?;
+        (padded, kept_padded) = (pressed(b)?, b.eval(page, &still)? == true);
+        b.drag(page, field, backdrop)?;
+        settle(b)?;
+        (out, kept_out) = (pressed(b)?, b.eval(page, &still)? == true);
+        b.click_at(page, backdrop)?;
+        b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+        away = pressed(b)?;
+    }
+    let closed = b.eval(page, "!document.querySelector('dialog.icon-sheet')")? == true;
+    s.ok(
+        "an app's icon sheet stays open on a press in its card's padding, and on its description selected past the card onto the backdrop, what was typed kept; a press on the backdrop closes it",
+        sheet && kept_padded && kept_out && closed
+            && padded == gesture("icon-sheet", "icon-sheet")
+            && out == gesture("hint", "icon-sheet")
+            && away == gesture("icon-sheet", "icon-sheet"),
+        json!({ "padding": padding, "field": field, "backdrop": backdrop, "padded": [padded, kept_padded], "out": [out, kept_out], "away": away, "closed": closed }),
+    );
+    b.eval(page, "(document.querySelector('dialog.icon-sheet[open]')?.close(), true)")?;
+    b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
     Ok(())
 }
 
