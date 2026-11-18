@@ -42,10 +42,10 @@ use std::collections::BTreeMap;
 use fragment_core::app_member::{self, Audience};
 use fragment_proto::{ErrorCode, FragmentKind, Member, Role};
 use serde_json::json;
-use worker::SqlStorageValue;
+use worker::{console_error, SqlStorageValue};
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::calls::{AppAnswer, AppAsked, AppAudienceOf, AppTold};
+use crate::fragment::calls::{AppAnswer, AppAsked, AppAudience, AppAudienceOf, AppTold};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 use crate::members::Actor;
@@ -127,6 +127,14 @@ impl FragmentCell {
             }
         }
         self.flush_index().await;
+        // what changed at the app while it was asked (a look meanwhile found
+        // no row, or the answer brought back what a look took off) is
+        // taken now; best effort: the app's next change looks again
+        if let Ok(member) = &taken {
+            if let Err(e) = self.app_looked(&member.principal, name).await {
+                console_error!("{}", json!({ "event": "app.look-failed", "app": name, "code": e.code, "message": e.message }));
+            }
+        }
         taken
     }
 
@@ -136,7 +144,9 @@ impl FragmentCell {
     /// one row of its name. Answers the row as written.
     fn app_answered(&self, actor: &Actor, name: &str, role: Role, (incarnation, version, owner, title): (i64, i64, &str, &str), answer: &AppAnswer, names: &BTreeMap<String, String>) -> CellResult<Member> {
         let newest = self.rows("SELECT 1 AS x FROM app_asks WHERE name = ? AND version = ?", vec![name.into(), SqlStorageValue::Integer(version)])?;
-        if self.incarnation().ok() != Some(incarnation) || self.must(MetaKey::Owner)? != owner || newest.is_empty() {
+        // an answer from a life whose end was heard meanwhile is no yes
+        let ended = self.rows("SELECT 1 AS x FROM app_ended WHERE name = ? AND incarnation >= ?", vec![name.into(), SqlStorageValue::Integer(answer.incarnation)])?;
+        if self.incarnation().ok() != Some(incarnation) || self.must(MetaKey::Owner)? != owner || newest.is_empty() || !ended.is_empty() {
             return Err(CellError::new(ErrorCode::Conflict, "it changed while its app was asked: ask again"));
         }
         // its list so far (none at a join) and its answer, held here; bounded:
@@ -158,10 +168,11 @@ impl FragmentCell {
             }
         };
         let current = self.member_role(&answer.npub)?;
-        self.room_for(u64::from(current.is_none()))?;
-        self.exec("DELETE FROM app_asks WHERE name = ?", vec![name.into()])?;
-        // an older life of the name, whose end was not heard yet, is out
+        // an older life of the name, whose end was not heard yet, gives up
+        // its place to this one
         let older = self.rows("SELECT principal FROM member_apps WHERE name = ? AND principal != ?", vec![name.into(), answer.npub.as_str().into()])?;
+        self.room_for(u64::from(current.is_none() && older.is_empty()))?;
+        self.exec("DELETE FROM app_asks WHERE name = ?", vec![name.into()])?;
         for old in older.iter().filter_map(|o| o["principal"].as_str()) {
             self.app_out(old)?;
         }
@@ -275,31 +286,55 @@ impl FragmentCell {
         if !from_app {
             let role = c.role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
             let (inc, ver) = (SqlStorageValue::Integer(c.incarnation), SqlStorageValue::Integer(c.version));
-            let took = self.rows(
-                "UPDATE member_of SET role = ?, incarnation = ?, version = ?
-                 WHERE name = ? AND (? > incarnation OR (? = incarnation AND ? > version)) RETURNING name",
-                vec![role, inc.clone(), ver.clone(), c.fragment.as_str().into(), inc.clone(), inc, ver],
-            )?;
+            // a role changes only a row it answered for; an end (none) is kept
+            // even with none, so an ask of that life arriving late is no yes
+            let took = match c.role {
+                Some(_) => self.rows(
+                    "UPDATE member_of SET role = ?, incarnation = ?, version = ?
+                     WHERE name = ? AND (? > incarnation OR (? = incarnation AND ? > version)) RETURNING name",
+                    vec![role, inc.clone(), ver.clone(), c.fragment.as_str().into(), inc.clone(), inc, ver],
+                )?,
+                None => self.rows(
+                    "INSERT INTO member_of (name, role, incarnation, version) VALUES (?, NULL, ?, ?)
+                     ON CONFLICT (name) DO UPDATE SET role = NULL, incarnation = excluded.incarnation, version = excluded.version
+                       WHERE excluded.incarnation > member_of.incarnation OR (excluded.incarnation = member_of.incarnation AND excluded.version > member_of.version)
+                     RETURNING name",
+                    vec![c.fragment.as_str().into(), inc, ver],
+                )?,
+            };
             if !took.is_empty() && c.role.is_none() {
                 self.event("app.out", &format!("no longer in {}", c.fragment), json!({ "target": c.fragment }));
             }
             return Ok(());
-        }
-        if c.role.is_none() {
-            self.exec("DELETE FROM app_asks WHERE name = ?", vec![c.fragment.as_str().into()])?;
         }
         let apps = self.rows(
             "SELECT principal FROM member_apps WHERE name = ? AND incarnation = ?",
             vec![c.fragment.as_str().into(), SqlStorageValue::Integer(c.incarnation)],
         )?;
         // bounded: one life of one app
-        for app in apps.iter().filter_map(|a| a["principal"].as_str()) {
-            match c.role {
-                None => {
+        let apps: Vec<&str> = apps.iter().filter_map(|a| a["principal"].as_str()).collect();
+        match c.role {
+            None => {
+                // its late answers are no yes; a newer life's ask stands
+                self.exec(
+                    "INSERT INTO app_ended (name, incarnation) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET incarnation = MAX(incarnation, excluded.incarnation)",
+                    vec![c.fragment.as_str().into(), SqlStorageValue::Integer(c.incarnation)],
+                )?;
+                for app in &apps {
                     self.app_out(app)?;
                     self.event("member.removed", &format!("the app {} was deleted", c.fragment), json!({ "principal": app, "app": c.fragment }));
                 }
-                Some(_) => self.app_looked(app, &c.fragment).await?,
+                // a newer life of the name, told it held the old one's place
+                // here, hears it holds none, unless it is in or asked
+                let held = self.rows("SELECT 1 AS x FROM member_apps WHERE name = ? UNION ALL SELECT 1 FROM app_asks WHERE name = ?", vec![c.fragment.as_str().into(), c.fragment.as_str().into()])?;
+                if !apps.is_empty() && held.is_empty() {
+                    self.app_change(&c.fragment, None)?;
+                }
+            }
+            Some(_) => {
+                for app in &apps {
+                    self.app_looked(app, &c.fragment).await?;
+                }
             }
         }
         Ok(())
@@ -310,7 +345,12 @@ impl FragmentCell {
     /// comes off its list, and each app is held to its list again.
     async fn app_looked(&self, principal: &str, name: &str) -> CellResult<()> {
         let began = js::now_ms();
-        let shown: Audience = crate::fragment::call(&self.env, name, &AppAudienceOf {}).await?.into_iter().collect();
+        let answer = crate::fragment::call(&self.env, name, &AppAudienceOf {}).await?;
+        // another life under the name (this one's end not heard yet) tells nothing of this one
+        if answer.npub != principal {
+            return Ok(());
+        }
+        let shown: Audience = answer.audience.into_iter().collect();
         // bounded as its audience is
         for (person, power) in self.app_audience(principal)? {
             let left = shown.get(&person).copied().map(|now| now.min(power));
@@ -326,10 +366,12 @@ impl FragmentCell {
         self.apps_held()
     }
 
-    /// Its audience as a fragment it is in holds it (`AppAudienceOf`).
-    pub(crate) fn app_audience_of(&self) -> CellResult<Vec<(String, Role)>> {
+    /// Its audience as a fragment it is in holds it (`AppAudienceOf`), with
+    /// its own key.
+    pub(crate) fn app_audience_of(&self) -> CellResult<AppAudience> {
         self.created()?;
-        Ok(app_member::audience(&self.must(MetaKey::Owner)?, &self.member_list()?.members).into_iter().collect())
+        let audience = app_member::audience(&self.must(MetaKey::Owner)?, &self.member_list()?.members).into_iter().collect();
+        Ok(AppAudience { npub: self.must(MetaKey::Npub)?, audience })
     }
 
     /// Each fragment this app is in asked to look at its audience again, at

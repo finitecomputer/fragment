@@ -13,7 +13,7 @@ step Fragment 6 installed_forward_only ca46b28bd2c487d0
 step Fragment 7 making df7c73337a08c512
 step Fragment 8 newest b439b2eb5ec07074
 step Fragment 9 inbox_forward_only ece226038ced1436
-step Fragment 10 member_apps 3138c8c7473b8454
+step Fragment 10 member_apps 932bcd4cda6bc7fd
 step Fragment 11 app_audience f806de1fcac04191
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
@@ -52,6 +52,7 @@ step Migrations 7 waiting_forward_only 18ed5cf065932299
 
 Fragment table app_asks: CREATE TABLE app_asks (name TEXT PRIMARY KEY, version INTEGER NOT NULL)
 Fragment table app_audience: CREATE TABLE app_audience (app TEXT NOT NULL, person TEXT NOT NULL, power TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (app, person))
+Fragment table app_ended: CREATE TABLE app_ended (name TEXT PRIMARY KEY, incarnation INTEGER NOT NULL)
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
 Fragment index charges_run: CREATE INDEX charges_run ON charges (run)
