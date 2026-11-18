@@ -234,7 +234,7 @@ pub fn elsewhere(s: &mut Suite, api: &Api) -> Result<()> {
 
 /// Follows (docs/api.md, subscriptions' `follow`; cell/src/subscriptions.rs):
 /// an agent's fragment follows a room's channel as its agent
-/// (`this.otherFragments.follow`), and each record there runs its own
+/// (`job.otherFragments.follow`), and each record there runs its own
 /// `followed` trigger, handed from the room's outbox, never the queue.
 ///
 /// - invalid: a person, a non-member, or a channel there is not, follows
@@ -333,7 +333,9 @@ pub fn follows(s: &mut Suite, api: &Api) -> Result<()> {
         to_a.contains(&"up".to_string()) && to_b.contains(&"up".to_string()) && to_a.len() + to_b.len() >= 3 && to_a.iter().chain(&to_b).any(|o| o == "later")
     });
     let both = again && times(api, &a, "second") == 1 && times(api, &b, "second") == 1;
-    let counted = |api: &Api, x: &Agent| runs(api, &owner, &x.name, "&op=seen").iter().filter(|r| r["status"] == "succeeded").count() == seen(api, &owner, x).len();
+    // every run of its followed trigger, queued ones too, kept one record (a
+    // blocked one, past the hop budget, keeps none)
+    let counted = |api: &Api, x: &Agent| runs(api, &owner, &x.name, "&op=seen").iter().filter(|r| r["status"] != "blocked").count() == seen(api, &owner, x).len();
     s.ok(
         "a record handed again after its answer was lost runs once at each follower",
         deferred && both && counted(api, &a) && counted(api, &b),

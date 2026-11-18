@@ -28,6 +28,11 @@ use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 /// What a follow names in place of a URL: its follower's fragment, which no
 /// one fetches.
 pub(crate) const FOLLOW_PREFIX: &str = "fragment:";
+/// How late after its post a record is still handed to a follower: within
+/// the time its follower keeps the runs that say it took it, and far past
+/// the outbox's own tries (deliveries.rs), so a late one is said, never run
+/// twice.
+const FOLLOWED_HAND_MS: i64 = crate::jobs::FOLLOWED_KEPT_MS / 2;
 
 /// What a record of a subscription goes to (`record_delivery`).
 pub(crate) enum Delivered {
@@ -163,6 +168,12 @@ impl FragmentCell {
         self.exec("DELETE FROM subs WHERE principal = ?", vec![principal.into()])
     }
 
+    /// Whether `subscriber` may still read `channel`, as its follow is
+    /// handed a record: a member whose role reads it now.
+    pub(crate) fn may_follow(&self, subscriber: &str, channel: &str) -> CellResult<bool> {
+        Ok(self.member_role(subscriber)?.zip(self.channel_read_role(channel).ok()).is_some_and(|(role, read)| role >= read))
+    }
+
     /// A follow that ends, saying why.
     pub(crate) fn unfollow(&self, sub: i64, follower: &str, why: &str) -> CellResult<()> {
         self.exec("DELETE FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
@@ -224,15 +235,16 @@ impl FragmentCell {
         let (url, subscriber) = (row["url"].as_str().expect("subs.url is TEXT"), row["principal"].as_str().expect("subs.principal is TEXT"));
         let record = self.read_channel(channel, seq - 1, 1)?.into_iter().next().filter(|r| r.seq == seq);
         if let Some(follower) = url.strip_prefix(FOLLOW_PREFIX) {
-            // a follow is its member's while its role may read the channel
-            if !self.member_role(subscriber)?.zip(self.channel_read_role(channel).ok()).is_some_and(|(role, read)| role >= read) {
-                self.unfollow(sub, follower, "its agent may read the channel no more")?;
-                return Ok(None);
-            }
             let Some(record) = record else {
                 self.event("delivery.failed", &format!("record {seq} of {channel} was past its retention before {follower} heard it"), json!({ "sub": sub, "seq": seq }));
                 return Ok(None);
             };
+            // handed on only while its follower would know it took it (its
+            // runs' keys outlive this): past that, said, never run twice
+            if crate::js::now_ms() - record.at > FOLLOWED_HAND_MS {
+                self.event("delivery.failed", &format!("record {seq} of {channel} was too late to hand {follower} once"), json!({ "sub": sub, "seq": seq }));
+                return Ok(None);
+            }
             let call = Followed { subscriber: subscriber.to_string(), fragment: fragment.to_string(), incarnation: incarnation.to_string(), record, depth };
             return Ok(Some(Delivered::Follow { follower: follower.to_string(), call }));
         }

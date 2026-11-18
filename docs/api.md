@@ -1140,10 +1140,7 @@ of the app's capability calls; a refusal throws with its `code` and
 - `draft(name, channel, {turn, text})` → `{ok}`, as `PUT
   /api/f/{name}/channels/{channel}/draft`;
 - `records(name, channel, {after?, before?, limit?})` → a `ChannelPage`,
-  as `GET …/channels/{channel}`;
-- `follow(name, channel)` → `{id, channel, follow}`, as `POST
-  …/subscriptions` `{channel, follow: true}`: its `followed` triggers hear
-  the channel's records.
+  as `GET …/channels/{channel}`.
 
 In a job, as steps (`job.otherFragments`; a refusal is a `StepError`
 whose message begins with its status):

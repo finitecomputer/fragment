@@ -15,7 +15,7 @@ pub fn outbox_retry_ms(attempts: i64) -> i64 {
 }
 
 /// The longest wait between tries, in seconds.
-pub const OUTBOX_RETRY_S_MAX: i64 = 600;
+const OUTBOX_RETRY_S_MAX: i64 = 600;
 
 /// The tries an invite's claim gets (registry/invites.rs): a sign-in's,
 /// then the registry's alarm's, with `outbox_retry_ms`'s waits (about 37

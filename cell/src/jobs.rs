@@ -120,10 +120,10 @@ pub(crate) struct Started {
     pub replayed: bool,
 }
 
-/// How long a followed record's runs outlive newer runs (`trim_runs`): past
-/// every try its source's outbox makes (deliveries.rs).
-const FOLLOWED_KEPT_MS: i64 = 24 * 3600 * 1000;
-const _: () = assert!(FOLLOWED_KEPT_MS > crate::deliveries::OUTBOX_TRIES_MAX_MS && FOLLOWED_KEPT_MS < limits::RUN_RETENTION_MS);
+/// How long a followed record's runs outlive newer runs (`trim_runs`): its
+/// source hands it on only within half of this (subscriptions.rs).
+pub(crate) const FOLLOWED_KEPT_MS: i64 = 24 * 3600 * 1000;
+const _: () = assert!(FOLLOWED_KEPT_MS < limits::RUN_RETENTION_MS);
 
 /// Why a step did not produce a value: for good (the job sees an error it
 /// may catch), or for now (the Workflow retries the step).
@@ -1014,10 +1014,13 @@ impl FragmentCell {
         let status = resp.status_code();
         let text = resp.text().await.map_err(|e| StepFail::Retry(e.to_string()))?;
         let answer: Value = crate::json_text(&text).unwrap_or(Value::Null);
+        let said = format!("{status}: {}", answer["message"].as_str().unwrap_or(&text));
         match status {
             200..=299 => Ok(answer),
-            429 | 500..=599 => Err(StepFail::Retry(format!("{name} answered {status}"))),
-            _ => Err(permanent(format!("{status}: {}", answer["message"].as_str().unwrap_or(&text)))),
+            // a follow's 429 is a full list there: no passing thing
+            429 if act != "follow" => Err(StepFail::Retry(said)),
+            500..=599 => Err(StepFail::Retry(said)),
+            _ => Err(permanent(said)),
         }
     }
 

@@ -59,8 +59,6 @@ const CLAIM_MS: i64 = 60_000;
 /// wait doubling to ten minutes, about two and a half hours of a queue
 /// that will not take it.
 const OUTBOX_ATTEMPTS_MAX: i64 = 20;
-/// The longest one row is tried: each try's wait at its longest, and its claim.
-pub(crate) const OUTBOX_TRIES_MAX_MS: i64 = OUTBOX_ATTEMPTS_MAX * (fragment_core::backoff::OUTBOX_RETRY_S_MAX * 1000 + CLAIM_MS);
 
 const _: () = assert!(QUEUE_BATCH * (PUSH_BATCHES_MAX - 1) >= limits::PUSH_SUBS_MAX as usize, "a push's batches cover every subscription");
 
@@ -326,11 +324,17 @@ impl FragmentCell {
     /// for another agent) is refused for good.
     async fn hand_followed(&self, f: &Follow) -> Woken {
         let laps = js::Laps::start();
-        let woken = match crate::fragment::call(&self.env, &f.follower, &f.call).await {
+        // its agent may read the channel still, asked as it goes: nothing
+        // waits between this and the call (a removal in the drain's waits counts)
+        let woken = match self.may_follow(&f.call.subscriber, &f.call.record.channel) {
+            Err(e) => Woken::Later(e.message),
+            Ok(false) => Woken::Refused("its agent may read the channel no more".into()),
+            Ok(true) => match crate::fragment::call(&self.env, &f.follower, &f.call).await {
             // a test fleet's answer lost after its follower took it: handed again
             Ok(()) => self.test_countdown(MetaKey::TestFailDeliveries, "the follower's answer was lost").map_or_else(|e| Woken::Later(e.message), |()| Woken::Up),
-            Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::NotFound) => Woken::Refused(e.message),
-            Err(e) => Woken::Later(e.message),
+                Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::NotFound) => Woken::Refused(e.message),
+                Err(e) => Woken::Later(e.message),
+            },
         };
         let (outcome, why) = match &woken {
             Woken::Up => ("up", None),
