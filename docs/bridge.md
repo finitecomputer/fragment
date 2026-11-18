@@ -213,9 +213,10 @@ The agent's next turn in that chat is told the chat, once a life
 (`note::recap`):
 
 - its messages before the turn's own, both sides, oldest first, since
-  the agent joined and after its owner's newest `/new` for it; each by
-  its sayer (`You`, `Your owner`, anyone else by name);
-- before each of its turns' first reply, that turn's steps on one line;
+  the agent joined and after the newest `/new` of its owner's it ran;
+  each by its sayer (`You`, `Your owner`, anyone else by name);
+- before each of its turns' first reply, that turn's steps on one line
+  (a cut turn's are the cut note's);
 - at most the 24 KiB a continued chat gets (`HISTORY_NOTE_MAX_BYTES`),
   the oldest dropped first, with where the rest is
   (`fragment channel <chat> chat`).
