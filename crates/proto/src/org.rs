@@ -456,6 +456,10 @@ pub enum GlanceLogs {
         /// Computers whose lines in the last day say they are in trouble,
         /// the most lines first.
         trouble: Vec<GlanceTrouble>,
+        /// Why the reasons saves failed (`GlanceTrouble::why`) were not
+        /// read, when they were not: the rest stands without them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why_unread: Option<String>,
     },
 }
 

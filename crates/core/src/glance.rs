@@ -454,6 +454,7 @@ mod tests {
             // a name that holds its quote, or a ": ": left out to the last
             ("backup '/data/home/Ann's Tax Return.pdf': EACCES", "backup '/data/…': EACCES"),
             ("open /data/home/Tax: Return.pdf: Permission denied", "open /data/…: Permission denied"),
+            ("open /data/home/Archive: Réunion médicale.pdf: Permission denied", "open /data/…: Permission denied"),
             // a relative path's earlier words may be its own: left out back to a bracket, a ": ", or the start
             ("failed to read My Documents/Tax.pdf: EACCES", "…: EACCES"),
             ("backup '/data': read My Documents/Tax.pdf", "backup '/data': …"),
@@ -462,7 +463,7 @@ mod tests {
         for (raw, shown) in paths {
             let w = why(raw);
             assert_eq!(w, shown);
-            assert!(["home", "Tax", "notes", "diary", "Return", "Ann", "My", "Documents", "secret"].iter().all(|p| !w.contains(p)), "{w}");
+            assert!(["home", "Tax", "notes", "diary", "Return", "Ann", "My", "Documents", "secret", "Archive", "médicale"].iter().all(|p| !w.contains(p)), "{w}");
         }
         for c in ['x', 'é', '€', '𝄞'] {
             for pad in WHY_MAX_BYTES - 8..=WHY_MAX_BYTES {

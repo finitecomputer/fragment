@@ -412,7 +412,8 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
             && trouble.first() == Some(&json!({ "computer": theirs, "kind": "wont_wake", "lines": 2, "npub": ivy_id, "email": ivy_email }))
             && trouble.get(1) == Some(&json!({ "computer": saver, "kind": "saves_failing", "lines": 2, "npub": null, "email": null, "why": { "at": now - 15_000, "text": "backup '/data': open /data/…: Permission denied (os error 13)" } }))
             && trouble.get(2) == Some(&json!({ "computer": stranger, "kind": "disk_filling", "lines": 1, "npub": null, "email": null }))
-            && trouble.len() == 3,
+            && trouble.len() == 3
+            && read.get("whyUnread").is_none(),
         read,
     );
     let asked = s.observability.asked();
@@ -431,6 +432,22 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
         "anyone else's glance is refused (403), and a day that is not today is invalid (400), the integers' ends too",
         person.status == 403 && [&tomorrow, &stale, &least, &most].iter().all(|r| r.status == 400),
         json!([person.status, tomorrow.status, stale.status, least.status, most.status]),
+    );
+    // why saves failed is the lines themselves, which may run past the
+    // cell's bound on an answer: its read failing alone takes nothing else
+    s.observability.fail_next_events(400, "too many events to answer");
+    let partial = ask(operator, day)?;
+    let logs = &partial.body["logs"];
+    let rows = logs["trouble"].as_array().cloned().unwrap_or_default();
+    s.ok(
+        "when only why saves failed can't be read, the logs' numbers and trouble stand, no row says why, and the glance says why not",
+        partial.status == 200
+            && logs["state"] == "read"
+            && logs["computersAwakeWeek"] == read["computersAwakeWeek"]
+            && rows.iter().map(|t| (&t["computer"], &t["kind"])).eq(trouble.iter().map(|t| (&t["computer"], &t["kind"])))
+            && rows.iter().all(|t| t.get("why").is_none())
+            && logs["whyUnread"].as_str().is_some_and(|w| w.contains("SaveWhys") && w.contains("too many events to answer")),
+        logs,
     );
     s.observability.fail_next(403, "Authentication error");
     let failed = ask(operator, day)?;

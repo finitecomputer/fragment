@@ -249,7 +249,7 @@ async function glance() {
     tile("Signed in, last 24 hours", v.signedIn.day, `${v.signedIn.week} in the last 7 days`),
   );
   $("glance-logs").textContent =
-    logs.state === "notConfigured" ? "Computers and fragments come from the deployment's logs, which aren't configured here (observability_read)." : logs.state === "failed" ? `The logs couldn't be read: ${logs.why}` : "";
+    logs.state === "notConfigured" ? "Computers and fragments come from the deployment's logs, which aren't configured here (observability_read)." : logs.state === "failed" ? `The logs couldn't be read: ${logs.why}` : logs.whyUnread ? `Why saves failed couldn't be read: ${logs.whyUnread}` : "";
   const trouble = read ? logs.trouble : [];
   $("trouble-head").hidden = $("trouble").hidden = trouble.length === 0;
   $("trouble-rows").replaceChildren(...trouble.map((t) => row([t.email || t.npub || "no one's", el("code", t.computer), troubleCell(t), String(t.lines)], t.npub ? openFromGlance(t.npub) : undefined)));

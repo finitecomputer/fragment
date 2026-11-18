@@ -26,8 +26,8 @@ struct Read {
     fragments_today: u64,
     trouble: Vec<(String, TroubleKind, u64)>,
     /// Each computer's newest failed save's reason, and when, of the lines
-    /// read (`core::whys_of`).
-    whys: Vec<(String, i64, String)>,
+    /// read (`core::whys_of`), or why they were not read.
+    whys: Result<Vec<(String, i64, String)>, String>,
 }
 
 /// The glance now, the day starting at the operator's `dayStart`.
@@ -58,6 +58,7 @@ pub(crate) async fn glance(env: &Env, cfg: &Config, url: &Url) -> CellResult<Adm
         Err(None) => GlanceLogs::NotConfigured,
         Err(Some(why)) => GlanceLogs::Failed { why },
         Ok(r) => GlanceLogs::Read {
+            why_unread: r.whys.as_ref().err().cloned(),
             computers_awake_now: r.awake_now,
             computers_awake_today: r.awake_today,
             computers_awake_week: r.awake_week.len() as u64,
@@ -69,7 +70,7 @@ pub(crate) async fn glance(env: &Env, cfg: &Config, url: &Url) -> CellResult<Adm
                 .map(|(computer, kind, lines)| {
                     let owner = g.owners.iter().find(|(c, _, _)| *c == computer);
                     let why = match kind {
-                        TroubleKind::SavesFailing => r.whys.iter().find(|(c, _, _)| *c == computer).map(|(_, at, text)| TroubleWhy { at: *at, text: text.clone() }),
+                        TroubleKind::SavesFailing => r.whys.iter().flatten().find(|(c, _, _)| *c == computer).map(|(_, at, text)| TroubleWhy { at: *at, text: text.clone() }),
                         TroubleKind::WontWake | TroubleKind::DiskFilling => None,
                     };
                     GlanceTrouble { npub: owner.map(|(_, n, _)| n.clone()), email: owner.and_then(|(_, _, e)| e.clone()), computer, kind, lines, why }
@@ -81,28 +82,26 @@ pub(crate) async fn glance(env: &Env, cfg: &Config, url: &Url) -> CellResult<Adm
 }
 
 /// Every question, asked together: what the logs say, or the first
-/// question's failure.
+/// counting question's failure. Why saves failed is the lines themselves,
+/// which may run past the cell's bound on an answer: its read failing
+/// leaves the rest, and says why (`why_unread`).
 async fn read(env: &Env, o: &crate::config::ObservabilityConfig, now: i64, day_start: i64) -> CellResult<Read> {
-    let asked = Question::ALL.map(|q| async move {
-        let answer = crate::keys::observability_query(env, o, &q.body(&o.script, now, day_start)).await?;
-        Ok::<_, CellError>((q, answer))
-    });
-    let mut read = Read { awake_now: 0, awake_today: 0, awake_week: vec![], fragments_now: 0, fragments_today: 0, trouble: vec![], whys: vec![] };
+    let asked = Question::ALL.map(|q| async move { (q, crate::keys::observability_query(env, o, &q.body(&o.script, now, day_start)).await) });
+    let mut read = Read { awake_now: 0, awake_today: 0, awake_week: vec![], fragments_now: 0, fragments_today: 0, trouble: vec![], whys: Ok(vec![]) };
     let mut kinds = Vec::with_capacity(3);
     // bounded: one answer per question
-    for answered in futures_util::future::join_all(asked).await {
-        let (q, answer) = answered?;
+    for (q, answered) in futures_util::future::join_all(asked).await {
         let why = |e: String| CellError::new(fragment_proto::ErrorCode::UpstreamFailed, format!("Workers Observability, {q:?}: {e}"));
         match q {
-            Question::AwakeNow => read.awake_now = core::uniq_of(&answer).map_err(why)?,
-            Question::AwakeToday => read.awake_today = core::uniq_of(&answer).map_err(why)?,
-            Question::AwakeWeek => read.awake_week = core::by_computer_of(&answer).map_err(why)?.into_iter().map(|(c, _)| c).collect(),
-            Question::FragmentsNow => read.fragments_now = core::uniq_of(&answer).map_err(why)?,
-            Question::FragmentsToday => read.fragments_today = core::uniq_of(&answer).map_err(why)?,
-            Question::WontWake => kinds.push((TroubleKind::WontWake, core::by_computer_of(&answer).map_err(why)?)),
-            Question::SavesFailing => kinds.push((TroubleKind::SavesFailing, core::by_computer_of(&answer).map_err(why)?)),
-            Question::DiskFilling => kinds.push((TroubleKind::DiskFilling, core::by_computer_of(&answer).map_err(why)?)),
-            Question::SaveWhys => read.whys = core::whys_of(&answer).map_err(why)?,
+            Question::AwakeNow => read.awake_now = core::uniq_of(&answered?).map_err(why)?,
+            Question::AwakeToday => read.awake_today = core::uniq_of(&answered?).map_err(why)?,
+            Question::AwakeWeek => read.awake_week = core::by_computer_of(&answered?).map_err(why)?.into_iter().map(|(c, _)| c).collect(),
+            Question::FragmentsNow => read.fragments_now = core::uniq_of(&answered?).map_err(why)?,
+            Question::FragmentsToday => read.fragments_today = core::uniq_of(&answered?).map_err(why)?,
+            Question::WontWake => kinds.push((TroubleKind::WontWake, core::by_computer_of(&answered?).map_err(why)?)),
+            Question::SavesFailing => kinds.push((TroubleKind::SavesFailing, core::by_computer_of(&answered?).map_err(why)?)),
+            Question::DiskFilling => kinds.push((TroubleKind::DiskFilling, core::by_computer_of(&answered?).map_err(why)?)),
+            Question::SaveWhys => read.whys = answered.and_then(|a| core::whys_of(&a).map_err(why)).map_err(|e| e.message),
         }
     }
     read.trouble = core::troubles(kinds);

@@ -8,8 +8,8 @@
 //! dotted into the line's objects), and one calculation over them, `uniq`
 //! of a key or `count`, grouped by a key or not; or, asked for the
 //! `events` view, the lines themselves, newest first, at most its limit.
-//! Only its account and its key are let in. Lever: the next query is
-//! refused (`fail_next`).
+//! Only its account and its key are let in. Levers: the next query is
+//! refused (`fail_next`), or the next of the events view (`fail_next_events`).
 
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +23,8 @@ struct State {
     lines: Vec<(i64, Value)>,
     /// The next query's refusal: its status and message.
     fail_next: Option<(u16, String)>,
+    /// The next events view query's refusal (`fail_next_events`).
+    fail_events: Option<(u16, String)>,
     /// The queries asked, as their bodies.
     asked: Vec<Value>,
 }
@@ -123,6 +125,11 @@ impl Observability {
             }
             let q: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
             s.asked.push(q.clone());
+            if q["view"] == "events" {
+                if let Some((status, message)) = s.fail_events.take() {
+                    return refused(status, &message);
+                }
+            }
             match answer(&s.lines, &q) {
                 Ok(a) => Response::json(200, &a),
                 Err(why) => refused(400, &why),
@@ -141,6 +148,12 @@ impl Observability {
     /// The next query is refused with `status` and `message`.
     pub fn fail_next(&self, status: u16, message: &str) {
         self.state.lock().expect("observability state").fail_next = Some((status, message.to_string()));
+    }
+
+    /// The next query of the events view is refused with `status` and
+    /// `message`, whichever of the glance's queries comes first.
+    pub fn fail_next_events(&self, status: u16, message: &str) {
+        self.state.lock().expect("observability state").fail_events = Some((status, message.to_string()));
     }
 
     /// The queries asked, oldest first.
