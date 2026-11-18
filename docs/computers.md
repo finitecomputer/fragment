@@ -834,10 +834,17 @@ arrives already transcribed, its words the quote above Hermes' audio
 note, its file only for work on the recording (`hermes::VOICE`); and that a
 reply line `MEDIA:<absolute path>` attaches a file there
 (`hermes::SENDING`). Hermes keeps the system prompt a chat's session
-began with and replays it on every later turn, so a change to these
-reaches an open chat at its next new session (its `/new`), or when
-Hermes next compresses it or its model changes; a new chat has it at
-once.
+began with and replays it on every later turn (rebuilding it only at a
+compression, a model change or `/new`), so whenever what it is built
+from changes (the relay hint, or a skill file Hermes indexes into it: the
+platform skill's, a bundled one, the owner's managed set;
+`hermes::prompt_inputs`), every session is asked to rebuild its prompt
+once, on its next turn, as Hermes' own `hermes sessions refresh-prompts`
+does (`hermes::REFRESH_PROMPTS`): at boot, its skills settled, against
+what the computer last stamped (`hermes::PROMPT_STAMP`), and after each
+install of the managed skills while it runs. An open chat has the change
+at its next turn, its conversation kept, at one prompt-cache miss; the
+same inputs ask nothing.
 
 ### Its name, in our Hermes image
 
