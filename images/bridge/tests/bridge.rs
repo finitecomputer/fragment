@@ -2120,10 +2120,11 @@ async fn it_answers_the_hold_once_no_claim_is_in_flight() {
 }
 
 /// Goal (F14): a running bridge writes what each step changed, appended to
-/// its log, never its whole state, until a hold: then the log is written
-/// into the snapshot before the hold is answered, so the save holds the
-/// state whole in `state.json`, which an older bridge, rolled back to,
-/// reads; and while held each write is whole. A restart reads it all back.
+/// its log, never its whole state, until a hold: then the state is written
+/// whole into the snapshot before the hold is answered, and so is each
+/// write while held, so the save holds the state whole in `state.json`,
+/// which an older bridge, rolled back to, reads. A restart reads it all
+/// back.
 #[tokio::test]
 async fn it_writes_what_changed_and_is_whole_when_held() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -2141,17 +2142,17 @@ async fn it_writes_what_changed_and_is_whole_when_held() {
     eprintln!("two turns: {steps} steps logged, {log_bytes} bytes; the snapshot {} bytes", snapshot.len());
     assert!(steps >= 4, "each turn's steps appended: {steps}");
     assert_eq!(std::fs::read(state.join("state.json")).expect("a snapshot"), snapshot, "and never the whole state");
-    // held: the log goes into the snapshot before the answer
+    // held: the state goes whole into the snapshot before the answer
+    let snapshot_alone = || -> fragment_bridge::engine::State { serde_json::from_slice(&std::fs::read(state.join("state.json")).expect("a snapshot")).expect("a state") };
     support::hold(&dir);
     support::until(WAIT, "its answer to the hold", || support::held(&dir)).await;
-    assert_eq!(support::logged(&state).0, 0, "held, the log holds nothing the snapshot does not");
-    let whole: Value = serde_json::from_slice(&std::fs::read(state.join("state.json")).expect("a snapshot")).expect("JSON");
-    assert!(whole["cursors"].as_object().is_some_and(|c| c.values().any(|v| v.as_u64() >= Some(2))), "the snapshot holds both turns' reading: {whole}");
-    // a message while held: recorded whole, not logged
+    assert_eq!(snapshot_alone(), fragment_bridge::store::load(&state).expect("reads"), "held, the snapshot alone is the state");
+    assert!(snapshot_alone().cursors.values().any(|c| *c >= 2), "and holds both turns' reading");
+    // a message while held: recorded whole in the snapshot
     let three = fake.say(&chat, &person("paul"), json!({ "text": "three" }));
     let t3 = turn_of("juniper", &chat, seq(&three));
     support::until(WAIT, "three read while held", || std::fs::read_to_string(state.join("state.json")).is_ok_and(|s| s.contains(&t3))).await;
-    assert_eq!(support::logged(&state).0, 0, "every write while held is whole");
+    assert_eq!(snapshot_alone(), fragment_bridge::store::load(&state).expect("reads"), "every write while held is whole");
     support::unhold(&dir);
     fake.until(WAIT, "three's end once the hold goes", |w| !ends_of(w, &chat, &t3).is_empty()).await;
     assert!(support::logged(&state).0 > 0, "the hold gone, its steps appended again");

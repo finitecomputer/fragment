@@ -179,7 +179,6 @@ fn a_crash_at_each_disk_action_leaves_a_state_written() {
             store.gate.holding.store(whole, Ordering::SeqCst);
             store.fuel = Some(fuel);
             let r = store.write(after);
-            drop(store);
             let read = load(&d).expect("reads after a crash");
             match r {
                 Ok(()) => {
@@ -191,13 +190,18 @@ fn a_crash_at_each_disk_action_leaves_a_state_written() {
                 Err(e) => panic!("{e}"),
             }
             crashed += 1;
+            // the same step written again, by a store that failed it, lands
+            store.fuel = None;
+            store.write(after).expect("written again");
+            assert_eq!(load(&d).expect("reads"), *after, "a step that failed at action {fuel} (whole: {whole}) is written when asked again");
+            drop(store);
             // the next life opens it, and its steps are written
             let mut next = open(&d);
             next.write(&steps[5]).expect("written");
             assert_eq!(load(&d).expect("reads"), steps[5]);
             let _ = std::fs::remove_dir_all(&d);
         }
-        assert_eq!(crashed, if whole { 6 } else { 2 }, "each action crashed once");
+        assert_eq!(crashed, if whole { 3 } else { 2 }, "each action crashed once");
     }
     // and a crash as a start writes the state whole
     for fuel in 0..6 {
@@ -208,8 +212,8 @@ fn a_crash_at_each_disk_action_leaves_a_state_written() {
         }
         drop(store);
         let state = load(&d).expect("reads");
-        let mut store = Store { dir: d.clone(), last: state.clone(), log: None, log_bytes: 0, snapshot_bytes: 0, gate: Arc::new(Gate::default()), fuel: Some(fuel) };
-        assert!(store.compact().is_err(), "crashed at {fuel}");
+        let mut store = Store { dir: d.clone(), last: state.clone(), log: None, log_bytes: 0, snapshot_bytes: 0, log_follows: String::new(), log_steps: false, gate: Arc::new(Gate::default()), fuel: Some(fuel) };
+        assert!(store.compact(&state).is_err(), "crashed at {fuel}");
         assert_eq!(load(&d).expect("reads"), state, "a start's crash at action {fuel} loses nothing");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -302,10 +306,14 @@ fn any_copy_a_save_takes_reads_as_a_state_written() {
     }
 }
 
-/// Goal (a rollback): under a hold the log is written into the snapshot
-/// before the hold is answered, and every write while held is whole, so a
-/// save holds the state whole in `state.json`, which is all an older
-/// bridge (before the log) reads. Once the hold goes, steps append again.
+/// Goal (a rollback): under a hold the state is written whole into the
+/// snapshot before the hold is answered, and so is every write while held
+/// (the snapshot alone, two syncs, as before the log: the log, naming an
+/// earlier snapshot, is read as none), so a save holds the state whole in
+/// `state.json`, which is all an older bridge (before the log) reads. No
+/// write while held says the log holds a change, even one cut short, so a
+/// busy turn never keeps the answer back. Once the hold goes, the first
+/// write is whole with a fresh log, and steps append after it.
 #[test]
 fn held_the_snapshot_holds_the_state_whole() {
     let d = dir("held");
@@ -321,17 +329,68 @@ fn held_the_snapshot_holds_the_state_whole() {
     store.settle().expect("settles");
     assert!(!gate.logged.load(Ordering::SeqCst), "held: the hold may be answered");
     assert_eq!(older_bridge_reads(&d), steps[1], "held: whole in the snapshot");
+    let log = std::fs::read(d.join(LOG)).expect("a log");
     for s in &steps[2..4] {
         store.write(s).expect("written");
         assert_eq!(older_bridge_reads(&d), *s, "every write while held is whole");
-        assert_eq!(log_lines(&d), 1);
+        assert_eq!(load(&d).expect("reads"), *s, "and the log read as none");
+        assert_eq!(std::fs::read(d.join(LOG)).expect("a log"), log, "the log untouched while held");
         assert!(!gate.logged.load(Ordering::SeqCst));
     }
+    // a held write cut short: still never said to be in the log
+    store.fuel = Some(0);
+    assert!(store.write(&steps[4]).is_err());
+    assert!(!gate.logged.load(Ordering::SeqCst), "a held write never holds the answer back");
+    store.fuel = None;
     gate.holding.store(false, Ordering::SeqCst);
     store.write(&steps[4]).expect("written");
-    assert_eq!(log_lines(&d), 2, "the hold gone, appended");
-    assert_eq!(load(&d).expect("reads"), steps[4]);
+    assert_eq!(log_lines(&d), 1, "the hold gone, written whole with a fresh log");
+    assert_eq!(older_bridge_reads(&d), steps[4]);
+    store.write(&steps[5]).expect("written");
+    assert_eq!(log_lines(&d), 2, "then appended");
+    assert_eq!(load(&d).expect("reads"), steps[5]);
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Restart, at its corner: held, a state that changed back to the very
+/// snapshot its log follows (a helper started and gone, nothing else), its
+/// log's steps would be read over it again. Then the log is written fresh,
+/// and first: a crash at each action leaves that state or the one before
+/// it (an earlier held write's), never the log's older one.
+#[test]
+fn a_held_write_back_to_the_logs_snapshot_writes_the_log_fresh() {
+    let base = computer(1, 1, 3);
+    let id = records::turn_id("agent0--k3x9", "chat0--k3x9", records::CHAT, 3);
+    let mut helper = base.clone();
+    helper.children.push(engine::Helper { agent: "agent0--k3x9".into(), fragment: "chat0--k3x9".into(), turn: id, child: "0123456789abcdef01234567".into(), goal: "g".into(), since: 1 });
+    let mut crashed = 0;
+    for fuel in 0.. {
+        let d = dir("back");
+        std::fs::create_dir_all(&d).expect("a directory");
+        std::fs::write(d.join(SNAPSHOT), serde_json::to_vec(&base).expect("serializes")).expect("written");
+        let gate = Arc::new(Gate::default());
+        let (mut store, read) = Store::open(&d, gate.clone()).expect("opens");
+        assert_eq!(read, base);
+        store.write(&helper).expect("a helper starts: appended");
+        gate.holding.store(true, Ordering::SeqCst);
+        let mut held = helper.clone();
+        held.said += 1;
+        store.write(&held).expect("held: the snapshot alone");
+        store.fuel = Some(fuel);
+        let r = store.write(&base);
+        drop(store);
+        let after = load(&d).expect("reads");
+        if r.is_ok() {
+            assert_eq!(after, base, "the helper gone, as written");
+            assert_eq!(older_bridge_reads(&d), base);
+            let _ = std::fs::remove_dir_all(&d);
+            break;
+        }
+        assert!(after == held || after == base, "a crash at action {fuel} leaves the step before or this one: {after:?}");
+        crashed += 1;
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    assert_eq!(crashed, 6, "a compaction's six actions, each crashed once");
 }
 
 /// Upgrade: a state an older bridge wrote (no log), as it wrote it, reads;

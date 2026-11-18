@@ -1994,8 +1994,8 @@ async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: A
         match (quiet, held.exists()) {
             // written whole, then renamed: the platform never reads half.
             // The log stops an answer not made yet, never takes one back:
-            // once held, every write is whole (store.rs), and it holds a
-            // change only while that write lasts.
+            // once held, every write is whole and none says the log holds a
+            // change (store.rs).
             (true, false) if !gate.logged.load(Ordering::SeqCst) => match write_whole(&held, answer.as_bytes()) {
                 Ok(()) => crate::ev!("held", { "held": held.display().to_string() }),
                 Err(e) => crate::ev!("held.failed", { "held": held.display().to_string(), "error": e.to_string() }),
