@@ -343,12 +343,18 @@ impl FragmentCell {
     pub(crate) async fn repo_ready(&self) -> CellResult<String> {
         // the life this writer was let in to: one ended while it waited
         // (deleted, and made again) is none of its to write
-        let life = self.must(MetaKey::CreatedAt)?.parse::<i64>().map_err(|_| CellError::host("its created_at is not a time"))?;
+        let life = self.life()?;
         if self.stage()?.waits_template() {
             self.seed(fragment_core::seed::Event::Write, Some(life)).await?;
         }
         self.same_life(life, "while its repo was made")?;
         self.must(MetaKey::Repo)
+    }
+
+    /// Its life (`created_at`): a request that awaits after it is let in
+    /// asks `same_life` of it before it writes.
+    pub(crate) fn life(&self) -> CellResult<i64> {
+        self.must(MetaKey::CreatedAt)?.parse::<i64>().map_err(|_| CellError::host("its created_at is not a time"))
     }
 
     pub(crate) fn pin(&self, which: &str) -> CellResult<Option<String>> {
@@ -968,10 +974,13 @@ impl FragmentCell {
         if !fragment_core::access::repo_role(self.standing(caller, false)?).is_some_and(|r| r >= needs) {
             return Err(CellError::new(ErrorCode::Forbidden, "a storage token reads the repo's whole history, so it is its members' alone: reading it through your agent's membership lends none"));
         }
+        let life = self.life()?;
         if write {
             // its token writes the repo: a deploy's first step
             self.writable().await?;
         }
+        // let in to this life: one ended while its ledger was asked is not its
+        self.same_life(life, "while its ledger was asked")?;
 
         let who = self.caller_id(caller)?;
         // its template still to land: its seed lands it first (`repo_ready`),
