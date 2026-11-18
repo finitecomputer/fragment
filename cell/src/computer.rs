@@ -3045,14 +3045,22 @@ impl ComputerCell {
                 json_response(&self.view().await?)
             }
             (Method::Put, ["agents", fragment]) => {
+                // a computer full refuses before the agent fragment takes it,
+                // which then names it as its computer; asked again after, as
+                // another assign may have come in meanwhile
+                let full = |cell: &ComputerCell| -> CellResult<()> {
+                    let n = cell.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![(*fragment).into()])?;
+                    match n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
+                        true => Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents"))),
+                        false => Ok(()),
+                    }
+                };
+                full(self)?;
                 // the agent fragment takes the computer first (its owner must
                 // be the computer's), and its key becomes the agent's identity
                 let took = crate::fragment::ask(&self.env, fragment, "computer/assign", &json!({ "computer": self.must(MetaKey::Id)?, "owner": who })).await?;
                 let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
-                let n = self.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![(*fragment).into()])?;
-                if n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
-                    return Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents")));
-                }
+                full(self)?;
                 // what it may use is its fragment's (a new agent's every
                 // connection its owner has: decision 44), kept as it was when
                 // assigned again; a row from before the move is handed over

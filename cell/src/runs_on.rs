@@ -59,9 +59,11 @@ struct Notice {
 }
 
 /// A failure that trying again may change: the registry, or the agent's
-/// fragment, did not answer.
+/// fragment, did not answer, or a deploy is going out. Asking again is
+/// safe: the registry's answer is a read, and the agent's notice is keyed
+/// by its membership, so a second ask posts nothing twice.
 fn passing(code: ErrorCode) -> bool {
-    matches!(code, ErrorCode::HostFailed | ErrorCode::UpstreamFailed | ErrorCode::NodeFull | ErrorCode::RateLimited | ErrorCode::RegistryUnavailable)
+    matches!(code, ErrorCode::HostFailed | ErrorCode::UpstreamFailed | ErrorCode::NodeFull | ErrorCode::RateLimited | ErrorCode::RegistryUnavailable | ErrorCode::Deploying)
 }
 
 #[derive(Deserialize)]
@@ -377,13 +379,16 @@ impl FragmentCell {
     /// that is awake lists its fragments again, and the computer is named
     /// for its caller to wake (on its own: a member's change never waits
     /// for a start). An agent that runs on none, or is no longer this
-    /// fragment's (made again since), has nothing to tell.
+    /// fragment's (made again since), has nothing to tell; nor does its
+    /// own fragment, which it is made an editor of as it is assigned
+    /// (`assign`), before its computer holds it: its home, never a join.
     pub(crate) async fn agent_joined(&self, j: AgentJoined) -> CellResult<JoinedAnswer> {
         self.created()?;
         if !npub::is_identity(&j.identity) || !valid_fragment_name(&j.fragment) || j.at <= 0 {
             return Err(CellError::invalid("a join names an identity, a fragment and when it joined"));
         }
-        let computer = match self.meta(MetaKey::AgentIdentity)?.as_deref() == Some(j.identity.as_str()) {
+        let own = j.fragment == self.name()?;
+        let computer = match !own && self.meta(MetaKey::AgentIdentity)?.as_deref() == Some(j.identity.as_str()) {
             true => self.meta(MetaKey::Computer)?,
             false => None,
         };
