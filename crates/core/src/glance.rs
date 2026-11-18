@@ -193,9 +193,9 @@ pub fn by_computer_of(answer: &Value) -> Result<Vec<(String, u64)>, String> {
 }
 
 /// The lines' answer (`Question::SaveWhys`): each computer's newest
-/// failed save's reason, as the glance shows it (`why`), and when (ms),
-/// sorted by computer. The lines come in the API's order, which this does
-/// not count on. A line of no computer or no reason is no row's: passed
+/// failed save's reason, as the glance shows it (`why`), and when (ms), in
+/// the order each computer was first read. The lines come in the API's
+/// order, which this does not count on for which is newest. A line of no computer or no reason is no row's: passed
 /// over. An answer of another shape says why.
 pub fn whys_of(answer: &Value) -> Result<Vec<(String, i64, String)>, String> {
     let events = &result(answer)?["events"];
@@ -208,17 +208,20 @@ pub fn whys_of(answer: &Value) -> Result<Vec<(String, i64, String)>, String> {
         Value::Array(lines) => lines,
         other => return Err(format!("the logs' events are a list, not {other}")),
     };
-    let mut newest: std::collections::BTreeMap<&str, (i64, &str)> = std::collections::BTreeMap::new();
+    // a list, not a map: at most `WHYS_READ_MAX` lines, and a map's code
+    // costs the cell's Wasm more than the scan does
+    let mut newest: Vec<(&str, i64, &str)> = Vec::new();
     for e in lines.iter().take(WHYS_READ_MAX as usize) {
         let at = e["timestamp"].as_i64().ok_or_else(|| format!("a line's timestamp is its ms, not {}", e["timestamp"]))?;
         let line = &e["source"];
         let (Some(computer), Some(said)) = (line["computer"].as_str().filter(|c| c.starts_with("computer:")), line["event"]["why"].as_str()) else { continue };
-        let kept = newest.entry(computer).or_insert((at, said));
-        if at > kept.0 {
-            *kept = (at, said);
+        match newest.iter_mut().find(|(c, _, _)| *c == computer) {
+            Some(kept) if at > kept.1 => *kept = (computer, at, said),
+            Some(_) => {}
+            None => newest.push((computer, at, said)),
         }
     }
-    Ok(newest.into_iter().map(|(computer, (at, w))| (computer.to_string(), at, why(w))).collect())
+    Ok(newest.into_iter().map(|(computer, at, w)| (computer.to_string(), at, why(w))).collect())
 }
 
 /// What opens a path's word, and what closes it.
@@ -419,12 +422,16 @@ mod tests {
             (NOW - 3_600_000, save_failed(b, "its container is not running")),
         ];
         let read = vec![(a.to_string(), NOW - 60_000, "backup '/data': open /data/…: Permission denied (os error 13)".to_string()), (b.to_string(), NOW - 3_600_000, "its container is not running".to_string())];
-        assert_eq!(whys_of(&events(lines.clone())), Ok(read.clone()));
+        let sorted = |w: Result<Vec<(String, i64, String)>, String>| w.map(|mut w| {
+            w.sort();
+            w
+        });
+        assert_eq!(sorted(whys_of(&events(lines.clone()))), Ok(read.clone()));
         lines.reverse();
-        assert_eq!(whys_of(&events(lines.clone())), Ok(read.clone()), "newest first or last: the newest");
+        assert_eq!(sorted(whys_of(&events(lines.clone()))), Ok(read.clone()), "newest first or last: the newest");
         lines.push((NOW, json!({ "computer": null, "event": { "event": "save_failed", "why": "no one's" } })));
         lines.push((NOW, json!({ "computer": a, "event": { "event": "save_failed" } })));
-        assert_eq!(whys_of(&events(lines)), Ok(read), "a line of no computer, or of no reason, is passed over");
+        assert_eq!(sorted(whys_of(&events(lines))), Ok(read), "a line of no computer, or of no reason, is passed over");
         assert_eq!(whys_of(&events(vec![])), Ok(vec![]), "no lines, none");
         assert_eq!(whys_of(&json!({ "success": true, "result": { "events": { "count": 0 } } })), Ok(vec![]), "none matched: the list left out");
         assert_eq!(whys_of(&json!({ "success": false, "errors": [{ "code": 10000, "message": "Authentication error" }] })), Err("Authentication error".into()));
