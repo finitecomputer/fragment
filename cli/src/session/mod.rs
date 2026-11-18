@@ -446,33 +446,25 @@ fn rows(c: &Client, name: &str) -> Result<Option<Vec<Row>>> {
 
 /// `rows` filed in the archive's list and `gone` dropped from it, a call a
 /// batch; false on a host whose archive has no list.
-fn file_rows(c: &Client, name: &str, rows: Vec<Row>, mut gone: Vec<String>) -> Result<bool> {
-    let mut batch: Vec<Row> = Vec::new();
+fn file_rows(c: &Client, name: &str, rows: Vec<Row>, gone: Vec<String>) -> Result<bool> {
+    let mut calls: Vec<(Vec<Row>, Vec<String>)> = vec![(Vec::new(), Vec::new())];
     let mut bytes = 0;
-    let send = |batch: Vec<Row>, gone: Vec<String>| -> Result<bool> {
-        Ok(op::<serde_json::Value>(c, name, "filed", serde_json::json!({ "rows": batch, "gone": gone }))?.is_some())
-    };
     for row in rows {
         let size = serde_json::to_vec(&row)?.len();
-        if batch.len() == FILED_ROWS || bytes + size > FILED_BYTES {
-            if !send(std::mem::take(&mut batch), Vec::new())? {
-                return Ok(false);
-            }
+        if calls.last().is_some_and(|(r, _)| r.len() == FILED_ROWS || bytes + size > FILED_BYTES) {
+            calls.push((Vec::new(), Vec::new()));
             bytes = 0;
         }
         bytes += size;
-        batch.push(row);
+        calls.last_mut().expect("a call").0.push(row);
     }
-    loop {
-        let rest = gone.split_off(gone.len().min(FILED_GONE));
-        if (!batch.is_empty() || !gone.is_empty()) && !send(std::mem::take(&mut batch), gone)? {
+    calls.extend(gone.chunks(FILED_GONE).map(|keys| (Vec::new(), keys.to_vec())));
+    for (rows, gone) in calls.into_iter().filter(|(r, g)| !r.is_empty() || !g.is_empty()) {
+        if op::<serde_json::Value>(c, name, "filed", serde_json::json!({ "rows": rows, "gone": gone }))?.is_none() {
             return Ok(false);
         }
-        if rest.is_empty() {
-            return Ok(true);
-        }
-        gone = rest;
     }
+    Ok(true)
 }
 
 fn held(c: &Client, name: &str, storage: &CodeStorage) -> Result<Held> {
