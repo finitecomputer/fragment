@@ -2816,6 +2816,25 @@ mod tests {
         assert!(api.contains(&rule), "docs/api.md should say: {rule}");
     }
 
+    /// Goal: a member reads as it did before apps (decision 72), and an app
+    /// member reads in a released client. Method: a person, an app member,
+    /// and the `kind` an older client would refuse.
+    #[test]
+    fn a_member_keeps_its_wire_form_and_an_app_member_leaves_kind_out() {
+        let person = Member { principal: "npub1robin".into(), role: Role::Viewer, added_by: "npub1me".into(), added_at: 1, kind: Some(IdentityKind::Person), owner: None, email: None, app: None };
+        let as_before = serde_json::json!({ "principal": "npub1robin", "role": "viewer", "addedBy": "npub1me", "addedAt": 1, "kind": "person" });
+        assert_eq!(serde_json::to_value(&person).unwrap(), as_before, "no app: the form an older client reads, unchanged");
+        let app = Member { principal: "npub1board".into(), kind: None, owner: Some("npub1me".into()), app: Some(MemberApp { name: "board-k3x9".into() }), ..person };
+        let shown = serde_json::json!({ "principal": "npub1board", "role": "viewer", "addedBy": "npub1me", "addedAt": 1, "owner": "npub1me", "app": { "name": "board-k3x9" } });
+        assert_eq!(serde_json::to_value(&app).unwrap(), shown);
+        assert_eq!(serde_json::from_value::<Member>(shown).unwrap(), app);
+        // why `kind` stays out of an app member: a released CLI reads it as
+        // person or agent alone, and one value it does not know fails its
+        // whole list
+        let older = serde_json::json!({ "principal": "npub1board", "role": "viewer", "addedBy": "npub1me", "addedAt": 1, "kind": "app" });
+        assert!(serde_json::from_value::<Member>(older).is_err());
+    }
+
     /// Goal: the list answers the cell builds through these types keep the
     /// wire form it built by hand (`json!`) before, the one docs/api.md
     /// names. Method: each type against that literal JSON.
