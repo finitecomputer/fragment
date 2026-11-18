@@ -447,6 +447,13 @@ impl FragmentCell {
             // an ended life's cleanup, which outlives it (ended.rs)
             return self.ended_view();
         }
+        if body["op"] == "ended-due" {
+            // every part of its ended lives due now, held ones too, as a
+            // wipe's call makes them (ended.rs), and the alarm armed
+            self.ended_due_now()?;
+            self.schedule().await?;
+            return self.ended_view();
+        }
         if body["op"] == "search-index" {
             // a life's search index, an ended life's too (searchable.rs)
             return self.search_index_lever(body).await;

@@ -6,8 +6,7 @@
 //! tell (one row each), its app's database and blobs (one), an agent
 //! fragment's agent (one: its computer runs it no more, and the registry
 //! names it by the fragment no more; not a wipe's, which empties both
-//! itself), and, a wipe's, its repo (one). A try of a part ends one of
-//! three ways:
+//! itself), and its repo (one). A try of a part ends one of three ways:
 //!
 //! - **done**: the part is gone, cleaned by this try or before it (a repo
 //!   code.storage says is gone, or was never there, is gone; so is an

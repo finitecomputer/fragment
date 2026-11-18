@@ -86,21 +86,6 @@ unfinished design, not debt.
   asleep through this release included); `taken` in each ask, the mark,
   `move_row` and both levers go with them.
 
-## A chat wiped while its seed runs can keep its template's repo
-
-- **Shortcut:** a chat's create answers before its repo is made
-  (`publish::seeds_later`); its seed makes the repo right after. A life
-  that ends while that seed waits on code.storage records no repo for its
-  wipe (none was made when it ended), and the seed, seeing the life gone,
-  stops and keeps what it made, as a delete keeps a repo
-  (`publish.rs` `seed`). A wipe in that second leaves the repo holding
-  the chat's first `fragment.json` (its template and title), or nothing.
-- **Risk:** one chat's title outlives its owner's wipe at code.storage,
-  when the wipe lands within about a second of that chat's making.
-- **Delete when:** a wipe deletes its person's repos by their name
-  (`codestorage::repo_name`, the owner's digest), not only those its
-  fragments' lives recorded.
-
 ## The bridge copies the platform's file bounds; the app, an older platform's
 
 - **Shortcut:** a file's bounds are proto's `limits`, which the platform
