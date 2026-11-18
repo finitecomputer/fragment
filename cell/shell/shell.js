@@ -1015,9 +1015,10 @@ function openChat(name, push = true, path = null) {
 }
 
 // A chat the person picked (its row, a thread's, History's, an alert's, a
-// link to it): opened, and a sign they mean to use their agent, so their
-// computer's start is raced (computer.js `prewake`). A chat the page opens
-// on its own (as it loads, after an archive) is no sign.
+// notice's action): opened, and a sign they mean to use their agent, so
+// their computer's start is raced (computer.js `prewake`). A chat the page
+// opens on its own (as it loads, after an archive), or a framed page asks
+// to open, is no sign.
 function pickChat(name) {
   openChat(name);
   prewake();
@@ -1290,7 +1291,8 @@ addEventListener("message", async (e) => {
   if (e.origin !== origin || from.contentWindow !== e.source) return;
   const name = fragmentAt(url, sender, origin);
   if (!name) return;
-  if (isChat(name)) pickChat(name);
+  // a page's ask, which it may send on its own: no sign of the person's
+  if (isChat(name)) openChat(name);
   else openApp(name, `${url.pathname}${url.search}${url.hash}`);
 });
 // A page an action's answer names (FIN-458: an invite's app, a checkout),
