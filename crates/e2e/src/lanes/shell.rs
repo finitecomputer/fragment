@@ -3471,18 +3471,27 @@ fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str
     let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
     let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     let shown = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=disk_filling]')";
-    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (3.2 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.')");
+    // its words, over settings once they have loaded (what the shots show)
+    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (3.2 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && document.getElementById('settings-page').innerText.toUpperCase().includes('COMPUTER')");
     let filling = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 3_240_662_016u64 }))?;
     b.viewport(page, 1280, 800, false)?;
     b.reload(page)?;
     let told = b.until(page, &words, wait);
     let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
-    let _ = b.screenshot(page, &shots.join("computer-disk-1280.png"));
+    for scheme in ["dark", "light"] {
+        b.color_scheme(page, scheme)?;
+        let _ = b.screenshot(page, &shots.join(format!("computer-disk-1280-{scheme}.png")));
+    }
     b.viewport(page, 390, 844, true)?;
     b.reload(page)?;
     let phone = b.until(page, &words, wait);
     let fits = b.eval(page, &format!("{shown}.getBoundingClientRect().right <= innerWidth + 1"))?;
-    let _ = b.screenshot(page, &shots.join("computer-disk-390.png"));
+    for scheme in ["dark", "light"] {
+        b.color_scheme(page, scheme)?;
+        let _ = b.screenshot(page, &shots.join(format!("computer-disk-390-{scheme}.png")));
+    }
+    // as the lane left it
+    b.color_scheme(page, "dark")?;
     b.viewport(page, 1280, 900, false)?;
     s.ok(
         "a disk filling is told over settings, in Paul's words: the room left, and to ask its agent to move big files to storage; on a desktop and on a phone (390 px), on screen",
