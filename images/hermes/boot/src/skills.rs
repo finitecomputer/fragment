@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn an_agent_is_told_a_sleep_ends_its_processes() {
         let page = COMPUTER_PAGE.split_whitespace().collect::<Vec<_>>().join(" ");
-        for said in ["A sleep or a restart ends every process you started (a server, a background command, a loop, crontab, `hermes cron`), and nothing starts it again", "a schedule on yourself, kept through every restart and sleep", "What should run without you (frequent checks, or for others) is an app"] {
+        for said in ["A sleep or a restart ends every process you started (a server, a background command, a loop), and nothing starts it again: never rely on crontab or `hermes cron`", "a schedule on yourself, kept through every restart and sleep", "What should run without you (frequent checks, or for others) is an app"] {
             assert!(page.contains(said), "computer.md says {said}");
         }
     }

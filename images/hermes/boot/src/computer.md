@@ -59,8 +59,8 @@ Archive, chats imported from elsewhere) and their brains, run
 
 Anything later or recurring ("every hour") is a schedule on yourself,
 kept through every restart and sleep. A sleep or a restart ends every
-process you started (a server, a background command, a loop, crontab,
-`hermes cron`), and nothing starts it again.
+process you started (a server, a background command, a loop), and
+nothing starts it again: never rely on crontab or `hermes cron`.
 
 ```
 fragment schedule add --routine "Tell me if the shelf is in stock" --cron "0 * * * *"
