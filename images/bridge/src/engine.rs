@@ -552,8 +552,9 @@ pub enum Input {
     Tick,
     /// A slice of the computer's counters, from `from` (ms) until now,
     /// over a floor or not (load.rs): work left running, which holds it
-    /// within `LEFT_RUNNING_HOLD_MS` of its agents' work.
-    Slice { from: u64, over: bool },
+    /// within `LEFT_RUNNING_HOLD_MS` of its agents' work. None: the
+    /// platform's hold overlapped it, so its save's work says nothing.
+    Slice { from: u64, over: Option<bool> },
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
     /// The agents whose SimpleX link is bound now (simplex/run.rs), each
@@ -662,13 +663,14 @@ pub struct Engine {
     busy: bool,
     /// Work left running (docs/bridge.md, "Work left running"): the last
     /// `LOAD_SLICES` slices of the computer's counters, each its start and
-    /// whether it was over a floor (`Input::Slice`); when this life's
+    /// whether it was over a floor, or unknown under a save
+    /// (`Input::Slice`); when this life's
     /// agents' work last stopped holding the computer, from which alone
     /// slices count, for `LEFT_RUNNING_HOLD_MS`; and whether it holds it
     /// now. Never written to `/data`: a new life holds none of it until its
     /// own work ends, so a wake's own start never holds a computer woken
     /// for a look.
-    slices: VecDeque<(u64, bool)>,
+    slices: VecDeque<(u64, Option<bool>)>,
     left_from: Option<u64>,
     left: bool,
     /// Turns that ran here and ended lately, oldest first (at most
@@ -960,8 +962,12 @@ impl Engine {
         // only slices wholly after the agents' work: its own (a turn's
         // last tool, the runtime's reply) never holds the computer on
         let window = limits::LOAD_SLICES as u64 * limits::LOAD_SLICE_MS;
-        let working = |from: u64| self.slices.iter().any(|&(start, over)| over && start >= from && start + window + limits::LOAD_SLICE_MS > self.now);
-        let left = !busy && self.left_from.is_some_and(|from| self.now < from + limits::LEFT_RUNNING_HOLD_MS && working(from));
+        let fresh = |start: u64| start + window + limits::LOAD_SLICE_MS > self.now;
+        let working = |from: u64| self.slices.iter().any(|&(start, over)| over == Some(true) && start >= from && fresh(start));
+        // under a save the counters say nothing: a hold stays as it was
+        // (a save never starts one, nor ends one while work runs)
+        let saving = self.slices.back().is_some_and(|&(start, over)| over.is_none() && start + 2 * limits::LOAD_SLICE_MS > self.now);
+        let left = !busy && self.left_from.is_some_and(|from| self.now < from + limits::LEFT_RUNNING_HOLD_MS && (working(from) || (saving && self.left)));
         if left != self.left {
             self.left = left;
             crate::ev!("keepalive.left", { "hold": left, "from": self.left_from });

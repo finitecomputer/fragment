@@ -369,9 +369,10 @@ own work. An idle server, an idle runtime and its desktop never do
   the computer is working while one of its last `LOAD_SLICES` (2
   minutes) was, counting only slices that began after its agents' work
   stopped holding it: a turn's own work (its last tool, the runtime's
-  reply) never holds the computer on, nor does a slice the platform's
-  hold overlapped: the save's own work would hold the computer it saves,
-  and its end save it again. Disk writes are no measure: idle
+  reply) never holds the computer on. A slice the platform's hold
+  overlapped says nothing: the save's own work would hold the computer it
+  saves, and its end save it again; a hold stays as it was through a
+  save, so a long one never ends it while work runs. Disk writes are no measure: idle
   write-back alone passes any useful floor. The measurements behind the
   floors are beside them.
 - **The bound is this life's**, never saved: a new life (a restart, a

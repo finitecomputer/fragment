@@ -96,9 +96,9 @@ fn read(from: CpuFrom) -> Option<Counters> {
 /// Reads the counters every `every` (`LOAD_SLICE_MS`) for the bridge's life, and
 /// gives the engine each slice (`Input::Slice`, as `wrap` puts it in
 /// `inbox`). A slice the platform's hold overlapped (`held`: it saves the
-/// computer then, and its save's work is no agent's) is never over a
-/// floor: else a save would hold the computer it saves, and its end save
-/// it again. With no counters to read, it says so once and gives none, as
+/// computer then, and its save's work is no agent's) says nothing (none):
+/// else a save would hold the computer it saves, and its end save it
+/// again. With no counters to read, it says so once and gives none, as
 /// a bridge before it.
 pub async fn watch<M>(inbox: mpsc::Sender<M>, wrap: fn(Input) -> M, every: Duration, mut held: watch::Receiver<bool>, mut stop: watch::Receiver<bool>) {
     assert!(!every.is_zero(), "slices take time");
@@ -119,7 +119,7 @@ pub async fn watch<M>(inbox: mpsc::Sender<M>, wrap: fn(Input) -> M, every: Durat
         let now = crate::log::now_ms();
         if let Some((was, at)) = last.replace((c, now)) {
             let Some(over) = over(was, c, now.saturating_sub(at)) else { continue };
-            let over = over && !holding;
+            let over = (!holding).then_some(over);
             if inbox.send(wrap(Input::Slice { from: at, over })).await.is_err() {
                 return;
             }
@@ -151,11 +151,10 @@ mod tests {
         assert_eq!(over(zero, at(1, 1), 0), None, "no time passed");
     }
 
-    /// Goal (Codex on #1349): a save's own work never holds the computer it
-    /// saves. Valid: this machine's counters, a thread spinning, give
+    /// Goal (Codex on #1349): a save's own work says nothing of the
+    /// computer's. Valid: this machine's counters, a thread spinning, give
     /// slices over the floor. Invalid: a slice the platform's hold
-    /// overlapped is under it, however busy, and so is one the hold ended
-    /// in.
+    /// overlapped says nothing, however busy, nor one the hold ended in.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_slice_under_the_hold_is_no_work() {
         let spin = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -174,13 +173,13 @@ mod tests {
             Some(Input::Slice { over, .. }) => over,
             other => panic!("a slice: {other:?}"),
         };
-        assert!(over(rx.recv().await), "a spinning core is over the floor");
+        assert_eq!(over(rx.recv().await), Some(true), "a spinning core is over the floor");
         held_tx.send_replace(true);
         rx.recv().await;
-        assert!(!over(rx.recv().await), "under the hold");
+        assert_eq!(over(rx.recv().await), None, "under the hold, it says nothing");
         held_tx.send_replace(false);
-        assert!(!over(rx.recv().await), "the slice the hold ended in");
-        assert!(over(rx.recv().await), "and after it, work again");
+        assert_eq!(over(rx.recv().await), None, "nor in the slice the hold ended in");
+        assert_eq!(over(rx.recv().await), Some(true), "and after it, work again");
         stop_tx.send_replace(true);
         spin.store(false, std::sync::atomic::Ordering::Relaxed);
         spinner.join().unwrap();
