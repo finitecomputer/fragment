@@ -219,8 +219,7 @@ mod tests {
     /// of the alarm that asked for them (a Durable Object's runs 15 minutes
     /// at most), so the start a wake during it owes is never made in what
     /// is left: the sleep's end asks for an alarm at once, an invocation of
-    /// its own, and that alarm makes it, though the wake's own hold ran out
-    /// during the save. Valid (owed and made once), the bound (its save as
+    /// its own, and that alarm makes it. Valid (owed and made once), the bound (its save as
     /// long as its backups' bound, 11 minutes and more), replay (a second
     /// alarm makes no second start). Method: the lifecycle's steps, each
     /// what one invocation of the DO performs.
@@ -230,11 +229,10 @@ mod tests {
         let g = started(&mut l, T);
         let slept = T + IDLE_MS;
         assert!(l.apply(Event::Alarm, slept).actions.contains(&Action::Sleep { generation: g }), "the idle sleep, in an alarm");
-        // a presence wake as it holds: its hold runs out long before the save ends
+        // a presence wake as it holds
         assert!(l.apply(Event::Wake { why: Wake::Presence }, slept + 1_000).actions.is_empty());
         let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, slept + 2_000));
         let saved = slept + 2_000 + 11 * 60_000;
-        assert!(saved > slept + 1_000 + PREWAKE_MS, "the wake's hold ran out during the save");
         assert_eq!(l.apply(Event::Saved { generation: g, seq }, saved).actions, vec![Action::Stop { generation: g, saved: true }]);
         let asleep = saved + 10_000;
         let s = l.apply(Event::Asleep { generation: g }, asleep);
@@ -796,7 +794,7 @@ mod tests {
         let mut l = Lifecycle::new();
         let s = l.apply(Event::Wake { why: Wake::Presence }, T);
         let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
-        let s = l.apply(Event::SnapshotFailed { generation, why: "slow".into() }, T + PREWAKE_MS + 1);
+        let s = l.apply(Event::SnapshotFailed { generation, why: "slow".into() }, T + IDLE_MS + 1);
         assert!(s.actions.is_empty() && matches!(l.phase, Phase::Asleep { .. }), "{s:?}");
     }
 

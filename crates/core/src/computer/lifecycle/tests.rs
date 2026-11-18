@@ -46,21 +46,25 @@ fn open_sockets_keep_it_awake() {
     assert!(l.open(), "the tab is still open");
 }
 
-/// Goal: a pre-wake that nothing follows stops after a minute, and one
-/// a record follows holds the full twenty.
+/// Goal (Paul, 2026-11-18: one number): every wake holds the computer
+/// the idle wait, a pre-wake as a record does, and a later one holds it
+/// from then.
 #[test]
-fn a_prewake_stops_after_a_minute_unless_something_arrives() {
-    let mut l = Lifecycle::new();
-    let s = l.apply(Event::Wake { why: Wake::Presence }, T);
-    let Action::Start { generation } = s.actions[0] else { panic!() };
-    l.apply(Event::Ready { generation }, T + 2_000);
-    let s = l.apply(Event::Alarm, T + PREWAKE_MS);
-    assert!(s.actions.contains(&Action::Sleep { generation }), "{s:?}");
+fn every_wake_holds_it_the_idle_wait() {
+    for why in [Wake::Record, Wake::Presence, Wake::Tab, Wake::Owner, Wake::Joined] {
+        let mut l = Lifecycle::new();
+        let s = l.apply(Event::Wake { why }, T);
+        let Action::Start { generation } = s.actions[0] else { panic!("{why:?}: {s:?}") };
+        l.apply(Event::Ready { generation }, T + 2_000);
+        assert_eq!(l.held_until_ms(), T + IDLE_MS, "{why:?}");
+        assert!(!l.apply(Event::Alarm, T + IDLE_MS - 1).actions.iter().any(|a| matches!(a, Action::Sleep { .. })), "{why:?}");
+        assert!(l.apply(Event::Alarm, T + IDLE_MS).actions.contains(&Action::Sleep { generation }), "{why:?}");
+    }
     let mut l = Lifecycle::new();
     l.apply(Event::Wake { why: Wake::Presence }, T);
     l.apply(Event::Ready { generation: 1 }, T + 2_000);
-    l.apply(Event::Wake { why: Wake::Record }, T + 3_000);
-    let s = l.apply(Event::Alarm, T + PREWAKE_MS);
+    l.apply(Event::Wake { why: Wake::Presence }, T + 3_000);
+    let s = l.apply(Event::Alarm, T + IDLE_MS);
     assert!(!s.actions.iter().any(|a| matches!(a, Action::Sleep { .. })));
     assert_eq!(l.held_until_ms(), T + 3_000 + IDLE_MS);
 }

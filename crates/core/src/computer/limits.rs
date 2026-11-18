@@ -1,16 +1,13 @@
 //! The bounds a computer's lifecycle keeps: its holds, deadlines, pauses and
 //! counts, each checked against the others as it builds.
 
-/// With nothing open, how long a record or a closed socket holds a
-/// computer awake (decision 39).
+/// With nothing open, how long a wake or a closed socket holds a computer
+/// awake (decision 39): the one number (Paul, 2026-11-18).
 pub const IDLE_MS: i64 = 20 * 60_000;
-/// How long a pre-wake holds one that nothing else holds (decision 39:
-/// "it stops again after 60 s if nothing arrives").
-pub const PREWAKE_MS: i64 = 60_000;
 /// Starts that fail in a row before the computer stops trying.
 pub const STARTS_FAILED_MAX: u32 = 3;
 /// How long a computer that won't wake waits before a wake that is not its
-/// owner's (a record, a page's presence, a join, a port tab) tries one
+/// owner's (a record, typing begun, a join, a port tab) tries one
 /// start again: "won't wake" is never for good, since what failed may have
 /// passed (a storage error, a disk a release made room on), yet a computer
 /// that still fails costs at most one start this often, and only while
@@ -104,7 +101,6 @@ pub const ALIVE_MS: i64 = 45_000;
 /// the next event closes the rest.
 pub const KEEPALIVES_LOST_MAX: u32 = 16;
 
-const _: () = assert!(PREWAKE_MS < IDLE_MS, "a pre-wake holds less than a record");
 const _: () = assert!(RETRY_PAUSE_MS << STARTS_FAILED_MAX < START_DEADLINE_MS, "retries stay within a start's deadline");
 const _: () = assert!(SAVE_SETTLE_MS < IDLE_MS, "work that ended is saved before an idle sleep would save it");
 const _: () = assert!(SAVE_RETRY_MS < SAVE_EVERY_MS && SAVE_EVERY_MS < UNSAVED_MAX_MS_DEFAULT, "a failed save is tried again within its bound");

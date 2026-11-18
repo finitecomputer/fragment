@@ -3012,12 +3012,6 @@ impl ComputerCell {
                 self.wake(Wake::Owner).await?;
                 json_response(&self.view().await?)
             }
-            // its owner's page pre-waking it (decision 39): held a minute,
-            // as a page's presence is, never "won't wake" lifted
-            (Method::Post, ["prewake"]) => {
-                self.wake(Wake::Presence).await?;
-                json_response(&self.view().await?)
-            }
             (Method::Post, ["sleep"]) => {
                 self.drive(Event::Sleep).await?;
                 json_response(&self.view().await?)

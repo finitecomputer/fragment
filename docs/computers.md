@@ -38,18 +38,18 @@ Phases: `asleep`, `starting`, `awake`, `sleeping`, and `wont_wake`
 an image may rely on this:
 
 - **It is woken** by a record on a channel one of its agents subscribed
-  to with `wake: true`, one of its agents added to a fragment, a sign
-  that its person means to use it (below), an open port tab, or its
-  owner. Never by its own guest's traffic.
-- **It stays awake** while one of its agents' turns runs (the guest holds
-  its keepalive socket) or a port tab is open, while its person is
-  interacting, and for the idle wait (`IDLE_MS`, 20 minutes) after a
-  turn, a record or a join that woke it, a port tab closed, or its
-  owner's own wake or restart. Each sign of intent holds it a minute
-  (`PREWAKE_MS`): in its owner's shell, a chat picked, the launcher
-  opened, or typing begun in a chat of theirs with their agent; a page
-  opening a fragment it follows. Nothing else holds it, but always on
-  (decision 25; docs/billing.md).
+  to with `wake: true`, one of its agents added to a fragment, an open
+  port tab, its owner, or a person beginning to use it: in its owner's
+  shell a chat picked or the launcher opened (their own wake), and on
+  any page of a fragment one of its agents follows, typing begun (the
+  page's presence `typing` turning on, decision 39). Never by its own
+  guest's traffic, a page loading, a tab shown again, a socket
+  reconnecting, or a timer: an open tab nobody uses keeps nothing awake.
+- **It stays awake** while it is used (one of its agents' turns runs,
+  the guest holding its keepalive socket, or a port tab is open), then
+  for the idle wait (`IDLE_MS`, 20 minutes) after the last use or wake,
+  then it saves and sleeps. That is the one number. An always-on seat's
+  computer never sleeps (decision 25; docs/billing.md).
 - **It is saved** when its work ends (its last keepalive or its last
   port tab closes, and 30 s pass with no keepalive opened again), every 15 minutes while a keepalive stays
   open, and at every sleep (below, "Saves and what a wake restores").

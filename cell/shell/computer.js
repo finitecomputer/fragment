@@ -46,30 +46,28 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     making.catch(() => { making = null; });
     return making;
   }
-  // The pre-wake (decision 39) races the computer's start against what the
-  // person is about to ask of it: each sign that they mean to use their
-  // agent (a chat picked, shell.js `pickChat`; the launcher opened; the
-  // first keystroke after a pause in a chat of theirs with their agent,
-  // frame-messages.js `active`) asks it to wake (`POST …/prewake`) and
-  // holds it a minute, as a page's presence does
-  // (`fragment_core::computer::PREWAKE_MS`), never an owner's twenty. Only
-  // another such sign holds it longer; a page left open, or loaded again,
-  // asks nothing, and it sleeps. Their agent's desktop is woken by its own
-  // port. One ask every `PREWAKE_AGAIN_MS` at most: signs closer than that
-  // are one sign.
+  // The pre-wake races the computer's start against what the person is
+  // about to ask of it. Each sign that they mean to use their agent (a
+  // chat picked, shell.js `pickChat`; the launcher opened) is their own
+  // wake (`POST …/wake`), held the idle wait as every wake is
+  // (docs/computers.md, "It stays awake"). Typing in a chat wakes its
+  // agents' computers from the chat's own socket (decision 39). A page
+  // left open, or loaded again, asks nothing, so it sleeps. Their agent's
+  // desktop is woken by its own port. One ask a minute at most: the wait
+  // is twenty, so signs closer than that are one sign.
   // A computer that won't start is not woken by the person's presence: its
   // starts kept failing, so the next is theirs to ask for (Restart, in its
   // notice), never one every visit pays for unasked. While the first run
   // makes the agent, its computer starts once it is in its chat (the
   // platform's `joined`), with the agent assigned, not before.
-  const PREWAKE_AGAIN_MS = 10_000;
+  const PREWAKE_AGAIN_MS = 60_000;
   let woke = -Infinity;
   function prewake() {
     if (setupPending()) return;
     const c = computer();
     if (!c || document.hidden || c.phase === "wont_wake" || now() - woke < PREWAKE_AGAIN_MS) return;
     woke = now();
-    api("POST", `/api/computers/${seg(c.computer)}/prewake`, {}).then(computerIs).catch(() => {});
+    api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then(computerIs).catch(() => {});
   }
   // ---- what the person is told (FIN-458, `GET /api/notices`): each
   // notice in the server's own words, the most pressing first, drawn the

@@ -2201,17 +2201,6 @@ addEventListener("message", (event) => {
   const name = frameOfWindow(event.source)?.dataset.fragment;
   if (name && byName(name)?.kind === "chat" && byName(name).archived) setArchived(name, false);
 });
-// A chat's page says its person began typing there (`active`): a sign they
-// mean to use their agent (computer.js `prewake`), taken only from a chat
-// of their own (its page's code is theirs: another's could send it on a
-// timer), in front, with one of their agents in it.
-addEventListener("message", (event) => {
-  if (event.data?.fragment !== KIND.active) return;
-  const frame = frameOfWindow(event.source);
-  const name = frame?.dataset.fragment;
-  const chat = name === state.current ? byName(name) : null;
-  if (chat && own(chat) && !frame.hidden && !$("frames").hidden && agentsOf(name).some((id) => state.agents.has(id))) prewake();
-});
 addEventListener("message", (event) => {
   const d = event.data;
   if (d?.fragment !== KIND.agentsAsk && d?.fragment !== KIND.busy) return;

@@ -222,8 +222,9 @@ computers) returns once this product works.
 39. **A subscription wakes a computer.** A record on a channel its bridge
     follows wakes it. It stays awake while a port tab or the guest's
     keepalive socket to the Computer DO is open (container traffic does
-    not count), then sleeps after `computer::IDLE_MS`. A page that opens
-    a fragment it follows pre-wakes it (`PREWAKE_MS`). An agent added to
+    not count), then sleeps after `computer::IDLE_MS`. Someone beginning
+    to type on a page of a fragment it follows pre-wakes it, held as any
+    wake is; a page opening, or reconnecting, does not. An agent added to
     a fragment wakes it with `{kind: "joined"}` on its `tasks`.
 40. **Blessed templates run the platform's release.** A chat, agent, brain
     or skills fragment runs its template's code from the release, so one

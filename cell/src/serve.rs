@@ -360,9 +360,6 @@ impl FragmentCell {
             let page = req.headers().get("origin")?.is_some() && !matches!(credential, Some(Credential::Key(_)));
             match self.live(&req, caller, credential, &principal, link) {
                 Ok(resp) => {
-                    // a page following this fragment may soon post to a computer's
-                    // channel (an agent's own socket wakes no computer it runs on)
-                    self.prewake(&principal);
                     laps.lap("accept");
                     laps.stamp(resp)?
                 }

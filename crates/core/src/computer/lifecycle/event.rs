@@ -5,7 +5,7 @@
 use fragment_proto::computer::LifeEnd;
 use serde::{Deserialize, Serialize};
 
-use crate::computer::limits::{IDLE_MS, PREWAKE_MS, UNSAVED_MAX_MS_DEFAULT};
+use crate::computer::limits::{IDLE_MS, UNSAVED_MAX_MS_DEFAULT};
 
 /// The deployment's rules for its computers' lifecycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,15 +21,15 @@ impl Default for Rules {
     }
 }
 
-/// What woke it, which says how long it holds the computer.
+/// What woke it. Each holds it the idle wait (Paul, 2026-11-18: one
+/// number); only its owner's lifts "won't wake".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Wake {
     /// A record on a channel one of its agents subscribed to.
     Record,
-    /// A page opened a fragment it subscribes to, or its owner's shell
-    /// saw a sign they mean to use their agent (`POST
-    /// /api/computers/{id}/prewake`: a chat picked, or begun typing in).
+    /// Someone began typing on a page of a fragment it subscribes to
+    /// (decision 39's pre-wake).
     Presence,
     /// A port tab is opening.
     Tab,
@@ -43,11 +43,9 @@ pub enum Wake {
 }
 
 impl Wake {
+    /// The idle wait, whatever woke it: one number for every hold.
     pub(super) fn hold_ms(self) -> i64 {
-        match self {
-            Wake::Presence => PREWAKE_MS,
-            Wake::Record | Wake::Tab | Wake::Owner | Wake::Joined => IDLE_MS,
-        }
+        IDLE_MS
     }
 }
 

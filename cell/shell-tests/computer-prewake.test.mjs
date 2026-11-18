@@ -1,13 +1,12 @@
-// cell/shell/computer.js's pre-wake (decision 39; Paul, 2026-11-18: each
-// sign of intent holds the computer a minute): as its person picks a chat,
-// opens the launcher, or begins typing in a chat of theirs with their
-// agent (shell.js calls `prewake` for each), the shell races their
-// computer's start, as a page's presence does (`POST …/prewake`, held a
-// minute), never as its owner's wake (`POST …/wake`, held twenty). Only
-// another such sign asks again, one ask every 10 s at most: nothing the
-// page does on its own (a timer, the tab shown again) asks, so a tab left
-// open lets the computer sleep. The real `createComputer`, its page faked
-// as far as the pre-wake.
+// cell/shell/computer.js's pre-wake (Paul, 2026-11-18: a computer is
+// awake while it is used, then twenty minutes; only real interaction is a
+// use): as its person picks a chat or opens the launcher (shell.js calls
+// `prewake` for each), the shell races their computer's start with their
+// own wake (`POST …/wake`, held the idle wait). Only another such sign
+// asks again, one ask a minute at most: nothing the page does on its own
+// (a timer, the tab shown again) asks, so a tab left open lets the
+// computer sleep. The real `createComputer`, its page faked as far as the
+// pre-wake.
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
@@ -15,7 +14,7 @@ import assert from "node:assert/strict";
 import { createComputer } from "../shell/computer.js";
 
 const COMPUTER = "computer:aa";
-const PREWAKE = `/api/computers/${COMPUTER}/prewake`;
+const WAKE = `/api/computers/${COMPUTER}/wake`;
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
 // The page's clock and timers, a test's: nothing runs unless it ticks.
@@ -89,10 +88,10 @@ function page(t, { phase = "asleep", setup = false, start = 1_700_000_000_000 } 
   });
 }
 
-test("arriving asks a pre-wake, never an owner's wake: a minute's hold, not twenty", async (t) => {
+test("a sign asks the owner's wake", async (t) => {
   const p = page(t);
   p.ui.prewake();
-  assert.deepEqual(p.posted(), [PREWAKE]);
+  assert.deepEqual(p.posted(), [WAKE]);
   await settle();
   assert.equal(p.shell.computer.phase, "awake", "its answer is the computer's view, taken");
 });
@@ -102,24 +101,24 @@ test("a tab left open asks nothing more: no timer of its own renews the pre-wake
   p.ui.prewake();
   assert.deepEqual(p.clock.pending(), [], "it set no timer");
   for (let i = 0; i < 40; i++) p.clock.tick(60_000);
-  assert.deepEqual(p.posted(), [PREWAKE], "forty minutes open, one pre-wake: the computer sleeps after its minute");
+  assert.deepEqual(p.posted(), [WAKE], "forty minutes open, one wake: the computer sleeps twenty minutes after it");
 });
 
-test("each sign the person gives asks again, signs within 10 s of the last ask one sign, while the computer is awake too", async (t) => {
+test("each sign the person gives asks again, signs within a minute of the last ask one sign, while the computer is awake too", async (t) => {
   const p = page(t);
   p.ui.prewake();
   await settle();
   assert.equal(p.shell.computer.phase, "awake");
-  // a chat opened, then typing in bursts: a sign every 4 s for a minute
-  for (let s = 4; s <= 60; s += 4) {
-    p.clock.tick(4_000);
+  // chats picked in turn: a sign every 20 s for three minutes
+  for (let s = 20; s <= 180; s += 20) {
+    p.clock.tick(20_000);
     p.ui.prewake();
   }
   const at = p.calls.map((x) => x.at - p.calls[0].at);
-  assert.deepEqual(at, [0, 12_000, 24_000, 36_000, 48_000, 60_000], "each ask holds it a minute, the next sign within it renewing it");
+  assert.deepEqual(at, [0, 60_000, 120_000, 180_000], "each ask holds it the idle wait, the next sign within it renewing it");
   // and then nothing for as long as the person gives no sign
   p.clock.tick(20 * 60_000);
-  assert.equal(p.calls.length, 6);
+  assert.equal(p.calls.length, 4);
 });
 
 test("the tab shown again is no sign: it asks nothing; and a hidden page asks nothing for a sign either", (t) => {
@@ -132,7 +131,7 @@ test("the tab shown again is no sign: it asks nothing; and a hidden page asks no
   assert.deepEqual(p.posted(), [], "hidden: no one is there");
   p.shown(true);
   p.ui.prewake();
-  assert.deepEqual(p.posted(), [PREWAKE]);
+  assert.deepEqual(p.posted(), [WAKE]);
 });
 
 test("a computer that won't wake, or one the first run has not set up, is not pre-woken", (t) => {
@@ -145,19 +144,19 @@ test("a computer that won't wake, or one the first run has not set up, is not pr
   assert.deepEqual(q.posted(), [], "the first run starts it once its agent is in its chat");
   q.shell.setup = false;
   q.ui.prewake();
-  assert.deepEqual(q.posted(), [PREWAKE]);
+  assert.deepEqual(q.posted(), [WAKE]);
 });
 
-test("a pre-wake refused (no credit, a deploy) is quiet, and the next is asked on the next thing the person does", async (t) => {
+test("a wake refused (no credit, a deploy) is quiet, and the next is asked on the next thing the person does", async (t) => {
   const p = page(t);
   p.refusing = Object.assign(new Error("no credit"), { status: 402 });
   p.ui.prewake();
   await settle();
   assert.equal(p.shell.computer.phase, "asleep", "a refusal is no view");
   p.refusing = null;
-  p.clock.tick(10_000);
+  p.clock.tick(60_000);
   p.ui.prewake();
   await settle();
-  assert.deepEqual(p.posted(), [PREWAKE, PREWAKE]);
+  assert.deepEqual(p.posted(), [WAKE, WAKE]);
   assert.equal(p.shell.computer.phase, "awake");
 });

@@ -11,12 +11,11 @@ pub fn default_computer_of(owner: &str) -> String {
     format!("computer:{}", &hex::encode(digest)[..24])
 }
 
-/// The computers a socket of `by` on a fragment pre-wakes (decision 39):
-/// each one the fragment's wake subscriptions (`(principal, computer)`)
-/// name, but none that `by`'s own name. A computer's agents never pre-wake
-/// their own computer, as what they post never wakes it: its guest opens
-/// their sockets as it boots and again after one drops, also while it goes
-/// to sleep, and a wake then would start it again from that sleep's save.
+/// The computers `by` beginning to type on a fragment pre-wakes (decision
+/// 39): each one the fragment's wake subscriptions (`(principal,
+/// computer)`) name, but none that `by`'s own name. A computer's agents
+/// never pre-wake their own computer, as what they post never wakes it:
+/// one as it goes to sleep would start it again from that sleep's save.
 /// Each once, in the order first named.
 pub fn prewoken<'a>(subs: &[(&'a str, &'a str)], by: &str) -> Vec<&'a str> {
     let own: Vec<&str> = subs.iter().filter(|(principal, _)| *principal == by).map(|(_, computer)| *computer).collect();

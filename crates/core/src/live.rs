@@ -1,10 +1,12 @@
 //! The live socket's bounds (cell/src/live.rs), as pure logic: the
-//! queries one principal may run over its sockets, and how often a socket
-//! may change its presence.
+//! queries one principal may run over its sockets, how often a socket
+//! may change its presence, and which change is its person beginning to
+//! type.
 
 use std::collections::BTreeSet;
 
 use fragment_proto::limits;
+use serde_json::Value;
 
 /// Why a socket's query was not run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +87,18 @@ pub fn presence_admit(due_ms: i64, now_ms: i64) -> Option<i64> {
     let next = due + PRESENCE_EVERY_MS;
     assert!(next > now_ms, "the next change is due after this one");
     Some(next)
+}
+
+/// Whether a socket's presence change says its person began typing
+/// (decision 39: a use of the agents its fragment wakes): `typing` is
+/// `true` now and was not on this socket before. The chat's composer
+/// turns it on at the first keystroke after a pause and off after a send
+/// or `TYPING_MS` of quiet; nothing else of a presence is read. A page
+/// sends its presence again as its socket reconnects, and as its tab is
+/// shown or hidden: none of those is typing begun.
+pub fn typing_began(before: Option<&Value>, now: &Value) -> bool {
+    let typing = |v: &Value| v.get("typing") == Some(&Value::Bool(true));
+    typing(now) && !before.is_some_and(typing)
 }
 
 #[cfg(test)]
@@ -184,5 +198,26 @@ mod tests {
         let flood: Vec<i64> = (0..10_000).map(|i| t + i).collect();
         let through = admitted(&flood).iter().filter(|a| **a).count() as i64;
         assert_eq!(through, limits::PRESENCE_BURST + 10 * limits::PRESENCE_PER_S - 1, "a burst, then ten a second");
+    }
+
+    /// Goal (Paul, 2026-11-18): only typing begun is a use; a page that
+    /// loads, reconnects, or is shown again sends its presence too, and is
+    /// none. Valid (begun, on a fresh socket too), invalid (other values,
+    /// shapes), replay (typing that goes on, or the same presence again).
+    #[test]
+    fn only_typing_turning_on_is_typing_begun() {
+        let page = serde_json::json!({ "typing": false, "looking": true });
+        let hidden = serde_json::json!({ "typing": false, "looking": false });
+        let typing = serde_json::json!({ "typing": true, "looking": true });
+        assert!(!typing_began(None, &page), "a page loaded, or its socket reconnected, says it is here");
+        assert!(!typing_began(Some(&page), &hidden) && !typing_began(Some(&hidden), &page), "the tab hidden, then shown again");
+        assert!(typing_began(Some(&page), &typing), "the first keystroke after a pause");
+        assert!(typing_began(None, &typing), "a socket reconnected as its person types");
+        assert!(!typing_began(Some(&typing), &serde_json::json!({ "typing": true, "looking": false })), "typing goes on");
+        assert!(!typing_began(Some(&typing), &typing), "the same presence again");
+        assert!(typing_began(Some(&page), &typing) && !typing_began(Some(&typing), &page), "a pause, then typing again begins again");
+        for other in [serde_json::json!({ "typing": "yes" }), serde_json::json!({ "typing": 1 }), serde_json::json!(null), serde_json::json!([true]), serde_json::json!("typing"), serde_json::json!({ "x": 1, "y": 2 })] {
+            assert!(!typing_began(None, &other), "{other}");
+        }
     }
 }

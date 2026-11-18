@@ -553,7 +553,7 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// The computers `principal`'s socket on this fragment pre-wakes: those
+    /// The computers `principal`'s typing on this fragment pre-wakes: those
     /// its channels wake, but none that `principal`'s own wake subscriptions
     /// name (`fragment_core::computer::prewoken`; at most `SUBS_MAX` rows).
     pub(crate) fn woken_computers(&self, principal: &str) -> CellResult<Vec<String>> {
@@ -562,14 +562,14 @@ impl FragmentCell {
         Ok(fragment_core::computer::prewoken(&subs, principal).into_iter().map(|u| format!("computer:{}", u.trim_start_matches("computer:"))).collect())
     }
 
-    /// A page opened this fragment (`principal`'s socket): the computers its
-    /// channels wake may hear from it soon, so each starts now (decision 39),
-    /// at most every `PREWAKE_EVERY_MS`. Each wake runs on its own, so the
-    /// page's socket never waits for a start; a failed pre-wake costs only
-    /// the wait. An agent's own socket (its guest following this fragment,
-    /// opened as it boots and again after one drops) pre-wakes no computer
-    /// it runs on: one opened as that computer goes to sleep would start it
-    /// again at once.
+    /// `principal` began typing on a page of this fragment (its socket's
+    /// presence, `fragment_core::live::typing_began`): the computers its
+    /// channels wake may hear from them soon, so each starts now, held as
+    /// any wake is (decision 39), at most every `PREWAKE_EVERY_MS`. A
+    /// socket's opening is no use of them: a tab left open reconnects on
+    /// its own. Each wake runs on its own, so the socket never waits for a
+    /// start; a failed pre-wake costs only the wait. An agent's own socket
+    /// pre-wakes no computer it runs on.
     pub(crate) fn prewake(&self, principal: &str) {
         let now = crate::js::now_ms();
         let due = self.meta(MetaKey::PrewakeAt).ok().flatten().and_then(|v| v.parse::<i64>().ok()).is_none_or(|at| now >= at);
