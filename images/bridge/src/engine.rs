@@ -31,10 +31,12 @@
 //!   next turn in that chat is told what was cut (P5): its note is built
 //!   from the chat's journal alone, before its claim (note.rs), so it is
 //!   said once, and the same in any life.
-//! - A turn another life claimed (409) ran after this life's `/data` was
-//!   saved, so its runtime remembers none of it: the agent's next turn in
-//!   that chat is told what those turns were (`TurnStart::forgotten`,
-//!   note.rs "forgotten"), once in this life.
+//! - A turn another life ran after this life's `/data` was saved (its
+//!   claim answered 409, and its lost end too: that life ended it) is in
+//!   no memory of its runtime's: the agent's next turn in that chat is told
+//!   the chat (`TurnStart::forgotten`, note.rs `recap`), once in this life.
+//!   One whose lost end lands as this life's was cut in that life: the cut
+//!   note tells it.
 //! - A turn is claimed only while the runtime can take it (`Connected`),
 //!   so a turn waits, unclaimed, for a runtime that is still starting.
 //! - Every turn gets both records: a turn refused, or stopped while it
@@ -674,13 +676,13 @@ pub struct Engine {
     /// `ENDED_HOPS_MAX`, each for `ENDED_HOPS_MS`): a reply of one read after
     /// it was let go is one hop past it (`hop_of`). Never written to `/data`.
     ended: VecDeque<EndedTurn>,
-    /// Per agent and chat, its turns there another life ran since this
-    /// life's `/data` was saved (each claim answered 409), the newest at
-    /// most `NOTE_FORGOTTEN_MAX`, and how many more: its runtime remembers
-    /// none of them, so its next turn there is told (`TurnStart::forgotten`)
-    /// and the entry goes. Never written to `/data`: a life that restores
-    /// the same old `/data` reads them again, and is told again.
-    forgotten: BTreeMap<(String, String), (VecDeque<String>, u32)>,
+    /// The agents and chats where another life ran a turn of the agent's
+    /// since this life's `/data` was saved (its lost end answered 409, or
+    /// refused: `posted`): its runtime remembers none of it, so its next
+    /// turn there is told the chat (`TurnStart::forgotten`) and the entry
+    /// goes. Never written to `/data`: a life that restores the same old
+    /// `/data` reads them again, and is told again.
+    forgotten: BTreeSet<(String, String)>,
     /// Cut turns another life ran (claims answered 409) that may be
     /// continued once their lost end is this life's, which the journal
     /// decides then (`Effect::ReadCut`). Never written to `/data`: a life
@@ -801,7 +803,7 @@ impl Engine {
             left_from: None,
             left: false,
             ended: VecDeque::new(),
-            forgotten: BTreeMap::new(),
+            forgotten: BTreeSet::new(),
             unread_cuts: BTreeSet::new(),
             reading_cuts: BTreeMap::new(),
             closed_late: BTreeSet::new(),
@@ -1651,11 +1653,21 @@ impl Engine {
         }
         let chat = (t.agent.clone(), t.fragment.clone());
         let cut = (kept && settled).then(|| t.clone());
+        // a lost end refused as another life's (409: that life ran the
+        // turn, or ended it, after this /data was saved): the runtime does
+        // not remember it, and the agent's next turn here is told the chat.
+        // One that lands as this life's was cut in that life: the cut note
+        // tells it.
+        let forgot = !kept && post == records::work_id(id, "end") && t.owed.iter().any(|o| o.id == post && o.body["error"] == LOST);
         t.owed.retain(|o| o.id != post);
         self.dirty = true;
         if t.owed.is_empty() {
             self.state.turns.remove(id);
             crate::ev!("turn.closed", { "turn": id });
+        }
+        if forgot {
+            crate::ev!("turn.forgotten", { "turn": id, "agent": chat.0, "fragment": chat.1 });
+            self.forgotten.insert(chat.clone());
         }
         // another life's cut turn: its read is due now, or never (that life
         // ended it, or its asker stopped it first)
@@ -1867,15 +1879,9 @@ impl Engine {
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.dirty = true;
                 crate::ev!("turn.lost", { "turn": id, "agent": agent, "why": "another life claimed it" });
-                // that life ran it after this /data was saved: the runtime
-                // remembers nothing of it, and its next turn here is told
-                let (newest, more) = self.forgotten.entry((agent.clone(), fragment.clone())).or_default();
-                newest.push_back(id.to_string());
-                if newest.len() > limits::NOTE_FORGOTTEN_MAX {
-                    newest.pop_front();
-                    *more = more.saturating_add(1);
-                }
-                assert!(newest.len() <= limits::NOTE_FORGOTTEN_MAX, "a note names its newest forgotten turns");
+                // whether that life ran it, which the runtime does not
+                // remember, its end's answer says (`posted`), before the
+                // chat's next claim: it is first in the chat's lane
                 self.owe(&agent, &fragment, id, end);
                 self.owe_answer(id, &Outcome::Error(LOST.into()), false);
                 self.pump(&agent, &fragment);
@@ -1910,9 +1916,9 @@ impl Engine {
             crate::ev!("turn.refused", { "turn": id, "agent": agent, "fragment": fragment, "why": "its runtime is none this bridge runs", "runtime": runtime });
             return self.end(id, Outcome::Error(refused_runtime(&runtime)), Closed::Expired);
         };
-        // what another life ran here that the runtime does not remember,
-        // told once: this turn takes it
-        let (forgotten, forgotten_more) = self.forgotten.remove(&(agent.clone(), fragment.clone())).map(|(newest, more)| (Vec::from(newest), more)).unwrap_or_default();
+        // the runtime does not remember what another life ran here: this
+        // turn is told the chat, once
+        let forgotten = self.forgotten.remove(&(agent.clone(), fragment.clone()));
         // the menu, once a life in each chat, as the agent first runs there
         if !menu.is_empty() && self.published.insert((agent.clone(), fragment.clone())) {
             self.post(&agent, &fragment, records::WORK, records::menu_id(&self.life), records::commands(&a.identity, menu), Vec::new());
@@ -1956,7 +1962,6 @@ impl Engine {
             note: t.note.clone(),
             age,
             forgotten,
-            forgotten_more,
             command: t.command,
             reply_to: t.reply_to,
             quote: None,
