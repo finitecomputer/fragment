@@ -470,6 +470,21 @@ pub struct GlanceTrouble {
     /// Whose it is, and their email, when a person's computer.
     pub npub: Option<String>,
     pub email: Option<String>,
+    /// For `saves_failing`: the reason its newest failed save gave, and
+    /// when, if that line is among the newest read
+    /// (`fragment_core::glance::WHYS_READ_MAX`); none for another kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<TroubleWhy>,
+}
+
+/// Why a computer's save failed, as its line said: the platform's words,
+/// short, with a person's paths left out (`fragment_core::glance::why`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TroubleWhy {
+    /// When it was logged (ms).
+    pub at: i64,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

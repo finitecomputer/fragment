@@ -3,12 +3,12 @@
 //! signed in; the deployment's Workers Logs, read through Cloudflare's
 //! Workers Observability with a read-only key (`keys::observability_query`),
 //! answer what runs: computers awake, fragments that ran, and computers in
-//! trouble (`fragment_core::glance`). No person's object is called. Each
-//! read asks afresh: the page asks again every minute, and only operators
-//! open it.
+//! trouble, with why a save failed (`fragment_core::glance`). No person's
+//! object is called. Each read asks afresh: the page asks again every
+//! minute, and only operators open it.
 
 use fragment_core::glance::{self as core, Question};
-use fragment_proto::org::{AdminGlance, GlanceLogs, GlanceTrouble, TroubleKind};
+use fragment_proto::org::{AdminGlance, GlanceLogs, GlanceTrouble, TroubleKind, TroubleWhy};
 use worker::{Env, Url};
 
 use crate::config::Config;
@@ -25,6 +25,9 @@ struct Read {
     fragments_now: u64,
     fragments_today: u64,
     trouble: Vec<(String, TroubleKind, u64)>,
+    /// Each computer's newest failed save's reason, and when, of the lines
+    /// read (`core::whys_of`).
+    whys: Vec<(String, i64, String)>,
 }
 
 /// The glance now, the day starting at the operator's `dayStart`.
@@ -65,7 +68,11 @@ pub(crate) async fn glance(env: &Env, cfg: &Config, url: &Url) -> CellResult<Adm
                 .into_iter()
                 .map(|(computer, kind, lines)| {
                     let owner = g.owners.iter().find(|(c, _, _)| *c == computer);
-                    GlanceTrouble { npub: owner.map(|(_, n, _)| n.clone()), email: owner.and_then(|(_, _, e)| e.clone()), computer, kind, lines }
+                    let why = match kind {
+                        TroubleKind::SavesFailing => r.whys.iter().find(|(c, _, _)| *c == computer).map(|(_, at, text)| TroubleWhy { at: *at, text: text.clone() }),
+                        TroubleKind::WontWake | TroubleKind::DiskFilling => None,
+                    };
+                    GlanceTrouble { npub: owner.map(|(_, n, _)| n.clone()), email: owner.and_then(|(_, _, e)| e.clone()), computer, kind, lines, why }
                 })
                 .collect(),
         },
@@ -80,7 +87,7 @@ async fn read(env: &Env, o: &crate::config::ObservabilityConfig, now: i64, day_s
         let answer = crate::keys::observability_query(env, o, &q.body(&o.script, now, day_start)).await?;
         Ok::<_, CellError>((q, answer))
     });
-    let mut read = Read { awake_now: 0, awake_today: 0, awake_week: vec![], fragments_now: 0, fragments_today: 0, trouble: vec![] };
+    let mut read = Read { awake_now: 0, awake_today: 0, awake_week: vec![], fragments_now: 0, fragments_today: 0, trouble: vec![], whys: vec![] };
     let mut kinds = Vec::with_capacity(3);
     // bounded: one answer per question
     for answered in futures_util::future::join_all(asked).await {
@@ -95,6 +102,7 @@ async fn read(env: &Env, o: &crate::config::ObservabilityConfig, now: i64, day_s
             Question::WontWake => kinds.push((TroubleKind::WontWake, core::by_computer_of(&answer).map_err(why)?)),
             Question::SavesFailing => kinds.push((TroubleKind::SavesFailing, core::by_computer_of(&answer).map_err(why)?)),
             Question::DiskFilling => kinds.push((TroubleKind::DiskFilling, core::by_computer_of(&answer).map_err(why)?)),
+            Question::SaveWhys => read.whys = core::whys_of(&answer).map_err(why)?,
         }
     }
     read.trouble = core::troubles(kinds);

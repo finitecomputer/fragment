@@ -244,6 +244,7 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
         let script = crate::OBSERVABILITY_SCRIPT;
         s.observability.log(now - 30_000, json!({ "$workers.scriptName": script, "computer": computer, "phase": { "phase": "awake" } }));
         s.observability.log(now - 20_000, json!({ "$workers.scriptName": script, "computer": computer, "phase": { "phase": "failed" } }));
+        s.observability.log(now - 10_000, json!({ "$workers.scriptName": script, "computer": computer, "event": { "event": "save_failed", "generation": 1, "seq": 1, "why": "backup '/data': No space left on device (os error 28)" } }));
     }
     let page = b.open(&format!("{}/admin", api.base))?;
     let tiles = b.until(&page, "document.querySelectorAll('#tiles .tile').length === 5 && /Updated/.test(document.getElementById('glance-at').textContent)", wait);
@@ -270,6 +271,18 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
             rows && before == json!(awake.to_string()),
             json!({ "page": shown, "glance": read.body["logs"] }),
         );
+        let said = b.until(
+            &page,
+            &format!("[...document.querySelectorAll('#trouble-rows tr')].some(r => r.textContent.includes({glancer_email:?}) && r.textContent.includes('a save failed') && /^disk full · \\d{{4}}-\\d\\d-\\d\\d \\d\\d:\\d\\d · backup '\\/data': No space left on device \\(os error 28\\)$/.test(r.querySelector('.why')?.textContent))"),
+            wait,
+        );
+        s.ok("its trouble says why a save failed: the kind's short label, when, and the reason its newest line gave", said, b.eval(&page, "document.getElementById('trouble-rows').innerText")?);
+        // the trouble rows as an operator sees them, wide and narrow, for review
+        for (width, height, mobile, name) in [(1280, 900, false, "glance-trouble-1280.png"), (390, 844, true, "glance-trouble-390.png")] {
+            b.viewport(&page, width, height, mobile)?;
+            let _ = b.screenshot(&page, &s.dir("admin-page").join(name));
+        }
+        b.viewport(&page, 1280, 900, false)?;
         // no cache: a computer awake since, and the glance read again
         s.observability.log(now, json!({ "$workers.scriptName": crate::OBSERVABILITY_SCRIPT, "computer": "computer:000000000000000000000a11", "phase": { "phase": "awake" } }));
         b.click(&page, "#tabs button[data-tab=glance]")?;
@@ -345,6 +358,7 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     }
     let theirs = fragment_core::computer::default_computer_of(ivy_id);
     let stranger = "computer:00000000000000000000beef".to_string();
+    let saver = "computer:0000000000000000000005a7".to_string();
     // the node's Worker's lines, and another deployment's in the same
     // account (a branch's), which name the same person's computer (a hash
     // of them) and are never counted
@@ -362,9 +376,14 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
         s.observability.log(now - ago, of(ours, json!({ "computer": theirs, "phase": { "phase": "failed", "why": "its container kept stopping" } })));
     }
     s.observability.log(now - 30_000, of(ours, json!({ "computer": stranger, "disk": { "total": 20_000_000_000_u64, "free": 1_000_000_000_u64 }, "generation": 3 })));
+    // its saves failed twice: the newest says why, naming a person's file
+    let failed = |seq: u64, why: &str| json!({ "computer": saver, "event": { "event": "save_failed", "generation": 2, "seq": seq, "why": why }, "phase": { "phase": "awake", "generation": 2, "since_ms": now - 600_000 } });
+    s.observability.log(now - 40_000, of(ours, failed(1, "its container is not running")));
+    s.observability.log(now - 15_000, of(ours, failed(2, "backup '/data': open /data/home/Tax Return.pdf: Permission denied (os error 13)")));
     s.observability.log(now - 5_000, of(foreign, json!({ "computer": "computer:0000000000000000000f0e1d", "phase": { "phase": "awake" } })));
     s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "phase": { "phase": "failed" } })));
-    s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "event": { "event": "save_failed" } })));
+    s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "event": { "event": "save_failed", "why": "another deployment's" } })));
+    s.observability.log(now - 1_000, of(foreign, json!({ "computer": saver, "event": { "event": "save_failed", "why": "another deployment's" } })));
     s.observability.log(now - 5_000, of(foreign, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "frag-elsewhere" })));
     let r = ask(operator, day)?;
     let b = &r.body;
@@ -384,15 +403,16 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     let read = &b["logs"];
     let trouble = read["trouble"].as_array().cloned().unwrap_or_default();
     s.ok(
-        "its logs' numbers, of this deployment's Worker's lines alone: computers awake now (a line in ten minutes), today and this week, fragments that ran, and computers in trouble, each named with its person when it is one's (another deployment's lines about the same person's computer count for nothing)",
+        "its logs' numbers, of this deployment's Worker's lines alone: computers awake now (a line in ten minutes), today and this week, fragments that ran, and computers in trouble, each named with its person when it is one's, a failed save with why its newest did, a person's file left out (another deployment's lines about the same computers count for nothing)",
         read["state"] == "read"
             && read["computersAwakeNow"] == 1
             && read["computersAwakeToday"] == 1
             && read["computersAwakeWeek"] == 2
             && read["fragmentsAwakeNow"] == 2
             && trouble.first() == Some(&json!({ "computer": theirs, "kind": "wont_wake", "lines": 2, "npub": ivy_id, "email": ivy_email }))
-            && trouble.get(1) == Some(&json!({ "computer": stranger, "kind": "disk_filling", "lines": 1, "npub": null, "email": null }))
-            && trouble.len() == 2,
+            && trouble.get(1) == Some(&json!({ "computer": saver, "kind": "saves_failing", "lines": 2, "npub": null, "email": null, "why": { "at": now - 15_000, "text": "backup '/data': open /data/…: Permission denied (os error 13)" } }))
+            && trouble.get(2) == Some(&json!({ "computer": stranger, "kind": "disk_filling", "lines": 1, "npub": null, "email": null }))
+            && trouble.len() == 3,
         read,
     );
     let asked = s.observability.asked();

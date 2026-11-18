@@ -12,7 +12,11 @@
 //!   anything (`$workers.entrypoint`, `$workers.durableObjectId`);
 //! - a computer is in trouble when its lines in the last day say it was
 //!   failed (won't wake), that a save failed, or that its disk had less
-//!   than `computer::DISK_TOLD_FREE_MAX` free.
+//!   than `computer::DISK_TOLD_FREE_MAX` free;
+//! - why a save failed is its line's own words (the lifecycle's
+//!   `Event::SaveFailed`'s `why`), the newest of each computer's among the
+//!   newest lines read (`WHYS_READ_MAX`), shown short and with a person's
+//!   paths left out (`why`).
 //!
 //! Every query counts this deployment's Worker's lines alone
 //! (`$workers.scriptName`): an account holds other deployments (a
@@ -24,6 +28,7 @@
 use serde_json::Value;
 
 use crate::computer::{DISK_TOLD_FREE_MAX, METER_EVERY_MS};
+use crate::search::cut;
 
 /// "Now": the last ten minutes, twice an awake computer's meter alarm.
 pub const NOW_MS: i64 = 10 * 60_000;
@@ -40,6 +45,16 @@ pub const NEW_PEOPLE_MAX: u32 = 50;
 pub const GROUPS_MAX: u32 = 1_000;
 /// Computers in trouble listed, the most lines first.
 pub const TROUBLE_MAX: usize = 100;
+/// Failed saves' lines read for their reasons, at most: the events
+/// themselves, each a couple of KB, well within the cell's bound on an
+/// answer (`OBSERVABILITY_ANSWER_MAX_BYTES`, 1 MiB). A computer failing
+/// all day writes about a hundred (its retries back off to every 15
+/// minutes); a computer whose last failure is older than these shows none.
+pub const WHYS_READ_MAX: u32 = 100;
+/// A save's reason, as the glance shows it, at most (cut at a character).
+pub const WHY_MAX_BYTES: usize = 160;
+/// A reason's words read, at most, before paths are left out of them.
+pub const WHY_READ_MAX_BYTES: usize = 4 * WHY_MAX_BYTES;
 /// What the queries are named in Cloudflare's own records.
 pub const QUERY_ID: &str = "fragment-admin-glance";
 /// A Worker's name, at most (Cloudflare's own limit).
@@ -74,10 +89,13 @@ pub enum Question {
     WontWake,
     SavesFailing,
     DiskFilling,
+    /// The newest lines that said a save failed (at most `WHYS_READ_MAX`):
+    /// the lines themselves, for their reasons and when.
+    SaveWhys,
 }
 
 impl Question {
-    pub const ALL: [Question; 8] = [
+    pub const ALL: [Question; 9] = [
         Question::AwakeNow,
         Question::AwakeToday,
         Question::AwakeWeek,
@@ -86,6 +104,7 @@ impl Question {
         Question::WontWake,
         Question::SavesFailing,
         Question::DiskFilling,
+        Question::SaveWhys,
     ];
 
     /// The query API's body for it, over `script`'s lines (this
@@ -96,40 +115,54 @@ impl Question {
         assert!(valid_script(script), "a Worker's name is checked as the config is read");
         assert!(day_start(Some(day_start_ms), now_ms).is_ok(), "the day's start is checked");
         // its one filter (key, operation, type, value as JSON), what it
-        // counts (a distinct key, or none: lines by computer), and from when
+        // asks (a distinct count of a key, lines by computer, or the lines
+        // themselves), and from when
+        enum Asks {
+            Uniq(&'static str),
+            ByComputer,
+            Lines,
+        }
         const AWAKE: (&str, &str, &str, &str) = ("phase.phase", "eq", "string", "\"awake\"");
         const FRAGMENT: (&str, &str, &str, &str) = ("$workers.entrypoint", "eq", "string", "\"Fragment\"");
+        const SAVE_FAILED: (&str, &str, &str, &str) = ("event.event", "eq", "string", "\"save_failed\"");
         let disk = DISK_TOLD_FREE_MAX.to_string();
-        let (filter, uniq, from) = match self {
-            Question::AwakeNow => (AWAKE, Some("computer"), now_ms - NOW_MS),
-            Question::AwakeToday => (AWAKE, Some("computer"), day_start_ms),
-            Question::AwakeWeek => (AWAKE, None, now_ms - WEEK_MS),
-            Question::FragmentsNow => (FRAGMENT, Some("$workers.durableObjectId"), now_ms - NOW_MS),
-            Question::FragmentsToday => (FRAGMENT, Some("$workers.durableObjectId"), day_start_ms),
-            Question::WontWake => (("phase.phase", "eq", "string", "\"failed\""), None, now_ms - DAY_MS),
-            Question::SavesFailing => (("event.event", "eq", "string", "\"save_failed\""), None, now_ms - DAY_MS),
-            Question::DiskFilling => (("disk.free", "lt", "number", disk.as_str()), None, now_ms - DAY_MS),
+        let (filter, asks, from) = match self {
+            Question::AwakeNow => (AWAKE, Asks::Uniq("computer"), now_ms - NOW_MS),
+            Question::AwakeToday => (AWAKE, Asks::Uniq("computer"), day_start_ms),
+            Question::AwakeWeek => (AWAKE, Asks::ByComputer, now_ms - WEEK_MS),
+            Question::FragmentsNow => (FRAGMENT, Asks::Uniq("$workers.durableObjectId"), now_ms - NOW_MS),
+            Question::FragmentsToday => (FRAGMENT, Asks::Uniq("$workers.durableObjectId"), day_start_ms),
+            Question::WontWake => (("phase.phase", "eq", "string", "\"failed\""), Asks::ByComputer, now_ms - DAY_MS),
+            Question::SavesFailing => (SAVE_FAILED, Asks::ByComputer, now_ms - DAY_MS),
+            Question::DiskFilling => (("disk.free", "lt", "number", disk.as_str()), Asks::ByComputer, now_ms - DAY_MS),
+            Question::SaveWhys => (SAVE_FAILED, Asks::Lines, now_ms - DAY_MS),
         };
         let (key, op, kind, value) = filter;
-        let counted = match uniq {
-            Some(k) => format!(r#""calculations":[{{"operator":"uniq","key":"{k}","alias":"n"}}]"#),
-            None => r#""calculations":[{"operator":"count","alias":"n"}],"groupBys":[{"type":"string","value":"computer"}]"#.to_string(),
+        let (view, limit, asked) = match asks {
+            Asks::Uniq(k) => ("calculations", GROUPS_MAX, format!(r#","calculations":[{{"operator":"uniq","key":"{k}","alias":"n"}}]"#)),
+            Asks::ByComputer => ("calculations", GROUPS_MAX, r#","calculations":[{"operator":"count","alias":"n"}],"groupBys":[{"type":"string","value":"computer"}]"#.to_string()),
+            Asks::Lines => ("events", WHYS_READ_MAX, String::new()),
         };
         let body = format!(
-            r#"{{"queryId":"{QUERY_ID}","timeframe":{{"from":{from},"to":{now_ms}}},"view":"calculations","limit":{GROUPS_MAX},"parameters":{{"datasets":["cloudflare-workers"],"filters":[{{"key":"$workers.scriptName","operation":"eq","type":"string","value":"{script}"}},{{"key":"{key}","operation":"{op}","type":"{kind}","value":{value}}}],{counted}}}}}"#
+            r#"{{"queryId":"{QUERY_ID}","timeframe":{{"from":{from},"to":{now_ms}}},"view":"{view}","limit":{limit},"parameters":{{"datasets":["cloudflare-workers"],"filters":[{{"key":"$workers.scriptName","operation":"eq","type":"string","value":"{script}"}},{{"key":"{key}","operation":"{op}","type":"{kind}","value":{value}}}]{asked}}}}}"#
         );
         serde_json::from_slice(body.as_bytes()).expect("a glance's query is JSON")
     }
 }
 
-/// The aggregates of an answer's one calculation, or why it is none: the
-/// API's own error, or a shape it does not have.
-fn aggregates(answer: &Value) -> Result<&Vec<Value>, String> {
+/// An answer's result, or the API's own error.
+fn result(answer: &Value) -> Result<&Value, String> {
     if answer["success"] != true {
         let errors = answer["errors"].as_array().map(|e| e.iter().filter_map(|e| e["message"].as_str()).collect::<Vec<_>>().join("; ")).unwrap_or_default();
         return Err(if errors.is_empty() { "the logs answered no result".to_string() } else { errors });
     }
-    match answer["result"]["calculations"].as_array().and_then(|c| c.first()) {
+    Ok(&answer["result"])
+}
+
+/// The aggregates of an answer's one calculation, or why it is none: the
+/// API's own error, or a shape it does not have.
+fn aggregates(answer: &Value) -> Result<&Vec<Value>, String> {
+    match result(answer)?["calculations"].as_array().and_then(|c| c.first()) {
         // a calculation over no lines answers no aggregate
         None => Ok(const { &Vec::new() }),
         Some(c) => c["aggregates"].as_array().ok_or_else(|| "the logs answered a calculation with no aggregates".to_string()),
@@ -156,6 +189,80 @@ pub fn by_computer_of(answer: &Value) -> Result<Vec<(String, u64)>, String> {
         out.push((computer.to_string(), lines as u64));
     }
     Ok(out)
+}
+
+/// The lines' answer (`Question::SaveWhys`): each computer's newest
+/// failed save's reason, as the glance shows it (`why`), and when (ms),
+/// sorted by computer. The lines come in the API's order, which this does
+/// not count on. A line of no computer or no reason is no row's: passed
+/// over. An answer of another shape says why.
+pub fn whys_of(answer: &Value) -> Result<Vec<(String, i64, String)>, String> {
+    let events = &result(answer)?["events"];
+    if !events.is_object() {
+        return Err("the logs answered no events".to_string());
+    }
+    let lines = match &events["events"] {
+        // none matched: the list is left out
+        Value::Null => return Ok(vec![]),
+        Value::Array(lines) => lines,
+        other => return Err(format!("the logs' events are a list, not {other}")),
+    };
+    let mut newest: std::collections::BTreeMap<&str, (i64, &str)> = std::collections::BTreeMap::new();
+    for e in lines.iter().take(WHYS_READ_MAX as usize) {
+        let at = e["timestamp"].as_i64().ok_or_else(|| format!("a line's timestamp is its ms, not {}", e["timestamp"]))?;
+        let line = &e["source"];
+        let (Some(computer), Some(said)) = (line["computer"].as_str().filter(|c| c.starts_with("computer:")), line["event"]["why"].as_str()) else { continue };
+        let kept = newest.entry(computer).or_insert((at, said));
+        if at > kept.0 {
+            *kept = (at, said);
+        }
+    }
+    Ok(newest.into_iter().map(|(computer, (at, w))| (computer.to_string(), at, why(w))).collect())
+}
+
+/// What opens a path's word, each with what closes it.
+const BRACKETS: [(char, char); 6] = [('\'', '\''), ('"', '"'), ('`', '`'), ('(', ')'), ('[', ']'), ('<', '>')];
+
+/// A failed save's reason as the glance shows it: the platform's words,
+/// never a person's file names (a backup's error may name a file it could
+/// not read). Of each path, only an absolute one's first directory stays
+/// (`/data`, the platform's own); the rest is left out up to where it
+/// ends: its closing quote or bracket, else the next `": "`, else the
+/// reason's end. Its spaces are one, and it is at most `WHY_MAX_BYTES`,
+/// cut at a character.
+pub fn why(raw: &str) -> String {
+    let spaced = cut(raw, WHY_READ_MAX_BYTES).split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::with_capacity(spaced.len());
+    let mut rest = spaced.as_str();
+    // bounded: each turn takes the slash it found, at least, off `rest`
+    while let Some(slash) = rest.find('/') {
+        // the path's word begins after a space or an opening bracket
+        let opener = rest[..slash].char_indices().rev().find(|(_, c)| *c == ' ' || BRACKETS.iter().any(|(o, _)| o == c));
+        let start = opener.map_or(0, |(i, c)| i + c.len_utf8());
+        let closer = opener.and_then(|(_, c)| BRACKETS.iter().find(|(o, _)| *o == c)).map(|(_, close)| *close);
+        let absolute = slash == start;
+        let kept = match absolute {
+            true => slash + 1 + rest[slash + 1..].find(|c: char| !(c.is_ascii_alphanumeric() || "_.-".contains(c))).unwrap_or(rest.len() - slash - 1),
+            false => start,
+        };
+        out.push_str(&rest[..kept]);
+        rest = &rest[kept..];
+        if absolute && !rest.starts_with('/') {
+            // a path of one directory, as it is
+            continue;
+        }
+        let end = closer.and_then(|c| rest.find(c)).or_else(|| rest.find(": ")).unwrap_or(rest.len());
+        // past the slash it found (an absolute path's next, at 0), whatever it ends at
+        let end = end.max(slash.saturating_sub(kept) + 1);
+        out.push_str(if absolute { "/…" } else { "…" });
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    if out.len() > WHY_MAX_BYTES {
+        out = format!("{}…", cut(&out, WHY_MAX_BYTES - "…".len()));
+    }
+    assert!(out.len() <= WHY_MAX_BYTES, "a reason shown is short");
+    out
 }
 
 /// The computers in trouble: each kind's, by computer, the most lines
@@ -252,6 +359,105 @@ mod tests {
         assert!(uniq_of(&answer(json!([{ "value": "many" }]))).is_err());
         assert!(by_computer_of(&answer(json!([{ "groups": [{ "key": "computer", "value": "x" }], "value": 1 }]))).is_err(), "a group is a computer's");
         assert!(by_computer_of(&answer(json!([{ "groups": [], "value": 1 }]))).is_err());
+    }
+
+    /// An events answer as Cloudflare's API types it (cloudflare-typescript,
+    /// `workers/observability/telemetry.ts`): `result.events.events`, each
+    /// with its `timestamp` (ms) and its `source`, the line as logged.
+    fn events(lines: Vec<(i64, Value)>) -> Value {
+        let events: Vec<Value> = lines.into_iter().enumerate().map(|(i, (at, source))| json!({ "$metadata": { "id": format!("e{i}") }, "dataset": "cloudflare-workers", "timestamp": at, "source": source })).collect();
+        json!({ "success": true, "result": { "run": {}, "statistics": {}, "events": { "count": events.len(), "events": events } } })
+    }
+
+    /// A failed save's line, as the Computer DO logs its event (cell/src/computer.rs `drive_events`).
+    fn save_failed(computer: &str, why: &str) -> Value {
+        json!({ "computer": computer, "event": { "event": "save_failed", "generation": 4, "seq": 2, "why": why }, "phase": { "phase": "awake", "generation": 4, "since_ms": NOW - 9_000_000 }, "actions": [{ "action": "unhold", "generation": 4 }] })
+    }
+
+    /// Goal: why a computer's save failed is its newest line's reason, with
+    /// when, one per computer, whatever order the lines come in; read from
+    /// the lines themselves (the events view), not a count. Valid (two
+    /// computers, one with two reasons, oldest first and newest first, one
+    /// naming a person's file), empty (no lines; the list left out), lines
+    /// of no row (no computer, no reason: passed over), invalid (the API's
+    /// error, another shape, a time that is no number).
+    #[test]
+    fn a_failed_saves_newest_reason_is_read_by_computer() {
+        let q = Question::SaveWhys.body(SCRIPT, NOW, NOW - 3_600_000);
+        assert_eq!((&q["view"], &q["limit"], &q["timeframe"]), (&json!("events"), &json!(WHYS_READ_MAX), &json!({ "from": NOW - DAY_MS, "to": NOW })));
+        let ours = json!({ "key": "$workers.scriptName", "operation": "eq", "type": "string", "value": SCRIPT });
+        assert_eq!(q["parameters"]["filters"], json!([ours, { "key": "event.event", "operation": "eq", "type": "string", "value": "save_failed" }]));
+        assert!(q["parameters"].get("calculations").is_none() && q["parameters"].get("groupBys").is_none(), "the lines themselves, not a count");
+        for counted in Question::ALL.into_iter().filter(|q| *q != Question::SaveWhys) {
+            assert_eq!(counted.body(SCRIPT, NOW, NOW - 3_600_000)["view"], "calculations", "{counted:?}");
+        }
+        let (a, b) = ("computer:17c33cdf88c6d1d8f58b7a0f", "computer:64f44a9e486a752ad97536b2");
+        let mut lines = vec![
+            (NOW - 7_200_000, save_failed(a, "the backup of /data: no answer within 727000 ms")),
+            (NOW - 60_000, save_failed(a, "backup '/data': open /data/home/Tax Return.pdf: Permission denied (os error 13)")),
+            (NOW - 3_600_000, save_failed(b, "its container is not running")),
+        ];
+        let read = vec![(a.to_string(), NOW - 60_000, "backup '/data': open /data/…: Permission denied (os error 13)".to_string()), (b.to_string(), NOW - 3_600_000, "its container is not running".to_string())];
+        assert_eq!(whys_of(&events(lines.clone())), Ok(read.clone()));
+        lines.reverse();
+        assert_eq!(whys_of(&events(lines.clone())), Ok(read.clone()), "newest first or last: the newest");
+        lines.push((NOW, json!({ "computer": null, "event": { "event": "save_failed", "why": "no one's" } })));
+        lines.push((NOW, json!({ "computer": a, "event": { "event": "save_failed" } })));
+        assert_eq!(whys_of(&events(lines)), Ok(read), "a line of no computer, or of no reason, is passed over");
+        assert_eq!(whys_of(&events(vec![])), Ok(vec![]), "no lines, none");
+        assert_eq!(whys_of(&json!({ "success": true, "result": { "events": { "count": 0 } } })), Ok(vec![]), "none matched: the list left out");
+        assert_eq!(whys_of(&json!({ "success": false, "errors": [{ "code": 10000, "message": "Authentication error" }] })), Err("Authentication error".into()));
+        assert!(whys_of(&json!({ "success": true, "result": { "calculations": [] } })).is_err(), "an answer of no events");
+        assert!(whys_of(&json!({ "success": true, "result": { "events": { "events": {} } } })).is_err());
+        let mut untimed = events(vec![(NOW, save_failed(a, "x"))]);
+        untimed["result"]["events"]["events"][0]["timestamp"] = json!("now");
+        assert!(whys_of(&untimed).is_err(), "a line's time is a number");
+    }
+
+    /// Goal: a reason shows the platform's words, never a person's file
+    /// names (a backup's error may name one it could not read): a path
+    /// keeps its first directory (`/data`, the platform's), the rest left
+    /// out up to where it ends (its quote or bracket, else `": "`, else the
+    /// reason's end), a relative path or a URL whole; its spaces are one,
+    /// and it is short, cut at a character. Valid (the platform's own
+    /// words, as they are), each shape of path, too long at each width of
+    /// character.
+    #[test]
+    fn a_reason_leaves_out_a_persons_paths_and_is_short() {
+        let own = ["its container is not running", "the backup of /data: no answer within 727000 ms", "backup '/data': No space left on device (os error 28)", "start 4 is not the running one", "a / b"];
+        for w in own {
+            assert_eq!(why(w), w);
+        }
+        let paths = [
+            ("backup '/data': open /data/home/Tax Return.pdf: Permission denied (os error 13)", "backup '/data': open /data/…: Permission denied (os error 13)"),
+            ("backup '/data/home/Tax Return.pdf': EACCES", "backup '/data/…': EACCES"),
+            ("read \"/work/notes/my diary.md\" failed", "read \"/work/…\" failed"),
+            ("Permission denied: /data/home/Tax Return.pdf", "Permission denied: /data/…"),
+            ("home/notes/Tax.pdf: Permission denied", "…: Permission denied"),
+            ("~/notes/Tax.pdf: gone", "…: gone"),
+            ("request failed (http://gateway/parts/1?d=/data/home/Tax.pdf) at last", "request failed (…) at last"),
+            ("backup\n  '/data':\tdisk   full", "backup '/data': disk full"),
+        ];
+        for (raw, shown) in paths {
+            let w = why(raw);
+            assert_eq!(w, shown);
+            assert!(["home", "Tax", "notes", "diary", "Return"].iter().all(|p| !w.contains(p)), "{w}");
+        }
+        for c in ['x', 'é', '€', '𝄞'] {
+            for pad in WHY_MAX_BYTES - 8..=WHY_MAX_BYTES {
+                let raw = format!("{}{}", "y".repeat(pad), c.to_string().repeat(8));
+                let w = why(&raw);
+                match raw.len() <= WHY_MAX_BYTES {
+                    true => assert_eq!(w, raw, "within its bound, whole"),
+                    // the most that fits before the mark, cut at a character
+                    false => assert!(w.len() <= WHY_MAX_BYTES && w.len() > WHY_MAX_BYTES - "…".len() - 4 && w.ends_with('…') && raw.starts_with(w.trim_end_matches('…')), "{c:?} after {pad}: {w}"),
+                }
+            }
+        }
+        assert_eq!(why(&"z".repeat(WHY_MAX_BYTES)), "z".repeat(WHY_MAX_BYTES), "at its bound, whole");
+        // a path past what is read is still left out
+        let long = format!("{} /data/home/Tax Return.pdf", "z ".repeat(WHY_READ_MAX_BYTES / 2 - 4));
+        assert!(!why(&long).contains("home"));
     }
 
     /// Goal: the trouble list is the worst first and bounded. Method: two
