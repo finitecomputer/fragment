@@ -14,7 +14,8 @@ use crate::api::{Api, Reply};
 use crate::{Need, Suite};
 
 pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("apps", &[Need::Node, Need::Chrome]) {
+    // Chrome is for its sheets' screenshots alone: without one, the rest runs
+    if !s.section("apps", &[Need::Node]) {
         return Ok(());
     }
     // the owner signs in on the platform too: their sheets are shown

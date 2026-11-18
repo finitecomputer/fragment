@@ -536,9 +536,11 @@ impl FragmentCell {
     pub(crate) async fn members(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let mut list = self.member_list()?;
-        // an app's: where it is in, which each of its members may open (decision 72)
-        list.can_see = self.targets()?;
         if self.shares(caller) {
+            // an app's, to its owner alone: where it is in (decision 72), as
+            // they added it there or accepted it; one of its people a
+            // fragment let go of, or a join not yet taken, names none
+            list.can_see = self.targets()?;
             // bounded: at most MEMBERS_MAX, asked PROFILES_MAX at a time
             let people = list.members.iter().filter(|m| m.kind != Some(IdentityKind::Agent) && m.app.is_none()).map(|m| m.principal.clone()).collect();
             let profiles = crate::share::profiles(&self.env, people).await;
@@ -604,6 +606,11 @@ impl FragmentCell {
         if actor.role != Some(Role::Owner) {
             let why = access::refuse_set_role(actor.role, None, body.role).expect("only the owner manages members");
             return Err(refusal(false, why));
+        }
+        // an app member by its key: its role, asked of it again, never an
+        // app added by a sheet that went stale (app_members.rs)
+        if let Some(name) = npub::parse(who).map(|k| npub::identity_of(&k)).map(|p| self.app_of(&p)).transpose()?.flatten() {
+            return json_response(&self.add_app(&actor, &name, body.role).await?);
         }
         // a fragment's name: an app of its owner's (app_members.rs)
         if fragment_proto::valid_fragment_name(who) {

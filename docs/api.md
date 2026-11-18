@@ -688,7 +688,8 @@ fragment they own, `PUT members/{the app's name}`.
   resumes it too.
 - Its row in `GET members` leaves out `kind` and names `app: {name}` and
   its `owner`, who reads nothing through it. The app's own `GET members`
-  names where it is in (`canSee`). The share sheet shows the app as a row
+  names where it is in (`canSee`), to its owner (or their agent for them)
+  alone. The share sheet shows the app as a row
   of its own (its name, whose app it is, and, paused, "Paused. Robin can
   see Board but is no longer here."), with its role and removal by its
   name, and the app's sheet says "Can see: Tracker, Notes". It is no guest in its owner's
