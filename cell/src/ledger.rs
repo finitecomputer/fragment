@@ -270,8 +270,10 @@ pub struct OrgStatus {}
 /// router recorded an org's grant, which its retry completes), or say the
 /// rows its SQLite has written since this activation began, as SQLite
 /// counts them (`total_changes()`: its head, tables, meta and alarm alike),
-/// and whether it holds a head yet (`writes`, answering `{rows, head}`: a
-/// read changes none).
+/// whether it holds a head yet and whether its alarm is set (`writes`,
+/// answering `{rows, head, alarm}`: a read changes none), or delete its
+/// alarm and forget it set one (`lose-alarm`: as a sweep that failed, its
+/// retry unset too, leaves it).
 /// Read as its fields (`TestHookFields`), not as serde's internally tagged
 /// reading, which buffers each to find its `op`: about 17 KB of the cell's Wasm.
 #[derive(Debug, Serialize, Deserialize)]
@@ -296,6 +298,7 @@ pub enum TestHook {
         times: u32,
     },
     Writes,
+    LoseAlarm,
 }
 
 /// A `TestHook` as it is read: every op's fields, flat, and the lever's
@@ -333,6 +336,7 @@ enum TestOp {
     GateHeard,
     FailGrants,
     Writes,
+    LoseAlarm,
 }
 
 impl TryFrom<TestHookFields> for TestHook {
@@ -356,6 +360,7 @@ impl TryFrom<TestHookFields> for TestHook {
             TestOp::GateHeard => TestHook::GateHeard,
             TestOp::FailGrants => TestHook::FailGrants { times: need(f.times, "times")? },
             TestOp::Writes => TestHook::Writes,
+            TestOp::LoseAlarm => TestHook::LoseAlarm,
         })
     }
 }
@@ -1064,7 +1069,13 @@ impl LedgerCell {
             TestHook::Writes => {
                 let rows: Vec<Value> = self.sql().exec("SELECT total_changes() AS rows, (SELECT COUNT(*) FROM head) AS head", None)?.to_array()?;
                 let row = rows.first().ok_or_else(|| CellError::host("total_changes() answered no row"))?;
-                reply(json!({ "rows": row["rows"], "head": row["head"] == 1 }))
+                let alarm = self.state.storage().get_alarm().await?.is_some();
+                reply(json!({ "rows": row["rows"], "head": row["head"] == 1, "alarm": alarm }))
+            }
+            TestHook::LoseAlarm => {
+                self.state.storage().delete_alarm().await?;
+                self.armed.set(None);
+                reply(json!({ "lost": true }))
             }
             // the book it charges with: its release's (it keeps none)
             TestHook::Book => reply(json!({ "book": self.cfg.book })),

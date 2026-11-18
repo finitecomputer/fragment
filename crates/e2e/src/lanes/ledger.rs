@@ -1142,6 +1142,18 @@ fn reads_write_nothing(s: &mut Suite, api: &Api, operator: &Keys) -> Result<()> 
         refused && same && after["rows"] == before["rows"] && after["head"] == true,
         json!({ "before": before, "after": after, "answers": answers.iter().map(|(status, _, read)| json!([status, read])).collect::<Vec<_>>() }),
     );
+    // its alarm lost (a sweep that failed, its retry unset too): the sweep
+    // rolls each month, and a month's credit pays a debt, so a read sets it
+    // again, as a change would
+    let lost = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": reader_id, "op": "lose-alarm" })))?;
+    let without = writes(api, &reader_id)?;
+    let read = ledger(api, &reader);
+    let with = writes(api, &reader_id)?;
+    s.ok(
+        "a ledger whose alarm was lost has it set again by its next read, so its sweep still rolls each month; the read answers as before",
+        lost.status == 200 && without["alarm"] == false && with["alarm"] == true && read == answers[0].2,
+        json!({ "without": without, "with": with, "read": read }),
+    );
     Ok(())
 }
 
