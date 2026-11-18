@@ -21,7 +21,12 @@
 //   in it. Such an app has no share link and is not public for now: the
 //   cell refuses them, and its share sheet (its Sharing here) says so, and
 //   that the people added can use its keys (reach.rs, share.rs).
-// Archived ones are folded at the end, each with Unarchive.
+// - Archive (`PUT /api/fragments/{name}/archived`): their own view, any
+//   role's; archived ones are folded at the end, each with Unarchive. Either
+//   moves the row only once the list says so.
+// - Delete (`DELETE /api/f/{name}`), the owner's alone: asked once more,
+//   with its name typed back, saying what goes; the row leaves once the
+//   list says it is gone (Paul, 2026-11-17).
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
 // `icon`, `named`, `titleOf`, `art` (an app's icon, as the dock draws it),
@@ -154,7 +159,7 @@ export function createAppsPage(page, h, shelf = "apps") {
   // a visit of the page (its open, its close) is an ask (asks.js `apps`,
   // `brains`): what answers for an earlier visit changes nothing
   const { asks } = h;
-  // per app: an action in flight ("dock", "card", "archive"), what the
+  // per app: an action in flight ("dock", "card", "archive", "delete"), what the
   // last one said (a refusal, or a preview still being taken), and its card
   const busy = new Map();
   const said = new Map();
@@ -174,6 +179,8 @@ export function createAppsPage(page, h, shelf = "apps") {
   // owner's), as the server says now; and a removal asked (a second press)
   const reach = new Map();
   const confirming = new Map();
+  // a delete's confirm: the name typed so far, kept across the row's redraws
+  const typed = new Map();
   const expanded = new Map();
   const editing = new Map();
   const iconEditors = new Map();
@@ -188,10 +195,16 @@ export function createAppsPage(page, h, shelf = "apps") {
     if (text) said.set(name, text);
     else said.delete(name);
   };
-  const beginBusy = (name, kind) => {
+  const beginBusy = (name, kind, to) => {
     const token = ++operation;
-    busy.set(name, { kind, token, started: Date.now() });
+    busy.set(name, { kind, token, started: Date.now(), to });
     return token;
+  };
+  // an archive or unarchive in flight, said by which it is: the list may
+  // move its row before the call's reload is done
+  const archiving = (name) => {
+    const b = busy.get(name);
+    return b?.kind === "archive" ? (b.to ? "Archiving…" : "Unarchiving…") : null;
   };
   const endBusy = (name, token) => {
     if (busy.get(name)?.token === token) busy.delete(name);
@@ -491,7 +504,7 @@ export function createAppsPage(page, h, shelf = "apps") {
       preview.append(img);
       head.append(preview);
     }
-    if (f.archived) head.append(button(doing === "archive" ? "Unarchiving…" : "Unarchive", "unarchive", () => unarchive(name), !!doing));
+    if (f.archived) head.append(button(archiving(name) ?? "Unarchive", "unarchive", () => setArchived(name, false), !!doing));
     else if (dockable(f)) {
       const dock = h.el("button", "app-dock");
       dock.type = "button";
@@ -516,7 +529,16 @@ export function createAppsPage(page, h, shelf = "apps") {
     if (edits(f) && reaches(f)) tools.append(tab("Reaches", "reach"));
     tools.append(tab(owns(f) ? "Sharing" : "People", "sharing"));
     if (owns(f) && !f.archived) tools.append(tab("Address", "address"));
+    const ends = h.el("span", "app-row-ends");
+    if (!f.archived) ends.append(button(archiving(name) ?? "Archive", "archive", () => setArchived(name, true), !!doing));
+    if (owns(f)) {
+      const ask = button("Delete", "delete", () => askDelete(name), !!doing);
+      ask.setAttribute("aria-expanded", String(confirming.get(name) === "delete"));
+      ends.append(ask);
+    }
+    if (ends.childElementCount) tools.append(ends);
     item.append(tools);
+    if (owns(f) && confirming.get(name) === "delete") item.append(deleteConfirm(f));
     if (section) {
       const panel = h.el("div", "app-row-panel");
       if (section === "appearance") {
@@ -550,9 +572,57 @@ export function createAppsPage(page, h, shelf = "apps") {
     const words = said.get(name);
     if (words) { const p = h.el("p", "app-row-said", words); p.setAttribute("role", "status"); item.append(p); }
     const edit = editing.get(name);
-    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null, reach.get(name) ?? null, confirming.get(name) ?? null]);
+    item.dataset.shows = JSON.stringify([f, doing ?? null, archiving(name), words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null, reach.get(name) ?? null, confirming.get(name) ?? null]);
     item.dataset.art = artReadiness(item);
     return item;
+  }
+
+  // Delete's confirm, under its row: what goes, and its name typed back
+  // before Delete is pressable
+  function askDelete(name) {
+    if (confirming.get(name) === "delete") {
+      confirming.delete(name);
+      typed.delete(name);
+    } else {
+      confirming.set(name, "delete");
+      expanded.delete(name);
+    }
+    render();
+    page.querySelector(`[data-delete-confirm="${CSS.escape(name)}"] input`)?.focus();
+  }
+  function deleteConfirm(f) {
+    const name = f.name;
+    const deleting = busy.get(name)?.kind === "delete";
+    const form = h.el("form", "app-delete");
+    form.dataset.deleteConfirm = name;
+    const matches = (text) => text.trim() === name;
+    const field = h.el("label", "app-delete-field");
+    const input = h.el("input");
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.setAttribute("autocapitalize", "off");
+    input.value = typed.get(name) ?? "";
+    input.disabled = deleting;
+    // one line of words, read as one: its name in it
+    const words = h.el("span");
+    words.append("Type ", h.el("code", null, name), " to confirm");
+    field.append(words, input);
+    const sure = button(deleting ? "Deleting…" : "Delete", "delete-sure", null, deleting || !matches(input.value));
+    sure.type = "submit";
+    sure.classList.add("danger");
+    const cancel = button("Cancel", "delete-cancel", () => askDelete(name), deleting);
+    input.oninput = () => {
+      typed.set(name, input.value);
+      sure.disabled = !matches(input.value);
+    };
+    const actions = h.el("div", "app-delete-actions");
+    actions.append(sure, cancel);
+    form.append(h.el("p", "app-delete-title", `Delete ${h.titleOf(name)}?`), h.el("p", "muted", "Its pages, data and files go for everyone in it. This can't be undone."), field, actions);
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      if (matches(input.value) && !busy.has(name)) deleteFragment(name);
+    };
+    return form;
   }
 
   function mountEditors() {
@@ -709,6 +779,8 @@ export function createAppsPage(page, h, shelf = "apps") {
       wrap.append(head, list, folded);
       page.replaceChildren(wrap);
     }
+    // a delete's name being typed keeps its focus when its row is drawn anew
+    const typing = document.activeElement?.closest?.("[data-delete-confirm]")?.dataset.deleteConfirm;
     if (access?.error && !page.querySelector(".apps-access-failed")) list.before(h.el("p", "settings-warning apps-access-failed", `Who has access did not load: ${access.error}`));
     if (!access?.error) page.querySelector(".apps-access-failed")?.remove();
     place(list, live.map(row));
@@ -717,6 +789,8 @@ export function createAppsPage(page, h, shelf = "apps") {
     folded.querySelector("summary").textContent = `Archived (${archived.length})`;
     place(folded.querySelector(".apps-list"), archived.map(row));
     mountEditors();
+    const input = typing && page.querySelector(`[data-delete-confirm="${CSS.escape(typing)}"] input`);
+    if (input && document.activeElement !== input) input.focus();
   }
 
   async function setDock(name, dock) {
@@ -734,13 +808,31 @@ export function createAppsPage(page, h, shelf = "apps") {
     }
   }
 
-  async function unarchive(name) {
-    const operation = beginBusy(name, "archive");
+  async function setArchived(name, archived) {
+    const operation = beginBusy(name, "archive", archived);
     say(name, "");
     render();
     try {
-      await h.api("PUT", `/api/fragments/${seg(name)}/archived`, { archived: false });
+      await h.api("PUT", `/api/fragments/${seg(name)}/archived`, { archived });
       await h.reload();
+    } catch (e) {
+      say(name, e.message);
+    } finally {
+      endBusy(name, operation);
+      render();
+    }
+  }
+
+  // deleted for everyone: its row leaves once the list no longer has it
+  async function deleteFragment(name) {
+    const operation = beginBusy(name, "delete");
+    say(name, "");
+    render();
+    try {
+      await h.api("DELETE", `/api/f/${seg(name)}`);
+      await h.reload();
+      confirming.delete(name);
+      typed.delete(name);
     } catch (e) {
       say(name, e.message);
     } finally {
@@ -814,6 +906,8 @@ export function createAppsPage(page, h, shelf = "apps") {
       sharingFrames.clear();
       addressEditors.clear();
       editing.clear();
+      confirming.clear();
+      typed.clear();
     },
     // the list changed: drawn again, who has access asked again when the
     // list says that changed, and new or changed apps' cards read

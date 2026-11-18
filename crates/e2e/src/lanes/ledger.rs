@@ -868,6 +868,8 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     );
     gate_waits_on_no_ledger(s, api, &hand, &owner_id)?;
     cap_mid_stream(s, api, wait)?;
+    reads_write_nothing(s, api, &operator)?;
+    racing_calls(s, api, wait)?;
     fallback(s, api, &hand, &owner_id, wait)?;
     let r = api.signed(&hand, "POST", route, Some(&json!({ "model": "high", "messages": [{ "role": "user", "content": "hi" }] })))?;
     s.ok("the high tier is refused, saying why (decision 23)", r.status == 400 && r.message().contains("high tier is off"), &r);
@@ -1093,6 +1095,101 @@ fn cap_mid_stream(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         "a cap reached mid-stream: the stream, begun with its gate cold, ends whole ([DONE]) and is charged once; the refusal heard beside it stops the next call (402) before its vendor call",
         streamed.status == 200 && streamed.text.contains("data: [DONE]") && taught && charged && next.status == 402 && s.ai.calls().len() == calls,
         json!({ "taught": taught, "charged": aig().len() - before, "next": next.body }),
+    );
+    Ok(())
+}
+
+/// What a ledger has written (the `writes` lever): its rows since its
+/// activation began, as SQLite counts them, and whether it holds a head.
+fn writes(api: &Api, identity: &str) -> Result<Value> {
+    let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "writes" })))?;
+    anyhow::ensure!(r.status == 200 && r.body["rows"].is_u64(), "the writes lever on {identity}: {r}");
+    Ok(r.body)
+}
+
+/// A read writes nothing (F14): a ledger's first call makes it, writing
+/// its head; after that its gate (`may-spend`) and its status read the
+/// head as last written and answer, writing no row, head or alarm. Its
+/// person has no fragment, so nothing of theirs is metered while it is
+/// counted, and is a guest, whose creates their ledger's gate refuses,
+/// asked each time (a create's gate keeps no answer).
+fn reads_write_nothing(s: &mut Suite, api: &Api, operator: &Keys) -> Result<()> {
+    let reader = api.person()?;
+    let reader_id = api.identity(&reader)?;
+    let unmade = writes(api, &reader_id)?;
+    let first = ledger(api, &reader);
+    let made = writes(api, &reader_id)?;
+    s.ok(
+        "a ledger's first call, a read of its status, makes it: its head written, a new person's default plan (a seat here)",
+        unmade["head"] == false && made["head"] == true && made["rows"].as_u64() > unmade["rows"].as_u64() && first["plan"] == "seat",
+        json!({ "unmade": unmade, "made": made, "first": first }),
+    );
+    let guest = api.signed(operator, "POST", &format!("/api/ledger/{reader_id}/plan"), Some(&json!({ "id": "reader-guest", "plan": "guest" })))?;
+    anyhow::ensure!(guest.status == 200, "the reader made a guest: {guest}");
+    let name = s.named(api, &reader, "ledger-reader")?;
+    let before = writes(api, &reader_id)?;
+    let mut answers = Vec::new();
+    // bounded: three of each
+    for _ in 0..3 {
+        let create = api.create(&reader, &name)?;
+        answers.push((create.status, create.error().to_string(), ledger(api, &reader)));
+    }
+    let after = writes(api, &reader_id)?;
+    let refused = answers.iter().all(|(status, error, _)| *status == 403 && error == "forbidden");
+    let same = answers.iter().all(|(_, _, read)| *read == answers[0].2) && answers[0].2["plan"] == "guest";
+    s.ok(
+        "then its reads write nothing: three creates its gate refuses (`may-spend`) and three reads of its status leave every row as it was, each answering as the first",
+        refused && same && after["rows"] == before["rows"] && after["head"] == true,
+        json!({ "before": before, "after": after, "answers": answers.iter().map(|(status, _, read)| json!([status, read])).collect::<Vec<_>>() }),
+    );
+    // its alarm lost (a sweep that failed, its retry unset too): the sweep
+    // rolls each month, and a month's credit pays a debt, so a read sets it
+    // again, as a change would
+    let lost = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": reader_id, "op": "lose-alarm" })))?;
+    let without = writes(api, &reader_id)?;
+    let read = ledger(api, &reader);
+    let with = writes(api, &reader_id)?;
+    s.ok(
+        "a ledger whose alarm was lost has it set again by its next read, so its sweep still rolls each month; the read answers as before",
+        lost.status == 200 && without["alarm"] == false && with["alarm"] == true && read == answers[0].2,
+        json!({ "without": without, "with": with, "read": read }),
+    );
+    Ok(())
+}
+
+/// Two paid calls racing (F14: the gate reads, writing nothing): a
+/// payer's agent's two model calls at once, the gate cold, the payer's
+/// ledger asked beside each, are each charged once, and the balance moves
+/// by both charges and nothing else.
+fn racing_calls(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    let payer = api.person()?;
+    let payer_id = api.identity(&payer)?;
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&payer, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &payer) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the payer's: {r}");
+    let before = ledger(api, &payer);
+    forget_gate(api, &payer_id)?;
+    let call = || api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()));
+    let (a, b) = std::thread::scope(|t| {
+        let a = t.spawn(call);
+        let b = t.spawn(call);
+        (a.join().expect("a racing call's thread"), b.join().expect("a racing call's thread"))
+    });
+    let (a, b) = (a?, b?);
+    let aig = || entries(api, &payer_id, "aig:");
+    let both = s.eventually(wait, || aig().len() == 2);
+    let charges: Vec<i64> = aig().iter().filter_map(charged).collect();
+    let after = ledger(api, &payer);
+    s.ok(
+        "two paid calls racing, the gate cold and the payer's ledger asked beside each: each is charged once, and the balance moves by both charges and nothing else",
+        a.status == 200
+            && b.status == 200
+            && both
+            && charges.len() == 2
+            && charges.iter().all(|c| *c > 0)
+            && m(&before, "balanceMicros") - m(&after, "balanceMicros") == charges.iter().sum::<i64>(),
+        json!({ "calls": [a.status, b.status], "charges": charges, "before": before, "after": after }),
     );
     Ok(())
 }
