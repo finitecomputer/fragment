@@ -46,30 +46,35 @@ function row(e) {
   return li;
 }
 
-// The archive's rows, every page of them; null when it could not say.
+// The archive's rows, every page of them, and whether they are its whole
+// list; null when they could not be read (a host before its list: none).
 async function rows() {
   const out = [];
   let after = "";
-  for (;;) {
-    const r = await fetch("__op/sessions", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: `list-${Date.now()}-${Math.random().toString(36).slice(2)}`, input: { after } }) }).catch(() => null);
+  for (let i = 0; i < 64; i++) {
+    const r = await fetch("__op/sessions", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: `list-${Date.now()}-${i}`, input: { after } }) }).catch(() => null);
+    if (r?.status === 404) return { sessions: [], whole: false };
     const page = r?.ok ? (await r.json().catch(() => null))?.result : null;
     if (!Array.isArray(page?.sessions)) return null;
     out.push(...page.sessions);
-    if (!page.next) return out;
+    if (!page.next || page.next <= after) return { sessions: out, whole: page.whole === true };
     after = page.next;
   }
+  return null;
 }
 
 // When it was last said, else begun: newest first.
 const newest = (a, b) => (b.ended_at ?? b.started_at ?? "").localeCompare(a.ended_at ?? a.started_at ?? "") || (a.key < b.key ? -1 : 1);
 
 async function list(page) {
-  const all = await rows();
-  // An archive imported before its rows were lists its index files until its
-  // next import fills them (docs/technical-debt-ledger.md).
-  const lists = all?.length
-    ? KINDS.map(([kind]) => all.filter((e) => e.kind === kind).sort(newest))
-    : await Promise.all(KINDS.map(([kind]) => file(`index/${kind}.json`).then((v) => (Array.isArray(v?.sessions) ? v.sessions : []))));
+  const listed = await rows();
+  if (!listed) throw new Error("its list was not read");
+  // An archive whose list is not whole yet (imported before its rows were)
+  // lists its index files until an import fills it (docs/technical-debt-ledger.md).
+  const indexed = listed.whole ? [] : await Promise.all(KINDS.map(([kind]) => file(`index/${kind}.json`)));
+  const lists = indexed.some(Boolean)
+    ? indexed.map((v) => (Array.isArray(v?.sessions) ? v.sessions : []))
+    : KINDS.map(([kind]) => listed.sessions.filter((e) => e.kind === kind).sort(newest));
   const head = el("header", "archive-head");
   head.append(el("h1", null, "Session Archive"));
   if (lists.every((l) => !l.length)) {

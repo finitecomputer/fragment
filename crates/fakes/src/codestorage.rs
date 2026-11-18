@@ -203,6 +203,9 @@ struct State {
     /// (`enable_list`; templates/sessions/app.mjs), by its name, then key.
     #[serde(skip)]
     lists: BTreeMap<String, BTreeMap<String, Value>>,
+    /// The archives whose list an import has called whole.
+    #[serde(skip)]
+    lists_whole: BTreeSet<String>,
     /// Another writer's moves still to land, each just ahead of the next
     /// search upsert to that fragment (`land_before_upserts`), by its name.
     #[serde(skip)]
@@ -580,6 +583,7 @@ impl Inner {
             // `sessions` and `filed`), for a fragment whose list is on;
             // another's is a host before it (404)
             if let Some((name, op)) = path.strip_prefix("/api/f/").and_then(|p| p.split_once("/ops/")).filter(|_| m == "POST") {
+                let whole = st.lists_whole.contains(name);
                 let Some(rows) = st.lists.get_mut(name) else { return problem(404, &format!("no route {m} {path}")) };
                 let input = serde_json::from_slice::<Value>(&req.body).unwrap_or_default()["input"].clone();
                 let result = match op {
@@ -587,7 +591,7 @@ impl Inner {
                         let after = input["after"].as_str().unwrap_or("");
                         let page: Vec<Value> = rows.range::<str, _>((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded)).take(LIST_PAGE + 1).map(|(_, v)| v.clone()).collect();
                         let next = (page.len() > LIST_PAGE).then(|| page[LIST_PAGE - 1]["key"].clone());
-                        json!({ "sessions": page.into_iter().take(LIST_PAGE).collect::<Vec<_>>(), "next": next })
+                        json!({ "sessions": page.into_iter().take(LIST_PAGE).collect::<Vec<_>>(), "next": next, "whole": whole })
                     }
                     "filed" => {
                         for row in input["rows"].as_array().into_iter().flatten() {
@@ -600,6 +604,12 @@ impl Inner {
                         }
                         for key in input["gone"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                             rows.remove(key);
+                        }
+                        if input["whole"] == true {
+                            st.lists_whole.insert(name.to_string());
+                        }
+                        if input["whole"] == false {
+                            st.lists_whole.remove(name);
                         }
                         json!({})
                     }
@@ -1413,6 +1423,11 @@ impl CodeStorage {
     /// or to seed.
     pub fn list_rows<T>(&self, name: &str, f: impl FnOnce(&mut BTreeMap<String, Value>) -> T) -> Option<T> {
         self.with(|st| st.lists.get_mut(name).map(f))
+    }
+
+    /// Whether an import has called fragment `name`'s list whole.
+    pub fn list_whole(&self, name: &str) -> bool {
+        self.with(|st| st.lists_whole.contains(name))
     }
 
     /// Each of `ahead` lands just ahead of one of the next search upserts

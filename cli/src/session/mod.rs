@@ -377,8 +377,11 @@ struct Held {
     stored: BTreeMap<String, Stored>,
     /// The rows whose files are gone.
     gone: Vec<String>,
-    /// The files `media/` holds, by path, and `index/` (the list's files,
-    /// before its rows).
+    /// Whether the list has a row for every conversation (an import filed
+    /// them all); until then its readers list its index files.
+    whole: bool,
+    /// The files `media/` holds, by path, and the index files a kind the
+    /// CLI before the list wrote (`index/<kind>.json`).
     media: BTreeSet<String>,
     indexes: Vec<String>,
 }
@@ -406,8 +409,12 @@ struct Row {
 
 #[derive(serde::Deserialize)]
 struct RowsPage {
-    sessions: Vec<Row>,
+    /// Each read alone: one that is no row (another writer's) is as none,
+    /// its file read and its row written again.
+    sessions: Vec<serde_json::Value>,
     next: Option<String>,
+    #[serde(default)]
+    whole: bool,
 }
 
 /// Rows one `filed` call carries at most, and their bytes (a call's input
@@ -416,27 +423,30 @@ const FILED_ROWS: usize = 200;
 const FILED_BYTES: usize = fragment_proto::limits::INPUT_MAX_BYTES / 2;
 const FILED_GONE: usize = 1000;
 
-/// `op` of the archive's app with `input`: its result, or `None` when the
-/// host's archive has no such operation (404: a host before its list).
-fn op<T: serde::de::DeserializeOwned>(c: &Client, name: &str, op: &str, input: serde_json::Value) -> Result<Option<T>> {
+/// `op` of the archive's app with `input`: its result. A host whose
+/// archive has no list (404: older than this CLI) is refused, before an
+/// import writes any conversation: it would be listed nowhere.
+fn op<T: serde::de::DeserializeOwned>(c: &Client, name: &str, op: &str, input: serde_json::Value) -> Result<T> {
     let id = format!("session-{op}-{:016x}", rand::random::<u64>());
     let resp = c.post_json_by_id(&format!("/api/f/{name}/ops/{op}"), &OpCall { id, input })?;
     if resp.status == 404 {
-        return Ok(None);
+        let msg = "this host's session archive keeps no list yet: it is older than this CLI. Import with the CLI it serves (its install page)".to_string();
+        return Err(anyhow::Error::new(CodedError { code: Code::Unavailable, msg }));
     }
     let done: OpResult = c.call_as(resp)?;
-    Ok(Some(serde_json::from_value(done.result).with_context(|| format!("the archive's {op} answered no list"))?))
+    serde_json::from_value(done.result).with_context(|| format!("the archive's {op} answered no list"))
 }
 
-/// Every row of the archive's list, or `None` on a host whose archive has none.
-fn rows(c: &Client, name: &str) -> Result<Option<Vec<Row>>> {
+/// Every row of the archive's list (each as it reads), and whether it is
+/// whole.
+fn rows(c: &Client, name: &str) -> Result<(Vec<serde_json::Value>, bool)> {
     let mut out = Vec::new();
     let mut after = String::new();
     for _ in 0..=session::SESSIONS_MAX {
-        let Some(page) = op::<RowsPage>(c, name, "sessions", serde_json::json!({ "after": after }))? else { return Ok(None) };
+        let page: RowsPage = op(c, name, "sessions", serde_json::json!({ "after": after }))?;
         out.extend(page.sessions);
         match page.next {
-            None => return Ok(Some(out)),
+            None => return Ok((out, page.whole)),
             Some(n) if n <= after => bail!("the archive's list stopped moving on at {}", said_id(&n)),
             Some(n) => after = n,
         }
@@ -445,8 +455,8 @@ fn rows(c: &Client, name: &str) -> Result<Option<Vec<Row>>> {
 }
 
 /// `rows` filed in the archive's list and `gone` dropped from it, a call a
-/// batch; false on a host whose archive has no list.
-fn file_rows(c: &Client, name: &str, rows: Vec<Row>, gone: Vec<String>) -> Result<bool> {
+/// batch, the last saying the list is whole (each conversation has its row).
+fn file_rows(c: &Client, name: &str, rows: Vec<Row>, gone: Vec<String>, whole: bool) -> Result<()> {
     let mut calls: Vec<(Vec<Row>, Vec<String>)> = vec![(Vec::new(), Vec::new())];
     let mut bytes = 0;
     for row in rows {
@@ -459,12 +469,19 @@ fn file_rows(c: &Client, name: &str, rows: Vec<Row>, gone: Vec<String>) -> Resul
         calls.last_mut().expect("a call").0.push(row);
     }
     calls.extend(gone.chunks(FILED_GONE).map(|keys| (Vec::new(), keys.to_vec())));
-    for (rows, gone) in calls.into_iter().filter(|(r, g)| !r.is_empty() || !g.is_empty()) {
-        if op::<serde_json::Value>(c, name, "filed", serde_json::json!({ "rows": rows, "gone": gone }))?.is_none() {
-            return Ok(false);
+    let calls: Vec<_> = calls.into_iter().filter(|(r, g)| !r.is_empty() || !g.is_empty()).collect();
+    let last = calls.len();
+    for (i, (rows, gone)) in calls.into_iter().enumerate() {
+        let mut input = serde_json::json!({ "rows": rows, "gone": gone });
+        if i + 1 == last {
+            input["whole"] = serde_json::json!(true);
         }
+        op::<serde_json::Value>(c, name, "filed", input)?;
     }
-    Ok(true)
+    if last == 0 && !whole {
+        op::<serde_json::Value>(c, name, "filed", serde_json::json!({ "whole": true }))?;
+    }
+    Ok(())
 }
 
 fn held(c: &Client, name: &str, storage: &CodeStorage) -> Result<Held> {
@@ -476,9 +493,16 @@ fn held(c: &Client, name: &str, storage: &CodeStorage) -> Result<Held> {
     let stored: BTreeMap<String, Stored> =
         listed.iter().filter_map(|e| session::key_of_path(e.path.as_str()).map(|k| (k.to_string(), Stored { commit: e.last_commit_sha.clone() }))).collect();
     let media = listed.iter().filter(|e| e.path.as_str().starts_with("media/")).map(|e| e.path.to_string()).collect();
-    let indexes = listed.iter().filter(|e| e.path.as_str().starts_with("index/") && e.path.as_str().ends_with(".json")).map(|e| e.path.to_string()).collect();
+    let indexes = listed.iter().filter(|e| e.path.as_str().strip_prefix("index/").and_then(|p| p.strip_suffix(".json")).is_some_and(|k| Kind::parse(k).is_some())).map(|e| e.path.to_string()).collect();
+    let (rows, whole) = rows(c, name)?;
     let (mut indexed, mut gone) = (BTreeMap::new(), Vec::new());
-    for Row { entry, commit } in rows(c, name)?.iter().flatten() {
+    for row in rows {
+        let key = row["key"].as_str().map(str::to_string);
+        let Ok(Row { entry, commit }) = serde_json::from_value::<Row>(row) else {
+            // no row: its file (if any) is read, and its row written again
+            gone.extend(key.filter(|k| !stored.contains_key(k)));
+            continue;
+        };
         match stored.get(&entry.key) {
             None => gone.push(entry.key.clone()),
             // a row that names its file's last commit describes it; any
@@ -489,7 +513,7 @@ fn held(c: &Client, name: &str, storage: &CodeStorage) -> Result<Held> {
             Some(_) => {}
         }
     }
-    Ok(Held { head, indexed, stored, gone, media, indexes })
+    Ok(Held { head, indexed, stored, gone, whole, media, indexes })
 }
 
 /// The entry of each conversation whose file in `sessions/` no row
@@ -588,12 +612,18 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     if total > 0 {
         crate::sync::refresh_pins(c, name, crate::codestorage::MAIN);
     }
-    // the list: each conversation read or written, and each row whose
-    // file is gone; then the list's files from before its rows go
-    let listed = file_rows(c, name, filed.into_values().collect(), h.gone)?;
-    if !listed {
-        eprintln!("warning: this host keeps no list of the archive's conversations yet: it is written at an import once it does");
-    } else if !h.indexes.is_empty() {
+    // the list: each conversation read or written, and each row whose file
+    // is gone (and still gone: another import may have written it since),
+    // then whole; then the index files from before its rows go
+    let gone = if h.gone.is_empty() {
+        h.gone
+    } else {
+        let now = storage.branch_head(MAIN)?.map(|rev| storage.list_files(&rev)).transpose()?.map(|l| l.entries).unwrap_or_default();
+        let there: BTreeSet<&str> = now.iter().filter_map(|e| session::key_of_path(e.path.as_str())).collect();
+        h.gone.into_iter().filter(|k| !there.contains(k.as_str())).collect()
+    };
+    file_rows(c, name, filed.into_values().collect(), gone, h.whole)?;
+    if !h.indexes.is_empty() {
         let gone = h.indexes.iter().map(|p| RepoPath::parse(p).map(|path| Change::Delete { path }).map_err(|e| anyhow!("{e}"))).collect::<Result<Vec<_>>>()?;
         commit(&storage, &author, head, "session import: its list is rows now", &gone)?;
         crate::sync::refresh_pins(c, name, crate::codestorage::MAIN);
@@ -1214,8 +1244,10 @@ mod tests {
             ],
             "an import before the archive's rows",
         );
+        assert!(!mock.list_whole(NAME), "no rows yet: its readers list its index files");
         let w = write(&c, NAME, &spooled(vec![])).unwrap();
         assert_eq!((w.added, w.updated, w.entries.len()), (0, 0, 3));
+        assert!(mock.list_whole(NAME), "every conversation listed: whole");
         assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&chat)), ("hermes-b".to_string(), sha(&later))], "each conversation listed as its file is");
         assert_eq!(keys(&mock, Kind::Cron), ["hermes-r"]);
         assert!(mock.paths(NAME, "main").iter().all(|p| !p.starts_with("index/")), "its index files are taken away once it has rows");
@@ -1227,23 +1259,43 @@ mod tests {
     }
 
     /// Goal: on a host whose archive has no list yet (an older platform,
-    /// its ops 404), an import still writes its conversations, says the
-    /// list waits, and leaves any index files as they are; the next import
-    /// on a host that has one lists them. Method: the fake's list off, then
-    /// on.
+    /// its ops 404), an import is refused before it writes a conversation,
+    /// saying so, its index files left as they are: what it wrote would be
+    /// listed nowhere. Invalid, then valid once the host has a list.
     #[test]
-    fn a_host_before_the_list_takes_the_conversations() {
+    fn a_host_before_the_list_is_refused_before_any_conversation() {
         let mock = crate::mockcs::start();
         mock.seed_repo(NAME, &[("fragment.json", br#"{"template":"sessions"}"#), ("index/chat.json", b"{}")]);
         let c = Client::new(&mock.url, crate::auth::fixed(7));
-        let w = write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])])).unwrap();
-        assert_eq!(w.added, 1);
-        assert!(mock.file_at(NAME, "main", &session::session_path("hermes-a")).is_some());
+        let packs = mock.requests(NAME, "POST commit-pack");
+        let refused = write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])])).err().expect("refused");
+        assert!(refused.to_string().contains("keeps no list yet"), "{refused:#}");
+        assert_eq!(mock.requests(NAME, "POST commit-pack"), packs, "nothing written");
         assert!(mock.file_at(NAME, "main", "index/chat.json").is_some(), "its index file stays");
         mock.enable_list(NAME);
+        let w = write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])])).unwrap();
+        assert_eq!(w.added, 1);
+        assert_eq!(keys(&mock, Kind::Chat), ["hermes-a"]);
+        assert!(mock.list_whole(NAME) && mock.file_at(NAME, "main", "index/chat.json").is_none());
+    }
+
+    /// Goal: a row that is no entry (another writer's, missing its fields)
+    /// is read as none: its file read and its row written again; one whose
+    /// file is gone is dropped. Method: rows seeded so, then an import of
+    /// nothing.
+    #[test]
+    fn a_row_that_is_no_entry_is_written_again() {
+        let (mock, c) = archive();
+        write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])])).unwrap();
+        mock.list_rows(NAME, |rows| {
+            rows.insert("hermes-a".into(), serde_json::json!({ "key": "hermes-a", "kind": "chat" }));
+            rows.insert("hermes-x".into(), serde_json::json!({ "key": "hermes-x" }));
+        });
         let w = write(&c, NAME, &spooled(vec![])).unwrap();
         assert_eq!(w.entries.len(), 1);
         assert_eq!(keys(&mock, Kind::Chat), ["hermes-a"]);
+        assert_eq!(commit_of(&mock, "hermes-a"), mock.branch(NAME, "main"), "written again whole, naming its commit");
+        assert!(mock.list_rows(NAME, |rows| !rows.contains_key("hermes-x")).unwrap(), "a row with no file dropped");
     }
 
     /// Goal: an import that pauses between its writes and its search, while

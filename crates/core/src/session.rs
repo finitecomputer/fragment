@@ -45,6 +45,13 @@ pub const TITLE: &str = "Session Archive";
 /// so an archive never fails its person's export. The count bounds its
 /// list too (at about 500 bytes an entry, 9 MB if every one is a run).
 pub const SESSIONS_MAX: usize = 18_000;
+/// The bytes of an archive's list (its entries as JSON), at most: inside
+/// the app's database (`limits::APP_DB_MAX_BYTES`, its rows' keys, its index
+/// and its ledger beside them), so an import whose list would not fit is
+/// refused before it writes anything, never cut off as it files its rows.
+/// About 580 bytes an entry when every conversation is listed.
+pub const LIST_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const _: () = assert!(LIST_MAX_BYTES + 4 * 1024 * 1024 <= fragment_proto::limits::APP_DB_MAX_BYTES, "an archive's list fits its app's database");
 pub const ARCHIVE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const _: () = assert!(SESSIONS_MAX + 2_000 <= crate::export::limits::FILES_MAX, "an archive's files fit its person's export");
 const _: () = assert!(2 * ARCHIVE_MAX_BYTES <= crate::export::limits::FRAGMENT_MAX_BYTES, "an archive's bytes fit its person's export");
@@ -492,6 +499,7 @@ impl<P> Default for Merge<P> {
 pub enum TooMuch {
     Conversations(usize),
     Bytes(u64),
+    List(u64),
 }
 
 impl std::fmt::Display for TooMuch {
@@ -499,6 +507,7 @@ impl std::fmt::Display for TooMuch {
         match self {
             TooMuch::Conversations(n) => write!(f, "the archive would hold {n} conversations, past the {SESSIONS_MAX} it holds (`--kind chat` imports only the chats)"),
             TooMuch::Bytes(n) => write!(f, "the archive would hold {} MiB of conversations, past the {} MiB it holds (`--kind chat` imports only the chats)", n / (1024 * 1024), ARCHIVE_MAX_BYTES / (1024 * 1024)),
+            TooMuch::List(n) => write!(f, "the archive's list would be {} MiB, past the {} MiB it holds (`--kind chat` imports only the chats)", n / (1024 * 1024), LIST_MAX_BYTES / (1024 * 1024)),
         }
     }
 }
@@ -541,6 +550,10 @@ pub fn merge<P>(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BT
     }
     if m.added > 0 || m.updated > 0 {
         within(m.entries.len(), m.entries.values().map(|e| e.bytes + e.media).sum())?;
+        let list: u64 = m.entries.values().map(|e| serde_json::to_vec(e).map_or(0, |j| j.len() as u64)).sum();
+        if list > LIST_MAX_BYTES {
+            return Err(TooMuch::List(list));
+        }
     }
     Ok(m)
 }
@@ -958,6 +971,20 @@ mod tests {
         let past = merge(&indexed, &stored, vec![], vec![(Entry { bytes: ARCHIVE_MAX_BYTES / 2 + 1, ..light }, bytes)]);
         assert_eq!(past.err(), Some(TooMuch::Bytes(ARCHIVE_MAX_BYTES + 1)));
         assert_eq!(within(SESSIONS_MAX, ARCHIVE_MAX_BYTES), Ok(()));
+
+        // a list past its app's database (long titles and previews in a
+        // script of three bytes a character): refused before anything is
+        // written, and one at the limit's edge taken
+        let wide = Entry { key: "hermes-00000".into(), title: "題".repeat(TITLE_MAX_CHARS), preview: "語".repeat(PREVIEW_MAX_CHARS), ..base.clone() };
+        let each = serde_json::to_vec(&wide).unwrap().len() as u64;
+        let fits = (LIST_MAX_BYTES / each) as usize;
+        let listed: BTreeMap<String, Entry> = (0..fits - 1).map(|i| (format!("hermes-{i:05}"), Entry { key: format!("hermes-{i:05}"), ..wide.clone() })).collect();
+        let stored: BTreeSet<String> = listed.keys().cloned().collect();
+        let one = |id: &str| (Entry { key: format!("hermes-{id}"), ..wide.clone() }, ());
+        let edge = merge(&listed, &stored, vec![], vec![one("zzzzz")]);
+        assert!(edge.is_ok(), "{fits} of {each} bytes fit: {:?}", edge.err());
+        let past = merge(&listed, &stored, vec![], vec![one("zzzzz"), one("zzzzy"), one("zzzzx")]);
+        assert!(matches!(past.err(), Some(TooMuch::List(n)) if n > LIST_MAX_BYTES));
     }
 
     /// Goal: times read as the export wrote them and Hermes kept them, and

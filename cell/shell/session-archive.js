@@ -1,7 +1,7 @@
 // The person's Session Archive (templates/sessions/README.md): its chats,
 // as its rows list them (its app's `sessions`, asked with this page's
-// session; an archive imported before its rows were, its `index/chat.json`
-// until its next import fills them), which the History page lists with the
+// session; while its list is not whole, as for an archive imported before
+// its rows were, its `index/chat.json`), which the History page lists with the
 // person's chats (history-page.js; Paul, 2026-10-31: in place of a
 // sidebar section of their own). One opens in the middle column,
 // read-only: the archive's own page for it (`/?s=<key>`), framed as a chat
@@ -64,25 +64,27 @@ export function createSessionArchive({
     changed();
   }
 
-  // the archive's chats, every page of its rows; none yet (or no app to
-  // ask), its chats' index file, gone once its next import fills its rows
+  // the archive's chats, every page of its rows; while its list is not
+  // whole (imported before its rows were, or a host before them), its
+  // chats' index file, when it has one
   async function chatsOf(name) {
     const out = [];
-    for (let after = ""; ;) {
-      const page = await api("POST", `/api/f/${seg(name)}/ops/sessions`, { id: `history-${Date.now()}-${read.asked}`, input: { kind: "chat", after } })
+    let whole = false;
+    for (let after = "", i = 0; i < 64; i++) {
+      const page = await api("POST", `/api/f/${seg(name)}/ops/sessions`, { id: `history-${Date.now()}-${i}`, input: { kind: "chat", after } })
         .then((r) => r?.result, (e) => (e.status === 404 ? null : Promise.reject(e)));
-      if (!Array.isArray(page?.sessions)) break;
+      if (!page) break;
+      if (!Array.isArray(page.sessions)) throw new Error("the archive answered no list");
       out.push(...page.sessions);
-      if (!page.next) return out.length ? out : chatsIndexed(name);
+      whole = page.whole === true;
+      if (!page.next || page.next <= after) break;
       after = page.next;
     }
-    return chatsIndexed(name);
+    if (whole) return out;
+    const index = await api("GET", `/api/f/${seg(name)}/file?path=${encodeURIComponent("index/chat.json")}`).catch((e) => (e.status === 404 ? null : Promise.reject(e)));
+    return Array.isArray(index?.sessions) ? index.sessions : out;
   }
 
-  async function chatsIndexed(name) {
-    const index = await api("GET", `/api/f/${seg(name)}/file?path=${encodeURIComponent("index/chat.json")}`).catch((e) => (e.status === 404 ? { sessions: [] } : Promise.reject(e)));
-    return Array.isArray(index?.sessions) ? index.sessions : [];
-  }
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) load().catch(() => {});
   });

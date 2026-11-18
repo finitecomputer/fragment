@@ -1108,8 +1108,8 @@ unfinished design, not debt.
 - **Shortcut:** an archive imported before its list was rows holds
   `index/<kind>.json` and no rows: its page (templates/sessions/site/sessions.js
   `list`), the shell's History (cell/shell/session-archive.js
-  `chatsIndexed`) and the iPhone's (ios/Sources/FragmentApp.swift
-  `loadImported`) read its chats from that file while it has no rows,
+  `chatsOf`) and the iPhone's (ios/Sources/FragmentApp.swift
+  `loadImported`) read its chats from that file while its list is not whole,
   and the CLI's next import takes the files away (cli/src/session/mod.rs
   `write`).
 - **Risk:** none beyond a second read path: an archive its person never

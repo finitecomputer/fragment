@@ -434,34 +434,37 @@ final class Library {
     }
     /// The person's imported chats: their session archive's rows of kind
     /// `chat` (its app's `sessions`, templates/sessions/README.md), apart
-    /// from the rest of the list; an archive with none yet (one imported
-    /// before its rows were, or a host before them), its `index/chat.json`,
-    /// as the web's History reads it. A read that fails keeps what was read
-    /// before, and nothing else waits on it.
+    /// from the rest of the list, the newest 2,000; while its list is not
+    /// whole (an archive imported before its rows were, or a host before
+    /// them), its `index/chat.json` when it has one, as the web's History
+    /// reads it. A read that fails keeps what was read before, and nothing
+    /// else waits on it.
     private func loadImported(_ api: FragmentAPI, _ requestID: UUID) async {
         struct Index: Decodable { let sessions: [ImportedSession] }
-        struct Page: Decodable { let sessions: [ImportedSession]; let next: String? }
+        struct Page: Decodable { let sessions: [ImportedSession]; let next: String?; let whole: Bool? }
         struct Answer: Decodable { let result: Page }
         guard let archive = fragments.first(where: { $0.kind == "sessions" && $0.role == "owner" }) else {
             if loadID == requestID { imported = [] }
             return
         }
         var rows: [ImportedSession] = []
+        var whole = false
         do {
             var after = ""
-            while rows.count < 2_000 {
-                let call: JSONValue = .object(["id": .string("ios-history-\(UUID().uuidString)"), "input": .object(["kind": .string("chat"), "after": .string(after)])])
+            for page in 0..<64 {
+                let call: JSONValue = .object(["id": .string("ios-history-\(page)-\(UUID().uuidString)"), "input": .object(["kind": .string("chat"), "after": .string(after)])])
                 guard let answer = try await api.optionalPost(Answer.self, "api/f/\(archive.name)/ops/sessions", body: call) else { break }
                 rows += answer.result.sessions
-                guard let next = answer.result.next else { break }
+                whole = answer.result.whole == true
+                guard let next = answer.result.next, next > after else { break }
                 after = next
             }
-            if rows.isEmpty {
-                rows = try await api.optional(Index.self, "api/f/\(archive.name)/file", query: [URLQueryItem(name: "path", value: "index/chat.json")])?.sessions ?? []
+            if !whole, let index = try await api.optional(Index.self, "api/f/\(archive.name)/file", query: [URLQueryItem(name: "path", value: "index/chat.json")]) {
+                rows = index.sessions
             }
         } catch { return }
         guard loadID == requestID, !Task.isCancelled else { return }
-        imported = Array(rows.prefix(2_000))
+        imported = Array(rows.sorted { $0.at > $1.at }.prefix(2_000))
     }
     func watch(_ api: FragmentAPI) async {
         var attempt = 0
