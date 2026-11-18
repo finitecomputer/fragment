@@ -66,7 +66,7 @@ export class App extends DurableObject {
   // ---- the capabilities ----
 
   async #reach(name, method, path, body) {
-    const r = await this.env.FRAGMENTS.fetch(name, method, path, body);
+    const r = await this.env.FRAGMENTS.request(name, method, path, body);
     const text = await r.text();
     if (!r.ok) throw new Error(`${method} ${name}${path}: ${r.status} ${text.slice(0, 300)}`);
     return text ? JSON.parse(text) : null;
@@ -105,6 +105,8 @@ export class App extends DurableObject {
       const database = new DurableObjectSqliteDatabase(this.ctx.storage);
       const storage = await SqliteStorage.open(database, { prefix: "pi_" });
       await database.exec("CREATE TABLE IF NOT EXISTS fa_chats (chat TEXT PRIMARY KEY, conversation INTEGER NOT NULL)");
+      // the turns this agent ended: a record run again finds its turn here
+      await database.exec("CREATE TABLE IF NOT EXISTS fa_ended (turn TEXT PRIMARY KEY, at INTEGER NOT NULL)");
       const modelFetch = async (_url, init) => this.env.MODELS.chat(typeof init.body === "string" ? init.body : await new Response(init.body).text());
       const provider = createProvider({
         id: "fragment",
@@ -232,7 +234,8 @@ export class App extends DurableObject {
     }
     const id = await hex24(`${live.fragment}|${chat}/${channel}/${record.seq}`);
     const t = { opened: 0, submitted: 0, firstDraft: null, answered: 0 };
-    const { openedMs } = await this.#open();
+    const { openedMs, database } = await this.#open();
+    if (await database.get("SELECT turn FROM fa_ended WHERE turn = ?", id)) return { turn: id, replayed: true };
     const conversation = await this.#conversation(chat);
     t.opened = Date.now() - received;
     const turn = { id, chat, steps: 0, tools: [], settled: false };
@@ -240,7 +243,7 @@ export class App extends DurableObject {
     if (!list.some((x) => x.id === id)) list.push(turn);
     this.#turns.set(conversation.id, list);
     const work = (part, b) => this.#reach(chat, "POST", "/api/channels/work", { id: `wk:${id}:${part}`, body: b });
-    await work("start", { kind: "turn.start", turn: id, asker: record.principal, agent: me, cause: { fragment: chat, channel, seq: record.seq }, life: live.fragment.replace(/[^a-z0-9]/g, "").padEnd(32, "0").slice(0, 32) });
+    await work("start", { kind: "turn.start", turn: id, asker: record.principal, agent: me, cause: { fragment: chat, channel, seq: record.seq }, life: `${await hex24(live.fragment)}00000000` });
     const submission = await conversation.submit({ type: "input", content: body.text, requestId: id }, BG);
     t.submitted = Date.now() - received;
     // the answer's text as it streams, into the chat's draft
@@ -281,6 +284,7 @@ export class App extends DurableObject {
     if (text) await this.#reach(chat, "POST", "/api/channels/chat", { id: `rp:${id}:1`, body: { text, turn: id } });
     const timing = { received_at: received, opened_ms: openedMs, open_ms: t.opened, submitted_ms: t.submitted, first_draft_ms: t.firstDraft, answered_ms: t.answered, tools: turn.tools };
     await work("end", { kind: "turn.end", turn: id, outcome, ...(error ? { error } : {}), timing });
+    await database.run("INSERT OR IGNORE INTO fa_ended (turn, at) VALUES (?, ?)", id, Date.now());
     return { turn: id, timing };
   }
 }

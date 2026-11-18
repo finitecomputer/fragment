@@ -182,7 +182,8 @@ export class Models extends Capability {
 
 export class Fragments extends Capability {
   // `{name, method, path, body?}`: `path` is `/api/…` on fragment `name`
-  fetch(name, method, path, body) {
+  // (not `fetch`: a WorkerEntrypoint's own fetch is its HTTP handler)
+  request(name, method, path, body) {
     return this.ask("fragments/fetch", JSON.stringify({ name, method, path, body: body ?? null }));
   }
 }
