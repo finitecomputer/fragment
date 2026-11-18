@@ -181,7 +181,7 @@ pub fn elsewhere(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a fragment that is no agent's acts nowhere (403)", starts(&nobody, "403") && records(api, &owner, &room, "chat").len() == 2, &nobody);
     // someone else who may edit it: its code acts nowhere, even once they are gone
     let editor = api.person()?;
-    let r = api.share(&agent, &editor.pubkey_hex(), "editor")?;
+    let r = api.share(&agent, editor.pubkey_hex(), "editor")?;
     anyhow::ensure!(r.status == 200, "an editor of the agent's fragment: {r}");
     let shared = act("records", &room, "chat", json!({}))?;
     s.commit(&x.made, &[("their.txt", Some(b"their code".as_slice()))]);
