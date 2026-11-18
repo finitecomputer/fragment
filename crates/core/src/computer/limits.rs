@@ -30,6 +30,10 @@ pub const START_DEADLINE_MS: i64 = 15 * 60_000;
 /// five minutes, a full disk's first one (the cell's `SNAPSHOT_MAX_MS`),
 /// and its other steps seconds.
 pub const SLEEP_DEADLINE_MS: i64 = 6 * 60_000;
+/// A stop under way is looked at this often (its alarm), so a new
+/// isolate's look (the cell's `adopt`) finds one whose end its isolate lost,
+/// its container gone, as soon as when its deadline was a minute.
+pub const STOP_LOOK_MS: i64 = 60_000;
 /// Awake time is metered at least this often.
 pub const METER_EVERY_MS: i64 = 5 * 60_000;
 /// A running computer is heard from at least every `METER_EVERY_MS` (its
@@ -111,6 +115,7 @@ const _: () = assert!(RETRY_PAUSE_MS << STARTS_FAILED_MAX < START_DEADLINE_MS, "
 const _: () = assert!(SAVE_SETTLE_MS < IDLE_MS, "work that ended is saved before an idle sleep would save it");
 const _: () = assert!(SAVE_RETRY_MS < SAVE_EVERY_MS && SAVE_EVERY_MS < UNSAVED_MAX_MS_DEFAULT, "a failed save is tried again within its bound");
 const _: () = assert!(HOLD_WAIT_MS < HOLD_DEADLINE_MS, "a hold's wait fits its deadline");
+const _: () = assert!(STOP_LOOK_MS < SLEEP_DEADLINE_MS, "a stop is looked at before its deadline");
 const _: () = assert!(SAVES_KEPT >= 2, "a save to fall back to");
 const _: () = assert!(UNSAVED_NOTICE_FAILURES >= 1, "told after a failure, never before");
 const _: () = assert!(ALIVE_MS < START_DEADLINE_MS, "a start's wait for its guest fits its deadline");

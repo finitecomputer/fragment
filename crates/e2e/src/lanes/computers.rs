@@ -329,13 +329,14 @@ fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
 /// The bound checks (r4, r6: a sick container after a wake, and a sleep
 /// that never ended; #362: a start from a snapshot that came up dead), each
 /// skipped off the stub and the fakes.
-const BOUND_CHECKS: [&str; 6] = [
+const BOUND_CHECKS: [&str; 7] = [
     "a start that waits for its guest, as one from a snapshot does, is up once its guest reads its view",
     "one whose guest never reads it came up dead: the same wake starts it again from its save (#362)",
     "a sleep whose backups never answer (a sick container's) fails at their bound, and keeps its container, saying why",
     "its backups answering again, its owner's sleep saves it, and it sleeps",
     "a sleep whose snapshot takes 45 s (a big disk's first, which 30 s cut) waits for it and keeps it, its container gone",
     "the wake after it starts once, nothing failed",
+    "a wake during a slow stop starts it once the stop ends, by its alarm: its owner's sleep never waits for that start",
 ];
 
 /// A start that waits for its guest, as a start from a snapshot does (local
@@ -457,6 +458,37 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
         woke.body["phase"] == "awake" && woke.body["generation"].as_u64() == Some(g + 1) && after.body["failures"] == 0 && slept.body["phase"] == "asleep",
         format!("{woke} / {after} / {slept}"),
     );
+    // a wake as its snapshot runs: its start waits for the stop, made by the
+    // alarm, never by its owner's sleep, which answers within its steps
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let g = woke.body["generation"].as_u64().unwrap_or(0);
+    std::thread::sleep(QUEUE_DRAIN);
+    let slow = Duration::from_secs(20);
+    let set = lever_with(api, c.id, json!({ "op": "slow-snapshot", "ms": slow.as_millis() as u64 }))?;
+    let (slept, during) = std::thread::scope(|scope| {
+        let sleeping = scope.spawn(|| api.patient(slow * 3).signed(c.owner, "POST", &path("/sleep"), Some(&json!({}))));
+        // its hold and save take a few seconds: this lands as it snapshots
+        std::thread::sleep(slow / 2);
+        let during = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})));
+        (sleeping.join().expect("the sleep's request"), during)
+    });
+    let (slept, during) = (slept?, during?);
+    let up = s.eventually(WAKE, || phase(api, c.owner, c.id) == "awake");
+    let after = api.signed(c.owner, "GET", &path(""), None)?;
+    s.ok(
+        BOUND_CHECKS[6],
+        woke.body["phase"] == "awake"
+            && set.status == 200
+            && during.status == 200
+            && slept.status == 200
+            && slept.body["phase"] != "awake"
+            && up
+            && after.body["generation"].as_u64() == Some(g + 1),
+        format!("{slept} / {during} / {after}"),
+    );
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    anyhow::ensure!(slept.body["phase"] == "asleep", "it sleeps again: {slept}");
     Ok(())
 }
 

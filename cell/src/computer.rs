@@ -890,7 +890,8 @@ impl ComputerCell {
     /// alarm its events asked for, an invocation of its own, since an alarm
     /// ends at `ALARM_WALL_MS` and its sleep's steps took most of this one.
     /// An owner's restart leaves its start to the alarm too, so it answers
-    /// the same on every path (`restart`).
+    /// the same on every path (`restart`), and so does its sleep, so it
+    /// answers within its steps' bound (docs/api.md).
     async fn drive_with(&self, first: Option<Event>, asked: bool) -> CellResult<Option<String>> {
         self.drive_answering(first, asked, None).await
     }
@@ -1971,7 +1972,7 @@ impl ComputerCell {
             // a restart's start is fresh from the image: no snapshot for it
             let fresh = saves.as_ref().is_some_and(Saves::fresh);
             // the lever's `slow-snapshot` takes one where the runtime takes none
-            let snapshots = self.cfg.computer_snapshots || self.meta(MetaKey::SlowSnapshot).ok().flatten().is_some();
+            let snapshots = self.cfg.computer_snapshots || (self.cfg.test_hooks && self.meta(MetaKey::SlowSnapshot).ok().flatten().is_some());
             if let (true, true, false, Some(save)) = (saved, snapshots, fresh, newest) {
                 self.snapshot(generation, &save.id, until_ms).await;
             }
@@ -2003,8 +2004,12 @@ impl ComputerCell {
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         let name = format!("{}-{generation}", id.replace(':', "-"));
         let (t0, bound) = (js::now_ms(), snapshot_ms(until_ms, js::now_ms()));
-        // the lever's `slow-snapshot`, taken once: one made up that takes its ms
-        let slow = self.meta(MetaKey::SlowSnapshot).ok().flatten().and_then(|ms| ms.parse::<f64>().ok()).unwrap_or(0.0);
+        // the lever's `slow-snapshot`, taken once, where the runtime takes
+        // none: one made up that takes its ms
+        let slow = match self.cfg.test_hooks && !self.cfg.computer_snapshots {
+            true => self.meta(MetaKey::SlowSnapshot).ok().flatten().and_then(|ms| ms.parse::<f64>().ok()).unwrap_or(0.0),
+            false => 0.0,
+        };
         if slow > 0.0 {
             let _ = self.delete_meta(MetaKey::SlowSnapshot);
         }
@@ -2650,7 +2655,11 @@ impl ComputerCell {
             }
             "slow-snapshot" => {
                 // its next sleep's snapshot takes `ms`, as a disk's first
-                // snapshot after it grew does (local workerd takes none)
+                // snapshot after it grew does (local workerd takes none); a
+                // deployment that takes real ones keeps no made-up one
+                if self.cfg.computer_snapshots {
+                    return Err(CellError::invalid("this deployment takes snapshots of its own: slow-snapshot makes one where none is taken"));
+                }
                 let ms = b.ms.map(i64::from).filter(|ms| *ms <= SNAPSHOT_MAX_MS).ok_or_else(|| CellError::invalid(format!("slow-snapshot names its ms, 0 to {SNAPSHOT_MAX_MS}")))?;
                 match ms {
                     0 => self.delete_meta(MetaKey::SlowSnapshot)?,
@@ -3066,7 +3075,9 @@ impl ComputerCell {
                 json_response(&self.view().await?)
             }
             (Method::Post, ["sleep"]) => {
-                self.drive(Event::Sleep).await?;
+                // a start a wake during its stop owes is its alarm's, as a
+                // restart's is: the sleep answers within its steps' bound
+                self.drive_with(Some(Event::Sleep), false).await?;
                 json_response(&self.view().await?)
             }
             (Method::Post, ["restart"]) => {

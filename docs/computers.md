@@ -471,7 +471,10 @@ the first after a disk grew took about 85 s for 9 GB (preview,
 2026-11-18), and 30 s for every one lost each over about 1.5 GB. A
 snapshot cut short frees nothing sooner: the runtime's takes no signal and
 holds the container until it ends. A wake that comes during the stop
-starts once the stop ends (`owes_start`). A start takes an alarm of its
+starts once the stop ends (`owes_start`), made by its alarm, never by its
+owner's sleep, which answers within its steps. The stop's deadline is six
+minutes, but it is looked at every minute (`STOP_LOOK_MS`), so one whose
+end its isolate lost is found as soon as before. A start takes an alarm of its
 own: the one start an alarm makes (a retry's, or one owed after a sleep),
 its disk's read among its steps, with the alarm's other events, fits
 15 minutes (`RESTORE_MS` leaves them their 65 seconds). So an owner's
