@@ -954,10 +954,11 @@ impl Engine {
 
     fn finish(&mut self) -> Step {
         let working = self.runtimes.values().any(|r| r.working);
+        let busy = working || self.state.turns.values().any(|t| t.phase == Phase::Queued || (t.phase == Phase::Running && !t.asking));
         // a card only this life can take holds it too (a sign-in's code: a
-        // later life refuses it, and its person starts again)
-        let card = |t: &Turn| t.active() && t.prompts.iter().any(|p| !p.closed && self.now < p.holds_until);
-        let busy = working || self.state.turns.values().any(|t| t.phase == Phase::Queued || (t.phase == Phase::Running && !t.asking) || card(t));
+        // later life refuses it, and its person starts again); it is
+        // waiting on a person, so work left running counts from its start
+        let card = self.state.turns.values().any(|t| t.active() && t.prompts.iter().any(|p| !p.closed && self.now < p.holds_until));
         if self.busy && !busy {
             self.left_from = Some(self.now);
         }
@@ -971,7 +972,7 @@ impl Engine {
             self.left = left;
             crate::ev!("keepalive.left", { "hold": left, "from": self.left_from });
         }
-        let hold = busy || left;
+        let hold = busy || card || left;
         if hold != self.keepalive {
             self.keepalive = hold;
             self.out.push(Effect::Keepalive(hold));
