@@ -1409,26 +1409,32 @@ impl ComputerCell {
     /// answer leaves them owed to the next (docs/technical-debt-ledger.md,
     /// "A computer keeps its owner's own keys from before the move").
     async fn hand_over_own(&self) -> CellResult<Vec<String>> {
-        // bounded: the rest go at the next touch
-        let rows = self.rows(&format!("SELECT provider, sealed, set_at FROM own_keys ORDER BY provider LIMIT {}", fragment_core::vault::SECRETS_MAX), vec![])?;
-        if rows.is_empty() {
-            return Ok(vec![]);
+        let mut taken = vec![];
+        // bounded: each batch deletes the rows it handed, so every key kept
+        // goes before the Vault is read (Codex, #1345); past
+        // `OWN_HANDOVER_BATCHES` batches the rest go at the next touch
+        for _ in 0..OWN_HANDOVER_BATCHES {
+            let rows = self.rows(&format!("SELECT provider, sealed, set_at FROM own_keys ORDER BY provider LIMIT {}", fragment_core::vault::SECRETS_MAX), vec![])?;
+            if rows.is_empty() {
+                break;
+            }
+            let owner = self.must(MetaKey::Owner)?;
+            let scope = crate::keys::scope(SEAL_CLASS, &self.state);
+            let text = |r: &Value, k: &str| r[k].as_str().unwrap_or_default().to_string();
+            let mut keys = Vec::with_capacity(rows.len());
+            for r in &rows {
+                let opened = crate::keys::open(&self.env, &scope, &text(r, "sealed")).await?;
+                let key = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("an own key that is not text"))?;
+                keys.push(crate::vault::Handed(text(r, "provider"), key, r["set_at"].as_i64().unwrap_or(0)));
+            }
+            let batch = crate::vault::hand_over(&self.env, &owner, &keys).await?;
+            for r in &rows {
+                self.exec("DELETE FROM own_keys WHERE provider = ? AND sealed = ?", vec![text(r, "provider").into(), text(r, "sealed").into()])?;
+            }
+            // its providers and counts, never a key
+            console_log!("{{\"computer\":{:?},\"ownKeys\":\"handed\",\"handed\":{},\"taken\":{:?},\"owed\":{}}}", self.meta(MetaKey::Id)?.unwrap_or_default(), rows.len(), batch, self.owed_own()?.len());
+            taken.extend(batch);
         }
-        let owner = self.must(MetaKey::Owner)?;
-        let scope = crate::keys::scope(SEAL_CLASS, &self.state);
-        let text = |r: &Value, k: &str| r[k].as_str().unwrap_or_default().to_string();
-        let mut keys = Vec::with_capacity(rows.len());
-        for r in &rows {
-            let opened = crate::keys::open(&self.env, &scope, &text(r, "sealed")).await?;
-            let key = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("an own key that is not text"))?;
-            keys.push(crate::vault::Handed(text(r, "provider"), key, r["set_at"].as_i64().unwrap_or(0)));
-        }
-        let taken = crate::vault::hand_over(&self.env, &owner, &keys).await?;
-        for r in &rows {
-            self.exec("DELETE FROM own_keys WHERE provider = ? AND sealed = ?", vec![text(r, "provider").into(), text(r, "sealed").into()])?;
-        }
-        // its providers and counts, never a key
-        console_log!("{{\"computer\":{:?},\"ownKeys\":\"handed\",\"handed\":{},\"taken\":{:?},\"owed\":{}}}", self.meta(MetaKey::Id)?.unwrap_or_default(), rows.len(), taken, self.owed_own()?.len());
         Ok(taken)
     }
 
@@ -4018,6 +4024,11 @@ async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str
 fn vault_s(cfg: &Config, p: &Placeholder) -> bool {
     !p.connection && cfg.providers.named(&p.provider, false).is_none()
 }
+
+/// Batches of `vault::SECRETS_MAX` own keys one hand-over sends at most
+/// (`ComputerCell::hand_over_own`): far more than a catalog has ever offered
+/// own providers, one row each.
+const OWN_HANDOVER_BATCHES: usize = 16;
 
 /// Headers a hop answers for itself, never sent on.
 const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "host"];
