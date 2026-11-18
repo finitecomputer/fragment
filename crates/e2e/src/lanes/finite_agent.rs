@@ -226,5 +226,8 @@ pub fn finite_agent(s: &mut Suite, api: &Api) -> Result<()> {
         s.skip("every everyday ask answered (the measure)", "it needs a real model: run it hosted");
     }
     page.close();
+    // its computer asleep again, as it was: nothing left running at the end
+    let r = api.patient(Duration::from_secs(900)).signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
+    s.ok("its computer goes back to sleep", r.status == 200 && r.body["phase"] == "asleep", &r);
     Ok(())
 }
