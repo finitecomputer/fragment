@@ -2,15 +2,15 @@
 //! entry.mjs `Models`, `Fragments`, `Commands`), each answered only while
 //! one of this fragment's live calls runs (jobs.rs `step_live`):
 //!
-//!   POST /cap/models/chat        the model route, as the fragment: its
+//!   /call/models/chat            the model route, as the fragment: its
 //!        owner pays, an agent fragment's calls are its agent's; the answer
 //!        streamed back as the model gives it (models.rs `complete`, the
 //!        agent route's own path)
-//!   POST /cap/fragments/fetch    another fragment's control API, as this
+//!   /call/fragments/fetch    another fragment's control API, as this
 //!        fragment's agent: routed as the router routes a signed request,
 //!        its membership and role checked there (routed.rs `Routed::ask`,
 //!        the share sheet's and search's path)
-//!   POST /cap/computer/exec      a command on the computer the agent uses,
+//!   /call/commands/exec        a command on the computer the agent uses,
 //!        its output streamed (computer.rs `exec_for`)
 //!
 //! An agent fragment acts as its agent, the identity the registry gave it
@@ -18,51 +18,36 @@
 //! never assigned has none, and is refused.
 
 use fragment_proto::{valid_fragment_name, ErrorCode};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::FragmentsFetch;
 use crate::fragment::{missing, FragmentCell, MetaKey};
 use crate::models::{InFragment, ModelCall};
 use crate::routed::{Routed, Signed};
 
-/// `cap/fragments/fetch`'s body: `path` an inner `/api/…` route there.
-#[derive(Deserialize)]
-struct Reach {
-    name: String,
-    method: String,
-    path: String,
-    #[serde(default)]
-    body: Option<Value>,
-}
-
 impl FragmentCell {
-    /// `/cap/<op>` for a live call's capabilities (the module's doc).
-    pub(crate) async fn cap_live(&self, op: &str, body: Vec<u8>) -> CellResult<Response> {
+    /// Its capabilities answer a live call alone, while it runs.
+    fn live_only(&self) -> CellResult<()> {
         if self.live_calls.get() == 0 {
             return Err(CellError::new(ErrorCode::Forbidden, "this capability answers a live operation's call alone, while it runs"));
         }
-        match op {
-            "models/chat" => self.cap_models(body).await,
-            "fragments/fetch" => self.cap_fragments(body).await,
-            "computer/exec" => self.cap_computer(body).await,
-            _ => Err(CellError::new(ErrorCode::NotFound, format!("no capability {op}"))),
-        }
+        Ok(())
     }
 
-    async fn cap_models(&self, body: Vec<u8>) -> CellResult<Response> {
-        let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    pub(crate) async fn cap_models(&self, v: Value) -> CellResult<Response> {
+        self.live_only()?;
         let [owner, name, agent] = self.metas([MetaKey::Owner, MetaKey::Name, MetaKey::AgentIdentity])?;
         let (owner, name) = (owner.ok_or_else(|| missing(MetaKey::Owner))?, name.ok_or_else(|| missing(MetaKey::Name))?);
         let named = self.cfg.models.named(v.get("model").and_then(Value::as_str), None).map_err(|e| CellError::invalid(e.message()))?;
         let stream = v.get("stream") == Some(&Value::Bool(true));
-        let call = ModelCall { payer: &owner, agent: agent.as_deref(), fragment: Some(InFragment { name: &name, owner: &owner, by_owner: true }), named, tier: None, body: v, stream };
+        let call = ModelCall { payer: &owner, agent: agent.as_deref(), fragment: Some(InFragment { name: &name, owner: &owner, by_owner: true }), named, route: None, body: v, stream };
         crate::models::complete(&self.env, call, &self.state).await
     }
 
-    async fn cap_fragments(&self, body: Vec<u8>) -> CellResult<Response> {
-        let r: Reach = crate::json_body(&body)?;
+    pub(crate) async fn cap_fragments(&self, r: FragmentsFetch) -> CellResult<Response> {
+        self.live_only()?;
         if !valid_fragment_name(&r.name) || !r.path.starts_with("/api/") || r.path.split(['/', '?']).any(|s| s == "..") {
             return Err(CellError::invalid("a fragment's name, and an /api/ route there"));
         }
@@ -79,8 +64,8 @@ impl FragmentCell {
         Routed { name: r.name, url, signed: Some(who), credential: None }.ask(&self.env, method, &r.path, body.as_deref(), None).await
     }
 
-    async fn cap_computer(&self, body: Vec<u8>) -> CellResult<Response> {
-        let mut ask: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    pub(crate) async fn cap_computer(&self, mut ask: Value) -> CellResult<Response> {
+        self.live_only()?;
         let [owner, agent, computer] = self.metas([MetaKey::Owner, MetaKey::AgentIdentity, MetaKey::Computer])?;
         let owner = owner.ok_or_else(|| missing(MetaKey::Owner))?;
         if agent.is_none() {

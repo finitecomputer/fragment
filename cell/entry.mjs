@@ -95,14 +95,15 @@ export class Registry extends DurableObject {
 
 // The app's read access to its files (files.rs), handed to its facet as
 // `env.FILES` bound to one fragment by `props`: the app cannot name another.
-// Both it and the job driver call the supervisor's internal routes through
-// `rs.InternalRoute.request` (routed.rs), which marks the request as that route
-// expects and stamps it with this release (an object refuses another's:
+// It, `Search` and the job driver make the fragment's typed calls
+// (`call/…`, fragment/calls.rs, which defines each one's body) through
+// `rs.InternalRoute.request` (routed.rs), which marks the request as a call
+// and stamps it with this release (an object refuses another's:
 // docs/MODEL.md, "Calls between releases"): the JavaScript names no header.
 export class Files extends WorkerEntrypoint {
   async #ask(op, body) {
     const { fragment } = this.ctx.props;
-    return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `cap/files/${op}`, JSON.stringify(body)));
+    return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `call/files/${op}`, JSON.stringify(body)));
   }
 
   async #answer(op, body) {
@@ -129,7 +130,7 @@ export class Files extends WorkerEntrypoint {
 export class Search extends WorkerEntrypoint {
   async #answer(op, body) {
     const { fragment } = this.ctx.props;
-    const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `cap/search/${op}`, JSON.stringify(body)));
+    const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `call/search/${op}`, JSON.stringify(body)));
     const answer = await resp.json().catch(() => ({}));
     if (resp.ok) return { answer };
     return {
@@ -168,28 +169,28 @@ export class Search extends WorkerEntrypoint {
 class Capability extends WorkerEntrypoint {
   ask(path, body) {
     const { fragment } = this.ctx.props;
-    return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, path, body));
+    return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `call/${path}`, body));
   }
 }
 
 export class Models extends Capability {
   // `body`: an OpenAI chat completion's JSON text; its answer as the model route answers it
   chat(body) {
-    return this.ask("cap/models/chat", String(body));
+    return this.ask("models/chat", String(body));
   }
 }
 
 export class Fragments extends Capability {
   // `{name, method, path, body?}`: `path` is `/api/…` on fragment `name`
   fetch(name, method, path, body) {
-    return this.ask("cap/fragments/fetch", JSON.stringify({ name, method, path, body: body ?? null }));
+    return this.ask("fragments/fetch", JSON.stringify({ name, method, path, body: body ?? null }));
   }
 }
 
 export class Commands extends Capability {
   // `{argv, stdin?, cwd?, ms?}`: one command, its output streamed
   exec(command) {
-    return this.ask("cap/computer/exec", JSON.stringify(command));
+    return this.ask("commands/exec", JSON.stringify(command));
   }
 }
 
@@ -210,9 +211,9 @@ export class Job extends WorkflowEntrypoint {
     const retrying = { retries: { limit: 4, delay: `${delay} seconds`, backoff: "exponential" }, timeout: "5 minutes" };
     const post = async (path, body) => {
       const call = JSON.stringify({ incarnation, run, attempt, ...body });
-      const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `job/${path}`, call));
+      const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `call/job/${path}`, call));
       const out = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(out.message || `job/${path} answered ${resp.status}`);
+      if (!resp.ok) throw new Error(out.message || `call/job/${path} answered ${resp.status}`);
       return out;
     };
     // the step before this round, when it ran out of retries

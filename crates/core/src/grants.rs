@@ -6,15 +6,13 @@
 //! person through their computer's routes; its computer asks for them at
 //! each use and keeps none. Pure: the cell stores and asks, this reads.
 //!
-//! **The move** from the computer, which kept them before (its
-//! `agents.connections` and `agent_accounts`): an agent's first ask after
-//! the deploy carries that row (`Row`), taken whole by a fragment that
-//! holds no grants of its own yet, and ignored by one that does
-//! (`answered`), so a row sent late or again can never undo what its owner
-//! set since. The computer then marks the row `MOVED` and sends it no
-//! more. The release is forward only (the Computer's step 5): the release
-//! before refuses every Computer object, so it never writes those rows
-//! again.
+//! **The move** from the computer, which kept them before: an agent's
+//! first ask after the deploy carried its computer's row (`Row`), taken
+//! whole by a fragment that holds no grants of its own yet, and ignored by
+//! one that does (`answered`), so a row sent late or again can never undo
+//! what its owner set since. The Computer's step 6 dropped those rows,
+//! keeping each one not yet taken as owed (`Owed`, its `meta`
+//! `grants_owed`), handed over the same way and forgotten once answered.
 
 use std::collections::BTreeMap;
 
@@ -23,11 +21,6 @@ use serde_json::{json, Value};
 
 use crate::catalog::{valid_name, PROVIDERS_MAX};
 use crate::connection_accounts::valid_account_id;
-
-/// A taken row's `agents.connections`: its fragment holds it, so its
-/// computer sends it no more. A list whose one name no provider can have
-/// (`catalog::valid_name` refuses a leading `-`), never a value of its own.
-pub const MOVED: &str = r#"["-"]"#;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,8 +80,8 @@ pub fn allows(narrowed: Option<&[String]>, provider: &str) -> bool {
     narrowed.is_none_or(|list| list.iter().any(|p| p == provider))
 }
 
-/// A computer's row for an agent as it stands: its `agents.connections` as
-/// stored (`MOVED` once marked) and its `agent_accounts`, provider to id.
+/// A computer's row for an agent from before the move: its connections as
+/// they were stored (`null`, or a list) and its picks, provider to id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Row {
     pub connections: String,
@@ -110,6 +103,37 @@ impl Row {
     }
 }
 
+/// The rows a computer owes its agents' fragments (its `meta`
+/// `grants_owed`, written by the Computer's step 6): agent fragment → the
+/// agent it was kept for and its row. At most the agents it ran then,
+/// and only ever fewer: none is written after.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Owed(pub BTreeMap<String, (String, Row)>);
+
+impl Owed {
+    /// As its computer's `meta` keeps it: at most `max` rows, its agents.
+    pub fn read(stored: &str, max: usize) -> Result<Owed, String> {
+        let v: Value = serde_json::from_slice(stored.as_bytes()).map_err(|e| e.to_string())?;
+        let fragments = v.as_object().ok_or("owed rows are an object, by agent fragment")?;
+        if fragments.len() > max {
+            return Err(format!("{} rows owed, more than a computer's {max} agents", fragments.len()));
+        }
+        let mut owed = BTreeMap::new();
+        for (fragment, o) in fragments {
+            let identity = o["identity"].as_str().ok_or_else(|| format!("{fragment}'s owed row names no agent"))?;
+            let row = Row::of(o).ok_or_else(|| format!("{fragment}'s owed row is no row: {o}"))?;
+            owed.insert(fragment.clone(), (identity.to_string(), row));
+        }
+        Ok(Owed(owed))
+    }
+
+    /// As its computer's `meta` keeps it; none owed, nothing kept.
+    pub fn stored(&self) -> Option<String> {
+        let rows: serde_json::Map<String, Value> = self.0.iter().map(|(f, (identity, row))| (f.clone(), json!({ "identity": identity, "connections": row.connections, "accounts": row.accounts }))).collect();
+        (!rows.is_empty()).then(|| Value::Object(rows).to_string())
+    }
+}
+
 /// Its owner's change, in person: its providers, or the account it uses at
 /// one (`None`: the default).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +150,7 @@ pub enum Change {
 pub fn answered(held: Option<&Grants>, taken: Option<&Row>, change: Option<Change>) -> Result<Grants, String> {
     let mut grants = match (held, taken) {
         (Some(held), _) => held.clone(),
-        (None, Some(row)) if row.connections != MOVED => {
+        (None, Some(row)) => {
             let connections = serde_json::from_slice(row.connections.as_bytes()).map_err(|e| format!("its computer's connections {:?}: {e}", row.connections))?;
             Grants { connections, accounts: row.accounts.clone() }
         }
@@ -230,29 +254,106 @@ mod tests {
     #[test]
     fn an_agent_with_no_old_row_starts_fresh() {
         assert_eq!(answered(None, None, None), Ok(Grants::default()), "every provider, each connection's default account");
-        assert_eq!(answered(None, Some(&row(MOVED, &[("google", "data_1")])), None), Ok(Grants::default()), "a row marked taken is no row");
         let picked = answered(None, None, Some(Change::Account { provider: "google".into(), account: Some("data_1".into()) })).expect("picked");
         assert_eq!((picked.connections.clone(), picked.account("google")), (None, Some("data_1")));
     }
 
-    /// Goal: the release before can never write an agent's old row again,
-    /// so nothing it writes needs merging (docs/MODEL.md: a release whose
-    /// stored value an older one cannot read is forward only). An object
-    /// that took Computer step 5 is refused by the code of the step before,
-    /// so rollout's `eligible` never rolls back across it; rolled forward,
-    /// it is current (valid, rollback, restart). Method: a Computer made by
-    /// this code, then started by the code of one step before, then by this.
-    #[test]
-    fn the_code_one_step_before_refuses_the_computer() {
-        use crate::migrate::{self, host::Lite, Db, Ran, SchemaError, COMPUTER};
-        let newest = COMPUTER.steps.len() as u32;
-        assert_eq!((newest, COMPUTER.steps.last().map(|s| s.name)), (5, Some("grants_forward_only")), "the move's step is the newest");
-        let before = migrate::Class { steps: &COMPUTER.steps[..4], ..COMPUTER };
+    /// An agent's row at step 5: its fragment, its `agents.connections`
+    /// and its `agent_accounts` picks, provider to account.
+    type OldRow<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
+
+    /// A computer at step 5 holding each of `rows`.
+    fn at_step_5(rows: &[OldRow]) -> crate::migrate::host::Lite {
+        use crate::migrate::{self, host::Lite, Ran, COMPUTER};
         let db = Lite::new();
-        assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 0)), Ok(Ran::Made { version: newest }));
-        db.exec("INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES ('juniper--k3x9', 'npub1a', 'npub1o', 1, '[\"-\"]')").expect("a taken row");
-        assert_eq!(db.transaction(|db| migrate::migrate(db, &before, 100)), Err(SchemaError::Newer { class: "Computer", held: newest, known: 4 }), "the release before refuses it");
-        assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 200)), Ok(Ran::Current { version: newest }), "rolled forward, it is current");
-        assert_eq!(db.rows("SELECT connections FROM agents").expect("its row")[0]["connections"], MOVED, "its row as written");
+        let five = migrate::Class { steps: &COMPUTER.steps[..5], ..COMPUTER };
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &five, 0)), Ok(Ran::Made { version: 5 }));
+        for (i, (fragment, connections, picks)) in rows.iter().enumerate() {
+            db.harness(&format!("INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES ('{fragment}', 'npub1{i}', 'npub1o', {i}, '{connections}')"));
+            for (provider, account) in *picks {
+                db.harness(&format!("INSERT INTO agent_accounts (agent, provider, account) VALUES ('{fragment}', '{provider}', '{account}')"));
+            }
+        }
+        db
+    }
+
+    fn owed_of(db: &crate::migrate::host::Lite) -> Option<Owed> {
+        use crate::migrate::Db;
+        let rows = db.rows("SELECT value FROM meta WHERE key = 'grants_owed'").expect("meta reads");
+        rows.first().map(|r| Owed::read(r["value"].as_str().expect("text"), 16).expect("step 6's rows read as the cell reads them"))
+    }
+
+    /// Goal: step 6 drops the computer's old grant rows and loses none its
+    /// agents' fragments have not taken: each is owed, read as the cell
+    /// reads it, and taken whole as before (the upgrade path). A row taken,
+    /// or one saying only the default, is not owed; narrowed to none is.
+    /// Started again it changes nothing (replay, restart); the code of the
+    /// step before refuses it (rollback). Method: a step-5 computer holding
+    /// every kind of row, migrated by this code, then by the step before.
+    #[test]
+    fn step_6_owes_each_row_not_taken() {
+        use crate::migrate::{self, Ran, SchemaError, COMPUTER};
+        let newest = COMPUTER.steps.len() as u32;
+        assert_eq!((newest, COMPUTER.steps.last().map(|s| s.name)), (6, Some("grants_owed")), "the drop's step is the newest");
+        let db = at_step_5(&[
+            ("taken--a1", r#"["-"]"#, &[("google", "data_stale")]),
+            ("narrowed--b2", r#"["github"]"#, &[("google", "data_1")]),
+            ("default--c3", "null", &[]),
+            ("picked--d4", "null", &[("google", "data_2")]),
+            ("none--e5", "[]", &[]),
+        ]);
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 100)), Ok(Ran::Migrated { from: 5, version: newest }));
+        let owed = owed_of(&db).expect("rows owed");
+        let expected = Owed(BTreeMap::from([
+            ("narrowed--b2".to_string(), ("npub11".to_string(), row(r#"["github"]"#, &[("google", "data_1")]))),
+            ("picked--d4".to_string(), ("npub13".to_string(), row("null", &[("google", "data_2")]))),
+            ("none--e5".to_string(), ("npub14".to_string(), row("[]", &[]))),
+        ]));
+        assert_eq!(owed, expected, "each row not taken, and none other");
+        let taken = |f: &str| answered(None, Some(&owed.0[f].1), None).expect("taken whole");
+        assert_eq!((taken("narrowed--b2").connections, taken("narrowed--b2").account("google").map(str::to_string)), (list(&["github"]), Some("data_1".into())));
+        assert_eq!((taken("picked--d4").connections, taken("picked--d4").account("google").map(str::to_string)), (None, Some("data_2".into())));
+        assert_eq!(taken("none--e5"), Grants::none(), "narrowed to none stays none, never every provider");
+        assert_eq!(db.columns("agents"), ["fragment", "identity", "owner", "added_at"], "the column is gone");
+        assert_eq!(db.count("SELECT COUNT(*) FROM sqlite_master WHERE name = 'agent_accounts'"), 0, "the table is gone");
+        assert_eq!(db.count("SELECT COUNT(*) FROM agents"), 5, "every agent still runs here");
+        // replay and restart
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 200)), Ok(Ran::Current { version: newest }));
+        assert_eq!(owed_of(&db), Some(expected), "started again, it owes the same");
+        // rollback
+        let before = migrate::Class { steps: &COMPUTER.steps[..5], ..COMPUTER };
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &before, 300)), Err(SchemaError::Newer { class: "Computer", held: newest, known: 5 }), "the release before refuses it");
+        // a wipe makes its life again, as step 6 left it
+        db.transaction(|db| migrate::remake(db, &COMPUTER)).expect("remade");
+        assert_eq!((db.columns("agents").len(), db.count("SELECT COUNT(*) FROM meta")), (4, 0));
+    }
+
+    /// Goal: a computer whose agents' fragments took every row, or that
+    /// held only defaults, owes nothing and keeps no row saying so.
+    #[test]
+    fn nothing_owed_keeps_no_row() {
+        use crate::migrate::{self, Ran, COMPUTER};
+        for rows in [&[][..], &[("taken--a1", r#"["-"]"#, &[][..]), ("default--c3", "null", &[][..])][..]] {
+            let db = at_step_5(rows);
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 100)), Ok(Ran::Migrated { from: 5, version: 6 }));
+            assert_eq!(owed_of(&db), None, "{rows:?} owes nothing");
+        }
+    }
+
+    /// Goal: what a computer owes reads back as it was kept, shrinks to
+    /// nothing kept, and refuses what step 6 never writes.
+    #[test]
+    fn owed_rows_read_as_kept() {
+        let mut owed = Owed(BTreeMap::from([("narrowed--b2".to_string(), ("npub1b".to_string(), row(r#"["github"]"#, &[("google", "data_1")])))]));
+        assert_eq!(Owed::read(&owed.stored().expect("kept"), 16), Ok(owed.clone()));
+        owed.0.clear();
+        assert_eq!(owed.stored(), None, "none owed, nothing kept");
+        let one = r#"{"connections":"null","accounts":{}}"#;
+        for stored in ["[]", "null", r#"{"a--b1":{"connections":"null","accounts":{}}}"#, r#"{"a--b1":{"identity":"npub1a","accounts":{}}}"#, r#"{"a--b1":{"identity":"npub1a","connections":"null","accounts":{"google":1}}}"#] {
+            assert!(Owed::read(stored, 16).is_err(), "{stored} is refused");
+        }
+        let many: Vec<String> = (0..3).map(|i| format!(r#""f--{i}":{{"identity":"npub1a",{}"#, &one[1..])).collect();
+        assert!(Owed::read(&format!("{{{}}}", many.join(",")), 2).is_err(), "more than its agents");
+        assert!(Owed::read(&format!("{{{}}}", many.join(",")), 3).is_ok());
     }
 }

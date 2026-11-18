@@ -147,7 +147,8 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D:
 /// platform does not read are ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AiText {
-    /// A tier (`fragment_proto::Tier`: `cheap` unless named), never a model id.
+    /// A route of the deployment's by its name (`fragment_core::models::
+    /// Models::step_route`: its default unless named), never a model id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// The conversation, OpenAI's messages as given (an assistant's

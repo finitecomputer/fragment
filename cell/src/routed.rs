@@ -10,11 +10,11 @@
 //! answer alike for everyone who may see the fragment, so the fragment asks
 //! the registry only when its answer depends on who is asking.
 //!
-//! Calls from inside the platform (a run's Workflow, the app's `Files`
-//! capability, the other objects' typed calls: fragment/calls.rs) are not
-//! routed requests: they carry no caller and no URL, and the supervisor
-//! answers them before it decodes a `Routed`. `internal_request` builds
-//! the untyped ones, for Rust and for `entry.mjs`.
+//! Calls from inside the platform (the typed calls of fragment/calls.rs,
+//! a run's Workflow's and the app's capabilities' among them, and a
+//! computer's routes) are not routed requests: they carry no caller and
+//! no URL, and the supervisor answers them before it decodes a `Routed`.
+//! `internal_request` builds them, for Rust and for `entry.mjs`.
 //!
 //! Every call into a platform object goes out through `send` (or
 //! `send_again`), here alone (xtask's guard), stamped with this release,
@@ -221,15 +221,7 @@ impl Routed {
 /// `None`: the route needs none. A fragment's typed calls carry their own
 /// (fragment/calls.rs).
 fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
-    if path.starts_with("job/") {
-        Ok(Some((crate::jobs::JOB_HEADER, "1")))
-    } else if path.starts_with("cap/files/") {
-        Ok(Some((crate::files::CAP_HEADER, "files")))
-    } else if path.starts_with("cap/search/") {
-        Ok(Some((crate::files::CAP_HEADER, "search")))
-    } else if path.starts_with("cap/models/") || path.starts_with("cap/fragments/") || path.starts_with("cap/computer/") {
-        Ok(Some((crate::files::CAP_HEADER, "live")))
-    } else if path.starts_with("call/") {
+    if path.starts_with("call/") {
         Ok(Some((crate::fragment::calls::HEADER, "1")))
     } else if path.starts_with("computer/") {
         Ok(Some((crate::computer::INTERNAL_HEADER, "1")))
@@ -248,8 +240,8 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
 }
 
 /// A call into a platform object from inside the platform: `path`
-/// (`job/advance`, `cap/files/read`, `index/search`), with a JSON body,
-/// marked as that route expects.
+/// (`call/job/advance`, `computer/view`, `index/search`), with a JSON
+/// body, marked as that route expects.
 pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
@@ -519,11 +511,12 @@ pub(crate) async fn objects(env: &Env, cfg: &Config) -> CellResult<Response> {
     Ok(Response::from_json(&body)?.with_status(if all { 200 } else { 503 }))
 }
 
-/// `internal_request` for `entry.mjs` (the job driver, the `Files`
-/// capability and a computer's reports to itself), stamped with the
-/// release of `env` (the caller's), so the JavaScript names no header. A
-/// class with a static method, because worker-build exports classes by
-/// name and a free function only as a method of the Worker's entrypoint.
+/// `internal_request` for `entry.mjs` (the job driver's and the `Files`
+/// and `Search` capabilities' calls, and a computer's reports to itself),
+/// stamped with the release of `env` (the caller's), so the JavaScript
+/// names no header. A class with a static method, because worker-build
+/// exports classes by name and a free function only as a method of the
+/// Worker's entrypoint.
 #[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
 pub struct InternalRoute;
 
