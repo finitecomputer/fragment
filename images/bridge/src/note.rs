@@ -395,12 +395,25 @@ pub fn own_words(principal: &str, body: &Value, me: &str, owner: &str) -> bool {
     principal == me && records::relayed(body).is_none_or(|r| r.for_ != owner)
 }
 
-/// Whether `r` is the agent's owner's `/new` for it (naming it, or naming
-/// no agent while it is the chat's lead, which a command for no one is
-/// for): its runtime's conversation in the chat begins again there. `new`
-/// is every runtime's (relay/menu.rs, claude.rs, script.rs).
-fn begins_again(r: &Record, me: &str, owner: &str, lead: bool) -> bool {
-    r.principal == owner && matches!(records::said(&r.body), Said::Command(c) if c.name == "new" && (c.to.iter().any(|t| t == me) || (c.to.is_empty() && lead)))
+/// Whether `r` is the agent's owner's `/new` naming it: its runtime's
+/// conversation in the chat begins again there. `new` is every runtime's
+/// (relay/menu.rs, claude.rs, script.rs). One naming no agent was the
+/// lead's then, whichever agent leads now: `restarted` asks the journal.
+fn begins_again(r: &Record, me: &str, owner: &str) -> bool {
+    r.principal == owner && matches!(records::said(&r.body), Said::Command(c) if c.name == "new" && c.to.iter().any(|t| t == me))
+}
+
+/// The seq of the newest of `chat` (this chat's records read back, oldest
+/// first) that is its owner's `/new` the agent ran: a turn of its on
+/// `work` it started, not refused. Its runtime's conversation in the chat
+/// began again there.
+pub fn restarted(chat: &[Record], work: &[Record], me: &str, owner: &str, fragment: &str) -> Option<u64> {
+    let ran = |seq: u64| {
+        work.iter().filter_map(|r| own(r, me, "turn.start")).any(|b| {
+            b["agent"] == me && b["cause"]["fragment"] == fragment && b["cause"]["channel"] == records::CHAT && b["cause"]["seq"] == seq && !work.iter().filter_map(|r| own(r, me, "turn.end")).any(|e| e["turn"] == b["turn"] && refused(e))
+        })
+    };
+    chat.iter().rev().filter(|r| r.channel == records::CHAT && r.principal == owner && matches!(records::said(&r.body), Said::Command(c) if c.name == "new")).map(|r| r.seq).find(|seq| ran(*seq))
 }
 
 /// Whether `c` breaks a line where it is shown (beside `\n`): a carriage
@@ -436,9 +449,9 @@ fn message(r: &Record) -> Option<String> {
 /// records read back (oldest first, each before the turn's own message),
 /// the messages said by `until` (the platform's ms; the turn's claim, when
 /// no message of this chat started it), a person's or an agent's, since
-/// the agent joined (`since`) and after its owner's newest `/new` for it
-/// (`lead`: it is the chat's lead), oldest first. With whether the records
-/// reach back to where that begins.
+/// the agent joined (`since`) and after its owner's newest `/new` naming
+/// it, oldest first. With whether the records reach back to where that
+/// begins.
 ///
 /// "Forgot": a rollback or a loss of `/data` sends the bridge's cursors
 /// back, and the turns it reads again were claimed by the life that ran
@@ -447,12 +460,12 @@ fn message(r: &Record) -> Option<String> {
 /// the chat is told the chat, from the records, which never go back in
 /// time; each message was one the bridge read as the agent, which may read
 /// all of them (`fragment channel`).
-pub fn exchanges<'a>(chat: &'a [Record], me: &str, owner: &str, lead: bool, since: i64, until: i64) -> (Vec<&'a Record>, bool) {
+pub fn exchanges<'a>(chat: &'a [Record], me: &str, owner: &str, since: i64, until: i64) -> (Vec<&'a Record>, bool) {
     let mut said = Vec::new();
     let mut begins = false;
     // newest first, back to where its runtime's conversation began
     for r in chat.iter().rev() {
-        if r.at < since || begins_again(r, me, owner, lead) {
+        if r.at < since || begins_again(r, me, owner) {
             begins = true;
             break;
         }
@@ -502,7 +515,8 @@ fn sayer(name: &str) -> String {
 /// a line of the note's), the oldest dropped first; and, before each of
 /// the agent's turns' first reply here (else after what started it, else
 /// where it started: a routine that said nothing), its steps as `work`
-/// recorded them, on one line. `None` with nothing to tell.
+/// recorded them, on one line, but a cut turn's (the cut note's). `None`
+/// with nothing to tell.
 pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &BTreeMap<String, String>, chat: &str, reached: bool) -> Option<String> {
     if said.is_empty() {
         return None;
@@ -518,7 +532,13 @@ pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &B
             Some((b["turn"].as_str()?, r.at, b["cause"]["seq"].as_u64().filter(|_| here)))
         })
         .collect();
+    // a turn a restart cut is the cut note's to tell (`text`): its steps
+    // are not told twice
+    let cut: Vec<&str> = work.iter().filter_map(|r| own(r, me, "turn.end")).filter(|e| e["outcome"] == "error" && field(e, "error") == LOST).filter_map(|e| e["turn"].as_str()).collect();
     let tools = |turn: &str| -> Option<String> {
+        if cut.contains(&turn) {
+            return None;
+        }
         let steps: Vec<CutStep> = work
             .iter()
             .filter(|r| r.principal == me && r.body["kind"] == "turn.step" && r.body["turn"] == turn)
@@ -1101,7 +1121,7 @@ mod tests {
         // these (the cut note's): never told here
         w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 130, principal: ME.into(), kind: "message".into(), body: turn_start("cut", OWNER, ME, &Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 14 }, LIFE) });
         w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 131, principal: ME.into(), kind: "message".into(), body: turn_step("cut", 1, &step("terminal", "the cut one", true)) });
-        let (said, begins) = exchanges(&chat, ME, OWNER, true, 15, i64::MAX);
+        let (said, begins) = exchanges(&chat, ME, OWNER, 15, i64::MAX);
         assert!(begins, "the records reach back to its join");
         assert_eq!(said.iter().map(|r| r.seq).collect::<Vec<_>>(), [2, 3, 4, 5, 6, 7, 8, 11, 12]);
         let names: BTreeMap<String, String> = [("npub1rowan", "rowan"), ("npub1mallory", "You\u{200B}:")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
@@ -1134,11 +1154,11 @@ mod tests {
     }
 
     /// Goal: a recap begins where its runtime's conversation did: at its
-    /// owner's newest `/new` for it (naming it, or naming no agent while it
-    /// is the chat's lead, which such a command is for), not one for
-    /// another agent or anyone else's; and, for a turn no message of this
-    /// chat started (a routine), with what was said by its claim (`until`),
-    /// nothing said after.
+    /// owner's newest `/new` it ran (`restarted`: a turn of its started by
+    /// it, not refused), whoever leads the chat now; at once at one naming
+    /// it (`exchanges`), never at one for another agent or anyone else's;
+    /// and, for a turn no message of this chat started (a routine), with
+    /// what was said by its claim (`until`), nothing said after.
     #[test]
     fn a_recap_begins_at_its_owners_new() {
         let new = |to: Value| json!({ "kind": "command", "command": "new", "to": to });
@@ -1152,17 +1172,53 @@ mod tests {
             said_at(7, OWNER, json!({ "text": "said after the claim" })),
         ];
         let seqs = |rs: &[&Record]| rs.iter().map(|r| r.seq).collect::<Vec<_>>();
-        let (said, begins) = exchanges(&chat, ME, OWNER, true, 0, i64::MAX);
-        assert!(begins && seqs(&said) == [3, 6, 7], "{:?}", seqs(&said));
-        let (said, _) = exchanges(&chat, ME, OWNER, true, 0, 65);
-        assert_eq!(seqs(&said), [3, 6], "by its claim");
-        let (said, begins) = exchanges(&chat, ME, OWNER, false, 0, i64::MAX);
-        assert!(!begins && seqs(&said) == [1, 3, 6, 7], "a /new for no one is the lead's, not this agent's: {:?}", seqs(&said));
+        let (said, begins) = exchanges(&chat, ME, OWNER, 0, i64::MAX);
+        assert!(!begins && seqs(&said) == [1, 3, 6, 7], "a /new for no one is the journal's to place: {:?}", seqs(&said));
+        let (said, _) = exchanges(&chat, ME, OWNER, 0, 65);
+        assert_eq!(seqs(&said), [1, 3, 6], "by its claim");
         let mut named = chat.clone();
         named[1] = said_at(2, OWNER, new(json!([ME])));
-        assert_eq!(seqs(&exchanges(&named, ME, OWNER, false, 0, i64::MAX).0), [3, 6, 7], "its own named, lead or not");
-        let (said, begins) = exchanges(&chat[2..], ME, OWNER, true, 0, i64::MAX);
+        let (said, begins) = exchanges(&named, ME, OWNER, 0, i64::MAX);
+        assert!(begins && seqs(&said) == [3, 6, 7], "its own named: {:?}", seqs(&said));
+        // the /new naming no agent: the one that ran it was the lead then
+        let mut w = Work::default();
+        w.start(ME, "t1", 1);
+        w.end(ME, "t1", Outcome::Idle);
+        assert_eq!(restarted(&chat, &w.0, ME, OWNER, "talk--k3x9"), None, "it ran none");
+        let mut rowans = Work::default();
+        rowans.start("npub1rowan", "r2", 2);
+        assert_eq!(restarted(&chat, &rowans.0, ME, OWNER, "talk--k3x9"), None, "another agent's /new (it led then)");
+        w.start(ME, "t2", 2);
+        w.end(ME, "t2", Outcome::Idle);
+        assert_eq!(restarted(&chat, &w.0, ME, OWNER, "talk--k3x9"), Some(2), "its own, whoever leads now");
+        let mut busy = Work::default();
+        busy.start(ME, "t2", 2);
+        busy.end(ME, "t2", Outcome::Error(REFUSED_BUSY.into()));
+        assert_eq!(restarted(&chat, &busy.0, ME, OWNER, "talk--k3x9"), None, "refused, it never ran");
+        let mut theirs = Work::default();
+        theirs.start(ME, "t5", 5);
+        assert_eq!(restarted(&chat, &theirs.0, ME, OWNER, "talk--k3x9"), None, "not its owner's");
+        let (said, begins) = exchanges(&chat[2..], ME, OWNER, 0, i64::MAX);
         assert!(!begins && seqs(&said) == [3, 6, 7], "no beginning among the records read");
+    }
+
+    /// Goal (Codex, review round 2): a turn a restart cut is the cut
+    /// note's to tell (`text`): the recap tells what it said, never its
+    /// steps, a message's turn or a routine's, so no action reads as two.
+    #[test]
+    fn a_cut_turns_steps_are_the_cut_notes() {
+        let chat = vec![said_at(1, OWNER, json!({ "text": "risky" })), said_at(2, ME, json!({ "text": "Let me look.", "turn": "cut", "interim": true })), said_at(5, OWNER, json!({ "text": "after" }))];
+        let mut w = Work::default();
+        w.start(ME, "cut", 1);
+        w.post(ME, turn_step("cut", 1, &step("terminal", "rm -rf x", true)));
+        w.end(ME, "cut", Outcome::Error(LOST.into()));
+        let routine = Cause { fragment: "juniper--k3x9".into(), channel: "tasks".into(), seq: 1 };
+        for (at, body) in [(35, turn_start("rcut", OWNER, ME, &routine, LIFE)), (36, turn_step("rcut", 1, &step("terminal", "touch x", true))), (37, turn_end("rcut", &Outcome::Error(LOST.into())))] {
+            w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at, principal: ME.into(), kind: "message".into(), body });
+        }
+        let (said, _) = exchanges(&chat, ME, OWNER, 0, i64::MAX);
+        let note = recap(&said, &w.0, ME, OWNER, &BTreeMap::new(), "talk--k3x9", true).unwrap();
+        assert!(note.ends_with("\nYour owner: risky\nYou: Let me look.\nYour owner: after") && !note.contains("Your tools"), "{note}");
     }
 
     /// Goal: a recap is bounded whatever the chat holds (many messages, long
@@ -1174,7 +1230,7 @@ mod tests {
     fn a_recap_is_bounded_and_says_where_the_rest_is() {
         let rest = "Earlier messages are on the chat's record: `fragment channel talk--k3x9 chat`.";
         let chat: Vec<Record> = (1..=40).map(|i| said_at(i, OWNER, json!({ "text": format!("{i} {}", "w".repeat(2_000)) }))).collect();
-        let (said, _) = exchanges(&chat, ME, OWNER, true, 0, i64::MAX);
+        let (said, _) = exchanges(&chat, ME, OWNER, 0, i64::MAX);
         let note = recap(&said, &[], ME, OWNER, &BTreeMap::new(), "talk--k3x9", true).unwrap();
         assert!(note.len() <= limits::HISTORY_NOTE_MAX_BYTES, "{}", note.len());
         assert!(note.lines().nth(1) == Some(rest) && note.contains("\nYour owner: 40 ") && !note.contains("\nYour owner: 1 w"), "the newest kept, the rest pointed to");
@@ -1184,14 +1240,14 @@ mod tests {
         for n in 1..=(limits::NOTE_STEPS_MAX as u32 + 3) {
             w.post(ME, turn_step("t10", n, &step(&"t".repeat(140), &"a".repeat(140), true)));
         }
-        let (said, _) = exchanges(&long, ME, OWNER, true, 0, i64::MAX);
+        let (said, _) = exchanges(&long, ME, OWNER, 0, i64::MAX);
         let note = recap(&said, &w.0, ME, OWNER, &BTreeMap::new(), "talk--k3x9", true).unwrap();
         assert!(note.len() <= limits::HISTORY_NOTE_MAX_BYTES, "{}", note.len());
         assert!(note.lines().next().unwrap().ends_with("before you do any of it again.") && note.lines().nth(1) == Some(rest), "{}", &note[..400]);
         assert!(note.lines().all(|l| l.len() <= limits::RECAP_MESSAGE_MAX_BYTES) && note.contains("; and 3 more\nYou: éé"), "each line bounded, its steps counted");
         // all of it fits: where the rest is only when the records stop short
         let few = &chat[..2];
-        let (said, _) = exchanges(few, ME, OWNER, true, 0, i64::MAX);
+        let (said, _) = exchanges(few, ME, OWNER, 0, i64::MAX);
         assert!(!recap(&said, &[], ME, OWNER, &BTreeMap::new(), "talk--k3x9", true).unwrap().contains(rest));
         assert!(recap(&said, &[], ME, OWNER, &BTreeMap::new(), "talk--k3x9", false).unwrap().contains(rest));
     }

@@ -1920,10 +1920,11 @@ async fn history_note(api: &Api, ts: &TurnStart) -> Option<String> {
 /// note.rs, `exchanges` and `recap`): its messages before the turn's own
 /// (for a turn no message of this chat started, those said by its claim),
 /// since the agent joined (its `members` row) and its owner's newest `/new`
-/// for it, read back from `chat` until the note is full; `work` back from
-/// the claim to their turns' starts, for their tools; and the names of
-/// whoever else said them (`__people`; unread, they are `Someone`). One
-/// `Budget`, each read complete or none. `None` when the runtime forgot
+/// it ran, read back from `chat` until the note is full; `work` back from
+/// the claim to their turns' starts, for their tools and that `/new`; and
+/// the names of whoever else said them (`__people`, within the note's own
+/// time; unread, they are `Someone`). One `Budget`, each read complete or
+/// none. `None` when the runtime forgot
 /// nothing here, there is nothing to tell, or the chat did not answer.
 async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
     if !ts.forgotten {
@@ -1931,14 +1932,12 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
     }
     let claim = ts.claim_seq?;
     let (agent, chat, me, owner) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str(), ts.agent.owner.as_str());
+    let began = tokio::time::Instant::now();
     let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "forgotten": true, "error": e.why() });
     // the turn's claim names what started it; the agent's row, when it joined
     let (claimed, members) = tokio::join!(api.records(agent, chat, records::WORK, claim.saturating_sub(1), 1), api.members(agent, chat));
     let claimed = claimed.map_err(|e| unread(e.into())).ok()?.records.into_iter().find(|r| r.seq == claim && r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == ts.turn.as_str());
-    let members = members.map_err(|e| unread(e.into())).ok()?;
-    let since = members.iter().find(|m| m.principal == me).map(|m| m.added_at);
-    // the lead, the first agent added (engine.rs): a command for no one is its
-    let lead = members.iter().filter(|m| m.kind == "agent").min_by(|a, b| (a.added_at, &a.principal).cmp(&(b.added_at, &b.principal))).is_some_and(|m| m.principal == me);
+    let since = members.map_err(|e| unread(e.into())).ok()?.into_iter().find(|m| m.principal == me).map(|m| m.added_at);
     let (Some(claimed), Some(since)) = (claimed, since) else {
         crate::ev!("note.unread", { "turn": ts.turn, "forgotten": true, "why": "its claim, or its agent's membership, is not where the turn says" });
         return None;
@@ -1955,12 +1954,12 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
         }
     };
     let full = |rs: &[Record]| {
-        let (said, begins) = note::exchanges(rs, me, owner, lead, since, until);
+        let (said, begins) = note::exchanges(rs, me, owner, since, until);
         begins || note::recap_bytes(&said) >= limits::HISTORY_NOTE_MAX_BYTES
     };
     // small pages: a page of the chat's longest records is one answer still
     let (read, from_start) = read_pages(api, agent, chat, records::CHAT, before, (limits::RECAP_PAGE_RECORDS, limits::RECAP_SCAN_RECORDS), full, &mut budget).await.map_err(unread).ok()?;
-    let (said, begins) = note::exchanges(&read, me, owner, lead, since, until);
+    let (mut said, mut begins) = note::exchanges(&read, me, owner, since, until);
     let Some(oldest) = said.first().map(|r| r.at) else {
         crate::ev!("note.none", { "turn": ts.turn, "forgotten": true, "why": "nothing said here before it to tell" });
         return None;
@@ -1978,7 +1977,9 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
         if others.is_empty() {
             return BTreeMap::new();
         }
-        let read = tokio::time::timeout(Duration::from_millis(limits::NAMES_READ_MS_MAX), api.people(agent, chat, &others)).await;
+        // within the note's own time, the recap's spare kept
+        let by = (began + Duration::from_millis(limits::NOTE_READ_MS_MAX - limits::RECAP_SPARE_MS)).min(tokio::time::Instant::now() + Duration::from_millis(limits::NAMES_READ_MS_MAX));
+        let read = tokio::time::timeout_at(by, api.people(agent, chat, &others)).await;
         read.map_err(|_| "the names answered too slowly".to_string()).and_then(|r| r.map_err(|e| e.to_string())).unwrap_or_else(|why| {
             crate::ev!("note.names_unread", { "turn": ts.turn, "why": why });
             BTreeMap::new()
@@ -1986,7 +1987,16 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
     };
     let (work, names) = tokio::join!(read_back(api, agent, chat, records::WORK, claim, started, &mut budget), names);
     let work = work.map_err(unread).ok()?.0;
-    let text = note::recap(&said, &work, me, owner, &names, chat, begins || from_start)?;
+    // a `/new` it ran began its runtime's conversation again (one naming no
+    // agent was the lead's then): nothing before it is told
+    if let Some(seq) = note::restarted(&read, &work, me, owner, chat) {
+        said.retain(|r| r.seq > seq);
+        begins = true;
+    }
+    let Some(text) = note::recap(&said, &work, me, owner, &names, chat, begins || from_start) else {
+        crate::ev!("note.none", { "turn": ts.turn, "forgotten": true, "why": "nothing said here since its /new to tell" });
+        return None;
+    };
     crate::ev!("note", { "turn": ts.turn, "forgotten": true, "messages": said.len(), "bytes": text.len() });
     Some(text)
 }

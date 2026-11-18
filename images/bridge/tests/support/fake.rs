@@ -121,6 +121,9 @@ pub struct World {
     /// Each read of a fragment's names (`__people`) is answered this much
     /// later: a slow platform.
     pub people_delay_ms: u64,
+    /// Each read of a page of `RECAP_PAGE_RECORDS` records (a recap's read
+    /// of its chat) is answered this much later.
+    pub recap_page_delay_ms: u64,
     /// Each post to a `chat` channel (a reply, among others) is answered
     /// this much later: a fragment's lane of posts held.
     pub chat_post_delay_ms: u64,
@@ -528,6 +531,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             Method::POST if path.ends_with("/channels/work") => w.work_post_delay_ms,
             Method::POST if path.ends_with("/channels/chat") => w.chat_post_delay_ms,
             Method::GET if path.ends_with("/__people") => w.people_delay_ms,
+            Method::GET if path.contains("/channels/") && query(&q, "limit") == [fragment_bridge::limits::RECAP_PAGE_RECORDS.to_string()] => w.recap_page_delay_ms,
             _ => 0,
         }
     };

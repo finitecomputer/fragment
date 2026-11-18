@@ -2036,12 +2036,15 @@ async fn a_chat_of_long_messages_is_told_its_newest() {
     bridge.stop().await;
 }
 
-/// Goal (M17; Codex on the recap): names that answer too slowly cost a
-/// recap its names, never the recap. In a chat with another person, the
-/// recap is told with what they said as `Someone`'s when the chat's names
-/// (`__people`) answer past the note's whole time (`NOTE_READ_MS_MAX`).
-/// Method: a loss of the state, the names slowed once the new life has
-/// read the chat's members (its view is fresh for `VIEW_TTL_MS`).
+/// Goal (M17; Codex on the recap, both rounds): names that answer too
+/// slowly cost a recap its names, never the recap, even when its read of
+/// the chat took most of the note's time. In a chat with another person,
+/// the recap is told with what they said as `Someone`'s when the chat's
+/// names (`__people`) answer past the note's whole time
+/// (`NOTE_READ_MS_MAX`), its chat read answering past the names' own
+/// bound short of it. Method: a loss of the state, the names and the
+/// recap's pages slowed once the new life has read the chat's members (its
+/// view is fresh for `VIEW_TTL_MS`).
 #[tokio::test]
 async fn a_recap_is_told_when_names_answer_slowly() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -2062,7 +2065,11 @@ async fn a_recap_is_told_when_names_answer_slowly() {
     let bridge = support::start_killable(cfg, support::script());
     // the new life has read both turns again (each claim and lost end a 409)
     fake.until(WAIT, "both turns read again", |w| work_posts(w, &chat) >= posted + 4).await;
-    fake.with(|w| w.people_delay_ms = fragment_bridge::limits::NOTE_READ_MS_MAX + 2_000);
+    let note_ms = fragment_bridge::limits::NOTE_READ_MS_MAX;
+    fake.with(|w| {
+        w.people_delay_ms = note_ms + 2_000;
+        w.recap_page_delay_ms = note_ms - fragment_bridge::limits::NAMES_READ_MS_MAX + 300;
+    });
     let t3 = said_and_ended(&fake, &chat, "three").await;
     let told = fake.with(|w| replies(w, &chat).into_iter().find(|r| r["turn"] == t3.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default());
     assert!(told.contains("\n\n(told: Your memory of this chat is behind") && told.contains("\nYour owner: one\nYou: echo: [paul] one\nSomeone: skyler here\nYou: echo: [skyler] skyler here"), "{told}");
