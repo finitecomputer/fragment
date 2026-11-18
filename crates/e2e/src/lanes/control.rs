@@ -339,7 +339,9 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     let name = s.named(api, &owner, "lock")?;
     s.create(api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
-    // every header the router sets for a fragment, forged to name the owner
+    // every header the router sets for a fragment, forged to name the
+    // owner, and the platform's call marker (cell fragment/calls.rs): one
+    // that reached the fragment would be answered `no call`
     let owner_id = api.identity(&owner)?;
     let claims_owner = json!({ "id": owner_id, "kind": "person", "owner": null, "key": owner.pubkey_hex() }).to_string();
     let owner_key_unsigned = json!({ "key": owner.pubkey_hex() }).to_string();
@@ -355,12 +357,13 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
                 };
                 (*h, v)
             })
+            .chain([("x-fragment-call", "1".to_string())])
             .collect::<Vec<_>>()
     };
     let forged = |keys: Option<&Keys>, url: String| api.call(Call { method: "GET", url, keys, extra: forged_headers(), ..Call::default() });
     let status_url = format!("{}/api/f/{name}/status", api.base);
     let r = forged(Some(&stranger), status_url.clone())?;
-    s.ok("a client's routing headers are dropped: the router's own say who signed (403)", r.status == 403, &r);
+    s.ok("a client's routing headers and call marker are dropped: the router's own say who signed (403)", r.status == 403, &r);
     let r = forged(None, status_url)?;
     s.ok("and an unsigned request stays unsigned (401)", r.status == 401, &r);
     let r = forged(None, api.site_url(&name, ""))?;

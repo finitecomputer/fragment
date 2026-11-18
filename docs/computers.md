@@ -121,7 +121,7 @@ back in time without changing what happens.
 | Fact | Its one authority | A cache of it |
 |---|---|---|
 | What was said | the chat's `chat` channel | the runtime's transcript |
-| Which turns started, which calls they asked for, what they did, how they ended, each card's answer | the chat's `work` channel, the journal (docs/chat-records.md) | the bridge's `state.json` |
+| Which turns started, which calls they asked for, what they did, how they ended, each card's answer | the chat's `work` channel, the journal (docs/chat-records.md) | the bridge's state (`/data/bridge`) |
 | The agent's self (`SOUL.md`, memories, skills) | the agent fragment's repo | the profile's checkout |
 | The runtime's context and the agent's working files | `/data`, as of its newest save | the snapshot, for one image |
 | Which save is current, and what a wake restored | the Computer DO | |
@@ -552,8 +552,8 @@ every door and relay asks. An image's own declarations grant nothing.
 `http://model.fragment.internal` is the platform's model routes as the
 agent (docs/api.md, Models), with the route's bounds and gate:
 
-- `POST /v1/chat/completions`: OpenAI's shape, `model` a tier (`cheap`,
-  `medium`; `high` only while it is on, decision 23), `vision`,
+- `POST /v1/chat/completions`: OpenAI's shape, `model` a route of the
+  deployment's by its name (`cheap`, `medium` on Finite's), `vision`,
   `fallback`, or a model by its id;
 - `GET /v1/models`: OpenAI's list of the ids a call may name, answered by
   the intercept itself, naming no agent and metering nothing;
@@ -573,32 +573,36 @@ Any other path is 404, unmetered.
   further than the computer. The intercept names no fragment, so a call
   bills its agent's owner (decision 36); one its owner's ledger refuses
   gets the ledger's reason (402, 403), and no call is made.
-- `x-fragment-tier: cheap` or `medium` (optional) is the caller's tier,
-  by which a model's id, `fallback` and `vision` run as its tier's route.
+- `x-fragment-tier: <route>` (optional; a route's name, any other 400) is
+  the caller's route, by which a model's id, `fallback` and `vision` run
+  as its route's.
 - **A model by its id.** The view's `models` names each slot's model id
   (`ModelIds`), as the deployment names them now. A guest names its
   models by those ids and reads them again while awake: a change of the
   deployment's `models` is a deploy, no new image, and an id no slot runs
   is refused (400). The route's names keep working.
-- **Each tier's route.** The view's `models.routes` names each tier's
-  label, whether it is private, and its fallback's and vision model's ids.
+- **Each route.** The view's `models.routes` names the routes `cheap` and
+  `medium` (each the route of that name, else the deployment's default:
+  what an image older than the list reads): its label, whether it is
+  private, and its fallback's and vision model's ids.
 - **A slot's own fallback.** A call that fails before answering is made
   once more on its slot's fallback, however it named the slot, and never
   a third time. A call that streams nothing is the runtime's own to give
   up on.
-- **A slot's `private`.** A private tier is a private route: every slot
-  its agents' calls reach (its fallback, its vision, its Deep, and the
-  route's four's `fallback`, which an image that reads no route names for
-  its stall) is private, or the deploy is refused. Not private yet: voice
+- **A slot's `private`.** A route on a private slot is a private route:
+  every slot its agents' calls reach (its fallback, its vision, its Deep,
+  and the view's `fallback`, the default route's, which an image that
+  reads no route names for its stall) is private, or the deploy is
+  refused. Not private yet: voice
   notes (`whisper`), decisions, the runtime's speech, the vendors its
   tools call (web search, `x_search`, image generation), and an owner's
   own model.
-- **Fast and Deep** (decision 65). Each tier runs Fast, its own slot, for
+- **Fast and Deep** (decision 65). Each route runs Fast, its own slot, for
   its agents' turns, and Deep for their delegates. `models.routes` carries
-  each tier's `reasoning` (Fast's effort) and `deep` (`{id, reasoning?,
+  each route's `reasoning` (Fast's effort) and `deep` (`{id, reasoning?,
   fallback?}`), absent when the deployment names none; an image copies
   them into each profile, and one that reads neither runs delegates on
-  Fast. A delegate names its Deep by its id with its tier said, so a
+  Fast. A delegate names its Deep by its id with its route said, so a
   private child stays on its private slot when Standard runs the same id.
 - **Native images** (decision 65). `models.images` lists the model ids
   the deployment declares image-capable; an image gives those models
@@ -674,12 +678,11 @@ provider's own hosts.
   person through their computer's routes. The computer asks the agent's
   fragment for them at each request it swaps and each read of a view,
   and keeps none: a provider taken away is refused from the next request.
-  A computer from before held them itself (`agents.connections`,
-  `agent_accounts`): an agent's first ask after the deploy carries that
-  row, taken whole by a fragment holding none of its own and ignored by
-  one that does (`grants::answered`), then marked moved and sent no more.
-  The release is forward only (the Computer's step 5): the release before
-  refuses every computer, so it never writes those rows again.
+  A computer from before held them itself; the rows its agents'
+  fragments had not taken when its step 6 dropped them it owes
+  (`grants::Owed`): an agent's next ask carries its row, taken whole by a
+  fragment holding none of its own and ignored by one that does
+  (`grants::answered`), then forgotten.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
@@ -830,8 +833,22 @@ payment card fill still asks. A card is its owner's alone to answer
 
 Every turn also tells the agent that a file attached in the chat is
 already on its computer, at the path the attachment note names, scratch
-until it copies it into its work (`hermes::FILES`); and that a reply line
-`MEDIA:<absolute path>` attaches a file there (`hermes::SENDING`).
+until it copies it into its work (`hermes::FILES`); that a voice memo
+arrives already transcribed, its words the quote above Hermes' audio
+note, its file only for work on the recording (`hermes::VOICE`); and that a
+reply line `MEDIA:<absolute path>` attaches a file there
+(`hermes::SENDING`). Hermes keeps the system prompt a chat's session
+began with and replays it on every later turn (rebuilding it only at a
+compression, a model change or `/new`), so whenever what it is built
+from changes (the relay hint, or a skill file Hermes indexes into it: the
+platform skill's, a bundled one, the owner's managed set;
+`hermes::prompt_inputs`), every session is asked to rebuild its prompt
+once, on its next turn, as Hermes' own `hermes sessions refresh-prompts`
+does (`hermes::REFRESH_PROMPTS`): at boot, its skills settled, against
+what the computer last stamped (`hermes::PROMPT_STAMP`), and after each
+install of the managed skills while it runs. An open chat has the change
+at its next turn, its conversation kept, at one prompt-cache miss; the
+same inputs ask nothing.
 
 ### Its name, in our Hermes image
 

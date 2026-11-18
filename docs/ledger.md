@@ -3,7 +3,7 @@
 Every cost someone causes is metered into one ledger per payer
 (docs/cloudflare-v1.md, decisions 24 to 27, 36, 37, 62 and 66 to 68).
 The state machine is `crates/core/src/ledger.rs` (an org's,
-`ledger/org.rs`), the prices `crates/core/src/price.rs`, the Durable
+`ledger/org.rs`), the prices `crates/core/src/price/`, the Durable
 Object `cell/src/ledger.rs`, a fragment's meters `cell/src/meter.rs`. The
 routes are docs/api.md, Ledger; seats and Stripe are docs/billing.md.
 
@@ -102,7 +102,7 @@ storage (the debt ledger).
 
 ## The price book
 
-The book is the core's defaults (`price.rs`, each price with its
+The book is the core's defaults (`price/defaults.rs`, each price with its
 source, and the margin, `MARGIN_BP_DEFAULT`), the catalog's operator-key
 prices and the model slots' rows (`Config::book`; the debt ledger, "The
 price book is the core's defaults"). A ledger keeps no book: every
@@ -204,7 +204,9 @@ agent's turn, an AI step, a wake, a write, a create), and when someone
 else spends in a fragment, its owner's ledger is asked `fragment_open`
 (its cap), at the same time; if both refuse, the payer's refusal is
 the one said. Both go through one cached question: each isolate keeps
-each answer, a refusal too, for `STANDING_CACHE_MS`. Only the ledger's
+each answer, a refusal too, for `STANDING_CACHE_MS`. A ledger answers
+by reading alone and writes nothing, as it answers its status (F14); a
+ledger's first call, whatever it asks, makes it. Only the ledger's
 own refusal stops a spend. A ledger that does not answer, or answers
 otherwise, lets the spend start (`ledger.gate-unknown`) and is asked
 again next time.

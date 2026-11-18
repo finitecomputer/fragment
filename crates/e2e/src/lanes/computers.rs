@@ -1976,6 +1976,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         heard && notices[0]["principal"] == agent_npub.as_str() && notices[0]["body"] == json!({ "kind": "joined", "fragment": chat_name }),
         json!(notices),
     );
+    // made an editor of its own fragment as it was assigned (before its
+    // computer held it): its home, no join, so nothing is posted for it
+    let home = told(api, &owner, &agent_name, &agent_name);
+    s.ok("its own fragment is no join: nothing is posted for it", home.is_empty(), json!(home));
     // awake, the guest follows the chat as the agent
     let woke = s.eventually(wake, || phase(api, &owner, &id) == "awake");
     s.ok("and wakes its computer, unasked", woke, phase(api, &owner, &id));
