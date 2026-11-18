@@ -118,10 +118,11 @@ ledger's `uses` table its store, `GET /api/ledger/uses[/{YYYY-MM}]`
   "accounting should be best effort, not sprawl into interfering and
   delaying everything that happens"). A count writes only the `uses`
   table, never the head, so the gate's answers never wait on it.
-- **Bounded.** Thirteen months are kept (`MONTHS_KEPT`), and a month
-  takes at most `ROWS_MAX` agent and provider pairs (a person's agents at
-  each provider); a pair past that is logged (`ledger.uses-full`), and
-  one held counts on.
+- **Bounded.** Thirteen months are kept (`MONTHS_KEPT`; an older one is
+  never read back, and a count, a hand-over or the ledger's daily sweep
+  forgets it), and a month takes at most `ROWS_MAX` agent and provider
+  pairs (a person's agents at each provider); a pair past that is logged
+  (`ledger.uses-full`), and one held counts on.
 - **Moved, never dropped.** A computer counted its agents' uses itself
   before. Its step 7 keeps each month it held as owed, and it hands each
   to its owner's ledger after a request it answers (`/take-uses`, under

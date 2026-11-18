@@ -868,7 +868,10 @@ impl LedgerCell {
             // a ledger no one has called has nothing to sweep
             return Ok(core::Swept { forgotten: 0 });
         }
-        let (swept, next) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
+        let (swept, next) = self.transact(|ledger, store, now| {
+            uses::sweep(store, now);
+            Ok(ledger.sweep(store, now))
+        })?;
         let swept = swept.expect("a sweep refuses nothing");
         self.arm(next).await?;
         self.told();

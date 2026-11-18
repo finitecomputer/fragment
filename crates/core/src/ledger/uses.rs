@@ -162,6 +162,13 @@ pub fn take(t: &mut impl Tally, o: &TakeUses, now_ms: i64) -> Result<(), Refused
     Ok(())
 }
 
+/// The ledger's sweep (its alarm, at least daily): the months past those
+/// kept forgotten, as a count forgets them, for a person whose agents count
+/// nothing more.
+pub fn sweep(t: &mut impl Tally, now_ms: i64) {
+    t.forget_before(oldest(now_ms));
+}
+
 /// `month`'s uses at `now_ms`: none for a month past those kept, which a
 /// read leaves out (it writes nothing) until a count or a hand-over
 /// forgets it.
@@ -359,6 +366,20 @@ mod tests {
         let owed = TakeUses { id: "c-1:695".into(), month: Month::of(later), rows: vec![row("lead--a1", "github", 1, 0)] };
         assert_eq!(take(&mut t, &owed, later), Ok(()));
         assert_eq!(t.rows(month), 0, "a hand-over forgets it");
+    }
+
+    /// Goal: a ledger whose agents count nothing more still forgets the
+    /// months past those kept, at its sweep (Codex review of #1343, round
+    /// 2). Method: a month counted, swept twelve and then thirteen months on.
+    #[test]
+    fn the_sweep_forgets_months_past_those_kept() {
+        let mut t = Memory::default();
+        let month = Month::of(NOW);
+        count(&mut t, &used("lead--a1", NOW, &[("github", 0)]), NOW).expect("counted");
+        sweep(&mut t, NOW + 365 * DAY_MS);
+        assert_eq!(t.rows(month), 1, "twelve months on, kept");
+        sweep(&mut t, NOW + 400 * DAY_MS);
+        assert_eq!(t.rows(month), 0, "thirteen months on, forgotten");
     }
 
     /// A step-6 computer holding `rows` (month, provider, agent, calls,
