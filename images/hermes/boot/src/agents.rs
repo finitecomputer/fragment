@@ -9,10 +9,13 @@
 //! another agent is ever cut by a change, and none waits for one.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use fragment_bridge::runtime::relay::wire;
-use fragment_bridge::runtime::Agent;
+use fragment_bridge::runtime::{claude, Agent};
 use serde_json::{json, Value};
+
+use crate::sync::Place;
 
 /// What changed between the agents the boot runs and the agents the
 /// platform lists now, each by its fragment (its profile's name).
@@ -53,9 +56,9 @@ pub fn diff(running: &[Agent], read: &[Agent]) -> Change {
 }
 
 /// The agents Hermes runs: each whose `agent.json` names no runtime or
-/// Hermes' (`runtime::DEFAULT`). Only these have a profile, a desktop, a
-/// route and a sync; another's turns go to the runtime it names, and a
-/// runtime this bridge does not run refuses them (docs/computers.md).
+/// Hermes' (`runtime::DEFAULT`). Only these have a profile, a desktop and a
+/// route; another's turns go to the runtime it names, and a runtime this
+/// bridge does not run refuses them (docs/computers.md).
 pub fn hermes(agents: &[Agent]) -> Vec<Agent> {
     agents.iter().filter(|a| of_hermes(a)).cloned().collect()
 }
@@ -63,6 +66,21 @@ pub fn hermes(agents: &[Agent]) -> Vec<Agent> {
 /// One of the agents Hermes runs (`hermes`).
 pub fn of_hermes(a: &Agent) -> bool {
     a.runtime.as_deref().is_none_or(|r| r == fragment_bridge::runtime::DEFAULT)
+}
+
+/// Where an agent's own files are synced with its agent fragment (sync.rs):
+/// a Hermes agent's profile; a Claude agent's working folder (the bridge's,
+/// `<work>/<its fragment>`) and Claude Code's memory for it, in the
+/// person's `.claude` in `home` (FIN-542); another runtime's, nowhere.
+pub fn places(a: &Agent, home: &Path) -> Vec<Place> {
+    if of_hermes(a) {
+        return vec![Place::hermes(&crate::hermes::profile_dir(home, &a.fragment))];
+    }
+    if a.runtime.as_deref() != Some(claude::NAME) {
+        return vec![];
+    }
+    let work = Path::new(crate::hermes::WORK).join(&a.fragment);
+    Place::claude(&work, &claude::memory_dir(&claude::config_dir(home), &work), home).into()
 }
 
 /// The bridge's ready file (its `ready.rs`): every agent it may run, in the
@@ -169,6 +187,21 @@ mod tests {
         assert!(diff(&[with("juniper", "fcx_google_a")], &[with("juniper", "fcx_google_a")]).is_empty());
         let c = diff(&[agent("juniper")], &[agent("juniper"), with("oak", "fcx_google_b")]);
         assert!(c.credentials.is_empty() && names(&c.added) == vec!["oak--k3x9"], "a new agent's profile is written whole anyway");
+    }
+
+    /// Goal (FIN-542): a Claude agent's own files sync too, where its
+    /// runtime keeps them: its working folder and Claude Code's memory for
+    /// it, never a profile; a Hermes agent's in its profile; a runtime no
+    /// one runs, nowhere.
+    #[test]
+    fn each_runtime_keeps_its_own_files_where_it_reads_them() {
+        let named = |label: &str, runtime: Option<&str>| Agent { runtime: runtime.map(str::to_string), ..agent(label) };
+        let home = Path::new("/data/hermes");
+        assert_eq!(places(&named("juniper", None), home), vec![Place::hermes(Path::new("/data/hermes/profiles/juniper--k3x9"))]);
+        let rowan = places(&named("rowan", Some("claude")), home);
+        let roots: Vec<_> = rowan.iter().map(|p| p.root.to_string_lossy().into_owned()).collect();
+        assert_eq!(roots, ["/data/work/rowan--k3x9", "/data/hermes/.claude/projects/-data-work-rowan--k3x9/memory"]);
+        assert!(places(&named("oak", Some("nobody-runs-this")), home).is_empty());
     }
 
     #[test]

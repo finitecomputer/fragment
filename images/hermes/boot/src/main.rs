@@ -704,7 +704,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     // fragment CLI, the skills' helpers, any SDK): written whole each time,
     // after the config
     write_credentials(a, home, ids);
-    let synced = sync::round(api, a, &dir, &own).await;
+    let synced = sync::round(api, a, &[sync::Place::hermes(&dir)], &own).await;
     // its identity (its title, its role else its job's first line: bots.rs)
     write_identity(a, &dir, ids, &face);
     // Bot Mode's hook, linked by images before route A, links to nothing now
@@ -714,6 +714,27 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     match synced {
         Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "model": main.map(|m| m.name()), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
         Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
+    }
+}
+
+/// One sync of an agent's own files with its agent fragment, where its
+/// runtime keeps them (agents.rs, `places`): said when it did something.
+async fn sync_own(api: &Api, a: &Agent, home: &Path, own: &(dyn Fn(&Path) + Sync)) -> sync::Done {
+    let places = agents::places(a, home);
+    if places.is_empty() {
+        return sync::Done::default();
+    }
+    match sync::round(api, a, &places, own).await {
+        Ok(d) => {
+            if d != sync::Done::default() {
+                ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted });
+            }
+            d
+        }
+        Err(e) => {
+            ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() });
+            sync::Done::default()
+        }
     }
 }
 
@@ -1478,6 +1499,10 @@ async fn boot_main() {
         Ok(Err(e)) => ev!("prompts.refresh_failed", { "why": "boot", "error": e.to_string() }),
         Err(_) => ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
     }
+    // the other runtimes' agents' own files, as each Hermes agent's came
+    // with its profile: back before the bridge runs their first turn
+    let own = move |p: &Path| chown(p, ids);
+    futures_util::future::join_all(agents.iter().filter(|a| !agents::of_hermes(a)).map(|a| sync_own(&api, a, &home, &own))).await;
     write_ready(&agents, &home);
     let mut bridge = spawn_bridge(card_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
@@ -1513,7 +1538,6 @@ async fn boot_main() {
     // idle desktops: looked at on their cadence, never while held
     let mut last_idle_look = Instant::now();
     let stopping = Stopping::default();
-    let own = move |p: &Path| chown(p, ids);
     // bounded by the computer's life: one tick or one signal per pass
     loop {
         // SIGTERM first: it means stop now (docs/computers.md)
@@ -1631,18 +1655,10 @@ async fn boot_main() {
             }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {
                 last_sync = Instant::now();
-                for a in &agents::hermes(&agents) {
-                    let dir = hermes::profile_dir(&home, &a.fragment);
-                    match sync::round(&api, a, &dir, &own).await {
-                        Ok(d) if d != sync::Done::default() => {
-                            // its job may have changed: its role with it
-                            if d.pulled > 0 {
-                                write_identity(a, &dir, ids, &read_face(&api, a).await);
-                            }
-                            ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted })
-                        }
-                        Ok(_) => {}
-                        Err(e) => ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() }),
+                for a in &agents {
+                    // a Hermes agent's job may have changed: its role with it
+                    if sync_own(&api, a, &home, &own).await.pulled > 0 && agents::of_hermes(a) {
+                        write_identity(a, &hermes::profile_dir(&home, &a.fragment), ids, &read_face(&api, a).await);
                     }
                 }
             }

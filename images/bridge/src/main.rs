@@ -59,7 +59,7 @@ fn runtimes() -> Runtimes {
     let home = PathBuf::from(env_or("BRIDGE_CLAUDE_HOME", "/data/claude"));
     let config = ClaudeConfig {
         bin: PathBuf::from(bin),
-        config_dir: home.join(".claude"),
+        config_dir: fragment_bridge::runtime::claude::config_dir(&home),
         home,
         work_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_WORK_DIR", "/data/work")),
         state_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_STATE_DIR", "/data/bridge/claude")),
@@ -71,7 +71,7 @@ fn runtimes() -> Runtimes {
         // Anthropic's installer, or the stand-in a test image names
         installer: Some(env_or("BRIDGE_CLAUDE_INSTALLER", fragment_bridge::runtime::claude::INSTALLER)),
     };
-    r.with("claude", Box::new(Claude { config }))
+    r.with(fragment_bridge::runtime::claude::NAME, Box::new(Claude { config }))
 }
 
 /// The runtime agents that name none run (`runtime::DEFAULT`): Hermes'

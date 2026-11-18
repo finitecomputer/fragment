@@ -757,7 +757,7 @@ What our Hermes image guarantees beyond the contract:
   own fragment, so a viewer's read-only sync is not this one's. A fragment
   shared with the agent's owner it syncs with the `fragment` CLI, as its
   owner would, at the lower of their roles (cli/GUIDE.md, Sync in depth). An agent whose `agent.json` names another runtime (Claude) has no
-  profile, desktop, route or sync: the boot reads `runtime` as the bridge
+  profile, desktop or route: the boot reads `runtime` as the bridge
   does (`with_runtimes`), and the ready file names it at once, for the
   bridge to run on its runtime. A start reads every agent's before it
   writes or retires a profile, asking again until each answers, so a
@@ -1005,6 +1005,13 @@ gates it.
 - **A Claude agent has no Hermes profile or desktop** (above, "One
   profile per agent of Hermes'"): its person installs and signs in from
   its chat.
+- **Its self is its fragment's, as a Hermes agent's is** (M17, FIN-542):
+  the same sync, every 60 s and at each start before the bridge runs it,
+  keeps its `SOUL.md` and its own `CLAUDE.md` in its work directory (its
+  `AGENTS.md` imports the soul), and Claude Code's auto memory for it as
+  the fragment's `memories/claude/`. Each folder keeps what was agreed
+  beside its files, so one lost alone deletes nothing. A computer whose
+  `/data` is lost or new brings all of it back from the fragment.
 
 ## Billing
 

@@ -963,6 +963,67 @@ async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, 
     (fake, model, chat, c)
 }
 
+/// Goal (M17, FIN-542): nothing of a Claude agent's self is the computer's
+/// alone. Its `SOUL.md` reaches its working folder, which its `AGENTS.md`
+/// imports, and what it writes of itself (Claude Code's auto memory, its
+/// own `CLAUDE.md`) is committed to its agent fragment, the memory as
+/// `memories/claude/`. Restart on a new computer, `/data` empty: before
+/// the bridge runs its first turn, all of it is back, the agent's own (the
+/// user Claude Code runs as). No model call, and no Claude Code: the boot
+/// syncs the folders Claude Code keeps them in.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_claude_agents_self_outlasts_its_computer() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &[]).await;
+    fake.add_agent_with("rowan", r#"{"tier":"cheap","runtime":"claude"}"#);
+    fake.with(|w| w.fragments.get_mut("rowan--k3x9").unwrap().files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Rowan, a builder.\n")));
+    let model = Model::start("0.0.0.0:0").await;
+    let (work, memory) = ("/data/work/rowan--k3x9", "/data/hermes/.claude/projects/-data-work-rowan--k3x9/memory");
+    let run = || Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SYNC_MS", "2000")]);
+    let ready = |c: &Container| c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]).contains("rowan--k3x9");
+    let owner = |c: &Container, p: &str| c.exec_out(&["stat", "-c", "%U", p]).trim().to_string();
+
+    let c = run();
+    let t = Instant::now();
+    while !ready(&c) {
+        assert!(t.elapsed() < Duration::from_secs(120), "the ready file never named rowan");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(c.exec_out(&["cat", &format!("{work}/SOUL.md")]), "You are Rowan, a builder.\n", "its soul in its folder before its first turn");
+    assert!(!c.exec(&["test", "-d", "/data/hermes/profiles/rowan--k3x9"]), "no Hermes profile");
+    // Claude Code writes a memory, and the agent its own notes, as the agents' user
+    let wrote = format!("mkdir -p {memory} && printf -- '- [Tomatoes](tomatoes.md)\\n' > {memory}/MEMORY.md && printf 'Paul likes tomatoes.\\n' > {memory}/tomatoes.md && printf '@AGENTS.md\\nMy own notes.\\n' > {work}/CLAUDE.md");
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &wrote]));
+    let main = |path: &str| fake.with(|w| w.fragments["rowan--k3x9"].files.get(path).map(|b| String::from_utf8_lossy(b).into_owned()));
+    let t = Instant::now();
+    while main("memories/claude/tomatoes.md").is_none() || main("CLAUDE.md").is_none() {
+        assert!(t.elapsed() < Duration::from_secs(60), "never committed: {}", c.logs().lines().filter(|l| l.contains("\"sync.")).collect::<Vec<_>>().join("\n"));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(main("memories/claude/MEMORY.md").as_deref(), Some("- [Tomatoes](tomatoes.md)\n"));
+    assert_eq!(main("CLAUDE.md").as_deref(), Some("@AGENTS.md\nMy own notes.\n"));
+    assert!(main("memories/MEMORY.md").is_none(), "its own folder, not Hermes' index");
+    drop(c);
+
+    // a new computer, its /data empty
+    let c = run();
+    let t = Instant::now();
+    while !ready(&c) {
+        assert!(t.elapsed() < Duration::from_secs(120), "the ready file never named rowan again");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(c.exec_out(&["cat", &format!("{memory}/MEMORY.md")]), "- [Tomatoes](tomatoes.md)\n", "its memory back before its first turn");
+    assert_eq!(c.exec_out(&["cat", &format!("{memory}/tomatoes.md")]), "Paul likes tomatoes.\n");
+    assert_eq!(c.exec_out(&["cat", &format!("{work}/CLAUDE.md")]), "@AGENTS.md\nMy own notes.\n");
+    assert_eq!(c.exec_out(&["cat", &format!("{work}/SOUL.md")]), "You are Rowan, a builder.\n");
+    for p in [format!("{memory}/MEMORY.md"), memory.into(), "/data/hermes/.claude".into(), format!("{work}/CLAUDE.md"), work.into()] {
+        assert_eq!(owner(&c, &p), "hermes", "the agents' own, as Claude Code runs: {p}");
+    }
+    let kept: Vec<String> = fake.with(|w| w.fragments["rowan--k3x9"].files.keys().cloned().collect());
+    assert_eq!(kept, ["CLAUDE.md", "SOUL.md", "agent.json", "memories/claude/MEMORY.md", "memories/claude/tomatoes.md"], "main whole: nothing deleted by the empty disk");
+}
+
 /// Goal (FIN-258): an agent whose `agent.json` names another runtime
 /// (Claude) gets no Hermes profile and no desktop, and the bridge's ready
 /// file names it at once: its turns go to the runtime it names, Claude

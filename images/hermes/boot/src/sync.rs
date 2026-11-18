@@ -1,11 +1,13 @@
-//! An agent's repo in its Hermes profile (decision 15): the agent
-//! fragment's `SOUL.md`, `memories/` and `skills/` checked out into the
-//! profile, and what Hermes changes there committed back through the files
-//! route, as the agent. Three ways: main, the profile, and what both agreed
-//! on at the last sync (the profile's `MANIFEST`: it goes where the profile
-//! goes, so a profile made again starts from nothing), so neither side's
-//! change is lost to the other's silence. When both changed a file, main
-//! wins (its owner edited it) and the profile's copy is kept beside it as
+//! An agent's own files on its computer (decision 15): the agent
+//! fragment's `SOUL.md`, `memories/` and `skills/` checked out where its
+//! runtime keeps them (a `Place`: a Hermes profile; a Claude agent's
+//! working folder and Claude Code's memory, agents.rs `places`), and what
+//! the agent changes there committed back through the files route, as the
+//! agent. Three ways: main, the place, and what both agreed on at the last
+//! sync (the place's `MANIFEST`: it goes where the place's files go, so a
+//! place made again starts from nothing), so neither side's change is lost
+//! to the other's silence. When both changed a file, main wins (its owner
+//! edited it) and the place's copy is kept beside it as
 //! `<file>.local-<ms>`, never pushed.
 //!
 //! A file is deleted on one side only when the other side was read whole
@@ -35,7 +37,7 @@ use fragment_bridge::runtime::Agent;
 pub const FILE_MAX_BYTES: usize = 192 * 1024;
 /// Files one agent's sync takes, at most, on each side; past it, none.
 pub const FILES_MAX: usize = 500;
-/// What was agreed at the last sync, in the profile.
+/// What was agreed at the last sync, in the place's `root`.
 pub const MANIFEST: &str = ".fragment-sync.json";
 /// One commit carries at most this many files (the route's 16), and is cut
 /// before its text and base64 pass this many bytes unless it carries a
@@ -81,11 +83,57 @@ pub enum Action {
     Forget(String),
 }
 
-/// Whether a path of the agent's repo is one Hermes keeps in its profile.
-pub fn synced(path: &str) -> bool {
-    let in_scope = path == "SOUL.md" || path.starts_with("memories/") || path.starts_with("skills/");
-    let parts_ok = path.split('/').all(|p| !p.is_empty() && !p.starts_with('.') && p != "__pycache__" && !p.contains(".local-"));
-    in_scope && parts_ok && path.len() <= 300
+/// Where an agent's own files are kept on its computer: each entry a file,
+/// or a folder (ending in `/`), of the agent's repo, and where it is here.
+/// What was agreed is kept in `root`, beside its files; what a pull makes
+/// below `base` is the agent's (`own`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub entries: Vec<(&'static str, PathBuf)>,
+    pub root: PathBuf,
+    pub base: PathBuf,
+}
+
+impl Place {
+    /// A Hermes profile: the repo's `SOUL.md`, `memories/` and `skills/`,
+    /// at the same paths.
+    pub fn hermes(profile: &Path) -> Place {
+        Place { entries: ["SOUL.md", "memories/", "skills/"].map(|e| (e, profile.join(e.trim_end_matches('/')))).to_vec(), root: profile.into(), base: profile.into() }
+    }
+
+    /// A Claude agent's (FIN-542): its `SOUL.md`, which its `AGENTS.md`
+    /// imports, and its own `CLAUDE.md`, in its working folder `work`; and
+    /// Claude Code's auto memory folder `memory` as the repo's
+    /// `memories/claude/` (its index is a `MEMORY.md` too). Two places, each
+    /// agreeing beside its own files: one lost alone (the work is saved as
+    /// a record of its own) starts from nothing, deleting nothing on main.
+    pub fn claude(work: &Path, memory: &Path, home: &Path) -> [Place; 2] {
+        let base = work.parent().expect("a working folder in the work directory");
+        [
+            Place { entries: vec![("SOUL.md", work.join("SOUL.md")), ("CLAUDE.md", work.join("CLAUDE.md"))], root: work.into(), base: base.into() },
+            Place { entries: vec![("memories/claude/", memory.into())], root: memory.into(), base: home.into() },
+        ]
+    }
+
+    /// Where the repo's path `p` is here, if this place keeps it.
+    fn local(&self, p: &str) -> Option<PathBuf> {
+        self.entries.iter().find_map(|(e, at)| match e.strip_suffix('/') {
+            None => (p == *e).then(|| at.clone()),
+            Some(dir) => p.strip_prefix(dir).and_then(|r| r.strip_prefix('/')).map(|rest| at.join(rest)),
+        })
+    }
+
+    /// Whether this place keeps the repo's path `p`.
+    pub fn takes(&self, p: &str) -> bool {
+        let parts_ok = p.split('/').all(|p| !p.is_empty() && !p.starts_with('.') && p != "__pycache__" && !p.contains(".local-"));
+        parts_ok && p.len() <= 300 && self.local(p).is_some()
+    }
+
+    /// Whether the scan reads the folder at the repo's path `p`: an entry's
+    /// own, or one this place keeps files under.
+    fn reads(&self, p: &str) -> bool {
+        self.entries.iter().any(|(e, _)| e.strip_suffix('/') == Some(p)) || self.takes(p)
+    }
 }
 
 /// The sync's steps, given main, what was agreed, the profile, and the
@@ -148,15 +196,15 @@ pub struct Side<F> {
     pub unsynced: BTreeSet<String>,
 }
 
-/// Main's synced files, from its whole listing (the files route answers
-/// every file or fails).
-pub fn listed(listing: Vec<FileEntry>) -> Result<Side<MainFile>, SyncError> {
+/// Main's files `place` keeps, from its whole listing (the files route
+/// answers every file or fails).
+pub fn listed(listing: &[FileEntry], place: &Place) -> Result<Side<MainFile>, SyncError> {
     let mut out = Side { files: Vec::new(), unsynced: BTreeSet::new() };
-    for f in listing.into_iter().filter(|f| synced(&f.path)) {
+    for f in listing.iter().filter(|f| place.takes(&f.path)) {
         if f.size as usize > FILE_MAX_BYTES {
-            out.unsynced.insert(f.path);
+            out.unsynced.insert(f.path.clone());
         } else {
-            out.files.push(MainFile { path: f.path, commit: f.last_commit_sha });
+            out.files.push(MainFile { path: f.path.clone(), commit: f.last_commit_sha.clone() });
         }
     }
     if out.files.len() + out.unsynced.len() > FILES_MAX {
@@ -165,13 +213,14 @@ pub fn listed(listing: Vec<FileEntry>) -> Result<Side<MainFile>, SyncError> {
     Ok(out)
 }
 
-/// The profile's synced files and their hashes, read whole: what cannot be
-/// read fails it, and so do more than `FILES_MAX` files.
-pub fn scan(profile: &Path) -> Result<Side<Local>, SyncError> {
+/// The files `place` keeps here and their hashes, by their paths in the
+/// repo, read whole: what cannot be read fails it, and so do more than
+/// `FILES_MAX` files.
+pub fn scan(place: &Place) -> Result<Side<Local>, SyncError> {
     let mut out = Side { files: Vec::new(), unsynced: BTreeSet::new() };
-    let mut stack: Vec<PathBuf> = vec![profile.join("SOUL.md"), profile.join("memories"), profile.join("skills")];
-    // bounded by the profile's tree, and FILES_MAX files in it
-    while let Some(p) = stack.pop() {
+    let mut stack: Vec<(String, PathBuf)> = place.entries.iter().map(|(e, at)| (e.trim_end_matches('/').to_string(), at.clone())).collect();
+    // bounded by the place's tree, and FILES_MAX files in it
+    while let Some((rel, p)) = stack.pop() {
         let unread = |e: std::io::Error| SyncError::Profile(format!("reading {}: {e}", p.display()));
         let meta = match std::fs::symlink_metadata(&p) {
             Ok(meta) => meta,
@@ -179,21 +228,21 @@ pub fn scan(profile: &Path) -> Result<Side<Local>, SyncError> {
             Err(e) if e.kind() == ErrorKind::NotFound => continue,
             Err(e) => return Err(unread(e)),
         };
-        let rel = p.strip_prefix(profile).expect("a path under the profile").to_string_lossy().replace('\\', "/");
         if meta.is_dir() {
             // a directory no synced file is under is not read
-            if rel == "memories" || rel == "skills" || synced(&rel) {
+            if place.reads(&rel) {
                 for e in std::fs::read_dir(&p).map_err(unread)? {
-                    stack.push(e.map_err(unread)?.path());
+                    let e = e.map_err(unread)?;
+                    stack.push((format!("{rel}/{}", e.file_name().to_string_lossy()), e.path()));
                 }
             }
             continue;
         }
-        if !synced(&rel) {
+        if !place.takes(&rel) {
             continue;
         }
         if out.files.len() + out.unsynced.len() == FILES_MAX {
-            return Err(SyncError::TooMany("the profile"));
+            return Err(SyncError::TooMany("this computer"));
         }
         if !meta.is_file() || meta.len() > FILE_MAX_BYTES as u64 {
             out.unsynced.insert(rel);
@@ -211,19 +260,19 @@ pub fn scan(profile: &Path) -> Result<Side<Local>, SyncError> {
 
 /// What was agreed at the last sync: nothing, when there is none to read
 /// (the safe side: with nothing agreed, nothing is deleted).
-pub fn load_manifest(profile: &Path) -> Manifest {
-    std::fs::read(profile.join(MANIFEST)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+pub fn load_manifest(root: &Path) -> Manifest {
+    std::fs::read(root.join(MANIFEST)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-fn save_manifest(profile: &Path, m: &Manifest) -> std::io::Result<()> {
-    let tmp = profile.join(format!("{MANIFEST}.tmp"));
+fn save_manifest(root: &Path, m: &Manifest) -> std::io::Result<()> {
+    let tmp = root.join(format!("{MANIFEST}.tmp"));
     std::fs::write(&tmp, serde_json::to_vec(m).expect("a manifest serializes"))?;
-    std::fs::rename(&tmp, profile.join(MANIFEST))
+    std::fs::rename(&tmp, root.join(MANIFEST))
 }
 
-/// Why a round stopped: the platform did not answer as it should, the
-/// profile was not read or written whole, or a side (`main`, `the
-/// profile`) has more than `FILES_MAX` files. What was agreed is saved only
+/// Why a round stopped: the platform did not answer as it should, a place
+/// was not read or written whole, or a side (`main`, `this computer`) has
+/// more than `FILES_MAX` files. What was agreed is saved only
 /// by a round that ends, so the next starts again from both sides.
 #[derive(Debug)]
 pub enum SyncError {
@@ -236,7 +285,7 @@ impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SyncError::Api(e) => write!(f, "{e}"),
-            SyncError::Profile(e) => write!(f, "the profile: {e}"),
+            SyncError::Profile(e) => write!(f, "this computer's copy: {e}"),
             SyncError::TooMany(side) => write!(f, "{side} has more than {FILES_MAX} synced files: none synced"),
         }
     }
@@ -257,16 +306,27 @@ pub struct Done {
     pub deleted: u32,
 }
 
-/// One sync of an agent's repo and its profile. `own` makes a written
-/// file Hermes' (its uid and gid).
-pub async fn round(api: &Api, agent: &Agent, profile: &Path, own: &(dyn Fn(&Path) + Sync)) -> Result<Done, SyncError> {
-    let mut known = load_manifest(profile);
-    let main = listed(api.files(&agent.fragment, &agent.fragment).await?)?;
-    let local = scan(profile)?;
+/// One sync of an agent's repo and each place it keeps its files in, from
+/// one listing of main. `own` makes a written file the agent's (Hermes'
+/// uid and gid).
+pub async fn round(api: &Api, agent: &Agent, places: &[Place], own: &(dyn Fn(&Path) + Sync)) -> Result<Done, SyncError> {
+    let listing = api.files(&agent.fragment, &agent.fragment).await?;
+    let mut done = Done::default();
+    for place in places {
+        settle(api, agent, place, &listing, own, &mut done).await?;
+    }
+    Ok(done)
+}
+
+/// One place's sync with main as `listing` says it is.
+async fn settle(api: &Api, agent: &Agent, place: &Place, listing: &[FileEntry], own: &(dyn Fn(&Path) + Sync), done: &mut Done) -> Result<(), SyncError> {
+    let agreed = load_manifest(&place.root);
+    let mut known = agreed.clone();
+    let main = listed(listing, place)?;
+    let local = scan(place)?;
     let unsynced: BTreeSet<String> = main.unsynced.union(&local.unsynced).cloned().collect();
     let main_commit: BTreeMap<String, String> = main.files.iter().map(|m| (m.path.clone(), m.commit.clone())).collect();
     let local_by: BTreeMap<String, Local> = local.files.iter().map(|l| (l.path.clone(), l.clone())).collect();
-    let mut done = Done::default();
     let mut push: Vec<FileChange> = Vec::new();
     let mut pushed: Vec<(String, Option<String>)> = Vec::new();
     for action in plan(&main.files, &known, &local.files, &unsynced) {
@@ -274,23 +334,23 @@ pub async fn round(api: &Api, agent: &Agent, profile: &Path, own: &(dyn Fn(&Path
             Action::Fetch(p) => {
                 let bytes = api.file(&agent.fragment, &agent.fragment, &p, FILE_MAX_BYTES).await?;
                 let h = hash(&bytes);
-                let target = profile.join(&p);
+                let target = place.local(&p).expect("a path the place keeps");
                 let wrote = |e: std::io::Error| SyncError::Profile(format!("writing {p}: {e}"));
                 match resolve(known.get(&p), local_by.get(&p), &h) {
                     Resolution::Same => {}
                     Resolution::Pull => {
-                        write(profile, &target, &bytes, own).map_err(wrote)?;
+                        write(&place.base, &target, &bytes, own).map_err(wrote)?;
                         done.pulled += 1;
                     }
                     Resolution::Push => {
-                        if let Some(change) = change_of(profile, &p, &mut pushed) {
+                        if let Some(change) = change_of(place, &p, &mut pushed) {
                             push.push(change);
                         }
                     }
                     Resolution::Conflict => {
                         let keep = target.with_file_name(format!("{}.local-{}", target.file_name().and_then(|n| n.to_str()).unwrap_or("file"), fragment_bridge::log::now_ms()));
                         std::fs::rename(&target, &keep).map_err(wrote)?;
-                        write(profile, &target, &bytes, own).map_err(wrote)?;
+                        write(&place.base, &target, &bytes, own).map_err(wrote)?;
                         done.conflicts += 1;
                         ev!("sync.conflict", { "agent": agent.fragment, "path": p, "kept": keep.display().to_string() });
                     }
@@ -298,7 +358,7 @@ pub async fn round(api: &Api, agent: &Agent, profile: &Path, own: &(dyn Fn(&Path
                 known.insert(p.clone(), Known { commit: main_commit[&p].clone(), hash: h });
             }
             Action::Push(p) => {
-                if let Some(change) = change_of(profile, &p, &mut pushed) {
+                if let Some(change) = change_of(place, &p, &mut pushed) {
                     push.push(change);
                 }
             }
@@ -307,7 +367,7 @@ pub async fn round(api: &Api, agent: &Agent, profile: &Path, own: &(dyn Fn(&Path
                 pushed.push((p, None));
             }
             Action::DeleteLocal(p) => {
-                std::fs::remove_file(profile.join(&p)).map_err(|e| SyncError::Profile(format!("deleting {p}: {e}")))?;
+                std::fs::remove_file(place.local(&p).expect("a path the place keeps")).map_err(|e| SyncError::Profile(format!("deleting {p}: {e}")))?;
                 known.remove(&p);
                 done.deleted += 1;
             }
@@ -328,24 +388,27 @@ pub async fn round(api: &Api, agent: &Agent, profile: &Path, own: &(dyn Fn(&Path
             FileChange::Delete { .. } => 0,
         };
         if !batch.is_empty() && (batch.len() >= COMMIT_FILES_MAX || bytes + size > COMMIT_BYTES_MAX) {
-            commit(api, agent, std::mem::take(&mut batch), std::mem::take(&mut batch_paths), &mut known, &mut done).await?;
+            commit(api, agent, std::mem::take(&mut batch), std::mem::take(&mut batch_paths), &mut known, done).await?;
             bytes = 0;
         }
         bytes += size;
         batch.push(change);
         batch_paths.push(path);
     }
-    commit(api, agent, batch, batch_paths, &mut known, &mut done).await?;
-    if let Err(e) = save_manifest(profile, &known) {
-        ev!("sync.unsaved", { "agent": agent.fragment, "error": e.to_string() });
+    commit(api, agent, batch, batch_paths, &mut known, done).await?;
+    // a place not made yet, with nothing agreed, is left unmade
+    if known != agreed {
+        if let Err(e) = save_manifest(&place.root, &known) {
+            ev!("sync.unsaved", { "agent": agent.fragment, "error": e.to_string() });
+        }
     }
-    Ok(done)
+    Ok(())
 }
 
-/// The profile's file `p` as a change to push, noting its hash in `pushed`;
+/// The place's file `p` as a change to push, noting its hash in `pushed`;
 /// None when it can't be read now (the next round sees it again).
-fn change_of(profile: &Path, p: &str, pushed: &mut Vec<(String, Option<String>)>) -> Option<FileChange> {
-    let bytes = std::fs::read(profile.join(p)).ok()?;
+fn change_of(place: &Place, p: &str, pushed: &mut Vec<(String, Option<String>)>) -> Option<FileChange> {
+    let bytes = std::fs::read(place.local(p)?).ok()?;
     pushed.push((p.to_string(), Some(hash(&bytes))));
     Some(match String::from_utf8(bytes) {
         Ok(text) => FileChange::Text { path: p.to_string(), text },
@@ -377,11 +440,11 @@ async fn commit(api: &Api, agent: &Agent, batch: Vec<FileChange>, paths: Vec<(St
     Ok(())
 }
 
-/// Writes a file of the profile. It and each directory made for it, up to
-/// the profile, are Hermes' (`own`): Hermes writes beside what is pulled.
-fn write(profile: &Path, target: &Path, bytes: &[u8], own: &(dyn Fn(&Path) + Sync)) -> std::io::Result<()> {
-    let dir = target.parent().expect("a file under the profile");
-    let made: Vec<&Path> = dir.ancestors().take_while(|d| d.starts_with(profile) && *d != profile && !d.exists()).collect();
+/// Writes a file of a place. It and each directory made for it below
+/// `base` are the agent's (`own`): its runtime writes beside what is pulled.
+fn write(base: &Path, target: &Path, bytes: &[u8], own: &(dyn Fn(&Path) + Sync)) -> std::io::Result<()> {
+    let dir = target.parent().expect("a file under the place");
+    let made: Vec<&Path> = dir.ancestors().take_while(|d| d.starts_with(base) && *d != base && !d.exists()).collect();
     std::fs::create_dir_all(dir)?;
     for d in made.into_iter().rev() {
         own(d);
@@ -407,12 +470,25 @@ mod tests {
 
     #[test]
     fn only_the_agents_own_files_sync() {
-        for yes in ["SOUL.md", "memories/MEMORY.md", "skills/cook/SKILL.md"] {
-            assert!(synced(yes), "{yes}");
+        let hermes = Place::hermes(Path::new("/data/hermes/profiles/juniper--k3x9"));
+        for yes in ["SOUL.md", "memories/MEMORY.md", "skills/cook/SKILL.md", "memories/claude/MEMORY.md"] {
+            assert!(hermes.takes(yes), "{yes}");
         }
-        for no in ["fragment.json", "site/index.html", "agent.json", "memories/.hidden", "skills/x/__pycache__/a.pyc", "memories/a.md.local-17", "memories//a", "soul.md"] {
-            assert!(!synced(no), "{no}");
+        for no in ["fragment.json", "site/index.html", "agent.json", "memories/.hidden", "skills/x/__pycache__/a.pyc", "memories/a.md.local-17", "memories//a", "soul.md", "memories", "memoriesx/a.md", "CLAUDE.md"] {
+            assert!(!hermes.takes(no), "{no}");
         }
+        assert_eq!(hermes.local("skills/cook/SKILL.md"), Some(PathBuf::from("/data/hermes/profiles/juniper--k3x9/skills/cook/SKILL.md")));
+        // a Claude agent's: its soul and notes in its working folder, Claude
+        // Code's memory as memories/claude/, and nothing of Hermes'
+        let [work, memory] = Place::claude(Path::new("/data/work/rowan--k3x9"), Path::new("/data/hermes/.claude/projects/-data-work-rowan--k3x9/memory"), Path::new("/data/hermes"));
+        assert_eq!(work.local("SOUL.md"), Some(PathBuf::from("/data/work/rowan--k3x9/SOUL.md")));
+        assert_eq!(work.local("CLAUDE.md"), Some(PathBuf::from("/data/work/rowan--k3x9/CLAUDE.md")));
+        assert_eq!(memory.local("memories/claude/MEMORY.md"), Some(PathBuf::from("/data/hermes/.claude/projects/-data-work-rowan--k3x9/memory/MEMORY.md")));
+        assert_eq!(memory.local("memories/claude/topics/a.md"), Some(PathBuf::from("/data/hermes/.claude/projects/-data-work-rowan--k3x9/memory/topics/a.md")));
+        for no in ["memories/MEMORY.md", "skills/cook/SKILL.md", "memories/claude", "memories/claudex/a.md", "memories/claude/.fragment-sync.json", "AGENTS.md"] {
+            assert!(!work.takes(no) && !memory.takes(no), "{no}");
+        }
+        assert_eq!((work.base.as_path(), memory.base.as_path()), (Path::new("/data/work"), Path::new("/data/hermes")));
     }
 
     /// Valid: every combination of who changed what since the last sync.
@@ -599,7 +675,7 @@ mod tests {
             std::fs::write(d.join(p), body).unwrap();
         }
         std::os::unix::fs::symlink("MEMORY.md", d.join("memories/link.md")).unwrap();
-        let s = scan(&d).unwrap();
+        let s = scan(&Place::hermes(&d)).unwrap();
         assert_eq!(s.files.iter().map(|l| l.path.as_str()).collect::<Vec<_>>(), ["SOUL.md", "memories/MEMORY.md", "skills/mine/SKILL.md"]);
         assert_eq!(s.unsynced.iter().map(String::as_str).collect::<Vec<_>>(), ["memories/big.md", "memories/link.md"]);
         let _ = std::fs::remove_dir_all(&d);
@@ -644,6 +720,48 @@ mod tests {
         assert_eq!(w.round().await.unwrap(), Done::default());
     }
 
+    /// Goal (FIN-542): a Claude agent's own files sync too: its `SOUL.md`
+    /// and `CLAUDE.md` in its working folder, Claude Code's memory as
+    /// `memories/claude/`, from one listing, never Hermes' memories. Restart:
+    /// either place lost alone (the work is saved as a record of its own)
+    /// comes back from main, and deletes nothing there; each directory a
+    /// pull makes below its base is the agent's.
+    #[tokio::test]
+    async fn a_claude_agents_own_files_come_back_from_main() {
+        let w = World::new("claude", &[("SOUL.md", "You are Rowan."), ("CLAUDE.md", "@AGENTS.md\nMy notes."), ("memories/MEMORY.md", "Hermes' own"), ("memories/claude/MEMORY.md", "- [Tomatoes](tomatoes.md)")]).await;
+        let (work, home) = (w.root.join("work/rowan--k3x9"), w.root.join("hermes"));
+        let memory = home.join(".claude/projects/-data-work-rowan--k3x9/memory");
+        std::fs::create_dir_all(&home).unwrap();
+        let places = Place::claude(&work, &memory, &home);
+        let owned = std::sync::Mutex::new(Vec::new());
+        let own = |p: &Path| owned.lock().unwrap().push(p.to_path_buf());
+        let d = round(&w.api, &w.agent, &places, &own).await.unwrap();
+        assert_eq!((d.pulled, d.pushed), (3, 0));
+        assert_eq!(std::fs::read_to_string(work.join("SOUL.md")).unwrap(), "You are Rowan.");
+        assert_eq!(std::fs::read_to_string(work.join("CLAUDE.md")).unwrap(), "@AGENTS.md\nMy notes.");
+        assert_eq!(std::fs::read_to_string(memory.join("MEMORY.md")).unwrap(), "- [Tomatoes](tomatoes.md)");
+        assert!(!memory.join("memories").exists() && !work.join("memories").exists(), "never Hermes' memories");
+        for made in [work.clone(), home.join(".claude"), home.join(".claude/projects"), memory.clone(), memory.join("MEMORY.md")] {
+            assert!(owned.lock().unwrap().contains(&made), "the agent's: {}", made.display());
+        }
+        assert_eq!(round(&w.api, &w.agent, &places, &own).await.unwrap(), Done::default(), "replay: settled");
+
+        // Claude Code writes a memory: committed back, as memories/claude/
+        std::fs::write(memory.join("tomatoes.md"), "Paul likes tomatoes.").unwrap();
+        assert_eq!(round(&w.api, &w.agent, &places, &own).await.unwrap().pushed, 1);
+        assert_eq!(w.main("memories/claude/tomatoes.md").as_deref(), Some(&b"Paul likes tomatoes."[..]));
+
+        // each place lost alone: back from main, nothing deleted there
+        for lost in [&memory, &work] {
+            std::fs::remove_dir_all(lost).unwrap();
+            let d = round(&w.api, &w.agent, &places, &own).await.unwrap();
+            assert_eq!((d.pulled, d.pushed, d.deleted), (2, 0, 0), "{}", lost.display());
+        }
+        assert_eq!(std::fs::read_to_string(memory.join("tomatoes.md")).unwrap(), "Paul likes tomatoes.");
+        assert_eq!(std::fs::read_to_string(work.join("SOUL.md")).unwrap(), "You are Rowan.");
+        assert_eq!(w.repo.lock().unwrap().files.len(), 5, "main whole");
+    }
+
     /// A profile and its agent's repo behind the fake files route.
     struct World {
         repo: std::sync::Arc<std::sync::Mutex<fake::Repo>>,
@@ -672,7 +790,7 @@ mod tests {
             World { repo, api, agent, root, profile, _stop }
         }
         async fn round(&self) -> Result<Done, SyncError> {
-            round(&self.api, &self.agent, &self.profile, &|_: &Path| {}).await
+            round(&self.api, &self.agent, &[Place::hermes(&self.profile)], &|_: &Path| {}).await
         }
         fn main(&self, path: &str) -> Option<Vec<u8>> {
             self.repo.lock().unwrap().files.get(path).map(|(_, b)| b.clone())
@@ -744,7 +862,7 @@ mod tests {
         w.write("memories/z.md", b"z");
         let got = w.round().await;
         assert!(names.iter().all(|n| w.main(n).is_some()), "nothing deleted on main");
-        assert!(matches!(got, Err(SyncError::TooMany("the profile"))), "refused: {got:?}");
+        assert!(matches!(got, Err(SyncError::TooMany("this computer"))), "refused: {got:?}");
     }
 
     /// Invalid: a directory the scan cannot read fails the round; its files

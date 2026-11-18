@@ -569,8 +569,10 @@ reaches it (`withheld`).
 - **Its folder** is its work directory, its own: an `AGENTS.md` the
   bridge writes (who it is, and the `fragment` CLI, which acts as it:
   `FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and a `CLAUDE.md` that reads it,
-  written only when the agent has none. Claude's auto memory is on, kept
-  per agent under the person's `.claude`.
+  written only when the agent has none. `AGENTS.md` imports its
+  `SOUL.md`. Claude's auto memory is on, kept per agent under the
+  person's `.claude`. The boot syncs `SOUL.md`, `CLAUDE.md` and that
+  memory with its agent fragment (docs/computers.md, "Claude Code").
 - **A session per agent and chat**, its id derived from the two and the
   chat's `/new` count, so every life names the same one. It resumes when
   its transcript is on disk, and its process stops once idle.

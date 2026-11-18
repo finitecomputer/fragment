@@ -105,9 +105,12 @@ pub struct Claude {
     pub config: ClaudeConfig,
 }
 
+/// The runtime's name, as an agent's `agent.json` names it.
+pub const NAME: &str = "claude";
+
 impl Runtime for Claude {
     fn name(&self) -> &'static str {
-        "claude"
+        NAME
     }
 
     fn menu(&self) -> &'static [MenuItem] {
@@ -131,13 +134,32 @@ pub fn session_id(agent: &str, chat: &str, generation: u64) -> String {
     format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
-/// Where Claude Code keeps a session's transcript: its project directory is
-/// the working directory with every character but letters and digits a
-/// `-` (Claude Code's sessions docs; ours are well under its 200).
-pub fn transcript(config_dir: &Path, cwd: &Path, id: &str) -> PathBuf {
+/// The person's `CLAUDE_CONFIG_DIR` in their home (`ClaudeConfig::config_dir`).
+pub fn config_dir(home: &Path) -> PathBuf {
+    home.join(".claude")
+}
+
+/// Claude Code's project directory for a working directory: the working
+/// directory with every character but letters and digits a `-` (Claude
+/// Code's sessions docs; ours are well under its 200).
+fn project_dir(config_dir: &Path, cwd: &Path) -> PathBuf {
     let project: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     assert!(project.len() <= 200, "a working directory Claude Code names whole: {project}");
-    config_dir.join("projects").join(project).join(format!("{id}.jsonl"))
+    config_dir.join("projects").join(project)
+}
+
+/// Where Claude Code keeps a session's transcript.
+pub fn transcript(config_dir: &Path, cwd: &Path, id: &str) -> PathBuf {
+    project_dir(config_dir, cwd).join(format!("{id}.jsonl"))
+}
+
+/// Claude Code's auto memory for an agent: `memory/` in its project
+/// directory (its `MEMORY.md` index and a file a topic), when no setting
+/// moves it and its working directory is no git repo's subfolder (an
+/// agent's is its own). The boot syncs it with its agent fragment
+/// (hermes-boot's sync.rs, FIN-542).
+pub fn memory_dir(config_dir: &Path, cwd: &Path) -> PathBuf {
+    project_dir(config_dir, cwd).join("memory")
 }
 
 /// Each chat's `/new` count, by `agent|chat` (none: 0), kept in
@@ -1041,7 +1063,8 @@ pub fn agents_md(agent: &Agent) -> String {
         "# This computer\n\n\
          You are {name}, an agent fragment (`{fragment}`) on its owner's computer, working for `{owner}`. Each chat you are in is a fragment; what you write in your turn is your reply there.\n\n\
          The `fragment` CLI acts as you here: the computer signs each request as you, so it needs no login or keys, and it acts for your owner where they may. Run `fragment skill` for its guide: making, deploying and sharing apps, reading and writing fragments, routines, and search.\n\n\
-         Your computer writes this file again when it changes. Keep your own notes in `CLAUDE.md` or your memory.\n",
+         Who you are and your job, which your owner edits too: @SOUL.md\n\n\
+         Your computer writes this file again when it changes. Keep your own notes in `CLAUDE.md` or your memory. Your agent fragment keeps them and `SOUL.md`, so they outlast this computer.\n",
         name = agent.name,
         fragment = agent.fragment,
         owner = agent.owner,
@@ -1535,6 +1558,8 @@ mod tests {
     fn a_transcript_is_where_claude_code_keeps_it() {
         let p = transcript(Path::new("/data/claude"), Path::new("/data/work/juniper--k3x9"), "abc");
         assert_eq!(p, PathBuf::from("/data/claude/projects/-data-work-juniper--k3x9/abc.jsonl"));
+        // its auto memory beside its transcripts, in its project directory
+        assert_eq!(memory_dir(&config_dir(Path::new("/data/hermes")), Path::new("/data/work/juniper--k3x9")), PathBuf::from("/data/hermes/.claude/projects/-data-work-juniper--k3x9/memory"));
     }
 
     /// Goal: nothing that would change whom `claude` signs in as, where it
