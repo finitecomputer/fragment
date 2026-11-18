@@ -113,13 +113,21 @@ pub const RECOMMENDED_LABEL: &str = "Recommended";
 pub const STANDARD_LABEL: &str = "Standard";
 
 /// `FRAGMENT_MODELS` on a plain node: every slot on Workers AI as unnamed
-/// (`fragment_core::models::Models::defaults`), each tier labelled, so its
-/// Settings offers two routes (Paul, 2026-10-24).
+/// (`fragment_core::models::Models::defaults`), each route labelled, so its
+/// Settings offers two routes (Paul, 2026-10-24). Named as configs named
+/// them before routes were a list, and read as a deploy reads one
+/// (`fragment_core::models::legacy`), so the e2e runs today's configs.
 pub fn plain_models() -> Value {
-    json!({
+    listed(json!({
         "cheap": { "provider": "workers_ai", "model": fragment_core::models::CHEAP_MODEL, "label": RECOMMENDED_LABEL },
         "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL }
-    })
+    }))
+}
+
+/// A config's `models` of the shape before routes were a list, as the cell
+/// reads it (xtask's deploy reads it so: `fragment_core::models::legacy`).
+fn listed(old: Value) -> Value {
+    fragment_core::models::legacy(&old).expect("the e2e's models are a deployment's")
 }
 
 /// `plain_models`, its embeddings slot the default model pinned at a
@@ -168,7 +176,7 @@ pub fn private_tier_models(fake: &str) -> Value {
     let mut private_deep = tinfoil.clone();
     private_deep.as_object_mut().unwrap().extend([("reasoning".into(), json!("max")), ("max_tokens".into(), json!(DEEP_MAX_TOKENS)), ("fallback".into(), json!("cheap"))]);
     private.as_object_mut().unwrap().extend([("label".into(), json!("Private (recommended)")), ("reasoning".into(), json!("high")), ("deep".into(), json!("private_deep")), ("fallback".into(), json!("private_deep"))]);
-    json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep })
+    listed(json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep }))
 }
 
 /// The most one call of a Deep slot writes on a node shaped as the private

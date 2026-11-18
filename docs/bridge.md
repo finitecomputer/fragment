@@ -94,11 +94,24 @@ with its default. What an image sets:
 
 ## State, and what it never does twice
 
-Its state (`state.json`, written whole before a step's effects) is a
-cache. The authority on which turns started is the chat's `work`
-channel, so `/data` restored from any earlier save, or lost, costs reads
-and runs nothing twice. A state of another format is set aside for a
-fresh one; one that contradicts itself is refused.
+Its state is a cache. The authority on which turns started is the
+chat's `work` channel, so `/data` restored from any earlier save, or
+lost, costs reads and runs nothing twice. A state of another format is
+set aside for a fresh one; one that contradicts itself is refused.
+
+It lives in `/data/bridge` (`store.rs`) as two files. `state.json` is
+the whole state, in the format every earlier bridge read. `state.log`
+holds what each step changed since then, one line per step, appended and
+synced before the step's effects. The bridge writes `state.json` whole
+again, with a fresh log, as it starts, once the log fills, and after a
+hold. Under a hold it writes `state.json` whole, with an empty log,
+before it answers, then `state.json` alone at each step while held, as
+before the log, the empty log naming an earlier `state.json`. So a save
+holds the state whole in `state.json`, which is all an older bridge
+reads. A log whose
+first line names another `state.json` (an older bridge wrote one since,
+or a save copied the two at different moments) is read as none. A crash
+mid-append leaves a torn last line, and the log is read up to it.
 
 - **One life per turn.** Each bridge process is a life: 128 random bits,
   never written to `/data`. A turn runs only in the life whose claim (its
@@ -201,14 +214,38 @@ check before acting on it." A continuation is told the age of what its
 cut turn answered. A routine (its message says its hour), a command,
 and a state from before keep or tell none.
 
-### What a rollback forgot
+### What a runtime forgot
 
 A computer can go back to an older save (docs/computers.md, "What its
-owner is told"). The bridge then reads again the turns run since that
-save, and each of their claims is a 409. Those 409s are exactly what its
-runtime forgot. The agent's next turn in that chat is told what each
-forgotten turn was asked and replied, from the journal
-(`note::forgotten`), once a life.
+owner is told"), or lose `/data`, and an agent can start on a computer
+that never ran it. The bridge then reads again the turns run since that
+save, and each of their claims is a 409. A turn whose lost end is
+refused as well (that life ended it) ran in another life: its runtime
+does not remember it (Paul, 2026-11-18, M17: rebuild from the records).
+The agent's next turn in that chat is told the chat, once a life
+(`note::recap`):
+
+- its messages before the turn's own, both sides, oldest first, since
+  the agent joined and after the newest `/new` of its owner's it ran;
+  each by its sayer (`You`, `Your owner`, anyone else by name);
+- before each of its turns' first reply, that turn's steps on one line
+  (a cut turn's are the cut note's);
+- at most the 24 KiB a continued chat gets (`HISTORY_NOTE_MAX_BYTES`),
+  the oldest dropped first, with where the rest is
+  (`fragment channel <chat> chat`).
+
+It is one bounded read, complete or nothing (`read_back`, `Budget`),
+and runtime-neutral: Hermes gets it as relay's `context`, Claude Code
+in its message. It opens "Your memory of this chat is behind". A turn
+whose lost end lands as this life's was cut in that life, and the cut
+note tells it. What a rebuild loses is tool outputs
+and the runtime's own summaries.
+
+In a chat with other members, the note hands the agent their words
+again. That widens nothing. The bridge reads the chat as the agent,
+which may read all of it with `fragment channel`, and only what was said
+since it joined is told. The note is read-only context, never a message
+or anyone's words to act on.
 
 ## An answer for the computer
 
@@ -417,8 +454,8 @@ never reaches another agent's core.
   relayed message"). What the agent says there goes to their app once
   posted: its replies but the interim ones, with their files, and a
   card's question with its choices. An unlink stops the mirror and keeps
-  the chat; a link again is that chat. `state.json` holds nothing of
-  SimpleX.
+  the chat; a link again is that chat. The bridge's state holds nothing
+  of SimpleX.
 - **Working shows as 🚀 on their message** (Paul, 2026-11-11): SimpleX
   carries no typing, so while the agent's turn runs on a message from
   their app (the engine's `working`: its own turn phases, whatever the

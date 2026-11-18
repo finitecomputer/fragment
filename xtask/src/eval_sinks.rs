@@ -1110,7 +1110,7 @@ mod tests {
         let files = sources(&root).expect("the repo's runtime code");
         for path in [
             CARDS,
-            "crates/core/src/card.rs",
+            "crates/core/src/card/heard.rs",
             "cell/entry.mjs",
             "cell/shell/shell.js",
             "cell/src/share.rs",

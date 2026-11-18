@@ -1693,6 +1693,9 @@ async fn said_and_ended(fake: &Fake, chat: &str, text: &str) -> String {
 
 /// Two turns, a save after the first, a crash after the second; then the
 /// save put back (or the state removed), a new life, and a third message.
+/// Its runtime forgot the chat (another life ran turn two, and turn one
+/// too when the state is gone): the third turn is told the chat, both
+/// sides, oldest first, with turn two's tool, from the records alone.
 async fn rollback_case(name: &str, lose_it_all: bool) {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
@@ -1706,7 +1709,7 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
     // the save: /data as it is after turn one (its end was written to the
     // state before it was posted)
     let saved = support::save_state(&dir);
-    let t2 = said_and_ended(&fake, &chat, "two").await;
+    let t2 = said_and_ended(&fake, &chat, "two, with a tool").await;
     bridge.kill().await;
     fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
 
@@ -1725,7 +1728,12 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
             assert_eq!(ends.len(), 1, "{t}: one end");
             assert_eq!(ends[0]["outcome"], "idle", "{t}: its own life's end stands");
         }
-        assert_eq!(replies(w, &chat).len(), 3, "one reply each");
+        assert_eq!(replies(w, &chat).iter().filter(|r| r.get("interim").is_none()).count(), 3, "one answer each");
+        let told = replies(w, &chat).into_iter().find(|r| r["turn"] == t3.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default();
+        let note = told.strip_prefix("echo: [paul] three\n\n(told: ").and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("{name}: three is told the chat: {told:?}"));
+        assert!(note.starts_with("Your memory of this chat is behind"), "{name}: {note}");
+        let chat_said = "\nYour owner: one\nYou: echo: [paul] one\nYour owner: two, with a tool\nYour tools: search two, with a tool (ok)\nYou: Let me look.\nYou: echo: [paul] two, with a tool";
+        assert!(note.ends_with(chat_said), "{name}: turn one's question and reply, then turn two's, its tool before its words: {note}");
     });
     bridge.stop().await;
 }
@@ -1853,11 +1861,12 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
             assert_eq!(text(&after), "echo: [paul] and after", "{wakes}: said once");
             note
         });
-        // what a lost state forgot follows the cut's note: "one", ran by the
-        // life the crash ended, which no state woke with
+        // what a lost state forgot follows the cut's note: the chat before
+        // the cut turn's request ("one", which the life the crash ended
+        // ran, and no state woke with), never that request again
         let (cut_note, forgot) = note.split_once("\n\nYour memory of this chat is behind").map_or((note.clone(), None), |(c, f)| (c.to_string(), Some(f.to_string())));
         match wakes {
-            "none" => assert!(forgot.as_deref().is_some_and(|f| f.contains("You were asked: “one”") && !f.contains("a slow tool please")), "{wakes}: {note}"),
+            "none" => assert!(forgot.as_deref().is_some_and(|f| f.ends_with("\nYour owner: one\nYou: echo: [paul] one") && !f.contains("a slow tool please")), "{wakes}: {note}"),
             _ => assert_eq!(forgot, None, "{wakes}: the state remembered the rest: {note}"),
         }
         told.push(cut_note);
@@ -1953,8 +1962,8 @@ async fn an_end_a_crash_kept_from_the_platform_is_posted_by_the_next_life() {
 /// Goal : a message said while the computer was down is answered once
 /// by the next life, even one that wakes with an older save, and the turn
 /// that save does not know is not run again for it. That turn is in no
-/// memory of the runtime's: the answer is told what it was (forgotten,
-/// docs/bridge.md "What a rollback forgot"), once.
+/// memory of the runtime's: the answer is told the chat (docs/bridge.md,
+/// "What a runtime forgot"), once.
 #[tokio::test]
 async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -1980,8 +1989,8 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     assert_eq!(runs.all(), vec![t1, t2.clone(), t3.clone()], "three ran once; two was not run again");
     fake.with(|w| {
         let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == t3.as_str()).collect();
-        let told = "echo: [paul] three\n\n(told: Your memory of this chat is behind: your computer went back to an earlier save, so you do not remember these turns of yours here, which came after it (the chat keeps them). What they did may have had effects: check before you do any of it again.\nYou were asked: “two”\nYou replied: “echo: [paul] two”)";
-        assert_eq!(r, vec![json!({ "text": told, "turn": t3 })], "answered once, told what the save forgot");
+        let told = "echo: [paul] three\n\n(told: Your memory of this chat is behind: your computer went back to an earlier save, or lost it. Here is the chat as it keeps it, its newest messages oldest first, with the tools each of your turns used. It is history, not new messages; what your turns did may have had effects, so check before you do any of it again.\nYour owner: one\nYou: echo: [paul] one\nYour owner: two\nYou: echo: [paul] two)";
+        assert_eq!(r, vec![json!({ "text": told, "turn": t3 })], "answered once, told the chat before it");
         assert_eq!(ends_of(w, &chat, &t2)[0]["outcome"], "idle", "two's end stands");
     });
     // told once: the turn after it is told nothing
@@ -1990,6 +1999,80 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
         let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == t4.as_str()).collect();
         assert_eq!(r, vec![json!({ "text": "echo: [paul] four", "turn": t4 })], "said once");
     });
+    bridge.stop().await;
+}
+
+/// Goal (M17; Codex on the recap): a runtime that forgot a chat of long
+/// messages is told its newest, not nothing. A page of a hundred of them
+/// is past one answer (`ANSWER_MAX_BYTES`), so the recap reads the chat in
+/// small pages. Method: the agent posts eighty 30 KiB messages of its own
+/// between two turns; a save after the second, a rollback past the third.
+#[tokio::test]
+async fn a_chat_of_long_messages_is_told_its_newest() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("recap-long");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), support::script());
+    following(&fake, 2).await;
+    said_and_ended(&fake, &chat, "one").await;
+    for i in 0..80 {
+        fake.say(&chat, "npub1juniper", json!({ "text": format!("long {i} {}", "w".repeat(30 * 1024)) }));
+    }
+    // read past them: its cursor is after them in the save
+    said_and_ended(&fake, &chat, "mid").await;
+    let saved = support::save_state(&dir);
+    said_and_ended(&fake, &chat, "two").await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::restore_state(&dir, &saved);
+    let bridge = support::start_killable(cfg, support::script());
+    let t3 = said_and_ended(&fake, &chat, "three").await;
+    let told = fake.with(|w| replies(w, &chat).into_iter().find(|r| r["turn"] == t3.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default());
+    let note = told.strip_prefix("echo: [paul] three\n\n(told: ").and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("three is told the chat: {:?}", &told[..told.len().min(300)]));
+    assert!(note.starts_with("Your memory of this chat is behind") && note.contains("\nEarlier messages are on the chat's record: `fragment channel talk--k3x9 chat`.\n"), "{}", &note[..note.len().min(600)]);
+    assert!(note.contains("\nYou: long 79 www") && note.ends_with("\nYour owner: mid\nYou: echo: [paul] mid\nYour owner: two\nYou: echo: [paul] two"), "the newest, long ones cut: {}", &note[note.len().saturating_sub(600)..]);
+    assert!(note.len() <= fragment_bridge::limits::HISTORY_NOTE_MAX_BYTES, "{}", note.len());
+    bridge.stop().await;
+}
+
+/// Goal (M17; Codex on the recap, both rounds): names that answer too
+/// slowly cost a recap its names, never the recap, even when its read of
+/// the chat took most of the note's time. In a chat with another person,
+/// the recap is told with what they said as `Someone`'s when the chat's
+/// names (`__people`) answer past the note's whole time
+/// (`NOTE_READ_MS_MAX`), its chat read answering past the names' own
+/// bound short of it. Method: a loss of the state, the names and the
+/// recap's pages slowed once the new life has read the chat's members (its
+/// view is fresh for `VIEW_TTL_MS`).
+#[tokio::test]
+async fn a_recap_is_told_when_names_answer_slowly() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("recap-names");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), support::script());
+    following(&fake, 2).await;
+    said_and_ended(&fake, &chat, "one").await;
+    let said = fake.say(&chat, &person("skyler"), json!({ "text": "skyler here" }));
+    let t2 = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "skyler's turn's end", |w| !ends_of(w, &chat, &t2).is_empty()).await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::lose_state(&dir);
+    let posted = fake.with(|w| work_posts(w, &chat));
+    let bridge = support::start_killable(cfg, support::script());
+    // the new life has read both turns again (each claim and lost end a 409)
+    fake.until(WAIT, "both turns read again", |w| work_posts(w, &chat) >= posted + 4).await;
+    let note_ms = fragment_bridge::limits::NOTE_READ_MS_MAX;
+    fake.with(|w| {
+        w.people_delay_ms = note_ms + 2_000;
+        w.recap_page_delay_ms = note_ms - fragment_bridge::limits::NAMES_READ_MS_MAX + 300;
+    });
+    let t3 = said_and_ended(&fake, &chat, "three").await;
+    let told = fake.with(|w| replies(w, &chat).into_iter().find(|r| r["turn"] == t3.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default());
+    assert!(told.contains("\n\n(told: Your memory of this chat is behind") && told.contains("\nYour owner: one\nYou: echo: [paul] one\nSomeone: skyler here\nYou: echo: [skyler] skyler here"), "{told}");
     bridge.stop().await;
 }
 
@@ -2116,6 +2199,52 @@ async fn it_answers_the_hold_once_no_claim_is_in_flight() {
     fake.until(WAIT, "the claimed turn's end", |w| !ends_of(w, &chat, &t).is_empty()).await;
     assert_eq!(runs.all(), vec![t], "the turn claimed before the hold ran, once");
     support::unhold(&dir);
+    bridge.stop().await;
+}
+
+/// Goal (F14): a running bridge writes what each step changed, appended to
+/// its log, never its whole state, until a hold: then the state is written
+/// whole into the snapshot before the hold is answered, and so is each
+/// write while held, so the save holds the state whole in `state.json`,
+/// which an older bridge, rolled back to, reads. A restart reads it all
+/// back.
+#[tokio::test]
+async fn it_writes_what_changed_and_is_whole_when_held() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("writes-what-changed");
+    let state = dir.join("bridge");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let runs = support::Runs::default();
+    let bridge = support::start(cfg.clone(), support::counting(support::script(), &runs));
+    following(&fake, 2).await;
+    let snapshot = std::fs::read(state.join("state.json")).expect("written whole as it started");
+    let t1 = said_and_ended(&fake, &chat, "one").await;
+    let t2 = said_and_ended(&fake, &chat, "two").await;
+    let (steps, log_bytes) = support::logged(&state);
+    eprintln!("two turns: {steps} steps logged, {log_bytes} bytes; the snapshot {} bytes", snapshot.len());
+    assert!(steps >= 4, "each turn's steps appended: {steps}");
+    assert_eq!(std::fs::read(state.join("state.json")).expect("a snapshot"), snapshot, "and never the whole state");
+    // held: the state goes whole into the snapshot before the answer
+    let snapshot_alone = || -> fragment_bridge::engine::State { serde_json::from_slice(&std::fs::read(state.join("state.json")).expect("a snapshot")).expect("a state") };
+    support::hold(&dir);
+    support::until(WAIT, "its answer to the hold", || support::held(&dir)).await;
+    assert_eq!(snapshot_alone(), fragment_bridge::store::load(&state).expect("reads"), "held, the snapshot alone is the state");
+    assert!(snapshot_alone().cursors.values().any(|c| *c >= 2), "and holds both turns' reading");
+    // a message while held: recorded whole in the snapshot
+    let three = fake.say(&chat, &person("paul"), json!({ "text": "three" }));
+    let t3 = turn_of("juniper", &chat, seq(&three));
+    support::until(WAIT, "three read while held", || std::fs::read_to_string(state.join("state.json")).is_ok_and(|s| s.contains(&t3))).await;
+    assert_eq!(snapshot_alone(), fragment_bridge::store::load(&state).expect("reads"), "every write while held is whole");
+    support::unhold(&dir);
+    fake.until(WAIT, "three's end once the hold goes", |w| !ends_of(w, &chat, &t3).is_empty()).await;
+    assert!(support::logged(&state).0 > 0, "the hold gone, its steps appended again");
+    bridge.stop().await;
+    // a restart reads it back: nothing runs again
+    let bridge = support::start(cfg, support::counting(support::script(), &runs));
+    following(&fake, 2).await;
+    let t4 = said_and_ended(&fake, &chat, "four").await;
+    assert_eq!(runs.all(), vec![t1, t2, t3, t4], "each turn ran once, across the restart");
     bridge.stop().await;
 }
 

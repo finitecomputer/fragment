@@ -34,7 +34,7 @@ use fragment_proto::{
 };
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
 const GUIDE: &str = include_str!("../GUIDE.md");
@@ -173,8 +173,20 @@ enum Cmd {
     },
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
-    /// Delete a fragment you own (its cell data and blobs; the repo stays; the name is reusable)
-    Rm { name: String },
+    /// Delete a fragment you own, for everyone in it: its pages, data and
+    /// blobs go, and its name is free; its repo's history stays. At a
+    /// terminal it asks you to type its name first, unless --yes
+    Rm {
+        name: String,
+        /// Delete without asking (only a terminal asks)
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Archive a fragment in your own lists (for you alone: no one else's
+    /// change); `fragment unarchive` brings it back
+    Archive { name: String },
+    /// Bring a fragment you archived back into your lists
+    Unarchive { name: String },
     /// Deploy: sync (if --dir), then move the `live` ref to main's tip.
     /// Prints the canonical URL. History is git history (`fragment drafts`).
     Deploy {
@@ -1091,7 +1103,6 @@ fn vault_name(name: &str) -> Result<String, String> {
 /// whole, its line end trimmed. Never argv or the environment, which `ps`,
 /// shell history and child processes keep.
 fn vault_value(name: &str) -> Result<String> {
-    use std::io::IsTerminal;
     let value = if std::io::stdin().is_terminal() {
         rpassword::prompt_password(format!("value for {name} (hidden): ")).context("reading the value from the terminal")?
     } else {
@@ -1103,6 +1114,18 @@ fn vault_value(name: &str) -> Result<String> {
         return Err(usage(format!("empty value for {name}: type it at the prompt, or pipe it on stdin")));
     }
     Ok(value)
+}
+
+/// Whether what was typed at `fragment rm`'s prompt is the fragment's name
+/// in full (its line end and spaces aside): anything else deletes nothing.
+fn rm_confirmed(name: &str, typed: &str) -> bool {
+    typed.trim() == name
+}
+
+/// `PUT /api/fragments/{name}/archived`: the caller's own view of it.
+fn set_archived(c: &api::Client, name: &str, archived: bool) -> Result<fragment_proto::Archived> {
+    let name = c.fragment(name)?;
+    c.call_as(c.put_json(&format!("/api/fragments/{name}/archived"), &fragment_proto::SetArchived { archived })?)
 }
 
 /// Where `fragment inbox` reads its token, before stdin.
@@ -2138,10 +2161,30 @@ fn run(cli: Cli) -> Result<()> {
             }
             std::process::exit(report.exit_code());
         }
-        Cmd::Rm { name } => {
+        Cmd::Rm { name, yes } => {
+            let name = c.fragment(&name)?;
+            if !yes && std::io::stdin().is_terminal() {
+                eprintln!("Delete {name} for everyone in it? Its pages, data and blobs go. This can't be undone.");
+                eprint!("Type {name} to delete it: ");
+                let mut typed = String::new();
+                std::io::stdin().read_line(&mut typed)?;
+                if !rm_confirmed(&name, &typed) {
+                    return Err(usage(format!("nothing deleted: that was not {name}")));
+                }
+            }
             c.call(c.delete(&format!("/api/f/{name}"))?)?;
             json_exit(j, &json!({ "deleted": true, "name": name }));
-            println!("deleted fragment {name} (the repo stays; the name is reusable)");
+            println!("deleted {name} for everyone in it: its pages, data and blobs are gone, and the name is free. Its repo's history stays, and comes back if you make {name} again.");
+        }
+        Cmd::Archive { name } => {
+            let done = set_archived(&c, &name, true)?;
+            json_exit(j, &done);
+            println!("archived {}: out of your lists, for you alone. `fragment unarchive {}` brings it back.", done.name, done.name);
+        }
+        Cmd::Unarchive { name } => {
+            let done = set_archived(&c, &name, false)?;
+            json_exit(j, &done);
+            println!("unarchived {}: back in your lists.", done.name);
         }
         Cmd::Verify { name, dir } => {
             let report = sync::verify(&c, &name, &dir).map_err(cs_anyhow)?;
@@ -3467,6 +3510,24 @@ mod tests {
         assert!(!parses(&["fragment", "write", "x--k3x9", "a.md", "--text", "t", "--dir", "out"]), "--text names no folder");
         assert!(!parses(&["fragment", "write", "x--k3x9", "a.md", "--from", "f", "--dir", "out"]), "--from names no folder");
         assert!(!parses(&["fragment", "write", "x--k3x9", "--dir", "out"]), "a write names its paths");
+    }
+
+    /// Goal: `fragment rm` deletes only what was typed back in full at a
+    /// terminal's prompt, and a script says --yes or is not asked (Paul,
+    /// 2026-11-17). Valid: the name, its line end or spaces aside. Invalid:
+    /// nothing, a bare label, another case, another fragment's name.
+    #[test]
+    fn rm_deletes_only_its_name_typed_back() {
+        for typed in ["garden--k3x9\n", "garden--k3x9", "  garden--k3x9 \r\n"] {
+            assert!(rm_confirmed("garden--k3x9", typed), "{typed:?}");
+        }
+        for typed in ["", "\n", "y\n", "yes\n", "garden\n", "Garden--k3x9\n", "garden--k3x8\n", "garden--k3x9x\n"] {
+            assert!(!rm_confirmed("garden--k3x9", typed), "{typed:?}");
+        }
+        let parses = |args: &[&str]| Cli::try_parse_from(args.iter().copied()).is_ok();
+        assert!(parses(&["fragment", "rm", "garden--k3x9"]) && parses(&["fragment", "rm", "garden--k3x9", "--yes"]));
+        assert!(parses(&["fragment", "archive", "garden--k3x9"]) && parses(&["fragment", "unarchive", "garden"]));
+        assert!(!parses(&["fragment", "archive"]) && !parses(&["fragment", "unarchive", "a--k3x9", "b--k3x9"]), "one fragment each");
     }
 
     /// Goal: GUIDE.md's command reference is the CLI's, not a copy that
