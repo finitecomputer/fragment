@@ -598,6 +598,17 @@ and tells its owner, once, under the invite form: "People you add can
 use this app's keys." A public address is the same members and
 visibility, so no sharing.
 
+**An agent's own is its owner's alone** (FIN-544). An agent fragment
+(its kind, or the identity it ran as) has no one in it but its owner and
+their own agents, no invite, no link and no public, whoever asks (its
+owner, an agent for them, the CLI, the sheet): an invite, its yes, adding
+or raising anyone else, and `link` or `public` are 403 "An agent's own
+page stays private to its owner." The other way, its first run on a
+computer is 403 while anyone else is in it or invited, or its link opens
+it. Narrowing is never refused, and one shared before the rule keeps what
+it had (debt ledger, "Agent fragments shared before FIN-544"). Its sheet
+offers no invite, and no switch but one to close a link from before.
+
 On a chat one of the owner's agents is in, the sheet, and `fragment
 members add`, say "People in this chat can talk to your agent."
 (`fragment_core::access::TRUST_WARNING`): whoever is in a chat may talk to

@@ -625,7 +625,13 @@ impl FragmentCell {
         if let Some(why) = access::refuse_set_role(actor.role, current, body.role) {
             return Err(refusal(true, why));
         }
-        if current.is_none() && !lever && target.owner.as_deref() != Some(self.must(MetaKey::Owner)?.as_str()) {
+        let theirs = target.owner.as_deref() == Some(self.must(MetaKey::Owner)?.as_str());
+        // on an agent's own, no one but its owner's agents comes in or is
+        // raised (alone.rs)
+        if !theirs && current.is_none_or(|was| body.role > was) {
+            self.share_while_alone()?;
+        }
+        if current.is_none() && !lever && !theirs {
             return Err(CellError::new(ErrorCode::Forbidden, match target.kind {
                 IdentityKind::Person => "a person joins by their own yes: invite them by email instead (the share sheet's Add, `fragment members add <name> <email>`), and they are in once they accept it",
                 IdentityKind::Agent => "someone else's agent joins with its owner: invite its owner by email instead (the share sheet's Add, `fragment members add <name> <email>`); once they accept, their agents act there for them",
@@ -829,6 +835,8 @@ impl FragmentCell {
             Err(e) => return Err(e),
         }
         self.drop_spent_invites().await?;
+        // none on an agent's own (alone.rs), decided in the write's turn
+        self.share_while_alone()?;
         let before = self.rows("SELECT email, role, expires_at, created_by, created_at FROM invites WHERE email = ?", vec![email.as_str().into()])?;
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
@@ -960,6 +968,10 @@ impl FragmentCell {
         let who = claim.identity.as_str();
         let current = self.member_role(who)?;
         let kept = current.is_some_and(|c| c >= role);
+        // a yes kept waiting on an agent's own lets no one in (alone.rs)
+        if !kept {
+            self.share_while_alone()?;
+        }
         // the owner is in already, with their agents as they chose them
         let owner = current == Some(Role::Owner);
         let agents: &[String] = if owner { &[] } else { &claim.agents };
@@ -1114,8 +1126,10 @@ impl FragmentCell {
 
     pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        // members only narrows it; its link or public, not with reach (reach.rs)
+        // members only narrows it; its link or public, not with reach
+        // (reach.rs) nor on an agent's own (alone.rs)
         if body.visibility != Visibility::Members {
+            self.share_while_alone()?;
             self.share_while_private()?;
         }
         let before = self.visibility()?;

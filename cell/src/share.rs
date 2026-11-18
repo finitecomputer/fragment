@@ -674,15 +674,21 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     // that means, then its address and Copy
     out += "<section><h2>Link</h2><div class=\"link-card\">";
     let (path, named, means) = general(sheet.visibility);
-    // with reach, With link and Public show, unavailable, saying why (reach.rs)
-    let locked = |v: Visibility| sheet.reach && v != Visibility::Members;
-    if sheet.owner() {
+    // an agent's own is its owner's alone (alone.rs): no switch, but one
+    // to close a link from before the rule
+    let alone = sheet.kind == FragmentKind::Agent;
+    let alone_now = alone && sheet.visibility == Visibility::Members;
+    // with reach, or an agent's, With link and Public show, unavailable,
+    // saying why (reach.rs)
+    let locked = |v: Visibility| (sheet.reach || alone) && v != Visibility::Members;
+    let why = if alone { crate::alone::AGENT } else { REACH_LINE };
+    if sheet.owner() && !alone_now {
         let option = |v: Visibility| {
             let (path, named, _) = general(v);
             let face = format!("{}{named}", svg("i", path));
             match (sheet.visibility == v, locked(v)) {
                 (true, _) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"true\">{face}</button>", v.as_str()),
-                (false, true) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"false\" aria-disabled=\"true\" title=\"{REACH_LINE}\" disabled>{face}</button>", v.as_str()),
+                (false, true) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"false\" aria-disabled=\"true\" title=\"{why}\" disabled>{face}</button>", v.as_str()),
                 (false, false) => format!("<button name=\"visibility\" value=\"{}\" aria-pressed=\"false\" data-arm disabled>{face}</button>", v.as_str()),
             }
         };
@@ -691,14 +697,14 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     } else {
         out += &format!("<div class=\"access-now\">{}<span>{named}</span></div>", svg("i", path));
     }
-    let note = if sheet.owner() && sheet.reach { REACH_LINE } else { means };
+    let note = if alone_now || (sheet.owner() && sheet.reach && !alone) { why } else { means };
     out += &format!("<p class=\"hint\" data-link-note>{note}</p>");
     // the share link: its owner's, while it is what opens it. With reach,
     // Copy link never gives it, though one from before the rule still
     // opens it: the sheet gives it to no one more (reach.rs); New link, in
     // its field, still ends it
     let shared = sheet.link.as_deref().filter(|_| sheet.visibility == Visibility::Link);
-    let copied = shared.filter(|_| !sheet.reach).unwrap_or(&sheet.canonical);
+    let copied = shared.filter(|_| !sheet.reach && !alone).unwrap_or(&sheet.canonical);
     let rotate = match sheet.owner() && shared.is_some() {
         true => action_form(
             sheet,
@@ -720,7 +726,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
 
     // the people: the owner's invite form, then everyone in and invited
     out += "<section><h2>People with access</h2>";
-    if sheet.owner() {
+    if sheet.owner() && !alone {
         let radio = |value: &str, name: &str, checked: bool| {
             format!(
                 "<label class=\"menu-radio\"><input type=\"radio\" name=\"role\" value=\"{value}\"{}><span>{name}</span>{}</label>",
