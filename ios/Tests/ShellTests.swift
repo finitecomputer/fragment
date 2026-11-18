@@ -127,12 +127,13 @@ struct ShellTests {
         let stub = Stub { seen, before in
             guard seen.route == "POST /api/f/archive--s1/ops/sessions" else { return Self.platform(seen, before) }
             return before.contains { $0.route == seen.route }
-                ? (200, #"{"result":{"sessions":[{"key":"hermes-b","kind":"chat","title":"Second","started_at":"2026-10-03T10:00:00Z"}],"next":null,"whole":true},"replayed":false}"#)
-                : (200, #"{"result":{"sessions":[{"key":"hermes-a","kind":"chat","title":"First","ended_at":"2026-10-02T10:00:00Z","commit":"0123456789abcdef0123456789abcdef01234567"}],"next":"hermes-a","whole":true},"replayed":false}"#)
+                ? (200, #"{"result":{"sessions":[{"key":"hermes-b","kind":"chat","title":"Second","started_at":"2026-10-03T10:00:00.250Z"}],"next":null,"whole":true},"replayed":false}"#)
+                : (200, #"{"result":{"sessions":[{"key":"hermes-a","kind":"chat","title":"First","ended_at":"2026-10-02T10:00:00.000Z","commit":"0123456789abcdef0123456789abcdef01234567"}],"next":"hermes-a","whole":true},"replayed":false}"#)
         }
         let library = Library()
         await library.load(try stub.api())
         #expect(library.error == nil && library.imported.map(\.key) == ["hermes-b", "hermes-a"], "newest first")
+        #expect(library.imported.map(\.at) == [1_791_021_600_250, 1_790_935_200_000], "times with milliseconds, as an archive writes them")
         #expect(stub.seen.filter { $0.route == "POST /api/f/archive--s1/ops/sessions" }.count == 2)
         #expect(!stub.seen.contains { $0.route == "GET /api/f/archive--s1/file" })
     }

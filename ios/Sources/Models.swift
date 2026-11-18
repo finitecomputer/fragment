@@ -451,5 +451,14 @@ struct ImportedSession: Decodable, Identifiable, Sendable {
     var started_at: String?
     var ended_at: String?
     var id: String { key }
-    var at: Int64 { Int64((ISO8601DateFormatter().date(from: ended_at ?? started_at ?? "")?.timeIntervalSince1970 ?? 0) * 1000) }
+    /// When it was last said, else begun, in milliseconds: an archive writes
+    /// its times with milliseconds (`2026-10-02T10:00:00.000Z`), an older
+    /// one without.
+    var at: Int64 {
+        let text = ended_at ?? started_at ?? ""
+        let precise = ISO8601DateFormatter()
+        precise.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = precise.date(from: text) ?? ISO8601DateFormatter().date(from: text)
+        return Int64((date?.timeIntervalSince1970 ?? 0) * 1000)
+    }
 }

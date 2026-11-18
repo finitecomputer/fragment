@@ -72,7 +72,7 @@ export function createSessionArchive({
     let whole = false;
     for (let after = "", i = 0; i < 64; i++) {
       const page = await api("POST", `/api/f/${seg(name)}/ops/sessions`, { id: `history-${Date.now()}-${i}`, input: { kind: "chat", after } })
-        .then((r) => r?.result, (e) => (e.status === 404 ? null : Promise.reject(e)));
+        .then((r) => r?.result, (e) => (e.status === 404 && i === 0 ? null : Promise.reject(e)));
       if (!page) break;
       if (!Array.isArray(page.sessions)) throw new Error("the archive answered no list");
       out.push(...page.sessions);

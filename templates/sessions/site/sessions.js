@@ -53,7 +53,8 @@ async function rows() {
   let after = "";
   for (let i = 0; i < 64; i++) {
     const r = await fetch("__op/sessions", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: `list-${Date.now()}-${i}`, input: { after } }) }).catch(() => null);
-    if (r?.status === 404) return { sessions: [], whole: false };
+    // no list at all (a host before it); one gone after its first page failed
+    if (r?.status === 404) return i === 0 ? { sessions: [], whole: false } : null;
     const page = r?.ok ? (await r.json().catch(() => null))?.result : null;
     if (!Array.isArray(page?.sessions)) return null;
     out.push(...page.sessions);

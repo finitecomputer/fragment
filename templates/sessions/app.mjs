@@ -79,7 +79,8 @@ export class App extends DurableObject {
       if (!text(entry.key) || !KEY.test(entry.key)) throw new Error(`no conversation's key: ${String(entry.key).slice(0, 160)}`);
       if (!text(entry.kind) || !KIND.test(entry.kind)) throw new Error(`${entry.key}: no kind's name`);
       if (!text(entry.id) || !text(entry.origin) || !text(entry.title) || !text(entry.sha256) || !SHA256.test(entry.sha256)) throw new Error(`${entry.key}: no entry (id, origin, title, sha256)`);
-      if (![entry.reader ?? 0, entry.messages, entry.bytes, entry.media ?? 0].every(count)) throw new Error(`${entry.key}: no entry (reader, messages, bytes, media)`);
+      const optional = (v) => (v === undefined ? 0 : v);
+      if (![optional(entry.reader), entry.messages, entry.bytes, optional(entry.media)].every(count)) throw new Error(`${entry.key}: no entry (reader, messages, bytes, media)`);
       if (![entry.agent, entry.source, entry.with, entry.started_at, entry.ended_at, entry.preview].every((v) => v === undefined || text(v))) throw new Error(`${entry.key}: no entry (its text fields)`);
       if (commit !== null && (!text(commit) || !COMMIT.test(commit))) throw new Error(`${entry.key}: no commit`);
       if (utf8.encode(json).length > ENTRY_MAX_BYTES) throw new Error(`${entry.key}: an entry is at most ${ENTRY_MAX_BYTES} bytes`);

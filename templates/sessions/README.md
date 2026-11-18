@@ -79,9 +79,11 @@ The import writes the rows, as the writer holding each conversation's
 bytes: an app reads no file of 1 MiB or more (a blob), and a
 conversation may be 8 MiB. Its last call says the list is whole. On a
 host whose archive has no list (older than the CLI) an import is
-refused before it writes a conversation. A list is at most
-`LIST_MAX_BYTES` (10 MiB of entries, inside the app's 16 MiB): an import
-past it is refused whole, as one past the archive's other limits is.
+refused before it writes a conversation. A list takes at most
+`LIST_MAX_BYTES` (13 MiB) of the app's 16 MiB database, each row
+counted as SQLite stores it (`list_cost`): a whole archive of entries of
+about 500 bytes fits, one of longer entries holds fewer. An import past
+it is refused whole, as one past the archive's other limits is.
 
 An archive imported before its list was rows holds an index file a kind
 instead (`index/<kind>.json`, `{format, kind, sessions: [entry]}`): its

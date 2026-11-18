@@ -453,7 +453,11 @@ final class Library {
             var after = ""
             for page in 0..<64 {
                 let call: JSONValue = .object(["id": .string("ios-history-\(page)-\(UUID().uuidString)"), "input": .object(["kind": .string("chat"), "after": .string(after)])])
-                guard let answer = try await api.optionalPost(Answer.self, "api/f/\(archive.name)/ops/sessions", body: call) else { break }
+                // no list at all (a host before it); one gone after its first page failed
+                guard let answer = try await api.optionalPost(Answer.self, "api/f/\(archive.name)/ops/sessions", body: call) else {
+                    if page > 0 { return }
+                    break
+                }
                 rows += answer.result.sessions
                 whole = answer.result.whole == true
                 guard let next = answer.result.next, next > after else { break }
