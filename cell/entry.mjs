@@ -129,7 +129,7 @@ export class Files extends WorkerEntrypoint {
 // throws it on the app's side, its fields whole.
 export class Search extends WorkerEntrypoint {
   #answer(op, body) {
-    return asked(this, `call/search/${op}`, body, `search.${op}`);
+    return asked.call(this, `call/search/${op}`, body, `search.${op}`);
   }
 
   upsert(source) { return this.#answer("upsert", source); }
@@ -142,11 +142,11 @@ export class Search extends WorkerEntrypoint {
   status() { return this.#answer("status", {}); }
 }
 
-// A capability's call to its fragment's supervisor, answered `{answer}`,
-// or a refusal as a plain `{error}` (SEARCH's and FRAGMENTS').
-async function asked(cap, path, body, what) {
-  const { fragment } = cap.ctx.props;
-  const resp = await cap.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(cap.env, path, JSON.stringify(body)));
+// A capability's call to its fragment's supervisor (`this`, SEARCH's or
+// FRAGMENTS'), answered `{answer}`, or a refusal as a plain `{error}`.
+async function asked(path, body, what) {
+  const { fragment } = this.ctx.props;
+  const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, path, JSON.stringify(body)));
   const answer = await resp.json().catch(() => ({}));
   if (resp.ok) return { answer };
   return {
@@ -170,7 +170,7 @@ async function asked(cap, path, body, what) {
 // plain `{error}`, which platform.mjs's `otherFragments` throws.
 export class Fragments extends WorkerEntrypoint {
   #answer(act, name, channel, body) {
-    return asked(this, `call/fragments/${act}/${encodeURIComponent(name)}/${encodeURIComponent(channel)}`, body ?? {}, `fragments.${act}`);
+    return asked.call(this, `call/fragments/${act}/${encodeURIComponent(name)}/${encodeURIComponent(channel)}`, body ?? {}, `fragments.${act}`);
   }
 
   post(name, channel, record) { return this.#answer("post", name, channel, record); }
