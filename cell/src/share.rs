@@ -458,7 +458,9 @@ fn person(m: &Member, sheet: &Sheet) -> String {
 /// An app member as a sheet shows it (decision 72): its name, whose it is,
 /// and, paused, whom it waits on.
 fn app_row(app: &fragment_proto::MemberApp, m: &Member, sheet: &Sheet) -> String {
-    let shown = label(&app.name);
+    // its label, unless another app here shares it: then its whole name
+    let twin = sheet.members.iter().any(|o| o.principal != m.principal && o.app.as_ref().is_some_and(|a| label(&a.name) == label(&app.name)));
+    let shown = if twin { app.name.as_str() } else { label(&app.name) };
     let mut under = vec![match m.owner.as_deref() {
         Some(o) if o == sheet.me => "Your app".to_string(),
         Some(o) => format!("{}'s app", esc(&name_of(o, sheet.profiles.get(o)))),
@@ -645,8 +647,9 @@ fn role_menu(sheet: &Sheet, m: &Member, who: &str) -> String {
         true => format!("<button type=\"button\" role=\"menuitem\">{}{}</button>", role_name(r), svg("tick on", TICK)),
         false => format!("<button role=\"menuitem\" name=\"role\" value=\"{}\" data-arm disabled>{}{}</button>", r.as_str(), role_name(r), svg("tick", TICK)),
     };
-    // an app by its name, which its role and removal take (decision 72)
-    let member = hidden("member", m.app.as_ref().map_or(&m.principal, |a| &a.name));
+    // by its key, an app's too: a sheet gone stale changes or removes only
+    // the one it showed, and adds none back (decision 72)
+    let member = hidden("member", &m.principal);
     let role = action_form(sheet, "role", &format!("{member}{}{}", item(Role::Viewer), item(Role::Editor)), "");
     let remove = action_form(
         sheet,
@@ -914,7 +917,7 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
     let who = Signed::new(live.identity, None);
     let field = |k: &str| fields.get(k).map_or("", |v| v.trim());
     let member = || match field("member") {
-        m if npub::is_identity(m) || fragment_proto::valid_fragment_name(m) => Ok(m.to_string()),
+        m if npub::is_identity(m) => Ok(m.to_string()),
         m => Err(CellError::invalid(format!("{m:?} is not a member"))),
     };
     let role = || match Role::parse(field("role")) {
