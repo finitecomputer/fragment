@@ -27,7 +27,7 @@
 
 use serde_json::Value;
 
-use crate::computer::{DISK_TOLD_FREE_MAX, METER_EVERY_MS};
+use crate::computer::{DISK_TOLD_FREE_MAX, METER_EVERY_MS, SAVED_DIRS};
 use crate::search::cut;
 
 /// "Now": the last ten minutes, twice an awake computer's meter alarm.
@@ -53,8 +53,9 @@ pub const TROUBLE_MAX: usize = 100;
 pub const WHYS_READ_MAX: u32 = 100;
 /// A save's reason, as the glance shows it, at most (cut at a character).
 pub const WHY_MAX_BYTES: usize = 160;
-/// A reason's words read, at most, before paths are left out of them.
-pub const WHY_READ_MAX_BYTES: usize = 4 * WHY_MAX_BYTES;
+/// A reason's words read, at most, before paths are left out of them: an
+/// OS error's words after a path are kept only from a reason read whole.
+pub const WHY_READ_MAX_BYTES: usize = 4096;
 /// What the queries are named in Cloudflare's own records.
 pub const QUERY_ID: &str = "fragment-admin-glance";
 /// A Worker's name, at most (Cloudflare's own limit).
@@ -220,54 +221,51 @@ pub fn whys_of(answer: &Value) -> Result<Vec<(String, i64, String)>, String> {
     Ok(newest.into_iter().map(|(computer, (at, w))| (computer.to_string(), at, why(w))).collect())
 }
 
-/// What opens a path's word, each with what closes it.
-const BRACKETS: [(char, char); 6] = [('\'', '\''), ('"', '"'), ('`', '`'), ('(', ')'), ('[', ']'), ('<', '>')];
+/// What opens a path's word, and what closes it.
+const OPENS: &str = "'\"`([<";
+const CLOSES: &str = "'\"`)]>";
 
 /// A failed save's reason as the glance shows it: the platform's words,
 /// never a person's file names (a backup's error may name a file it could
-/// not read). Of each path, only an absolute one's first directory stays
-/// (`/data`, the platform's own). The rest is left out to where it ends,
-/// erring long, since a name may hold a space, a quote or a `": "`: the
-/// last of its closing quote or bracket, else the last `": "`, else the
-/// reason's end. A relative path's earlier words may be its own too: it is
-/// left out back to its opening bracket, or the `": "` before it, or the
-/// reason's start. Its spaces are one, and it is at most `WHY_MAX_BYTES`,
-/// cut at a character.
+/// not read, and a name may hold any mark, a quote, a bracket or a `": "`,
+/// so no mark after one says where it ends). Up to the first path that is
+/// not the platform's own (`SAVED_DIRS`, or one directory under the root)
+/// it is as it is; of that path, an absolute one keeps its first directory
+/// (`/data/…`), and a relative one or a URL is left out back to the first
+/// mark before it (`(`, a quote, a `": "`), or the reason's start, since
+/// its earlier words may be its own. After it, only an OS error's own
+/// words stay (`os_error`), and only from a reason read whole. Its spaces
+/// are one, and it is at most `WHY_MAX_BYTES`, cut at a character.
 pub fn why(raw: &str) -> String {
-    let spaced = cut(raw, WHY_READ_MAX_BYTES).split_whitespace().collect::<Vec<_>>().join(" ");
-    let opens = |c: char| BRACKETS.iter().find(|(o, _)| *o == c).map(|(_, close)| *close);
+    let read = cut(raw, WHY_READ_MAX_BYTES);
+    let spaced = read.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out = String::with_capacity(spaced.len());
     let mut rest = spaced.as_str();
-    // bounded: each turn takes the slash it found, at least, off `rest`
+    // bounded: each turn takes one platform path, at least its slash, off `rest`, or ends
     while let Some(slash) = rest.find('/') {
-        let before = rest[..slash].chars().next_back();
-        // absolute: its slash begins a word (after a space or an opening bracket)
-        let absolute = before.is_none_or(|c| c == ' ' || opens(c).is_some());
-        let (kept, closer) = match absolute {
-            true => (slash + 1 + rest[slash + 1..].find(|c: char| !(c.is_ascii_alphanumeric() || "_.-".contains(c))).unwrap_or(rest.len() - slash - 1), before.and_then(opens)),
-            false => {
-                let bracket = rest[..slash].char_indices().rev().find(|(_, c)| opens(*c).is_some()).map(|(i, c)| (i + c.len_utf8(), opens(c)));
-                let colon = rest[..slash].rfind(": ").map(|i| i + 2);
-                match (bracket, colon) {
-                    (Some((b, close)), c) if c.is_none_or(|c| b > c) => (b, close),
-                    (_, c) => (c.unwrap_or(0), None),
-                }
+        let absolute = rest[..slash].chars().next_back().is_none_or(|c| c == ' ' || OPENS.contains(c));
+        if absolute {
+            let len = rest[slash..].find(|c: char| c == ' ' || c == ':' || c == ',' || c == ';' || CLOSES.contains(c)).unwrap_or(rest.len() - slash);
+            let path = &rest[slash..slash + len];
+            if SAVED_DIRS.contains(&path) || !path[1..].contains('/') {
+                out.push_str(&rest[..slash + len]);
+                rest = &rest[slash + len..];
+                continue;
             }
-        };
-        out.push_str(&rest[..kept]);
-        rest = &rest[kept..];
-        if absolute && !rest.starts_with('/') {
-            // a path of one directory, as it is
-            continue;
+            let top = 1 + path[1..].find('/').expect("a path past one directory");
+            out.push_str(&rest[..slash + top]);
+            out.push_str("/…");
+        } else {
+            let from = rest[..slash].char_indices().find(|&(i, c)| OPENS.contains(c) || rest[i..].starts_with(": ")).map_or(0, |(i, c)| i + if c == ':' { 2 } else { c.len_utf8() });
+            out.push_str(&rest[..from]);
+            out.push('…');
         }
-        // where the path left out ends, looked for past the slash it found
-        // (an absolute path's next, at 0): never before it
-        let from = slash.saturating_sub(kept);
-        let tail = &rest[from..];
-        let end = from + closer.and_then(|c| tail.rfind(c)).or_else(|| tail.rfind(": ")).unwrap_or(tail.len());
-        assert!(end > from, "a turn takes its slash");
-        out.push_str(if absolute { "/…" } else { "…" });
-        rest = &rest[end..];
+        let after = &rest[slash..];
+        if let Some(words) = after.rfind(": ").map(|i| &after[i + 2..]).filter(|w| read.len() == raw.len() && os_error(w)) {
+            out.push_str(": ");
+            out.push_str(words);
+        }
+        rest = "";
     }
     out.push_str(rest);
     if out.len() > WHY_MAX_BYTES {
@@ -275,6 +273,17 @@ pub fn why(raw: &str) -> String {
     }
     assert!(out.len() <= WHY_MAX_BYTES, "a reason shown is short");
     out
+}
+
+/// Whether `words` are an OS error's own, as Rust's `io::Error` writes one
+/// (`No space left on device (os error 28)`): ASCII letters, spaces, `-`
+/// and `'`, then its code.
+fn os_error(words: &str) -> bool {
+    let Some((said, code)) = words.strip_suffix(')').and_then(|w| w.rsplit_once(" (os error ")) else { return false };
+    (1..=64).contains(&said.len())
+        && said.chars().all(|c| c.is_ascii_alphabetic() || " -'".contains(c))
+        && (1..=4).contains(&code.len())
+        && code.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// The computers in trouble: each kind's, by computer, the most lines
@@ -427,43 +436,63 @@ mod tests {
     }
 
     /// Goal: a reason shows the platform's words, never a person's file
-    /// names (a backup's error may name one it could not read): a path
-    /// keeps its first directory (`/data`, the platform's), the rest left
-    /// out to the last of its closing quote or bracket, else the last
-    /// `": "`, else the reason's end (a name may hold a quote, a space or
-    /// a `": "`); a relative path or a URL whole, back to its bracket or
-    /// the `": "` before it; its spaces are one, and it is short, cut at a
-    /// character. Valid (the platform's own words, as they are), each shape
-    /// of path (a name holding its quote and a `": "`, watched leaking
-    /// before), too long at each width of character.
+    /// names (a backup's error may name one it could not read), whatever
+    /// marks a name holds (a quote, a bracket, a `": "`) and wherever the
+    /// read cuts it: of the first path that is not the platform's own
+    /// (`SAVED_DIRS`, or one directory under the root), an absolute one
+    /// keeps its first directory and a relative one or a URL is left out
+    /// back to the first mark before it; after it, only an OS error's own
+    /// words stay. Its spaces are one, and it is short, cut at a character.
+    /// Valid (the platform's own words, as they are), each shape of path
+    /// (the reviews' leaks among them, watched leaking before), a read cut
+    /// mid-name, too long at each width of character.
     #[test]
     fn a_reason_leaves_out_a_persons_paths_and_is_short() {
-        let own = ["its container is not running", "the backup of /data: no answer within 727000 ms", "backup '/data': No space left on device (os error 28)", "start 4 is not the running one", "a / b"];
+        let own = [
+            "its container is not running",
+            "the backup of /data: no answer within 727000 ms",
+            "the backup of /data/work: no answer within 727000 ms",
+            "backup '/data': No space left on device (os error 28)",
+            "backup '/data/work': R2 stored 10 bytes, but the container uploaded 12",
+            "start 4 is not the running one",
+            "a / b",
+        ];
         for w in own {
             assert_eq!(why(w), w);
         }
-        let paths = [
+        let deep = "d".repeat(190);
+        let leaks = [
             ("backup '/data': open /data/home/Tax Return.pdf: Permission denied (os error 13)", "backup '/data': open /data/…: Permission denied (os error 13)"),
-            ("backup '/data/home/Tax Return.pdf': EACCES", "backup '/data/…': EACCES"),
-            ("read \"/work/notes/my diary.md\" failed", "read \"/work/…\" failed"),
+            ("backup '/data/home/Tax Return.pdf': EACCES", "backup '/data/…"),
+            ("read \"/data/work/notes/my diary.md\" failed", "read \"/data/…"),
             ("Permission denied: /data/home/Tax Return.pdf", "Permission denied: /data/…"),
-            ("home/notes/Tax.pdf: Permission denied", "…: Permission denied"),
-            ("~/notes/Tax.pdf: gone", "…: gone"),
-            ("request failed (http://gateway/parts/1?d=/data/home/Tax.pdf) at last", "request failed (…) at last"),
+            ("home/notes/Tax.pdf: Permission denied (os error 13)", "…: Permission denied (os error 13)"),
+            ("~/notes/Tax.pdf: gone", "…"),
+            ("request failed (http://gateway/parts/1?d=/data/home/Tax.pdf) at last", "request failed (…"),
+            ("ENOSPC: no space left on device, open '/data/home/Tax.pdf'", "ENOSPC: no space left on device, open '/data/…"),
             ("backup\n  '/data':\tdisk   full", "backup '/data': disk full"),
-            // a name that holds its quote, or a ": ": left out to the last
-            ("backup '/data/home/Ann's Tax Return.pdf': EACCES", "backup '/data/…': EACCES"),
-            ("open /data/home/Tax: Return.pdf: Permission denied", "open /data/…: Permission denied"),
-            ("open /data/home/Archive: Réunion médicale.pdf: Permission denied", "open /data/…: Permission denied"),
-            // a relative path's earlier words may be its own: left out back to a bracket, a ": ", or the start
-            ("failed to read My Documents/Tax.pdf: EACCES", "…: EACCES"),
-            ("backup '/data': read My Documents/Tax.pdf", "backup '/data': …"),
-            ("(a)b/secret: x", "(…: x"),
+            // a name holding its quote, a ": ", a bracket
+            ("backup '/data/home/Ann's Tax Return.pdf': EACCES", "backup '/data/…"),
+            ("open /data/home/Tax: Return.pdf: Permission denied", "open /data/…"),
+            ("open /data/home/Archive: Réunion médicale.pdf: Permission denied", "open /data/…"),
+            ("open 'Réunion: médicale (dossier/Tax.pdf': EACCES", "open '…"),
+            ("failed to read My Documents/Tax.pdf: EACCES", "…"),
+            ("backup '/data': read My Documents/Tax.pdf", "backup '/data'…"),
+            ("(a)b/secret: x", "(…"),
+            // an OS error's words after a name that looks like one stay; they are no one's
+            ("open /data/home/Tax (os error 1): Permission denied (os error 13)", "open /data/…: Permission denied (os error 13)"),
         ];
-        for (raw, shown) in paths {
+        let theirs = ["home", "Tax", "notes", "diary", "Return", "Ann", "My", "Documents", "secret", "Archive", "Réunion", "médicale", "dossier", "gateway", "work/"];
+        for (raw, shown) in leaks {
             let w = why(raw);
-            assert_eq!(w, shown);
-            assert!(["home", "Tax", "notes", "diary", "Return", "Ann", "My", "Documents", "secret", "Archive", "médicale"].iter().all(|p| !w.contains(p)), "{w}");
+            assert_eq!(w, shown, "{raw}");
+            assert!(theirs.iter().all(|p| !w.contains(p)), "{w}");
+        }
+        // the read cut mid-name: its ": " gone, the name still left out,
+        // and no OS error's words kept from what was not read whole
+        for (dirs, shown) in [(3, "open /data/…: Permission denied (os error 13)"), (30, "open /data/…")] {
+            let raw = format!("open /data/{}/Archive: Réunion médicale.pdf{}: Permission denied (os error 13)", vec![deep.as_str(); dirs].join("/"), "x".repeat(30));
+            assert_eq!(why(&raw), shown, "{dirs} directories, {} bytes", raw.len());
         }
         for c in ['x', 'é', '€', '𝄞'] {
             for pad in WHY_MAX_BYTES - 8..=WHY_MAX_BYTES {
