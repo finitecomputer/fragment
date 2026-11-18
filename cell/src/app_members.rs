@@ -176,7 +176,9 @@ impl FragmentCell {
 
     /// `PUT members/<name>`, `name` an app of its owner's, at `role`: the
     /// app asked, then held to the rule in this fragment's own turn.
-    pub(crate) async fn add_app(&self, actor: &Actor, name: &str, role: Role, app_owner: &str, invited: Option<Invited>) -> CellResult<Member> {
+    /// `key`: the app life asked for, when one already is (a role by its
+    /// key, an invite's): another life under the name is no yes.
+    pub(crate) async fn add_app(&self, actor: &Actor, name: &str, role: Role, app_owner: &str, invited: Option<Invited>, key: Option<&str>) -> CellResult<Member> {
         let me = self.name()?;
         let title = self.app_title()?;
         if name == me {
@@ -198,7 +200,10 @@ impl FragmentCell {
             Ok(answer) => {
                 // each person by their email, as the owner sees them, should a line name one
                 let names = self.emails(answer.audience.iter().map(|(p, _)| p.clone()).collect()).await;
-                self.app_answered(actor, name, role, (incarnation, version, &owner, app_owner, &title), &answer, &names, invited.as_ref())
+                match key.is_some_and(|k| k != answer.npub) {
+                    true => Err(CellError::new(ErrorCode::Conflict, "that app is no longer the one asked for: open its sheet again")),
+                    false => self.app_answered(actor, name, role, (incarnation, version, &owner, app_owner, &title), &answer, &names, invited.as_ref()),
+                }
             }
             Err(e) => Err(e),
         };
@@ -318,7 +323,7 @@ impl FragmentCell {
         let owner = self.must(MetaKey::Owner)?;
         let crate::fragment::calls::AppOwner { owner: theirs, npub: key } = crate::fragment::call(&self.env, name, &AppOwnerOf {}).await?;
         if theirs == owner {
-            return Ok(fragment_proto::Shared::Member(self.add_app(actor, name, role, &owner, None).await?));
+            return Ok(fragment_proto::Shared::Member(self.add_app(actor, name, role, &owner, None, Some(&key)).await?));
         }
         let (title, shown) = (self.app_title()?, label(name));
         if self.member_role(&theirs)?.is_none() {
@@ -373,7 +378,8 @@ impl FragmentCell {
     /// waits on, as any refusal of the app's leaves it.
     pub(crate) async fn claim_app_invite(&self, claim: &crate::fragment::calls::InviteAnswer, app: &str, role: Role, by: String, invited: Invited) -> CellResult<Role> {
         let (email, made) = (invited.email.clone(), invited.made);
-        match self.add_app(&Actor::invited_by(by), app, role, &claim.identity, Some(invited)).await {
+        let key = invited.key.clone();
+        match self.add_app(&Actor::invited_by(by), app, role, &claim.identity, Some(invited), Some(&key)).await {
             // its invite went in the join's own turn
             Ok(member) => Ok(member.role),
             // the app is gone: its invite goes with it, as the registry forgets it

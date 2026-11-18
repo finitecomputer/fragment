@@ -610,15 +610,16 @@ impl FragmentCell {
         // an app member by its key: its role, asked of it again, never an
         // app added by a sheet that went stale (app_members.rs)
         if let Some(name) = npub::parse(who).map(|k| npub::identity_of(&k)).map(|p| self.app_of(&p)).transpose()?.flatten() {
-            // asked for its own owner, a member here or ours
+            // asked for its own owner, a member here or ours, and that life alone
             let rows = self.rows("SELECT owner FROM member_apps WHERE name = ?", vec![name.as_str().into()])?;
             let app_owner = rows.first().and_then(|r| r["owner"].as_str()).map(str::to_string).ok_or_else(|| CellError::host("an app member has no owner"))?;
-            return json_response(&self.add_app(&actor, &name, body.role, &app_owner, None).await?);
+            let key = npub::parse(who).map(|k| npub::identity_of(&k)).unwrap_or_default();
+            return json_response(&self.add_app(&actor, &name, body.role, &app_owner, None, Some(&key)).await?);
         }
         // a fragment's name: an app of its owner's (app_members.rs)
         if fragment_proto::valid_fragment_name(who) {
             let owner = self.must(MetaKey::Owner)?;
-            return json_response(&self.add_app(&actor, who, body.role, &owner, None).await?);
+            return json_response(&self.add_app(&actor, who, body.role, &owner, None, None).await?);
         }
         // what it waited on, for its client (`Server-Timing`)
         let mut laps = crate::js::Laps::start();
