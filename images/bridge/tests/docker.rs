@@ -3107,6 +3107,74 @@ async fn a_question_in_words_says_whose_answer_it_waits_for() {
     });
 }
 
+/// Goal (Austin, 2026-11-17: a voice memo sent as the answer to a question
+/// in words was never transcribed, so the agent transcribed it itself):
+/// real Hermes' open clarify answered with a voice memo is answered with
+/// what the memo says, transcribed once through the route, and the answer
+/// starts no turn of its own. Method: the question, then a memo (a WAV that
+/// says its words, as the scripted model reads them) said as the answer;
+/// the route's transcriptions, and the turn's reply after, which quotes
+/// the clarify's answer.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_question_in_words_is_answered_by_a_voice_memo() {
+    use sha2::Digest;
+    let (fake, model, chat, c) = hermes_running().await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "clarify: What should I call the plant?" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let asked = |w: &support::fake::World| w.bodies(&chat, "work", "turn.asked").into_iter().filter(|a| a["turn"] == turn).collect::<Vec<_>>();
+    within(&fake, &chat, &c, 120_000, "the question, and whose answer it waits for", |w| !asked(w).is_empty()).await;
+    let words = "call it fernando the fern";
+    let audio = support::model::memo(words);
+    let sha = fragment_bridge::records::hex(&sha2::Sha256::digest(&audio));
+    fake.with(|w| w.fragments.get_mut(&chat).expect("the chat").blobs.insert(sha.clone(), ("audio/wav".into(), bytes::Bytes::from(audio.clone()))));
+    let heard_before = model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/audio/transcriptions")).count();
+    fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": audio.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    within(&fake, &chat, &c, 120_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    let heard = model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/audio/transcriptions")).count() - heard_before;
+    assert_eq!(heard, 1, "the memo transcribed once, through the route");
+    fake.with(|w| {
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.last().is_some_and(|r| r.contains(words)), "the memo's words answered the clarify: {replies:?}");
+        assert_eq!(asked(w).len(), 1, "asked once");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the answer started no turn of its own (hello, then this one)");
+    });
+}
+
+/// Goal (the council on this change, 2026-11-17): a voice memo Hermes hears
+/// no words in leaves its clarify open, and says nothing, so the bridge
+/// keeps the question open too: the asker's retry, in words, answers it,
+/// and no turn of its own is started. Method: the question, a memo that
+/// says nothing (the scripted model hears it so), then the words; the
+/// turn's reply quotes the clarify's answer.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_voice_memo_heard_as_nothing_leaves_the_question_to_answer_again() {
+    use sha2::Digest;
+    let (fake, _model, chat, c) = hermes_running().await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "clarify: What should I call the plant?" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let asked = |w: &support::fake::World| w.bodies(&chat, "work", "turn.asked").into_iter().filter(|a| a["turn"] == turn).collect::<Vec<_>>();
+    within(&fake, &chat, &c, 120_000, "the question, and whose answer it waits for", |w| !asked(w).is_empty()).await;
+    let audio = support::model::memo("");
+    let sha = fragment_bridge::records::hex(&sha2::Sha256::digest(&audio));
+    fake.with(|w| w.fragments.get_mut(&chat).expect("the chat").blobs.insert(sha.clone(), ("audio/wav".into(), bytes::Bytes::from(audio.clone()))));
+    fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": audio.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    // Hermes heard it as nothing, and keeps its clarify
+    let t = Instant::now();
+    while !c.logs().contains("voice transcription produced no usable text") && !c.exec_out(&["sh", "-c", "grep -rl 'voice transcription produced no usable text' /data/hermes/logs /data/hermes/profiles/*/logs 2>/dev/null | head -1"]).contains("log") {
+        assert!(t.elapsed() < Duration::from_secs(90), "Hermes never kept its clarify for a memo with no words");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    fake.say(&chat, &person("paul"), json!({ "text": "Fernando" }));
+    within(&fake, &chat, &c, 120_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    fake.with(|w| {
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.last().is_some_and(|r| r.contains("Fernando")), "the retry answered the clarify: {replies:?}");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the retry started no turn of its own (hello, then this one)");
+    });
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: a step read as its raw
 /// tool name and its arguments cut at 40 characters): real Hermes' steps
 /// say what they do. Its terminal, write_file and execute_code calls are
@@ -4314,6 +4382,20 @@ async fn a_voice_memo_is_transcribed_through_the_route() {
     assert_eq!((h.body["model"].clone(), h.body["language"].clone(), h.body["audio_bytes"].clone()), (json!("whisper"), serde_json::Value::Null, json!(audio.len())), "the route's whisper, the memo whole, no language forced");
     let asked = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).any(|c| c.body["messages"].to_string().contains(words));
     assert!(asked, "the turn's model call carries what the memo said: {:#?}", calls.iter().map(|c| c.body["messages"].to_string().chars().take(400).collect::<String>()).collect::<Vec<_>>());
+    // what the turn's model is told (Austin, 2026-11-17: his agent
+    // transcribed memos again itself): its system prompt says a memo arrives
+    // transcribed (hermes::VOICE), and its message is the shape VOICE
+    // describes, the words quoted just above Hermes' audio note, then the
+    // bridge's note naming the same recording. A Hermes that moves the
+    // quote makes VOICE false, and fails here.
+    let memo_call = handed(&model, "juniper--k3x9", words).into_iter().next().expect("the memo's turn's model call");
+    let messages = memo_call.body["messages"].as_array().cloned().unwrap_or_default();
+    let system = messages.first().filter(|m| m["role"] == "system").map(content_text).unwrap_or_default();
+    assert!(system.contains("A voice memo arrives already transcribed: the quoted words just above the note that the user sent audio"), "its system prompt says a memo is already transcribed (hermes::VOICE): {}", system.chars().take(2000).collect::<String>());
+    let user = messages.iter().rev().find(|m| m["role"] == "user").map(content_text).unwrap_or_default();
+    let quoted = user.find(&format!("\"{words}\"\n[User sent audio: "));
+    let noted = user.find("sent a file: 'memo.wav' (audio/wav). It is on your computer at: /tmp/bridge-media/");
+    assert!(matches!((quoted, noted), (Some(q), Some(n)) if q < n), "its message quotes the words just above Hermes' audio note, then the bridge's note: {user}");
     let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == t).collect::<Vec<_>>());
     eprintln!("memo: replies {replies:?}");
     assert_eq!(replies.len(), 1, "one reply, no transcript echoed as a message of its own: {replies:?}");

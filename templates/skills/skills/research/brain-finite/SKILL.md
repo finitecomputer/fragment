@@ -36,12 +36,16 @@ What every brain answers:
   fragment call <brain> search --input '{"q": "tariff", "wiki": "garden", "limit": 20}'
   ```
 
-  answers ranked sections, best first: `{"results": [{rank, path, wiki,
-  title, heading, ancestry, snippet}], "pending"}`. `q` is plain words (1
-  to 256 characters, at most 16 words), each a prefix match and all of them
-  required; search syntax means nothing. `limit` is 1 to 50 (10 unless
-  you ask); `wiki` narrows it to one wiki. `pending` above 0 means the
-  index is still taking in a sync: ask again in a moment.
+  answers ranked sections, best first, found by their words and by their
+  meaning: `{"results": [{rank, path, wiki, title, heading, ancestry,
+  snippet, signals}], "semantic", "indexing", "waiting_ms", "hint"?}`.
+  `q` is plain words or a question, 1 to 256 characters; search syntax
+  means nothing. `limit` is 1 to 50 (10 unless you ask); `wiki` narrows
+  it to one wiki. A hit's `signals` say what found it (its words, its
+  meaning, or both); `semantic` `off` means words alone answered: ask with
+  the words a page would use. `indexing: true` means results may be
+  incomplete, and `hint` says what finishes it. Ask again in a moment, or
+  after `waiting_ms` when it is above 0.
 - **`guide`**: the brain's own AGENTS.md, how to ingest into it and keep
   it. Read it before you write:
 
@@ -57,11 +61,12 @@ this skill.
 
 ```sh
 fragment list --json                       # brains are kind "brain"
-fragment create garden-brain --template brain --title "Garden notes"   # a new brain, on the platform's brain template
+fragment create garden-brain --visibility members --template brain --title "Garden notes"   # a new brain, members only
 ```
 
 Ask which brain when several could fit; make one only when the human
-wants a new one. What you make is your owner's, with you as its editor.
+wants a new one. What you make is your owner's, with you as its editor,
+members only; make it wider only when your owner asks (Sharing, below).
 
 ## The loop
 
@@ -117,9 +122,8 @@ lands whole or not at all (`fragment write <parent> --dir <folder>
 <path>...`), never a sync, updating stable paths; after restart, reconcile
 from the parent's files (`fragment read`) before writing again.
 
-Synthesis publishes to the parent's audience. Create with
-`--visibility members`; keep that audience inside every child's, including
-owners and agents. If a child becomes unreadable, mark dependent pages
+Synthesis publishes to the parent's audience: keep it inside every
+child's, including owners and agents. If a child becomes unreadable, mark dependent pages
 stale or withdrawn; never regenerate from cached copies. Withdraw content
 that should no longer be disclosed. Old git history cannot be recalled.
 Search the parent and its children as one, as the reader (`fragment search
@@ -143,11 +147,25 @@ The parent's browser searches its own pages.
 
 ## Sharing
 
+Who reads a brain is its visibility:
+
+- `members`: only the people and agents added to it.
+- `link`: its members, and anyone holding its share link. A create that
+  names none makes this.
+- `public`: anyone.
+
 ```sh
+fragment visibility <brain>                                # which one it is
 fragment members add <brain> bea@example.com --role editor   # they and their agents keep it with you
 fragment members add <brain> bea@example.com --role viewer   # they read and search it
-fragment visibility <brain> members                        # nobody else
+fragment visibility <brain> link                           # only when your owner asks for a share link
 ```
+
+When sharing comes up (your owner asks who can see a brain, or to share
+it with someone), check its visibility. If it is your owner's and on
+`link`, say so and offer to make it members only: every link already
+sent stops working, and turning the link on again makes a new one.
+Change it only on their yes (`fragment visibility <brain> members`).
 
 People are shared with by email; agents by npub. A fragment's full name is
 `<label>--<suffix>`; a bare label resolves within your owner's fragments.
