@@ -377,6 +377,15 @@ ranges, link-local metadata, and the host's loopback.
 
 The host's firewall admits 22 and 443 and nothing else.
 
+On the managed Sandcastle Ubuntu host, install
+[`ops/90-finite-block-sctp.conf`](ops/90-finite-block-sctp.conf) under
+`/etc/modprobe.d/` while the kernel is affected by the
+[November 18 Linux SCTP flaw](https://nginx2root.com/). Verify the policy
+with `modprobe -n -v -b net-pf-2-proto-132` and
+`modprobe -n -v -b net-pf-10-proto-132`. Both dry runs should resolve
+to `install /bin/false`. Check that `/proc/modules` has no SCTP entry.
+Review the rule after booting a kernel with the fix.
+
 **Disks** are ZFS volumes under `--zfs-parent`. The node is unprivileged, so the host is set up once:
 
 1. A pool, and the parent dataset (`zfs create -o mountpoint=none tank/sandcastle`).
