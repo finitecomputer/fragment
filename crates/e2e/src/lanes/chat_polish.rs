@@ -152,10 +152,13 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     // box's top less the message's offset). Scrolled to the top, the
     // reader's message is the first shown; the page above it comes in.
     // a keyboard's way to the page above: the control at the top of the
-    // timeline, reached by Tab, seen once focused (the page its focus
-    // scrolls to come in), and Enter loads one page more above
+    // timeline, reached by Tab, seen once focused, and Enter loads one page
+    // more above. Seen: whole in the timeline's view at the frame the focus
+    // lands in, as an observer of its own tells, before the page that
+    // focus brings in moves it up with the reader's place.
+    chrome.eval(&page, "(() => { const b = document.getElementById('earlier-load'); window.__seenFocused = null; const o = new IntersectionObserver((entries) => { const e = entries.at(-1); if (e.isIntersecting && document.activeElement === b) { window.__seenFocused = { width: e.boundingClientRect.width, height: e.boundingClientRect.height, ratio: e.intersectionRatio }; o.disconnect(); } }, { root: document.getElementById('scroll') }); o.observe(b); return true; })()")?;
     let (reached, scrolled) = tab_to_earlier(chrome, &page)?;
-    let shown = chrome.eval(&page, "(() => { const b = document.getElementById('earlier-load'); const r = b.getBoundingClientRect(); return { label: b.textContent, width: r.width, height: r.height, focused: document.activeElement === b, disabled: b.getAttribute('aria-disabled') }; })()")?;
+    let shown = chrome.eval(&page, "(() => { const b = document.getElementById('earlier-load'); return { label: b.textContent, seen: window.__seenFocused, focused: document.activeElement === b, disabled: b.getAttribute('aria-disabled') }; })()")?;
     let before = chrome.eval(&page, "document.querySelectorAll('.msg.user').length")?.as_u64().unwrap_or(0);
     let reads = "window.__older.filter((u) => u.startsWith('chat?')).length";
     let read = chrome.eval(&page, reads)?.as_u64().unwrap_or(0);
@@ -163,7 +166,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let paged = super::shows(chrome, &page, &format!("document.querySelectorAll('.msg.user').length === {} && {reads} === {} && document.activeElement?.id === 'earlier-load' && document.getElementById('scroll').dataset.history === 'more'", before + 100, read + 1));
     s.ok(
         "a keyboard reaches Load earlier messages at the top of the timeline (seen once focused), and Enter loads the page above, the focus kept on it",
-        reached && scrolled && shown["label"] == "Load earlier messages" && shown["focused"] == true && shown["disabled"] == "false" && shown["width"].as_f64().is_some_and(|w| w > 20.0) && paged,
+        reached && scrolled && shown["label"] == "Load earlier messages" && shown["focused"] == true && shown["disabled"] == "false" && shown["seen"]["width"].as_f64().is_some_and(|w| w > 20.0) && shown["seen"]["ratio"].as_f64().is_some_and(|r| r > 0.99) && paged,
         json!({ "reached": reached, "scrolled": scrolled, "shown": shown, "before": before, "now": chrome.eval(&page, "document.querySelectorAll('.msg.user').length")?, "reads": chrome.eval(&page, "window.__older")? }),
     );
     let before = chrome.eval(&page, "document.querySelectorAll('.msg.user').length")?.as_u64().unwrap_or(0);
