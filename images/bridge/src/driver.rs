@@ -42,7 +42,7 @@ use crate::net::Backoff;
 use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Cause, Record};
-use crate::runtime::{Agent, Command, Event, Kept, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
+use crate::runtime::{Agent, Command, Event, Kept, LocalFile, Memory, Quote, RuntimeIo, Runtimes, TurnStart};
 use crate::scratch::Scratch;
 use crate::store::{Gate, Store};
 
@@ -307,11 +307,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
         engine = engine.with_runtime(&serves, runtime.menu());
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(256);
         let (event_tx, mut event_rx) = mpsc::channel::<Event>(1024);
-        let name = runtime.name();
+        let (name, memory) = (runtime.name(), runtime.memory());
         runs.push(json!({ "serves": serves, "runtime": name }));
         let task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone(), held: held_rx.clone(), unquiet: runtimes_unquiet.clone() }));
         runtime_tasks.push(Box::pin(async move { (name, task.await) }));
-        to_runtime.insert(serves.clone(), cmd_tx);
+        to_runtime.insert(serves.clone(), (cmd_tx, memory));
         let inbox_tx = inbox_tx.clone();
         tokio::spawn(async move {
             // bounded by the runtime: ends when it drops its sender
@@ -350,7 +350,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtimes": runs, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
-    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, scratch.clone(), turn_files.clone()))).collect();
+    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, (tx, memory))| (serves, RuntimeLane::spawn(api.clone(), tx, memory, scratch.clone(), turn_files.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
@@ -1637,7 +1637,8 @@ async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> 
 
 /// Commands to the runtime in order; a turn's attachments are downloaded,
 /// and its note read from its chat's journal, before it is handed (so a Stop
-/// never overtakes its Start), as an answer's are before it is.
+/// never overtakes its Start), as an answer's are before it is. Once a
+/// turn is handed, the runtime's memory's marker names it (crate::seen).
 struct RuntimeLane {
     tx: mpsc::UnboundedSender<Command>,
 }
@@ -1646,7 +1647,7 @@ impl RuntimeLane {
     /// One runtime's lane: a turn's commands all go to one runtime, so they
     /// keep the engine's order, and a runtime slow to read its commands
     /// holds no other's.
-    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, scratch: Arc<Scratch>, turn_files: TurnFiles) -> RuntimeLane {
+    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, memory: Option<Memory>, scratch: Arc<Scratch>, turn_files: TurnFiles) -> RuntimeLane {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
@@ -1672,9 +1673,14 @@ impl RuntimeLane {
                     }
                     _ => {}
                 }
+                let mut handed: Option<(PathBuf, String, String)> = None;
                 if let Command::Start(ts) = &mut c {
+                    // what its runtime was last handed here, beside its memory
+                    let memory = memory.as_ref().map(|m| m(&ts.agent.fragment));
+                    let seen = memory.as_ref().map(|m| crate::seen::read(m, &ts.fragment));
+                    handed = memory.map(|m| (m, ts.fragment.clone(), ts.turn.clone()));
                     let note = async {
-                        let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), note_for(&api, ts)).await;
+                        let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), note_for(&api, ts, seen)).await;
                         read.unwrap_or_else(|_| {
                             crate::ev!("note.unread", { "turn": ts.turn, "why": "the journal answered too slowly" });
                             None
@@ -1701,6 +1707,13 @@ impl RuntimeLane {
                 }
                 if to_runtime.send(c).await.is_err() {
                     return;
+                }
+                // its runtime has it now: a write that fails tells the turn
+                // after the chat again, never less
+                if let Some((memory, chat, turn)) = handed {
+                    if let Err(e) = crate::seen::write(&memory, &chat, &turn) {
+                        crate::ev!("seen.unwritten", { "turn": turn, "fragment": chat, "error": e.to_string() });
+                    }
                 }
             }
         });
@@ -1846,19 +1859,26 @@ async fn card_history(api: &Api, agent: &Agent, fragment: &str, record: &Record)
 /// continued from its owner's Session Archive, what was said there
 /// (`history_note`, at most `HISTORY_NOTE_MAX_BYTES`); what a restart cut
 /// of the agent's turn before it in the chat (`cut_note`); and, when its
-/// runtime forgot the chat, the chat (`forgotten_note`, at most
-/// `HISTORY_NOTE_MAX_BYTES`), each from the chat's journal. A runtime that
-/// forgot the chat ran turns there, so it is not told a history, which is
-/// a first turn's alone. `None` when there is none, or the journal did not
-/// answer: a turn is never held back for its note. A late card answer's
-/// turn carries its card's turn as its note already (`TurnStart::note`),
-/// in the cut note's place: that turn is the one a restart cut, most
-/// often, and is told once.
-async fn note_for(api: &Api, ts: &TurnStart) -> Option<String> {
-    let cut = async { if ts.note.is_some() { None } else { cut_note(api, ts).await } };
-    let history = async { if ts.forgotten { None } else { history_note(api, ts).await } };
-    let (history, cut, forgot) = tokio::join!(history, cut, forgotten_note(api, ts));
-    assert!(history.is_none() || forgot.is_none(), "a history or a recap, never both");
+/// runtime's memory of the chat is behind, the chat (`forgotten_note`, at
+/// most `HISTORY_NOTE_MAX_BYTES`), each from the chat's journal. Behind: a
+/// turn of the agent's there ran after `seen`, what its runtime was last
+/// handed there (crate::seen; `None`: it keeps no memory), as `before`
+/// reads it. A runtime behind ran turns there, so it is not told a
+/// history, which is a first turn's alone. `None` when there is none, or
+/// the journal did not answer: a turn is never held back for its note. A
+/// late card answer's turn carries its card's turn as its note already
+/// (`TurnStart::note`), in the cut note's place: that turn is the one a
+/// restart cut, most often, and is told once.
+async fn note_for(api: &Api, ts: &TurnStart, seen: Option<Option<String>>) -> Option<String> {
+    let (before, history) = tokio::join!(before(api, ts, seen.as_ref().map(Option::as_deref)), history_note(api, ts));
+    let (before, behind) = before.map_or((None, false), |(b, behind)| (Some(b), behind));
+    if behind {
+        crate::ev!("note.behind", { "turn": ts.turn, "fragment": ts.fragment, "seen": seen });
+    }
+    let cut = async { if ts.note.is_some() { None } else { cut_note(api, ts, before.as_ref()).await } };
+    let forgot = async { if behind { forgotten_note(api, ts).await } else { None } };
+    let (cut, forgot) = tokio::join!(cut, forgot);
+    assert!(history.is_none() || !behind, "a history or a recap, never both");
     let note = [history, cut, forgot].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
     assert!(note.len() <= limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 2, "a turn's notes are bounded");
     (!note.is_empty()).then_some(note)
@@ -1884,7 +1904,7 @@ async fn history_note(api: &Api, ts: &TurnStart) -> Option<String> {
     Some(text)
 }
 
-/// The chat, told to a runtime that forgot it (`TurnStart::forgotten`;
+/// The chat, told to a runtime whose memory of it is behind (`note_for`;
 /// note.rs, `exchanges` and `recap`): its messages before the turn's own
 /// (for a turn no message of this chat started, those said by its claim),
 /// since the agent joined (its `members` row) and its owner's newest `/new`
@@ -1892,12 +1912,8 @@ async fn history_note(api: &Api, ts: &TurnStart) -> Option<String> {
 /// the claim to their turns' starts, for their tools and that `/new`; and
 /// the names of whoever else said them (`__people`, within the note's own
 /// time; unread, they are `Someone`). One `Budget`, each read complete or
-/// none. `None` when the runtime forgot
-/// nothing here, there is nothing to tell, or the chat did not answer.
+/// none. `None` when there is nothing to tell, or the chat did not answer.
 async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
-    if !ts.forgotten {
-        return None;
-    }
     let claim = ts.claim_seq?;
     let (agent, chat, me, owner) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str(), ts.agent.owner.as_str());
     let began = tokio::time::Instant::now();
@@ -1956,9 +1972,11 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
     let (work, names) = tokio::join!(read_back(api, agent, chat, records::WORK, claim, started, &mut budget), names);
     let work = work.map_err(unread).ok()?.0;
     // a `/new` it ran began its runtime's conversation again (one naming no
-    // agent was the lead's then): nothing before it is told
+    // agent was the lead's then): nothing before it is told, nor what it
+    // said of the `/new` itself (a new conversation is behind nothing)
     if let Some(seq) = note::restarted(&read, &work, me, owner, chat) {
-        said.retain(|r| r.seq > seq);
+        let new = records::turn_id(agent, chat, records::CHAT, seq);
+        said.retain(|r| r.seq > seq && r.body["turn"] != new.as_str());
         begins = true;
     }
     let Some(text) = note::recap(&said, &work, me, owner, &names, chat, begins || from_start) else {
@@ -1969,12 +1987,35 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
     Some(text)
 }
 
-/// The note of a cut turn (note.rs), from its chat's journal alone: `work`
-/// back from the turn's claim to the agent's turn before it there; when a
-/// restart cut that turn, the record it answered and what it had replied
-/// (`chat` back from its tail to that turn's cause, or its start). `None`
-/// when nothing was cut, or the journal did not answer.
-async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
+/// What the journal says of the agent's turns before this one in its chat
+/// (`work` read back from the turn's claim): its turn before (note.rs
+/// `previous`), and whether its runtime, last handed `seen` there
+/// (crate::seen; `None`: it keeps no memory), missed one that ran (note.rs
+/// `behind`; not when the read does not reach far enough to say). `None`
+/// when the journal did not answer, or the turn before is further back
+/// than a note reads.
+async fn before(api: &Api, ts: &TurnStart, seen: Option<Option<&str>>) -> Option<(note::Before, bool)> {
+    let claim = ts.claim_seq?;
+    let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
+    let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "error": e.why() });
+    let known = |rs: &[Record]| note::previous(rs, me, false) != note::Before::Unread && seen.is_none_or(|s| note::behind(rs, me, s, false).is_some());
+    let (work, from_start) = read_back(api, agent, chat, records::WORK, claim, known, &mut Budget::default()).await.map_err(unread).ok()?;
+    let before = note::previous(&work, me, from_start);
+    if before == note::Before::Unread {
+        crate::ev!("note.unread", { "turn": ts.turn, "why": "the agent's turn before is further back than a note reads", "read": work.len() });
+        return None;
+    }
+    let behind = seen.and_then(|s| note::behind(&work, me, s, from_start)).unwrap_or(false);
+    Some((before, behind))
+}
+
+/// The note of a cut turn (note.rs), from its chat's journal alone: the
+/// agent's turn before it there (`before`; a continuation's, the turn it
+/// continues, read back to it); when a restart cut that turn, the record it
+/// answered and what it had replied (`chat` back from its tail to that
+/// turn's cause, or its start). `None` when nothing was cut, or the journal
+/// did not answer.
+async fn cut_note(api: &Api, ts: &TurnStart, before: Option<&note::Before>) -> Option<String> {
     let claim = ts.claim_seq?;
     let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
     let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "error": e.why() });
@@ -1991,17 +2032,10 @@ async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
             };
             c
         }
-        None => {
-            let (work, from_start) = read_back(api, agent, chat, records::WORK, claim, |rs| note::previous(rs, me, false) != note::Before::Unread, &mut Budget::default()).await.map_err(unread).ok()?;
-            match note::previous(&work, me, from_start) {
-                note::Before::Cut(c) => c,
-                note::Before::Kept => return None,
-                note::Before::Unread => {
-                    crate::ev!("note.unread", { "turn": ts.turn, "why": "the agent's turn before is further back than a note reads", "read": work.len() });
-                    return None;
-                }
-            }
-        }
+        None => match before? {
+            note::Before::Cut(c) => c.clone(),
+            _ => return None,
+        },
     };
     // the cut turn's replies, from the chat's tail back to its cause (or,
     // for a routine, to its start: a reply comes after its turn's claim);

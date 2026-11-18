@@ -1177,10 +1177,9 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\nHERMES_GATEWAY_MAX_STARTS=0\nHERMES_STREAM_RETRIES={STREAM_RETRIES}\n")
 }
 
-/// A profile's directory, under the Hermes home.
-pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
-    home.join("profiles").join(wire::profile(agent_fragment))
-}
+/// A profile's directory, under the Hermes home: the bridge's, which
+/// keeps its marker of each chat there (its `seen.rs`).
+pub use wire::profile_dir;
 
 /// Settles each turn a restart cut, in Hermes' own sessions, before the
 /// gateway starts (docs/computers.md, Durability, P5), run by Hermes' Python as

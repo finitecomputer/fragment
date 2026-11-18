@@ -31,12 +31,10 @@
 //!   next turn in that chat is told what was cut (P5): its note is built
 //!   from the chat's journal alone, before its claim (note.rs), so it is
 //!   said once, and the same in any life.
-//! - A turn another life ran after this life's `/data` was saved (its
-//!   claim answered 409, and its lost end too: that life ended it) is in
-//!   no memory of its runtime's: the agent's next turn in that chat is told
-//!   the chat (`TurnStart::forgotten`, note.rs `recap`), once in this life.
-//!   One whose lost end lands as this life's was cut in that life: the cut
-//!   note tells it.
+//! - Whether a runtime remembers a chat is its memory's to say, not this
+//!   state's: the driver compares the marker beside it with the journal's
+//!   newest turn of the agent's there (crate::seen), and a turn whose
+//!   runtime is behind is told the chat (note.rs `recap`).
 //! - A turn is claimed only while the runtime can take it (`Connected`),
 //!   so a turn waits, unclaimed, for a runtime that is still starting.
 //! - Every turn gets both records: a turn refused, or stopped while it
@@ -172,10 +170,17 @@ pub const CONTINUE_NOTICE: &str = "Picking up where it left off after a restart"
 /// computer's bridge does not run (its image carries none by that name).
 pub fn refused_runtime(runtime: &str) -> String {
     if crate::runtime::valid_name(runtime) {
-        format!("this computer doesn't run {runtime} agents")
+        format!("{REFUSED_RUNTIME}{runtime} agents")
     } else {
-        "this computer doesn't run this agent's runtime".to_string()
+        format!("{REFUSED_RUNTIME}this agent's runtime")
     }
+}
+const REFUSED_RUNTIME: &str = "this computer doesn't run ";
+
+/// Whether a turn's end's error is a refusal: the turn never reached a
+/// runtime (note.rs passes over it).
+pub fn refusal(error: &str) -> bool {
+    matches!(error, REFUSED_QUEUED | REFUSED_BUSY) || error.starts_with(REFUSED_RUNTIME) || error == refused_deep() || error == refused_budget()
 }
 
 /// Why an agent's hand-off is refused a turn: the chat's agents started as
@@ -659,13 +664,6 @@ pub struct Engine {
     /// `ENDED_HOPS_MAX`, each for `ENDED_HOPS_MS`): a reply of one read after
     /// it was let go is one hop past it (`hop_of`). Never written to `/data`.
     ended: VecDeque<EndedTurn>,
-    /// The agents and chats where another life ran a turn of the agent's
-    /// since this life's `/data` was saved (its lost end answered 409, or
-    /// refused: `posted`): its runtime remembers none of it, so its next
-    /// turn there is told the chat (`TurnStart::forgotten`) and the entry
-    /// goes. Never written to `/data`: a life that restores the same old
-    /// `/data` reads them again, and is told again.
-    forgotten: BTreeSet<(String, String)>,
     /// Cut turns another life ran (claims answered 409) that may be
     /// continued once their lost end is this life's, which the journal
     /// decides then (`Effect::ReadCut`). Never written to `/data`: a life
@@ -782,7 +780,6 @@ impl Engine {
             views: HashMap::new(),
             keepalive: false,
             ended: VecDeque::new(),
-            forgotten: BTreeSet::new(),
             unread_cuts: BTreeSet::new(),
             reading_cuts: BTreeMap::new(),
             closed_late: BTreeSet::new(),
@@ -1604,21 +1601,11 @@ impl Engine {
         }
         let chat = (t.agent.clone(), t.fragment.clone());
         let cut = (kept && settled).then(|| t.clone());
-        // a lost end refused as another life's (409: that life ran the
-        // turn, or ended it, after this /data was saved): the runtime does
-        // not remember it, and the agent's next turn here is told the chat.
-        // One that lands as this life's was cut in that life: the cut note
-        // tells it.
-        let forgot = !kept && post == records::work_id(id, "end") && t.owed.iter().any(|o| o.id == post && o.body["error"] == LOST);
         t.owed.retain(|o| o.id != post);
         self.dirty = true;
         if t.owed.is_empty() {
             self.state.turns.remove(id);
             crate::ev!("turn.closed", { "turn": id });
-        }
-        if forgot {
-            crate::ev!("turn.forgotten", { "turn": id, "agent": chat.0, "fragment": chat.1 });
-            self.forgotten.insert(chat.clone());
         }
         // another life's cut turn: its read is due now, or never (that life
         // ended it, or its asker stopped it first)
@@ -1830,9 +1817,6 @@ impl Engine {
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.dirty = true;
                 crate::ev!("turn.lost", { "turn": id, "agent": agent, "why": "another life claimed it" });
-                // whether that life ran it, which the runtime does not
-                // remember, its end's answer says (`posted`), before the
-                // chat's next claim: it is first in the chat's lane
                 self.owe(&agent, &fragment, id, end);
                 self.owe_answer(id, &Outcome::Error(LOST.into()), false);
                 self.pump(&agent, &fragment);
@@ -1867,9 +1851,6 @@ impl Engine {
             crate::ev!("turn.refused", { "turn": id, "agent": agent, "fragment": fragment, "why": "its runtime is none this bridge runs", "runtime": runtime });
             return self.end(id, Outcome::Error(refused_runtime(&runtime)), Closed::Expired);
         };
-        // the runtime does not remember what another life ran here: this
-        // turn is told the chat, once
-        let forgotten = self.forgotten.remove(&(agent.clone(), fragment.clone()));
         // the menu, once a life in each chat, as the agent first runs there
         if !menu.is_empty() && self.published.insert((agent.clone(), fragment.clone())) {
             self.post(&agent, &fragment, records::WORK, records::menu_id(&self.life), records::commands(&a.identity, menu), Vec::new());
@@ -1912,7 +1893,6 @@ impl Engine {
             claim_seq,
             note: t.note.clone(),
             age,
-            forgotten,
             command: t.command,
             reply_to: t.reply_to,
             quote: None,

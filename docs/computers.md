@@ -267,9 +267,9 @@ draws them over every chat and Settings with no code of its own for any.
   failing idle computer is kept. That time is the platform's, not metered
   (docs/ledger.md, "Who pays").
 - **The agent** is told what a cut lost, and the chat when a rollback or
-  a loss of `/data` made its runtime forget it, in its next turn in each
-  chat (docs/bridge.md, "The turn after a cut one is told" and "What a
-  runtime forgot").
+  a loss of `/data`, or of its runtime's memory alone, made its runtime
+  forget it, in its next turn in each chat (docs/bridge.md, "The turn
+  after a cut one is told" and "What a runtime forgot").
 - **Getting help**: a deployment may name `support_url`, which a
   `wont_wake` notice offers beside Restart.
 

@@ -75,7 +75,9 @@ with its default. What an image sets:
   the save may leave out. An image with more to quiet names another file
   and answers the platform itself.
 - `BRIDGE_RUNTIME`: `relay` (with `BRIDGE_RELAY_SECRET_FILE`, the secret
-  Hermes is given too) or `script`.
+  Hermes is given too, and `BRIDGE_RELAY_HOME`, Hermes' home, whose
+  profiles hold each agent's memory) or `script` (`BRIDGE_SCRIPT_MEMORY`
+  its stand-in for that memory). See "What a runtime forgot".
 - `BRIDGE_AGENTS_FILE`: the agents the image has made ready (`ready.rs`).
   Unset, every agent the platform lists runs.
 - `BRIDGE_SCREEN_LISTEN`, `BRIDGE_SCREENS_FILE` and `BRIDGE_SCREEN_START`:
@@ -216,14 +218,30 @@ and a state from before keep or tell none.
 
 ### What a runtime forgot
 
-A computer can go back to an older save (docs/computers.md, "What its
-owner is told"), or lose `/data`, and an agent can start on a computer
-that never ran it. The bridge then reads again the turns run since that
-save, and each of their claims is a 409. A turn whose lost end is
-refused as well (that life ended it) ran in another life: its runtime
-does not remember it (Paul, 2026-11-18, M17: rebuild from the records).
-The agent's next turn in that chat is told the chat, once a life
-(`note::recap`):
+A runtime's memory of a chat is on `/data`: Hermes' sessions in the
+agent's profile, Claude Code's transcripts. A computer can go back to an
+older save (docs/computers.md, "What its owner is told"), lose `/data`
+or only that memory, and an agent can start on a computer that never ran
+it. Then the runtime has forgotten turns the chat's records hold (Paul,
+2026-11-18, M17: rebuild from the records).
+
+The runtime says when it is behind (`seen.rs`). Beside its memory of
+each agent (`Runtime::memory`: the profile; Claude Code's project
+directory), the bridge keeps one marker per chat, `fragment-seen/<chat>`,
+naming the turn it last handed the runtime there. The marker goes back,
+and is lost, exactly when that memory does. As it hands a turn, the
+bridge reads the chat's `work` back from the turn's claim
+(`note::behind`). If a turn of the agent's there ran after the marker's
+turn, or there is no marker, the runtime is behind. Turns that never
+reached a runtime (refusals, and a stop with nothing recorded) don't
+count. A chat the agent never took a turn in is behind nothing, and a
+`/new` is a turn like any other. A behind runtime's turn is told the
+chat (`note::recap`), and once it is handed the marker names it. So a
+sleep before anyone writes in a chat loses nothing, and a profile lost
+alone is noticed. In the end state the agent fragment compares, and the
+marker stays where it is.
+
+The note holds:
 
 - its messages before the turn's own, both sides, oldest first, since
   the agent joined and after the newest `/new` of its owner's it ran;
@@ -236,10 +254,10 @@ The agent's next turn in that chat is told the chat, once a life
 
 It is one bounded read, complete or nothing (`read_back`, `Budget`),
 and runtime-neutral: Hermes gets it as relay's `context`, Claude Code
-in its message. It opens "Your memory of this chat is behind". A turn
-whose lost end lands as this life's was cut in that life, and the cut
-note tells it. What a rebuild loses is tool outputs
-and the runtime's own summaries.
+in its message. It opens "Your memory of this chat is behind". A cut
+turn is the cut note's to tell. What a rebuild loses is tool outputs
+and the runtime's own summaries. After a `/new` nothing is told from
+before it, nor the runtime's words about the `/new` itself.
 
 In a chat with other members, the note hands the agent their words
 again. That widens nothing. The bridge reads the chat as the agent,
