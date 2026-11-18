@@ -1,7 +1,12 @@
 {
   "operations": {
     "act": { "kind": "query", "role": "editor" },
-    "relay": { "kind": "job" }
+    "relay": { "kind": "job" },
+    "seen": { "kind": "mutation" },
+    "seen_log": { "kind": "query" }
   },
-  "triggers": [{ "channel": "inbox", "run": "relay" }]
+  "triggers": [
+    { "channel": "inbox", "run": "relay" },
+    { "followed": true, "run": "seen" }
+  ]
 }

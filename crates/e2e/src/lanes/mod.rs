@@ -159,6 +159,7 @@ const LANES: &[Lane] = &[
     shell::shell_platform,
     computers::computers,
     elsewhere::elsewhere,
+    elsewhere::follows,
     export::export,
     search::search,
     search_across::search_across,
@@ -204,7 +205,7 @@ const LANES: &[Lane] = &[
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 5] = [
     &[
-        "keys", "levers", "delegation", "orgs", "admin-page", "computers", "elsewhere", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask",
+        "keys", "levers", "delegation", "orgs", "admin-page", "computers", "elsewhere", "follows", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask",
         "agent-app", "agent-restart", "checkout",
     ],
     &["shell-ui"],

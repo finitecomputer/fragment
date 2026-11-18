@@ -1,34 +1,25 @@
 //! A fragment acting elsewhere (docs/api.md, "Acting in another
-//! fragment"): an agent's fragment, running its own code, posts, drafts
-//! and reads in a room as its agent, through its `FRAGMENTS` capability
-//! (`this.otherFragments`; cell/src/acting.rs). Its agent is made by an
-//! assignment to its owner's computer, undone before it joins anything, so
-//! no computer is ever woken.
-//!
-//! - valid: a post there names the agent, and its record's runs are one hop
-//!   deeper than the call that posted it; a draft is taken; the records
-//!   read back;
-//! - replay: the same id and body again is that record, another body 409;
-//! - invalid: the room checks the agent as it would the agent's own request
-//!   (a channel its role may not post to, a fragment it is no member of, a
-//!   `relayed` record no door signed), and a fragment that is no agent's
-//!   acts nowhere;
-//! - depth: a post from a job at the hop budget runs there; one a hop past
-//!   it is blocked there, as a chain within one fragment is.
+//! fragment"): an agent's fragment, running its own code, posts, drafts,
+//! reads and follows in a room as its agent, through its `FRAGMENTS`
+//! capability (`this.otherFragments`; cell/src/acting.rs). Its agent is
+//! made by an assignment to its owner's computer, undone before it joins
+//! anything, so no computer is ever woken.
 
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use fragment_nip98::Keys;
 use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use super::app::ship;
-use super::jobs::{inbox, records, runs, settle};
+use super::jobs::{events, inbox, records, runs, settle};
 use crate::api::Api;
 use crate::{Need, Suite};
 
 /// The agent's own code: `act` (a query) acts once; `relay` (a job its
-/// inbox triggers) posts what it is given.
+/// inbox triggers) posts what it is given; `seen` (its `followed`
+/// trigger) keeps each record it hears.
 const APP: &[u8] = include_bytes!("../../fixtures/elsewhere.mjs");
 const MANIFEST: &[u8] = include_bytes!("../../fixtures/elsewhere.json");
 /// The room: `chat` anyone may post to, `notes` its editors; each `chat`
@@ -38,44 +29,81 @@ const ROOM_JSON: &[u8] = include_bytes!("../../fixtures/heard.json");
 
 const WAIT: Duration = Duration::from_secs(30);
 
+/// An agent's fragment running the fixture's code, members only.
+struct Agent {
+    name: String,
+    identity: String,
+    token: String,
+}
+
+/// An agent of `owner`'s: its key becomes its agent's identity at its
+/// first assignment, undone at once, so no join wakes the computer.
+fn agent(s: &Suite, api: &Api, owner: &Keys, base: &str) -> Result<Agent> {
+    let name = s.named(api, owner, base)?;
+    let made = s.create(api, owner, &name)?;
+    ship(s, &made, APP, MANIFEST);
+    let token = made["inboxToken"].as_str().context("its inbox token")?.to_string();
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "the agent made members-only: {r}");
+    let r = api.signed(owner, "POST", "/api/computers", Some(&json!({})))?;
+    let computer = r.body["computer"].as_str().with_context(|| format!("a computer: {r}"))?.to_string();
+    let r = api.signed(owner, "PUT", &format!("/api/computers/{computer}/agents/{name}"), Some(&json!({})))?;
+    let identity = r.body["agents"].as_array().into_iter().flatten().find(|x| x["fragment"] == name.as_str()).and_then(|x| x["identity"].as_str()).unwrap_or("").to_string();
+    let r2 = api.signed(owner, "DELETE", &format!("/api/computers/{computer}/agents/{name}"), None)?;
+    anyhow::ensure!(fragment_core::npub::is_identity(&identity) && r2.status == 200, "the agent's identity: {r} {r2}");
+    Ok(Agent { name, identity, token })
+}
+
+/// A room of `owner`'s, members only, that `agents` join as viewers.
+fn make_room(s: &Suite, api: &Api, owner: &Keys, base: &str, agents: &[&Agent]) -> Result<String> {
+    let name = s.named(api, owner, base)?;
+    let c = s.create(api, owner, &name)?;
+    ship(s, &c, ROOM_APP, ROOM_JSON);
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "the room made members-only: {r}");
+    for x in agents {
+        let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{}", x.identity), Some(&json!({ "role": "viewer" })))?;
+        anyhow::ensure!(r.status == 200, "{} joins the room: {r}", x.name);
+    }
+    Ok(name)
+}
+
+/// One act of `from`'s code in fragment `name`: its answer, or its refusal.
+fn act_in(api: &Api, owner: &Keys, from: &str, act: &str, name: &str, channel: &str, arg: Value) -> Result<Value> {
+    let id = format!("{act}-{}", Keys::generate().pubkey_hex());
+    let r = api.op(owner, from, "act", &id, json!({ "act": act, "name": name, "channel": channel, "arg": arg }))?;
+    anyhow::ensure!(r.status == 200, "act {act}: {r}");
+    Ok(r.body["result"].clone())
+}
+
+/// The room's `heard` runs, newest first, once `want` of them are done.
+fn heard(s: &Suite, api: &Api, owner: &Keys, room: &str, want: usize) -> Vec<Value> {
+    s.eventually(WAIT, || runs(api, owner, room, "&op=heard").iter().filter(|r| r["status"] != "queued" && r["status"] != "running").count() >= want);
+    runs(api, owner, room, "&op=heard")
+}
+
+/// Acting (docs/api.md, "Acting in another fragment"):
+///
+/// - valid: a post there names the agent, and its record's runs are one hop
+///   deeper than the call that posted it; a draft is taken; the records
+///   read back;
+/// - replay: the same id and body again is that record, another body 409;
+/// - invalid: the room checks the agent as it would the agent's own request
+///   (a channel its role may not post to, a fragment it is no member of, a
+///   `relayed` record no door signed), and a fragment that is no agent's
+///   acts nowhere;
+/// - depth: a post from a job at the hop budget runs there; one a hop past
+///   it is blocked there, as a chain within one fragment is.
 pub fn elsewhere(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("elsewhere", &[Need::Computers]) {
         return Ok(());
     }
     let owner = api.person()?;
-    // the agent: a fragment running its own code, members only
-    let agent = s.named(api, &owner, "acts")?;
-    let made = s.create(api, &owner, &agent)?;
-    ship(s, &made, APP, MANIFEST);
-    let token = made["inboxToken"].as_str().context("its inbox token")?.to_string();
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{agent}/visibility"), Some(&json!({ "visibility": "members" })))?;
-    anyhow::ensure!(r.status == 200, "the agent made members-only: {r}");
-    // its key becomes its agent's identity at its first assignment; undone
-    // at once, so no join wakes the computer
-    let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
-    let computer = r.body["computer"].as_str().with_context(|| format!("a computer: {r}"))?.to_string();
-    let r = api.signed(&owner, "PUT", &format!("/api/computers/{computer}/agents/{agent}"), Some(&json!({})))?;
-    let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
-    let r2 = api.signed(&owner, "DELETE", &format!("/api/computers/{computer}/agents/{agent}"), None)?;
-    anyhow::ensure!(fragment_core::npub::is_identity(&identity) && r2.status == 200, "the agent's identity: {r} {r2}");
-
-    // the room, where the agent is a viewer; another the agent is not in
-    let room = s.named(api, &owner, "room")?;
-    let c = s.create(api, &owner, &room)?;
-    ship(s, &c, ROOM_APP, ROOM_JSON);
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{room}/members/{identity}"), Some(&json!({ "role": "viewer" })))?;
-    anyhow::ensure!(r.status == 200, "the agent joins the room: {r}");
-    let closed = s.named(api, &owner, "closed")?;
-    let c = s.create(api, &owner, &closed)?;
-    ship(s, &c, ROOM_APP, ROOM_JSON);
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{closed}/visibility"), Some(&json!({ "visibility": "members" })))?;
-    anyhow::ensure!(r.status == 200, "the closed room made members-only: {r}");
-
-    let act = |from: &str, act: &str, name: &str, channel: &str, arg: Value| -> Result<Value> {
-        let r = api.op(&owner, from, "act", &format!("{act}-{}", fragment_nip98::Keys::generate().pubkey_hex()), json!({ "act": act, "name": name, "channel": channel, "arg": arg }))?;
-        anyhow::ensure!(r.status == 200, "act {act}: {r}");
-        Ok(r.body["result"].clone())
-    };
+    let x = agent(s, api, &owner, "acts")?;
+    let (agent, identity, token) = (x.name.clone(), x.identity.clone(), x.token.clone());
+    let room = make_room(s, api, &owner, "room", &[&x])?;
+    let closed = make_room(s, api, &owner, "closed", &[])?;
+    let act = |from: &str, verb: &str, name: &str, channel: &str, arg: Value| act_in(api, &owner, from, verb, name, channel, arg);
 
     // valid: a post as the agent, its record's run a hop deeper than the query that posted it
     let posted = act(&agent, "post", &room, "chat", json!({ "id": "hello", "body": { "text": "hello from the agent's code" } }))?;
@@ -148,8 +176,142 @@ pub fn elsewhere(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
-/// The room's `heard` runs, newest first, once `want` of them are done.
-fn heard(s: &Suite, api: &Api, owner: &fragment_nip98::Keys, room: &str, want: usize) -> Vec<Value> {
-    s.eventually(WAIT, || runs(api, owner, room, "&op=heard").iter().filter(|r| r["status"] != "queued" && r["status"] != "running").count() >= want);
-    runs(api, owner, room, "&op=heard")
+/// Follows (docs/api.md, subscriptions' `follow`; cell/src/subscriptions.rs):
+/// an agent's fragment follows a room's channel as its agent
+/// (`this.otherFragments.follow`), and each record there runs its own
+/// `followed` trigger, handed from the room's outbox, never the queue.
+///
+/// - invalid: a person, a non-member, or a channel there is not, follows
+///   nothing;
+/// - valid: each follower hears each record once, as a run at the record's
+///   depth, never its own agent's;
+/// - depth: what one follower posts at the hop budget runs at another
+///   follower; a hop past it is blocked there;
+/// - replay: an answer lost after the follower took it hands it again, and
+///   it runs once;
+/// - restart: a node restart while a record waits to be handed again
+///   leaves it run once;
+/// - a removed member's follow ends, and so does a deleted follower's.
+pub fn follows(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("follows", &[Need::Computers, Need::Levers, Need::Node]) {
+        return Ok(());
+    }
+    let owner = api.person()?;
+    let (a, b) = (agent(s, api, &owner, "follower-a")?, agent(s, api, &owner, "follower-b")?);
+    let room = make_room(s, api, &owner, "followed", &[&a, &b])?;
+    let closed = make_room(s, api, &owner, "unfollowed", &[])?;
+    let subs = |api: &Api| -> Vec<Value> {
+        api.signed(&owner, "GET", &format!("/api/f/{room}/subscriptions"), None).ok().and_then(|r| r.body["subscriptions"].as_array().cloned()).unwrap_or_default()
+    };
+    let post = |api: &Api, text: &str| -> Result<()> {
+        let r = api.signed(&owner, "POST", &format!("/api/f/{room}/channels/chat"), Some(&json!({ "id": text, "body": { "text": text } })))?;
+        anyhow::ensure!(r.status == 200, "the owner's post {text}: {r}");
+        Ok(())
+    };
+    let times = |api: &Api, x: &Agent, text: &str| seen(api, &owner, x).iter().filter(|r| r["text"] == text).count();
+
+    // invalid
+    let r = api.signed(&owner, "POST", &format!("/api/f/{room}/subscriptions"), Some(&json!({ "channel": "chat", "follow": true })))?;
+    s.ok("a person follows nothing: only an agent's own fragment does (403)", r.status == 403, &r);
+    let stranger = act_in(api, &owner, &a.name, "follow", &closed, "chat", json!({}))?;
+    s.ok("an agent follows nothing in a fragment it is no member of", matches!(stranger["error"]["status"].as_u64(), Some(403 | 404)), &stranger);
+    let nowhere = act_in(api, &owner, &a.name, "follow", &room, "nosuch", json!({}))?;
+    s.ok("nor a channel there is not (404)", nowhere["error"]["status"] == 404, &nowhere);
+
+    // valid
+    let followed = act_in(api, &owner, &a.name, "follow", &room, "chat", json!({}))?;
+    act_in(api, &owner, &b.name, "follow", &room, "chat", json!({}))?;
+    let again = act_in(api, &owner, &a.name, "follow", &room, "chat", json!({}))?;
+    let listed = subs(api);
+    let follow_of = |x: &Agent| listed.iter().find(|f| f["follow"] == x.name.as_str()).cloned().unwrap_or_default();
+    s.ok(
+        "an agent's fragment follows a channel as its agent: the subscription names it and no URL; asked again, the same one",
+        followed["answer"]["follow"] == a.name.as_str()
+            && again["answer"]["id"] == followed["answer"]["id"]
+            && [&a, &b].iter().all(|x| follow_of(x)["principal"] == x.identity.as_str() && follow_of(x)["url"].is_null() && follow_of(x)["channel"] == "chat"),
+        json!({ "followed": followed, "again": again, "subscriptions": listed }),
+    );
+    post(api, "first")?;
+    let both = s.eventually(WAIT, || times(api, &a, "first") == 1 && times(api, &b, "first") == 1);
+    let run = runs(api, &owner, &a.name, "&op=seen");
+    s.ok(
+        "each follower hears a record once, as a run of its followed trigger at the record's depth",
+        both && run.len() == 1 && run[0]["via"] == "followed" && run[0]["trigger"] == format!("{room}/chat").as_str() && run[0]["depth"] == 1 && run[0]["status"] == "succeeded",
+        json!({ "a": seen(api, &owner, &a), "b": seen(api, &owner, &b), "run": run }),
+    );
+    act_in(api, &owner, &a.name, "post", &room, "chat", json!({ "id": "own", "body": { "text": "from a" } }))?;
+    let heard_by_b = s.eventually(WAIT, || seen(api, &owner, &b).iter().any(|r| r["text"] == "from a" && r["principal"] == a.identity.as_str()));
+    s.ok("a follower never hears what its own agent posts; another follower does", heard_by_b && times(api, &a, "from a") == 0, json!(seen(api, &owner, &a)));
+
+    // depth: a's job posts at the hop budget, then a hop past it; b's runs
+    let budget = limits::HOP_DEPTH_MAX;
+    for hops in [budget - 1, budget] {
+        let text = format!("from depth {hops}");
+        let before = runs(api, &owner, &b.name, "&op=seen").len();
+        let r = inbox(api, &a.name, &a.token, &json!({ "payload": { "name": room, "id": format!("deep-{hops}"), "body": { "text": text } } }), Some(hops))?;
+        settle(api, &owner, &a.name, r.body["runs"][0].as_i64().unwrap_or(0), &["succeeded", "held", "blocked"], WAIT);
+        s.eventually(WAIT, || runs(api, &owner, &b.name, "&op=seen").iter().filter(|r| r["status"] != "queued" && r["status"] != "running").count() > before);
+    }
+    let deep = runs(api, &owner, &b.name, "&op=seen");
+    let (past, at) = (deep.first().cloned().unwrap_or_default(), deep.get(1).cloned().unwrap_or_default());
+    s.ok(
+        "a follow carries its record's hop depth: at the budget the follower's run runs, a hop past it is blocked",
+        at["depth"] == budget && at["status"] == "succeeded" && past["depth"] == budget + 1 && past["status"] == "blocked" && times(api, &b, &format!("from depth {budget}")) == 0,
+        json!({ "at": at, "past": past }),
+    );
+
+    // replay: the room loses the first follower's answer, and hands the record again
+    let lever = |api: &Api, times: u32| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": room, "op": "fail-deliveries", "times": times })));
+    let r = lever(api, 1)?;
+    anyhow::ensure!(r.status == 200, "the room's lever: {r}");
+    post(api, "second")?;
+    let deferred = s.eventually(WAIT, || events(api, &owner, &room).iter().any(|e| e["kind"] == "delivery.deferred"));
+    let both = s.eventually(WAIT, || times(api, &a, "second") == 1 && times(api, &b, "second") == 1);
+    let counted = |api: &Api, x: &Agent| runs(api, &owner, &x.name, "&op=seen").iter().filter(|r| r["status"] == "succeeded").count() == seen(api, &owner, x).len();
+    s.ok(
+        "a record handed again after its answer was lost runs once at each follower",
+        deferred && both && counted(api, &a) && counted(api, &b),
+        json!({ "a": seen(api, &owner, &a), "b": seen(api, &owner, &b) }),
+    );
+
+    // restart: the node goes down while the record waits to be handed again
+    let r = lever(api, 2)?;
+    anyhow::ensure!(r.status == 200, "the room's lever: {r}");
+    post(api, "third")?;
+    let taken = s.eventually(WAIT, || times(api, &a, "third") + times(api, &b, "third") > 0);
+    s.crash()?;
+    let restarted = s.start(false)?;
+    let api = &restarted;
+    let both = s.eventually(Duration::from_secs(90), || times(api, &a, "third") == 1 && times(api, &b, "third") == 1);
+    s.ok(
+        "a node restart while a record waits to be handed again leaves it run once at each follower",
+        taken && both && times(api, &a, "third") == 1 && times(api, &b, "third") == 1 && counted(api, &a) && counted(api, &b),
+        json!({ "a": seen(api, &owner, &a), "b": seen(api, &owner, &b) }),
+    );
+
+    // a removed member's follow ends with its membership
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{room}/members/{}", a.identity), None)?;
+    anyhow::ensure!(r.status == 200, "a removed: {r}");
+    let gone = !subs(api).iter().any(|f| f["follow"] == a.name.as_str());
+    post(api, "fourth")?;
+    let to_b = s.eventually(WAIT, || times(api, &b, "fourth") == 1);
+    s.ok("a removed member's follow ends with its membership: it hears nothing more", gone && to_b && times(api, &a, "fourth") == 0, json!(subs(api)));
+    // and, all this later, each record ran once
+    s.ok(
+        "every record a follower heard, it heard once",
+        ["first", "second", "third"].iter().all(|t| times(api, &a, t) == 1) && ["first", "second", "third", "fourth"].iter().all(|t| times(api, &b, t) == 1),
+        json!({ "a": seen(api, &owner, &a), "b": seen(api, &owner, &b) }),
+    );
+    // a follower deleted is no follower
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{}", b.name), None)?;
+    anyhow::ensure!(r.status == 200, "b deleted: {r}");
+    post(api, "fifth")?;
+    let ended = s.eventually(WAIT, || !subs(api).iter().any(|f| f["follow"] == b.name.as_str()));
+    s.ok("a follower that is gone ends its follow", ended, json!(subs(api)));
+    Ok(())
+}
+
+/// What an agent's fragment heard of the channels it follows, in order.
+fn seen(api: &Api, owner: &Keys, x: &Agent) -> Vec<Value> {
+    api.op(owner, &x.name, "seen_log", "q", json!({})).ok().and_then(|r| r.body["result"].as_array().cloned()).unwrap_or_default()
 }

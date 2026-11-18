@@ -60,7 +60,7 @@ use fragment_proto::ledger::Why;
 use fragment_proto::{
     limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use worker::wasm_bindgen::JsValue;
 use worker::*;
@@ -1060,6 +1060,51 @@ impl FragmentCell {
         Ok(started)
     }
 
+    /// A record of a channel its agent follows in another fragment
+    /// (`calls::Followed`, from that fragment's outbox): its `followed`
+    /// triggers' runs, as the fragment, at the record's depth there, each
+    /// once by the record, so a record handed again starts none twice. A
+    /// follow is its agent's own: another identity's (this fragment made
+    /// again since) is refused, and its follower ends it.
+    pub(crate) async fn heard_followed(&self, f: crate::fragment::calls::Followed) -> CellResult<()> {
+        #[derive(Serialize)]
+        struct Heard<'a> {
+            fragment: &'a str,
+            channel: &'a str,
+            record: &'a ChannelRecord,
+        }
+        self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
+        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(f.subscriber.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "that follow is another agent's, not this fragment's"));
+        }
+        let ops = || -> CellResult<Vec<String>> { Ok(self.triggers()?.into_iter().filter(|t| matches!(t.on, TriggerOn::Followed(_))).map(|t| t.run).collect()) };
+        if ops()?.is_empty() {
+            return Ok(());
+        }
+        let read_only = self.read_only().await?;
+        // read after the wait, so the runs start from the code installed now
+        let own = self.own_key()?;
+        let (fragment, channel, seq) = (f.fragment.as_str(), f.record.channel.as_str(), f.record.seq);
+        let input = serde_json::to_value(Heard { fragment, channel, record: &f.record }).expect("a record serializes");
+        for op in &ops()? {
+            let call_id = format!("followed:{fragment}:{channel}:{seq}:{op}");
+            let sha = crate::ops::input_sha(op, &fragment_proto::canonical_json(&input));
+            self.start_run(NewRun {
+                op,
+                via: Via::Followed,
+                trigger: Some(format!("{fragment}/{channel}")),
+                principal: &own,
+                role: Role::Editor,
+                depth: f.depth,
+                call: Some((&call_id, &sha)),
+                input: input.clone(),
+                owner_read_only: read_only,
+            })?;
+        }
+        self.later();
+        Ok(())
+    }
+
     /// Starts the runs a move of `main` triggers, blocked when `read_only`
     /// (the owner's standing, read before the move was: plane.rs).
     pub(crate) fn fire_files(&self, commit: Option<&str>, paths: &[String], depth: u32, read_only: Option<Why>) -> CellResult<()> {
@@ -1471,8 +1516,11 @@ impl FragmentCell {
     /// or trigger handed it, a viewer's to see. Its output is the app's
     /// own answer, a viewer's to see whatever it copied (docs/api.md).
     fn input_shown(&self, role: Role, run: &RunRow) -> CellResult<bool> {
-        if run.via != Via::Channel {
-            return Ok(true);
+        match run.via {
+            // a record another fragment let its agent read: its editors' (its agent's, its owner's)
+            Via::Followed => return Ok(role >= Role::Editor),
+            Via::Channel => {}
+            _ => return Ok(true),
         }
         let channel = run.trigger.as_deref().ok_or_else(|| CellError::host(format!("channel run #{} names no channel", run.id)))?;
         match self.channel_read_role(channel) {

@@ -521,8 +521,10 @@ export class App extends DurableObject {
   the app.
 - **Other fragments**, from an agent's fragment, as its agent:
   `this.otherFragments.post(name, channel, {id, body})` / `draft(name,
-  channel, {turn, text})` / `records(name, channel, {after})`, each
-  checked there as the agent's own request.
+  channel, {turn, text})` / `records(name, channel, {after})` /
+  `follow(name, channel)`, each checked there as the agent's own request;
+  `{"followed": true, "run": op}` then gets `{fragment, channel, record}`
+  for each record there but the agent's own.
 - **`fetch(request)`**, if the App has one, answers every site path that
   is not a file in `site/` (any method); `x-fragment-principal` and
   `x-fragment-role` say who.

@@ -1047,6 +1047,7 @@ impl FragmentCell {
             ReachOf::PATH => reply::<ReachOf>(self.reach_of()),
             AgentMade::PATH => reply::<AgentMade>(self.agent_with_person(decode(body)?).await),
             calls::AgentJoined::PATH => reply::<calls::AgentJoined>(self.agent_joined(decode(body)?).await),
+            calls::Followed::PATH => reply::<calls::Followed>(self.heard_followed(decode(body)?).await),
             InviteAnswer::PATH => {
                 let answer: InviteAnswer = decode(body)?;
                 reply::<InviteAnswer>(match answer.yes {
@@ -1299,7 +1300,7 @@ impl FragmentCell {
             (Method::Get, ["api", "search", "status"]) => self.search_status(&caller).await,
             (Method::Post, ["api", "subscriptions"]) => {
                 let body: Value = body_json(&mut req).await?;
-                self.subscribe(&caller, &body)
+                self.subscribe(&caller, &body).await
             }
             (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
             (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
@@ -1774,8 +1775,8 @@ impl FragmentCell {
         let ((drained, drain_ms), (launched, launch_ms)) = futures_util::future::join(drain, launch).await;
         laps.took("drain", drain_ms);
         laps.took("launch", launch_ms);
-        if searched || listed || drained.queued + drained.woken + launched > 0 {
-            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "launched": launched }));
+        if searched || listed || drained.queued + drained.woken + drained.followed + launched > 0 {
+            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "followed": drained.followed, "launched": launched }));
         }
     }
 

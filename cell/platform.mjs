@@ -19,8 +19,8 @@
 // / query / status` write and ask the fragment's own search index
 // (docs/api.md, "A fragment's search") as the fragment itself, its owner
 // paying; camel case, so no operation (`a-z`, `0-9`, `_`) can shadow it.
-// `this.otherFragments.post / draft / records` act in another fragment as
-// this one's agent (docs/api.md, "Acting in another fragment").
+// `this.otherFragments.post / draft / records / follow` act in another
+// fragment as this one's agent (docs/api.md, "Acting in another fragment").
 //
 // A job's method gets (input, job) and runs as a Workflow: each `await
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
@@ -512,6 +512,7 @@ export class App extends AuthorApp {
       post: (name, channel, record) => answered(cap.post(String(name), String(channel), record)),
       draft: (name, channel, draft) => answered(cap.draft(String(name), String(channel), draft)),
       records: (name, channel, page = {}) => answered(cap.records(String(name), String(channel), page)),
+      follow: (name, channel) => answered(cap.follow(String(name), String(channel))),
     };
   }
 

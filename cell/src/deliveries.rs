@@ -18,8 +18,11 @@
 //! A computer's wake subscription (`computer:<id>`) is a wake, not a
 //! request: the drain asks the computer itself (its guest reads the record:
 //! runs_on.rs), never through the queue, and its row goes once the computer
-//! answers. The outbox is its retry: a wake that fails for now waits as a
-//! row the queue did not take waits.
+//! answers. A follow (`fragment:<name>`) goes the same way, the record to
+//! its follower's supervisor, which starts its own runs once by the record
+//! (jobs.rs `heard_followed`); one that takes it no more ends the follow. The
+//! outbox is their retry: one that fails for now waits as a row the queue
+//! did not take waits, so a follower hears each record at least once.
 
 use std::time::Duration;
 
@@ -32,9 +35,10 @@ use worker::*;
 use crate::config::Config;
 use crate::cs::FetchFailed;
 use crate::error::{CellError, CellResult};
-use crate::fragment::calls::{Outcome, Report};
+use crate::fragment::calls::{Followed, Outcome, Report};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
+use crate::subscriptions::Delivered;
 
 pub const DEAD_QUEUE: &str = "fragment-deliveries-dead";
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -60,8 +64,9 @@ const _: () = assert!(QUEUE_BATCH * (PUSH_BATCHES_MAX - 1) >= limits::PUSH_SUBS_
 
 /// One outbox row, decoded once.
 enum Pending {
-    /// Record `seq` of `channel`, to the channel subscription `sub`.
-    Record { sub: i64, channel: String, seq: i64 },
+    /// Record `seq` of `channel`, to the channel subscription `sub`, its
+    /// runs here at `depth`.
+    Record { sub: i64, channel: String, seq: i64, depth: u32 },
     Push(PendingPush),
 }
 
@@ -75,7 +80,7 @@ struct PendingPush {
 }
 
 /// What a computer's wake subscription names in place of a URL (runs_on.rs).
-const WAKE_PREFIX: &str = "computer:";
+pub(crate) const WAKE_PREFIX: &str = "computer:";
 
 /// The wake of `computer` that outbox row `id` holds, for record `seq` of
 /// `channel`, posted at `at` (ms).
@@ -85,13 +90,24 @@ struct Wake {
     computer: String,
     channel: String,
     seq: i64,
-    at: Option<i64>,
+    at: i64,
 }
 
-/// How a wake went.
+/// The record outbox row `id` holds for `follower`, which follows its
+/// channel by subscription `sub`.
+struct Follow {
+    id: i64,
+    attempts: i64,
+    sub: i64,
+    follower: String,
+    call: Followed,
+}
+
+/// How a wake, or a follow's record, went.
 enum Woken {
     Up,
-    /// For good: it won't wake, its owner cannot pay, or it is gone.
+    /// For good: it won't wake, its owner cannot pay, or it is gone; a
+    /// follower takes it no more.
     Refused(String),
     /// For now: the outbox tries it again.
     Later(String),
@@ -104,6 +120,8 @@ pub(crate) struct Drained {
     pub queued: usize,
     /// Computers that answered their wake.
     pub woken: usize,
+    /// Records their followers took.
+    pub followed: usize,
 }
 
 /// What a delivery carries: a record to a channel subscriber, or a web
@@ -131,7 +149,10 @@ fn decode(row: &Value) -> Pending {
     let text = |k: &str| row[k].as_str().unwrap_or_else(|| panic!("a delivery_outbox row has no {k}: {row}")).to_string();
     let int = |k: &str| row[k].as_i64().unwrap_or_else(|| panic!("a delivery_outbox row has no {k}: {row}"));
     match DeliveryKind::deserialize(&row["kind"]).unwrap_or_else(|_| panic!("a delivery_outbox row of kind {}", row["kind"])) {
-        DeliveryKind::Record => Pending::Record { sub: int("sub"), channel: text("channel"), seq: int("seq") },
+        DeliveryKind::Record => {
+            let depth = u32::try_from(int("depth")).unwrap_or_else(|_| panic!("a delivery_outbox row's depth is a hop count: {row}"));
+            Pending::Record { sub: int("sub"), channel: text("channel"), seq: int("seq"), depth }
+        }
         DeliveryKind::Push => Pending::Push(PendingPush { who: text("who"), payload: text("body"), after: int("after_sub"), upto: int("upto_sub") }),
     }
 }
@@ -202,27 +223,27 @@ impl FragmentCell {
         let (Ok(fragment), Ok(incarnation)) = (self.must(MetaKey::Name), self.must(MetaKey::CreatedAt)) else { return drained };
         let mut failed = false;
         // records go a queue batch at a time; each push goes on its own;
-        // each wake goes to its computer
+        // each wake goes to its computer, each follow's record to its follower
         let mut singles: Vec<(i64, i64, Delivery)> = vec![];
         let mut wakes: Vec<Wake> = vec![];
+        let mut follows: Vec<Follow> = vec![];
         for row in &rows {
             let (id, attempts) = (row["id"].as_i64().expect("delivery_outbox.id"), row["attempts"].as_i64().expect("delivery_outbox.attempts"));
             match decode(row) {
-                Pending::Record { sub, channel, seq } => match self.record_delivery(sub, &channel, seq, &fragment, &incarnation) {
-                    Ok(Some(d)) if d.url.starts_with(WAKE_PREFIX) => {
-                        let at = self.record_at(&channel, seq);
-                        wakes.push(Wake { id, attempts, computer: d.url, channel, seq, at })
-                    }
-                    Ok(Some(d)) => singles.push((id, attempts, d)),
+                Pending::Record { sub, channel, seq, depth } => match self.record_delivery(sub, &channel, seq, depth, &fragment, &incarnation) {
+                    Ok(Some(Delivered::Wake { computer, at })) => wakes.push(Wake { id, attempts, computer, channel, seq, at }),
+                    Ok(Some(Delivered::Follow { follower, call })) => follows.push(Follow { id, attempts, sub, follower, call }),
+                    Ok(Some(Delivered::Queued(d))) => singles.push((id, attempts, d)),
                     Ok(None) => self.outbox_done(id),
                     Err(e) => self.outbox_failed(&mut failed, id, attempts, &e.message),
                 },
                 Pending::Push(push) => self.drain_push(&mut failed, id, attempts, push, &fragment, &incarnation).await,
             }
         }
-        // the wakes go out beside the queue's sends, each on its own: a
-        // computer that takes its time starting holds up nothing else
+        // the wakes and follows go out beside the queue's sends, each on its
+        // own: a computer that takes its time starting holds up nothing else
         let woken = futures_util::future::join_all(wakes.iter().map(|w| self.wake(w, &fragment)));
+        let followed = futures_util::future::join_all(follows.iter().map(|f| self.hand_followed(f)));
         let sent = async {
             let mut chunks = singles.chunks(QUEUE_BATCH);
             for chunk in chunks.by_ref() {
@@ -243,7 +264,7 @@ impl FragmentCell {
                 chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failed, *id, *attempts, "an earlier batch was refused"));
             }
         };
-        let (woken, ()) = futures_util::future::join(woken, sent).await;
+        let (woken, followed, ()) = futures_util::future::join3(woken, followed, sent).await;
         for (w, woken) in wakes.iter().zip(woken) {
             match woken {
                 Woken::Up => {
@@ -255,6 +276,20 @@ impl FragmentCell {
                     self.event("delivery.failed", &format!("a computer's wake: {why}"), json!({ "kind": DeliveryKind::Record.as_str(), "status": 0 }));
                 }
                 Woken::Later(why) => self.outbox_failed(&mut failed, w.id, w.attempts, &why),
+            }
+        }
+        for (f, followed) in follows.iter().zip(followed) {
+            match followed {
+                Woken::Up => {
+                    self.outbox_done(f.id);
+                    drained.followed += 1;
+                }
+                Woken::Refused(why) => {
+                    self.outbox_done(f.id);
+                    let _ = self.exec("DELETE FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(f.sub)]);
+                    self.event("subscription.gone", &format!("{} follows no more: {why}", f.follower), json!({ "sub": f.sub }));
+                }
+                Woken::Later(why) => self.outbox_failed(&mut failed, f.id, f.attempts, &why),
             }
         }
         if failed || rows.len() as i64 == DRAIN_ROWS {
@@ -281,6 +316,28 @@ impl FragmentCell {
             Woken::Later(why) => ("later", Some(why)),
         };
         laps.log("delivery.wake", json!({ "computer": w.computer, "fragment": fragment, "channel": w.channel, "seq": w.seq, "attempts": w.attempts, "outcome": outcome, "why": why }));
+        woken
+    }
+
+    /// Hands a record to the fragment that follows its channel, as a wake
+    /// goes to its computer: it starts its own runs, once by the record
+    /// (jobs.rs `heard_followed`). One that takes it no more (gone, or made again
+    /// for another agent) is refused for good.
+    async fn hand_followed(&self, f: &Follow) -> Woken {
+        let laps = js::Laps::start();
+        let woken = match crate::fragment::call(&self.env, &f.follower, &f.call).await {
+            // a test fleet's answer lost after its follower took it: handed again
+            Ok(()) => self.test_countdown(MetaKey::TestFailDeliveries, "the follower's answer was lost").map_or_else(|e| Woken::Later(e.message), |()| Woken::Up),
+            Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::NotFound) => Woken::Refused(e.message),
+            Err(e) => Woken::Later(e.message),
+        };
+        let (outcome, why) = match &woken {
+            Woken::Up => ("up", None),
+            Woken::Refused(why) => ("gone", Some(why)),
+            Woken::Later(why) => ("later", Some(why)),
+        };
+        let (channel, seq) = (&f.call.record.channel, f.call.record.seq);
+        laps.log("delivery.follow", json!({ "follower": f.follower, "fragment": f.call.fragment, "channel": channel, "seq": seq, "depth": f.call.depth, "attempts": f.attempts, "outcome": outcome, "why": why }));
         woken
     }
 

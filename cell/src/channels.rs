@@ -447,7 +447,7 @@ impl FragmentCell {
         // then only if the try that appended it never wrote them (the mark
         // goes with them), so none is lost and none is sent twice.
         if appended || !self.outboxed(record)? {
-            self.outbox_record(record)?;
+            self.outbox_record(record, depth)?;
         }
         laps.lap("outbox");
         let fired = self.fire_channel(record, depth).await;

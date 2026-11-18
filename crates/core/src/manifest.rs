@@ -411,14 +411,14 @@ fn listed(name: &str, v: &Value) -> Result<ListedDecl, String> {
 }
 
 /// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`
-/// or `{"installed" | "woke": true, "run": op}`, a channel's with an optional
+/// or `{"installed" | "woke" | "followed": true, "run": op}`, a channel's with an optional
 /// `"from": "person" | "agent"` (only records a member of that kind posted
 /// start runs).
 fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
     let at = format!("triggers[{i}]");
     let obj = v.as_object().ok_or_else(|| format!("{at} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "woke" | "run" | "from")) {
-        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, woke, run, from)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "woke" | "followed" | "run" | "from")) {
+        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, woke, followed, run, from)"));
     }
     let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{at}.{k} must be a string"))).transpose();
     let flag = |k: &str| match obj.get(k) {
@@ -426,27 +426,28 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
         Some(Value::Bool(true)) => Ok(true),
         Some(_) => Err(format!("{at}.{k} must be true")),
     };
-    let (installed, woke) = (flag("installed")?, flag("woke")?);
-    let on = match (text("cron")?, text("channel")?, text("files")?, installed, woke) {
-        (None, None, None, true, false) => TriggerOn::Installed(true),
-        (None, None, None, false, true) => TriggerOn::Woke(true),
-        (Some(c), None, None, false, false) => {
+    let (installed, woke, followed) = (flag("installed")?, flag("woke")?, flag("followed")?);
+    let on = match (text("cron")?, text("channel")?, text("files")?, installed, woke, followed) {
+        (None, None, None, true, false, false) => TriggerOn::Installed(true),
+        (None, None, None, false, true, false) => TriggerOn::Woke(true),
+        (None, None, None, false, false, true) => TriggerOn::Followed(true),
+        (Some(c), None, None, false, false, false) => {
             crate::cron::Cron::parse(&c).map_err(|e| format!("{at}.cron: {e}"))?;
             TriggerOn::Cron(c)
         }
-        (None, Some(c), None, false, false) => {
+        (None, Some(c), None, false, false, false) => {
             if c != "inbox" && !m.channels.contains_key(&c) {
                 return Err(format!("{at}.channel must be inbox or a channel this fragment.json declares, not {c:?}"));
             }
             TriggerOn::Channel(c)
         }
-        (None, None, Some(f), false, false) => {
+        (None, None, Some(f), false, false, false) => {
             if !crate::glob::valid(&f) {
                 return Err(format!("{at}.files must be a relative path pattern (* ** ?), not {f:?}"));
             }
             TriggerOn::Files(f)
         }
-        _ => return Err(format!("{at} needs exactly one of cron, channel, files, installed, woke")),
+        _ => return Err(format!("{at} needs exactly one of cron, channel, files, installed, woke, followed")),
     };
     let run = text("run")?.ok_or_else(|| format!("{at} needs run: the operation it starts"))?;
     let decl = m.operations.get(&run).ok_or_else(|| format!("{at}.run names no declared operation: {run:?}"))?;
@@ -774,7 +775,8 @@ mod tests {
             let back = db.rows("SELECT value FROM meta WHERE key = 'inbox_secret'").expect("its row");
             assert_eq!(back[0]["value"].as_str().map(InboxDecl::from_stored), Some(Ok(decl)), "rolled forward, it reads as written");
         }
-        assert_eq!((newest, FRAGMENT.steps[8].name), (9, "inbox_forward_only"));
+        // step 9 makes it forward only; a later step keeps it so
+        assert!(newest >= 9 && FRAGMENT.steps[8].name == "inbox_forward_only", "{newest} steps");
     }
 
     #[test]
@@ -931,6 +933,29 @@ mod tests {
             (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":true,"files":"a/**","run":"n"}]}"#, "exactly one of"),
             (br#"{"operations":{"n":{"kind":"query"}},"triggers":[{"woke":true,"run":"n"}]}"#, "is a query"),
             (br#"{"operations":{"n":{"kind":"job","role":"owner"}},"triggers":[{"woke":true,"run":"n"}]}"#, "a trigger acts as an editor"),
+        ] {
+            let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(e.contains(says), "{e}");
+        }
+    }
+
+    /// Goal: an agent's fragment hears each record of a channel it follows
+    /// in another fragment: `"followed": true`, valid alone, running a
+    /// mutation or a job an editor may, with no `from`.
+    #[test]
+    fn a_followed_trigger_is_true_and_alone() {
+        let m = parse(br#"{"operations":{"n":{"kind":"mutation"}},"triggers":[{"followed":true,"run":"n"}]}"#).unwrap();
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Followed(true), run: "n".into(), from: None });
+        let wire = serde_json::to_value(&m.triggers[0]).unwrap();
+        assert_eq!(wire, serde_json::json!({ "followed": true, "run": "n" }));
+        assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");
+        assert_eq!(TriggerOn::from_parts("followed", String::new()), Some(TriggerOn::Followed(true)), "it is stored and read back by its parts");
+        for (bad, says) in [
+            (&br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"followed":false,"run":"n"}]}"#[..], "followed must be true"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"followed":true,"woke":true,"run":"n"}]}"#, "exactly one of"),
+            (br#"{"operations":{"n":{"kind":"job"}},"channels":{"c":{}},"triggers":[{"followed":true,"channel":"c","run":"n"}]}"#, "exactly one of"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"followed":true,"from":"person","run":"n"}]}"#, "from is a channel trigger's"),
+            (br#"{"operations":{"n":{"kind":"query"}},"triggers":[{"followed":true,"run":"n"}]}"#, "is a query"),
         ] {
             let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
             assert!(e.contains(says), "{e}");

@@ -176,6 +176,7 @@ export class Fragments extends WorkerEntrypoint {
   post(name, channel, record) { return this.#answer("post", name, channel, record); }
   draft(name, channel, draft) { return this.#answer("draft", name, channel, draft); }
   records(name, channel, page) { return this.#answer("records", name, channel, page); }
+  follow(name, channel) { return this.#answer("follow", name, channel, {}); }
 }
 
 // One run of an operation (docs/api.md, Jobs and triggers). Each round asks

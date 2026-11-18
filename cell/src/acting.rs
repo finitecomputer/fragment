@@ -74,7 +74,7 @@ impl FragmentCell {
             Asked::Put => Method::Put,
         };
         let hops = act.hops.map(|d| d.to_string());
-        routed.ask(&self.env, method, &format!("/api{}", act.route), act.body, hops.as_deref().map(|h| (crate::jobs::HOPS_HEADER, h))).await
+        routed.ask(&self.env, method, &format!("/api{}", act.route), act.body.as_deref(), hops.as_deref().map(|h| (crate::jobs::HOPS_HEADER, h))).await
     }
 
     /// Its agent, as the router resolves a request its key signs.
