@@ -277,6 +277,9 @@ class ContainerHost {
   #report;
   #generation = 0;
   #backups;
+  // Until when the lever's `slow-snapshot` holds the container, as the
+  // runtime's own snapshot does: a signal or a destroy lands once it ends.
+  #heldUntil = 0;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -471,10 +474,13 @@ class ContainerHost {
 
   // A snapshot of the container within `ms` (`Overdue` past it): its id.
   // `slowMs` (the lever's `slow-snapshot`, where local workerd takes none):
-  // one made up that takes that long.
+  // one made up that takes that long, holding the container.
   async snapshot(generation, name, ms, slowMs) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
-    if (slowMs > 0) return bounded("the snapshot", ms, () => new Promise((r) => setTimeout(() => r(`lever-${name}`), slowMs)));
+    if (slowMs > 0) {
+      this.#heldUntil = Date.now() + slowMs;
+      return bounded("the snapshot", ms, () => this.#unheld().then(() => `lever-${name}`));
+    }
     const s = await bounded("the snapshot", ms, () => this.#c.snapshotContainer({ name }));
     return s.id;
   }
@@ -482,7 +488,7 @@ class ContainerHost {
   // Sends signal `n` to the guest's PID 1 (from outside its PID namespace,
   // so SIGKILL lands as a crash's would). Answers whether it was sent.
   signal(generation, n) {
-    if (generation !== this.#generation || !this.#c.running) return false;
+    if (generation !== this.#generation || !this.#c.running || Date.now() < this.#heldUntil) return false;
     this.#c.signal(n);
     return true;
   }
@@ -495,9 +501,14 @@ class ContainerHost {
     if (generation !== 0 && generation !== this.#generation) return false;
     if (!(ms > 0)) throw new Error("a destroy is bounded");
     const t0 = Date.now();
-    if (this.#c.running) await bounded("the destroy", ms, () => this.#c.destroy(reason)).catch(() => {});
+    if (this.#c.running) await bounded("the destroy", ms, () => this.#unheld().then(() => this.#c.destroy(reason))).catch(() => {});
     while (this.#c.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
     return !this.#c.running;
+  }
+
+  // Once the lever's snapshot no longer holds the container (at once if none does).
+  #unheld() {
+    return new Promise((r) => setTimeout(r, Math.max(0, this.#heldUntil - Date.now())));
   }
 
   // Waits up to `ms` for the container to exit on its own (after a signal).

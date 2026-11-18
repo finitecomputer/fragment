@@ -426,6 +426,78 @@ mod tests {
         assert_eq!(old.apply(Event::Wake { why: Wake::Presence }, T).actions, vec![Action::Start { generation: 1 }]);
     }
 
+    /// Goal (big-disk snapshot wakes on preview, 2026-11-18: 4 of 14 wakes
+    /// on master failed so): a sleep's snapshot the runtime still takes
+    /// holds its container past the sleep's destroy, so the start after it
+    /// finds that container running. That start started nothing: no strike.
+    /// It is made again at once (owed: its alarm's, or the waiting
+    /// request's), told as starting all along, until the container before
+    /// it has had a stop's deadline since the first such try; past that
+    /// each try is a failure as any, so one that never goes gives up as
+    /// failing starts do. Valid (held up, then up, its count clean), invalid
+    /// (an earlier start's report; past the bound), replay (the same report
+    /// twice), restart (the chain read back from storage keeps its bound).
+    /// Method: the lifecycle's steps, as the DO hears them, each try a
+    /// destroy's 15 s wait.
+    #[test]
+    fn a_start_held_up_by_the_container_before_it_waits_without_a_strike() {
+        let mut l = Lifecycle::new();
+        assert_eq!(l.apply(Event::Wake { why: Wake::Owner }, T).actions, vec![Action::Start { generation: 1 }]);
+        let first = T + 15_000;
+        let s = l.apply(Event::StartBlocked { generation: 1 }, first);
+        assert!(s.actions.is_empty() && l.failures() == 0, "no strike, and no start in its own step: {s:?} {l:?}");
+        assert_eq!(s.alarm_ms, Some(first), "its alarm at once");
+        assert!(l.start_due(first) && l.starting(first), "told as starting: {l:?}");
+        // replay, and an earlier start's report: nothing
+        let before = l.clone();
+        l.apply(Event::StartBlocked { generation: 1 }, first + 1);
+        l.apply(Event::StartBlocked { generation: 0 }, first + 2);
+        assert_eq!(l, before);
+        let (mut at, mut g) = (first, 1);
+        for _ in 0..3 {
+            let s = l.apply(Event::Alarm, at);
+            g += 1;
+            assert_eq!(s.actions, vec![Action::Start { generation: g }]);
+            at += 15_000;
+            l.apply(Event::StartBlocked { generation: g }, at);
+            assert!(l.failures() == 0 && l.starting(at), "{l:?}");
+            // its isolate gone: read back, the same chain and bound
+            let (read, _) = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap();
+            assert_eq!(read, l);
+        }
+        // the container before it goes: the next comes up, its count clean
+        let s = l.apply(Event::Alarm, at);
+        assert_eq!(s.actions, vec![Action::Start { generation: g + 1 }]);
+        l.apply(Event::Ready { generation: g + 1 }, at + 3_000);
+        assert!(matches!(l.phase, Phase::Awake { .. }) && l.failures() == 0 && l.blocked_since_ms.is_none(), "{l:?}");
+
+        // one that never goes: tried at once for a stop's deadline, then
+        // each try a strike, and it gives up as failing starts do
+        let mut l = Lifecycle::new();
+        l.apply(Event::Wake { why: Wake::Record }, T);
+        let (mut at, mut g, mut struck_at) = (T, 1, None);
+        // bounded: SLEEP_DEADLINE_MS of tries 15 s apart, then the strikes
+        while !matches!(l.phase, Phase::Failed { .. }) {
+            assert!(g < 64, "the bound ends the tries: {l:?}");
+            at += 15_000;
+            let s = l.apply(Event::StartBlocked { generation: g }, at);
+            if l.failures() > 0 {
+                struck_at.get_or_insert(at);
+            } else {
+                assert_eq!(s.alarm_ms, Some(at), "no strike yet: made again at once");
+            }
+            if let Some(next) = s.alarm_ms {
+                at = at.max(next);
+                g += 1;
+                assert_eq!(l.apply(Event::Alarm, at).actions, vec![Action::Start { generation: g }]);
+            }
+        }
+        let struck_at = struck_at.expect("struck");
+        assert!((T + 15_000 + SLEEP_DEADLINE_MS..T + 30_000 + SLEEP_DEADLINE_MS).contains(&struck_at), "the first strike once a stop's deadline passed: {struck_at}");
+        assert!(matches!(&l.phase, Phase::Failed { why, .. } if why.contains("still ran")), "{l:?}");
+        assert!(l.failures() == STARTS_FAILED_MAX);
+    }
+
     /// Goal: a container that stops on its own is started again while it
     /// is wanted, and metered up to its stop.
     #[test]

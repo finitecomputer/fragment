@@ -105,6 +105,12 @@ pub enum Event {
     /// `destroying`), and the start's own report follows. Kept with the
     /// lifecycle, so an isolate that comes up after it knows it too.
     StartFailing { generation: u64 },
+    /// The start `generation` found the container before it still running
+    /// past its destroy (a snapshot the runtime still takes holds a sleep's
+    /// container until it ends) and started nothing: made again at once, no
+    /// strike, until that container has had a stop's deadline
+    /// (`SLEEP_DEADLINE_MS`) since the first such try; a failure after.
+    StartBlocked { generation: u64 },
     Alarm,
     /// Its owner put it to sleep: what held it is let go (its sockets close
     /// with its container).

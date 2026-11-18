@@ -4,7 +4,7 @@
 use fragment_proto::computer::LifeEnd;
 use serde::{Deserialize, Serialize};
 
-use crate::computer::limits::{ALARM_LATE_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, STOP_LOOK_MS, WONT_WAKE_RETRY_MS};
+use crate::computer::limits::{ALARM_LATE_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, STOP_LOOK_MS, WONT_WAKE_RETRY_MS};
 
 mod event;
 mod legacy;
@@ -192,6 +192,11 @@ pub struct Lifecycle {
     /// has, or stored before it was kept.
     #[serde(default, skip_serializing_if = "is_zero")]
     opened_ms: i64,
+    /// Since when the starts of this wake have found the container before
+    /// them still running (`Event::StartBlocked`): none once one comes up,
+    /// or as a wake or a restart counts its strikes anew.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocked_since_ms: Option<i64>,
 }
 
 impl Default for Lifecycle {
@@ -233,6 +238,7 @@ impl Lifecycle {
             kept_ms: 0,
             owed_ms: None,
             opened_ms: 0,
+            blocked_since_ms: None,
         }
     }
 
@@ -435,12 +441,14 @@ impl Lifecycle {
                         // its last strike (failing, it gives up again at once)
                         self.failures = STARTS_FAILED_MAX - 1;
                         self.restore_fallbacks = 0;
+                        self.blocked_since_ms = None;
                         self.hold(now_ms + why.hold_ms());
                         self.start(now_ms, &mut step);
                     }
                     Phase::Failed { .. } | Phase::Asleep { .. } => {
                         self.failures = 0;
                         self.restore_fallbacks = 0;
+                        self.blocked_since_ms = None;
                         self.hold(now_ms + why.hold_ms());
                         self.start(now_ms, &mut step);
                     }
@@ -466,6 +474,7 @@ impl Lifecycle {
                         // `starting` whatever it restarted (`starting`)
                         self.failures = 0;
                         self.restore_fallbacks = 0;
+                        self.blocked_since_ms = None;
                         self.phase = Phase::Asleep { retry: Some(Retry { at_ms: now_ms, owed: true }) };
                     }
                     // the start under way is the restart's
@@ -484,6 +493,7 @@ impl Lifecycle {
             }
             (Phase::Starting { generation, .. }, Event::Ready { generation: g }) if g == generation => {
                 self.failures = 0;
+                self.blocked_since_ms = None;
                 self.fell_back = false;
                 self.ready = true;
                 self.metered_to_ms = now_ms;
@@ -491,6 +501,17 @@ impl Lifecycle {
                 self.begin_life(now_ms);
             }
             (Phase::Starting { generation, .. }, Event::StartFailed { generation: g, why }) if g == generation => self.failed(why, now_ms),
+            (Phase::Starting { generation, .. }, Event::StartBlocked { generation: g }) if g == generation => {
+                // nothing of it ran: made again at once, as it was asked,
+                // no strike, while the container before it may still be its
+                // sleep's, held by a snapshot; then each try is a failure
+                let since = *self.blocked_since_ms.get_or_insert(now_ms);
+                if now_ms < since + SLEEP_DEADLINE_MS {
+                    self.phase = Phase::Asleep { retry: Some(Retry { at_ms: now_ms, owed: true }) };
+                } else {
+                    self.failed(format!("the container before it still ran {} s after its first try", (now_ms - since) / 1000), now_ms);
+                }
+            }
             (Phase::Starting { generation, .. }, Event::SnapshotFailed { generation: g, why }) if g == generation => {
                 if std::mem::replace(&mut self.fell_back, true) {
                     // its snapshot went at the first: this one is the image's
@@ -526,7 +547,8 @@ impl Lifecycle {
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }
                 | Event::Exited { .. }
-                | Event::StartFailing { .. },
+                | Event::StartFailing { .. }
+                | Event::StartBlocked { .. },
             ) if !matches!(&self.phase, Phase::Sleeping { .. } | Phase::Awake { .. } | Phase::Starting { .. }) => {}
             (Phase::Starting { generation, since_ms, .. }, Event::StartFailing { generation: g }) if g == generation => {
                 self.phase = Phase::Starting { generation, since_ms, destroying: true };
@@ -642,7 +664,8 @@ impl Lifecycle {
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }
                 | Event::Exited { .. }
-                | Event::StartFailing { .. },
+                | Event::StartFailing { .. }
+                | Event::StartBlocked { .. },
             ) => {}
             (_, Event::Opened { socket }) => {
                 match socket {
