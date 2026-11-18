@@ -724,6 +724,18 @@ mod tests {
         assert!(PLATFORM_DESCRIPTION.contains("to search past conversations and brains (`fragment search`)"));
     }
 
+    /// Goal (P5 of the plan to sandbox per agent): an agent plans
+    /// honestly, knowing a sleep or restart ends the servers and background
+    /// commands it started and that nothing starts them again, and where
+    /// what must outlive its turn lives instead.
+    #[test]
+    fn an_agent_is_told_a_sleep_ends_its_processes() {
+        let page = COMPUTER_PAGE.split_whitespace().collect::<Vec<_>>().join(" ");
+        for said in ["a sleep or a restart ends every process you started: a server, a background command, a download", "Nothing starts them again", "What must outlive your turn is a routine, or an app"] {
+            assert!(page.contains(said), "computer.md says {said}");
+        }
+    }
+
     #[test]
     fn the_platform_skill_is_the_clis_after_the_computers_page() {
         let cli = &cli_skill();
