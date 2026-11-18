@@ -12,22 +12,26 @@
 //!   starts the container; one while it starts or is awake holds it
 //!   longer; one while it is going to sleep starts it again once it is
 //!   asleep (the newest push wins: lesson 3 of docs/cloudflare-v1.md).
-//! - **Staying awake.** While the guest holds a keepalive socket or a
-//!   port tab is open; with nothing open, until the latest hold runs out
-//!   (twenty minutes after a record or the last socket closed, a minute
-//!   after a pre-wake). An always-on computer never sleeps.
+//! - **Staying awake.** While the guest holds a keepalive socket; with
+//!   none open, until the latest hold runs out (twenty minutes after a
+//!   record, a keepalive's close, or a port tab's opening, close or last
+//!   use, a minute after a pre-wake). A port tab merely open holds
+//!   nothing: its page's words do (`Event::TabUsed`). An always-on
+//!   computer never sleeps.
 //! - **Saving** (docs/computers.md, Durability, step 1). `/data` is saved when
 //!   work ends (the guest's last keepalive or its owner's last port tab
 //!   closes, and `SAVE_SETTLE_MS` pass with no keepalive opened again, so
 //!   turns back to back, or tabs, save once), every
-//!   `SAVE_EVERY_MS` while a keepalive stays open, and at every sleep. A
+//!   `SAVE_EVERY_MS` while a keepalive stays open or a port tab is used,
+//!   and at every sleep. A
 //!   save is a hold (the DO touches `/run/computer/hold` and waits for the
 //!   guest's `/run/computer/held`), the save, and, awake, the hold let go.
 //!   A save that fails is tried again after a growing pause.
 //! - **Sleeping.** Its hold and its save, then its stop (snapshot, signal,
 //!   wait, destroy), reported back by `Asleep`. A keepalive that opens
 //!   during an idle sleep's hold cancels the sleep: the guest took work as
-//!   it was held, so it stays awake (docs/computers.md, Lifecycle).
+//!   it was held, so it stays awake (docs/computers.md, Lifecycle); so
+//!   does a port tab's use (its person came back).
 //!   A sleep whose save fails keeps its container and is tried again, for
 //!   at most `Rules::unsaved_max_ms`; then it sleeps unsaved, and says so.
 //!   A container its host stops unasked while it is idle, with all this

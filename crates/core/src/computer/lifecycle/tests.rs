@@ -23,8 +23,9 @@ fn a_record_wakes_it_and_idleness_puts_it_to_sleep() {
     assert_eq!((l.phase.clone(), s.alarm_ms), (Phase::ASLEEP, None));
 }
 
-/// Goal: an open keepalive or tab keeps it awake past any hold, and
-/// closing it holds it twenty minutes more.
+/// Goal: an open keepalive keeps it awake past any hold, and closing it
+/// holds it twenty minutes more (a tab holds it only by its use:
+/// `a_tab_no_one_uses_lets_it_sleep`).
 #[test]
 fn open_sockets_keep_it_awake() {
     let mut l = Lifecycle::new();
@@ -43,7 +44,144 @@ fn open_sockets_keep_it_awake() {
     assert!(matches!(s.actions[..], [Action::Start { generation: 1 }]));
     // a close with nothing open never underflows
     l.apply(Event::Closed { socket: Socket::Keepalive }, T);
-    assert!(l.open(), "the tab is still open");
+    assert_eq!((l.keepalives, l.tabs), (0, 1), "the tab is still counted open");
+}
+
+/// Its alarms from `l.next_alarm()` up to `until`, fired as the DO fires
+/// them, each hold and save it asks for answered as the DO does (saved):
+/// when each awake save was asked, and when it began to sleep, if it did.
+fn run_alarms(l: &mut Lifecycle, until: i64) -> (Vec<i64>, Option<i64>) {
+    let mut asked = vec![];
+    // bounded: a day of alarms, every METER_EVERY_MS at the most
+    for _ in 0..1_000 {
+        let Some(at) = l.next_alarm().filter(|at| *at <= until) else { return (asked, None) };
+        let s = l.apply(Event::Alarm, at);
+        if let Some(Action::Sleep { .. }) = s.actions.last() {
+            return (asked, Some(at));
+        }
+        if let Some(Action::Hold { generation }) = s.actions.last().cloned() {
+            asked.push(at);
+            let (_, _, seq) = save_asked(&l.apply(Event::Held { generation, held: true }, at + 100));
+            assert_eq!(l.apply(Event::Saved { generation, seq }, at + 200).actions, vec![Action::Unhold { generation }]);
+        }
+    }
+    panic!("more alarms than a day asks for");
+}
+
+/// The sleep `l` began (`Action::Sleep`, at `at`), its hold, save and stop
+/// answered as the DO does: its life's end.
+fn sleep_through(l: &mut Lifecycle, at: i64) -> Ended {
+    let g = l.generation();
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 500));
+    assert_eq!(l.apply(Event::Saved { generation: g, seq }, at + 1_000).actions, vec![Action::Stop { generation: g, saved: true }]);
+    l.apply(Event::Asleep { generation: g }, at + 2_000).ended.expect("a life ends at its sleep")
+}
+
+/// Goal (Paul, 2026-11-18: "an open tab, without any action touching the
+/// agent, should not keep the agent awake indefinitely"): a port tab its
+/// page says nothing on holds the computer `IDLE_MS` from its opening, as
+/// a record does, then it sleeps as under no tab: its hold, its save, its
+/// stop, metered up to that stop and no further. On master it stayed
+/// awake, unsaved, as long as the tab was open (11 hours on the preview,
+/// 2026-11-18). Method: its alarms fired for a day, a tab opened and
+/// never used.
+#[test]
+fn a_tab_no_one_uses_lets_it_sleep() {
+    let mut l = Lifecycle::new();
+    let g = started(&mut l, T);
+    let opened = T + 10 * 60_000;
+    l.apply(Event::Opened { socket: Socket::Tab }, opened);
+    let (saves, slept) = run_alarms(&mut l, T + 24 * 3_600_000);
+    assert_eq!(slept, Some(opened + IDLE_MS), "it sleeps IDLE_MS after the tab's last word: its opening");
+    assert!(saves.is_empty(), "nothing was done to save before its sleep's own: {saves:?}");
+    let ended = sleep_through(&mut l, opened + IDLE_MS);
+    assert_eq!((ended.generation, ended.by, ended.saved), (g, LifeEnd::Sleep, true));
+    assert_eq!(l.phase, Phase::ASLEEP);
+    // its tab's socket closes as its container goes: that holds nothing,
+    // starts nothing, and meters nothing
+    let s = l.apply(Event::Closed { socket: Socket::Tab }, opened + IDLE_MS + 3_000);
+    assert_eq!((s.actions.clone(), s.alarm_ms, l.phase.clone()), (vec![], None, Phase::ASLEEP), "{s:?}");
+    assert!(l.apply(Event::TabUsed, opened + IDLE_MS + 4_000).actions.is_empty(), "a use heard after its stop starts nothing");
+}
+
+/// Goal: a port tab a person uses (its page speaks: the DO tells each
+/// minute of it) keeps the computer awake as a turn does, and is saved
+/// every `SAVE_EVERY_MS` while used, so a stop during long work through
+/// a screen or a terminal loses at most about that; once its page goes
+/// quiet it sleeps `IDLE_MS` after its last word. Valid: two hours of
+/// use. Invalid: a use with no tab counted is nothing. Restart: a
+/// lifecycle stored and read back mid-use saves on time. Always on: saved
+/// the same, never slept nor metered. On master it was never saved while
+/// the tab stayed open. Method: a minute's use at a time, the alarms in
+/// between fired and answered as the DO does.
+#[test]
+fn a_tab_in_use_keeps_it_awake_and_saves_every_15_minutes() {
+    for always_on in [false, true] {
+        let mut l = Lifecycle::new();
+        if always_on {
+            l.apply(Event::AlwaysOn { on: true }, T);
+            l.apply(Event::Ready { generation: 1 }, T + 3_000);
+        } else {
+            started(&mut l, T);
+        }
+        // invalid: a use with no tab counted holds nothing
+        let held = l.held_until_ms();
+        l.apply(Event::TabUsed, T + 5_000);
+        assert_eq!(l.held_until_ms(), held, "no tab, no use");
+        l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
+        let mut saves = vec![];
+        let last = T + 2 * 3_600_000;
+        let mut at = T + 60_000;
+        while at <= last {
+            let (asked, slept) = run_alarms(&mut l, at - 1);
+            assert_eq!(slept, None, "in use, it never sleeps (always on: {always_on})");
+            saves.extend(asked);
+            l.apply(Event::TabUsed, at);
+            if at == T + 3_600_000 {
+                // restart: stored and read back as its isolate goes
+                l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap().0;
+            }
+            at += 60_000;
+        }
+        assert!(saves.len() >= 7, "two hours in use save every 15 minutes: {saves:?}");
+        assert_eq!(saves[0], T + 60_000 + SAVE_EVERY_MS, "the first 15 minutes after its first use: {saves:?}");
+        for w in saves.windows(2) {
+            assert!(w[1] - w[0] >= SAVE_EVERY_MS && w[1] - w[0] <= SAVE_EVERY_MS + 60_000, "every 15 minutes, a minute's use apart at most: {saves:?}");
+        }
+        let (asked, slept) = run_alarms(&mut l, last + 3 * IDLE_MS);
+        if always_on {
+            assert_eq!(slept, None, "always on never sleeps");
+            assert!(asked.len() <= 1, "quiet, it saves no more than its last use's: {asked:?}");
+        } else {
+            assert_eq!(slept, Some(last + IDLE_MS), "quiet, it sleeps IDLE_MS after its last use");
+            assert!(asked.len() <= 1, "{asked:?}");
+        }
+    }
+}
+
+/// Goal: a computer that slept under a tab no one used wakes when its
+/// person comes back to that tab (the screen opens its sockets again on
+/// their next press or key: a wake, then a tab), and is held as any
+/// tab's opening holds it; with no one back, nothing wakes it, however
+/// long. On master it never slept under the tab. Method: the sleep, an
+/// hour's silence, then the tab's wake.
+#[test]
+fn a_tab_wakes_it_after_it_slept_under_it() {
+    let mut l = Lifecycle::new();
+    started(&mut l, T);
+    l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
+    let (_, slept) = run_alarms(&mut l, T + 24 * 3_600_000);
+    let slept = slept.expect("it sleeps under a tab no one uses");
+    sleep_through(&mut l, slept);
+    l.apply(Event::Closed { socket: Socket::Tab }, slept + 3_000);
+    assert_eq!((l.next_alarm(), l.phase.clone()), (None, Phase::ASLEEP), "no alarm: nothing wakes it by itself");
+    // an hour on, the person presses a key in the tab
+    let back = slept + 3_600_000;
+    let s = l.apply(Event::Wake { why: Wake::Tab }, back);
+    let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("a tab's wake starts it: {s:?}") };
+    l.apply(Event::Ready { generation }, back + 3_000);
+    l.apply(Event::Opened { socket: Socket::Tab }, back + 3_500);
+    assert!(matches!(l.phase, Phase::Awake { .. }) && l.held_until_ms() == back + 3_500 + IDLE_MS, "held IDLE_MS from the tab's opening: {l:?}");
 }
 
 /// Goal: a pre-wake that nothing follows stops after a minute, and one
@@ -320,14 +458,14 @@ const DAYS: i64 = 3 * 24 * 3_600_000;
 /// metered only up to the last moment it was shown up, never the silence
 /// after it, which nothing shows it ran; metered on from there as it is
 /// heard, and its exit, heard late, ends its life as before. Valid: heard
-/// just within the bound, metered to it as ever. Method: a tab opened,
-/// then its next alarm, or its exit, 3 days on.
+/// just within the bound, metered to it as ever. Method: a turn begun (a
+/// keepalive opened), then its next alarm, or its exit, 3 days on.
 #[test]
 fn an_awake_computer_heard_late_is_metered_to_when_it_was_shown_up() {
     let awake = || {
         let mut l = Lifecycle::new();
         let g = started(&mut l, T);
-        l.apply(Event::Opened { socket: Socket::Tab }, T + 5_000);
+        l.apply(Event::Opened { socket: Socket::Keepalive }, T + 5_000);
         (l, g)
     };
     let late = T + DAYS;
@@ -549,13 +687,14 @@ fn an_ordinary_life_is_metered_as_before() {
 
 /// Goal (FIN-511, the other side): a computer really awake for days, each
 /// of its alarms heard, is metered for all of it, in `METER_EVERY_MS`
-/// intervals. Method: a tab open three days, each alarm at the time it
-/// asked for.
+/// intervals. Method: a record for its agents at each of its alarms, for
+/// three days, each alarm at the time it asked for (an open tab holds it
+/// no longer: its use does).
 #[test]
 fn a_computer_awake_for_days_is_metered_for_all_of_it() {
     let mut l = Lifecycle::new();
     started(&mut l, T);
-    let mut s = l.apply(Event::Opened { socket: Socket::Tab }, T + 5_000);
+    let mut s = l.apply(Event::Wake { why: Wake::Record }, T + 5_000);
     let until = T + DAYS;
     let mut metered = vec![];
     loop {
@@ -563,8 +702,9 @@ fn a_computer_awake_for_days_is_metered_for_all_of_it() {
         if at > until {
             break;
         }
+        l.apply(Event::Wake { why: Wake::Record }, at);
         s = l.apply(Event::Alarm, at);
-        assert!(matches!(l.phase, Phase::Awake { .. }), "a tab open keeps it awake");
+        assert!(matches!(l.phase, Phase::Awake { .. }), "its records keep it awake");
         metered.extend(meters(&s));
     }
     assert!(metered.windows(2).all(|w| w[0].1 == w[1].0) && metered.iter().all(|(a, b)| b - a == METER_EVERY_MS), "one interval an alarm, none missed: {:?}", &metered[..3]);

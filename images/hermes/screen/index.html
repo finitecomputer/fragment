@@ -14,7 +14,12 @@
   button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: transparent; color: var(--accent); cursor: pointer; }
   button[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
   button:disabled { opacity: .5; cursor: default; }
-  #screen { flex: 1; min-height: 0; }
+  #view { flex: 1; min-height: 0; position: relative; }
+  #screen { position: absolute; inset: 0; }
+  /* the last frame, dimmed, while the stream is paused or gone */
+  #still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #282828; opacity: .45; }
+  #note { position: absolute; left: 16px; right: 16px; top: 50%; transform: translateY(-50%); margin: 0; text-align: center; font-size: 16px; color: #fff; text-shadow: 0 1px 3px #000; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body data-state="connecting">
@@ -22,7 +27,11 @@
   <span id="status">Connecting to the screen…</span>
   <button id="control" type="button" aria-pressed="false" disabled>Take over</button>
 </header>
-<div id="screen"></div>
+<main id="view">
+  <div id="screen"></div>
+  <img id="still" alt="" hidden>
+  <p id="note" hidden></p>
+</main>
 <script type="module">
   // An agent's screen (decision 11): its own desktop, the agent named by
   // the page's `?agent=` (its fragment), as its chat opens it. Everyone
@@ -30,6 +39,7 @@
   // server enforces that: Take over is the agent's own lease, so its
   // screen tools wait while a person holds it.
   import RFB from "./novnc/core/rfb.js";
+  import { attention } from "./attend.js";
 
   const agent = new URLSearchParams(location.search).get("agent");
   const viewer = crypto.randomUUID().replaceAll("-", "");
@@ -44,11 +54,17 @@
   const status = document.getElementById("status");
   const button = document.getElementById("control");
   const screen = document.getElementById("screen");
+  const still = document.getElementById("still");
+  const note = document.getElementById("note");
   // For a person, and for checks: the page's state (body's data-state) and
-  // the agent it shows (#screen's data-agent).
+  // the agent it shows (#screen's data-agent). A screen not streaming says
+  // so over its last frame too.
+  const QUIET = ["paused", "asleep", "restarting", "closed", "waking"];
   const say = (state, text) => {
     document.body.dataset.state = state;
     status.textContent = text;
+    note.textContent = text;
+    note.hidden = !QUIET.includes(state);
   };
   if (!agent) {
     say("none", "Open an agent's screen from its chat.");
@@ -67,16 +83,20 @@
   // The stream follows the desktop: one that closes while the control
   // socket is open (the desktop stopped or restarted on a computer still
   // up) is opened again, after RETRY_MIN_MS, doubling to RETRY_MAX_MS, and
-  // the bridge starts the desktop for it. The control socket is the
-  // computer's: once it closes, nothing is opened again until a reload.
+  // the bridge starts the desktop for it, while someone is at it
+  // (attend.js). No one touching it for PAUSE_MS pauses the stream, so its
+  // computer may sleep; their next touch resumes it. The control socket is
+  // the computer's: once it closes (a sleep or a restart closes it with
+  // 4000 and says which), nothing is opened again until a press or a key.
   const RETRY_MIN_MS = 1000, RETRY_MAX_MS = 10000;
-  let rfb = null, connects = 0, retry = RETRY_MIN_MS, shown = false, closed = null, mine = false, holder = null;
-  const control = new WebSocket(socket("control"));
+  let rfb = null, connects = 0, retry = RETRY_MIN_MS, shown = false, closed = null, mine = false, holder = null, control = null, paused = false, waking = null;
   const show = () => {
     // a holder may give back while the stream reconnects
-    const ready = control.readyState === WebSocket.OPEN && (shown || mine);
-    button.disabled = !ready || closed !== null;
-    if (closed !== null) return say("closed", closed());
+    const ready = control?.readyState === WebSocket.OPEN && (shown || mine);
+    button.disabled = !ready || closed !== null || paused;
+    if (closed !== null) return say(closed.state, closed.text);
+    if (paused) return say("paused", "Paused. Press anywhere to watch again.");
+    if (!shown && waking !== null) return say("waking", waking === "asleep" ? "Waking your computer…" : `Connecting to ${whose()}…`);
     if (!shown) return connects === 0 ? say("connecting", `Connecting to ${whose()}…`) : say("reconnecting", `${whose(true)} restarted. Reconnecting…`);
     if (mine) return say("mine", `You have ${whose()}`);
     if (holder) return say("theirs", `Someone else has ${whose()}`);
@@ -84,12 +104,22 @@
   };
   addEventListener("message", (e) => {
     const d = e.data;
-    if (window.parent === window || e.source !== window.parent || d?.fragment !== "screen" || d.agent !== agent || typeof d.name !== "string" || !d.name) return;
+    if (window.parent === window || e.source !== window.parent || d?.fragment !== "screen" || d.agent !== agent) return;
+    // its person is at the page framing it (a key, a press, the pointer)
+    if (d.active === true) return document.hidden || attn.used("move");
+    if (typeof d.name !== "string" || !d.name) return;
     name = d.name;
     titled();
     show();
   });
 
+  // the stream's last frame, kept in sight while it is paused or gone
+  const keep = () => {
+    try {
+      if (rfb && shown) still.src = rfb.toDataURL();
+    } catch {}
+    still.hidden = !still.src;
+  };
   const connect = () => {
     rfb = new RFB(screen, socket("websockify"), { shared: true });
     rfb.viewOnly = !mine;
@@ -100,40 +130,93 @@
       connects += 1;
       // how many streams this page has opened, for its checks (crates/e2e: hermes)
       screen.dataset.connects = String(connects);
+      still.hidden = true;
+      waking = null;
+      attn.up();
       show();
     });
     rfb.addEventListener("disconnect", () => {
       shown = false;
       rfb = null;
-      if (closed === null) {
+      if (closed === null && !paused && attn.attended()) {
         setTimeout(again, retry);
         retry = Math.min(retry * 2, RETRY_MAX_MS);
       }
-      gone();
+      show();
     });
   };
-  // The stream again, unless the control socket closed meanwhile; and what
-  // the page says once both are closed.
-  const again = () => (closed === null ? connect() : gone());
-  const gone = () => {
-    if (closed !== null && !shown) closed = () => `${whose(true)} closed. Reload to see it again.`;
+  // The stream again, unless the page closed or paused meanwhile, or no one
+  // is at it any more.
+  const again = () => (closed === null && !paused && !rfb && attn.attended() ? connect() : show());
+  // Its control socket closed: the computer went (asleep, restarting) or
+  // could not be reached. The stream goes with it, its last frame kept.
+  const lost = (code, reason) => {
+    const why = code === 4000 ? reason : "";
+    closed =
+      why === "asleep" ? { state: "asleep", text: "Your computer is asleep. Press anywhere to wake it." }
+      : why === "restarting" ? { state: "restarting", text: "Your computer is restarting. Press anywhere to see it again." }
+      : { state: "closed", text: "Disconnected. Press anywhere to connect again." };
+    waking = null;
+    attn.gone();
+    keep();
+    rfb?.disconnect();
     show();
   };
-  connect();
-
-  control.addEventListener("open", show);
-  control.addEventListener("close", () => { closed ??= () => "Take over is unavailable. Reload to try again."; gone(); });
-  control.addEventListener("message", (e) => {
-    const m = JSON.parse(e.data);
-    if (m.type !== "control" || m.agent !== agent) return;
-    holder = m.holder;
-    mine = holder === viewer;
-    if (rfb) rfb.viewOnly = !mine;
-    button.textContent = mine ? "Give back" : "Take over";
-    button.setAttribute("aria-pressed", String(mine));
-    show();
+  const openControl = () => {
+    const c = new WebSocket(socket("control"));
+    control = c;
+    c.addEventListener("open", show);
+    c.addEventListener("close", (e) => control === c && lost(e.code, e.reason));
+    c.addEventListener("message", (e) => {
+      const m = JSON.parse(e.data);
+      if (m.type !== "control" || m.agent !== agent) return;
+      holder = m.holder;
+      mine = holder === viewer;
+      if (rfb) rfb.viewOnly = !mine;
+      button.textContent = mine ? "Give back" : "Take over";
+      button.setAttribute("aria-pressed", String(mine));
+      show();
+    });
+  };
+  const attn = attention({
+    now: () => Date.now(),
+    setTimer: (f, ms) => setTimeout(f, ms),
+    clearTimer: (t) => clearTimeout(t),
+    // no one at it: the stream stops, so its tab goes quiet
+    pause: () => {
+      paused = true;
+      keep();
+      rfb?.disconnect();
+      show();
+    },
+    resume: () => {
+      paused = false;
+      retry = RETRY_MIN_MS;
+      if (closed === null && !rfb) connect();
+      show();
+    },
+    // a press after its sockets went: both opened again, once (a computer
+    // asleep wakes for them)
+    wake: () => {
+      waking = closed?.state ?? "closed";
+      closed = null;
+      paused = false;
+      retry = RETRY_MIN_MS;
+      openControl();
+      if (!rfb) connect();
+      show();
+    },
   });
-  button.addEventListener("click", () => control.send(JSON.stringify({ type: mine ? "give" : "take" })));
+  // A person's use, while the page is in sight: a press (a pointer or a
+  // touch down, a key), or the pointer moving, the wheel, the page shown.
+  const touched = (kind) => () => document.hidden || attn.used(kind);
+  for (const type of ["pointerdown", "keydown", "touchstart"]) addEventListener(type, touched("press"), { capture: true, passive: true });
+  for (const type of ["pointermove", "wheel"]) addEventListener(type, touched("move"), { capture: true, passive: true });
+  document.addEventListener("visibilitychange", touched("move"));
+
+  openControl();
+  connect();
+  button.addEventListener("click", () => control?.readyState === WebSocket.OPEN && control.send(JSON.stringify({ type: mine ? "give" : "take" })));
 </script>
 </body>
 </html>

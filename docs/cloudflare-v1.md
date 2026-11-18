@@ -220,9 +220,10 @@ computers) returns once this product works.
 ### The generic pieces
 
 39. **A subscription wakes a computer.** A record on a channel its bridge
-    follows wakes it. It stays awake while a port tab or the guest's
-    keepalive socket to the Computer DO is open (container traffic does
-    not count), then sleeps after `computer::IDLE_MS`. A page that opens
+    follows wakes it. It stays awake while the guest's keepalive socket
+    to the Computer DO is open, or a port tab's page speaks (container
+    traffic does not count; Paul, 2026-11-18: a tab merely open holds
+    nothing), then sleeps after `computer::IDLE_MS`. A page that opens
     a fragment it follows pre-wakes it (`PREWAKE_MS`). An agent added to
     a fragment wakes it with `{kind: "joined"}` on its `tasks`.
 40. **Blessed templates run the platform's release.** A chat, agent, brain

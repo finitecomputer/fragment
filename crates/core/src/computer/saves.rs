@@ -161,6 +161,11 @@ pub struct WentBack {
     pub restored: ComputerRestore,
     /// That save's number (none: it restored nothing).
     pub save: Option<u64>,
+    /// No turn ran and no port tab was used on the lost life after the save
+    /// it went back to (`Saves::unchanged`). False when stored before this
+    /// was kept: told as a change lost.
+    #[serde(default)]
+    pub unchanged: bool,
 }
 
 /// Why a life's work since its last save is in no save, from how it ended
@@ -241,11 +246,28 @@ impl Saves {
     /// nothing of such a start (`notices`); its guest still reads it as a
     /// rollback (`restored`).
     fn lost_nothing(&self, e: &Ended, back_to: Option<&Save>) -> bool {
+        e.quiet && self.back_to_its_own(e, back_to)
+    }
+
+    /// Whether going back to `back_to` after the life `e` ended changed
+    /// nothing the platform ran since: no turn ran and no port tab was used
+    /// on that life since its newest save that worked (`Ended::unchanged`),
+    /// and `back_to` is that save (or the one it came up from), as for
+    /// `lost_nothing`. Its owner is told it went back, never that changes
+    /// were lost.
+    pub fn unchanged(&self, e: &Ended, back_to: Option<&Save>) -> bool {
+        e.unchanged && self.back_to_its_own(e, back_to)
+    }
+
+    /// Whether `back_to` (none: an empty `/data`) is the save that holds
+    /// what the life `e` did up to its newest save that worked: that save,
+    /// or, with none of its own, the one it came up from.
+    fn back_to_its_own(&self, e: &Ended, back_to: Option<&Save>) -> bool {
         let kept_in = match self.saves.iter().find(|s| s.generation == e.generation) {
             Some(own) => Some(Some(own.id.as_str())),
             None => self.restored.as_ref().filter(|r| r.generation == e.generation).map(|r| r.save.as_deref()),
         };
-        e.quiet && kept_in == Some(back_to.map(|s| s.id.as_str()))
+        kept_in == Some(back_to.map(|s| s.id.as_str()))
     }
 
     /// Its owner saw the notice of the lost life `life`: it, and any loss
@@ -341,11 +363,11 @@ impl Saves {
         // its owner is told of it until they say they saw it (`notices`),
         // unless it lost nothing (read before this start's `restored`
         // replaces the lost life's)
-        let told = ended.filter(|e| rollback && !self.lost_nothing(e, restored_save));
+        let told = ended.filter(|e| rollback && !self.lost_nothing(e, restored_save)).map(|e| (e, self.unchanged(&e, restored_save)));
         self.rollbacks += u64::from(rollback);
         self.restored = Some(restored.clone());
-        if let Some(e) = told {
-            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number) });
+        if let Some((e, unchanged)) = told {
+            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number), unchanged });
         }
         // a restart's start is fresh; the starts after it may use a snapshot again
         self.fresh = false;

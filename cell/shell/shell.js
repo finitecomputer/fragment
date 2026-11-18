@@ -40,6 +40,7 @@ import { answerTo } from "./computer-answer.js";
 import { standIns } from "./frame-standin.js";
 import * as making from "./making.js";
 import { createAsks } from "./asks.js";
+import { screenActive } from "./screen-active.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -1409,6 +1410,16 @@ function nameScreen(frame) {
     frame.contentWindow?.postMessage({ fragment: KIND.screen, agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
   } catch {}
 }
+
+// The person at the shell, told to the agents' screens on view, so one
+// beside what they work in keeps streaming (screen-active.js): a key, a
+// press, the pointer or a touch while the page is in sight.
+const screensActive = screenActive({
+  now: () => Date.now(),
+  frames: () => [...document.querySelectorAll("iframe[data-screen]")].filter((f) => f.checkVisibility()),
+  tell: (frame) => frame.contentWindow?.postMessage({ fragment: KIND.screen, agent: frame.dataset.screen, active: true }, new URL(frame.dataset.src).origin),
+});
+for (const type of ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"]) addEventListener(type, () => document.hidden || screensActive(), { capture: true, passive: true });
 
 const { pressSetup, openSetup } = createConnectorSetup({ el, named, frameOf });
 const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({

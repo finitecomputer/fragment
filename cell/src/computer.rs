@@ -729,9 +729,13 @@ struct TestLever {
     row: Option<Value>,
 }
 
+/// `computer/tab` (entry.mjs, `port`): a port tab opened, closed, or used
+/// (`used`: its page spoke, told a minute apart at most).
 #[derive(Deserialize)]
 struct Tab {
     open: bool,
+    #[serde(default)]
+    used: bool,
 }
 
 fn sha_hex(s: &str) -> String {
@@ -1941,6 +1945,10 @@ impl ComputerCell {
         let t0 = js::now_ms();
         let mut exited = None;
         if self.container_running().await {
+            // its port tabs told why they close, before its container's
+            // end of them goes unexplained (docs/computers.md, Ports)
+            let why = if matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { restarting: true, .. })) { "restarting" } else { "asleep" };
+            let _ = self.call("closeTabs", &[why.into()]).await;
             let saves = self.saves().ok();
             let newest = saves.as_ref().and_then(|s| s.all().first().cloned()).filter(|s| s.generation == generation);
             // a restart's start is fresh from the image: no snapshot for it
@@ -2694,6 +2702,7 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                v["heldUntil"] = json!(life.held_until_ms());
                 v["phase"] = json!(life.phase);
                 v["failures"] = json!(life.failures());
                 // a container runs for this object, whichever start's
@@ -2966,7 +2975,12 @@ impl ComputerCell {
             "computer/tab" => {
                 let b: Tab = body_json(&mut req).await?;
                 let socket = Socket::Tab;
-                self.drive(if b.open { Event::Opened { socket } } else { Event::Closed { socket } }).await?;
+                self.drive(match (b.open, b.used) {
+                    (true, true) => Event::TabUsed,
+                    (true, false) => Event::Opened { socket },
+                    (false, _) => Event::Closed { socket },
+                })
+                .await?;
                 json_response(&json!({ "ok": true }))
             }
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),

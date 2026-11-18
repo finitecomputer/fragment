@@ -270,12 +270,23 @@ async function bounded(step, ms, run) {
 // names the start it is for (its generation): a late call for an earlier
 // start (a sleep that finishes after a wake started another) touches
 // nothing.
+// A port tab's use is told at most this often, across its tabs: a message
+// from a tab's page is its person's use (an open tab holds the computer
+// only by its use, IDLE_MS after the last: fragment_core's lifecycle,
+// `Event::TabUsed`), and one report a minute keeps a person at work awake
+// at one lifecycle write a minute, not one a keystroke.
+const TAB_USED_EVERY_MS = 60_000;
+
 class ContainerHost {
   #ctx;
   #env;
   #report;
   #generation = 0;
   #backups;
+  // when a tab's use was last told (`#used`)
+  #usedAt = 0;
+  // each open tab's close (`port`), for a stop to close them (`closeTabs`)
+  #tabs = new Set();
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -504,9 +515,12 @@ class ContainerHost {
   }
 
   // A request to one of the container's ports. A WebSocket is bridged
-  // through this Durable Object (both ends accepted here, so an open tab
-  // keeps the computer awake), its opening and closing reported as
-  // `computer/tab`. Each end's listeners are added before it is accepted
+  // through this Durable Object (both ends accepted here), its opening,
+  // closing and use reported as `computer/tab`: a message from the page's
+  // end after its opening was told is its use (`#used`), and a tab whose
+  // page says nothing holds the computer no longer than its opening does.
+  // The container's end speaking is no use: a screen draws by itself.
+  // Each end's listeners are added before it is accepted
   // and before anything is awaited: a message that arrives with no
   // listener is gone, and a container's socket may speak first (an RFB
   // server's version, the screen's control socket's holder), whose first
@@ -528,9 +542,12 @@ class ContainerHost {
     if (!upstream) return resp;
     const [client, server] = Object.values(new WebSocketPair());
     let closed = false;
+    // its opening is told (before that, a word from its page is the opening's)
+    let told = false;
     const close = (code, reason) => {
       if (closed) return;
       closed = true;
+      this.#tabs.delete(close);
       const sendable = code >= 1000 && code < 5000 && ![1004, 1005, 1006, 1015].includes(code);
       for (const ws of [upstream, server]) {
         try {
@@ -548,7 +565,9 @@ class ContainerHost {
       if (!closed) server.send(e.data);
     });
     server.addEventListener("message", (e) => {
-      if (!closed) upstream.send(e.data);
+      if (closed) return;
+      upstream.send(e.data);
+      if (told) this.#used();
     });
     for (const ws of [upstream, server]) {
       ws.addEventListener("close", (e) => close(e.code, e.reason));
@@ -556,8 +575,30 @@ class ContainerHost {
     }
     server.accept();
     upstream.accept();
+    this.#tabs.add(close);
     await this.#report("computer/tab", { open: true });
+    told = true;
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // A sleep or a restart is about to stop the container: each open port
+  // tab closes first with 4000 and `why` ("asleep" or "restarting"), which
+  // the container's own end of it, gone with it, could not say (its page
+  // says so, and waits for its person: images/hermes/screen/index.html).
+  // Answers how many it closed.
+  closeTabs(why) {
+    const tabs = [...this.#tabs];
+    for (const close of tabs) close(4000, why);
+    return tabs.length;
+  }
+
+  // A port tab's page spoke: told, unless a tab's use was told within
+  // TAB_USED_EVERY_MS. A report that fails is logged; the next use tells it.
+  #used() {
+    const now = Date.now();
+    if (now - this.#usedAt < TAB_USED_EVERY_MS) return;
+    this.#usedAt = now;
+    this.#report("computer/tab", { open: true, used: true }).catch((e) => console.error(JSON.stringify({ tab: "used", error: String((e && e.message) || e) })));
   }
 }
 
