@@ -690,11 +690,12 @@ impl FragmentCell {
                 serde_json::to_string(&modules).expect("modules serialize").into(),
             ],
         )?;
-        // code acts elsewhere as its agent only if it went live while its
-        // owner and its agent alone could edit it (acting.rs)
-        match self.others_edit()? {
-            false => self.set_meta(MetaKey::ActsAs, &loader_id)?,
-            true => self.del_meta(MetaKey::ActsAs)?,
+        // a blessed template's release code is the platform's: it acts
+        // elsewhere as its agent; the fragment's own code acts once its
+        // owner or its agent deploys it themselves (acting.rs `vouch`)
+        match &blessed {
+            Some(_) => self.set_meta(MetaKey::ActsAs, &loader_id)?,
+            None => self.del_meta(MetaKey::ActsAs)?,
         }
         let installed = Installed { operations: &manifest.operations, channels: &manifest.channels, triggers: &manifest.triggers };
         store_installed(&self.sql(), &installed)?;
@@ -965,6 +966,7 @@ impl FragmentCell {
         self.require(caller, false, Role::Editor)?;
         self.repo_ready().await?;
         let moved = self.interpret(refs).await?;
+        self.vouch(self.caller_id(caller)?)?;
         let refs: serde_json::Map<String, Value> = moved
             .into_iter()
             .map(|(which, m)| {

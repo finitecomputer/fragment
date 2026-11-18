@@ -1151,8 +1151,11 @@ Each is checked there exactly as the agent's own signed request (its
 membership and role, its owner's hold, a `relayed` record's door), so it
 opens nothing the agent could not do. A fragment that is no agent's acts
 nowhere (403), nor does one anyone but its owner and its agent may edit,
-nor code put live while someone else could (403: its owner or its agent
-deploys again).
+nor code but what its owner or its agent put live themselves (`deploy`,
+or `refresh` of `live`, while they alone may edit it) or a blessed
+template's release (403: its owner or its agent deploys it). In a job's
+body, which runs again at each advance, the capability's draft is sent
+again and its read read again: read through the step for an answer kept.
 
 ### Blobs
 

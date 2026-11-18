@@ -167,7 +167,7 @@ pub fn elsewhere(s: &mut Suite, api: &Api) -> Result<()> {
     let bound = act("post", &room, "chat", json!({ "id": "b1", "body": { "text": "not a step" } }))?;
     s.ok(
         "the capability posts nothing: a post is a job's step, at its run's depth",
-        bound["error"]["status"].as_u64().is_some() && bound["error"]["message"].as_str().is_some_and(|m| m.contains("job.otherFragments")) && records(api, &owner, &room, "chat").len() == 2,
+        bound["error"]["message"].as_str().is_some_and(|m| m.contains("job.otherFragments.post")) && records(api, &owner, &room, "chat").len() == 2,
         &bound,
     );
     // the same code on a fragment that is no agent's acts nowhere
@@ -190,11 +190,12 @@ pub fn elsewhere(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "DELETE", &format!("/api/f/{agent}/members/{them}"), None)?;
     anyhow::ensure!(r.status == 200, "the editor removed: {r}");
     let theirs = act("records", &room, "chat", json!({}))?;
-    s.commit(&x.made, &[("their.txt", Some(b"our code again".as_slice()))]);
-    s.deploy(&x.made);
+    // its owner deploys the same commit again: now theirs to vouch for
+    let r = api.signed(&owner, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?;
+    anyhow::ensure!(r.status == 200, "the owner deploys it again: {r}");
     let ours = act("records", &room, "chat", json!({}))?;
     s.ok(
-        "its code acts nowhere while someone else may edit it, nor code they put live once they are gone; deployed again by its owner, it acts",
+        "its code acts nowhere while someone else may edit it, nor code they put live once they are gone; deployed again by its owner, the same commit, it acts",
         shared["error"]["status"] == 403 && theirs["error"]["status"] == 403 && ours["answer"]["records"].as_array().is_some_and(|l| l.len() == 2),
         json!({ "shared": shared, "theirs": theirs, "ours": ours }),
     );
