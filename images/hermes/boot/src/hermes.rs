@@ -1271,29 +1271,55 @@ pub fn cut_turns_settled(out: &str) -> Result<(u64, u64, u64), String> {
     }
 }
 
-/// Where the boot keeps the relay hint (`relay_hint`) the computer last
-/// booted with, under the gateway's home: the hint its sessions' stored
-/// system prompts hold (`REFRESH_PROMPTS`).
-pub const HINT_STAMP: &str = ".fragment_relay_hint";
+/// Where the boot keeps the digest of what the sessions' stored system
+/// prompts were built from (`prompt_inputs`), under the gateway's home.
+pub const PROMPT_STAMP: &str = ".fragment_prompt_inputs";
 
-/// Whether the sessions' stored system prompts may hold another relay hint
-/// than `hint`: the stamp the last boot left (`HINT_STAMP`) is not it, or
-/// there is none (a computer that booted before the stamp, whose prompts
-/// hold whatever hint it had then).
-pub fn hint_changed(stamp: Option<&str>, hint: &str) -> bool {
-    stamp != Some(hint)
+/// What of ours a session's system prompt is built from, as one digest
+/// (SHA-256, hex): the relay hint (`relay_hint`) and every skill file
+/// Hermes indexes into it (`files`, each its path and bytes:
+/// `skills::indexed`, the SKILL.md and DESCRIPTION.md files its own
+/// skills-index snapshot watches), in path order. A change to any of them
+/// (an image's hint or its platform or bundled skills, an owner's managed
+/// skills) is a prompt the stored ones lack (`REFRESH_PROMPTS`).
+pub fn prompt_inputs(hint: &str, files: &[(String, Vec<u8>)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut h = Sha256::new();
+    h.update(b"hint\0");
+    h.update(hint.as_bytes());
+    for (path, bytes) in sorted {
+        h.update(b"\0file\0");
+        h.update(path.as_bytes());
+        h.update(b"\0");
+        h.update(Sha256::digest(bytes));
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether the sessions' stored system prompts may have been built from
+/// other inputs than `inputs` (`prompt_inputs`): the stamp the last
+/// refresh left (`PROMPT_STAMP`) is not it, or there is none (a computer
+/// that never stamped, whose prompts hold whatever it had then).
+pub fn inputs_changed(stamp: Option<&str>, inputs: &str) -> bool {
+    stamp != Some(inputs)
 }
 
 /// Every session of each `state.db` asked to rebuild its stored system
 /// prompt once, on its next turn, as Hermes' own `hermes sessions
 /// refresh-prompts` asks (a refresh epoch in the profile's state.db,
 /// `request_prompt_refresh`): history, session ids and the tools pin kept,
-/// one prompt-cache miss each. Hermes replays a session's stored prompt on
+/// one prompt-cache miss each, and the skills index read from disk again
+/// (its `rebuild_for_refresh`). Hermes replays a session's stored prompt on
 /// every later turn, rebuilding it only at a compression, a model change
-/// or `/new`, so a changed hint (`relay_hint`) would otherwise reach only
-/// new chats (Austin, 2026-11-17: `VOICE`, which an open chat's agent never
-/// saw). Run as the hermes user with each `state.db` as its arguments,
-/// before the gateway starts. Prints `{"asked": n}`, n the databases.
+/// or `/new`, so a changed input (`prompt_inputs`) would otherwise reach
+/// only new chats (Austin, 2026-11-17: `VOICE`, which an open chat's agent
+/// never saw; a managed skill added to an owner's set, which it never
+/// listed). Run as the hermes user with each `state.db` as its arguments,
+/// at boot before the gateway starts or beside it (Hermes takes a request
+/// while it runs, a warm agent included). Prints `{"asked": n}`, n the
+/// databases.
 pub const REFRESH_PROMPTS: &str = r#"import json, sys
 from pathlib import Path
 from hermes_state import SessionDB
@@ -1379,9 +1405,17 @@ mod tests {
     #[test]
     fn a_changed_hint_refreshes_the_stored_prompts() {
         let hint = relay_hint();
-        assert!(hint_changed(None, &hint), "a computer that booted before the stamp");
-        assert!(hint_changed(Some(&hint.replace(&format!("{VOICE}\n\n"), "")), &hint), "the hint before VOICE");
-        assert!(!hint_changed(Some(&hint), &hint), "a restart on the same image");
+        let skill = |path: &str, text: &str| (path.to_string(), text.as_bytes().to_vec());
+        let set = vec![skill("/managed/a/SKILL.md", "name: a"), skill("/view/fragment/SKILL.md", "name: fragment")];
+        let today = prompt_inputs(&hint, &set);
+        assert_eq!(today.len(), 64, "a SHA-256, hex: {today}");
+        assert!(inputs_changed(None, &today), "a computer that never stamped");
+        assert!(inputs_changed(Some(&prompt_inputs(&hint.replace(&format!("{VOICE}\n\n"), ""), &set)), &today), "the hint before VOICE");
+        assert!(inputs_changed(Some(&prompt_inputs(&hint, &set[..1])), &today), "a skill added since");
+        assert!(inputs_changed(Some(&prompt_inputs(&hint, &[set[0].clone(), skill("/view/fragment/SKILL.md", "name: fragment\ndescription: new")])), &today), "a skill changed since");
+        assert!(!inputs_changed(Some(&today), &today), "a restart on the same inputs");
+        assert_eq!(prompt_inputs(&hint, &[set[1].clone(), set[0].clone()]), today, "the order they are found in is no change");
+        assert_ne!(prompt_inputs(&hint, &[skill("/managed/a/SKILL.mdname: a", "")]), prompt_inputs(&hint, &set[..1]), "a path is never read into its bytes");
         assert_eq!(prompts_refreshed("{\"asked\": 2}\n"), Ok(2));
         assert_eq!(prompts_refreshed("a warning Hermes logged\n{\"asked\": 0}\n\n"), Ok(0));
         for bad in ["", "\n", "Traceback (most recent call last):", "{\"dbs\": 1}", "{\"asked\": -1}"] {
