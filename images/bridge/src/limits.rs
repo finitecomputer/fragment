@@ -212,6 +212,15 @@ pub const HISTORY_SCAN_RECORDS: u32 = 8;
 /// characters (a file's too).
 pub const RECAP_MESSAGE_MAX_BYTES: usize = HISTORY_NOTE_MAX_BYTES / 4;
 pub const RECAP_NAME_MAX_CHARS: usize = 60;
+/// Its read of the chat goes back in pages of this many records, at most
+/// this many: a chat's long messages fill a page of 100 past one answer
+/// (`ANSWER_MAX_BYTES`), and a page of these is one answer even when every
+/// record is a long reply, escaped twice over (or a record at the
+/// platform's own most, proto's `RECORD_BODY_MAX_BYTES`). The names of
+/// whoever else said them are read in this long, or told as `Someone`.
+pub const RECAP_PAGE_RECORDS: u32 = 16;
+pub const RECAP_SCAN_RECORDS: usize = 192;
+pub const NAMES_READ_MS_MAX: u64 = 1_500;
 /// The journal a note or a late card's answer reads, at most: pages of
 /// this many records, back from the turn's claim on `work` (to the agent's
 /// turn before it, or to the card) and back from the chat's tail (to that
@@ -387,6 +396,10 @@ const _: () = assert!(2 * KEEPALIVE_PING_MS < 60_000, "a cut keepalive is opened
 const _: () = assert!(NOTE_MAX_BYTES < MESSAGE_TEXT_MAX_BYTES, "a note is small beside the message it comes with");
 const _: () = assert!(AGE_NOTE_MAX_BYTES + NOTE_MAX_BYTES + HISTORY_NOTE_MAX_BYTES + 4 <= MESSAGE_TEXT_MAX_BYTES, "a turn's notes together (its age, a cut turn's or a card's, a chat's history or a recap) are told in no more than a message holds");
 const _: () = assert!(RECAP_MESSAGE_MAX_BYTES + 1024 < HISTORY_NOTE_MAX_BYTES, "a recap's newest line fits beside its head and where the rest is (under 1 KiB: note.rs, `recap`)");
+const _: () = assert!(RECAP_PAGE_RECORDS as usize * (2 * REPLY_TEXT_MAX_BYTES + 1024) < ANSWER_MAX_BYTES, "a page of the longest replies is one answer");
+const _: () = assert!(RECAP_PAGE_RECORDS <= NOTE_PAGE_RECORDS && RECAP_PAGE_RECORDS as usize <= RECAP_SCAN_RECORDS && RECAP_SCAN_RECORDS + NOTE_SCAN_RECORDS_MAX <= HISTORY_RECORDS_MAX);
+const _: () = assert!(RECAP_SCAN_RECORDS.div_ceil(RECAP_PAGE_RECORDS as usize) + NOTE_SCAN_RECORDS_MAX / NOTE_PAGE_RECORDS as usize + 1 <= HISTORY_PAGES_MAX, "a recap's reads (the chat, `work`, the channel list) are one budget");
+const _: () = assert!(NAMES_READ_MS_MAX < NOTE_READ_MS_MAX, "names are a note's detail");
 const _: () = assert!(HISTORY_NOTE_MAX_BYTES <= MESSAGE_TEXT_MAX_BYTES, "a chat's history is told in no more than a message holds");
 const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);
 const _: () = assert!(2 * NOTE_SCAN_RECORDS_MAX <= HISTORY_RECORDS_MAX && 2 * NOTE_SCAN_RECORDS_MAX / NOTE_PAGE_RECORDS as usize + 2 <= HISTORY_PAGES_MAX, "a read's bounds hold both scans");

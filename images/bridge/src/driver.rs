@@ -1799,19 +1799,27 @@ async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef]
 /// answer, the channel's first record is read, or `NOTE_SCAN_RECORDS_MAX`
 /// are. With whether they reach back to its start.
 async fn read_back(api: &Api, agent: &str, fragment: &str, channel: &str, before: u64, enough: impl Fn(&[Record]) -> bool, budget: &mut Budget) -> Result<(Vec<Record>, bool), Unavailable> {
+    read_pages(api, agent, fragment, channel, before, (limits::NOTE_PAGE_RECORDS, limits::NOTE_SCAN_RECORDS_MAX), enough, budget).await
+}
+
+/// `read_back`, a page of `scan.0` records at a time, at most `scan.1`.
+#[allow(clippy::too_many_arguments)]
+async fn read_pages(api: &Api, agent: &str, fragment: &str, channel: &str, before: u64, scan: (u32, usize), enough: impl Fn(&[Record]) -> bool, budget: &mut Budget) -> Result<(Vec<Record>, bool), Unavailable> {
+    let (page_records, most) = scan;
+    assert!(page_records >= 1 && page_records <= limits::NOTE_PAGE_RECORDS && page_records as usize <= most, "a scan reads whole pages");
     let mut got: Vec<Record> = Vec::new();
     // the newest seq not read yet
     let mut upto = before.saturating_sub(1);
-    // bounded by NOTE_SCAN_RECORDS_MAX: each pass reads a page further back
+    // bounded by `most`: each pass reads a page further back
     loop {
         if upto == 0 {
             return Ok((got, true));
         }
-        if enough(&got) || got.len() >= limits::NOTE_SCAN_RECORDS_MAX {
+        if enough(&got) || got.len() >= most {
             return Ok((got, false));
         }
-        let after = upto.saturating_sub(u64::from(limits::NOTE_PAGE_RECORDS));
-        let (page, size) = api.history_records(agent, fragment, channel, after, limits::NOTE_PAGE_RECORDS, budget.request()?).await?;
+        let after = upto.saturating_sub(u64::from(page_records));
+        let (page, size) = api.history_records(agent, fragment, channel, after, page_records, budget.request()?).await?;
         budget.bytes(size)?;
         budget.page(&page.records, channel, after, upto)?;
         let mut older: Vec<Record> = page.records.into_iter().filter(|r| r.seq <= upto).collect();
@@ -1927,7 +1935,10 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
     // the turn's claim names what started it; the agent's row, when it joined
     let (claimed, members) = tokio::join!(api.records(agent, chat, records::WORK, claim.saturating_sub(1), 1), api.members(agent, chat));
     let claimed = claimed.map_err(|e| unread(e.into())).ok()?.records.into_iter().find(|r| r.seq == claim && r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == ts.turn.as_str());
-    let since = members.map_err(|e| unread(e.into())).ok()?.into_iter().find(|m| m.principal == me).map(|m| m.added_at);
+    let members = members.map_err(|e| unread(e.into())).ok()?;
+    let since = members.iter().find(|m| m.principal == me).map(|m| m.added_at);
+    // the lead, the first agent added (engine.rs): a command for no one is its
+    let lead = members.iter().filter(|m| m.kind == "agent").min_by(|a, b| (a.added_at, &a.principal).cmp(&(b.added_at, &b.principal))).is_some_and(|m| m.principal == me);
     let (Some(claimed), Some(since)) = (claimed, since) else {
         crate::ev!("note.unread", { "turn": ts.turn, "forgotten": true, "why": "its claim, or its agent's membership, is not where the turn says" });
         return None;
@@ -1944,11 +1955,12 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
         }
     };
     let full = |rs: &[Record]| {
-        let (said, begins) = note::exchanges(rs, me, owner, since, until);
+        let (said, begins) = note::exchanges(rs, me, owner, lead, since, until);
         begins || note::recap_bytes(&said) >= limits::HISTORY_NOTE_MAX_BYTES
     };
-    let (read, from_start) = read_back(api, agent, chat, records::CHAT, before, full, &mut budget).await.map_err(unread).ok()?;
-    let (said, begins) = note::exchanges(&read, me, owner, since, until);
+    // small pages: a page of the chat's longest records is one answer still
+    let (read, from_start) = read_pages(api, agent, chat, records::CHAT, before, (limits::RECAP_PAGE_RECORDS, limits::RECAP_SCAN_RECORDS), full, &mut budget).await.map_err(unread).ok()?;
+    let (said, begins) = note::exchanges(&read, me, owner, lead, since, until);
     let Some(oldest) = said.first().map(|r| r.at) else {
         crate::ev!("note.none", { "turn": ts.turn, "forgotten": true, "why": "nothing said here before it to tell" });
         return None;
@@ -1957,18 +1969,23 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
     // the oldest of them, and to the start of each turn a reply names
     let replied: Vec<&str> = said.iter().filter(|r| note::own_words(&r.principal, &r.body, me, owner)).filter_map(|r| r.body["turn"].as_str()).collect();
     let started = |rs: &[Record]| rs.first().is_some_and(|r| r.at < oldest) && replied.iter().all(|t| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == *t));
-    let (work, _) = read_back(api, agent, chat, records::WORK, claim, started, &mut budget).await.map_err(unread).ok()?;
+    // and whoever else said them, by name, beside it: a name not read in
+    // time is `Someone`, and the note goes on
     let mut others: Vec<String> = said.iter().map(|r| r.principal.clone()).filter(|p| p != me && p != owner).collect();
     others.sort();
     others.dedup();
-    let names = if others.is_empty() {
-        BTreeMap::new()
-    } else {
-        api.people(agent, chat, &others).await.unwrap_or_else(|e| {
-            crate::ev!("note.names_unread", { "turn": ts.turn, "error": e.to_string() });
+    let names = async {
+        if others.is_empty() {
+            return BTreeMap::new();
+        }
+        let read = tokio::time::timeout(Duration::from_millis(limits::NAMES_READ_MS_MAX), api.people(agent, chat, &others)).await;
+        read.map_err(|_| "the names answered too slowly".to_string()).and_then(|r| r.map_err(|e| e.to_string())).unwrap_or_else(|why| {
+            crate::ev!("note.names_unread", { "turn": ts.turn, "why": why });
             BTreeMap::new()
         })
     };
+    let (work, names) = tokio::join!(read_back(api, agent, chat, records::WORK, claim, started, &mut budget), names);
+    let work = work.map_err(unread).ok()?.0;
     let text = note::recap(&said, &work, me, owner, &names, chat, begins || from_start)?;
     crate::ev!("note", { "turn": ts.turn, "forgotten": true, "messages": said.len(), "bytes": text.len() });
     Some(text)

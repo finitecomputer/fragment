@@ -2002,6 +2002,73 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     bridge.stop().await;
 }
 
+/// Goal (M17; Codex on the recap): a runtime that forgot a chat of long
+/// messages is told its newest, not nothing. A page of a hundred of them
+/// is past one answer (`ANSWER_MAX_BYTES`), so the recap reads the chat in
+/// small pages. Method: the agent posts eighty 30 KiB messages of its own
+/// between two turns; a save after the second, a rollback past the third.
+#[tokio::test]
+async fn a_chat_of_long_messages_is_told_its_newest() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("recap-long");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), support::script());
+    following(&fake, 2).await;
+    said_and_ended(&fake, &chat, "one").await;
+    for i in 0..80 {
+        fake.say(&chat, "npub1juniper", json!({ "text": format!("long {i} {}", "w".repeat(30 * 1024)) }));
+    }
+    // read past them: its cursor is after them in the save
+    said_and_ended(&fake, &chat, "mid").await;
+    let saved = support::save_state(&dir);
+    said_and_ended(&fake, &chat, "two").await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::restore_state(&dir, &saved);
+    let bridge = support::start_killable(cfg, support::script());
+    let t3 = said_and_ended(&fake, &chat, "three").await;
+    let told = fake.with(|w| replies(w, &chat).into_iter().find(|r| r["turn"] == t3.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default());
+    let note = told.strip_prefix("echo: [paul] three\n\n(told: ").and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("three is told the chat: {:?}", &told[..told.len().min(300)]));
+    assert!(note.starts_with("Your memory of this chat is behind") && note.contains("\nEarlier messages are on the chat's record: `fragment channel talk--k3x9 chat`.\n"), "{}", &note[..note.len().min(600)]);
+    assert!(note.contains("\nYou: long 79 www") && note.ends_with("\nYour owner: mid\nYou: echo: [paul] mid\nYour owner: two\nYou: echo: [paul] two"), "the newest, long ones cut: {}", &note[note.len().saturating_sub(600)..]);
+    assert!(note.len() <= fragment_bridge::limits::HISTORY_NOTE_MAX_BYTES, "{}", note.len());
+    bridge.stop().await;
+}
+
+/// Goal (M17; Codex on the recap): names that answer too slowly cost a
+/// recap its names, never the recap. In a chat with another person, the
+/// recap is told with what they said as `Someone`'s when the chat's names
+/// (`__people`) answer past the note's whole time (`NOTE_READ_MS_MAX`).
+/// Method: a loss of the state, the names slowed once the new life has
+/// read the chat's members (its view is fresh for `VIEW_TTL_MS`).
+#[tokio::test]
+async fn a_recap_is_told_when_names_answer_slowly() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("recap-names");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), support::script());
+    following(&fake, 2).await;
+    said_and_ended(&fake, &chat, "one").await;
+    let said = fake.say(&chat, &person("skyler"), json!({ "text": "skyler here" }));
+    let t2 = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "skyler's turn's end", |w| !ends_of(w, &chat, &t2).is_empty()).await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::lose_state(&dir);
+    let posted = fake.with(|w| work_posts(w, &chat));
+    let bridge = support::start_killable(cfg, support::script());
+    // the new life has read both turns again (each claim and lost end a 409)
+    fake.until(WAIT, "both turns read again", |w| work_posts(w, &chat) >= posted + 4).await;
+    fake.with(|w| w.people_delay_ms = fragment_bridge::limits::NOTE_READ_MS_MAX + 2_000);
+    let t3 = said_and_ended(&fake, &chat, "three").await;
+    let told = fake.with(|w| replies(w, &chat).into_iter().find(|r| r["turn"] == t3.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default());
+    assert!(told.contains("\n\n(told: Your memory of this chat is behind") && told.contains("\nYour owner: one\nYou: echo: [paul] one\nSomeone: skyler here\nYou: echo: [skyler] skyler here"), "{told}");
+    bridge.stop().await;
+}
+
 /// Goal (P1): a turn whose claim (its `turn.start`) the platform does not
 /// answer is not run. Method: every post fails as the message arrives;
 /// once the fake has refused the claim twice (the lane tried it again),
