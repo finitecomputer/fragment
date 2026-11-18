@@ -60,6 +60,19 @@ use crate::share::label;
 /// an app to a fragment it is in: each way its own, so neither is read as
 /// the other (members.rs `tell_index`).
 pub(crate) const TO_APP: &str = "app:";
+
+/// An app's invite as its yes takes it: the invite waiting on `email`,
+/// made at `made`, for the app life holding `key`.
+pub(crate) struct Invited {
+    pub email: String,
+    pub made: i64,
+    pub key: String,
+}
+
+/// How long an app's growth note lasts: a growth asks each fragment it is
+/// in once, in one request, far sooner; a note older is one a request left
+/// as it ended (a restart), and looks no longer carry it.
+const GROWTH_NOTED_MS: i64 = 10 * 60 * 1000;
 pub(crate) const FROM_APP: &str = "in:";
 
 impl FragmentCell {
@@ -105,27 +118,35 @@ impl FragmentCell {
             vec![person.into(), power.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
         let id = noted.first().and_then(|r| r["id"].as_i64()).ok_or_else(|| CellError::host("a growth noted has no id"))?;
-        let asked = AppGrows { app: self.must(MetaKey::Npub)?, title: self.app_title()?, person: person.to_string(), role };
+        let asked = AppGrows { app: self.must(MetaKey::Npub)?, name: self.name()?, title: self.app_title()?, person: person.to_string(), role };
         // bounded: the fragments an app is in hold it as a member
         let answers = join_all(targets.iter().map(|t| crate::fragment::call(&self.env, t, &asked))).await;
         let refused = answers.iter().find_map(|a| a.as_ref().err().filter(|e| e.code != ErrorCode::NotFound));
         let Some(refused) = refused else { return Ok(Some(id)) };
-        self.exec("DELETE FROM app_growth WHERE id = ?", vec![SqlStorageValue::Integer(id)])?;
-        for (target, answer) in targets.iter().zip(&answers) {
-            if answer.is_ok() {
-                self.app_look(target)?;
-            }
-        }
-        self.flush_index().await;
+        self.given_up(Some(id)).await?;
         Err(CellError::new(refused.code, refused.message.clone()))
     }
 
-    /// A growth asked and written, or given up: its note goes.
+    /// A growth asked and written: its note goes.
     pub(crate) fn grown(&self, noted: Option<i64>) -> CellResult<()> {
         match noted {
             Some(id) => self.exec("DELETE FROM app_growth WHERE id = ?", vec![SqlStorageValue::Integer(id)]),
             None => Ok(()),
         }
+    }
+
+    /// A growth asked and not written (a no, a refusal after the yes, an
+    /// invite's ask, which its yes asks again): its note goes, and every
+    /// fragment it is in looks again, so no yes stays for someone it never
+    /// took.
+    pub(crate) async fn given_up(&self, noted: Option<i64>) -> CellResult<()> {
+        if noted.is_none() {
+            return Ok(());
+        }
+        self.grown(noted)?;
+        self.apps_look()?;
+        self.flush_index().await;
+        Ok(())
     }
 
     /// An app member's growth asked here (`AppGrows`): yes records the
@@ -134,7 +155,12 @@ impl FragmentCell {
     /// held to the strictest role, an editor's.
     pub(crate) async fn app_grows(&self, g: AppGrows) -> CellResult<()> {
         self.created()?;
-        let app_role = self.member_role(&g.app)?.unwrap_or(Role::Editor);
+        let asking = !self.rows("SELECT 1 AS x FROM app_asks WHERE name = ?", vec![g.name.as_str().into()])?.is_empty();
+        let app_role = match self.member_role(&g.app)? {
+            Some(role) => role,
+            None if asking => Role::Editor,
+            None => return Err(CellError::new(ErrorCode::NotFound, "that app is no member here")),
+        };
         let mut approved = self.app_audience(&g.app)?;
         let holds = self.member_role(&g.person)?;
         if let Err(refused) = app_member::grow(&mut approved, app_role, &g.person, g.role, holds) {
@@ -150,7 +176,7 @@ impl FragmentCell {
 
     /// `PUT members/<name>`, `name` an app of its owner's, at `role`: the
     /// app asked, then held to the rule in this fragment's own turn.
-    pub(crate) async fn add_app(&self, actor: &Actor, name: &str, role: Role, app_owner: &str) -> CellResult<Member> {
+    pub(crate) async fn add_app(&self, actor: &Actor, name: &str, role: Role, app_owner: &str, invited: Option<Invited>) -> CellResult<Member> {
         let me = self.name()?;
         let title = self.app_title()?;
         if name == me {
@@ -172,7 +198,7 @@ impl FragmentCell {
             Ok(answer) => {
                 // each person by their email, as the owner sees them, should a line name one
                 let names = self.emails(answer.audience.iter().map(|(p, _)| p.clone()).collect()).await;
-                self.app_answered(actor, name, role, (incarnation, version, &owner, app_owner, &title), &answer, &names)
+                self.app_answered(actor, name, role, (incarnation, version, &owner, app_owner, &title), &answer, &names, invited.as_ref())
             }
             Err(e) => Err(e),
         };
@@ -204,12 +230,23 @@ impl FragmentCell {
     /// why not: only while the ask is the newest, the life that asked and
     /// its owner's; held to the rule; then its row, the answer's life the
     /// one row of its name. Answers the row as written.
-    fn app_answered(&self, actor: &Actor, name: &str, role: Role, (incarnation, version, owner, app_owner, title): (i64, i64, &str, &str, &str), answer: &AppAnswer, names: &BTreeMap<String, String>) -> CellResult<Member> {
+    #[allow(clippy::too_many_arguments)]
+    fn app_answered(&self, actor: &Actor, name: &str, role: Role, (incarnation, version, owner, app_owner, title): (i64, i64, &str, &str, &str), answer: &AppAnswer, names: &BTreeMap<String, String>, invited: Option<&Invited>) -> CellResult<Member> {
         let newest = self.rows("SELECT 1 AS x FROM app_asks WHERE name = ? AND version = ?", vec![name.into(), SqlStorageValue::Integer(version)])?;
         // an answer from a life whose end was heard meanwhile is no yes
         let ended = self.rows("SELECT 1 AS x FROM app_ended WHERE name = ? AND incarnation >= ?", vec![name.into(), SqlStorageValue::Integer(answer.incarnation)])?;
         if self.incarnation().ok() != Some(incarnation) || self.must(MetaKey::Owner)? != owner || newest.is_empty() || !ended.is_empty() {
             return Err(CellError::new(ErrorCode::Conflict, "it changed while its app was asked: ask again"));
+        }
+        // an invite's yes: that same invite, waiting still, for that same app life
+        if let Some(i) = invited {
+            let waits = self.rows(
+                "SELECT 1 AS x FROM invites WHERE email = ? AND created_at = ? AND app = ? AND expires_at > ?",
+                vec![i.email.as_str().into(), SqlStorageValue::Integer(i.made), name.into(), SqlStorageValue::Integer(js::now_ms())],
+            )?;
+            if waits.is_empty() || answer.npub != i.key {
+                return Err(CellError::new(ErrorCode::Conflict, "that invite is no longer this app's: ask its owner to invite it again"));
+            }
         }
         // its list so far (none at a join) and its answer, held here; bounded:
         // an app's audience is its members and their owners
@@ -235,6 +272,10 @@ impl FragmentCell {
         let older = self.rows("SELECT principal FROM member_apps WHERE name = ? AND principal != ?", vec![name.into(), answer.npub.as_str().into()])?;
         self.room_for(u64::from(current.is_none() && older.is_empty()))?;
         self.exec("DELETE FROM app_asks WHERE name = ?", vec![name.into()])?;
+        // its invite, met, goes as the app comes in
+        if let Some(i) = invited {
+            self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![i.email.as_str().into(), SqlStorageValue::Integer(i.made)])?;
+        }
         for old in older.iter().filter_map(|o| o["principal"].as_str()) {
             self.app_out(old)?;
         }
@@ -275,9 +316,9 @@ impl FragmentCell {
             return Err(CellError::invalid("an app is invited by its fragment's name, and is not this one"));
         }
         let owner = self.must(MetaKey::Owner)?;
-        let theirs = crate::fragment::call(&self.env, name, &AppOwnerOf {}).await?.owner;
+        let crate::fragment::calls::AppOwner { owner: theirs, npub: key } = crate::fragment::call(&self.env, name, &AppOwnerOf {}).await?;
         if theirs == owner {
-            return Ok(fragment_proto::Shared::Member(self.add_app(actor, name, role, &owner).await?));
+            return Ok(fragment_proto::Shared::Member(self.add_app(actor, name, role, &owner, None).await?));
         }
         let (title, shown) = (self.app_title()?, label(name));
         if self.member_role(&theirs)?.is_none() {
@@ -292,12 +333,14 @@ impl FragmentCell {
         }
         let now = js::now_ms();
         let expires_at = now + fragment_proto::limits::INVITE_TTL_S * 1000;
-        // one app's invite to a member at a time: a newer one takes its place
+        // one app's invite to a member at a time: a newer one takes its
+        // place, and the one before comes back should the mail fail
+        let before = self.rows("SELECT email, role, expires_at, created_by, created_at, app, app_key FROM invites WHERE email = ?", vec![email.as_str().into()])?;
         self.exec(
-            "INSERT INTO invites (email, role, expires_at, created_by, created_at, app) VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO invites (email, role, expires_at, created_by, created_at, app, app_key) VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (email) DO UPDATE SET role = excluded.role, expires_at = excluded.expires_at, created_by = excluded.created_by,
-               created_at = excluded.created_at, app = excluded.app",
-            vec![email.as_str().into(), role.as_str().into(), SqlStorageValue::Integer(expires_at), actor.by.as_str().into(), SqlStorageValue::Integer(now), name.into()],
+               created_at = excluded.created_at, app = excluded.app, app_key = excluded.app_key",
+            vec![email.as_str().into(), role.as_str().into(), SqlStorageValue::Integer(expires_at), actor.by.as_str().into(), SqlStorageValue::Integer(now), name.into(), key.as_str().into()],
         )?;
         let asked = crate::registry::calls::InviteEmail {
             email: email.clone(),
@@ -309,6 +352,14 @@ impl FragmentCell {
         };
         if let Err(e) = crate::ask_registry(&self.env, &asked).await {
             self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
+            if let Some(was) = before.first() {
+                let text = |k: &str| was[k].as_str().map_or(SqlStorageValue::Null, Into::into);
+                let int = |k: &str| SqlStorageValue::Integer(was[k].as_i64().unwrap_or_default());
+                self.exec(
+                    "INSERT INTO invites (email, role, expires_at, created_by, created_at, app, app_key) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (email) DO NOTHING",
+                    vec![text("email"), text("role"), int("expires_at"), text("created_by"), int("created_at"), text("app"), text("app_key")],
+                )?;
+            }
             return Err(e);
         }
         self.sharing_changed()?;
@@ -320,12 +371,20 @@ impl FragmentCell {
     /// An app's invite accepted by `claim`'s person (the registry's yes):
     /// the app asked in, for its owner, them; it holds then, or the invite
     /// waits on, as any refusal of the app's leaves it.
-    pub(crate) async fn claim_app_invite(&self, claim: &crate::fragment::calls::InviteAnswer, app: &str, role: Role, by: String) -> CellResult<Role> {
-        let member = self.add_app(&Actor::invited_by(by), app, role, &claim.identity).await?;
-        self.exec("DELETE FROM invites WHERE email = ? AND app = ?", vec![claim.email.as_str().into(), app.into()])?;
-        self.sharing_changed()?;
-        self.flush_index().await;
-        Ok(member.role)
+    pub(crate) async fn claim_app_invite(&self, claim: &crate::fragment::calls::InviteAnswer, app: &str, role: Role, by: String, invited: Invited) -> CellResult<Role> {
+        let (email, made) = (invited.email.clone(), invited.made);
+        match self.add_app(&Actor::invited_by(by), app, role, &claim.identity, Some(invited)).await {
+            // its invite went in the join's own turn
+            Ok(member) => Ok(member.role),
+            // the app is gone: its invite goes with it, as the registry forgets it
+            Err(e) if e.code == ErrorCode::NotFound => {
+                self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(made)])?;
+                self.sharing_changed()?;
+                self.flush_index().await;
+                Err(e)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// The app members `person` owns, out with them (decision 72: a
@@ -341,10 +400,10 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// Whose this app is (`AppOwnerOf`), for an invite naming it.
+    /// Whose this app is, and its key (`AppOwnerOf`), for an invite naming it.
     pub(crate) fn app_owner_of(&self) -> CellResult<crate::fragment::calls::AppOwner> {
         self.created()?;
-        Ok(crate::fragment::calls::AppOwner { owner: self.must(MetaKey::Owner)? })
+        Ok(crate::fragment::calls::AppOwner { owner: self.must(MetaKey::Owner)?, npub: self.must(MetaKey::Npub)? })
     }
 
     /// The app member `principal`, by its name, if it is one.
@@ -511,6 +570,8 @@ impl FragmentCell {
     pub(crate) fn app_audience_of(&self) -> CellResult<AppAudience> {
         self.created()?;
         let mut audience = app_member::audience(&self.must(MetaKey::Owner)?, &self.member_list()?.members);
+        // a note a request left when it ended unanswered (a restart) goes
+        self.exec("DELETE FROM app_growth WHERE at < ?", vec![SqlStorageValue::Integer(js::now_ms() - GROWTH_NOTED_MS)])?;
         for g in self.rows("SELECT person, power FROM app_growth", vec![])? {
             let (Some(person), Some(power)) = (g["person"].as_str(), g["power"].as_str().and_then(Role::parse)) else { continue };
             let held = audience.entry(person.to_string()).or_insert(power);

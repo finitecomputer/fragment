@@ -162,6 +162,8 @@ impl Call for AppAsked {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AppGrows {
     pub app: String,
+    /// Its fragment name: a join still on its way is asked by it.
+    pub name: String,
     pub title: String,
     pub person: String,
     pub role: Role,
@@ -179,6 +181,8 @@ pub(crate) struct AppOwnerOf {}
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AppOwner {
     pub owner: String,
+    /// Its own key: an invite binds this life alone.
+    pub npub: String,
 }
 
 impl Call for AppOwnerOf {
