@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::time::Duration;
 use crate::api::{Api, Call};
-use crate::browser::Browser;
+use crate::browser::{Browser, Page};
 use crate::Suite;
 use fragment_nip98::Keys;
 use fragment_proto::limits;
@@ -152,25 +152,19 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     // box's top less the message's offset). Scrolled to the top, the
     // reader's message is the first shown; the page above it comes in.
     // a keyboard's way to the page above: the control at the top of the
-    // timeline, reached by Tab, seen once focused, and Enter loads the page
-    // above (a page the focus itself brought in by scrolling counts)
-    let mut reached = false;
-    for _ in 0..40 {
-        chrome.press(&page, "Tab", false)?;
-        if chrome.eval(&page, "document.activeElement?.id === 'earlier-load'")? == true {
-            reached = true;
-            break;
-        }
-    }
-    anyhow::ensure!(super::shows(chrome, &page, "document.getElementById('scroll').dataset.history === 'more'"), "no page in flight");
+    // timeline, reached by Tab, seen once focused (the page its focus
+    // scrolls to come in), and Enter loads one page more above
+    let (reached, scrolled) = tab_to_earlier(chrome, &page)?;
     let shown = chrome.eval(&page, "(() => { const b = document.getElementById('earlier-load'); const r = b.getBoundingClientRect(); return { label: b.textContent, width: r.width, height: r.height, focused: document.activeElement === b, disabled: b.getAttribute('aria-disabled') }; })()")?;
     let before = chrome.eval(&page, "document.querySelectorAll('.msg.user').length")?.as_u64().unwrap_or(0);
+    let reads = "window.__older.filter((u) => u.startsWith('chat?')).length";
+    let read = chrome.eval(&page, reads)?.as_u64().unwrap_or(0);
     chrome.press(&page, "Enter", false)?;
-    let paged = super::shows(chrome, &page, &format!("document.querySelectorAll('.msg.user').length === {} && document.activeElement?.id === 'earlier-load' && document.getElementById('scroll').dataset.history === 'more'", before + 100));
+    let paged = super::shows(chrome, &page, &format!("document.querySelectorAll('.msg.user').length === {} && {reads} === {} && document.activeElement?.id === 'earlier-load' && document.getElementById('scroll').dataset.history === 'more'", before + 100, read + 1));
     s.ok(
         "a keyboard reaches Load earlier messages at the top of the timeline (seen once focused), and Enter loads the page above, the focus kept on it",
-        reached && shown["label"] == "Load earlier messages" && shown["focused"] == true && shown["disabled"] == "false" && shown["width"].as_f64().is_some_and(|w| w > 20.0) && paged,
-        json!({ "reached": reached, "shown": shown, "before": before, "now": chrome.eval(&page, "document.querySelectorAll('.msg.user').length")? }),
+        reached && scrolled && shown["label"] == "Load earlier messages" && shown["focused"] == true && shown["disabled"] == "false" && shown["width"].as_f64().is_some_and(|w| w > 20.0) && paged,
+        json!({ "reached": reached, "scrolled": scrolled, "shown": shown, "before": before, "now": chrome.eval(&page, "document.querySelectorAll('.msg.user').length")?, "reads": chrome.eval(&page, "window.__older")? }),
     );
     let before = chrome.eval(&page, "document.querySelectorAll('.msg.user').length")?.as_u64().unwrap_or(0);
     let anchor = chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); window.__offset = (n) => n.getBoundingClientRect().top - s.getBoundingClientRect().top; window.__placed = () => window.__offset(document.querySelector('.msg[data-seq=\"' + window.__historySeq + '\"]')); s.scrollTop = 0; const m = [...document.querySelectorAll('.msg[data-seq]')].find(m => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); window.__historySeq = m.dataset.seq; window.__historyTop = window.__offset(m); return m.dataset.seq; })()")?;
@@ -1176,18 +1170,10 @@ pub(super) fn history_recovers(s: &mut Suite, api: &Api, owner: &Keys, session: 
     let recovered = super::shows(chrome, &page, &format!("{history} === 'more' && document.getElementById('history-status').textContent === '' && document.getElementById('earlier-again').hidden"));
     s.ok("connected again, nothing is said and older messages are there to load", recovered, chrome.eval(&page, history)?);
     // by the keyboard's control
-    let mut reached = false;
-    for _ in 0..40 {
-        chrome.press(&page, "Tab", false)?;
-        if chrome.eval(&page, "document.activeElement?.id === 'earlier-load'")? == true {
-            reached = true;
-            break;
-        }
-    }
-    anyhow::ensure!(super::shows(chrome, &page, &format!("{history} === 'more'")), "no page in flight");
+    let (reached, scrolled) = tab_to_earlier(chrome, &page)?;
     let before = chrome.eval(&page, count)?.as_u64().unwrap_or(0);
     chrome.press(&page, "Enter", false)?;
-    let by_key = reached && super::shows(chrome, &page, &format!("{count} === {} && {history} === 'more'", before + 100));
+    let by_key = reached && scrolled && super::shows(chrome, &page, &format!("{count} === {} && {history} === 'more'", before + 100));
     // and by scrolling up
     let before = chrome.eval(&page, count)?.as_u64().unwrap_or(0);
     chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
@@ -1195,10 +1181,31 @@ pub(super) fn history_recovers(s: &mut Suite, api: &Api, owner: &Keys, session: 
     s.ok(
         "after it, a page comes by the keyboard's control and a page by scrolling up",
         by_key && by_scroll,
-        json!({ "reached": reached, "byKey": by_key, "byScroll": by_scroll, "now": chrome.eval(&page, count)? }),
+        json!({ "reached": reached, "scrolled": scrolled, "byKey": by_key, "byScroll": by_scroll, "now": chrome.eval(&page, count)? }),
     );
     chrome.close(page)?;
     Ok(())
+}
+
+/// Tabs to the timeline's Load earlier messages, then waits for the page
+/// its focus brings in: focused, the control scrolls the timeline to its
+/// top, and the sentinel above it reads the page above. Its observer tells
+/// of the scroll only at the next frame, so just after the Tab the page
+/// says no read is in flight though one is about to start (CI read the
+/// control disabled there, its Enter lost to that read). With that page
+/// in and the focus kept, none is in flight or coming. Answers whether
+/// the Tab reached the control, and whether that page came.
+fn tab_to_earlier(chrome: &mut Browser, page: &Page) -> Result<(bool, bool)> {
+    let count = "document.querySelectorAll('.msg.user').length";
+    let shown = chrome.eval(page, count)?.as_u64().unwrap_or(0);
+    for _ in 0..40 {
+        chrome.press(page, "Tab", false)?;
+        if chrome.eval(page, "document.activeElement?.id === 'earlier-load'")? == true {
+            let came = format!("{count} === {} && document.activeElement?.id === 'earlier-load' && document.getElementById('scroll').dataset.history === 'more'", shown + 100);
+            return Ok((true, super::shows(chrome, page, &came)));
+        }
+    }
+    Ok((false, false))
 }
 
 /// A chat longer than the page's window (`WINDOW_MAX`, 600 messages):
