@@ -34,6 +34,7 @@ step Computer 2 agent_accounts 55b329a8b0da4bbd
 step Computer 3 key_hour 6c22fff2c2414701
 step Computer 4 key_caps 3a6f4f9976a3efe3
 step Computer 5 grants_forward_only 88b35e74ad3f41fe
+step Computer 6 grants_owed a3e6ebc05fade9e1
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 step Vault 1 baseline ecff84048657043f
@@ -208,8 +209,7 @@ Ledger table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Ledger table spend: CREATE TABLE spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment))
 Ledger table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
 
-Computer table agent_accounts: CREATE TABLE agent_accounts (agent TEXT NOT NULL, provider TEXT NOT NULL, account TEXT NOT NULL, PRIMARY KEY (agent, provider))
-Computer table agents: CREATE TABLE agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null')
+Computer table agents: CREATE TABLE agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL)
 Computer table awake: CREATE TABLE awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL)
 Computer table key_caps: CREATE TABLE key_caps (provider TEXT PRIMARY KEY, micros INTEGER NOT NULL)
 Computer table key_hour: CREATE TABLE key_hour (provider TEXT NOT NULL, slot INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (provider, slot))
