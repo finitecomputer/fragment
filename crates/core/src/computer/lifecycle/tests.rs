@@ -5,7 +5,6 @@ use serde_json::Value;
 
 use super::*;
 use crate::computer::testing::{owed, save_asked, started, T};
-use crate::computer::*;
 
 /// Goal: a record wakes a sleeping computer, which then sleeps twenty
 /// minutes after nothing holds it, metering exactly its awake time.

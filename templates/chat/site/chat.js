@@ -2980,9 +2980,7 @@ export function mount(root) {
   // this page's typing, to everyone here: on while there is text and a key
   // came lately, off after a send or TYPING_MS of quiet
   // with whether the chat is on screen (`looking`), which keeps the
-  // chat's code from pushing its replies to this page's person (app.mjs).
-  // Its turning on (the first keystroke after a pause) wakes the agents'
-  // computers here (decision 39).
+  // chat's code from pushing its replies to this page's person (app.mjs)
   const onScreen = () => document.visibilityState === "visible";
   const shared = { typing: false, looking: onScreen() };
   let typingTimer = 0;
