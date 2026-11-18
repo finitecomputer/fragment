@@ -822,10 +822,14 @@ arrives already transcribed, its words the quote above Hermes' audio
 note, its file only for work on the recording (`hermes::VOICE`); and that a
 reply line `MEDIA:<absolute path>` attaches a file there
 (`hermes::SENDING`). Hermes keeps the system prompt a chat's session
-began with and replays it on every later turn, so a change to these
-reaches an open chat at its next new session (its `/new`), or when
-Hermes next compresses it or its model changes; a new chat has it at
-once.
+began with and replays it on every later turn (rebuilding it only at a
+compression, a model change or `/new`), so when an image's relay hint
+is not the one the computer last booted with (its stamp,
+`hermes::HINT_STAMP`), the boot asks every session to rebuild its
+prompt once, on its next turn, as Hermes' own `hermes sessions
+refresh-prompts` does (`hermes::REFRESH_PROMPTS`): an open chat has the
+new hint at its next turn, its conversation kept, at one prompt-cache
+miss. A restart on the same hint asks nothing.
 
 ### Its name, in our Hermes image
 
