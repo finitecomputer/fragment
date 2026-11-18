@@ -4412,6 +4412,118 @@ async fn a_voice_memo_is_transcribed_through_the_route() {
     assert_eq!(c.exec_out(&["sh", "-c", "find /data -iname '*faster_whisper*' -o -iname 'ctranslate2*' | head -3"]).trim(), "", "no local Whisper installed for it");
 }
 
+/// Goal (Austin, 2026-11-17: `VOICE` would reach only new chats, as every
+/// hint before it did): a chat open before an image whose relay hint
+/// changed gets the new hint at its next turn after the computer starts on
+/// it, its conversation kept; a plain restart asks nothing again. Method:
+/// a turn, then the session's stored system prompt made an older image's
+/// (no VOICE) and the boot's stamp that image's hint, a restart, the next
+/// turn's model call; then a second restart, and the boot's events.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_open_chat_gets_a_changed_hint_after_a_restart() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let turn_of = |said: serde_json::Value| fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let before = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "remember the green gate" })));
+    fake.until(180_000, "the turn before the restart", |w| ended(w, &before)).await;
+    // the older image's: its stored prompts without VOICE, its stamp its hint
+    // (Hermes keeps a session's prompt in `system_prompts`, by its SHA-256,
+    // which the session's `system_prompt_hash` names)
+    const OLDER: &str = r#"import hashlib, re, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+old = lambda s: re.sub(r"\n\nA voice memo arrives already transcribed:.*?type it\.", "", s, flags=re.S)
+stored = "SELECT s.id, COALESCE(sp.prompt, s.system_prompt) FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash WHERE COALESCE(sp.prompt, s.system_prompt) LIKE '%A voice memo arrives already transcribed%'"
+rows = db.execute(stored).fetchall()
+for i, p in rows:
+    o = old(p)
+    h = hashlib.sha256(o.encode("utf-8")).hexdigest()
+    db.execute("INSERT OR IGNORE INTO system_prompts (hash, prompt) VALUES (?, ?)", (h, o))
+    db.execute("UPDATE sessions SET system_prompt_hash = ?, system_prompt = CASE WHEN system_prompt IS NULL THEN NULL ELSE ? END WHERE id = ?", (h, o, i))
+db.commit()
+print(len(rows), len(db.execute(stored).fetchall()))
+was = open(sys.argv[2]).read().strip()
+assert len(was) == 64 and int(was, 16) >= 0, "the stamp is today's inputs' digest: " + was
+open(sys.argv[2], "w").write("0" * 64)
+print(len(was))
+"#;
+    let older = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", OLDER, "/data/hermes/profiles/juniper--k3x9/state.db", "/data/hermes/.fragment_prompt_inputs"]);
+    let counts: Vec<u64> = older.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+    assert!(matches!(counts[..], [made, 0, stamped] if made > 0 && stamped > 0), "the chat's stored prompt and the stamp made the older image's: {older}");
+    c.restart();
+    let after = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "what gate was it" })));
+    fake.until(180_000, "the turn after the restart", |w| ended(w, &after)).await;
+    let call = handed(&model, "juniper--k3x9", "what gate was it").into_iter().next().expect("the turn's model call");
+    let messages = call.body["messages"].as_array().cloned().unwrap_or_default();
+    let system = messages.first().filter(|m| m["role"] == "system").map(content_text).unwrap_or_default();
+    assert!(system.contains("A voice memo arrives already transcribed"), "the open chat's prompt rebuilt with today's hint: {}", system.chars().take(2000).collect::<String>());
+    assert!(messages.iter().any(|m| m["role"] == "user" && content_text(m).contains("remember the green gate")), "its conversation kept: {messages:#?}");
+    // a restart on the same hint asks nothing: one refresh in both starts
+    c.restart();
+    let again = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "and again" })));
+    fake.until(180_000, "the turn after the second restart", |w| ended(w, &again)).await;
+    let refreshed = c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "prompts.refreshed" && e["why"] == "boot").count();
+    assert_eq!(refreshed, 1, "one refresh, at the first start on the changed hint: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
+}
+
+/// Goal (Austin, 2026-11-17: a skill's change, as a hint's, would reach
+/// only new chats): a managed skill added to its owner's set while a chat
+/// is open is in that chat's prompt at its next turn, no restart, its
+/// conversation kept; the turn before it had none. Method: an owner's
+/// skills fragment with one skill, installed every 2 s; a turn; a second
+/// skill added to the fragment; its install, then the refresh it asks for
+/// (`prompts.refreshed`, why `skills`); the next turn's model call.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_open_chat_lists_a_managed_skill_added_while_it_runs() {
+    const GARDEN: &str = "---\nname: garden-log\ndescription: Keep the garden's daily log of what was sown and watered.\n---\n# Garden log\n";
+    const SEEDS: &str = "---\nname: seed-swap\ndescription: Trade spare seeds with the neighbours' garden club each spring.\n---\n# Seed swap\n";
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let skills = fake.skills("skills", &[("skills/notes/garden-log/SKILL.md", GARDEN)]);
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SKILLS_MS", "2000")]);
+    fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let installed = |path: &str| c.exec(&["test", "-f", &format!("/data/hermes/managed-skills/{path}")]);
+    let t = Instant::now();
+    while !installed("notes/garden-log/SKILL.md") {
+        assert!(t.elapsed() < Duration::from_secs(60), "the first skill never installed:\n{}", c.logs());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let turn_of = |said: serde_json::Value| fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let before = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "remember the green gate" })));
+    fake.until(180_000, "the turn before the new skill", |w| ended(w, &before)).await;
+    let system_of = |said: &str| {
+        let call = handed(&model, "juniper--k3x9", said).into_iter().next().unwrap_or_else(|| panic!("the turn's model call for {said}"));
+        call.body["messages"].as_array().and_then(|m| m.first().filter(|m| m["role"] == "system").map(content_text)).unwrap_or_default()
+    };
+    let first = system_of("remember the green gate");
+    assert!(first.contains("garden-log") && !first.contains("seed-swap"), "the chat's prompt lists the set it began with: {}", first.chars().take(4000).collect::<String>());
+    // the owner's set gains a skill while the chat is open (the first
+    // install's own refresh, if the gateway had a database by then, is
+    // counted before it)
+    let refreshed = |c: &Container| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "prompts.refreshed" && e["why"] == "skills").count();
+    let base = refreshed(&c);
+    fake.with(|w| w.fragments.get_mut(&skills).expect("the skills fragment").files.insert("skills/notes/seed-swap/SKILL.md".into(), bytes::Bytes::from_static(SEEDS.as_bytes())));
+    let t = Instant::now();
+    while !(installed("notes/seed-swap/SKILL.md") && refreshed(&c) > base) {
+        assert!(t.elapsed() < Duration::from_secs(60), "the new skill's install never asked a refresh:\n{}", c.logs().lines().filter(|l| l.contains("skills.") || l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let after = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "what gate was it" })));
+    fake.until(180_000, "the turn after the new skill", |w| ended(w, &after)).await;
+    let call = handed(&model, "juniper--k3x9", "what gate was it").into_iter().next().expect("the turn's model call");
+    let messages = call.body["messages"].as_array().cloned().unwrap_or_default();
+    let system = messages.first().filter(|m| m["role"] == "system").map(content_text).unwrap_or_default();
+    assert!(system.contains("seed-swap"), "the open chat's prompt lists the new skill: {}", system.chars().take(4000).collect::<String>());
+    assert!(messages.iter().any(|m| m["role"] == "user" && content_text(m).contains("remember the green gate")), "its conversation kept: {messages:#?}");
+    // and an install that changes nothing asks nothing more
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(refreshed(&c), base + 1, "one refresh for the one change: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
+}
+
 // ---- teammates asking each other (route A: images/hermes/plugins/fragment-ask) ----
 
 /// The model calls made as `agent` whose messages hold `text`.
