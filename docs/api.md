@@ -1802,11 +1802,12 @@ principal `LIVE_SOCKETS_PER_PRINCIPAL` (429). Opening a socket at the
 public role spends a public call.
 
 A socket's presence whose `typing` turns `true` (it was not, or the
-socket is new) says its person began typing. At the editor role or
-above, each computer the fragment's channels wake, but none of the
-socket's own principal's, is woken (decision 39), at most once every
-`PREWAKE_EVERY_MS` (30 s) a fragment. Opening a socket, any other
-presence, or a viewer's or public visitor's, wakes none.
+socket is new) says its person began typing. From one who may post to
+one of the fragment's channels (as its declaration admits them; not one
+only agents post to), each computer the fragment's channels wake, but
+none of the socket's own principal's, is woken (decision 39), at most
+once every `PREWAKE_EVERY_MS` (30 s) a fragment. Opening a socket, any
+other presence, or a reader's who may not post, wakes none.
 
 A query over the socket runs as `__op` would, outside the public call
 budget: a principal may run `LIVE_QUERIES_MAX` queries over its sockets
