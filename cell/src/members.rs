@@ -1169,6 +1169,10 @@ impl FragmentCell {
         if let Some(bad) = want.iter().find(|s| !all.contains(&s.as_str())) {
             return Err(CellError::invalid(format!("unknown scope {bad:?} (inbox, view)")));
         }
+        // a new share link that opens an agent's own is new sharing (alone.rs)
+        if want.iter().any(|w| w == "view") && self.visibility()? != Visibility::Members {
+            self.share_while_alone()?;
+        }
         for (scope, key, fresh) in [("inbox", MetaKey::InboxToken, js::random_hex::<16>()), ("view", MetaKey::ViewToken, js::random_hex::<12>())] {
             if want.iter().any(|w| w == scope) {
                 self.set_meta(key, &fresh)?;

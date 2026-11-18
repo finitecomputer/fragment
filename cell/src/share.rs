@@ -343,6 +343,7 @@ struct SheetStatus {
     title: Option<String>,
     view_token: Option<String>,
     reach: Option<bool>,
+    npub: String,
 }
 
 /// Emails and pictures for identities, asked of the registry
@@ -480,6 +481,9 @@ struct Sheet {
     /// once that the people added can use its keys, and its Copy link is
     /// its address, never the share link.
     reach: bool,
+    /// An agent's own, its owner's alone (alone.rs): by its kind, or its
+    /// own key among its members, as it is once it has run as an agent.
+    alone: bool,
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
     form: String,
@@ -527,6 +531,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
     // an agent in with its person is no entry of its own (decision 64):
     // its person is the one, "with their agents", never named
     let all = members.members;
+    let alone = kind == FragmentKind::Agent || all.iter().any(|m| m.principal == status.npub);
     let with_agents: Vec<String> = all.iter().filter(|m| with_their_person(m, &all)).filter_map(|m| m.owner.clone()).collect();
     let members: Vec<Member> = all.iter().filter(|m| !with_their_person(m, &all)).cloned().collect();
     // an agent by its title and picture, as the shell shows it, read
@@ -552,6 +557,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         link,
         canonical,
         reach: status.reach == Some(true),
+        alone,
         profiles,
         form: form::issue(session, &purpose("share", name), js::now_ms()),
     })
@@ -676,7 +682,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     let (path, named, means) = general(sheet.visibility);
     // an agent's own is its owner's alone (alone.rs): no switch, but one
     // to close a link from before the rule
-    let alone = sheet.kind == FragmentKind::Agent;
+    let alone = sheet.alone;
     let alone_now = alone && sheet.visibility == Visibility::Members;
     // with reach, or an agent's, With link and Public show, unavailable,
     // saying why (reach.rs)
@@ -705,7 +711,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     // its field, still ends it
     let shared = sheet.link.as_deref().filter(|_| sheet.visibility == Visibility::Link);
     let copied = shared.filter(|_| !sheet.reach && !alone).unwrap_or(&sheet.canonical);
-    let rotate = match sheet.owner() && shared.is_some() {
+    let rotate = match sheet.owner() && shared.is_some() && !alone {
         true => action_form(
             sheet,
             "rotate",

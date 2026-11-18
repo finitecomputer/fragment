@@ -165,13 +165,15 @@ pub fn agent_sharing(s: &mut Suite, api: &Api) -> Result<()> {
     let closes = sheet.text.contains("name=\"visibility\" value=\"members\"");
     let public_locked = sheet.text.contains("value=\"public\" aria-pressed=\"false\" aria-disabled=\"true\"");
     let offers_invite = sheet.text.contains("Add people by email");
+    let offers_new = sheet.text.contains("aria-label=\"New link\"");
+    let renewed = api.signed(&owner, "POST", &at("rotate"), Some(&json!({ "scopes": ["view"] })))?;
     let closed = api.signed(&owner, "PUT", &at("visibility"), Some(&json!({ "visibility": "members" })))?;
     let after = api.page(&agent, &format!("__file?path=SOUL.md&view={view}"), None)?;
     let again = api.signed(&owner, "PUT", &at("visibility"), Some(&json!({ "visibility": "link" })))?;
     s.ok(
-        "FIN-544 before the rule: an agent fragment opened by its link keeps it until its owner closes it from its sheet, then it opens by link no more",
-        lever.status == 200 && held(&kept, SOUL) && closes && public_locked && !offers_invite && closed.status == 200 && !held(&after, SOUL) && again.status == 403,
-        json!({ "lever": lever.status, "kept": kept.status, "closes": closes, "public_locked": public_locked, "invite": offers_invite, "closed": closed.status, "after": after.status, "again": again.status }),
+        "FIN-544 before the rule: an agent fragment opened by its link keeps it, gets no new one, until its owner closes it from its sheet, then it opens by link no more",
+        lever.status == 200 && held(&kept, SOUL) && closes && public_locked && !offers_invite && !offers_new && renewed.status == 403 && closed.status == 200 && !held(&after, SOUL) && again.status == 403,
+        json!({ "lever": lever.status, "kept": kept.status, "closes": closes, "public_locked": public_locked, "invite": offers_invite, "new_link": offers_new, "renewed": renewed.status, "closed": closed.status, "after": after.status, "again": again.status }),
     );
 
     // 7. the other way: a fragment shared past its owner is not made an
@@ -190,6 +192,24 @@ pub fn agent_sharing(s: &mut Suite, api: &Api) -> Result<()> {
         "FIN-544 the other way: a fragment shared by link is not made an agent, and is once members only",
         linked.status == 200 && refused.status == 403 && refused.text.contains("It is shared") && narrowed.status == 200 && taken.status == 200,
         json!({ "link": linked.status, "assign": refused.status, "body": refused.body, "members": narrowed.status, "assign_after": taken.status }),
+    );
+    let invited = api.signed(&owner, "POST", &format!("/api/f/{app}/invites"), Some(&json!({ "email": Api::email_of(&api.person()?), "role": "viewer" })))?;
+    let sheet = with_session(api, "GET", &format!("/share/{app}"), &session)?;
+    let offers = sheet.text.contains("Add people by email") || sheet.text.contains("value=\"link\"");
+    s.ok(
+        "FIN-544 by its identity: a fragment that runs as an agent, though its fragment.json says app, takes no invite, and its sheet offers none",
+        invited.status == 403 && sheet.status == 200 && !offers && sheet.text.contains(PRIVATE),
+        json!({ "invite": invited.status, "sheet": sheet.status, "offers": offers }),
+    );
+
+    // 8. made public from its making: refused, and nothing made
+    let born = s.named(api, &owner, "agent-sharing-born")?;
+    let made = api.create_with(&owner, json!({ "name": born, "template": "agent", "title": "Wren", "visibility": "public" }))?;
+    let none = api.status(&owner, &born)?;
+    s.ok(
+        "FIN-544 at its making: an agent fragment made public is refused, and nothing is made",
+        made.status == 403 && made.text.contains(PRIVATE) && none.status == 404,
+        json!({ "create": made.status, "body": made.body, "status": none.status }),
     );
     Ok(())
 }
