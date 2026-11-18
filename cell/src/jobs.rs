@@ -60,7 +60,7 @@ use fragment_proto::ledger::Why;
 use fragment_proto::{
     limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use worker::wasm_bindgen::JsValue;
 use worker::*;
@@ -1067,12 +1067,6 @@ impl FragmentCell {
     /// follow is its agent's own: another identity's (this fragment made
     /// again since) is refused, and its follower ends it.
     pub(crate) async fn heard_followed(&self, f: crate::fragment::calls::Followed) -> CellResult<()> {
-        #[derive(Serialize)]
-        struct Heard<'a> {
-            fragment: &'a str,
-            channel: &'a str,
-            record: &'a ChannelRecord,
-        }
         self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
         if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(f.subscriber.as_str()) {
             return Err(CellError::new(ErrorCode::Forbidden, "that follow is another agent's, not this fragment's"));
@@ -1085,7 +1079,8 @@ impl FragmentCell {
         // read after the wait, so the runs start from the code installed now
         let own = self.own_key()?;
         let (fragment, channel, seq) = (f.fragment.as_str(), f.record.channel.as_str(), f.record.seq);
-        let input = serde_json::to_value(Heard { fragment, channel, record: &f.record }).expect("a record serializes");
+        // as a channel trigger's input (`fire_channel`), with where it was heard
+        let input = json!({ "fragment": fragment, "channel": channel, "record": f.record });
         for op in &ops()? {
             let call_id = format!("followed:{fragment}:{channel}:{seq}:{op}");
             let sha = crate::ops::input_sha(op, &fragment_proto::canonical_json(&input));
