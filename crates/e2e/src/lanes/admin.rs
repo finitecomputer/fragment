@@ -251,8 +251,9 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     let shown = b.eval(&page, "[...document.querySelectorAll('#tiles .tile')].map(t => t.querySelector('.label').textContent + ': ' + t.querySelector('.big').textContent)")?;
     let me = b.eval(&page, "document.getElementById('me').textContent")?;
     s.ok("an operator's session opens the admin's page on its glance: five tiles, and says who they are", tiles && me == "operator@e2e.test", &shown);
-    // the glance as an operator sees it, for review
-    let _ = b.screenshot(&page, &s.dir("admin-page").join("glance.png"));
+    // the glance as an operator sees it, for review (`dir` clears it: once)
+    let shots = s.dir("admin-page");
+    let _ = b.screenshot(&page, &shots.join("glance.png"));
     if !s.hosted() {
         let day = b.eval(&page, "(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); })()")?;
         let read = api.signed(&s.operator, "GET", &format!("/api/admin/glance?dayStart={day}"), None)?;
@@ -280,7 +281,7 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
         // the trouble rows as an operator sees them, wide and narrow, for review
         for (width, height, mobile, name) in [(1280, 900, false, "glance-trouble-1280.png"), (390, 844, true, "glance-trouble-390.png")] {
             b.viewport(&page, width, height, mobile)?;
-            let _ = b.screenshot(&page, &s.dir("admin-page").join(name));
+            let _ = b.screenshot(&page, &shots.join(name));
         }
         b.viewport(&page, 1280, 900, false)?;
         // no cache: a computer awake since, and the glance read again
@@ -377,7 +378,8 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     }
     s.observability.log(now - 30_000, of(ours, json!({ "computer": stranger, "disk": { "total": 20_000_000_000_u64, "free": 1_000_000_000_u64 }, "generation": 3 })));
     // its saves failed twice: the newest says why, naming a person's file
-    let failed = |seq: u64, why: &str| json!({ "computer": saver, "event": { "event": "save_failed", "generation": 2, "seq": seq, "why": why }, "phase": { "phase": "awake", "generation": 2, "since_ms": now - 600_000 } });
+    // (its phase left out of the lines, so it counts as awake nowhere)
+    let failed = |seq: u64, why: &str| json!({ "computer": saver, "event": { "event": "save_failed", "generation": 2, "seq": seq, "why": why } });
     s.observability.log(now - 40_000, of(ours, failed(1, "its container is not running")));
     s.observability.log(now - 15_000, of(ours, failed(2, "backup '/data': open /data/home/Tax Return.pdf: Permission denied (os error 13)")));
     s.observability.log(now - 5_000, of(foreign, json!({ "computer": "computer:0000000000000000000f0e1d", "phase": { "phase": "awake" } })));

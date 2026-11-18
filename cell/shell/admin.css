@@ -27,4 +27,4 @@ code, .mono { font-family: ui-monospace, monospace; font-size: .9em; }
 .tile .small { opacity: .8; font-size: .85rem; }
 section h2 { font-size: 1rem; margin: 1rem 0 .25rem; }
 .quiet { opacity: .6; font-size: .85rem; }
-.why { max-width: 40rem; overflow-wrap: anywhere; }
+.why { max-width: 40rem; overflow-wrap: break-word; }
