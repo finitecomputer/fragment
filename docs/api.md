@@ -687,7 +687,11 @@ fragment they own, `PUT members/{the app's name}`.
   no longer shows comes off its list, so taking them out of the app
   resumes it too.
 - Its row in `GET members` leaves out `kind` and names `app: {name}` and
-  its `owner`, who reads nothing through it. It is no guest in its owner's
+  its `owner`, who reads nothing through it. The app's own `GET members`
+  names where it is in (`canSee`). The share sheet shows the app as a row
+  of its own (its name, whose app it is, and, paused, "Paused. Robin can
+  see Board but is no longer here."), with its role and removal by its
+  name, and the app's sheet says "Can see: Tracker, Notes". It is no guest in its owner's
   row's `sharing`, and has no list of its own.
 - While it is a member anywhere, the app's `link` or `public` visibility is
   403 ("Board is in tracker, so it stays members only."), and its audience

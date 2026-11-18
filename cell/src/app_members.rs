@@ -83,7 +83,7 @@ impl FragmentCell {
     }
 
     /// The fragments this app is in, by name.
-    fn targets(&self) -> CellResult<Vec<String>> {
+    pub(crate) fn targets(&self) -> CellResult<Vec<String>> {
         let rows = self.rows("SELECT name FROM member_of WHERE role IS NOT NULL ORDER BY name", vec![])?;
         Ok(rows.iter().filter_map(|r| r["name"].as_str().map(str::to_string)).collect())
     }

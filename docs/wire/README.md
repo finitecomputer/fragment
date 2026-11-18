@@ -765,6 +765,7 @@ out. `GET /api/f/<name>/members` (viewer).
 
 | field | type | | |
 | --- | --- | --- | --- |
+| `canSee` | `array` of `string` | optional | An app's: the fragments it is a member of, by name, as its sheet's "Can see" says (decision 72; add-only: absent when none). |
 | `members` | `array` of [`Member`](#member) | required |  |
 
 ### `MessageHit`

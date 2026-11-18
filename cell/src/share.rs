@@ -404,7 +404,7 @@ pub(crate) fn with_their_person(m: &Member, members: &[Member]) -> bool {
 /// The ids a member list needs named: its members, and its agent
 /// members' owners.
 fn named_ids(members: &[Member]) -> Vec<String> {
-    members.iter().flat_map(|m| std::iter::once(m.principal.clone()).chain(m.owner.clone())).collect()
+    members.iter().flat_map(|m| std::iter::once(m.principal.clone()).chain(m.owner.clone()).chain(m.app.as_ref().and_then(|a| a.paused.clone()))).collect()
 }
 
 /// Someone as a sheet names them in a sentence: their email, an agent's
@@ -422,6 +422,9 @@ fn name_of(id: &str, p: Option<&Profile>) -> String {
 /// or an agent's name, and under it what they are to the fragment: an
 /// agent's owner, or a person's own agents, who reach what they do.
 fn person(m: &Member, sheet: &Sheet) -> String {
+    if let Some(app) = &m.app {
+        return app_row(app, m, sheet);
+    }
     let p = sheet.profiles.get(&m.principal);
     let (name, initial) = match p {
         Some(Profile { kind: IdentityKind::Agent, .. }) => (esc(&name_of(&m.principal, p)), "✦".to_string()),
@@ -452,6 +455,28 @@ fn person(m: &Member, sheet: &Sheet) -> String {
     format!("{picture}<span class=\"who\">{name}{you}{under}</span>")
 }
 
+/// An app member as a sheet shows it (decision 72): its name, whose it is,
+/// and, paused, whom it waits on.
+fn app_row(app: &fragment_proto::MemberApp, m: &Member, sheet: &Sheet) -> String {
+    let shown = label(&app.name);
+    let mut under = vec![match m.owner.as_deref() {
+        Some(o) if o == sheet.me => "Your app".to_string(),
+        Some(o) => format!("{}'s app", esc(&name_of(o, sheet.profiles.get(o)))),
+        None => "An app".to_string(),
+    }];
+    if let Some(person) = &app.paused {
+        let holds = sheet.members.iter().find(|p| &p.principal == person).map(|p| p.role);
+        let short = fragment_core::app_member::Short { person: person.clone(), power: Role::Editor, holds };
+        under.push(format!("<span class=\"paused\">{}</span>", esc(&short.paused(shown, &name_of(person, sheet.profiles.get(person))))));
+    }
+    format!(
+        "<span class=\"av\" aria-hidden=\"true\">{}</span><span class=\"who\">{}<small>{}</small></span>",
+        esc(&shown.chars().next().unwrap_or('?').to_uppercase().to_string()),
+        esc(shown),
+        under.join(" · ")
+    )
+}
+
 /// What the sheet shows, read as the signed-in person.
 struct Sheet {
     me: String,
@@ -459,6 +484,8 @@ struct Sheet {
     role: Option<Role>,
     /// Its members, less the agents in with their person.
     members: Vec<Member>,
+    /// An app's: the fragments it is in (decision 72), by name.
+    can_see: Vec<String>,
     /// The people whose agents are in with them.
     with_agents: Vec<String>,
     /// The invites waiting: the owner's only.
@@ -526,6 +553,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
     };
     // an agent in with its person is no entry of its own (decision 64):
     // its person is the one, "with their agents", never named
+    let can_see = members.can_see;
     let all = members.members;
     let with_agents: Vec<String> = all.iter().filter(|m| with_their_person(m, &all)).filter_map(|m| m.owner.clone()).collect();
     let members: Vec<Member> = all.iter().filter(|m| !with_their_person(m, &all)).cloned().collect();
@@ -543,6 +571,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         me: who.id.clone(),
         role,
         members,
+        can_see,
         with_agents,
         invites,
         visibility,
@@ -616,7 +645,8 @@ fn role_menu(sheet: &Sheet, m: &Member, who: &str) -> String {
         true => format!("<button type=\"button\" role=\"menuitem\">{}{}</button>", role_name(r), svg("tick on", TICK)),
         false => format!("<button role=\"menuitem\" name=\"role\" value=\"{}\" data-arm disabled>{}{}</button>", r.as_str(), role_name(r), svg("tick", TICK)),
     };
-    let member = hidden("member", &m.principal);
+    // an app by its name, which its role and removal take (decision 72)
+    let member = hidden("member", m.app.as_ref().map_or(&m.principal, |a| &a.name));
     let role = action_form(sheet, "role", &format!("{member}{}{}", item(Role::Viewer), item(Role::Editor)), "");
     let remove = action_form(
         sheet,
@@ -783,7 +813,13 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             ),
         );
     }
-    out += "</ul></section>";
+    out += "</ul>";
+    // an app's: where it is in, so its owner knows why its people are held
+    // to those (decision 72)
+    if !sheet.can_see.is_empty() {
+        out += &format!("<p class=\"hint can-see\">Can see: {}</p>", sheet.can_see.iter().map(|n| esc(label(n))).collect::<Vec<_>>().join(", "));
+    }
+    out += "</section>";
     // anyone else's: who changes it, and a member's own leaving (its
     // owner cannot)
     if !sheet.owner() {
@@ -878,7 +914,7 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
     let who = Signed::new(live.identity, None);
     let field = |k: &str| fields.get(k).map_or("", |v| v.trim());
     let member = || match field("member") {
-        m if npub::is_identity(m) => Ok(m.to_string()),
+        m if npub::is_identity(m) || fragment_proto::valid_fragment_name(m) => Ok(m.to_string()),
         m => Err(CellError::invalid(format!("{m:?} is not a member"))),
     };
     let role = || match Role::parse(field("role")) {
@@ -1079,6 +1115,7 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
                             owner_email: m.owner.as_deref().and_then(email),
                             // a person's own agents are never named (decision 63)
                             agents: vec![],
+                            app: m.app.clone(),
                         })
                         .collect();
                     (Some(listed), more, invites)

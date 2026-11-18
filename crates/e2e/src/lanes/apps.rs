@@ -14,10 +14,11 @@ use crate::api::{Api, Reply};
 use crate::{Need, Suite};
 
 pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("apps", &[Need::Node]) {
+    if !s.section("apps", &[Need::Node, Need::Chrome]) {
         return Ok(());
     }
-    let owner = api.person()?;
+    // the owner signs in on the platform too: their sheets are shown
+    let (owner, owner_session) = super::templates::person(api)?;
     let bob = api.person()?;
     let made = |s: &Suite, keys: &Keys, base: &str| -> Result<(String, String)> {
         let name = s.named(api, keys, base)?;
@@ -122,6 +123,32 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("lowering its editor to a viewer here works, and pauses it, naming them", lowered.status == 200 && paused(&carol_id)?, &lowered);
     let again = api.share(&tracker, &carol_id, "viewer")?;
     s.ok("(the same lowering again: still paused, on the same person)", again.status == 200 && paused(&carol_id)?, &again);
+
+    // ---- the two sheets as their owner sees them, at a desktop's width and
+    // a phone's, light and dark (evidence for a person): no sideways scroll
+    if let Some(mut chrome) = s.browser()? {
+        let (platform, wait) = (api.base.clone(), std::time::Duration::from_secs(20));
+        chrome.set_cookie(&format!("{platform}/"), "fragment_session", &owner_session)?;
+        let (mut fits, mut texts) = (vec![], vec![]);
+        for (sheet, base) in [(&tracker, "apps-sheet-fragment"), (&board, "apps-sheet-app")] {
+            let page = chrome.open(&format!("{platform}/share/{sheet}"))?;
+            for (width, mobile, scheme) in [(1280, false, "light"), (1280, false, "dark"), (390, true, "light"), (390, true, "dark")] {
+                chrome.viewport(&page, width, 900, mobile)?;
+                chrome.color_scheme(&page, scheme)?;
+                let ready = chrome.until(&page, "document.readyState === 'complete' && !!document.querySelector('main.share .people')", wait);
+                fits.push(ready && chrome.eval(&page, "document.documentElement.scrollWidth <= innerWidth")? == json!(true));
+                chrome.screenshot(&page, &s.scratch.join(format!("{base}-{width}-{scheme}.png")))?;
+            }
+            texts.push(chrome.eval(&page, "document.querySelector('main.share')?.innerText ?? ''")?.as_str().unwrap_or_default().to_string());
+            chrome.close(page)?;
+        }
+        let paused_line = format!("Paused. {} can edit {} but only views here.", Api::email_of(&carol), label(&board));
+        s.ok(
+            "the fragment's sheet shows the app as its owner's, paused, naming whom it waits on; the app's says where it is in; each fits, light and dark",
+            fits.iter().all(|f| *f) && texts[0].contains(&label(&board)) && texts[0].contains("Your app") && texts[0].contains(&paused_line) && texts[1].contains(&format!("Can see: {}", label(&tracker))),
+            format!("{fits:?} {texts:?}"),
+        );
+    }
     let gone = api.signed(&owner, "DELETE", &format!("/api/f/{tracker}/members/{dana_id}"), None)?;
     let row = app_row(&tracker)?;
     s.ok(

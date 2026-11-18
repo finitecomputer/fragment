@@ -1521,6 +1521,9 @@ pub struct AccessMember {
     /// email"), each acting with at most its cap (R17).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AccessAgent>,
+    /// An app member (`Member.app`; add-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<MemberApp>,
 }
 
 /// A member's agent, as the access view names it.
@@ -1614,8 +1617,14 @@ pub struct MemberApp {
 /// `GET /api/f/<name>/members` (viewer).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct MemberList {
     pub members: Vec<Member>,
+    /// An app's: the fragments it is a member of, by name, as its sheet's
+    /// "Can see" says (decision 72; add-only: absent when none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
+    pub can_see: Vec<String>,
 }
 
 /// What an identity is (docs/cloudflare-v1.md, R15). A fragment's own key
@@ -2926,7 +2935,7 @@ mod tests {
             value(&found),
             serde_json::json!({ "fragments": [], "messages": [{ "fragment": "talk.ann", "channel": "chat", "seq": 4, "at": 1, "snippet": "water the tomatoes" }] })
         );
-        let members = MemberList { members: vec![] };
+        let members = MemberList { members: vec![], can_see: vec![] };
         assert_eq!(value(&members), serde_json::json!({ "members": [] }));
         let invites = InviteList { invites: vec![] };
         assert_eq!(value(&invites), serde_json::json!({ "invites": [] }));

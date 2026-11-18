@@ -76,6 +76,7 @@ bound Member.email default null
 bound Member.kind default null
 bound Member.owner default null
 bound MemberApp.paused default null
+bound MemberList.canSee default []
 bound MessageHit.at range i64
 bound MessageHit.seq range i64
 bound Notice.actions default []
@@ -347,6 +348,7 @@ field Member.principal required string
 field Member.role required Role
 field MemberApp.name required string
 field MemberApp.paused optional string|null
+field MemberList.canSee optional array<string>
 field MemberList.members required array<Member>
 field MessageHit.at required integer
 field MessageHit.channel required string

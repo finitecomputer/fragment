@@ -1738,6 +1738,14 @@
       "MemberList": {
         "description": "`GET /api/f/<name>/members` (viewer).",
         "properties": {
+          "canSee": {
+            "default": [],
+            "description": "An app's: the fragments it is a member of, by name, as its sheet's\n\"Can see\" says (decision 72; add-only: absent when none).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "members": {
             "items": {
               "$ref": "#/components/schemas/Member"

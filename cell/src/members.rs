@@ -524,6 +524,8 @@ impl FragmentCell {
     pub(crate) async fn members(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let mut list = self.member_list()?;
+        // an app's: where it is in, which each of its members may open (decision 72)
+        list.can_see = self.targets()?;
         if self.shares(caller) {
             // bounded: at most MEMBERS_MAX, asked PROFILES_MAX at a time
             let people = list.members.iter().filter(|m| m.kind != Some(IdentityKind::Agent) && m.app.is_none()).map(|m| m.principal.clone()).collect();
@@ -543,7 +545,7 @@ impl FragmentCell {
              FROM members m LEFT JOIN member_apps a USING (principal) ORDER BY m.added_at, m.principal",
             vec![],
         )?;
-        Ok(MemberList { members: rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()? })
+        Ok(MemberList { members: rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()?, can_see: vec![] })
     }
 
     /// Its agent members as every list's row names them: the first added

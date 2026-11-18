@@ -371,7 +371,9 @@ export function createAppsPage(page, h, shelf = "apps") {
     }
     // their own agents reach what they do, unnamed (decision 63)
     const people = (row.members ?? []).filter((m) => !(m.kind === "agent" && m.owner === h.state.me?.id));
-    const names = people.map((m) => (m.kind === "agent" ? `${m.ownerEmail ?? "someone"}'s agent` : m.email ?? `${m.principal.slice(0, 9)}…`));
+    const names = people.map((m) =>
+      m.app ? `${m.app.name.split("--")[0]} (app)` : m.kind === "agent" ? `${m.ownerEmail ?? "someone"}'s agent` : m.email ?? `${m.principal.slice(0, 9)}…`,
+    );
     const more = names.length - NAMES_SHOWN + (row.more ?? 0);
     if (names.length) line.append(` · ${names.slice(0, NAMES_SHOWN).join(", ")}${more > 0 ? ` +${more}` : ""}`);
     else if (!row.members && row.sharing?.guests) line.append(` · ${row.sharing.guests} ${row.sharing.guests === 1 ? "other" : "others"}`);
