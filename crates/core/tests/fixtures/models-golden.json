@@ -1,0 +1,1473 @@
+{
+ "defaults": {
+  "calls": {
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|null": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "@cf/thinkingmachines/inkling-2-small|cheap": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "@cf/thinkingmachines/inkling-2-small|medium": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "@cf/thinkingmachines/inkling-2-small|null": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "@cf/zai-org/glm-5.3|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "@cf/zai-org/glm-5.3|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "@cf/zai-org/glm-5.3|null": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "cheap|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap|null": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "fallback|cheap": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "fallback|medium": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "fallback|null": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "medium|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "medium|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "medium|null": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "nope|cheap": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: @cf/deepseek-ai/deepseek-v4.1-flash-1017, @cf/zai-org/glm-5.3, @cf/thinkingmachines/inkling-2-small"
+   },
+   "nope|medium": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: @cf/deepseek-ai/deepseek-v4.1-flash-1017, @cf/zai-org/glm-5.3, @cf/thinkingmachines/inkling-2-small"
+   },
+   "nope|null": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: @cf/deepseek-ai/deepseek-v4.1-flash-1017, @cf/zai-org/glm-5.3, @cf/thinkingmachines/inkling-2-small"
+   },
+   "null|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "null|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "null|null": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "vision|cheap": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "vision"
+   },
+   "vision|medium": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "vision"
+   },
+   "vision|null": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "vision"
+   }
+  },
+  "deep": {
+   "cheap": null,
+   "medium": null
+  },
+  "embeddings_refused": null,
+  "ids": [
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+   "@cf/thinkingmachines/inkling-2-small",
+   "@cf/zai-org/glm-5.3"
+  ],
+  "priced": [
+   [
+    "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    {
+     "cache_write": 300000,
+     "cached_input": 6000,
+     "input": 300000,
+     "output": 1200000
+    }
+   ],
+   [
+    "@cf/thinkingmachines/inkling-2-small",
+    {
+     "cache_write": 300000,
+     "cached_input": 100000,
+     "input": 300000,
+     "output": 1000000
+    }
+   ],
+   [
+    "@cf/zai-org/glm-5.3",
+    {
+     "cache_write": 1400000,
+     "cached_input": 260000,
+     "input": 1400000,
+     "output": 4400000
+    }
+   ]
+  ],
+  "reached": {
+   "cheap": [
+    "cheap",
+    "fallback",
+    "vision"
+   ],
+   "medium": [
+    "fallback",
+    "medium",
+    "vision"
+   ]
+  },
+  "steps": {
+   "(none)": {
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap": {
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "high": {
+    "refused": "the high tier is off until Cloudflare raises Unified Billing's limit on Opus; use cheap or medium"
+   },
+   "medium": {
+    "id": "@cf/zai-org/glm-5.3",
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "nope": {
+    "refused": "model names a tier: cheap or medium (a model id is never one)"
+   }
+  },
+  "view": {
+   "cheap": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+   "fallback": "@cf/thinkingmachines/inkling-2-small",
+   "images": [],
+   "medium": "@cf/zai-org/glm-5.3",
+   "routes": {
+    "cheap": {
+     "fallback": "@cf/thinkingmachines/inkling-2-small",
+     "private": false,
+     "vision": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    },
+    "medium": {
+     "fallback": "@cf/thinkingmachines/inkling-2-small",
+     "private": false,
+     "vision": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    }
+   },
+   "vision": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+  }
+ },
+ "openrouter": {
+  "calls": {
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|cheap": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|medium": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|null": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "cheap|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap|null": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "fallback|cheap": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "fallback|medium": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "fallback|null": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "medium|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "medium|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "medium|null": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "nope|cheap": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: z-ai/glm-5.3-flash, @cf/deepseek-ai/deepseek-v4.1-flash-1017"
+   },
+   "nope|medium": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: z-ai/glm-5.3-flash, @cf/deepseek-ai/deepseek-v4.1-flash-1017"
+   },
+   "nope|null": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: z-ai/glm-5.3-flash, @cf/deepseek-ai/deepseek-v4.1-flash-1017"
+   },
+   "null|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "null|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "null|null": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "vision|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "vision"
+   },
+   "vision|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "vision"
+   },
+   "vision|null": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "vision"
+   },
+   "z-ai/glm-5.3-flash|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "z-ai/glm-5.3-flash|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "z-ai/glm-5.3-flash|null": {
+    "fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "fallback",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   }
+  },
+  "deep": {
+   "cheap": null,
+   "medium": null
+  },
+  "embeddings_refused": null,
+  "ids": [
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+   "z-ai/glm-5.3-flash"
+  ],
+  "priced": [
+   [
+    "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    {
+     "cache_write": 300000,
+     "cached_input": 6000,
+     "input": 300000,
+     "output": 1200000
+    }
+   ],
+   [
+    "z-ai/glm-5.3-flash",
+    {
+     "cache_write": 150715,
+     "cached_input": 150715,
+     "input": 150715,
+     "output": 502381
+    }
+   ]
+  ],
+  "reached": {
+   "cheap": [
+    "cheap",
+    "fallback",
+    "vision"
+   ],
+   "medium": [
+    "fallback",
+    "medium",
+    "vision"
+   ]
+  },
+  "steps": {
+   "(none)": {
+    "id": "z-ai/glm-5.3-flash",
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap": {
+    "id": "z-ai/glm-5.3-flash",
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "high": {
+    "refused": "the high tier is off until Cloudflare raises Unified Billing's limit on Opus; use cheap or medium"
+   },
+   "medium": {
+    "id": "z-ai/glm-5.3-flash",
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "nope": {
+    "refused": "model names a tier: cheap or medium (a model id is never one)"
+   }
+  },
+  "view": {
+   "cheap": "z-ai/glm-5.3-flash",
+   "fallback": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+   "images": [
+    "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+   ],
+   "medium": "z-ai/glm-5.3-flash",
+   "routes": {
+    "cheap": {
+     "fallback": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+     "private": false,
+     "vision": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    },
+    "medium": {
+     "fallback": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+     "private": false,
+     "vision": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    }
+   },
+   "vision": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+  }
+ },
+ "plain": {
+  "calls": {
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|null": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "@cf/thinkingmachines/inkling-2-small|cheap": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "@cf/thinkingmachines/inkling-2-small|medium": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "@cf/thinkingmachines/inkling-2-small|null": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "@cf/zai-org/glm-5.3|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "@cf/zai-org/glm-5.3|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "@cf/zai-org/glm-5.3|null": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "cheap|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap|null": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "fallback|cheap": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "fallback|medium": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "fallback|null": {
+    "fallback": null,
+    "id": "@cf/thinkingmachines/inkling-2-small",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "medium|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "medium|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "medium|null": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/zai-org/glm-5.3",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "nope|cheap": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: @cf/deepseek-ai/deepseek-v4.1-flash-1017, @cf/zai-org/glm-5.3, @cf/thinkingmachines/inkling-2-small"
+   },
+   "nope|medium": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: @cf/deepseek-ai/deepseek-v4.1-flash-1017, @cf/zai-org/glm-5.3, @cf/thinkingmachines/inkling-2-small"
+   },
+   "nope|null": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: @cf/deepseek-ai/deepseek-v4.1-flash-1017, @cf/zai-org/glm-5.3, @cf/thinkingmachines/inkling-2-small"
+   },
+   "null|cheap": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "null|medium": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "null|null": {
+    "fallback": [
+     "fallback",
+     "@cf/thinkingmachines/inkling-2-small"
+    ],
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "vision|cheap": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "vision"
+   },
+   "vision|medium": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "vision"
+   },
+   "vision|null": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "vision"
+   }
+  },
+  "deep": {
+   "cheap": null,
+   "medium": null
+  },
+  "embeddings_refused": null,
+  "ids": [
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+   "@cf/thinkingmachines/inkling-2-small",
+   "@cf/zai-org/glm-5.3"
+  ],
+  "priced": [
+   [
+    "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    {
+     "cache_write": 300000,
+     "cached_input": 6000,
+     "input": 300000,
+     "output": 1200000
+    }
+   ],
+   [
+    "@cf/thinkingmachines/inkling-2-small",
+    {
+     "cache_write": 300000,
+     "cached_input": 100000,
+     "input": 300000,
+     "output": 1000000
+    }
+   ],
+   [
+    "@cf/zai-org/glm-5.3",
+    {
+     "cache_write": 1400000,
+     "cached_input": 260000,
+     "input": 1400000,
+     "output": 4400000
+    }
+   ]
+  ],
+  "reached": {
+   "cheap": [
+    "cheap",
+    "fallback",
+    "vision"
+   ],
+   "medium": [
+    "fallback",
+    "medium",
+    "vision"
+   ]
+  },
+  "steps": {
+   "(none)": {
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap": {
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "high": {
+    "refused": "the high tier is off until Cloudflare raises Unified Billing's limit on Opus; use cheap or medium"
+   },
+   "medium": {
+    "id": "@cf/zai-org/glm-5.3",
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "nope": {
+    "refused": "model names a tier: cheap or medium (a model id is never one)"
+   }
+  },
+  "view": {
+   "cheap": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+   "fallback": "@cf/thinkingmachines/inkling-2-small",
+   "images": [],
+   "medium": "@cf/zai-org/glm-5.3",
+   "routes": {
+    "cheap": {
+     "fallback": "@cf/thinkingmachines/inkling-2-small",
+     "label": "Recommended",
+     "private": false,
+     "vision": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    },
+    "medium": {
+     "fallback": "@cf/thinkingmachines/inkling-2-small",
+     "label": "Standard",
+     "private": false,
+     "vision": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    }
+   },
+   "vision": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+  }
+ },
+ "production": {
+  "calls": {
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|cheap": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cloudflare"
+   },
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|medium": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cloudflare"
+   },
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017|null": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cloudflare"
+   },
+   "cheap|cheap": {
+    "fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap|medium": {
+    "fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap|null": {
+    "fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "deepseek-v4-1-flash|cheap": {
+    "fallback": [
+     "cheap",
+     "glm-5-3-flash"
+    ],
+    "id": "deepseek-v4-1-flash",
+    "image_fallback": [
+     "cheap",
+     "glm-5-3-flash"
+    ],
+    "max_tokens": 32768,
+    "slot": "private_deep"
+   },
+   "deepseek-v4-1-flash|medium": {
+    "fallback": null,
+    "id": "deepseek-v4-1-flash",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "deepseek-v4-1-flash|null": {
+    "fallback": null,
+    "id": "deepseek-v4-1-flash",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "deepseek/deepseek-v4.1-flash|cheap": {
+    "fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "deepseek/deepseek-v4.1-flash",
+    "image_fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 32768,
+    "slot": "standard_deep"
+   },
+   "deepseek/deepseek-v4.1-flash|medium": {
+    "fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "deepseek/deepseek-v4.1-flash",
+    "image_fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 32768,
+    "slot": "standard_deep"
+   },
+   "deepseek/deepseek-v4.1-flash|null": {
+    "fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "deepseek/deepseek-v4.1-flash",
+    "image_fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 32768,
+    "slot": "standard_deep"
+   },
+   "fallback|cheap": {
+    "fallback": [
+     "cheap",
+     "glm-5-3-flash"
+    ],
+    "id": "deepseek-v4-1-flash",
+    "image_fallback": [
+     "cheap",
+     "glm-5-3-flash"
+    ],
+    "max_tokens": 32768,
+    "slot": "private_deep"
+   },
+   "fallback|medium": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cloudflare"
+   },
+   "fallback|null": {
+    "fallback": null,
+    "id": "deepseek-v4-1-flash",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "fallback"
+   },
+   "glm-5-3-flash|cheap": {
+    "fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "glm-5-3-flash|medium": {
+    "fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "glm-5-3-flash|null": {
+    "fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "medium|cheap": {
+    "fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "medium|medium": {
+    "fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "medium|null": {
+    "fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "nope|cheap": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: glm-5-3-flash, z-ai/glm-5.3-flash, deepseek-v4-1-flash, @cf/deepseek-ai/deepseek-v4.1-flash-1017, deepseek/deepseek-v4.1-flash"
+   },
+   "nope|medium": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: glm-5-3-flash, z-ai/glm-5.3-flash, deepseek-v4-1-flash, @cf/deepseek-ai/deepseek-v4.1-flash-1017, deepseek/deepseek-v4.1-flash"
+   },
+   "nope|null": {
+    "refused": "model is one of this deployment's models, as GET /v1/models lists them: glm-5-3-flash, z-ai/glm-5.3-flash, deepseek-v4-1-flash, @cf/deepseek-ai/deepseek-v4.1-flash-1017, deepseek/deepseek-v4.1-flash"
+   },
+   "null|cheap": {
+    "fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "null|medium": {
+    "fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "null|null": {
+    "fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "private_deep",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "vision|cheap": {
+    "fallback": [
+     "fallback",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "fallback",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "vision"
+   },
+   "vision|medium": {
+    "fallback": null,
+    "id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "image_fallback": null,
+    "max_tokens": 16384,
+    "slot": "cloudflare"
+   },
+   "vision|null": {
+    "fallback": [
+     "fallback",
+     "deepseek-v4-1-flash"
+    ],
+    "id": "glm-5-3-flash",
+    "image_fallback": [
+     "fallback",
+     "deepseek-v4-1-flash"
+    ],
+    "max_tokens": 16384,
+    "slot": "vision"
+   },
+   "z-ai/glm-5.3-flash|cheap": {
+    "fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "z-ai/glm-5.3-flash|medium": {
+    "fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "z-ai/glm-5.3-flash|null": {
+    "fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "id": "z-ai/glm-5.3-flash",
+    "image_fallback": [
+     "cloudflare",
+     "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    ],
+    "max_tokens": 16384,
+    "slot": "medium"
+   }
+  },
+  "deep": {
+   "cheap": [
+    "private_deep",
+    "deepseek-v4-1-flash"
+   ],
+   "medium": [
+    "standard_deep",
+    "deepseek/deepseek-v4.1-flash"
+   ]
+  },
+  "embeddings_refused": null,
+  "ids": [
+   "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+   "deepseek-v4-1-flash",
+   "deepseek/deepseek-v4.1-flash",
+   "glm-5-3-flash",
+   "z-ai/glm-5.3-flash"
+  ],
+  "priced": [
+   [
+    "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    {
+     "cache_write": 300000,
+     "cached_input": 6000,
+     "input": 300000,
+     "output": 1200000
+    }
+   ],
+   [
+    "deepseek-v4-1-flash",
+    {
+     "cache_write": 650000,
+     "cached_input": 130000,
+     "input": 650000,
+     "output": 1450000
+    }
+   ],
+   [
+    "deepseek/deepseek-v4.1-flash",
+    {
+     "cache_write": 301429,
+     "cached_input": 301429,
+     "input": 301429,
+     "output": 1205715
+    }
+   ],
+   [
+    "glm-5-3-flash",
+    {
+     "cache_write": 150000,
+     "cached_input": 30000,
+     "input": 150000,
+     "output": 500000
+    }
+   ],
+   [
+    "z-ai/glm-5.3-flash",
+    {
+     "cache_write": 150715,
+     "cached_input": 150715,
+     "input": 150715,
+     "output": 502381
+    }
+   ]
+  ],
+  "reached": {
+   "cheap": [
+    "cheap",
+    "fallback",
+    "private_deep",
+    "vision"
+   ],
+   "medium": [
+    "cloudflare",
+    "fallback",
+    "medium",
+    "standard_deep"
+   ]
+  },
+  "steps": {
+   "(none)": {
+    "id": "glm-5-3-flash",
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "cheap": {
+    "id": "glm-5-3-flash",
+    "max_tokens": 16384,
+    "slot": "cheap"
+   },
+   "high": {
+    "refused": "the high tier is off until Cloudflare raises Unified Billing's limit on Opus; use cheap or medium"
+   },
+   "medium": {
+    "id": "z-ai/glm-5.3-flash",
+    "max_tokens": 16384,
+    "slot": "medium"
+   },
+   "nope": {
+    "refused": "model names a tier: cheap or medium (a model id is never one)"
+   }
+  },
+  "view": {
+   "cheap": "glm-5-3-flash",
+   "fallback": "deepseek-v4-1-flash",
+   "images": [
+    "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "deepseek-v4-1-flash",
+    "deepseek/deepseek-v4.1-flash",
+    "glm-5-3-flash",
+    "z-ai/glm-5.3-flash"
+   ],
+   "medium": "z-ai/glm-5.3-flash",
+   "routes": {
+    "cheap": {
+     "deep": {
+      "fallback": "glm-5-3-flash",
+      "id": "deepseek-v4-1-flash",
+      "reasoning": "max"
+     },
+     "fallback": "deepseek-v4-1-flash",
+     "label": "Private (recommended)",
+     "private": true,
+     "reasoning": "high",
+     "vision": "glm-5-3-flash"
+    },
+    "medium": {
+     "deep": {
+      "fallback": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+      "id": "deepseek/deepseek-v4.1-flash",
+      "reasoning": "max"
+     },
+     "fallback": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+     "label": "Standard",
+     "private": false,
+     "reasoning": "high",
+     "vision": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    }
+   },
+   "vision": "glm-5-3-flash"
+  }
+ }
+}

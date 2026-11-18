@@ -1217,7 +1217,9 @@ fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment write <name> <path>... --dir D [--message M]   # several files from D, one commit: all land or none
 fragment blob put <name> <file>          # prints its sha256: its pages read it at __blob/<sha256>
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
-fragment rm <name>                       fragment guide|skill
+fragment rm <name> [--yes]               # for everyone in it; a terminal asks for its name typed back, unless --yes
+fragment archive|unarchive <name>        # your own lists only
+fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S] | --return-to CHAT] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 fragment search "<query>" --in <name>[,<name>…] | --all  [--limit N] [--mode hybrid|lexical|semantic] [--field K=V]… [--after T] [--before T]

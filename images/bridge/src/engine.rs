@@ -187,7 +187,7 @@ pub fn refused_budget() -> String {
     )
 }
 
-/// What the bridge keeps across restarts (`/data/bridge/state.json`): a
+/// What the bridge keeps across restarts (`/data/bridge`, store.rs): a
 /// cache of where to read from and what it has in hand, never the
 /// authority on which turns have run (the journal is).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -441,6 +441,14 @@ pub struct Turn {
     /// turn not queued, and a turn's end clears this.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub asking: bool,
+    /// Its question was answered by a voice memo alone (`Command::Tell`'s
+    /// `voice`), which its runtime hears or not: one it hears nothing in
+    /// leaves its question open, and says nothing (Hermes' clarify keeps
+    /// waiting). So it is `asking` still until the turn goes on (its next
+    /// event: a draft, a reply, a step, a card, a question, its end), and
+    /// its asker's next message meanwhile answers it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hearing: bool,
     /// Its text is a command of the runtime's menu, said to it as it is
     /// (`TurnStart::command`). A state from before commands holds none.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1474,6 +1482,7 @@ impl Engine {
             stop_requested: false,
             owed: Vec::new(),
             asking: false,
+            hearing: false,
             command: matches!(ask, Ask::Command | Ask::Refused(_)),
             reply_to: m.reply_to,
             note: None,
@@ -1738,6 +1747,7 @@ impl Engine {
             stop_requested: false,
             owed: Vec::new(),
             asking: false,
+            hearing: false,
             command: false,
             reply_to: None,
             note: None,
@@ -1981,12 +1991,20 @@ impl Engine {
             if answers != principal {
                 return false;
             }
+            // a voice memo alone: no words, every file audio (Austin,
+            // 2026-11-17: words typed with a memo are a written answer, as
+            // they were, since Hermes answers a clarify heard in audio with
+            // the audio's words alone)
+            // within Hermes' media cap, as the relay hosts it: a larger one
+            // is its file's line, a written answer
+            let voice = text.trim().is_empty() && !m.attachments.is_empty() && m.attachments.iter().all(|a| a.media_type.starts_with("audio/") && a.size <= limits::HERMES_MEDIA_MAX_BYTES);
             let t = self.state.turns.get_mut(&id).expect("found");
-            t.asking = false;
+            t.asking = voice;
+            t.hearing = voice;
             t.last_ms = self.now;
             self.dirty = true;
-            crate::ev!("turn.told", { "turn": id, "seq": seq, "files": m.attachments.len() });
-            self.tell_runtime(&id, Command::Tell { turn: id.clone(), seq, by: principal.to_string(), by_name, text, attached });
+            crate::ev!("turn.told", { "turn": id, "seq": seq, "files": m.attachments.len(), "voice": voice });
+            self.tell_runtime(&id, Command::Tell { turn: id.clone(), seq, by: principal.to_string(), by_name, text, attached, files: Vec::new(), voice });
             return true;
         }
         // its card that takes words, the oldest open one: its owner's alone
@@ -2261,7 +2279,17 @@ impl Engine {
                 return;
             }
             match self.state.turns.get_mut(&id) {
-                Some(t) if t.active() => t.last_ms = self.now,
+                Some(t) if t.active() => {
+                    t.last_ms = self.now;
+                    // it went on from a voice answer: heard (its question,
+                    // if it asks again, is a new one: `Event::Asked`)
+                    if t.hearing {
+                        t.hearing = false;
+                        t.asking = false;
+                        self.dirty = true;
+                        crate::ev!("turn.heard", { "turn": id });
+                    }
+                }
                 _ => {
                     crate::ev!("runtime.stale", { "turn": id, "why": "the bridge holds no running turn by that id" });
                     return;
@@ -2349,7 +2377,7 @@ impl Engine {
                 if t.ret.is_some() {
                     crate::ev!("turn.asked_back", { "turn": turn });
                     let (by, by_name) = (t.asker.clone(), t.asker_name.clone());
-                    self.tell_runtime(&turn, Command::Tell { turn: turn.clone(), seq: ASKED_BACK_SEQ, by, by_name, text: ASKED_BACK.into(), attached: None });
+                    self.tell_runtime(&turn, Command::Tell { turn: turn.clone(), seq: ASKED_BACK_SEQ, by, by_name, text: ASKED_BACK.into(), attached: None, files: Vec::new(), voice: false });
                     return;
                 }
                 let t = self.state.turns.get_mut(&turn).expect("checked");

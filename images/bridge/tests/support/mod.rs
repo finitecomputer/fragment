@@ -163,18 +163,28 @@ fn state_dir(dir: &Path) -> PathBuf {
     dir.join("bridge")
 }
 
-/// Copies the state file of the directory `from` into `to` (made fresh),
-/// if there is one. Its temporary twin is left behind: the bridge renames
-/// it into place whole and never reads it, so a save that caught it would
-/// hold nothing a restore uses.
+/// Copies the state of the directory `from` into `to` (made fresh): its
+/// snapshot and its log (store.rs), each if there is one. Their temporary
+/// twins are left behind: the bridge renames them into place whole and
+/// never reads them, so a save that caught one would hold nothing a
+/// restore uses.
 fn copy_state(from: &Path, to: &Path) {
     let _ = std::fs::remove_dir_all(to);
     std::fs::create_dir_all(to).expect("a copy's directory");
-    match std::fs::copy(from.join("state.json"), to.join("state.json")) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => panic!("{}: {e}", from.display()),
+    for name in [fragment_bridge::store::SNAPSHOT, fragment_bridge::store::LOG] {
+        match std::fs::copy(from.join(name), to.join(name)) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("{}: {e}", from.display()),
+        }
     }
+}
+
+/// The steps the state's log in `state` (`<dir>/bridge`) holds past its
+/// snapshot (its lines but the first), and its bytes.
+pub fn logged(state: &Path) -> (usize, usize) {
+    let log = std::fs::read(state.join(fragment_bridge::store::LOG)).expect("a log");
+    (log.iter().filter(|b| **b == b'\n').count().saturating_sub(1), log.len())
 }
 
 /// The save: the state directory as it is now.

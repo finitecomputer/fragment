@@ -210,8 +210,8 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&hand, "GET", "/api/models/v1/models", None)?;
     let listed: Vec<&str> = r.body["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
     s.ok(
-        "the route lists the routes' ids, each once, and nothing of their prices or where each runs (no base URL, no routing)",
-        r.status == 200 && listed == [PRIVATE, ROUTED, TINFOIL, FLASH, ROUTED_DEEP] && !r.text.contains("price") && !r.text.contains("/v1") && !r.text.contains("zdr"),
+        "the route lists its ids, each once, its routes' own models first, then each slot's by its name, and nothing of their prices or where each runs (no base URL, no routing)",
+        r.status == 200 && listed == [PRIVATE, ROUTED, FLASH, TINFOIL, ROUTED_DEEP] && !r.text.contains("price") && !r.text.contains("/v1") && !r.text.contains("zdr"),
         &r,
     );
 
