@@ -3326,14 +3326,17 @@ impl ComputerCell {
             let grants = if catalogued { self.grants_of(agent, &identity, None).await? } else { Grants::none() };
             Ok::<_, CellError>((grants, catalogued.then(|| js::now_ms() - asked_at)))
         };
+        // each wait timed from one start (`grantsMs`, `ownMs`): asked side by
+        // side, the request waits the longer, never the two added
         let keys = async {
             if own.is_empty() {
-                return Ok(vec![]);
+                return Ok((vec![], None));
             }
             self.hand_over_logged().await;
-            crate::vault::own_keys(&self.env, &owner, &own).await
+            let keys = crate::vault::own_keys(&self.env, &owner, &own).await?;
+            Ok((keys, Some(js::now_ms() - asked_at)))
         };
-        let ((grants, grants_ms), keys) = futures_util::future::try_join(grants, keys).await?;
+        let ((grants, grants_ms), (keys, own_ms)) = futures_util::future::try_join(grants, keys).await?;
         let mut secrets = vec![];
         // a Vault's secret (a key's name no catalog key has) is its egress's to ask
         // the agent's person's Vault for, this agent's now that its tag says so
@@ -3375,7 +3378,7 @@ impl ComputerCell {
             }
             secrets.push(json!({ "provider": provider.name, "tag": p.tag, "connection": p.connection, "secret": secret }));
         }
-        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "grantsMs": grants_ms }))
+        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "grantsMs": grants_ms, "ownMs": own_ms }))
     }
 
     /// `owner`'s token for `provider`: WorkOS Pipes', for the WorkOS user
@@ -4076,12 +4079,14 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     let mut signed = false;
     // whose ledger a key's call goes on, and as which agent
     let mut payer: Option<(String, String, String)> = None;
-    // how long the computer waited on the agent's fragment for what it may use
-    let mut grants_ms = None;
+    // how long the computer waited on the agent's fragment for what it may
+    // use, and on its person's Vault for their own keys, from one start
+    let (mut grants_ms, mut own_ms) = (None, None);
     if !found.is_empty() {
         let asked: Vec<Value> = found.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag, "connection": p.connection })).collect();
         let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "placeholders": asked })).await?;
         grants_ms = answer["grantsMs"].as_i64();
+        own_ms = answer["ownMs"].as_i64();
         for s in answer["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
             let (provider, tag, secret) = (s["provider"].as_str().unwrap_or_default(), s["tag"].as_str().unwrap_or_default(), s["secret"].as_str().unwrap_or_default());
             // its kind: a connection's and a Vault secret's may share a name and a tag
@@ -4214,7 +4219,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // one line per swap (lesson 14), naming the providers, never a tag or a value
     if !plan.is_empty() {
         let names: Vec<String> = plan.wanted.iter().map(Placeholder::named).collect();
-        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status, "grantsMs": grants_ms }));
+        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status, "grantsMs": grants_ms, "ownMs": own_ms }));
     }
     match sent {
         Ok(resp) if !filled.is_empty() => hidden(resp, &filled).await,

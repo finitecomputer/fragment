@@ -1274,6 +1274,7 @@ pub(super) fn own_move_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &
 pub(super) const OWN_SIGNIN_MOVED_CHECKS: &[&str] = &[
     "an own key's sign-in begun on its computer before the move finishes after it, in the browser that began it: the key the provider made is its person's, given to the guest as a placeholder and never itself, and the sign-in comes back once",
     "no own key, kept from before the move, set, or made by a sign-in, is in the node's log",
+    "each swap through an own key logs how long it waited on the agent's fragment (grantsMs) and on its person's Vault (ownMs), each from one start, and never a key",
 ];
 
 /// The checks; answers how many turns of the agent's they took. Run after
@@ -1322,6 +1323,15 @@ pub(super) fn own_signin_moved_checks(s: &mut Suite, api: &Api, w: &Swapping, fe
     keys.extend(s.openrouter.keys());
     let named: Vec<usize> = keys.iter().enumerate().filter(|(_, k)| log.contains(k.as_str())).map(|(i, _)| i).collect();
     s.ok(OWN_SIGNIN_MOVED_CHECKS[1], !log.is_empty() && keys.len() >= 6 && named.is_empty(), json!({ "logBytes": log.len(), "keys": keys.len(), "named": named }));
+    // the swap's own line: both waits, for a call through an own key
+    let own_swap = format!("fck_{SWAP_OWN}_…");
+    let timed: Vec<Value> = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+        .filter(|v| v["egress"] == "swap" && v["credentials"].as_array().is_some_and(|c| c.iter().any(|n| n == own_swap.as_str())) && v["status"] == 200)
+        .collect();
+    let both = timed.iter().filter(|v| v["grantsMs"].as_i64().is_some_and(|ms| ms >= 0) && v["ownMs"].as_i64().is_some_and(|ms| ms >= 0)).count();
+    s.ok(OWN_SIGNIN_MOVED_CHECKS[2], !timed.is_empty() && both == timed.len(), json!({ "lines": timed.len(), "both": both, "first": timed.first() }));
     Ok(turns)
 }
 
