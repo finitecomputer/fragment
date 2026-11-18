@@ -328,7 +328,7 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     let first = api.create_with(owner, json!({ "label": label, "template": "chat", "title": "Seeded" }))?;
     let gone = first.body["name"].as_str().unwrap_or("").to_string();
     s.fake.set_latency(DEPLOY_SLOW);
-    let (deploying, deleted, read) = std::thread::scope(|scope| {
+    let (deploying, deleted, read, wrote) = std::thread::scope(|scope| {
         // its first writer's seed, whose answer is the life's end (404)
         let writer = scope.spawn(|| api.signed(owner, "GET", &format!("/api/f/{gone}/storage-token"), None));
         // its deploy made live, and its refresh listed live's files: its
@@ -342,10 +342,10 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
         // that read answered after the delete: whatever its refresh writes
         // next (live's pin and tree) it has written before the name is made again
         let read = s.eventually(wait, || s.fake.requests(&url, "GET file") > reads);
-        let _ = writer.join().expect("the writer's thread");
-        (deploying, deleted, read)
+        let wrote = writer.join().expect("the writer's thread").map(|r| r.status).unwrap_or(0);
+        (deploying, deleted, read, wrote)
     });
-    let deleted = deleted?;
+    let (deploying, deleted, read, wrote) = (deploying, deleted?, read, wrote);
     // (a stale live pin left in the next life broke its create: it never answered)
     let again = api.create_with(owner, json!({ "name": gone, "template": "chat", "title": "Seeded after its deploy" }));
     let again = match again {
@@ -362,8 +362,8 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     let healed = healer.status == 200 && st["repo"].as_str().is_some_and(|r| !r.is_empty()) && st["pins"]["live"].is_string() && st["pins"]["main"] == st["pins"]["live"];
     let manifest = manifest_at(s, st["repo"].as_str().unwrap_or(""));
     s.ok(
-        "a chat deleted while its first writer's deploy's live refresh is in flight, the name made again: the delete waits for that step, the old seed writes nothing into the new life, which is made (no stale pin) and whose first writer lands its own template on main",
-        first.status == 200 && deploying && deleted.status == 200 && read && again == "200" && healed
+        "a chat deleted while its first writer's deploy's live refresh is in flight, the name made again: the delete waits for that step, the old writer is answered 404 and its seed writes nothing into the new life, which is made (no stale pin) and whose first writer lands its own template on main",
+        first.status == 200 && deploying && deleted.status == 200 && read && wrote == 404 && again == "200" && healed
             && manifest == json!({ "template": "chat" }) && events(&gone, "template").len() == 1,
         format!("{deleted} {again} {st} {manifest}"),
     );

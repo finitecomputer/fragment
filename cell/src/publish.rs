@@ -130,8 +130,12 @@ impl FragmentCell {
     /// Landed is installed: the agents that joined meanwhile are told then
     /// (`Stage::joins_wait`), by whichever seed lands it, the create's or a
     /// later one.
-    pub(crate) async fn seed(&self, by: Event) -> CellResult<()> {
-        for effect in self.seed_locked(&by).await? {
+    ///
+    /// `life`, a writer's: the life it was let in to, so a writer that
+    /// waited on the lock while its fragment was deleted and made again
+    /// seeds nothing of the next life's (`repo_ready` then answers 404).
+    pub(crate) async fn seed(&self, by: Event, life: Option<i64>) -> CellResult<()> {
+        for effect in self.seed_locked(&by, life).await? {
             assert!(effect == Effect::TellJoined, "only its agents' notice follows a seed's lock");
             self.flush_joined().await;
         }
@@ -142,14 +146,19 @@ impl FragmentCell {
     /// stepped, and the rows read back, which must say the step the
     /// machine said as far as rows can (`Stage::durable`; a life that ended
     /// meanwhile goes no further). Answers what is left for after the lock.
-    async fn seed_locked(&self, by: &Event) -> CellResult<Vec<Effect>> {
+    async fn seed_locked(&self, by: &Event, life: Option<i64>) -> CellResult<Vec<Effect>> {
         let _seeding = self.seeding.lock().await;
-        let Some(life) = self.seed_rows()?.created_at else { return Ok(vec![]) };
+        let Some(life) = life.or(self.seed_rows()?.created_at) else { return Ok(vec![]) };
         let mut stage = self.stage_in(life)?;
         if !stage.waits_template() {
             return Ok(vec![]);
         }
         let (_, mut effects) = seed::step(&stage, by).map_err(refused)?;
+        // no step to take (its alarm's, while the release runs it): it waits
+        // for its first writer
+        if effects.is_empty() {
+            return Ok(vec![]);
+        }
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let mut after = vec![];
         let mut steps = 0;
@@ -254,7 +263,7 @@ impl FragmentCell {
     /// name made again, between its awaits leaves the next life's pending
     /// template, title and repo to that life's own seed. Asked after an
     /// await and before what the step writes or commits next.
-    fn same_life(&self, life: i64, when: &str) -> CellResult<()> {
+    pub(crate) fn same_life(&self, life: i64, when: &str) -> CellResult<()> {
         if self.meta(MetaKey::CreatedAt)?.and_then(|at| at.parse::<i64>().ok()) == Some(life) {
             return Ok(());
         }

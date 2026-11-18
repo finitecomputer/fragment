@@ -1512,7 +1512,7 @@ impl FragmentCell {
                 // did not land is retried by the alarm, and whichever seed
                 // lands it tells its agents they joined
                 seed::Effect::Commit => {
-                    if let Err(e) = self.seed(seed::Event::Write).await {
+                    if let Err(e) = self.seed(seed::Event::Write, None).await {
                         self.event("template.failed", &e.message, json!({ "code": e.code }));
                     }
                     laps.lap("seed");
@@ -1674,7 +1674,7 @@ impl FragmentCell {
         // a template still to land that the release does not run takes its
         // next step (publish.rs `seed`); one it runs waits for its first
         // writer, and asks code.storage nothing here
-        if let Err(e) = self.seed(seed::Event::Alarm).await {
+        if let Err(e) = self.seed(seed::Event::Alarm, None).await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
         // after its seed: an agent's notice waits until its template is in

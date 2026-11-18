@@ -341,9 +341,13 @@ impl FragmentCell {
     /// fragment's repo is made here, at its first file. A seed that cannot
     /// land fails the writer as code.storage failed it.
     pub(crate) async fn repo_ready(&self) -> CellResult<String> {
+        // the life this writer was let in to: one ended while it waited
+        // (deleted, and made again) is none of its to write
+        let life = self.must(MetaKey::CreatedAt)?.parse::<i64>().map_err(|_| CellError::host("its created_at is not a time"))?;
         if self.stage()?.waits_template() {
-            self.seed(fragment_core::seed::Event::Write).await?;
+            self.seed(fragment_core::seed::Event::Write, Some(life)).await?;
         }
+        self.same_life(life, "while its repo was made")?;
         self.must(MetaKey::Repo)
     }
 
@@ -543,7 +547,15 @@ impl FragmentCell {
             worker::Delay::from(std::time::Duration::from_millis(TEST_HOLD_INSTALL_POLL_MS)).await;
         }
         self.test_hold_install.set((self.test_hold_install.get().0, false));
-        self.install(manifest, None, "").await
+        self.install(manifest, None, "").await?;
+        // its page, the release's, wants its card as a deploy's live does
+        // (`interpret`): a brain's is shot before its first file
+        if let Some(version) = self.page_version()? {
+            if let Err(e) = self.card_wanted(&version) {
+                self.event("card.want-failed", &e.message, json!({ "code": e.code }));
+            }
+        }
+        Ok(())
     }
 
     /// Installs `manifest`'s app, read at `sha` of `repo` (`None`: a
