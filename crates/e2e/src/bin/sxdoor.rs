@@ -692,6 +692,44 @@ fn main() -> Result<()> {
         "computer-link" => computer_link(args.get(1).context("the person's port")?.parse()?),
         "computer-page" => computer_page(args.get(1).context("a path")?),
         "copy" => copy(),
+        "replay-blocked" => {
+            let a = hosted()?;
+            let st = state();
+            let keys = owner(&st)?;
+            let conn = s(&st, "connector")?;
+            let which = args.get(1).cloned().unwrap_or_else(|| "intake".into());
+            let r = a.signed(&keys, "POST", &format!("/api/f/{conn}/pause"), Some(&json!({ "op": which, "paused": false })))?;
+            println!("unpause: {} {}", r.status, r.text);
+            let runs = a.signed(&keys, "GET", &format!("/api/f/{conn}/runs?status=blocked&op={which}&limit=200"), None)?;
+            let mut ids: Vec<i64> = runs.body["runs"].as_array().into_iter().flatten().filter_map(|r| r["id"].as_i64()).collect();
+            ids.sort();
+            let t0 = Instant::now();
+            let mut ok = 0;
+            for id in &ids {
+                let r = a.signed(&keys, "POST", &format!("/api/f/{conn}/replay"), Some(&json!({ "run": id })))?;
+                if r.status == 200 { ok += 1 } else { println!("replay {id}: {r}") }
+            }
+            println!("replayed {ok} of {} in {:.1?}", ids.len(), t0.elapsed());
+            Ok(())
+        }
+        "replay-one" => {
+            let a = hosted()?;
+            let st = state();
+            let keys = owner(&st)?;
+            let conn = s(&st, "connector")?;
+            let id: i64 = args.get(1).context("a run")?.parse()?;
+            let r = a.signed(&keys, "POST", &format!("/api/f/{conn}/replay"), Some(&json!({ "run": id })))?;
+            println!("replay {id}: {r}");
+            Ok(())
+        }
+        "get" => {
+            let a = hosted()?;
+            let st = state();
+            let keys = owner(&st)?;
+            let r = a.signed(&keys, "GET", args.get(1).context("a path")?, None)?;
+            println!("{}", r.text);
+            Ok(())
+        }
         "records" => {
             let a = hosted()?;
             let st = state();
