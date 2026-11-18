@@ -1263,12 +1263,12 @@ impl ComputerCell {
         Ok(self.meta(MetaKey::Used)?.and_then(|ms| ms.parse().ok()))
     }
 
-    /// Its quiet wake (P7), when due (`refresh_due`): a pre-wake's start, its
-    /// owner told nothing and charged nothing, then a pre-wake's minute
-    /// again once it is up, so its guest boots before its idle sleep holds
-    /// it and takes the snapshot its person's next wake starts from. A
-    /// start that fails is let go, not tried again (`Event::Sleep`): never
-    /// a strike toward "won't wake".
+    /// Its quiet wake (P7), when due (`refresh_due`): a wake as its owner's,
+    /// held `IDLE_MS` from now, so its guest boots well before its idle
+    /// sleep holds it and takes the snapshot its person's next wake starts
+    /// from; its owner told nothing and charged nothing. A start that fails
+    /// is let go, not tried again (`Event::Sleep`): never a strike toward
+    /// "won't wake".
     async fn refresh(&self) -> CellResult<()> {
         let (life, saves, next) = (self.lifecycle()?, self.saves()?, self.images()?);
         if !refresh_due(&life, &saves, next.next(), self.used_ms()?, js::now_ms()) {
@@ -1280,19 +1280,13 @@ impl ComputerCell {
         }
         self.set_meta(MetaKey::Quiet, &js::now_ms().to_string())?;
         console_log!("{}", json!({ "computer": id, "refresh": "wake", "image": next.next(), "ran": saves.ran() }));
-        self.drive(Event::Wake { why: Wake::Presence }).await?;
-        if self.meta(MetaKey::Quiet)?.is_none() {
-            // something else woke it meanwhile: the wake is theirs
-            return Ok(());
+        self.drive(Event::Wake { why: Wake::Owner }).await?;
+        // something else that woke it meanwhile keeps what it wanted
+        if self.meta(MetaKey::Quiet)?.is_some() && matches!(self.lifecycle()?.phase, Phase::Asleep { retry: Some(_) }) {
+            console_log!("{}", json!({ "computer": id, "refresh": "unstarted" }));
+            self.drive(Event::Sleep).await?;
         }
-        match self.lifecycle()?.phase {
-            Phase::Awake { .. } => self.drive(Event::Wake { why: Wake::Presence }).await.map(|_| ()),
-            Phase::Asleep { retry: Some(_) } => {
-                console_log!("{}", json!({ "computer": id, "refresh": "unstarted" }));
-                self.drive(Event::Sleep).await.map(|_| ())
-            }
-            _ => Ok(()),
-        }
+        Ok(())
     }
 
     /// Whether its owner's ledger lets it start (decision 27: at zero

@@ -59,16 +59,20 @@ mod tests {
         c
     }
 
-    /// The quiet wake as the DO makes it: a presence's wake, its start up
-    /// on the image it looked at last, held a minute from then, its sleep
-    /// saved as `save` and snapshotted on the image it ran.
+    /// The quiet wake as the DO makes it: a wake as its owner's, its start
+    /// up on the image it looked at last, held `IDLE_MS` from the wake
+    /// however long that start took, its sleep saved as `save` and
+    /// snapshotted on the image it ran.
     fn quiet_life(c: &mut Computer, save: &str) {
-        let s = c.apply(Event::Wake { why: Wake::Presence });
+        let s = c.apply(Event::Wake { why: Wake::Owner });
         let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("a quiet wake starts it: {s:?}") };
+        // a first pull and a whole restore: minutes
+        c.now += 3 * 60_000;
         let restored = c.come_up(generation);
         assert_eq!(restored.from, RestoreSource::Backup, "its start is a full one: the reason it wakes");
-        c.apply(Event::Wake { why: Wake::Presence });
-        c.now += PREWAKE_MS;
+        let s = c.apply(Event::Alarm);
+        assert!(!s.actions.contains(&Action::Sleep { generation }), "up after minutes, it is still held while its guest boots: {s:?}");
+        c.now += IDLE_MS;
         let s = c.apply(Event::Alarm);
         assert!(s.actions.contains(&Action::Sleep { generation }), "it idles out: {s:?}");
         let (_, held, seq) = save_asked(&c.apply(Event::Held { generation, held: true }));

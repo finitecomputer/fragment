@@ -1639,17 +1639,17 @@ fn now_ms() -> i64 {
 
 const QUIET: [&str; 4] = [
     "asleep, its next start on an image it did not run last, it wakes on its own at its look (its alarm), quietly: on that image, its owner told nothing new",
-    "its pre-wake's minute over, it idles out and sleeps, saved and held: the snapshot a sleep takes on Cloudflare is on the image its next wake runs",
+    "its quiet life put to sleep (its idle wait is IDLE_MS), it saves, held: the snapshot a sleep takes on Cloudflare is on the image its next wake runs",
     "its quiet life is the platform's: no awake time metered to its owner",
     "a look again wakes nothing: it ran this image last",
 ];
 
 /// P7: computer `id`, asleep (`asleep`, its owner's view as it went to
 /// sleep) with its next start on an image it did not run last, wakes once
-/// at its alarm's look, quietly, and sleeps again on its own. Its quiet
+/// at its alarm's look, quietly; put to sleep, it is never metered. Its quiet
 /// life's save, whose snapshot (on Cloudflare; a local fleet takes none)
 /// its next wake starts from.
-fn quiet_wake(s: &mut Suite, api: &Api, owner_id: &str, id: &str, asleep: &Value, view: &dyn Fn() -> Value, wake: Duration) -> Result<Option<String>> {
+fn quiet_wake(s: &mut Suite, api: &Api, owner: &crate::Keys, owner_id: &str, id: &str, asleep: &Value, wake: Duration) -> Result<Option<String>> {
     let metered = || super::ledger::quiet(api, owner_id, &format!("awake:{id}:"));
     let before = (metered(), saves_of(api, id)["generation"].as_u64().unwrap_or(0));
     let generation = before.1 + 1;
@@ -1658,17 +1658,15 @@ fn quiet_wake(s: &mut Suite, api: &Api, owner_id: &str, id: &str, asleep: &Value
         let v = saves_of(api, id);
         v["phase"]["phase"] == "awake" && v["generation"].as_u64() == Some(generation)
     });
-    let up = view();
+    let up = api.signed(owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
     s.ok(
         QUIET[0],
         woke && up["phase"] == "awake" && up["version"] == asleep["latest"] && up["why"].is_null() && up["notices"] == asleep["notices"],
         json!({ "up": up, "asleep": asleep }),
     );
-    let mut last = Value::Null;
-    let slept = s.eventually(Duration::from_secs(180), || {
-        last = saves_of(api, id);
-        last["phase"]["phase"] == "asleep" && last["saves"][0]["generation"].as_u64() == Some(generation)
-    });
+    let (slept, _) = put_to_sleep(s, api, owner, id);
+    let last = saves_of(api, id);
+    let slept = slept && last["phase"]["phase"] == "asleep" && last["saves"][0]["generation"].as_u64() == Some(generation);
     let save = last["saves"][0]["id"].as_str().map(str::to_string);
     s.ok(QUIET[1], slept && last["saves"][0]["held"] == true && last["generation"].as_u64() == Some(generation), &last);
     let after = metered();
@@ -2618,7 +2616,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         std::thread::sleep(QUEUE_DRAIN);
         let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
         s.ok("asleep, no update is told: its next start takes it", r.body["phase"] == "asleep" && r.body["version"].is_null() && r.body["latest"] == first["version"] && notice(&r.body, "update").is_null(), &r);
-        let quiet_save = quiet_wake(s, api, &owner_id, &id, &r.body, &view, wake)?;
+        let quiet_save = quiet_wake(s, api, &owner, &owner_id, &id, &r.body, wake)?;
         let v = view();
         s.ok(
             "woken, it runs the first build again (a rollback), from its quiet wake's save",
