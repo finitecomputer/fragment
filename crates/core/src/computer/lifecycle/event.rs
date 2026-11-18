@@ -89,6 +89,10 @@ pub enum Event {
     /// The DO touched the hold of start `generation` and waited: whether
     /// the guest answered `held` in time.
     Held { generation: u64, held: bool },
+    /// Save `seq` of start `generation` took its home's record (`/data`
+    /// without its work: the guest's own state, what the hold is for), and
+    /// takes its work's next.
+    HomeSaved { generation: u64, seq: u64 },
     /// Save `seq` of start `generation` worked: the DO keeps it.
     Saved { generation: u64, seq: u64 },
     /// Save `seq` of start `generation` failed (`seq` 0: its hold found no

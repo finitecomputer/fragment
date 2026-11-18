@@ -522,6 +522,7 @@ impl Lifecycle {
                 | Event::SnapshotFailed { .. }
                 | Event::RestoreFailed { .. }
                 | Event::Held { .. }
+                | Event::HomeSaved { .. }
                 | Event::Saved { .. }
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }
@@ -601,10 +602,15 @@ impl Lifecycle {
             (Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. }, Event::Held { generation: g, held }) if g == generation && matches!(self.saving, Some(Saving::Hold { .. })) => {
                 self.save(generation, held, now_ms, &mut step);
             }
+            (Phase::Awake { .. } | Phase::Sleeping { .. }, Event::HomeSaved { generation, seq }) => self.home_saved(generation, seq, &mut step),
             (Phase::Awake { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
+                // held to its end, unless it let go once its home was in
+                let unheld = self.unheld();
                 self.saving = None;
                 self.saved(now_ms, &mut step);
-                step.actions.push(Action::Unhold { generation });
+                if !unheld {
+                    step.actions.push(Action::Unhold { generation });
+                }
             }
             (Phase::Sleeping { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
                 // its try heard late (its meter passed over the time since,
@@ -638,6 +644,7 @@ impl Lifecycle {
                 | Event::SnapshotFailed { .. }
                 | Event::RestoreFailed { .. }
                 | Event::Held { .. }
+                | Event::HomeSaved { .. }
                 | Event::Saved { .. }
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }

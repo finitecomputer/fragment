@@ -14,7 +14,15 @@ pub enum Saving {
     /// The DO touched the hold and waits for the guest's `held`.
     Hold { since_ms: i64 },
     /// The DO saves `/data` (`held`: the guest answered), as save `seq`.
-    Save { since_ms: i64, held: bool, seq: u64 },
+    /// `unheld`: awake, it let go of its hold once its home's record was
+    /// taken (`Event::HomeSaved`), and takes its work's as its guest works.
+    Save {
+        since_ms: i64,
+        held: bool,
+        seq: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unheld: bool,
+    },
     /// A sleep's last step: snapshot (`saved`: its save worked), signal,
     /// wait, destroy.
     Stop { since_ms: i64, saved: bool },
@@ -67,8 +75,27 @@ impl Lifecycle {
     /// The hold answered (or its wait ran out): the save itself.
     pub(super) fn save(&mut self, generation: u64, held: bool, now_ms: i64, step: &mut Step) {
         self.save_seq += 1;
-        self.saving = Some(Saving::Save { since_ms: now_ms, held, seq: self.save_seq });
+        self.saving = Some(Saving::Save { since_ms: now_ms, held, seq: self.save_seq, unheld: false });
         step.actions.push(Action::Save { generation, held, seq: self.save_seq });
+    }
+
+    /// Save `seq`'s home's record is taken (`Event::HomeSaved`). The hold
+    /// was for the home, whose databases the guest copied under it
+    /// (docs/computers.md, "The hold"): an awake save lets go of it now,
+    /// once, so its guest claims turns again while its work is copied, as
+    /// tools already running always wrote to it during a save. A sleep's
+    /// save keeps its hold until its container is gone.
+    pub(super) fn home_saved(&mut self, generation: u64, seq: u64, step: &mut Step) {
+        let Some(Saving::Save { seq: s, unheld, .. }) = &mut self.saving else { return };
+        if *s == seq && !*unheld && matches!(self.phase, Phase::Awake { generation: g, .. } if g == generation) {
+            *unheld = true;
+            step.actions.push(Action::Unhold { generation });
+        }
+    }
+
+    /// Whether the save under way already let go of its hold.
+    pub(super) fn unheld(&self) -> bool {
+        matches!(self.saving, Some(Saving::Save { unheld: true, .. }))
     }
 
     /// A save worked: nothing of this life is unsaved since it was asked,
@@ -138,6 +165,93 @@ mod tests {
         started(&mut l, T);
         let s = l.apply(Event::Closed { socket: Socket::Keepalive }, T + 10_000);
         assert_eq!(s.alarm_ms, Some((T + 3_000 + METER_EVERY_MS).min(T + 10_000 + IDLE_MS)), "{s:?}");
+    }
+
+    /// Goal (P9): an awake save holds its guest only while its home's
+    /// record is taken: once that is in (`HomeSaved`) it lets go, once, and
+    /// its end lets go of nothing more; a sleep keeps its hold to its stop.
+    /// Method: the events as the DO reports them, valid, invalid (another
+    /// save's, another start's, before its save began, a sleep's), replayed,
+    /// and across a store and read back.
+    #[test]
+    fn an_awake_save_holds_its_home_only() {
+        // a save asked once a turn's work settles, its hold answered
+        let awake_save = || {
+            let mut l = Lifecycle::new();
+            let g = started(&mut l, T);
+            l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
+            l.apply(Event::Closed { socket: Socket::Keepalive }, T + 10_000);
+            let at = T + 10_000 + SAVE_SETTLE_MS;
+            assert_eq!(l.apply(Event::Alarm, at).actions.last(), Some(&Action::Hold { generation: g }));
+            let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 500));
+            (l, g, seq, at)
+        };
+        // valid: its home in, it lets go; its end lets go of nothing more
+        let (mut l, g, seq, at) = awake_save();
+        let alarm = l.next_alarm();
+        let s = l.apply(Event::HomeSaved { generation: g, seq }, at + 2_000);
+        assert_eq!(s.actions, vec![Action::Unhold { generation: g }]);
+        assert_eq!((s.alarm_ms, l.saving().map(Saving::deadline_ms)), (alarm, Some(at + 500 + SAVE_DEADLINE_MS)), "its work's record is still the save's, under its deadline");
+        // replay: once only
+        let before = l.clone();
+        assert!(l.apply(Event::HomeSaved { generation: g, seq }, at + 2_100).actions.is_empty());
+        assert_eq!(l.saving(), before.saving());
+        // restart: stored and read back between its home and its end
+        let mut l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap().0;
+        assert_eq!(l.saving(), before.saving());
+        let s = l.apply(Event::Saved { generation: g, seq }, at + 60_000);
+        assert!(s.actions.is_empty() && l.saving().is_none(), "let go already: {s:?}");
+        assert_eq!(s.note, SaveNote::Clear);
+        assert!(l.apply(Event::HomeSaved { generation: g, seq }, at + 60_100).actions.is_empty(), "a late one, once it is done");
+        // its work's record failing after it let go: tried again, its
+        // unhold asked again (nothing holds it: an unhold is a no-op)
+        let (mut l, g, seq, at) = awake_save();
+        l.apply(Event::HomeSaved { generation: g, seq }, at + 2_000);
+        let s = l.apply(Event::SaveFailed { generation: g, seq, why: "R2 is down".into() }, at + 9_000);
+        assert_eq!((s.actions, s.alarm_ms.is_some()), (vec![Action::Unhold { generation: g }], true));
+        // a save whose isolate went with its report, after its home: failed
+        // at its deadline, as any
+        let (mut l, g, seq, at) = awake_save();
+        l.apply(Event::HomeSaved { generation: g, seq }, at + 2_000);
+        let s = l.apply(Event::Alarm, at + 500 + SAVE_DEADLINE_MS);
+        assert_eq!(s.actions.last(), Some(&Action::Unhold { generation: g }), "{s:?}");
+        assert!(l.saving().is_none());
+        // invalid: another save's, another start's, before its save began
+        let (mut l, g, seq, at) = awake_save();
+        let before = l.clone();
+        assert!(l.apply(Event::HomeSaved { generation: g, seq: seq + 1 }, at + 2_000).actions.is_empty());
+        assert!(l.apply(Event::HomeSaved { generation: g + 1, seq }, at + 2_000).actions.is_empty());
+        assert_eq!(l.saving(), before.saving());
+        assert_eq!(l.apply(Event::Saved { generation: g, seq }, at + 3_000).actions, vec![Action::Unhold { generation: g }], "never let go: held to its end, as before");
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
+        l.apply(Event::Closed { socket: Socket::Keepalive }, T + 10_000);
+        l.apply(Event::Alarm, T + 10_000 + SAVE_SETTLE_MS);
+        assert!(l.apply(Event::HomeSaved { generation: g, seq: 1 }, T + 41_000).actions.is_empty(), "at its hold, no save is under way");
+        // a sleep's save keeps its hold to its stop
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Alarm, T + IDLE_MS);
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + IDLE_MS + 500));
+        assert!(l.apply(Event::HomeSaved { generation: g, seq }, T + IDLE_MS + 2_000).actions.is_empty());
+        assert_eq!(l.apply(Event::Saved { generation: g, seq }, T + IDLE_MS + 4_000).actions, vec![Action::Stop { generation: g, saved: true }]);
+        // its owner's sleep while an awake save copies its work: the sleep's
+        // hold is never let go by the awake save's late reports
+        let (mut l, g, seq, at) = awake_save();
+        l.apply(Event::HomeSaved { generation: g, seq }, at + 2_000);
+        assert_eq!(l.apply(Event::Sleep, at + 3_000).actions, vec![Action::Sleep { generation: g }]);
+        assert!(l.apply(Event::HomeSaved { generation: g, seq }, at + 3_100).actions.is_empty());
+        assert!(l.apply(Event::Saved { generation: g, seq }, at + 3_200).actions.is_empty());
+        assert!(matches!(l.saving(), Some(Saving::Hold { .. })), "the sleep's own hold: {:?}", l.saving());
+        // a lifecycle stored before `unheld` was kept reads it unset: held to
+        // its end, as that release would have
+        let (l, g, seq, at) = awake_save();
+        let mut v = serde_json::to_value(&l).unwrap();
+        assert!(v["saving"].get("unheld").is_none(), "unset, not stored: {v}");
+        v["saving"].as_object_mut().unwrap().remove("unheld");
+        let (mut old, _) = Lifecycle::read(&v.to_string()).unwrap();
+        assert_eq!(old.apply(Event::Saved { generation: g, seq }, at + 3_000).actions, vec![Action::Unhold { generation: g }]);
     }
 
     /// The saves the lifecycle asks for, firing the alarm it asks for each

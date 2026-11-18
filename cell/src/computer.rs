@@ -1826,6 +1826,12 @@ impl ComputerCell {
                 Ok(record) => {
                     took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
                     records.push(record);
+                    // its home is in, the copies its guest made under the
+                    // hold with it: an awake save lets go of its hold before
+                    // it takes its work's (`Lifecycle`'s `HomeSaved`)
+                    if dir == "/data" {
+                        self.home_saved(generation, seq).await;
+                    }
                 }
                 Err(e) => {
                     console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": e.message, "ms": js::now_ms() - t0 }));
@@ -1849,6 +1855,34 @@ impl ComputerCell {
                 console_error!("{}", json!({ "computer": id, "save": seq, "generation": generation, "unkept": e.message }));
                 Event::SaveFailed { generation, seq, why: e.message }
             }
+        }
+    }
+
+    /// Save `seq`'s home's record is taken: told to its lifecycle as the
+    /// drive tells any event (`drive_events`: stored, one line), within the
+    /// save, and the unhold it asks for (an awake save's, once) made at once,
+    /// so its guest claims turns again while its work is copied. It asks for
+    /// nothing else: no life ends, nothing of its saves is said, and its
+    /// alarm stays the save's deadline.
+    async fn home_saved(&self, generation: u64, seq: u64) {
+        let event = Event::HomeSaved { generation, seq };
+        let logged = json!(event);
+        let applied = self.lifecycle().and_then(|mut life| {
+            let step = life.apply_with(event, js::now_ms(), &self.rules());
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions }));
+            self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)?;
+            Ok(step)
+        });
+        match applied {
+            Ok(step) => {
+                assert!(step.ended.is_none() && step.note == SaveNote::Same, "a save's home ends no life and says nothing of its saves");
+                for action in step.actions {
+                    let Action::Unhold { generation } = action else { unreachable!("a save's home asks for its unhold alone: {action:?}") };
+                    self.unhold(generation).await;
+                }
+            }
+            // held on to its end, as before: its end lets go
+            Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": seq, "homeSaved": "untold", "error": e.message })),
         }
     }
 
