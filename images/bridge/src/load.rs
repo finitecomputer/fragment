@@ -10,7 +10,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
 use crate::engine::Input;
-use crate::limits::{LOAD_CPU_FLOOR_PERMILLE, LOAD_NET_FLOOR_BYTES_PER_S, LOAD_SLICE_MS};
+use crate::limits::{LOAD_CPU_FLOOR_PERMILLE, LOAD_NET_FLOOR_BYTES_PER_S};
+#[cfg(test)]
+use crate::limits::LOAD_SLICE_MS;
 
 /// The computer's own counters, each counting up from its start.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,11 +48,11 @@ pub fn proc_cpu(stat: &str, hz: u64) -> Option<u64> {
     assert!(hz > 0, "the clock ticks");
     let line = stat.lines().find(|l| l.starts_with("cpu "))?;
     let f: Vec<u64> = line.split_whitespace().skip(1).map(|v| v.parse().ok()).collect::<Option<_>>()?;
-    // user nice system idle iowait irq softirq steal …
-    if f.len() < 8 {
+    // user nice system idle iowait irq softirq (steal: the host's, not ours)
+    if f.len() < 7 {
         return None;
     }
-    let busy = f[0] + f[1] + f[2] + f[5] + f[6] + f[7];
+    let busy = f[0] + f[1] + f[2] + f[5] + f[6];
     Some(busy.saturating_mul(1_000_000) / hz)
 }
 
@@ -91,26 +93,33 @@ fn read(from: CpuFrom) -> Option<Counters> {
     Some(Counters { cpu_usec, net_bytes })
 }
 
-/// Reads the counters every `LOAD_SLICE_MS` for the bridge's life, and
+/// Reads the counters every `every` (`LOAD_SLICE_MS`) for the bridge's life, and
 /// gives the engine each slice (`Input::Slice`, as `wrap` puts it in
-/// `inbox`). With no counters to read, it says so once and gives none, as
+/// `inbox`). A slice the platform's hold overlapped (`held`: it saves the
+/// computer then, and its save's work is no agent's) is never over a
+/// floor: else a save would hold the computer it saves, and its end save
+/// it again. With no counters to read, it says so once and gives none, as
 /// a bridge before it.
-pub async fn watch<M>(inbox: mpsc::Sender<M>, wrap: fn(Input) -> M, mut stop: watch::Receiver<bool>) {
+pub async fn watch<M>(inbox: mpsc::Sender<M>, wrap: fn(Input) -> M, every: Duration, mut held: watch::Receiver<bool>, mut stop: watch::Receiver<bool>) {
+    assert!(!every.is_zero(), "slices take time");
     let from = [CpuFrom::Cgroup, CpuFrom::Proc].into_iter().find(|f| read(*f).is_some());
     crate::ev!("load.counters", { "cpu": from.map(|f| format!("{f:?}")) });
     let Some(from) = from else { return };
     let mut last: Option<(Counters, u64)> = None;
-    let mut every = tokio::time::interval(Duration::from_millis(LOAD_SLICE_MS));
+    let mut every = tokio::time::interval(every);
     // bounded by the bridge's life: one read per slice, ended by `stop`
     loop {
         tokio::select! {
             _ = every.tick() => {}
             _ = crate::net::stopped(&mut stop) => return,
         }
+        // held now, or at any moment since the last look (a change)
+        let holding = held.has_changed().unwrap_or(false) | *held.borrow_and_update();
         let Some(c) = read(from) else { continue };
         let now = crate::log::now_ms();
         if let Some((was, at)) = last.replace((c, now)) {
             let Some(over) = over(was, c, now.saturating_sub(at)) else { continue };
+            let over = over && !holding;
             if inbox.send(wrap(Input::Slice { from: at, over })).await.is_err() {
                 return;
             }
@@ -142,12 +151,47 @@ mod tests {
         assert_eq!(over(zero, at(1, 1), 0), None, "no time passed");
     }
 
+    /// Goal (Codex on #1349): a save's own work never holds the computer it
+    /// saves. Valid: this machine's counters, a thread spinning, give
+    /// slices over the floor. Invalid: a slice the platform's hold
+    /// overlapped is under it, however busy, and so is one the hold ended
+    /// in.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slice_under_the_hold_is_no_work() {
+        let spin = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let spinning = spin.clone();
+        // bounded by the test: it stops it
+        let spinner = std::thread::spawn(move || {
+            while spinning.load(std::sync::atomic::Ordering::Relaxed) {
+                std::hint::black_box(0u64);
+            }
+        });
+        let (tx, mut rx) = mpsc::channel(16);
+        let (held_tx, held_rx) = watch::channel(false);
+        let (stop_tx, stop_rx) = watch::channel(false);
+        tokio::spawn(watch(tx, |i| i, Duration::from_millis(200), held_rx, stop_rx));
+        let over = |i: Option<Input>| match i {
+            Some(Input::Slice { over, .. }) => over,
+            other => panic!("a slice: {other:?}"),
+        };
+        assert!(over(rx.recv().await), "a spinning core is over the floor");
+        held_tx.send_replace(true);
+        rx.recv().await;
+        assert!(!over(rx.recv().await), "under the hold");
+        held_tx.send_replace(false);
+        assert!(!over(rx.recv().await), "the slice the hold ended in");
+        assert!(over(rx.recv().await), "and after it, work again");
+        stop_tx.send_replace(true);
+        spin.store(false, std::sync::atomic::Ordering::Relaxed);
+        spinner.join().unwrap();
+    }
+
     #[test]
     fn counters_parse() {
         assert_eq!(cgroup_cpu("usage_usec 631383441\nuser_usec 517364789\n"), Some(631_383_441));
         assert_eq!(cgroup_cpu("user_usec 1\n"), None);
         // user nice system idle iowait irq softirq steal guest guest_nice
-        assert_eq!(proc_cpu("cpu  100 2 30 9999 50 4 5 6 0 0\ncpu0 1 1 1 1 1 1 1 1 0 0\n", 100), Some(147 * 10_000));
+        assert_eq!(proc_cpu("cpu  100 2 30 9999 50 4 5 6 0 0\ncpu0 1 1 1 1 1 1 1 1 0 0\n", 100), Some(141 * 10_000), "steal is the host's");
         assert_eq!(proc_cpu("cpu  1 2\n", 100), None);
         let dev = "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo:  820992   13530    0    0    0     0          0         0   820992   13530    0    0    0     0       0          0\n  eth0: 7254812  120885    0    0    0     0          0         0  5787279   81328    0    0    0     0       0          0\n";
         assert_eq!(net_bytes(dev), Some(7_254_812 + 5_787_279), "loopback left out");

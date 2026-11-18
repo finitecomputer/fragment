@@ -369,12 +369,17 @@ own work. An idle server, an idle runtime and its desktop never do
   the computer is working while one of its last `LOAD_SLICES` (2
   minutes) was, counting only slices that began after its agents' work
   stopped holding it: a turn's own work (its last tool, the runtime's
-  reply) never holds the computer on. Disk writes are no measure: idle
+  reply) never holds the computer on, nor does a slice the platform's
+  hold overlapped: the save's own work would hold the computer it saves,
+  and its end save it again. Disk writes are no measure: idle
   write-back alone passes any useful floor. The measurements behind the
   floors are beside them.
 - **The bound is this life's**, never saved: a new life (a restart, a
-  wake) holds nothing until its own agents' work ends, so a wake's own
-  start never holds a computer woken for a look. A bridge restarted alone
+  wake) holds nothing until its own agents' work ends (an earlier life's
+  turns it ends as lost are none of its), so a wake's own start never
+  holds a computer woken for a look. The bound runs on the guest's clock,
+  as every bound of the engine does: a clock set back holds that much
+  longer. A bridge restarted alone
   loses the hold; the computer then sleeps after its idle wait unless a
   turn runs.
 - A computer with no counters to read (`load.counters` names none) holds

@@ -906,6 +906,10 @@ impl Engine {
             self.end(id, Outcome::Error(LOST.into()), Closed::Expired);
         }
         assert!(self.state.turns.values().all(|t| matches!(t.phase, Phase::Queued | Phase::Ended)), "a recovered life holds only queued and ended turns");
+        // an earlier life's turns, ended here, were no work of this life's:
+        // work left running counts from none of them
+        self.busy = false;
+        self.left_from = None;
         self.pump_all();
         self.finish()
     }

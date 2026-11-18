@@ -107,7 +107,11 @@ fn work_left_running_holds_within_its_bound() {
     assert_eq!(keepalive(&e.step(heard(Event::End { turn: next, outcome: Outcome::Idle }), end2)), Some(false));
     assert_eq!(slice(&mut e, end2, true), Some(true), "a new bound");
 
-    // restart mid-hold: the next life holds nothing of it
+    // restart mid-hold, a turn running (a command, say): the next life
+    // holds nothing of it, though it ends that turn as lost (a wake's
+    // start must not count as this life's work ending)
+    said(&mut e, &a, &v, 99, "npub1paul", json!({ "text": "one more" }), end2 + 2);
+    assert!(e.state().turns.values().any(|t| t.phase == Phase::Running), "a turn runs as the life ends");
     let settings = Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 };
     let mut next = Engine::new(e.state().clone(), settings, "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
     next.step(Input::Agents(vec![a.clone()]), end2 + s);
@@ -116,7 +120,8 @@ fn work_left_running_holds_within_its_bound() {
     assert_eq!(slice(&mut next, end2 + s, true), None);
     assert!(!next.keepalive(), "a new life holds no earlier life's work");
     let t3 = end2 + 3 * s;
-    let turn3 = started(&said(&mut next, &a, &v, 3, "npub1paul", json!({ "text": "and again" }), t3)).expect("started").turn;
+    // in another chat: the lost turn's continuation waits its turn in its own
+    let turn3 = started(&to_own_chat(&mut next, &a, 1, json!({ "text": "and again" }), t3)).expect("started").turn;
     assert_eq!(keepalive(&next.step(heard(Event::End { turn: turn3, outcome: Outcome::Idle }), t3 + 1)), Some(false));
     assert_eq!(slice(&mut next, t3 + 1, true), Some(true), "its own turn's work holds it");
 }
