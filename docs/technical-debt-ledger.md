@@ -1048,7 +1048,7 @@ unfinished design, not debt.
 ## Files depend on code.storage, a hosted service with no self-hosted twin
 
 - **Shortcut:** files live in code.storage through its REST API
-  (cell/src/cs.rs, cli/src/sync.rs); the only twin is the fake.
+  (cell/src/cs.rs, cli/src/sync/); the only twin is the fake.
 - **Risk:** not self-hostable; one outage stops every fragment's files.
 - **Delete when:** a self-hostable service answers the same REST subset
   with the fake's rules as its conformance suite and the e2e passing on
@@ -1126,3 +1126,47 @@ unfinished design, not debt.
 - **Delete when:** each batch's commit is made again from main as the
   indexes' is (keeping the newer entry), or the archive moves to an app
   whose mutation writes both.
+
+## The computer's view carries two fixed routes beside the list
+
+- **Shortcut:** the view's `models` keeps `cheap`, `medium`, `fallback`,
+  `vision` and `routes.{cheap,medium}` (fragment_core::models
+  `VIEW_ROUTES`, `Models::ids_by_name`): each the route of that name,
+  else the deployment's default, and the default's fallback and vision.
+  An image's bridge decodes them as required fields.
+- **Risk:** the only place code names a route; an older image runs an
+  agent on a route of any other name on the default, silently.
+- **Delete when:** every deployment's pinned image (production, preview,
+  each self-hosted box's) reads the view's list of routes; then the view
+  drops the two and their fields.
+
+## Model configs of the four-slot shape are read through a converter
+
+- **Shortcut:** xtask reads a deployment's `models` naming `cheap`,
+  `medium`, `fallback` and `vision` as the routes they meant
+  (fragment_core::models `legacy`, deploy.rs `models_cell`); the e2e's
+  configs and most of core's model tests are of that shape.
+- **Risk:** two shapes of one config; an error names `models.slots.<x>`
+  for a file that wrote `models.<x>`.
+- **Delete when:** fragment-deploy's `preview.jsonc` and
+  `production.jsonc`, deploy/example.jsonc, docs/self-host.md and the
+  e2e's configs name routes; then `legacy` goes and its tests read lists.
+
+## An older bridge reads the state's snapshot, not its log
+
+- **Shortcut:** the bridge appends each step's change to `state.log`
+  beside `state.json` (`images/bridge/src/store.rs`). A bridge from
+  before the log reads `state.json` alone. A save under an answered hold
+  holds the state whole in `state.json`, because the answer waits for
+  the log to be written into it. A rollback from such a save loses
+  nothing. Two kinds of `/data` can still hold steps in the log only: a
+  save whose hold went unanswered (the DO saves anyway after
+  `HOLD_WAIT_MS`), and a `/data` a container kept without a save (a
+  self-hosted node after a crash). An older bridge starts from the
+  snapshot, as of the last compaction, at most the log's room behind.
+- **Risk:** that older bridge goes back to the snapshot, as a restore
+  of an earlier save does. It reads those chats again and runs nothing
+  twice (P1), since the journal is the authority. It misreads nothing:
+  the snapshot is in the format it wrote.
+- **Delete when:** no computer can be pinned to an image whose bridge
+  predates the log.

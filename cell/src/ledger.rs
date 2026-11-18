@@ -8,10 +8,13 @@
 //! The head (plan, seat, balance) is kept whole as one
 //! JSON row, small and bounded; what grows with use (references, batches,
 //! commands, each fragment's spend by month, caps) is in tables, read and
-//! written through `SqlStore`. Each route is one `transactionSync` over
-//! both: the core decides before it writes, so a refusal changes nothing
-//! but the month it rolled to, and a store that failed rolls the whole
-//! route back. Its alarm runs `sweep` at the head's `next_sweep_ms`.
+//! written through `SqlStore`. Each route that may change them is one
+//! `transactionSync` over both: the core decides before it writes, so a
+//! refusal changes nothing but the month it rolled to, and a store that
+//! failed rolls the whole route back. A route whose core function only
+//! reads them (`read`: the gate's questions and the statuses) writes
+//! nothing, its head included, once a call has made the ledger (F14). Its
+//! alarm runs `sweep` at the head's `next_sweep_ms`.
 //!
 //! Nothing is held before a paid call (decision 62): a head or an entry
 //! the releases before kept (holds, reservations) loads, its holds
@@ -272,7 +275,13 @@ pub struct UsesOf {
 /// fail its next `times` grants
 /// before it takes them (`fail-grants {times}`, at most
 /// `TEST_FAIL_GRANTS_MAX`, 0 to end it: a ledger not reached once the
-/// router recorded an org's grant, which its retry completes).
+/// router recorded an org's grant, which its retry completes), or say the
+/// rows its SQLite has written since this activation began, as SQLite
+/// counts them (`total_changes()`: its head, tables, meta and alarm alike),
+/// whether it holds a head yet and whether its alarm is set (`writes`,
+/// answering `{rows, head, alarm}`: a read changes none), or delete its
+/// alarm and forget it set one (`lose-alarm`: as a sweep that failed, its
+/// retry unset too, leaves it).
 /// Read as its fields (`TestHookFields`), not as serde's internally tagged
 /// reading, which buffers each to find its `op`: about 17 KB of the cell's Wasm.
 #[derive(Debug, Serialize, Deserialize)]
@@ -296,6 +305,8 @@ pub enum TestHook {
     FailGrants {
         times: u32,
     },
+    Writes,
+    LoseAlarm,
 }
 
 /// A `TestHook` as it is read: every op's fields, flat, and the lever's
@@ -332,6 +343,8 @@ enum TestOp {
     ForgetGate,
     GateHeard,
     FailGrants,
+    Writes,
+    LoseAlarm,
 }
 
 impl TryFrom<TestHookFields> for TestHook {
@@ -354,6 +367,8 @@ impl TryFrom<TestHookFields> for TestHook {
             TestOp::ForgetGate => TestHook::ForgetGate,
             TestOp::GateHeard => TestHook::GateHeard,
             TestOp::FailGrants => TestHook::FailGrants { times: need(f.times, "times")? },
+            TestOp::Writes => TestHook::Writes,
+            TestOp::LoseAlarm => TestHook::LoseAlarm,
         })
     }
 }
@@ -696,12 +711,10 @@ impl Store for SqlStore {
     }
 }
 
-/// The head as this cell keeps it, bound as an org's when its name is an
-/// org's (`Ledger::bind_org`), or a new one: an org's, with no credit
-/// (`Ledger::new_org`), or a person's, a guest with no credit
-/// (`Ledger::new`), then the deployment's default plan for new people
-/// (decision 25: `FRAGMENT_DEFAULT_PLAN`).
-fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
+/// What this cell keeps of its ledger: an org's terms when it is an org's,
+/// and its head as last written, bound as an org's then
+/// (`Ledger::bind_org`); no head until a call has written one (`head`).
+fn stored(store: &SqlStore) -> CellResult<(Option<core::org::OrgTerms>, Option<Ledger>)> {
     // an org's terms are never in its head (an older release's sweep
     // rewrites the head it reads): that it is an org's is its name, kept
     // as its first call named it, and its budget a row of its own
@@ -716,12 +729,22 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
         }
         _ => None,
     };
-    if let Some(row) = rows.into_iter().next() {
-        let mut ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
-        if let Some(terms) = org {
-            ledger.bind_org(terms);
-        }
-        ledger.assert_valid();
+    let Some(row) = rows.into_iter().next() else { return Ok((org, None)) };
+    let mut ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+    if let Some(terms) = org {
+        ledger.bind_org(terms);
+    }
+    ledger.assert_valid();
+    Ok((org, Some(ledger)))
+}
+
+/// The head as this cell keeps it (`stored`), or a new one: an org's, with
+/// no credit (`Ledger::new_org`), or a person's, a guest with no credit
+/// (`Ledger::new`), then the deployment's default plan for new people
+/// (decision 25: `FRAGMENT_DEFAULT_PLAN`).
+fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
+    let (org, ledger) = stored(store)?;
+    if let Some(ledger) = ledger {
         return Ok(ledger);
     }
     if org.is_some() {
@@ -831,6 +854,47 @@ impl LedgerCell {
         answer.map_err(Failed::Refused)
     }
 
+    /// A route whose core function only reads (it takes `&Ledger` and
+    /// `&impl Store`, as `may_spend`, `fragment_open`, `status` and
+    /// `org_status` do): `op` answers from the head as last written and the
+    /// store, at the ledger's now, in one synchronous step (no other call
+    /// runs between), and nothing is written: not the head, which `op`
+    /// cannot change, nor the alarm, which the write that made the head
+    /// set and each sweep sets again, unless it was lost (`alarm_kept`)
+    /// (F14). Its person is told when what the ledger says changed by the
+    /// clock alone (`told`, which writes only then), as after a mutation.
+    /// A ledger no call has written yet is made by its first (`head`: a
+    /// person's default plan is a command it keeps), so that call is a
+    /// mutation, writing it.
+    async fn read<T: 'static>(&self, op: impl FnOnce(&Ledger, &SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
+        let now = js::now_ms() + self.offset_ms()?;
+        let store = SqlStore::new(self.sql());
+        let Some(ledger) = stored(&store)?.1 else {
+            return self.mutate(move |l, s, now| op(l, s, now)).await;
+        };
+        let answer = op(&ledger, &store, now);
+        store.checked()?;
+        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok())));
+        if self.armed.get().is_none() {
+            self.alarm_kept(ledger.next_sweep_ms(now)).await?;
+        }
+        self.told();
+        answer.map_err(Failed::Refused)
+    }
+
+    /// An activation's first read keeps the alarm: the one set is read,
+    /// not written, or, when none is (a sweep that failed, its retry unset
+    /// too), `next` is set, as a mutation would set it. The sweep rolls
+    /// each month even when nothing else changes the ledger, and a month's
+    /// included credit pays a debt as it arrives.
+    async fn alarm_kept(&self, next: i64) -> CellResult<()> {
+        match self.state.storage().get_alarm().await? {
+            Some(real) => self.armed.set(Some(real + self.offset_ms()?)),
+            None => self.arm(next).await?,
+        }
+        Ok(())
+    }
+
     /// Its person's pages told (`changed`) when what the ledger says (its
     /// notices, `Ledger::told_key`) is not what it last told them (FIN-458,
     /// `GET /api/notices`): its standing, or anything else its notices say,
@@ -934,11 +998,11 @@ impl LedgerCell {
                 if self.cfg.test_hooks && matches!(q.spend, Spend::AgentTurn | Spend::AiStep) {
                     self.paid_calls()?;
                 }
-                reply(done(self.mutate(move |l, s, now| l.may_spend(s, q.spend, q.fragment.as_deref(), q.by_owner, now)).await?))
+                reply(done(self.read(move |l, s, now| l.may_spend(s, q.spend, q.fragment.as_deref(), q.by_owner, now)).await?))
             }
             FragmentOpen::PATH => {
                 let q: FragmentOpen = decode(&body)?;
-                reply(done(self.mutate(move |l, s, now| l.fragment_open(s, &q.fragment, now)).await?))
+                reply(done(self.read(move |l, s, now| l.fragment_open(s, &q.fragment, now)).await?))
             }
             <GrantCredit as Route>::PATH => {
                 let c: GrantCredit = decode(&body)?;
@@ -967,7 +1031,7 @@ impl LedgerCell {
             Status::PATH => {
                 let Status {} = decode(&body)?;
                 let book = &self.cfg.book;
-                reply(self.mutate(move |l, s, now| if l.is_org() { Err(Refused::PersonsOnly) } else { Ok(l.status(s, now, book)) }).await?)
+                reply(self.read(move |l, s, now| if l.is_org() { Err(Refused::PersonsOnly) } else { Ok(l.status(s, now, book)) }).await?)
             }
             NoticesOf::PATH => {
                 // read alone, outside any transaction, as nothing is written:
@@ -989,7 +1053,7 @@ impl LedgerCell {
                 let OrgStatus {} = decode(&body)?;
                 let Some(Payer::Org(org)) = Payer::parse(&payer) else { return Err(Failed::Refused(Refused::OrgsOnly)) };
                 let book = &self.cfg.book;
-                reply(self.mutate(move |l, s, now| l.org_status(&org, s, now, book)).await?)
+                reply(self.read(move |l, s, now| l.org_status(&org, s, now, book)).await?)
             }
             <OrgBudget as Route>::PATH => {
                 let c: OrgBudget = decode(&body)?;
@@ -1146,6 +1210,17 @@ impl LedgerCell {
                 reply(json!({ "entries": entries }))
             }
             TestHook::Totals => reply(self.mutate(|l, _, _| Ok(l.totals())).await?),
+            TestHook::Writes => {
+                let rows: Vec<Value> = self.sql().exec("SELECT total_changes() AS rows, (SELECT COUNT(*) FROM head) AS head", None)?.to_array()?;
+                let row = rows.first().ok_or_else(|| CellError::host("total_changes() answered no row"))?;
+                let alarm = self.state.storage().get_alarm().await?.is_some();
+                reply(json!({ "rows": row["rows"], "head": row["head"] == 1, "alarm": alarm }))
+            }
+            TestHook::LoseAlarm => {
+                self.state.storage().delete_alarm().await?;
+                self.armed.set(None);
+                reply(json!({ "lost": true }))
+            }
             // the book it charges with: its release's (it keeps none)
             TestHook::Book => reply(json!({ "book": self.cfg.book })),
             TestHook::LegacySeat { seat, seq } => {

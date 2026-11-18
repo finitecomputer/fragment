@@ -108,7 +108,7 @@ Every change is checked against this table.
 | A hosted door: which agent's door a connector fragment is | the connector fragment's `meta` `door_actor`, set and cleared by its owner in person, and `door_template` (docs/api.md, "An agent's doors") | the agent fragment's `door.hosted` event; each publish reads the binding, the installed code and the deployment's `connectors` |
 | Which connectors may be linked, and each one's relay targets | the deployment's `connectors` (`FRAGMENT_CONNECTORS`; absent, `connectors::Policy::default`) | none: every door and relay asks `Policy::authorize` at the time |
 | An agent's colour | its identity, through one function (`agent-color.js`) | none: never stored |
-| The model route's models, and each tier's Fast and Deep | the deployment's `models` (`FRAGMENT_MODELS`) | ids only, in each computer's view and its owner's; `GET /v1/models` reads the config |
+| The model route's models, its routes (name, label, default) and each route's Fast and Deep | the deployment's `models` (`FRAGMENT_MODELS`) | ids only, in each computer's view and its owner's; `GET /v1/models` reads the config |
 | A computer's agents | the Computer DO's `agents` | the agent fragment's `computer` and the registry's `agent_fragments`; a delete unassigns it (cell/src/ended.rs) |
 | What a person's agents used of each provider, by month | their ledger's `uses` (`fragment_core::ledger::uses`), counted after each swap's answer, best effort | none; a computer's months from before the move (Computer step 7) are owed, taken once by id, then forgotten |
 | A shared key's charges this last hour, per person | their computer's `key_hour` (`fragment_core::key_hour`), counted by `computer/used` after a swap a shared key charged | none |

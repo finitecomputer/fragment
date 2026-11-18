@@ -20,6 +20,7 @@ import { createSchedulesPage } from "./schedules-page.js";
 import { createMovePage } from "./move-page.js";
 import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
+import { closeOnOutsidePress } from "./dialog.js";
 import { createViewer } from "./viewer.js";
 import { seatGives } from "./billing.js";
 import { createChatList, newestChat } from "./chat-list.js";
@@ -764,7 +765,7 @@ addEventListener("message", (e) => {
   if (Number.isFinite(e.data?.height)) frame.style.height = `${e.data.height}px`;
   if (e.data?.share === "done") sheet.close();
 });
-sheet.onclick = (e) => { if (e.target === sheet) sheet.close(); };
+closeOnOutsidePress(sheet);
 sheet.onclose = () => {
   sheet.replaceChildren();
   load().catch(() => {});

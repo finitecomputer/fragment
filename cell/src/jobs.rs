@@ -3,19 +3,19 @@
 //! A **run** is one execution of an operation outside a request: a job
 //! someone called, or a mutation or job a trigger started. Each run is a
 //! Workflow instance (`Job` in entry.mjs) that drives it one step at
-//! a time by calling back into this supervisor:
+//! a time by calling back into this supervisor (fragment/calls.rs):
 //!
-//!   POST /job/advance {run, attempt, count, failed?}   re-run the job's body
+//!   `JobAdvance` {run, attempt, count, failed?}   re-run the job's body
 //!        in the app facet over the answers of its first `count` steps, up
 //!        to its next step
-//!   POST /job/effect  {run, attempt, index, kind, args}   perform that step
+//!   `JobEffect`  {run, attempt, index, kind, args}   perform that step
 //!        (call an operation, fetch with secrets added here, publish, …)
 //!        and keep its answer
-//!   POST /job/finish  {run, attempt, error}     the Workflow gave up
+//!   `JobFinish`  {run, attempt, error}     the Workflow gave up
 //!
-//! Every callback names the fragment's incarnation, checked before the
-//! callback decodes into its struct below; a step's kind and args decode
-//! into `fragment_core::steps::Step`, and a run's row into `RunRow`.
+//! Every callback names the fragment's incarnation, checked with its run
+//! (`current_run`); a step's kind and args decode into
+//! `fragment_core::steps::Step`, and a run's row into `RunRow`.
 //!
 //! Each step's answer is kept here (`steps`, by run, attempt, and index)
 //! before the Workflow hears that the step is done, and the job's body
@@ -66,13 +66,12 @@ use worker::wasm_bindgen::JsValue;
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{JobAdvance, JobEffect, JobFinish};
 use crate::fragment::{json_response, missing, Caller, FragmentCell, MetaKey};
 use crate::ops::{Invocation, JOB_ID_PREFIX};
 use crate::{js, keys};
 use fragment_core::gather::Gathered;
 
-/// Set by the Workflow on its callbacks; the router never sets or passes it.
-pub const JOB_HEADER: &str = "x-fragment-job";
 /// How far a fetch carries the chain it is part of (another fragment's inbox reads it).
 pub const HOPS_HEADER: &str = "x-fragment-hops";
 /// What a fetch that is not a GET or a HEAD names its step by (`step_fetch`).
@@ -243,26 +242,6 @@ fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Value, Option
     }
 }
 
-/// `POST /job/advance`
-#[derive(Deserialize)]
-struct AdvanceCall {
-    run: i64,
-    attempt: u32,
-    /// Steps taken so far: the cell kept each one's answer.
-    count: u32,
-    /// The last step, when it ran out of retries: its answer is the error
-    /// only the Workflow saw.
-    #[serde(default)]
-    failed: Option<FailedStep>,
-}
-
-#[derive(Deserialize)]
-struct FailedStep {
-    index: u32,
-    kind: String,
-    error: String,
-}
-
 /// A `steps` row: one step's answer as the cell kept it.
 #[derive(Deserialize)]
 struct StepRow {
@@ -288,29 +267,6 @@ impl StepRow {
         };
         StepResult { kind: self.kind, outcome }
     }
-}
-
-/// `POST /job/effect`: the step as the Workflow carries it, whose kind and
-/// args decode into a `Step` (a step that does not is the job's failure).
-#[derive(Deserialize)]
-struct EffectCall {
-    run: i64,
-    attempt: u32,
-    index: u32,
-    kind: String,
-    args: Value,
-    /// The Workflow's try of this step, from 1 (its step context's
-    /// `attempt`), when it says: a text step's timing reports it.
-    #[serde(default, rename = "try")]
-    tried: Option<u32>,
-}
-
-/// `POST /job/finish`
-#[derive(Deserialize)]
-struct FinishCall {
-    run: i64,
-    attempt: u32,
-    error: String,
 }
 
 /// What admits a delivery to a fragment's inbox: its inbox token, or, when
@@ -499,9 +455,14 @@ impl FragmentCell {
         started
     }
 
-    /// The run a Workflow callback is for, if it is still that attempt and
-    /// unfinished (a replay or a finish makes older instances stop).
-    fn current_run(&self, run: i64, attempt: u32) -> CellResult<Option<RunRow>> {
+    /// The run a Workflow callback is for, if it is of this fragment's
+    /// life (a Workflow from a deleted fragment's earlier life stops), and
+    /// still that attempt and unfinished (a replay or a finish makes older
+    /// instances stop).
+    fn current_run(&self, incarnation: &str, run: i64, attempt: u32) -> CellResult<Option<RunRow>> {
+        if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(incarnation) {
+            return Ok(None);
+        }
         let rows = self.rows(
             &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ? AND attempt = ? AND status IN ('queued', 'running')"),
             vec![SqlStorageValue::Integer(run), SqlStorageValue::Integer(attempt.into())],
@@ -516,12 +477,6 @@ impl FragmentCell {
             current.status = RunStatus::Running;
         }
         Ok(Some(current))
-    }
-
-    /// Whether a callback is from this fragment's life: a Workflow from a
-    /// deleted fragment's earlier life stops.
-    fn this_life(&self, incarnation: &str) -> CellResult<bool> {
-        Ok(self.meta(MetaKey::CreatedAt)?.as_deref() == Some(incarnation))
     }
 
     /// Records a run's outcome (once: a second report is ignored).
@@ -574,38 +529,18 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// A callback from a run's Workflow (`/job/<route>`); one from an
-    /// earlier life of the fragment is told to stop.
-    pub(crate) async fn job_callback(&self, route: &str, body: &[u8]) -> CellResult<Value> {
-        fn decode<'a, T: Deserialize<'a>>(body: &'a [u8]) -> CellResult<T> {
-            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("a job callback: {e}")))
+    /// The Workflow gave up (`JobFinish`): the run is held with its error.
+    pub(crate) fn job_finish(&self, call: JobFinish) -> CellResult<()> {
+        if let Some(run) = self.current_run(&call.incarnation, call.run, call.attempt)? {
+            self.finish_run(&run, Err(call.error))?;
         }
-        /// Every callback names the fragment's life it is from.
-        #[derive(Deserialize)]
-        struct Life {
-            incarnation: String,
-        }
-        if !self.this_life(&decode::<Life>(body)?.incarnation)? {
-            return Ok(json!({ "stop": true }));
-        }
-        match route {
-            "advance" => self.advance(decode(body)?).await,
-            "effect" => self.job_effect(decode(body)?).await,
-            "finish" => {
-                let call: FinishCall = decode(body)?;
-                if let Some(run) = self.current_run(call.run, call.attempt)? {
-                    self.finish_run(&run, Err(call.error))?;
-                }
-                Ok(json!({ "ok": true }))
-            }
-            _ => Err(CellError::new(ErrorCode::NotFound, format!("no route /job/{route}"))),
-        }
+        Ok(())
     }
 
-    /// `POST /job/advance`
-    async fn advance(&self, call: AdvanceCall) -> CellResult<Value> {
+    /// The Workflow's advance (`JobAdvance`).
+    pub(crate) async fn job_advance(&self, call: JobAdvance) -> CellResult<Value> {
         let (run_id, attempt, count) = (call.run, call.attempt, call.count);
-        let Some(run) = self.current_run(run_id, attempt)? else { return Ok(json!({ "stop": true })) };
+        let Some(run) = self.current_run(&call.incarnation, run_id, attempt)? else { return Ok(json!({ "stop": true })) };
         let fail = |why: String| -> CellResult<Value> {
             self.finish_run(&run, Err(why.clone()))?;
             Ok(json!({ "failed": why }))
@@ -813,14 +748,15 @@ impl FragmentCell {
         Ok(stored_json(row, "input"))
     }
 
-    /// `POST /job/effect`: one step, performed and its answer kept (a
-    /// value, or a lasting failure the job sees) before the reply; a
-    /// passing failure is a 502, which the Workflow retries. A step that
-    /// already has a kept answer (its reply was lost) is not performed again;
-    /// one kept as another kind (a job that did not reach its steps in the
-    /// same order) is the next advance's to refuse, in the app's platform code.
-    async fn job_effect(&self, call: EffectCall) -> CellResult<Value> {
-        let Some(run) = self.current_run(call.run, call.attempt)? else { return Ok(json!({ "stop": true })) };
+    /// The Workflow's effect (`JobEffect`): one step, performed and its
+    /// answer kept (a value, or a lasting failure the job sees) before the
+    /// reply; a passing failure is a 502, which the Workflow retries. A
+    /// step that already has a kept answer (its reply was lost) is not
+    /// performed again; one kept as another kind (a job that did not reach
+    /// its steps in the same order) is the next advance's to refuse, in the
+    /// app's platform code.
+    pub(crate) async fn job_effect(&self, call: JobEffect) -> CellResult<Value> {
+        let Some(run) = self.current_run(&call.incarnation, call.run, call.attempt)? else { return Ok(json!({ "stop": true })) };
         let index = call.index;
         if index as usize >= limits::JOB_STEPS_MAX {
             return Err(CellError::invalid(format!("step {index}: a job takes at most {} steps", limits::JOB_STEPS_MAX)));

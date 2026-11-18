@@ -37,10 +37,9 @@
 //!   ledger (`fragment_core::ledger::uses`), sent after the answer. The
 //!   months it counted itself before (its step 7) it owes that ledger,
 //!   handed over after a request it answers (`hand_over_uses`).
-//! - **Its agents' new fragments** (`computer/joined`, from a fragment an
-//!   agent of its was added to): the agent's own fragment posts `joined`
-//!   on its `tasks`, and the fragment that added it then wakes the
-//!   computer (`Wake::Joined`; docs/computers.md).
+//! - **Its agents' new fragments**: the fragment an agent of its was added
+//!   to tells the agent's own fragment, which posts `joined` on its `tasks`
+//!   and names this computer, and then wakes it (`Wake::Joined`; runs_on.rs).
 //! - **A wipe of its owner** (docs/api.md, Operators: `computer/wipe`)
 //!   marks it wiped before anything else, destroys its container, deletes
 //!   every save from R2 (each record, then whatever else is under its saves'
@@ -653,15 +652,6 @@ struct OwnKeysAsk {
     /// With them, the accounts at each connection that takes several.
     #[serde(default)]
     accounts: Option<BTreeMap<String, Vec<Held>>>,
-}
-
-/// `computer/joined`'s body: the agent `identity` was added to `fragment`,
-/// its membership made at `at` (which keys the notice: runs_on.rs).
-#[derive(Deserialize)]
-struct JoinedAsk {
-    identity: String,
-    fragment: String,
-    at: i64,
 }
 
 #[derive(Deserialize)]
@@ -2931,10 +2921,6 @@ impl ComputerCell {
                 }
                 json_response(&json!({ "providers": self.own_key_names()? }))
             }
-            "computer/joined" => {
-                let b: JoinedAsk = body_json(&mut req).await?;
-                json_response(&self.joined(b).await?)
-            }
             "computer/redeem" => {
                 let b: Redeem = body_json(&mut req).await?;
                 let now = js::now_ms();
@@ -3112,14 +3098,22 @@ impl ComputerCell {
                 json_response(&self.view().await?)
             }
             (Method::Put, ["agents", fragment]) => {
+                // a computer full refuses before the agent fragment takes it,
+                // which then names it as its computer; asked again after, as
+                // another assign may have come in meanwhile
+                let full = |cell: &ComputerCell| -> CellResult<()> {
+                    let n = cell.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![(*fragment).into()])?;
+                    match n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
+                        true => Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents"))),
+                        false => Ok(()),
+                    }
+                };
+                full(self)?;
                 // the agent fragment takes the computer first (its owner must
                 // be the computer's), and its key becomes the agent's identity
                 let took = crate::fragment::ask(&self.env, fragment, "computer/assign", &json!({ "computer": self.must(MetaKey::Id)?, "owner": who })).await?;
                 let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
-                let n = self.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![(*fragment).into()])?;
-                if n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
-                    return Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents")));
-                }
+                full(self)?;
                 // what it may use is its fragment's (a new agent's every
                 // connection its owner has: decision 44), kept as it was when
                 // assigned again
@@ -3381,26 +3375,6 @@ impl ComputerCell {
             secrets.push(json!({ "provider": provider.name, "tag": p.tag, "connection": p.connection, "secret": secret }));
         }
         Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "grantsMs": grants_ms }))
-    }
-
-    /// The agent `b.identity` was added to `b.fragment` (runs_on.rs, from
-    /// that fragment's outbox): when it runs here, its own fragment posts
-    /// `joined` on its `tasks` (once by the membership: a retry posts
-    /// nothing twice), so a guest that is awake lists its fragments again.
-    /// Answers `{runs}`: whether it runs here, and so whether there is a
-    /// computer to wake (its caller wakes it, on its own: a member's change
-    /// never waits for a start). Here is no one's computer, or the
-    /// identity no agent of it: nothing to tell.
-    async fn joined(&self, b: JoinedAsk) -> CellResult<Value> {
-        if !fragment_core::npub::is_identity(&b.identity) || !fragment_proto::valid_fragment_name(&b.fragment) || b.at <= 0 {
-            return Err(CellError::invalid("a join names an identity, a fragment and when it joined"));
-        }
-        let Some(id) = self.meta(MetaKey::Id)? else { return Ok(json!({ "runs": false })) };
-        let rows = self.rows("SELECT fragment FROM agents WHERE identity = ?", vec![b.identity.as_str().into()])?;
-        let Some(agent) = rows.first().and_then(|r| r["fragment"].as_str()).map(str::to_string) else { return Ok(json!({ "runs": false })) };
-        let posted = crate::fragment::ask(&self.env, &agent, "computer/joined", &json!({ "computer": id, "fragment": b.fragment, "at": b.at })).await?;
-        console_log!("{}", json!({ "computer": id, "joined": b.fragment, "agent": agent, "posted": posted["posted"] }));
-        Ok(json!({ "runs": true, "computer": id, "agent": agent, "posted": posted["posted"] }))
     }
 
     /// `owner`'s token for `provider`: WorkOS Pipes', for the WorkOS user

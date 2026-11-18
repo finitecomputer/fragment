@@ -641,8 +641,12 @@ export function createLauncher(shell) {
     try { if (event.origin !== await originOf(name)) return; } catch { return; }
     if (frame.contentWindow === event.source && document.activeElement === frame) openSearch($("sidebar-new-chat"));
   });
+  // closed by a press on its empty space, begun and let go there: a
+  // selection dragged across the box, either way, keeps what was typed
+  let pressedOn = null;
+  dialog.addEventListener("pointerdown", (e) => { pressedOn = e.target; }, true);
   dialog.addEventListener("click", (e) => {
-    if (e.target === dialog) closeSearch();
+    if (e.target === dialog && pressedOn === dialog && document.elementFromPoint(e.clientX, e.clientY) === dialog) closeSearch();
   });
   dialog.addEventListener("cancel", (e) => { e.preventDefault(); closeSearch(); });
   dialog.addEventListener("close", () => {
