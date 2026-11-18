@@ -483,7 +483,7 @@ fn computer_link(port: u16) -> Result<()> {
     let t1 = Instant::now();
     let r = loop {
         let r = page("POST", format!("/simplex/link?agent={agent}"), Some(ticket.body.to_string().into_bytes()))?;
-        if r.status != 503 || t1.elapsed() > Duration::from_secs(120) {
+        if !(r.status == 503 || (r.status == 500 && r.text.contains("not listening"))) || t1.elapsed() > Duration::from_secs(300) {
             break r;
         }
         std::thread::sleep(Duration::from_secs(2));

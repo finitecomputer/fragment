@@ -102,9 +102,22 @@ struct Door {
     sent_n: AtomicU64,
     syncs: AtomicU64,
     saving: tokio::sync::Mutex<()>,
+    /// Where its start is, and the last thing that failed (its health says both).
+    phase: Mutex<String>,
+    last_error: Mutex<Value>,
 }
 
 impl Door {
+    fn phase(&self, p: &str) {
+        *self.phase.lock().expect("phase") = p.to_string();
+        log!("phase": p);
+    }
+
+    fn failed(&self, what: &str, why: String) {
+        log!("failed": what, "why": why);
+        *self.last_error.lock().expect("error") = json!({ "what": what, "why": why, "at": now_ms() });
+    }
+
     async fn to_do(&self, method: &str, path: &str, headers: &[(&str, String)], body: Bytes) -> Result<http::Answer, String> {
         let mut h: Vec<(&str, String)> = vec![("x-door-generation", self.generation.to_string())];
         h.extend(headers.iter().cloned());
@@ -194,6 +207,8 @@ async fn main() {
         sent_n: AtomicU64::new(0),
         syncs: AtomicU64::new(0),
         saving: tokio::sync::Mutex::new(()),
+        phase: Mutex::new("start".into()),
+        last_error: Mutex::new(Value::Null),
     });
 
     // the Durable Object's HTTP API first, so it can see the runner come up
@@ -204,13 +219,14 @@ async fn main() {
     tokio::spawn(net::serve(listener, move |req, _| handle(d.clone(), req), stop_rx.clone()));
 
     // 1. the newest save, or none
+    door.phase("restore");
     let t = Instant::now();
     let restored = loop {
         match door.to_do("GET", "/save", &[], Bytes::new()).await {
             Ok(a) if a.status == 200 => break Some(a),
             Ok(a) if a.status == 204 => break None,
-            Ok(a) => log!("restore": "refused", "status": a.status, "body": String::from_utf8_lossy(&a.body)),
-            Err(e) => log!("restore": "failed", "error": e),
+            Ok(a) => door.failed("restore", format!("{} {}", a.status, String::from_utf8_lossy(&a.body))),
+            Err(e) => door.failed("restore", e),
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     };
@@ -236,6 +252,7 @@ async fn main() {
     log!("restore": restore);
 
     // 2. its config
+    door.phase("config");
     loop {
         match door.to_do("GET", "/config", &[], Bytes::new()).await {
             Ok(a) if a.status == 200 => {
@@ -244,13 +261,15 @@ async fn main() {
                 *door.config.lock().expect("config") = c;
                 break;
             }
-            other => log!("config": "failed", "answer": other.map(|a| a.status).map_err(|e| e)),
+            Ok(a) => door.failed("config", format!("{} {}", a.status, String::from_utf8_lossy(&a.body))),
+            Err(e) => door.failed("config", e),
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     // 3. both databases in WAL mode (save.rs `wal` says why), the XFTP
     // relay's way out, then the core
+    door.phase("wal");
     let modes = save::wal(&dir).expect("the databases in WAL mode");
     log!("journal": modes);
     let socks = tokio::net::TcpListener::bind(("127.0.0.1", SOCKS_PORT)).await.expect("the SOCKS port");
@@ -267,6 +286,7 @@ async fn main() {
         .spawn()
         .expect("the core starts");
     let spawned_ms = started.elapsed().as_millis() as u64;
+    door.phase("core starting");
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
     let core = loop {
         match Core::connect(CORE_PORT, ev_tx.clone()).await {
@@ -282,6 +302,7 @@ async fn main() {
     };
     let _ = door.core.set(core);
     let api_ms = started.elapsed().as_millis() as u64;
+    door.phase("core up");
     // its message expiry: the chat in Fragment is the record, not the core
     let ttl = door.config.lock().expect("config").ttl.clone().unwrap_or_else(|| "day".into());
     let ttl_answer = door.core().expect("up").ask(&format!("/ttl {ttl}"), ASK_WAIT).await;
@@ -309,6 +330,7 @@ async fn main() {
     }
     let ready_ms = started.elapsed().as_millis() as u64;
     door.ready.store(true, Ordering::SeqCst);
+    door.phase("ready");
     let started_stat = json!({ "generation": generation, "restore": restore, "spawnedMs": spawned_ms, "apiMs": api_ms, "readyMs": ready_ms, "ratchet": ratchet, "contact": contact, "forcedSync": forced });
     log!("ready": started_stat);
     door.stat("start", started_stat);
@@ -488,7 +510,7 @@ async fn deliveries(door: Arc<Door>, mut rx: mpsc::UnboundedReceiver<wire::Item>
                     break;
                 }
                 other => {
-                    log!("deliver": "failed", "item": item.id, "answer": other.map(|a| format!("{} {}", a.status, String::from_utf8_lossy(&a.body))).unwrap_or_else(|e| e));
+                    door.failed("deliver", other.map(|a| format!("{} {}", a.status, String::from_utf8_lossy(&a.body))).unwrap_or_else(|e| e));
                     tokio::time::sleep(wait).await;
                     wait = (wait * 2).min(Duration::from_secs(30));
                 }
@@ -564,6 +586,7 @@ async fn handle(door: Arc<Door>, req: Request<Incoming>) -> Response<Body> {
                 "state": *door.state.lock().expect("state"), "saves": door.saves.load(Ordering::SeqCst), "lastSave": *door.last_save.lock().expect("last"),
                 "delivered": door.delivered_n.load(Ordering::SeqCst), "sent": door.sent_n.load(Ordering::SeqCst), "syncs": door.syncs.load(Ordering::SeqCst),
                 "inbox": door.config.lock().expect("config").inbox.is_some(),
+                "phase": *door.phase.lock().expect("phase"), "lastError": *door.last_error.lock().expect("error"),
             }),
         ),
         ("POST", "/config") => {

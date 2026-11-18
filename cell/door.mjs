@@ -374,7 +374,8 @@ export class DoorEgress extends WorkerEntrypoint {
     const stub = this.env.SIMPLEX_DOOR.get(this.env.SIMPLEX_DOOR.idFromName(door));
     const headers = new Headers(request.headers);
     headers.set("x-door-name", door);
-    return stub.fetch(new Request(`http://door/egress${url.pathname}${url.search}`, { method: request.method, headers, body: request.body }));
+    const body = request.method === "GET" || request.method === "HEAD" ? null : request.body;
+    return stub.fetch(new Request(`http://door/egress${url.pathname}${url.search}`, { method: request.method, headers, body }));
   }
 }
 
@@ -458,5 +459,6 @@ export async function sxdoorAdmin(request, env) {
   const headers = new Headers(request.headers);
   headers.set("x-door-name", m[1]);
   headers.delete("x-fragment-test-secret");
-  return stub.fetch(new Request(`http://door/admin/${m[2]}${url.search}`, { method: request.method, headers, body: request.body }));
+  const body = request.method === "GET" || request.method === "HEAD" ? null : request.body;
+  return stub.fetch(new Request(`http://door/admin/${m[2]}${url.search}`, { method: request.method, headers, body }));
 }
