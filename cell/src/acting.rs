@@ -1,7 +1,8 @@
-//! The `FRAGMENTS` capability (entry.mjs `Fragments`; docs/api.md, Apps):
-//! a fragment's app acting in another fragment as the fragment's own
-//! principal. Only an agent's fragment has one: its agent, whose key is
-//! the fragment's own (registered at its first assignment: runs_on.rs
+//! An agent's fragment acting in another fragment as its agent (docs/api.md,
+//! "Acting in another fragment"): its app's `FRAGMENTS` capability
+//! (entry.mjs `Fragments`: a draft, a read) and its jobs' `fragments` steps
+//! (a post, a read). Only an agent's fragment acts: as its agent, whose key
+//! is the fragment's own (registered at its first assignment: runs_on.rs
 //! `assign`). Each act goes to the target as the router hands it a request
 //! that key signed, its body as the app sent it, so the target checks who
 //! is asking exactly as for the agent's own request (its membership and
@@ -9,63 +10,45 @@
 //! nothing the agent could not do. The router's own check of an agent is
 //! for routes no act names (`fragment_core::access::reserved`).
 //!
-//! A post says how deep in a chain of triggered runs the app's call is
-//! (`depth_now`), as a job's fetch does, so its record's runs are a hop
-//! deeper and fragments that trigger one another stop at `HOP_DEPTH_MAX`,
-//! as one fragment's chain does.
+//! The code that acts is its owner's and its agent's alone: it acts only
+//! while no one else may edit the fragment, and only code installed while
+//! that held (plane.rs records it, as `MetaKey::ActsAs`), so a former
+//! editor's code acts nowhere.
+//!
+//! A post is a job's step: it carries its run's hop depth, as a job's
+//! fetch and publish do, so fragments triggering one another stop at
+//! `HOP_DEPTH_MAX`, and it is made once however often the job's body runs.
 //!
 //! It could later replace the platform's own cases of the same act: a
 //! search across fragments as its signer (across.rs), and a computer's
 //! bridge posting as its agent through the public API.
 
 use fragment_core::acting::{self, Method as Asked, Refused};
-use fragment_proto::{ErrorCode, IdentityKind};
-use worker::{Method, Response, Url};
+use fragment_proto::{ErrorCode, IdentityKind, Role};
+use worker::{Method, Response, SqlStorageValue, Url};
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::FragmentCell;
+use crate::fragment::{FragmentCell, MetaKey};
 use crate::routed::{Routed, Signed};
 
 /// Where the app facet's acts arrive: `<act>/<fragment>/<channel>`.
 pub(crate) const PREFIX: &str = "/call/fragments/";
 
-/// One of the app's calls into its facet while it runs at a hop depth (a
-/// job's, a query's): `depth_now` is the deepest of those under way.
-pub(crate) struct AtDepth<'a> {
-    cell: &'a FragmentCell,
-    depth: u32,
-}
-
-impl Drop for AtDepth<'_> {
-    fn drop(&mut self) {
-        let mut depths = self.cell.app_depths.borrow_mut();
-        let at = depths.iter().position(|d| *d == self.depth).expect("a depth is pushed before its guard is made");
-        depths.swap_remove(at);
-    }
-}
-
 impl FragmentCell {
-    /// An app call at `depth` under way until the guard drops.
-    pub(crate) fn at_depth(&self, depth: u32) -> AtDepth<'_> {
-        self.app_depths.borrow_mut().push(depth);
-        AtDepth { cell: self, depth }
-    }
-
-    /// How deep the app's call that acts is: the deepest of its calls under
-    /// way (0 for none: a page's, a person's). An act names no call, and
-    /// calls at once in one object are few, so the deepest is a stand-in
-    /// that never makes a chain look shorter than it is.
-    fn depth_now(&self) -> u32 {
-        self.app_depths.borrow().iter().copied().max().unwrap_or(0)
-    }
-
-    /// An act of the app's in another fragment (`PREFIX`), the target's
-    /// answer as it made it.
+    /// An act of the app's capability (`PREFIX`), the target's answer as it
+    /// made it.
     pub(crate) async fn act(&self, path: &str, body: &[u8]) -> CellResult<Response> {
-        let act = acting::read(path.strip_prefix(PREFIX).unwrap_or_default(), body, self.depth_now()).map_err(|r| match r {
+        self.act_as_agent(path.strip_prefix(PREFIX).unwrap_or_default(), body, None).await
+    }
+
+    /// An act (`<act>/<fragment>/<channel>`, `fragment_core::acting`), from
+    /// a job's step at its run's `depth`, or from the capability (`None`).
+    pub(crate) async fn act_as_agent(&self, at: &str, body: &[u8], depth: Option<u32>) -> CellResult<Response> {
+        let act = acting::read(at, body, depth).map_err(|r| match r {
             Refused::Invalid(why) => CellError::invalid(why),
             Refused::Unknown(why) => CellError::new(ErrorCode::NotFound, why),
         })?;
+        self.vouched()?;
         let url = Url::parse(&format!("{}/api/f/{}{}", self.cfg.platform_url, act.fragment, act.route)).map_err(|e| CellError::host(e.to_string()))?;
         let routed = Routed { name: act.fragment.to_string(), url, signed: Some(self.as_agent().await?), credential: None };
         let method = match act.method {
@@ -75,6 +58,29 @@ impl FragmentCell {
         };
         let hops = act.hops.map(|d| d.to_string());
         routed.ask(&self.env, method, &format!("/api{}", act.route), act.body, hops.as_deref().map(|h| (crate::jobs::HOPS_HEADER, h))).await
+    }
+
+    /// Whether anyone but its owner and its agent may edit it.
+    pub(crate) fn others_edit(&self) -> CellResult<bool> {
+        let [owner, agent] = self.metas([MetaKey::Owner, MetaKey::AgentIdentity])?;
+        let rows = self.rows(
+            "SELECT 1 AS x FROM members WHERE role IN (?, ?) AND principal NOT IN (?, ?) LIMIT 1",
+            vec![Role::Editor.as_str().into(), Role::Owner.as_str().into(), owner.unwrap_or_default().into(), SqlStorageValue::from(agent.unwrap_or_default())],
+        )?;
+        Ok(!rows.is_empty())
+    }
+
+    /// Its code acts as its agent only while its owner and its agent alone
+    /// may edit it, and only the code installed while they alone could.
+    fn vouched(&self) -> CellResult<()> {
+        let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("its code acts as its agent elsewhere only {why}"));
+        if self.others_edit()? {
+            return Err(refused("while its owner and its agent alone may edit it"));
+        }
+        if self.meta(MetaKey::ActsAs)?.is_none_or(|code| self.installed_code().ok().flatten() != Some(code)) {
+            return Err(refused("from code put live while its owner and its agent alone could edit it: deploy it again"));
+        }
+        Ok(())
     }
 
     /// Its agent, as the router resolves a request its key signs.

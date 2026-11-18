@@ -525,12 +525,25 @@ impl FragmentCell {
         laps.lap("append");
         // A retry finishes what the first try left undone for as long as a
         // mutation's effects are tried again; later, the runs it started may
-        // be forgotten, and it would start them twice.
+        // be forgotten, and it would start them twice. It starts them no
+        // shallower than the first try did (another fragment's post came deep).
         if appended || js::now_ms() - record.at < retry_horizon_ms() {
+            let depth = if appended { depth } else { depth.max(self.record_runs_depth(&record)?) };
             self.published(&record, appended, depth, &mut laps).await?;
         }
         laps.log("post", json!({ "fragment": facts.name, "channel": channel, "seq": record.seq, "replayed": !appended }));
         Ok((record, !appended))
+    }
+
+    /// The deepest of the runs a record's triggers started (`fire_channel`
+    /// keys them `record:<channel>:<seq>:<op>`), or 0.
+    fn record_runs_depth(&self, record: &ChannelRecord) -> CellResult<u32> {
+        let prefix = format!("record:{}:{}:", record.channel, record.seq);
+        let rows = self.rows(
+            "SELECT MAX(depth) AS d FROM runs WHERE substr(call_id, 1, ?) = ?",
+            vec![SqlStorageValue::Integer(prefix.len() as i64), prefix.as_str().into()],
+        )?;
+        Ok(rows.first().and_then(|r| r["d"].as_u64()).map_or(0, |d| u32::try_from(d).unwrap_or(u32::MAX)))
     }
 
     /// A post that says it relays its agent's owner (`relayed`: docs/api.md,

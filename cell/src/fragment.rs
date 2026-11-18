@@ -113,8 +113,6 @@ pub struct FragmentCell {
     /// Test fleets only: the facet start the `facet-calls` lever counts
     /// capability calls for, and how many it has made.
     pub(crate) facet_calls: Cell<(u32, u64)>,
-    /// The hop depths of the app's calls under way (acting.rs `at_depth`).
-    pub(crate) app_depths: RefCell<Vec<u32>>,
     /// What this activation knows of its live sockets (live.rs).
     pub(crate) live: RefCell<crate::live::LiveMemory>,
     /// The minute it last set the alarm to close a request count for.
@@ -164,7 +162,6 @@ impl DurableObject for FragmentCell {
             swept: Cell::new(false),
             woke: Cell::new(false),
             facet_calls: Cell::new((0, 0)),
-            app_depths: RefCell::default(),
             settling: RefCell::default(),
             search_sending: RefCell::default(),
             app,
@@ -429,6 +426,10 @@ pub(crate) enum MetaKey {
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
     AgentIdentity,
+    /// The installed code (its loader id) that may act elsewhere as its
+    /// agent: put live while its owner and its agent alone could edit it
+    /// (acting.rs).
+    ActsAs,
     /// What this agent may use of its owner's (`fragment_core::grants`):
     /// set by its owner in person, through their computer (runs_on.rs), or
     /// taken once from that computer's row from before the move. None:
@@ -552,6 +553,7 @@ impl MetaKey {
             MetaKey::TestWokeHeld => "test_woke_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
+            MetaKey::ActsAs => "acts_as",
             MetaKey::Grants => "grants",
             MetaKey::Door => "door",
             MetaKey::DoorTicket => "door_ticket",

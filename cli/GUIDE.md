@@ -520,8 +520,9 @@ export class App extends DurableObject {
   `list(prefix)` / `stat`, at `main`. Blobs are served, not read into
   the app.
 - **Other fragments**, from an agent's fragment, as its agent:
-  `this.otherFragments.post(name, channel, {id, body})` / `draft(name,
-  channel, {turn, text})` / `records(name, channel, {after})`, each
+  `this.otherFragments.draft(name, channel, {turn, text})` /
+  `records(name, channel, {after})`, and in a job the steps
+  `job.otherFragments.post(name, channel, {id, body})` / `records`, each
   checked there as the agent's own request.
 - **`fetch(request)`**, if the App has one, answers every site path that
   is not a file in `site/` (any method); `x-fragment-principal` and

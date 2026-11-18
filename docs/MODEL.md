@@ -54,7 +54,7 @@ platform tables, and a mutation commits with its ledger row in the
 facet's own transaction. The app has no network (`globalOutbound: null`):
 a job reaches out only through `job.fetch` steps, and an agent's fragment
 acts in another fragment, as its agent, only through its `FRAGMENTS`
-capability; the supervisor takes both.
+capability and its jobs' `fragments` steps; the supervisor takes all.
 
 Where a fetch, a push endpoint or a subscription may go
 (`fragment_core::egress::check`): public addresses only, unless the
