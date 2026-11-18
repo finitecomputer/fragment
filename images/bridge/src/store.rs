@@ -14,11 +14,12 @@
 //! `STATE_FILE_MAX_BYTES`) and two (F14 of FIN-453's audit). The snapshot
 //! is written whole again with a fresh log (a compaction) as the bridge
 //! starts, once the log would pass its room (`room`), and after a hold.
-//! While the platform holds the computer, the snapshot alone is written
-//! whole at each step, as before the log, and the log, naming an earlier
-//! snapshot, is read as none; the hold's answer waits for the first such
-//! write (`Gate`). So a save holds the state whole in `state.json`, which
-//! is what an older bridge, rolled back to, reads.
+//! While the platform holds the computer, the first write is whole with an
+//! empty log, and the hold's answer waits for it (`Gate`); each after
+//! writes the snapshot alone, as before the log, the empty log naming an
+//! earlier snapshot read as none. So a save holds the state whole in
+//! `state.json`, which is what an older bridge, rolled back to, reads, and
+//! no step of a log it copies is read over a later snapshot.
 //!
 //! An append-only log beside a snapshot, rather than SQLite, because of the
 //! hold's rule (docs/computers.md, "What changes under the hold": each file
@@ -314,9 +315,8 @@ pub struct Store {
     log: Option<File>,
     log_bytes: usize,
     snapshot_bytes: usize,
-    /// The log on disk: the snapshot its first line names, and whether it
-    /// holds steps after it (`write_held`).
-    log_follows: String,
+    /// The log on disk may hold steps after its first line: set before an
+    /// append is tried, cleared only once an empty log is in place.
     log_steps: bool,
     gate: Arc<Gate>,
     /// A test's crash: the disk actions left before one fails, the files
@@ -337,8 +337,7 @@ impl Store {
             log: None,
             log_bytes: 0,
             snapshot_bytes: 0,
-            log_follows: String::new(),
-            log_steps: false,
+            log_steps: true,
             gate,
             #[cfg(test)]
             fuel: None,
@@ -372,13 +371,13 @@ impl Store {
         if self.log.is_none() || self.log_bytes + line.len() > room(self.snapshot_bytes) {
             return self.compact(now);
         }
+        self.log_steps = true;
         if let Err(e) = self.append(&line) {
             // a torn line may end the log: nothing more goes after it
             self.log = None;
             return Err(BridgeError::Disk(format!("{}: {e}", self.dir.join(LOG).display())));
         }
         self.log_bytes += line.len();
-        self.log_steps = true;
         apply(&mut self.last, change);
         debug_assert!(self.last == *now, "the log's change is the step's");
         Ok(())
@@ -415,18 +414,18 @@ impl Store {
         self.log.as_mut().expect("a log is open to append to").sync_data()
     }
 
-    /// Held: `state` as the snapshot alone, as before the log (one file
-    /// and its directory synced). The log is left as it is, naming an
-    /// earlier snapshot, so it is read as none, and the first write after
-    /// the hold writes it again (`compact`). A log whose steps follow a
-    /// snapshot of these very bytes (the state changed back to it) would be
-    /// read again over it: then it is written fresh too.
+    /// Held: the first write while the log holds steps is whole with an
+    /// empty log (`compact`), before the hold is answered (`Gate`), so no
+    /// step of the log is on disk for a save to copy and read over a later
+    /// snapshot. Each one after writes `state` as the snapshot alone, as
+    /// before the log (one file and its directory synced), the empty log
+    /// left as it is; the first write after the hold writes it again.
     fn write_held(&mut self, state: &State) -> Result<(), BridgeError> {
-        let bytes = serde_json::to_vec(state).map_err(|e| BridgeError::Disk(e.to_string()))?;
-        assert!(bytes.len() <= limits::STATE_FILE_MAX_BYTES, "the engine bounds its state: {} bytes", bytes.len());
-        if self.log_steps && snapshot_id(&bytes) == self.log_follows {
+        if self.log_steps {
             return self.compact(state);
         }
+        let bytes = serde_json::to_vec(state).map_err(|e| BridgeError::Disk(e.to_string()))?;
+        assert!(bytes.len() <= limits::STATE_FILE_MAX_BYTES, "the engine bounds its state: {} bytes", bytes.len());
         self.log = None;
         self.write_whole(SNAPSHOT, &bytes).map_err(|e| BridgeError::Disk(format!("{}: {e}", self.dir.display())))?;
         self.last = state.clone();
@@ -438,32 +437,22 @@ impl Store {
 
     /// Writes `state` whole: the snapshot (written beside, synced, renamed
     /// over, its directory synced), then an empty log that follows it (the
-    /// same way). A crash between leaves the new snapshot with the old log,
-    /// which follows another and is read as none. When the old log follows
-    /// a snapshot of these very bytes, it would be read over the new one:
-    /// then the new log goes first, and a crash between leaves it, empty,
-    /// beside the old snapshot (these bytes, or one it does not follow).
+    /// same way). A crash between leaves the new snapshot with the old log:
+    /// one that follows another snapshot, read as none; or, the state's
+    /// bytes unchanged since the log began, one whose steps lead to the
+    /// state before this step, as written.
     fn compact(&mut self, state: &State) -> Result<(), BridgeError> {
         self.log = None;
         let bytes = serde_json::to_vec(state).map_err(|e| BridgeError::Disk(e.to_string()))?;
         assert!(bytes.len() <= limits::STATE_FILE_MAX_BYTES, "the engine bounds its state: {} bytes", bytes.len());
-        let id = snapshot_id(&bytes);
         let head = header(&bytes);
         let disk = |e: std::io::Error, dir: &Path| BridgeError::Disk(format!("{}: {e}", dir.display()));
-        let log = if id == self.log_follows {
-            let log = self.write_whole(LOG, &head).map_err(|e| disk(e, &self.dir))?;
-            self.log_steps = false;
-            self.write_whole(SNAPSHOT, &bytes).map_err(|e| disk(e, &self.dir))?;
-            log
-        } else {
-            self.write_whole(SNAPSHOT, &bytes).map_err(|e| disk(e, &self.dir))?;
-            self.write_whole(LOG, &head).map_err(|e| disk(e, &self.dir))?
-        };
+        self.write_whole(SNAPSHOT, &bytes).map_err(|e| disk(e, &self.dir))?;
+        let log = self.write_whole(LOG, &head).map_err(|e| disk(e, &self.dir))?;
         self.last = state.clone();
         self.snapshot_bytes = bytes.len();
         self.log = Some(log);
         self.log_bytes = head.len();
-        self.log_follows = id;
         self.log_steps = false;
         self.gate.logged.store(false, Ordering::SeqCst);
         self.gate.settled.notify_one();

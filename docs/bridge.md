@@ -104,10 +104,11 @@ the whole state, in the format every earlier bridge read. `state.log`
 holds what each step changed since then, one line per step, appended and
 synced before the step's effects. The bridge writes `state.json` whole
 again, with a fresh log, as it starts, once the log fills, and after a
-hold. Under a hold it writes `state.json` whole before it answers, and
-again at each step while held, as before the log, leaving the log to
-name an earlier `state.json`. So a save holds the state whole in
-`state.json`, which is all an older bridge reads. A log whose
+hold. Under a hold it writes `state.json` whole, with an empty log,
+before it answers, then `state.json` alone at each step while held, as
+before the log, the empty log naming an earlier `state.json`. So a save
+holds the state whole in `state.json`, which is all an older bridge
+reads. A log whose
 first line names another `state.json` (an older bridge wrote one since,
 or a save copied the two at different moments) is read as none. A crash
 mid-append leaves a torn last line, and the log is read up to it.

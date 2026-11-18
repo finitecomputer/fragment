@@ -176,7 +176,10 @@ fn a_crash_at_each_disk_action_leaves_a_state_written() {
             for s in &steps[..4] {
                 store.write(s).expect("written");
             }
+            // held: its first write (as the hold comes) whole with an empty
+            // log, then the step's, the snapshot alone
             store.gate.holding.store(whole, Ordering::SeqCst);
+            store.settle().expect("settles");
             store.fuel = Some(fuel);
             let r = store.write(after);
             let read = load(&d).expect("reads after a crash");
@@ -212,7 +215,7 @@ fn a_crash_at_each_disk_action_leaves_a_state_written() {
         }
         drop(store);
         let state = load(&d).expect("reads");
-        let mut store = Store { dir: d.clone(), last: state.clone(), log: None, log_bytes: 0, snapshot_bytes: 0, log_follows: String::new(), log_steps: false, gate: Arc::new(Gate::default()), fuel: Some(fuel) };
+        let mut store = Store { dir: d.clone(), last: state.clone(), log: None, log_bytes: 0, snapshot_bytes: 0, log_steps: true, gate: Arc::new(Gate::default()), fuel: Some(fuel) };
         assert!(store.compact(&state).is_err(), "crashed at {fuel}");
         assert_eq!(load(&d).expect("reads"), state, "a start's crash at action {fuel} loses nothing");
         let _ = std::fs::remove_dir_all(&d);
@@ -352,45 +355,92 @@ fn held_the_snapshot_holds_the_state_whole() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Restart, at its corner: held, a state that changed back to the very
-/// snapshot its log follows (a helper started and gone, nothing else), its
-/// log's steps would be read over it again. Then the log is written fresh,
-/// and first: a crash at each action leaves that state or the one before
-/// it (an earlier held write's), never the log's older one.
+/// Goal (a save under the hold): the platform copies `state.json` and
+/// `state.log` once the hold is answered, at moments of its own. A log's
+/// steps follow the snapshot it names; held, the state may change back to
+/// that very snapshot's bytes (a helper started before the hold, another
+/// during it, both gone). No copy taken after the answer may then read the
+/// old steps over it: every pair reads as a state written since the answer.
+/// So the first write held is whole with an empty log, before the answer,
+/// and a crash at each of its actions leaves the step before or this one.
 #[test]
-fn a_held_write_back_to_the_logs_snapshot_writes_the_log_fresh() {
+fn a_save_under_a_hold_reads_no_older_than_its_answer() {
     let base = computer(1, 1, 3);
     let id = records::turn_id("agent0--k3x9", "chat0--k3x9", records::CHAT, 3);
-    let mut helper = base.clone();
-    helper.children.push(engine::Helper { agent: "agent0--k3x9".into(), fragment: "chat0--k3x9".into(), turn: id, child: "0123456789abcdef01234567".into(), goal: "g".into(), since: 1 });
-    let mut crashed = 0;
+    let helper = |child: &str| engine::Helper { agent: "agent0--k3x9".into(), fragment: "chat0--k3x9".into(), turn: id.clone(), child: child.into(), goal: "g".into(), since: 1 };
+    let mut x = base.clone();
+    x.children.push(helper("0123456789abcdef01234567"));
+    let mut y = base.clone();
+    y.children.push(helper("76543210fedcba9876543210"));
+    let take = |d: &Path| (std::fs::read(d.join(SNAPSHOT)).ok(), std::fs::read(d.join(LOG)).ok());
+    // the files after each action from the answer on: the hold comes as
+    // y is written (its first held write), is answered, then the state
+    // goes back to the snapshot's bytes
+    let mut copies: Vec<Files> = Vec::new();
+    let mut answered = None;
     for fuel in 0.. {
-        let d = dir("back");
+        let d = dir("save-held");
         std::fs::create_dir_all(&d).expect("a directory");
         std::fs::write(d.join(SNAPSHOT), serde_json::to_vec(&base).expect("serializes")).expect("written");
         let gate = Arc::new(Gate::default());
-        let (mut store, read) = Store::open(&d, gate.clone()).expect("opens");
-        assert_eq!(read, base);
-        store.write(&helper).expect("a helper starts: appended");
+        let (mut store, _) = Store::open(&d, gate.clone()).expect("opens");
+        store.write(&x).expect("a helper starts: appended");
         gate.holding.store(true, Ordering::SeqCst);
-        let mut held = helper.clone();
-        held.said += 1;
-        store.write(&held).expect("held: the snapshot alone");
         store.fuel = Some(fuel);
-        let r = store.write(&base);
-        drop(store);
-        let after = load(&d).expect("reads");
-        if r.is_ok() {
-            assert_eq!(after, base, "the helper gone, as written");
-            assert_eq!(older_bridge_reads(&d), base);
+        let first = store.write(&y);
+        if first.is_err() {
+            drop(store);
+            let read = load(&d).expect("reads");
+            assert!(read == x || read == y, "a crash at the first held write's action {fuel} leaves the step before or this one: {read:?}");
             let _ = std::fs::remove_dir_all(&d);
+            continue;
+        }
+        assert!(!gate.logged.load(Ordering::SeqCst), "answered once written");
+        answered.get_or_insert_with(|| take(&d));
+        let back = store.write(&base);
+        copies.push(take(&d));
+        let _ = std::fs::remove_dir_all(&d);
+        if back.is_ok() {
             break;
         }
-        assert!(after == held || after == base, "a crash at action {fuel} leaves the step before or this one: {after:?}");
-        crashed += 1;
-        let _ = std::fs::remove_dir_all(&d);
     }
-    assert_eq!(crashed, 6, "a compaction's six actions, each crashed once");
+    copies.insert(0, answered.expect("answered"));
+    let since = [y.clone(), base.clone()];
+    for (i, (snapshot, _)) in copies.iter().enumerate() {
+        for (j, (_, log)) in copies.iter().enumerate() {
+            let d = dir("save-copy");
+            std::fs::create_dir_all(&d).expect("a directory");
+            std::fs::write(d.join(SNAPSHOT), snapshot.as_ref().expect("a snapshot")).expect("written");
+            std::fs::write(d.join(LOG), log.as_ref().expect("a log")).expect("written");
+            let read = load(&d).expect("reads");
+            assert!(since.contains(&read), "the snapshot after action {i} and the log after action {j} of the hold read as a state from before its answer: {read:?}");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+}
+
+/// Restart: an append whose line was written and whose sync failed leaves
+/// that line on disk. Held next, the state the store counts as written goes
+/// whole into the snapshot (the same bytes the log follows): the failed
+/// step is never read over it.
+#[test]
+fn a_failed_append_is_never_read_over_a_held_snapshot() {
+    let d = dir("failed-append");
+    let base = computer(1, 1, 3);
+    std::fs::create_dir_all(&d).expect("a directory");
+    std::fs::write(d.join(SNAPSHOT), serde_json::to_vec(&base).expect("serializes")).expect("written");
+    let gate = Arc::new(Gate::default());
+    let (mut store, _) = Store::open(&d, gate.clone()).expect("opens");
+    let mut x = base.clone();
+    x.said = 1;
+    store.fuel = Some(1);
+    assert!(store.write(&x).is_err(), "its sync failed");
+    store.fuel = None;
+    assert_eq!(log_lines(&d), 2, "its line is on disk");
+    gate.holding.store(true, Ordering::SeqCst);
+    store.settle().expect("settles");
+    assert_eq!(load(&d).expect("reads"), base, "the state written, not the failed step");
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// Upgrade: a state an older bridge wrote (no log), as it wrote it, reads;
