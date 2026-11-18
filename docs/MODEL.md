@@ -11,9 +11,13 @@ the wire contract; docs/cloudflare-v1.md holds the decisions.
   media they point at, an archive, and an agent's own self (one repo per
   agent: its `SOUL.md`, memories and skills). What the platform or a
   process writes as it goes, or reads to decide what to do (a name, a
-  setting, an index, a live transcript, a log), is state: it lives in the
-  fragment's `meta` or its app's SQL, never in a file, and its history
-  goes on a channel. The test: would anyone ever open it in an editor,
+  setting, an index, a live transcript, a log), is state: it belongs in
+  the fragment's `meta` or its app's SQL, not a file, and its history on
+  a channel. Some has not moved yet, each in a change of its own: a
+  fragment's title, an agent's role and picture (`fragment.json`,
+  `avatar.png` at live), an agent's settings (its `agent.json`) and a
+  session archive's indexes are still files, and the table below says
+  where each lives today. The test: would anyone ever open it in an editor,
   diff it or revert it? If not, it is not a file. For a file-based app
   (a vault, a wiki, a brain) the files are the state, because people
   author them. A file of `fragment_core::blob::BLOB_MIN_BYTES` or more is
@@ -109,7 +113,7 @@ Every change is checked against this table.
 | The image a computer's next start runs | each image name's reference in the Worker version; a computer's pin names one | the Computer DO's last look, recorded as the image each life runs |
 | An agent's name and picture | its fragment at live: `meta.title` and `avatar.png` (docs/api.md, "An agent's name and picture") | its cell's face, and everything read from it; its computer's profile and SimpleX profile follow a rename; no chat title or `SOUL.md` copies it; its label never changes |
 | An agent's role | its fragment at live: `meta.role` | its status's `agentRole`, which its runtime tells it at each turn |
-| An agent's self: its `SOUL.md`, `memories/` and `skills/` | the agent fragment's git, authored by the agent and its owner | its computer's checkout, synced both ways (docs/computers.md) |
+| An agent's self: its `SOUL.md`, `memories/` and `skills/` | the agent fragment's git, authored by the agent and its owner | a Hermes agent's computer's checkout, synced both ways (docs/computers.md); another runtime's computer syncs none |
 | An agent's runtime, tier, or its own models and efforts | its `agent.json` in git (`runtime`, `hermes` unless named; `claude.model` and `claude.effort` for Claude Code; docs/computers.md, docs/bridge.md) | its computer's bridge and profile config; Settings and the agent's page read it |
 | An agent's home | its `agent.json` `home` in git (docs/api.md, "An agent's home") | read by the shell, its computer's profile and the bridge; none kept |
 | An agent's SimpleX chat | its owner's chat `<agent label>-simplex`, the agent in it | its name in the link's file, chosen once, before the chat is made |
