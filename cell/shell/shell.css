@@ -1111,7 +1111,7 @@ label.settings-line { cursor: pointer; }
 .skills-row { display: flex; align-items: center; gap: 14px; min-width: 0; padding: 4px 12px 4px 0; border-radius: 12px; }
 .skills-row:hover { background: var(--bg-hover); }
 .skills-main, .skills-row-managed { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; padding: 8px 0 8px 10px; border: 0; border-radius: 12px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-button.skills-row-managed { flex-direction: row; align-items: center; width: 100%; padding-right: 12px; }
+button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px; width: 100%; padding-right: 12px; }
 .skills-row-managed .skills-main { padding: 0; cursor: inherit; }
 .skills-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
 .skills-name { color: var(--text-primary); font: var(--type-body-strong); }
