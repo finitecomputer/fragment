@@ -724,9 +724,14 @@ struct TestLever {
     row: Option<Value>,
 }
 
+/// `computer/tab` (entry.mjs, `port`): a port tab opened, closed, or used
+/// (`used`: its page spoke, told `TAB_USED_EVERY_MS` apart at most; on a
+/// close, a use not told before it).
 #[derive(Deserialize)]
 struct Tab {
     open: bool,
+    #[serde(default)]
+    used: bool,
 }
 
 fn sha_hex(s: &str) -> String {
@@ -1760,6 +1765,13 @@ impl ComputerCell {
             }
             return Event::SaveFailed { generation, seq: 0, why: "its container is not running".into() };
         }
+        if sleeping {
+            // a sleep closes its port tabs as it begins, before its hold,
+            // saying why (docs/computers.md, Ports): nothing a person sends
+            // after reaches the container its save holds
+            let why = if matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { restarting: true, .. })) { "restarting" } else { "asleep" };
+            let _ = self.call("closeTabs", &[why.into()]).await;
+        }
         let t0 = js::now_ms();
         if let Err(e) = self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await {
             // a guest the DO cannot mark is saved as it is
@@ -2702,6 +2714,7 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                v["heldUntil"] = json!(life.held_until_ms());
                 v["phase"] = json!(life.phase);
                 v["failures"] = json!(life.failures());
                 // a container runs for this object, whichever start's
@@ -2958,7 +2971,13 @@ impl ComputerCell {
             "computer/tab" => {
                 let b: Tab = body_json(&mut req).await?;
                 let socket = Socket::Tab;
-                self.drive(if b.open { Event::Opened { socket } } else { Event::Closed { socket } }).await?;
+                // a close that carries a use not told yet: the use, then the close
+                if b.used {
+                    self.drive(Event::TabUsed).await?;
+                }
+                if !(b.open && b.used) {
+                    self.drive(if b.open { Event::Opened { socket } } else { Event::Closed { socket } }).await?;
+                }
                 json_response(&json!({ "ok": true }))
             }
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
@@ -3012,12 +3031,6 @@ impl ComputerCell {
             (Method::Get, []) => json_response(&self.view().await?),
             (Method::Post, ["wake"]) => {
                 self.wake(Wake::Owner).await?;
-                json_response(&self.view().await?)
-            }
-            // its owner's page pre-waking it (decision 39): held a minute,
-            // as a page's presence is, never "won't wake" lifted
-            (Method::Post, ["prewake"]) => {
-                self.wake(Wake::Presence).await?;
                 json_response(&self.view().await?)
             }
             (Method::Post, ["sleep"]) => {
@@ -3473,12 +3486,19 @@ impl ComputerCell {
             return Err(CellError::new(ErrorCode::Unauthenticated, "sign in to this computer: its owner opens it from the platform"));
         }
         let port: u16 = req.headers().get(PORT_HEADER)?.and_then(|p| p.parse().ok()).filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("name a port"))?;
-        // a request to a sleeping computer's port wakes it, as a tab does
+        // a request to a sleeping computer's port wakes it, as a tab does;
+        // one going to sleep is woken after, and reaches none of the
+        // container its sleep saved (its tabs closed as it began)
         let life = self.lifecycle()?;
+        if matches!(life.phase, Phase::Sleeping { .. }) {
+            self.wake(Wake::Tab).await?;
+            return Ok(Response::error("its computer is going to sleep, and wakes again after: try again in a moment", 503)?);
+        }
         if !matches!(life.phase, Phase::Awake { .. }) {
             self.wake(Wake::Tab).await?;
         }
-        let out = self.call("port", &[JsValue::from_f64(f64::from(port)), JsValue::from(req.inner())]).await?;
+        let every = JsValue::from_f64(fragment_core::computer::TAB_USED_EVERY_MS as f64);
+        let out = self.call("port", &[JsValue::from_f64(f64::from(port)), JsValue::from(req.inner()), every]).await?;
         let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the port answered no Response"))?;
         Ok(Response::from(resp))
     }

@@ -69,12 +69,6 @@ export const MESSAGES = Object.freeze({
     fields: "{}",
     says: "The person's message was sent there: a chat they archived is unarchived (`PUT /api/fragments/{name}/archived`), back in their sidebar.",
   },
-  active: {
-    kind: "active",
-    from: "a chat → the shell",
-    fields: "{}",
-    says: "The person began typing in its composer (the first keystroke after a pause, as its typing presence turns on): taken only from a chat of the person's own, in front, with one of their agents in it, the shell races their computer's pre-wake (`POST /api/computers/{id}/prewake`, held a minute).",
-  },
   forgetDraft: {
     kind: "forget-draft",
     from: "the shell → each chat, before signing out",
@@ -134,8 +128,8 @@ export const MESSAGES = Object.freeze({
   screen: {
     kind: "screen",
     from: "the shell → an agent's screen page",
-    fields: "{agent, name}",
-    says: "The agent's name, as the page loads and on a rename.",
+    fields: "{agent, name} | {agent, active: true}",
+    says: "The agent's name, as the page loads and on a rename; `active`: its person is at the shell (a key, a press, the pointer, a touch), told to the screens on view at most every 30 s (screen-active.js), so a screen beside what they work in keeps streaming and one no one is at pauses (images/hermes/screen/attend.js).",
   },
   simplex: {
     kind: "simplex",

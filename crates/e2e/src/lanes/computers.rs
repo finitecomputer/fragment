@@ -1695,86 +1695,41 @@ fn put_to_sleep(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> (bool, V
     (slept, last)
 }
 
-/// Two computers woken as the lane begins, each its own person's, with no
-/// agent and nothing sent to them: one by its owner's page's pre-wake
-/// (`POST …/prewake`, what the shell asks as its person picks a chat or
-/// begins typing in one), one by its owner's own wake (`POST …/wake`).
-/// Checked later in the lane (`prewakes_checked`), so the minute between
-/// runs beside the lane's other checks.
-struct Prewoken {
-    page: (crate::Keys, String),
-    owner: (crate::Keys, String),
-    /// When the pre-wake and the wake were asked (this machine's clock).
-    asked_ms: i64,
-    woken_ms: i64,
-    /// What each answered (`answered`).
-    prewake: Value,
-    wake: Value,
-}
-
-const PREWAKE_CHECKS: [&str; 2] = [
-    "its owner's page's pre-wake (a chat picked, nothing sent) wakes their computer and holds it a minute, as a page's presence does: it sleeps again after about a minute, not twenty",
-    "its owner's own wake still holds it twenty minutes: awake past a pre-wake's minute",
+/// A page left open on an agent's chat, with its computer asleep (Paul,
+/// 2026-11-18: only real interaction is a use, and a tab nobody uses keeps
+/// nothing awake). Its socket opened, then opened again as a page's
+/// reconnect does (a deploy, a network change, or its cookie's check
+/// after the fragment woke from hibernation), each sending its presence as
+/// a page does on each (and again as its tab is shown), wakes nothing.
+/// Typing begun there, its presence's `typing` turning on, wakes it
+/// (decision 39).
+const OPEN_PAGE_CHECKS: [&str; 2] = [
+    "a page open on its agent's chat wakes nothing: its socket opened and reconnected, its presence sent with each, nothing typed, its computer stays asleep",
+    "typing begun on that page (its presence's typing turning on) wakes it",
 ];
+/// How long an asleep computer is watched for a wake nothing should
+/// bring: a socket's opening that woke it reached it within a second.
+const NOTHING_WAKES_WITHIN: Duration = Duration::from_secs(5);
 
-/// How long past its minute a pre-woken computer may take to be asleep:
-/// its alarm, its hold, a save of a `/data` with nothing in it, its stop
-/// (and on a hosted run its start, which the minute may not cover).
-const PREWAKE_SLEPT_WITHIN: Duration = Duration::from_secs(90);
-/// How long past a minute from its wake, and from when it was seen awake,
-/// the owner's computer is looked at: held only a minute, it would be
-/// going to sleep by then.
-const PREWAKE_PAST_MS: i64 = 15_000;
-/// The clocks of this machine and the deployment's apart, at most.
-const CLOCKS_APART_MS: i64 = 10_000;
-
-/// A wake's answer: its status and phase, or why it went unanswered (a
-/// start longer than the client waits; the start goes on).
-fn answered(r: Result<crate::api::Reply>) -> Value {
-    match r {
-        Ok(r) => json!({ "status": r.status, "phase": r.body["phase"] }),
-        Err(e) => json!({ "unanswered": e.to_string() }),
-    }
-}
-
-fn prewakes_started(api: &Api) -> Result<Prewoken> {
-    let made = || -> Result<(crate::Keys, String)> {
-        let who = api.person_paying(0)?;
-        let r = api.signed(&who, "POST", "/api/computers", Some(&json!({})))?;
-        anyhow::ensure!(r.status == 200 && r.body["phase"] == "asleep", "a computer made, asleep: {r}");
-        Ok((who, r.body["computer"].as_str().unwrap_or("").to_string()))
+fn open_page_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, chat: &str, wake: Duration) -> Result<()> {
+    let (slept, last) = put_to_sleep(s, api, owner, id);
+    anyhow::ensure!(slept, "its computer put to sleep for the open page's checks: {last}");
+    let here = |typing: bool| json!({ "type": "presence", "data": { "typing": typing, "looking": true } });
+    let opened = || -> Result<Socket> {
+        let mut page = Socket::open(api, chat, "__live", Some(owner), None)?;
+        page.until("hello", 5)?;
+        page.send(&here(false))?;
+        page.until_where("presence", 5, |p| p["data"]["looking"] == true)?;
+        Ok(page)
     };
-    let (page, owner) = (made()?, made()?);
-    let asked_ms = now_ms();
-    let prewake = answered(api.signed(&page.0, "POST", &format!("/api/computers/{}/prewake", page.1), Some(&json!({}))));
-    let woken_ms = now_ms();
-    let wake = answered(api.signed(&owner.0, "POST", &format!("/api/computers/{}/wake", owner.1), Some(&json!({}))));
-    Ok(Prewoken { page, owner, asked_ms, woken_ms, prewake, wake })
-}
-
-fn prewakes_checked(s: &mut Suite, api: &Api, w: &Prewoken, wake: Duration) -> Result<()> {
-    let ((page, page_id), (owner, owner_id)) = (&w.page, &w.owner);
-    let hold = fragment_core::computer::PREWAKE_MS;
-    let taken = |a: &Value| a["status"] == 200 || a.get("unanswered").is_some();
-    let slack = (PREWAKE_SLEPT_WITHIN + if s.hosted() { wake } else { Duration::ZERO }).as_millis() as i64;
-    let left = Duration::from_millis(u64::try_from(w.asked_ms + hold + slack - now_ms()).unwrap_or(0)).max(Duration::from_secs(5));
-    let asleep = taken(&w.prewake) && s.eventually(left, || phase(api, page, page_id) == "asleep");
-    // it woke and slept: its sleep's save, when its minute ran out
-    let saved = newest_save(api, page_id);
-    let slept_after = saved["atMs"].as_i64().map(|at| at - w.asked_ms);
-    let about_a_minute = slept_after.is_some_and(|ms| ms >= hold - CLOCKS_APART_MS && ms <= hold + slack);
-    s.ok(PREWAKE_CHECKS[0], asleep && about_a_minute, json!({ "prewake": w.prewake, "asleep": asleep, "sleptAfterMs": slept_after, "save": saved }));
-    // a minute past its wake, and past when it was seen up (a slow start's
-    // minute may have run out by then), the owner's wake holds on
-    let up = taken(&w.wake) && s.eventually(wake, || phase(api, owner, owner_id) == "awake");
-    let past = (w.woken_ms + hold).max(now_ms()) + PREWAKE_PAST_MS - now_ms();
-    if past > 0 {
-        std::thread::sleep(Duration::from_millis(past as u64));
-    }
-    let held = phase(api, owner, owner_id);
-    s.ok(PREWAKE_CHECKS[1], up && held == "awake", json!({ "wake": w.wake, "up": up, "now": held, "sinceMs": now_ms() - w.woken_ms }));
-    // its container let go, its twenty minutes not waited out
-    api.signed(owner, "POST", &format!("/api/computers/{owner_id}/sleep"), Some(&json!({})))?;
+    opened()?.close();
+    let mut page = opened()?;
+    let woke = s.eventually(NOTHING_WAKES_WITHIN, || phase(api, owner, id) != "asleep");
+    s.ok(OPEN_PAGE_CHECKS[0], !woke, phase(api, owner, id));
+    page.send(&here(true))?;
+    let up = s.eventually(wake, || phase(api, owner, id) == "awake");
+    s.ok(OPEN_PAGE_CHECKS[1], up, phase(api, owner, id));
+    page.close();
     Ok(())
 }
 
@@ -2012,7 +1967,6 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // a hosted run's owner pays a real model, from the run's budget
     let owner = api.person_paying(HOSTED_PAID_CALLS)?;
     let stranger = api.person()?;
-    let prewoken = prewakes_started(api)?;
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
@@ -2205,7 +2159,6 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         replies_so_far += 1;
         s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
     }
-    prewakes_checked(s, api, &prewoken, wake)?;
     let owner_id = api.identity(&owner)?;
 
     // the swap (Paul, 2026-10-04): the guest finds each credential its agent
@@ -2403,6 +2356,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         }
     }
 
+    open_page_checks(s, api, &owner, &id, &chat_name, wake)?;
+
     // a second agent on the same computer: @mentioned it answers, else the lead
     let maple_name = s.named(api, &owner, "maple")?;
     let maple = s.create(api, &owner, &maple_name)?;
@@ -2519,6 +2474,32 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // agent's screen's control socket speaks first (whose screen, who holds
     // control), as an RFB server does, and that first word reaches the page
     let control = |agent: &str| Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e&agent={agent}"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
+    // and it holds the computer only while its page speaks (Paul,
+    // 2026-11-18: an open tab no one uses must not keep it awake): its
+    // opening holds it IDLE_MS, the container's words and two seconds of
+    // its page's silence no longer, and a word from its page (a give, which
+    // changes nothing here) IDLE_MS from that word. Its first word since
+    // this computer's object came up: a page's use is told a minute apart.
+    let held = || lever(api, &id, "saves").ok().and_then(|r| r.body["heldUntil"].as_i64()).unwrap_or(0);
+    let holds = control(&agent_name).and_then(|mut c| {
+        c.next()?;
+        let opened = held();
+        std::thread::sleep(Duration::from_secs(2));
+        let silent = held();
+        c.send(&json!({ "type": "give" }))?;
+        let mut used = silent;
+        s.eventually(Duration::from_secs(10), || {
+            used = held();
+            used > silent
+        });
+        c.close();
+        Ok((opened, silent, used))
+    });
+    s.ok(
+        "a socket on its port holds the computer IDLE_MS from its opening, no longer while its page says nothing (the container's words hold nothing), and IDLE_MS from its page's word",
+        holds.as_ref().is_ok_and(|(opened, silent, used)| *opened > 0 && silent == opened && *used >= silent + 1_500 && *used < silent + 60_000),
+        format!("{holds:?}"),
+    );
     let heard = control(&agent_name).and_then(|mut c| {
         let first = c.next()?;
         c.send(&json!({ "type": "take" }))?;
@@ -2706,6 +2687,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         api.signed(&owner, "GET", &format!("/api/f/{next_name}/channels"), None).is_ok_and(|r| r.body["channels"].as_array().is_some_and(|c| c.iter().any(|x| x["name"] == "chat")))
     });
     std::thread::sleep(QUEUE_DRAIN);
+    // a socket open on its port as it sleeps
+    let tab = control(&agent_name).and_then(|mut c| c.next().map(|_| c));
     // a real runtime's last turn may still post a record that wakes it
     // again (a preview's model is slower than the stub): asked until asleep
     let mut last = Value::Null;
@@ -2715,6 +2698,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         last["phase"] == "asleep"
     });
     s.ok("asleep, with a new chat deployed", deployed && slept, &last);
+    let closed = tab.and_then(|mut c| c.closed(8));
+    s.ok(
+        "its sleep closed the socket open on its port as it began, before its hold, saying why (4000, asleep): nothing its page sends after reaches the container its save holds, and its page says so and waits for its person",
+        closed.as_ref().is_ok_and(|(code, why)| *code == 4000 && why == "asleep"),
+        format!("{closed:?}"),
+    );
     let t0 = std::time::Instant::now();
     let r = api.signed(&owner, "PUT", &format!("/api/f/{next_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     s.ok("its agent is added to the new chat", r.status == 200, &r);

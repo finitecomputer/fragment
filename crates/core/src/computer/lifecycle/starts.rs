@@ -5,7 +5,7 @@
 use fragment_proto::computer::{ComputerPhase, LifeEnd};
 
 use super::{Action, Ended, Lifecycle, Phase, Retry, Saving, Step};
-use crate::computer::limits::{RETRY_PAUSE_MS, STARTS_FAILED_MAX};
+use crate::computer::limits::{RETRY_PAUSE_MS, STARTS_FAILED_MAX, TAB_USED_EVERY_MS};
 
 impl Lifecycle {
     /// Starts of this wake that failed in a row.
@@ -45,6 +45,10 @@ impl Lifecycle {
         // up is work under way
         self.kept_ms = now_ms;
         self.worked_ms = if self.open() { now_ms } else { 0 };
+        self.changed_ms = Some(self.worked_ms);
+        // a tab's use is its life's: none of an earlier one counts here
+        self.tab_used_ms = 0;
+        self.used_since_ms = None;
     }
 
     /// Something was done on this life: a keepalive or a port tab opened or
@@ -57,6 +61,22 @@ impl Lifecycle {
         if self.ready {
             self.worked_ms = self.worked_ms.max(now_ms);
         }
+    }
+
+    /// This life ran something that may change its files: a keepalive
+    /// opened or closed (a turn), or a person used a port tab. Always work
+    /// too (`worked`), never the other way: a tab's opening, or a record's
+    /// wake, changes nothing by itself.
+    pub(super) fn changed(&mut self, now_ms: i64) {
+        if self.ready {
+            self.changed_ms = Some(self.changed_ms().max(now_ms));
+        }
+    }
+
+    /// When this life last ran something that may change its files (its
+    /// work's time, in a lifecycle stored before that was kept).
+    fn changed_ms(&self) -> i64 {
+        self.changed_ms.unwrap_or(self.worked_ms)
     }
 
     /// The running start's container is gone: if it came up, that was a
@@ -76,20 +96,39 @@ impl Lifecycle {
         if std::mem::take(&mut self.ready) {
             assert!(step.ended.is_none(), "one event ends one life");
             let restarting = matches!(self.phase, Phase::Sleeping { restarting: true, .. });
-            step.ended = Some(Ended { generation: self.generation, by, saved, at_ms: now_ms, restart: restarting && by == LifeEnd::Sleep, quiet: self.quiet() });
+            let unheard = self.tab_unheard_ms(now_ms);
+            let (quiet, unchanged) = (self.quiet(now_ms), self.kept_ms > 0 && self.changed_ms().max(unheard) < self.kept_ms);
+            assert!(!quiet || unchanged, "a life nothing was done on changed nothing");
+            step.ended = Some(Ended { generation: self.generation, by, saved, at_ms: now_ms, restart: restarting && by == LifeEnd::Sleep, quiet, unchanged });
         }
     }
 
     /// Nothing was done on this life since its newest save that worked, or
-    /// since it came up when it has none: what it ran is in that save.
-    fn quiet(&self) -> bool {
-        self.kept_ms > 0 && self.worked_ms < self.kept_ms
+    /// since it came up when it has none, as far as was heard by `now`:
+    /// what it ran is in that save.
+    fn quiet(&self, now_ms: i64) -> bool {
+        self.kept_ms > 0 && self.worked_ms.max(self.tab_unheard_ms(now_ms)) < self.kept_ms
+    }
+
+    /// The latest a person's use of an open port tab, not heard yet, may
+    /// have reached its container by `now`: a use is heard
+    /// `TAB_USED_EVERY_MS` after the last one heard at most (cell/entry.mjs),
+    /// or with its tab's close, and one its container took with it as it
+    /// stopped never is. 0 with no tab open, or none used.
+    fn tab_unheard_ms(&self, now_ms: i64) -> i64 {
+        if self.tabs > 0 && self.tab_used_ms > 0 {
+            now_ms.min(self.tab_used_ms + TAB_USED_EVERY_MS)
+        } else {
+            0
+        }
     }
 
     /// Whether its container, stopped now though nothing asked, ends a sleep
-    /// and not a crash: a life that came up, awake, nothing open, no save
+    /// and not a crash: a life that came up, awake, no keepalive open (a
+    /// port tab open holds nothing: its use since its save is work), no save
     /// under way, a save it made since it was last awake (`Awake`'s
-    /// `since_ms`) holds all it did (`quiet`), and no record or join woke
+    /// `since_ms`) holds all it did (`quiet`, a tab's use not heard yet
+    /// counted done), and no record or join woke
     /// it that its guest has not taken up (`owed_ms`). A host stops
     /// containers for its own reasons (its maintenance, a node short of
     /// memory); stopped so, such a computer loses nothing and leaves nothing
@@ -98,9 +137,9 @@ impl Lifecycle {
     /// with no save of its own may have been woken for work it has not
     /// begun, so either stop stays a crash, started again while that wake
     /// holds it.
-    pub(super) fn idle_and_kept(&self) -> bool {
+    pub(super) fn idle_and_kept(&self, now_ms: i64) -> bool {
         let Phase::Awake { since_ms, .. } = self.phase else { return false };
-        self.ready && !self.open() && self.saving.is_none() && self.quiet() && self.kept_ms > since_ms && self.owed_ms.is_none()
+        self.ready && !self.open() && self.saving.is_none() && self.quiet(now_ms) && self.kept_ms > since_ms && self.owed_ms.is_none()
     }
 
     /// Its container stopped unasked while it was idle and kept
@@ -110,7 +149,7 @@ impl Lifecycle {
     /// wakes it from that save. Always on, it is wanted still: it starts
     /// again, as after its owner's sleep of it.
     pub(super) fn slept_unasked(&mut self, now_ms: i64, step: &mut Step) {
-        assert!(self.idle_and_kept(), "only an idle computer whose work is kept sleeps unasked");
+        assert!(self.idle_and_kept(now_ms), "only an idle computer whose work is kept sleeps unasked");
         self.held_until_ms = now_ms;
         self.life_ended(LifeEnd::Sleep, true, now_ms, step);
         self.gone(now_ms, step);
@@ -233,8 +272,7 @@ mod tests {
     /// of the alarm that asked for them (a Durable Object's runs 15 minutes
     /// at most), so the start a wake during it owes is never made in what
     /// is left: the sleep's end asks for an alarm at once, an invocation of
-    /// its own, and that alarm makes it, though the wake's own hold ran out
-    /// during the save. Valid (owed and made once), the bound (its save as
+    /// its own, and that alarm makes it. Valid (owed and made once), the bound (its save as
     /// long as its backups' bound, 11 minutes and more), replay (a second
     /// alarm makes no second start). Method: the lifecycle's steps, each
     /// what one invocation of the DO performs.
@@ -244,11 +282,10 @@ mod tests {
         let g = started(&mut l, T);
         let slept = T + IDLE_MS;
         assert!(l.apply(Event::Alarm, slept).actions.contains(&Action::Sleep { generation: g }), "the idle sleep, in an alarm");
-        // a presence wake as it holds: its hold runs out long before the save ends
+        // a presence wake as it holds
         assert!(l.apply(Event::Wake { why: Wake::Presence }, slept + 1_000).actions.is_empty());
         let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, slept + 2_000));
         let saved = slept + 2_000 + 11 * 60_000;
-        assert!(saved > slept + 1_000 + PREWAKE_MS, "the wake's hold ran out during the save");
         assert_eq!(l.apply(Event::Saved { generation: g, seq }, saved).actions, vec![Action::Stop { generation: g, saved: true }]);
         let asleep = saved + 10_000;
         let s = l.apply(Event::Asleep { generation: g }, asleep);
@@ -483,7 +520,7 @@ mod tests {
         // restart: the isolate that hears the exit reads it back
         c.life = Lifecycle::read(&serde_json::to_string(&c.life).unwrap()).unwrap().0;
         let s = c.apply(Event::Exited { generation: g });
-        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: c.now, restart: false, quiet: true }), "{s:?}");
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: c.now, restart: false, quiet: true, unchanged: true }), "{s:?}");
         assert_eq!((c.life.phase.clone(), c.life.failures(), s.alarm_ms), (Phase::ASLEEP, 0, None), "asleep with no strike and no start due: {s:?}");
         assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "{s:?}");
         assert_eq!(told(&c), vec![], "nothing to tell");
@@ -753,7 +790,7 @@ mod tests {
         // SAVE_EVERY_MS) saved, never put to sleep
         assert_eq!(l.apply(Event::Alarm, late - 1).actions, vec![Action::Meter { from_ms: T + 3_000, to_ms: late - 1 }, Action::Hold { generation: g }], "busy, it stays awake");
         let s = l.apply(Event::Exited { generation: g }, late);
-        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Exit, saved: false, at_ms: late, restart: false, quiet: false }));
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Exit, saved: false, at_ms: late, restart: false, quiet: false, unchanged: false }));
         let s = owed(&mut l, &s, late);
         assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "busy when it died, it starts again: {s:?}");
         // the next life comes up and, its turns ended, is idle: it sleeps
@@ -810,7 +847,7 @@ mod tests {
         let mut l = Lifecycle::new();
         let s = l.apply(Event::Wake { why: Wake::Presence }, T);
         let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
-        let s = l.apply(Event::SnapshotFailed { generation, why: "slow".into() }, T + PREWAKE_MS + 1);
+        let s = l.apply(Event::SnapshotFailed { generation, why: "slow".into() }, T + IDLE_MS + 1);
         assert!(s.actions.is_empty() && matches!(l.phase, Phase::Asleep { .. }), "{s:?}");
     }
 
@@ -823,7 +860,7 @@ mod tests {
         let g = started(&mut l, T);
         l.apply(Event::Sleep, T + 10_000);
         let s = l.apply(Event::Exited { generation: g }, T + 11_000);
-        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Exit, saved: false, at_ms: T + 11_000, restart: false, quiet: true }), "gone as its sleep held it, before the sleep stopped it: on its own");
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Exit, saved: false, at_ms: T + 11_000, restart: false, quiet: true, unchanged: true }), "gone as its sleep held it, before the sleep stopped it: on its own");
         assert!(l.apply(Event::Asleep { generation: g }, T + 12_000).ended.is_none(), "it ended once");
         // one that never came up
         let s = l.apply(Event::Wake { why: Wake::Owner }, T + 20_000);
@@ -841,7 +878,7 @@ mod tests {
         l.apply(Event::Ready { generation }, T + 1_000);
         l.failures = STARTS_FAILED_MAX - 1;
         let s = l.apply(Event::Exited { generation }, T + 2_000);
-        assert!(matches!(l.phase, Phase::Failed { .. }) && s.ended == Some(Ended { generation, by: LifeEnd::Exit, saved: false, at_ms: T + 2_000, restart: false, quiet: true }), "{s:?} {:?}", l.phase);
+        assert!(matches!(l.phase, Phase::Failed { .. }) && s.ended == Some(Ended { generation, by: LifeEnd::Exit, saved: false, at_ms: T + 2_000, restart: false, quiet: true, unchanged: true }), "{s:?} {:?}", l.phase);
     }
 
     /// Goal: a start from a snapshot that fails forgets it, and
@@ -989,7 +1026,7 @@ mod tests {
         assert!(held);
         assert_eq!(l.apply(Event::Saved { generation: g, seq }, T + 12_000).actions, vec![Action::Stop { generation: g, saved: true }]);
         let s = l.apply(Event::Asleep { generation: g }, T + 15_000);
-        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: T + 15_000, restart: true, quiet: false }), "saved: no rollback");
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: T + 15_000, restart: true, quiet: false, unchanged: false }), "saved: no rollback");
         assert!(l.starting(T + 15_000) && l.generation() == g, "told starting once its start is owed, before it is made");
         let s = owed(&mut l, &s, T + 15_000);
         assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "then a start, at once: {s:?}");
@@ -1067,7 +1104,7 @@ mod tests {
                 assert!(matches!(l.phase, Phase::Sleeping { generation, .. } if generation == g), "still the restart's sleep: {:?}", l.phase);
             }
             let s = l.apply(Event::Asleep { generation: g }, T + 12_300);
-            assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved, at_ms: T + 12_300, restart: true, quiet: true }));
+            assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved, at_ms: T + 12_300, restart: true, quiet: true, unchanged: true }));
             let s = owed(&mut l, &s, T + 12_300);
             assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "the stop's end owes it, made by its alarm: {s:?}");
             // a report of the stopped one, late, changes nothing

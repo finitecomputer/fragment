@@ -38,21 +38,25 @@ Phases: `asleep`, `starting`, `awake`, `sleeping`, and `wont_wake`
 an image may rely on this:
 
 - **It is woken** by a record on a channel one of its agents subscribed
-  to with `wake: true`, one of its agents added to a fragment, a sign
-  that its person means to use it (below), an open port tab, or its
-  owner. Never by its own guest's traffic.
-- **It stays awake** while one of its agents' turns runs (the guest holds
-  its keepalive socket) or a port tab is open, while its person is
-  interacting, and for the idle wait (`IDLE_MS`, 20 minutes) after a
-  turn, a record or a join that woke it, a port tab closed, or its
-  owner's own wake or restart. Each sign of intent holds it a minute
-  (`PREWAKE_MS`): in its owner's shell, a chat picked, the launcher
-  opened, or typing begun in a chat of theirs with their agent; a page
-  opening a fragment it follows. Nothing else holds it, but always on
-  (decision 25; docs/billing.md).
+  to with `wake: true`, one of its agents added to a fragment, an open
+  port tab, its owner, or a person beginning to use it: in its owner's
+  shell a chat picked or the launcher opened (their own wake), and on
+  any page of a fragment one of its agents follows, typing begun by one
+  who may post there (the page's presence `typing` turning on, decision
+  39). Never by its own guest's traffic, a page loading, a tab shown
+  again, a socket reconnecting, or a timer.
+- **It stays awake** while the guest holds its keepalive socket, and
+  `IDLE_MS` (20 minutes) after what last held it: a keepalive's close, a
+  wake, or a port tab's opening, close or use (a message from its page).
+  A port tab merely open holds nothing (Paul, 2026-11-18: "an open tab,
+  without any action touching the agent, should not keep the agent awake
+  indefinitely"). An always-on seat's computer never sleeps (decision 25;
+  docs/billing.md).
 - **It is saved** when its work ends (its last keepalive or its last
-  port tab closes, and 30 s pass with no keepalive opened again), every 15 minutes while a keepalive stays
-  open, and at every sleep (below, "Saves and what a wake restores").
+  port tab closes, and 30 s pass with no keepalive opened again), every
+  15 minutes while a keepalive stays open or a port tab is in use
+  (counted from its first use since the last save), and at every sleep
+  (below, "Saves and what a wake restores").
 - **A sleep** is, in order: the hold, the save, a container snapshot
   (only after a save that worked), SIGTERM, up to 5 s for the guest to
   exit, destroy. A keepalive opened during an idle sleep's hold cancels
@@ -68,8 +72,9 @@ an image may rely on this:
   every path, and its owner's page follows it to awake.
 - **A stop nothing asked for, while idle, is a sleep.** A host may stop
   a container for its own reasons (its maintenance, a host short of
-  memory). One that stops while its computer is awake with nothing open
-  (no keepalive, no port tab), no save under way, all this life did in a
+  memory). One that stops while its computer is awake with no keepalive
+  open (a port tab open holds nothing; its use is work), no save under
+  way, all this life did in a
   save it made since it came up, and no message or join it was woken for
   that its guest has not taken up, has slept: no strike, no rollback,
   nothing told, and nothing starts it again, though the hold after its
@@ -230,7 +235,9 @@ steps; its "no reply yet" waits until it is up):
   the bound stops it.
 - `went_back`: a start went back to an older save, or will at its next
   start, told until its owner says they saw it. None when nothing was
-  done on the lost life after that save (Paul, 2026-10-23).
+  done on the lost life after that save (Paul, 2026-10-23). When nothing
+  that may change its files ran after it (no turn, no port tab used:
+  `unchanged`), it says where it went back to and no loss.
 - `update`: it is awake, with no keepalive open, on another version than
   its next start runs, until its owner puts that version off.
 - `key_paused`: a shared key's charges this last hour reached its owner's
@@ -561,8 +568,8 @@ every door and relay asks. An image's own declarations grant nothing.
 `http://model.fragment.internal` is the platform's model routes as the
 agent (docs/api.md, Models), with the route's bounds and gate:
 
-- `POST /v1/chat/completions`: OpenAI's shape, `model` a tier (`cheap`,
-  `medium`; `high` only while it is on, decision 23), `vision`,
+- `POST /v1/chat/completions`: OpenAI's shape, `model` a route of the
+  deployment's by its name (`cheap`, `medium` on Finite's), `vision`,
   `fallback`, or a model by its id;
 - `GET /v1/models`: OpenAI's list of the ids a call may name, answered by
   the intercept itself, naming no agent and metering nothing;
@@ -582,32 +589,36 @@ Any other path is 404, unmetered.
   further than the computer. The intercept names no fragment, so a call
   bills its agent's owner (decision 36); one its owner's ledger refuses
   gets the ledger's reason (402, 403), and no call is made.
-- `x-fragment-tier: cheap` or `medium` (optional) is the caller's tier,
-  by which a model's id, `fallback` and `vision` run as its tier's route.
+- `x-fragment-tier: <route>` (optional; a route's name, any other 400) is
+  the caller's route, by which a model's id, `fallback` and `vision` run
+  as its route's.
 - **A model by its id.** The view's `models` names each slot's model id
   (`ModelIds`), as the deployment names them now. A guest names its
   models by those ids and reads them again while awake: a change of the
   deployment's `models` is a deploy, no new image, and an id no slot runs
   is refused (400). The route's names keep working.
-- **Each tier's route.** The view's `models.routes` names each tier's
-  label, whether it is private, and its fallback's and vision model's ids.
+- **Each route.** The view's `models.routes` names the routes `cheap` and
+  `medium` (each the route of that name, else the deployment's default:
+  what an image older than the list reads): its label, whether it is
+  private, and its fallback's and vision model's ids.
 - **A slot's own fallback.** A call that fails before answering is made
   once more on its slot's fallback, however it named the slot, and never
   a third time. A call that streams nothing is the runtime's own to give
   up on.
-- **A slot's `private`.** A private tier is a private route: every slot
-  its agents' calls reach (its fallback, its vision, its Deep, and the
-  route's four's `fallback`, which an image that reads no route names for
-  its stall) is private, or the deploy is refused. Not private yet: voice
+- **A slot's `private`.** A route on a private slot is a private route:
+  every slot its agents' calls reach (its fallback, its vision, its Deep,
+  and the view's `fallback`, the default route's, which an image that
+  reads no route names for its stall) is private, or the deploy is
+  refused. Not private yet: voice
   notes (`whisper`), decisions, the runtime's speech, the vendors its
   tools call (web search, `x_search`, image generation), and an owner's
   own model.
-- **Fast and Deep** (decision 65). Each tier runs Fast, its own slot, for
+- **Fast and Deep** (decision 65). Each route runs Fast, its own slot, for
   its agents' turns, and Deep for their delegates. `models.routes` carries
-  each tier's `reasoning` (Fast's effort) and `deep` (`{id, reasoning?,
+  each route's `reasoning` (Fast's effort) and `deep` (`{id, reasoning?,
   fallback?}`), absent when the deployment names none; an image copies
   them into each profile, and one that reads neither runs delegates on
-  Fast. A delegate names its Deep by its id with its tier said, so a
+  Fast. A delegate names its Deep by its id with its route said, so a
   private child stays on its private slot when Standard runs the same id.
 - **Native images** (decision 65). `models.images` lists the model ids
   the deployment declares image-capable; an image gives those models
@@ -733,8 +744,16 @@ agent; their account pays.
 - Only the platform's page may frame a port, so an image's page may not
   frame its own ports either: a screen is one page, its sockets relative
   to it.
-- A WebSocket on a port holds the computer awake while open. The
-  container may speak first. A close at either end closes the other.
+- A WebSocket on a port holds the computer awake only while its page
+  speaks: its opening, and each message from the page's end (heard a
+  minute at a time), hold it `IDLE_MS`; one whose page says nothing lets
+  it sleep, and a page that stops speaking when no one is at it lets it
+  sleep under an open tab. The container may speak first; its words hold
+  nothing. A close at either end closes the other. A sleep (a restart's
+  too) closes each as it begins, before its hold, with 4000 and `asleep`
+  or `restarting`, so nothing a page sends after reaches the container its
+  save holds; a request to a port while it sleeps wakes it after, and is
+  answered 503.
 - **The screen** (decision 11) is a page on port 6080, one for each
   agent, at `/p/6080/?agent=<agent fragment>`. The platform carries the
   query and reads nothing in it: which desktop is the agent's, and
@@ -744,6 +763,13 @@ agent; their account pays.
   `postMessage({fragment: "screen", agent, name})`; a page takes it only
   from its parent and only for its own agent. Opened in a tab of its own,
   it names none: the computer knows an agent by its label, never its name.
+  The shell also tells the screens on view that its person is at it
+  (`{fragment: "screen", agent, active: true}`, every 30 s at most).
+  Our screen backs off to silence (`images/hermes/screen/attend.js`): no
+  key, press, pointer or touch on it or the shell for five minutes
+  pauses its stream, its last frame kept; the next one resumes it. Once
+  its sockets close (a sleep, a restart, the network), only a press or a
+  key opens them again, once each, and a computer asleep wakes for them.
 
 ## Our images
 
@@ -843,10 +869,17 @@ arrives already transcribed, its words the quote above Hermes' audio
 note, its file only for work on the recording (`hermes::VOICE`); and that a
 reply line `MEDIA:<absolute path>` attaches a file there
 (`hermes::SENDING`). Hermes keeps the system prompt a chat's session
-began with and replays it on every later turn, so a change to these
-reaches an open chat at its next new session (its `/new`), or when
-Hermes next compresses it or its model changes; a new chat has it at
-once.
+began with and replays it on every later turn (rebuilding it only at a
+compression, a model change or `/new`), so whenever what it is built
+from changes (the relay hint, or a skill file Hermes indexes into it: the
+platform skill's, a bundled one, the owner's managed set;
+`hermes::prompt_inputs`), every session is asked to rebuild its prompt
+once, on its next turn, as Hermes' own `hermes sessions refresh-prompts`
+does (`hermes::REFRESH_PROMPTS`): at boot, its skills settled, against
+what the computer last stamped (`hermes::PROMPT_STAMP`), and after each
+install of the managed skills while it runs. An open chat has the change
+at its next turn, its conversation kept, at one prompt-cache miss; the
+same inputs ask nothing.
 
 ### Its name, in our Hermes image
 

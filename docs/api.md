@@ -1243,7 +1243,7 @@ by channel and `seq`. A push service's 404 or 410 drops the subscription
 
 A job's AI steps bill the fragment's owner, capped when the run's
 principal is neither the owner nor an agent of theirs (Ledger). Text goes
-through the model route by tier (Models), images to a Workers AI image
+through the model route by route (Models), images to a Workers AI image
 model, decisions to the Clef family (Decisions). No app holds a key.
 
 Each paid step asks the gate before its call (docs/ledger.md, "The gate";
@@ -1256,8 +1256,9 @@ reason (402 `budget_used_up`). A run answers `costMicros`.
 
 - `job.ai.text({model?, prompt | messages, max_tokens?, reasoning_effort?,
   tools?, tool_choice?, draft?})` → `{text, message, finish_reason, model,
-  tier, usage, timing}`: `model` a tier, `cheap` (the default) or `medium`
-  (`high` refused); `max_tokens` at most 16384; `reasoning_effort` `low`
+  tier, usage, timing}`: `model` one of the deployment's routes by its
+  name (its default unnamed; any other refused, naming them), `tier` the
+  route it ran; `max_tokens` at most 16384; `reasoning_effort` `low`
   (the default, and what anything unknown becomes), `high` or `max`.
 - `job.ai.decide({model?, input, questions, media?})` → `{model, answers,
   usage}` (Decisions). An answer that does not answer what was asked is
@@ -1370,36 +1371,37 @@ It is charged after the answer at its input tokens (docs/ledger.md).
 
 ### Models (docs/cloudflare-v1.md, decisions 23 and 61)
 
-One OpenAI-shaped chat completion on a tier's model, metered on its
+One OpenAI-shaped chat completion on a route's model, metered on its
 payer's ledger (cell/src/models.rs, `fragment_core::models`). The route's
-names: the tiers `cheap` (the default) and `medium`; `high`, refused (400,
-saying why); `vision`, for a runtime's calls about an image; and
-`fallback`, a runtime's own switch when its model stalls. `vision` and
-`fallback` are metered as a tier's call and are no tier a job's step may
-name. Where each runs is the deployment's config (`FRAGMENT_MODELS`;
-decision 61): a Workers AI model through the deployment's AI Gateway, or a
+names: the deployment's routes (its config's `models.routes`, each by
+its name, one its default; `cheap` and `medium` on Finite's); `vision`,
+for a runtime's calls about an image; and `fallback`, a runtime's own
+switch when its model stalls. `vision` and `fallback` are the caller's
+route's (the default's when it says none), metered as any call, and no
+route a job's step may name. Where each runs is the deployment's config
+(`FRAGMENT_MODELS`; decision 61): a Workers AI model through the
+deployment's AI Gateway, or a
 model on an OpenAI-compatible API with the deployment's key and its slot's
 own `body`, the call's other fields than a chat completion's dropped
 (`models::CLIENT_KEYS`).
 
-**Fallback.** A tier's call whose model fails before answering (not
-reached, 429, 5xx; on an OpenAI-compatible API also 401, 402, 403, 404,
-none of them the caller's) is made once more on its route's fallback, and
+**Fallback.** A call whose model fails before answering (not reached,
+429, 5xx; on an OpenAI-compatible API also 401, 402, 403, 404, none of
+them the caller's) is made once more on its slot's fallback, and
 its answer is the call's, charged once (a 401 or 402 is logged,
 `model.platform-key`). An answer that began is final; a 400 or other 4xx is
 the call's. `vision` falls back only to a model whose slot says it reads
 images; transcriptions never. A slot may name its own `"fallback"`, its
 Deep (`"deep"`), `"reasoning"` and `"max_tokens"` (docs/computers.md,
-"Fast and Deep"); a caller may say its tier in `x-fragment-tier` (`cheap`
-or `medium`; any other 400).
+"Fast and Deep"); a caller may say its route in `x-fragment-tier` (one of
+the deployment's routes by its name; any other 400, naming them).
 
 **A model by its id.** A call may name a slot's model by its own id instead
-(`Models::named`): the caller's tier's slot that runs it, else its Deep,
-else the first slot that does (`cheap`, `medium`, `fallback`, `vision`),
-as if it named that slot. An id no slot runs is 400, the message listing
-those a call may name. One id is one model: a deployment whose two slots
-name one id at two places is refused. A job's step names a tier, never an
-id.
+(`Models::named`): the caller's route's slot that runs it, else its Deep,
+else the first route's slot that does, else the first slot by name, as if
+it named that slot. An id no slot runs is 400, the message listing those
+a call may name. One id is one model: a deployment whose two slots name
+one id at two places is refused. A job's step names a route, never an id.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
@@ -1409,7 +1411,7 @@ id.
 | `POST /api/models/v1/decide[?fragment=<name>]` | an agent (`for` its asker) | a decision, media inline (Decisions) → `{model, answers, usage}`. A blob 400 (the route reads no fragment's store). An answer that does not answer what was asked is charged and 502 `upstream_failed`. A computer's guest asks it as `POST /v1/decide` on its intercept |
 | `POST /api/models/v1/embeddings[?fragment=<name>]` | an agent (`for` its asker) | OpenAI's `{input, model?, dimensions?, encoding_format?}` → `{object: "list", data: [{object, index, embedding}], model, usage, space: {model, dimensions, version}}` (Embeddings). `POST /v1/embeddings` on a computer's intercept |
 
-The model is sent the body bounded: its tier's model, images as they came,
+The model is sent the body bounded: its route's model, images as they came,
 `max_tokens` at most 16384 (or its slot's), `reasoning_effort` clamped,
 usage asked for when it streams, none of the client's headers. Its payer is
 the agent's owner (decision 36). `fragment`, one the agent is a member of
@@ -1427,7 +1429,7 @@ answer is kept. Each charge logs `{"event": "model.settled", ref, logId,
 tier, model, usage, first_ms, ms, calls}`.
 
 **Embeddings** (`fragment_core::embed`) run on the deployment's
-`models.embeddings` slot, no chat slot (no tier names it, nothing falls
+`models.embeddings` slot, no chat slot (no route names it, nothing falls
 back to it); unnamed, `embed::MODEL_DEFAULT` on Workers AI. Every answer
 names its `space`, and every vector has the slot's `dimensions` and unit
 length;
@@ -1444,8 +1446,8 @@ the model rate-limits is 429 `rate_limited` with `retry_after_ms` (and
 `Retry-After`, in seconds): the model's own wait, else 60 s, held between
 1 s and 10 minutes; its writer waits that long, then writes again. A
 question it rate-limits is answered by its words alone. This route
-embeds an agent's input as given. A deployment whose
-tiers are private embeds only on a slot marked `private` (else 403). Refused 400 before anything is sent:
+embeds an agent's input as given. A deployment with a
+private route embeds only on a slot marked `private` (else 403). Refused 400 before anything is sent:
 `input` not a string or 1 to `embed::INPUTS_MAX` strings, an empty one, or
 one that may pass the slot's window (`embed::tokens_max`; nothing is cut);
 `model` other than `embeddings` or the slot's; `dimensions` other than the
@@ -1799,6 +1801,14 @@ by its status. A fragment holds at most `LIVE_SOCKETS_MAX` sockets, a
 principal `LIVE_SOCKETS_PER_PRINCIPAL` (429). Opening a socket at the
 public role spends a public call.
 
+A socket's presence whose `typing` turns `true` (it was not, or the
+socket is new) says its person began typing. From one who may post to
+one of the fragment's channels (as its declaration admits them; not one
+only agents post to), each computer the fragment's channels wake, but
+none of the socket's own principal's, is woken (decision 39), at most
+once every `PREWAKE_EVERY_MS` (30 s) a fragment. Opening a socket, any
+other presence, or a reader's who may not post, wakes none.
+
 A query over the socket runs as `__op` would, outside the public call
 budget: a principal may run `LIVE_QUERIES_MAX` queries over its sockets
 between two changes to the fragment, one at a time per id (429
@@ -2090,7 +2100,6 @@ docs/computers.md's; these routes are its owner's. A view is
 | `GET /api/computers` | a person | → `{computers: [ComputerView], support}`, `support` `FRAGMENT_SUPPORT_URL` or `null` |
 | `GET /api/computers/{id}` | its owner (anyone else 404) | → `ComputerView`. Their pages are told when it changes (`watch`'s `changed`) |
 | `POST /api/computers/{id}/wake` | its owner | → the view once awake; 503 `wont_wake` when it would not start |
-| `POST /api/computers/{id}/prewake` | its owner | → the view once awake: a page's pre-wake (decision 39), held a minute (`PREWAKE_MS`) as a page's presence is, where `wake` holds it `IDLE_MS`; one that won't wake is not lifted (503 `wont_wake` within `WONT_WAKE_RETRY_MS`). The shell asks it on each sign its person means to use their agent: a chat picked, the launcher opened, or typing begun in a chat of theirs with their agent (docs/computers.md, Lifecycle) |
 | `POST /api/computers/{id}/sleep` | its owner | → the view once asleep, or awake with its `why` when its save failed; within the sum of its steps' bounds (`SLEEP_STEPS_MS`), at most 14 minutes |
 | `POST /api/computers/{id}/restart` | its owner | `{generation?}` → the view once the restart is under way, its start owed to its alarm: `phase` `starting` (`generation` the start it restarted until that start is made). Running, it answers after its save (done or failed) and its stop; asleep or `wont_wake`, at once; going to sleep, at once with `sleeping` (that sleep is the restart's, its start owed at its end). The start is fresh from the image and its newest good save; follow the view (`GET`) to `awake` with a newer `generation`, or `wont_wake`. `generation` names the start the owner saw: one already restarted is not restarted again (the view as it is). At zero credit 402, a guest 403 |
 | `POST /api/computers/{id}/notices/seen` | its owner | `{life}` → the view, that `went_back` notice told no more; a `life` past the newest, or 0, 400 |

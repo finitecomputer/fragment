@@ -6,30 +6,32 @@
 //! container that came up after it was put to sleep) changes nothing.
 //!
 //! What it decides:
-//! - **Waking.** A record on a subscribed channel, an open port tab, a
-//!   sign that its person means to use it (a pre-wake: a page's presence,
-//!   or its owner's shell), one of its agents added to a fragment, or the
-//!   owner. A wake while asleep
+//! - **Waking.** A record on a subscribed channel, an open port tab,
+//!   typing begun on a page of a fragment it follows (a pre-wake), one of
+//!   its agents added to a fragment, or the owner. A wake while asleep
 //!   starts the container; one while it starts or is awake holds it
 //!   longer; one while it is going to sleep starts it again once it is
 //!   asleep (the newest push wins: lesson 3 of docs/cloudflare-v1.md).
-//! - **Staying awake.** While the guest holds a keepalive socket or a
-//!   port tab is open; with nothing open, until the latest hold runs out
-//!   (twenty minutes after a record, a join, the last socket closed or
-//!   its owner's own wake or restart; a minute after a pre-wake). Nothing
-//!   else holds it, but always on: an always-on computer never sleeps.
+//! - **Staying awake.** While the guest holds a keepalive socket; with
+//!   none open, until the latest hold runs out (`IDLE_MS` after a wake,
+//!   a keepalive's close, or a port tab's opening, close or last use:
+//!   the one number). A port tab merely open holds nothing: its page's
+//!   words do (`Event::TabUsed`). An always-on computer never sleeps.
 //! - **Saving** (docs/computers.md, Durability, step 1). `/data` is saved when
 //!   work ends (the guest's last keepalive or its owner's last port tab
 //!   closes, and `SAVE_SETTLE_MS` pass with no keepalive opened again, so
 //!   turns back to back, or tabs, save once), every
-//!   `SAVE_EVERY_MS` while a keepalive stays open, and at every sleep. A
+//!   `SAVE_EVERY_MS` while a keepalive stays open or a port tab is used,
+//!   and at every sleep. A
 //!   save is a hold (the DO touches `/run/computer/hold` and waits for the
 //!   guest's `/run/computer/held`), the save, and, awake, the hold let go.
 //!   A save that fails is tried again after a growing pause.
 //! - **Sleeping.** Its hold and its save, then its stop (snapshot, signal,
 //!   wait, destroy), reported back by `Asleep`. A keepalive that opens
 //!   during an idle sleep's hold cancels the sleep: the guest took work as
-//!   it was held, so it stays awake (docs/computers.md, Lifecycle).
+//!   it was held, so it stays awake (docs/computers.md, Lifecycle). Its
+//!   port tabs close as it begins (the cell's), so nothing a person sends
+//!   after reaches the container its save holds.
 //!   A sleep whose save fails keeps its container and is tried again, for
 //!   at most `Rules::unsaved_max_ms`; then it sleeps unsaved, and says so.
 //!   A container its host stops unasked while it is idle, with all this
@@ -83,8 +85,8 @@ pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_
 pub use images::{does_simplex, image_running, valid_version, version_now, version_of, version_running, Images, VERSION_HEX};
 pub use lifecycle::{alive, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};
 pub use limits::{
-    ALARM_LATE_MS, ALIVE_MS, AWAKE_ROW_MAX_MS, FAILED_WHY_MAX_BYTES, HOLD_DEADLINE_MS, HOLD_WAIT_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, PREWAKE_MS, RETRY_PAUSE_MS, SAVES_KEPT, SAVE_DEADLINE_MS, SAVE_EVERY_MS, SAVE_RETRY_MS,
-    SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, STARTS_OWED_MAX, START_DEADLINE_MS, UNSAVED_MAX_MS_DEFAULT, UNSAVED_NOTICE_FAILURES, WONT_WAKE_RETRY_MS,
+    ALARM_LATE_MS, ALIVE_MS, AWAKE_ROW_MAX_MS, FAILED_WHY_MAX_BYTES, HOLD_DEADLINE_MS, HOLD_WAIT_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, RETRY_PAUSE_MS, SAVES_KEPT, SAVE_DEADLINE_MS, SAVE_EVERY_MS, SAVE_RETRY_MS,
+    SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, STARTS_OWED_MAX, START_DEADLINE_MS, TAB_USED_EVERY_MS, UNSAVED_MAX_MS_DEFAULT, UNSAVED_NOTICE_FAILURES, WONT_WAKE_RETRY_MS,
 };
 pub use notices::{notices, support_url_ok, SUPPORT_URL_MAX_BYTES};
 pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};
