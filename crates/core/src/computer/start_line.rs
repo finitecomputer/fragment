@@ -96,7 +96,8 @@ pub enum Failed {
     Start,
     /// Its snapshot would not start.
     Snapshot,
-    /// From its snapshot it came up dead: its guest never read its view (#362).
+    /// Its guest never read its view within its wait: a start from a
+    /// snapshot that came up dead (#362), or the `alive-check` lever's.
     Dead,
     /// Its save would not restore.
     Unusable,

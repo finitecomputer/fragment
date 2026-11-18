@@ -468,7 +468,8 @@ keepalive (a turn), `TURN_WAIT_MS` (a minute) passes after it came up, or
 its life ends, whichever is first.
 
 - `failed`: `start` (its own steps), `snapshot` (the snapshot would not
-  start), `dead` (from the snapshot its guest never read its view),
+  start), `dead` (its guest never read its view within its wait: a
+  snapshot that came up dead, or the `alive-check` lever),
   `unusable` (its save would not restore), `exit` (its container stopped
   first), `deadline`, `other`.
 - `woke`: what asked for the wake it answers: `record`, `presence`, `tab`,
