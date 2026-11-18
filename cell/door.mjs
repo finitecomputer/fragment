@@ -222,8 +222,14 @@ export class SimplexDoor extends DurableObject {
       const s = this.newest();
       this.put("restoreFrom", null);
       if (!s) return new Response(null, { status: 204 });
-      this.stat("restore_served", { save: s.id, bytes: s.bytes, generationAsked: generation });
-      return new Response(this.blob(s), { headers: { "content-type": "application/octet-stream", "x-save-seq": String(s.id), "x-save-generation": String(s.generation) } });
+      // behind: the door said or delivered something after this save was
+      // made (a crash between the two, or a rollback), so its ratchet may
+      // be behind its contact's: the runner syncs it, forced, once, before
+      // it sends anything
+      const effectAt = this.get("effectAt") ?? 0;
+      const behind = effectAt > s.at;
+      this.stat("restore_served", { save: s.id, bytes: s.bytes, generationAsked: generation, behind, saveAt: s.at, effectAt });
+      return new Response(this.blob(s), { headers: { "content-type": "application/octet-stream", "x-save-seq": String(s.id), "x-save-generation": String(s.generation), "x-save-behind": behind ? "1" : "0" } });
     }
     if (path === "save" && request.method === "PUT") {
       if (generation !== current) {
@@ -239,6 +245,7 @@ export class SimplexDoor extends DurableObject {
     if (path === "stat" && request.method === "POST") {
       const v = await request.json();
       this.stat(String(v.kind).slice(0, 40), v.data, generation);
+      if (v.kind === "delivered" && generation === current) this.put("effectAt", Date.now());
       const n = this.ctx.storage.sql.exec("SELECT max(id) - min(id) AS n FROM stats").one().n;
       if (n > STATS_KEPT) this.ctx.storage.sql.exec("DELETE FROM stats WHERE id < (SELECT max(id) FROM stats) - ?", STATS_KEPT);
       return json({ ok: true });
@@ -269,6 +276,7 @@ export class SimplexDoor extends DurableObject {
       if (had) return json({ ...JSON.parse(had.answer), replayed: true });
       const t0 = Date.now();
       const answer = await this.runner("POST", "/send", { text: v.text });
+      this.put("effectAt", Date.now());
       if (key) this.ctx.storage.sql.exec("INSERT INTO sent (key, at, answer) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", key, Date.now(), JSON.stringify(answer));
       this.stat("sent", { key, ms: Date.now() - t0, items: answer.items });
       return json(answer);

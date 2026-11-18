@@ -50,6 +50,8 @@ const ASK_WAIT: Duration = Duration::from_secs(30);
 const DEBOUNCE_MS: u64 = 1000;
 /// The databases' versions are read this often.
 const WATCH_MS: u64 = 250;
+/// A forced sync's answer is waited for this long before the door sends.
+const FORCED_SYNC_WAIT: Duration = Duration::from_secs(60);
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -229,7 +231,7 @@ async fn main() {
                 }
             }
         }
-        restore = json!({ "fetchMs": fetch_ms, "unpackMs": t.elapsed().as_millis() as u64, "packedBytes": a.body.len(), "save": a.header("x-save-seq"), "saveGeneration": a.header("x-save-generation"), "state": *door.state.lock().expect("state") });
+        restore = json!({ "fetchMs": fetch_ms, "unpackMs": t.elapsed().as_millis() as u64, "packedBytes": a.body.len(), "save": a.header("x-save-seq"), "saveGeneration": a.header("x-save-generation"), "behind": a.header("x-save-behind") == Some("1"), "state": *door.state.lock().expect("state") });
     }
     log!("restore": restore);
 
@@ -288,10 +290,18 @@ async fn main() {
     // 4. its contact's ratchet, then what arrived since the cursor
     let contact = door.state.lock().expect("state").contact;
     let mut ratchet = Value::Null;
+    let behind = restore["behind"] == true;
+    let mut forced = Value::Null;
     if let Some(c) = contact {
         if let Ok((Resp::ContactInfo { status, .. }, _)) = door.ask(&Cmd::ContactInfo { contact: c }).await {
             ratchet = json!(format!("{status:?}"));
-            if matches!(status, SyncStatus::Required | SyncStatus::Allowed) {
+            if behind {
+                // a save older than what the door last said or delivered:
+                // its contact may hold ratchet steps this copy never took,
+                // which no unforced sync sees (the core thinks it is in
+                // step), so one forced sync before anything is sent
+                forced = force_sync(&door, c).await;
+            } else if matches!(status, SyncStatus::Required | SyncStatus::Allowed) {
                 sync(&door, c).await;
             }
         }
@@ -299,7 +309,7 @@ async fn main() {
     }
     let ready_ms = started.elapsed().as_millis() as u64;
     door.ready.store(true, Ordering::SeqCst);
-    let started_stat = json!({ "generation": generation, "restore": restore, "spawnedMs": spawned_ms, "apiMs": api_ms, "readyMs": ready_ms, "ratchet": ratchet, "contact": contact });
+    let started_stat = json!({ "generation": generation, "restore": restore, "spawnedMs": spawned_ms, "apiMs": api_ms, "readyMs": ready_ms, "ratchet": ratchet, "contact": contact, "forcedSync": forced });
     log!("ready": started_stat);
     door.stat("start", started_stat);
 
@@ -341,6 +351,29 @@ async fn sync(door: &Arc<Door>, contact: i64) {
     let said = r.as_ref().map(|(resp, _)| format!("{resp:?}")).unwrap_or_else(|e| e.clone());
     log!("sync": said, "ms": t.elapsed().as_millis() as u64);
     door.stat("sync", json!({ "answer": said, "ms": t.elapsed().as_millis() as u64 }));
+}
+
+/// One forced sync, then its contact's ratchet read until it is in step
+/// (at most `FORCED_SYNC_WAIT`: a phone offline answers later, and sends
+/// wait until then).
+async fn force_sync(door: &Arc<Door>, contact: i64) -> Value {
+    let t = Instant::now();
+    let asked = door.ask(&Cmd::Sync { contact, force: true }).await.map(|(r, _)| format!("{r:?}")).unwrap_or_else(|e| e);
+    door.syncs.fetch_add(1, Ordering::SeqCst);
+    let mut status = String::new();
+    while t.elapsed() < FORCED_SYNC_WAIT {
+        if let Ok((Resp::ContactInfo { status: s, .. }, _)) = door.ask(&Cmd::ContactInfo { contact }).await {
+            status = format!("{s:?}");
+            if s == SyncStatus::Ok {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let v = json!({ "asked": asked, "status": status, "ms": t.elapsed().as_millis() as u64 });
+    log!("forcedSync": v);
+    door.stat("forced_sync", v.clone());
+    v
 }
 
 /// What the contact sent since the cursor, from the core's own chat (the
@@ -553,6 +586,9 @@ async fn handle(door: Arc<Door>, req: Request<Incoming>) -> Response<Body> {
             }
         }
         ("POST", "/send") => {
+            if !door.ready.load(Ordering::SeqCst) {
+                return answer(503, json!({ "error": "the door is starting (or syncing its ratchet)" }));
+            }
             let v = read_json(req).await;
             let text = v["text"].as_str().unwrap_or("").to_string();
             let Some(contact) = door.state.lock().expect("state").contact else {

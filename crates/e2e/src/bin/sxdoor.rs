@@ -314,11 +314,11 @@ fn rand_byte() -> u8 {
     b[0]
 }
 
-fn link(port: u16) -> Result<()> {
+fn link(port: u16, key: &str) -> Result<()> {
     let a = hosted()?;
     let st = state();
     let keys = owner(&st)?;
-    let conn = s(&st, "connector")?;
+    let conn = s(&st, key)?;
     let t0 = Instant::now();
     let run = op(&a, &keys, &conn, "link", json!({}))?;
     println!("link: {} in {:.1?}", run["status"], t0.elapsed());
@@ -451,6 +451,186 @@ fn door(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn lever(a: &api::Api, computer: &str, body: Value) -> Result<Value> {
+    let mut b = body;
+    b["computer"] = json!(computer);
+    let r = a.unsigned("POST", "/api/test/computer", Some(&b))?;
+    anyhow::ensure!(r.status == 200, "lever {b}: {r}");
+    Ok(r.body)
+}
+
+fn cookie_of(r: &api::Reply, name: &str) -> Option<String> {
+    r.headers.get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).find_map(|c| c.split(';').next().filter(|kv| kv.starts_with(&format!("{name}="))).map(str::to_string))
+}
+
+/// The computer's own SimpleX link (today's door): always on, its owner's
+/// ticket redeemed on its link page, the person connecting to it.
+fn computer_link(port: u16) -> Result<()> {
+    let a = hosted()?;
+    let st = state();
+    let keys = owner(&st)?;
+    let (computer, agent) = (s(&st, "computer")?, s(&st, "agent")?);
+    println!("always-on: {}", lever(&a, &computer, json!({ "op": "always-on", "on": true }))?["alwaysOn"]);
+    let t0 = Instant::now();
+    let r = a.signed(&keys, "POST", &format!("/api/computers/{computer}/wake"), Some(&json!({})))?;
+    println!("wake: {} {} in {:.1?}", r.status, r.body["phase"], t0.elapsed());
+    let ticket = a.signed(&keys, "POST", &format!("/api/computers/{computer}/agents/{agent}/door"), Some(&json!({ "door": "simplex", "act": "link" })))?;
+    anyhow::ensure!(ticket.status == 200, "a link ticket: {ticket}");
+    let nonce = ticket.body["nonce"].as_str().context("a ticket's nonce")?.to_string();
+    let (origin, cookie) = port_session(&a, &keys, &computer, &format!("/simplex/?agent={agent}"))?;
+    let page = |method: &'static str, path: String, body: Option<Vec<u8>>| a.call(api::Call { method, url: format!("{origin}/p/6080{path}"), content_type: body.as_ref().map(|_| "application/json"), body, cookie: Some(cookie.clone()), extra: vec![("origin", origin.clone()), ("sec-fetch-site", "same-origin".into())], ..api::Call::default() });
+    // its link page may answer 503 until the bridge is past its restore gate
+    let t1 = Instant::now();
+    let r = loop {
+        let r = page("POST", format!("/simplex/link?agent={agent}"), Some(ticket.body.to_string().into_bytes()))?;
+        if r.status != 503 || t1.elapsed() > Duration::from_secs(120) {
+            break r;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    };
+    println!("link page: {} {}", r.status, r.text.chars().take(300).collect::<String>());
+    let t2 = Instant::now();
+    let link = loop {
+        let v = page("GET", format!("/simplex/state?agent={agent}&s={nonce}"), None)?;
+        if let Some(l) = v.body["short"].as_str().or(v.body["link"].as_str()).filter(|l| !l.is_empty()) {
+            break l.to_string();
+        }
+        anyhow::ensure!(t2.elapsed() < Duration::from_secs(180), "no invitation: {v}");
+        std::thread::sleep(Duration::from_secs(2));
+    };
+    let mut p = Person::open(port)?;
+    println!("{}", p.ask(&format!("/connect {link}"))?["resp"]["type"]);
+    let ok = p.until(Duration::from_secs(120), |v| v["resp"]["type"] == "contactConnected")?;
+    println!("connected to the computer's core: {}", ok.is_some());
+    let v = page("GET", format!("/simplex/state?agent={agent}"), None)?;
+    println!("state: {}", v.body);
+    Ok(())
+}
+
+/// A browser's session on the computer's origin, through a port ticket.
+fn port_session(a: &api::Api, keys: &fragment_nip98::Keys, computer: &str, path: &str) -> Result<(String, String)> {
+    let r = a.signed(keys, "POST", &format!("/api/computers/{computer}/ports/6080/ticket"), Some(&json!({ "path": path })))?;
+    anyhow::ensure!(r.status == 200, "a port ticket: {r}");
+    let url = r.body["url"].as_str().context("its url")?.to_string();
+    let origin = url.split('/').take(3).collect::<Vec<_>>().join("/");
+    let visit = a.call(api::Call { method: "GET", url, ..api::Call::default() })?;
+    let cookie = cookie_of(&visit, "__Host-fragment_computer").or_else(|| cookie_of(&visit, "fragment_computer")).context(format!("the computer's cookie: {visit}"))?;
+    Ok((origin, cookie))
+}
+
+fn computer_page(path: &str) -> Result<()> {
+    let a = hosted()?;
+    let st = state();
+    let keys = owner(&st)?;
+    let computer = s(&st, "computer")?;
+    let (origin, cookie) = port_session(&a, &keys, &computer, "/")?;
+    let r = a.call(api::Call { method: "GET", url: format!("{origin}/p/6080{path}"), cookie: Some(cookie), extra: vec![("origin", origin.clone()), ("sec-fetch-site", "same-origin".into())], ..api::Call::default() })?;
+    println!("{} {}", r.status, r.text.chars().take(2000).collect::<String>());
+    Ok(())
+}
+
+/// The owner's fragment labelled `label`, by its listing.
+fn fragment_labelled(a: &api::Api, keys: &fragment_nip98::Keys, label: &str) -> Result<Option<String>> {
+    let r = a.signed(keys, "GET", "/api/fragments", None)?;
+    Ok(r.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).find(|n| n.starts_with(&format!("{label}--"))).map(str::to_string))
+}
+
+/// The history question: the agent's old SimpleX chat copied into the
+/// connector's chat, in order, each once, before its door is bound.
+fn copy() -> Result<()> {
+    let a = hosted()?;
+    let mut st = state();
+    let keys = owner(&st)?;
+    let conn = s(&st, "connector")?;
+    let agent = s(&st, "agent")?;
+    let label = agent.rsplit_once("--").map(|(l, _)| l).unwrap_or(&agent).to_string();
+    let old = match st["oldChat"].as_str() {
+        Some(o) => o.to_string(),
+        None => fragment_labelled(&a, &keys, &format!("{label}-simplex"))?.context("the agent's SimpleX chat")?,
+    };
+    st["oldChat"] = json!(old);
+    save_state(&st)?;
+    let recs = records(&a, &keys, &old, "chat")?;
+    let messages: Vec<Value> = recs.iter().filter(|r| r["kind"] == "message" && (r["body"]["kind"].is_null() || r["body"]["kind"] == "message")).map(|r| json!({ "seq": r["seq"], "at": r["at"], "principal": r["principal"], "body": r["body"] })).collect();
+    println!("{old}: {} records, {} messages", recs.len(), messages.len());
+    let t0 = Instant::now();
+    let (mut copied, mut skipped) = (0, 0);
+    for (i, batch) in messages.chunks(40).enumerate() {
+        let r = a.op(&keys, &conn, "copy", &format!("copy-{old}-{i}"), json!({ "from": old, "records": batch }))?;
+        anyhow::ensure!(r.status == 200, "copy batch {i}: {r}");
+        copied += r.body["result"]["copied"].as_i64().unwrap_or(0);
+        skipped += r.body["result"]["skipped"].as_i64().unwrap_or(0);
+    }
+    println!("copied {copied}, skipped {skipped}, in {:.1?}", t0.elapsed());
+    Ok(())
+}
+
+/// Each message of the old chat in the connector's chat, once, in order,
+/// marked copied.
+fn copy_check() -> Result<()> {
+    let a = hosted()?;
+    let st = state();
+    let keys = owner(&st)?;
+    let (conn, old) = (s(&st, "connector")?, s(&st, "oldChat")?);
+    let olds: Vec<Value> = records(&a, &keys, &old, "chat")?.into_iter().filter(|r| r["kind"] == "message" && (r["body"]["kind"].is_null() || r["body"]["kind"] == "message")).collect();
+    let news: Vec<Value> = records(&a, &keys, &conn, "chat")?.into_iter().filter(|r| r["body"]["copied"].is_object()).collect();
+    let mut problems = vec![];
+    let mut last = 0;
+    for o in &olds {
+        let hits: Vec<&Value> = news.iter().filter(|n| n["body"]["copied"]["seq"] == o["seq"]).collect();
+        if hits.len() != 1 {
+            problems.push(format!("old seq {} copied {} times", o["seq"], hits.len()));
+            continue;
+        }
+        let n = hits[0];
+        let by = o["body"]["relayed"]["for"].as_str().or(o["principal"].as_str()).unwrap_or("");
+        if n["body"]["text"] != o["body"]["text"] || n["body"]["copied"]["at"] != o["at"] || n["body"]["copied"]["by"] != by {
+            problems.push(format!("old seq {} copied otherwise: {} vs {}", o["seq"], n["body"], o["body"]));
+        }
+        let seq = n["seq"].as_i64().unwrap_or(0);
+        if seq < last {
+            problems.push(format!("old seq {} out of order", o["seq"]));
+        }
+        last = seq;
+    }
+    println!("{}", serde_json::to_string_pretty(&json!({ "old": olds.len(), "copies": news.len(), "problems": problems }))?);
+    Ok(())
+}
+
+/// The hold's evidence: one message each way through connector `key`'s
+/// door (the state's `connector`, or `connector0`), and how long each took.
+fn ping(port: u16, key: &str) -> Result<()> {
+    let a = hosted()?;
+    let st = state();
+    let keys = owner(&st)?;
+    let conn = s(&st, key)?;
+    let mut p = Person::open(port)?;
+    let c = person_contact(&mut p)?;
+    let n = now_ms();
+    let text = format!("ping {n}");
+    let body = json!([{ "msgContent": { "type": "text", "text": text } }]);
+    p.ask(&format!("/_send @{c} json {body}"))?;
+    let t0 = Instant::now();
+    let mut inbound_ms = None;
+    while t0.elapsed() < Duration::from_secs(120) {
+        let recs = records(&a, &keys, &conn, "inbox")?;
+        if recs.iter().rev().take(20).any(|r| r["body"]["payload"]["text"] == text.as_str()) {
+            inbound_ms = Some(t0.elapsed().as_millis() as u64);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let pong = format!("pong {n}");
+    let t1 = Instant::now();
+    let r = admin(&a, &conn, "runner", "POST", Some(json!({ "method": "POST", "path": "/send", "body": { "text": pong } }).to_string().into_bytes()))?;
+    let got = p.until(Duration::from_secs(120), |v| v["resp"]["type"] == "newChatItems" && v.to_string().contains(&pong))?;
+    let out = json!({ "at": n, "connector": conn, "inboundMs": inbound_ms, "sendStatus": r.status, "outboundMs": got.map(|_| t1.elapsed().as_millis() as u64) });
+    println!("{out}");
+    let mut f = std::fs::OpenOptions::new().append(true).create(true).open(cache().join("pings.jsonl"))?;
+    std::io::Write::write_all(&mut f, format!("{out}\n").as_bytes())?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(step) = args.first() else { bail!("a step: person-up, person-connect, person-send, person-items, person-cmd") };
@@ -458,10 +638,23 @@ fn main() -> Result<()> {
         "person-up" => person_up(args.get(1).context("a name")?, args.get(2).context("a port")?.parse()?),
         "setup" => setup(),
         "connector" => connector(args.get(1).map(String::as_str).unwrap_or("e2e-sxd-simplex")),
-        "link" => link(args.get(1).context("the person's port")?.parse()?),
+        "link" => link(args.get(1).context("the person's port")?.parse()?, args.get(2).map(String::as_str).unwrap_or("connector")),
         "bind" => bind(),
         "burst" => burst(args.get(1).context("a port")?.parse()?, args.get(2).context("n")?.parse()?, args.get(3).context("a prefix")?, args.get(4).is_some_and(|e| e == "echo"), args.get(5).map(|g| g.parse()).transpose()?.unwrap_or(0)),
         "door" => door(&args),
+        "computer-link" => computer_link(args.get(1).context("the person's port")?.parse()?),
+        "computer-page" => computer_page(args.get(1).context("a path")?),
+        "copy" => copy(),
+        "ping" => ping(args.get(1).context("a port")?.parse()?, args.get(2).map(String::as_str).unwrap_or("connector0")),
+        "connector0" => {
+            // the hold's own connector, never bound: its door alone
+            connector("e2e-sxd-hold")?;
+            let mut st = state();
+            st["connector0"] = st["connector"].clone();
+            st["connector"] = Value::Null;
+            save_state(&st)
+        }
+        "copy-check" => copy_check(),
         "state" => {
             let st = state();
             println!("{}", serde_json::to_string_pretty(&json!({ "ownerId": st["ownerId"], "computer": st["computer"], "agent": st["agent"], "agentId": st["agentId"], "connector": st["connector"], "oldChat": st["oldChat"] }))?);
