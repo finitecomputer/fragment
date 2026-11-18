@@ -144,4 +144,7 @@ test("an ordinary upgrade is a tab: opened, its page's words reach the container
   reopened.send("a key, on its next life");
   await settle();
   assert.deepEqual(next.sent, ["a key, on its next life"]);
+  // its page leaves: the use not told yet goes with its close (no timer left)
+  reopened.close(1000, "");
+  assert.deepEqual(tabReports().at(-1), { open: false, used: true });
 });
