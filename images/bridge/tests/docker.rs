@@ -3682,6 +3682,65 @@ async fn a_turn_cut_while_its_tool_runs_is_continued_once() {
     }
 }
 
+/// Goal (M17, Paul 2026-11-18: an agent whose computer is blown away is
+/// still that agent, and carries on the work), with real Hermes: a
+/// computer that comes back with nothing of its `/data` (the agent's Hermes
+/// profile and its sessions gone, and the bridge's state: a lost disk, or
+/// the agent on a computer that never ran it) tells the agent's next turn
+/// in the chat the chat it forgot, once. A fake model cannot judge an
+/// answer, so this asserts what Hermes sends it for a question only the
+/// chat's earlier turns answer: the chat, both sides, with the tool a turn
+/// used, as the relay's channel context before the new message, and no
+/// message of a session of its own holding any of it. Before M17 that
+/// turn was told the newest four of its turns, each cut to 200 characters,
+/// with no tool (`FRAGMENT_DOCKER_SKIP_BUILD=1
+/// FRAGMENT_DOCKER_HERMES_TAG=<an image>` runs this against another image).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_computer_blown_away_tells_its_agent_the_chat() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    let code = x.say("remember the codeword: zebra-42");
+    within(fake, chat, &c, 180_000, "the codeword's turn to end", |w| !x.ends(w, &code).is_empty()).await;
+    let tool = x.say("run: echo m17-tool-ran");
+    within(fake, chat, &c, 180_000, "the tool's turn to end", |w| !x.ends(w, &tool).is_empty()).await;
+    assert!(c.exec(&["test", "-d", "/data/hermes/profiles/juniper--k3x9"]), "its profile is on the disk; {}", told(fake, chat, &c));
+    // blown away: the computer goes, and one with an empty disk takes its place
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let calls_before = x.model.calls.lock().unwrap().len();
+    let c = x.container(&[]);
+    within(fake, chat, &c, 120_000, "the new computer's bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let asked = x.say("what was the codeword?");
+    within(fake, chat, &c, 240_000, "the question's turn to end", |w| !x.ends(w, &asked).is_empty()).await;
+    let after = x.say("and after that?");
+    within(fake, chat, &c, 120_000, "the turn after's end", |w| !x.ends(w, &after).is_empty()).await;
+
+    let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
+    let saw = x.model_saw(calls_before);
+    fake.with(|w| {
+        for turn in [&code, &tool] {
+            assert_eq!(w.bodies(chat, "work", "turn.start").iter().filter(|s| s["turn"] == turn.as_str()).count(), 1, "{turn}: started once, never run again");
+        }
+        assert_eq!(x.ends(w, &asked)[0]["outcome"], "idle", "the question is answered: the model saw {saw:#?}");
+    });
+    let request = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).find(|c| c.body["messages"].as_array().is_some_and(|m| m.iter().rev().find(|m| m["role"] == "user").is_some_and(|m| content_text(m).contains("what was the codeword?")))).unwrap_or_else(|| panic!("a model request for the question; it saw {saw:#?}"));
+    let messages = request.body["messages"].as_array().cloned().unwrap_or_default();
+    let at = messages.iter().rposition(|m| m["role"] == "user").expect("a user message");
+    let last = content_text(&messages[at]);
+    assert!(last.starts_with("[Recent channel messages]\nYour memory of this chat is behind"), "the chat first, as its channel context: {last:?}");
+    for said in ["\nYour owner: hello\nYou: ", "\nYour owner: remember the codeword: zebra-42\nYou: ", "\nYour owner: run: echo m17-tool-ran\nYour tools: terminal", "m17-tool-ran (ok)\nYou: ", "\n\n[New message]\n[paul] what was the codeword?"] {
+        assert!(last.contains(said), "{said:?} in the model's request: {last:?}");
+    }
+    // its profile is new: no message of a session of Hermes' own holds it
+    let remembered: Vec<String> = messages[..at].iter().filter(|m| m["role"] != "system").map(content_text).filter(|t| t.contains("zebra-42")).collect();
+    assert!(remembered.is_empty(), "only the note tells it: {remembered:?}");
+    // told once: the turn after is told nothing, its session holding the note
+    let (asked_after, _) = asked_with(&calls, "and after that?").expect("a request for the message after");
+    assert!(!asked_after.contains("[Recent channel messages]"), "the turn after is told nothing: {asked_after:?}");
+    eprintln!("blown away: the model was sent {} bytes: {last}", last.len());
+}
+
 /// Goal (Codex on #1305): a chat Hermes compressed answers on after a
 /// turn a crash cut, never paused. A compressed chat's admissions are its
 /// compression lineage's root's, while Hermes lists its newest session,

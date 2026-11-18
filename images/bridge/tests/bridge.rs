@@ -1693,6 +1693,9 @@ async fn said_and_ended(fake: &Fake, chat: &str, text: &str) -> String {
 
 /// Two turns, a save after the first, a crash after the second; then the
 /// save put back (or the state removed), a new life, and a third message.
+/// Its runtime forgot the chat (another life ran turn two, and turn one
+/// too when the state is gone): the third turn is told the chat, both
+/// sides, oldest first, with turn two's tool, from the records alone.
 async fn rollback_case(name: &str, lose_it_all: bool) {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
@@ -1706,7 +1709,7 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
     // the save: /data as it is after turn one (its end was written to the
     // state before it was posted)
     let saved = support::save_state(&dir);
-    let t2 = said_and_ended(&fake, &chat, "two").await;
+    let t2 = said_and_ended(&fake, &chat, "two, with a tool").await;
     bridge.kill().await;
     fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
 
@@ -1725,7 +1728,12 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
             assert_eq!(ends.len(), 1, "{t}: one end");
             assert_eq!(ends[0]["outcome"], "idle", "{t}: its own life's end stands");
         }
-        assert_eq!(replies(w, &chat).len(), 3, "one reply each");
+        assert_eq!(replies(w, &chat).iter().filter(|r| r.get("interim").is_none()).count(), 3, "one answer each");
+        let told = replies(w, &chat).into_iter().find(|r| r["turn"] == t3.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default();
+        let note = told.strip_prefix("echo: [paul] three\n\n(told: ").and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("{name}: three is told the chat: {told:?}"));
+        assert!(note.starts_with("Your memory of this chat is behind"), "{name}: {note}");
+        let chat_said = "\nYour owner: one\nYou: echo: [paul] one\nYour owner: two, with a tool\nYour tools: search two, with a tool (ok)\nYou: Let me look.\nYou: echo: [paul] two, with a tool";
+        assert!(note.ends_with(chat_said), "{name}: turn one's question and reply, then turn two's, its tool before its words: {note}");
     });
     bridge.stop().await;
 }
@@ -1853,11 +1861,12 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
             assert_eq!(text(&after), "echo: [paul] and after", "{wakes}: said once");
             note
         });
-        // what a lost state forgot follows the cut's note: "one", ran by the
-        // life the crash ended, which no state woke with
+        // what a lost state forgot follows the cut's note: the chat before
+        // the cut turn's request ("one", which the life the crash ended
+        // ran, and no state woke with), never that request again
         let (cut_note, forgot) = note.split_once("\n\nYour memory of this chat is behind").map_or((note.clone(), None), |(c, f)| (c.to_string(), Some(f.to_string())));
         match wakes {
-            "none" => assert!(forgot.as_deref().is_some_and(|f| f.contains("You were asked: “one”") && !f.contains("a slow tool please")), "{wakes}: {note}"),
+            "none" => assert!(forgot.as_deref().is_some_and(|f| f.ends_with("\nYour owner: one\nYou: echo: [paul] one") && !f.contains("a slow tool please")), "{wakes}: {note}"),
             _ => assert_eq!(forgot, None, "{wakes}: the state remembered the rest: {note}"),
         }
         told.push(cut_note);
@@ -1953,8 +1962,8 @@ async fn an_end_a_crash_kept_from_the_platform_is_posted_by_the_next_life() {
 /// Goal : a message said while the computer was down is answered once
 /// by the next life, even one that wakes with an older save, and the turn
 /// that save does not know is not run again for it. That turn is in no
-/// memory of the runtime's: the answer is told what it was (forgotten,
-/// docs/bridge.md "What a rollback forgot"), once.
+/// memory of the runtime's: the answer is told the chat (docs/bridge.md,
+/// "What a runtime forgot"), once.
 #[tokio::test]
 async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -1980,8 +1989,8 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     assert_eq!(runs.all(), vec![t1, t2.clone(), t3.clone()], "three ran once; two was not run again");
     fake.with(|w| {
         let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == t3.as_str()).collect();
-        let told = "echo: [paul] three\n\n(told: Your memory of this chat is behind: your computer went back to an earlier save, so you do not remember these turns of yours here, which came after it (the chat keeps them). What they did may have had effects: check before you do any of it again.\nYou were asked: “two”\nYou replied: “echo: [paul] two”)";
-        assert_eq!(r, vec![json!({ "text": told, "turn": t3 })], "answered once, told what the save forgot");
+        let told = "echo: [paul] three\n\n(told: Your memory of this chat is behind: your computer went back to an earlier save, or lost it. Here is the chat as it keeps it, its newest messages oldest first, with the tools each of your turns used. It is history, not new messages; what your turns did may have had effects, so check before you do any of it again.\nYour owner: one\nYou: echo: [paul] one\nYour owner: two\nYou: echo: [paul] two)";
+        assert_eq!(r, vec![json!({ "text": told, "turn": t3 })], "answered once, told the chat before it");
         assert_eq!(ends_of(w, &chat, &t2)[0]["outcome"], "idle", "two's end stands");
     });
     // told once: the turn after it is told nothing

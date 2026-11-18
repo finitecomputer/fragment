@@ -201,14 +201,37 @@ check before acting on it." A continuation is told the age of what its
 cut turn answered. A routine (its message says its hour), a command,
 and a state from before keep or tell none.
 
-### What a rollback forgot
+### What a runtime forgot
 
 A computer can go back to an older save (docs/computers.md, "What its
-owner is told"). The bridge then reads again the turns run since that
-save, and each of their claims is a 409. Those 409s are exactly what its
-runtime forgot. The agent's next turn in that chat is told what each
-forgotten turn was asked and replied, from the journal
-(`note::forgotten`), once a life.
+owner is told"), or lose `/data`, and an agent can start on a computer
+that never ran it. The bridge then reads again the turns run since that
+save, and each of their claims is a 409. A turn whose lost end is
+refused as well (that life ended it) ran in another life: its runtime
+does not remember it (Paul, 2026-11-18, M17: rebuild from the records).
+The agent's next turn in that chat is told the chat, once a life
+(`note::recap`):
+
+- its messages before the turn's own, both sides, oldest first, since
+  the agent joined and after its owner's newest `/new` for it; each by
+  its sayer (`You`, `Your owner`, anyone else by name);
+- before each of its turns' first reply, that turn's steps on one line;
+- at most the 24 KiB a continued chat gets (`HISTORY_NOTE_MAX_BYTES`),
+  the oldest dropped first, with where the rest is
+  (`fragment channel <chat> chat`).
+
+It is one bounded read, complete or nothing (`read_back`, `Budget`),
+and runtime-neutral: Hermes gets it as relay's `context`, Claude Code
+in its message. It opens "Your memory of this chat is behind". A turn
+whose lost end lands as this life's was cut in that life, and the cut
+note tells it. What a rebuild loses is tool outputs
+and the runtime's own summaries.
+
+In a chat with other members, the note hands the agent their words
+again. That widens nothing. The bridge reads the chat as the agent,
+which may read all of it with `fragment channel`, and only what was said
+since it joined is told. The note is read-only context, never a message
+or anyone's words to act on.
 
 ## An answer for the computer
 

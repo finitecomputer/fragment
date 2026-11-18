@@ -1728,7 +1728,7 @@ impl RuntimeLane {
                     let notes: Vec<String> = [ts.age.take(), ts.note.take(), note].into_iter().flatten().collect();
                     ts.note = (!notes.is_empty()).then(|| notes.join("\n\n"));
                     // (its own, a card's turn, in the cut note's place: `note_for`)
-                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 6), "a turn's notes are bounded");
+                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 4), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
                 if to_runtime.send(c).await.is_err() {
@@ -1773,7 +1773,7 @@ async fn quote_of(api: &Api, ts: &TurnStart, seq: u64) -> Option<Quote> {
 /// from its owner (docs/chat-records.md, "A relayed message"), which are
 /// its owner's.
 fn own_words(principal: &str, body: &Value, agent: &crate::runtime::Agent) -> bool {
-    principal == agent.identity && records::relayed(body).is_none_or(|r| r.for_ != agent.owner)
+    note::own_words(principal, body, &agent.identity, &agent.owner)
 }
 
 /// A message's attachments, from the chat's blobs to scratch files, each
@@ -1869,18 +1869,22 @@ async fn card_history(api: &Api, agent: &Agent, fragment: &str, record: &Record)
 /// The note a turn carries (note.rs): at the agent's first turn in a chat
 /// continued from its owner's Session Archive, what was said there
 /// (`history_note`, at most `HISTORY_NOTE_MAX_BYTES`); what a restart cut
-/// of the agent's turn before it in the chat (`cut_note`); and what its
-/// runtime does not remember of the chat (`forgotten_note`), each from the
-/// chat's journal, the last two together at most twice a note's bound. `None` when there is neither, or
-/// the journal did not answer: a turn is never held back for its note. A
-/// late card answer's turn carries its card's turn as its note already
-/// (`TurnStart::note`), in the cut note's place: that turn is the one a
-/// restart cut, most often, and is told once.
+/// of the agent's turn before it in the chat (`cut_note`); and, when its
+/// runtime forgot the chat, the chat (`forgotten_note`, at most
+/// `HISTORY_NOTE_MAX_BYTES`), each from the chat's journal. A runtime that
+/// forgot the chat ran turns there, so it is not told a history, which is
+/// a first turn's alone. `None` when there is none, or the journal did not
+/// answer: a turn is never held back for its note. A late card answer's
+/// turn carries its card's turn as its note already (`TurnStart::note`),
+/// in the cut note's place: that turn is the one a restart cut, most
+/// often, and is told once.
 async fn note_for(api: &Api, ts: &TurnStart) -> Option<String> {
     let cut = async { if ts.note.is_some() { None } else { cut_note(api, ts).await } };
-    let (history, cut, forgot) = tokio::join!(history_note(api, ts), cut, forgotten_note(api, ts));
+    let history = async { if ts.forgotten { None } else { history_note(api, ts).await } };
+    let (history, cut, forgot) = tokio::join!(history, cut, forgotten_note(api, ts));
+    assert!(history.is_none() || forgot.is_none(), "a history or a recap, never both");
     let note = [history, cut, forgot].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
-    assert!(note.len() <= limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 4, "a turn's notes are bounded");
+    assert!(note.len() <= limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 2, "a turn's notes are bounded");
     (!note.is_empty()).then_some(note)
 }
 
@@ -1904,41 +1908,69 @@ async fn history_note(api: &Api, ts: &TurnStart) -> Option<String> {
     Some(text)
 }
 
-/// What the agent no longer remembers of the chat (note.rs, "forgotten"):
-/// its turns there that another life ran since this life's `/data` was
-/// saved (`TurnStart::forgotten`), read from `work` back from the turn's
-/// claim to the oldest of their starts, and from `chat` back from its tail
-/// to the oldest of their causes. `None` when there are none, or the
-/// journal did not answer.
+/// The chat, told to a runtime that forgot it (`TurnStart::forgotten`;
+/// note.rs, `exchanges` and `recap`): its messages before the turn's own
+/// (for a turn no message of this chat started, those said by its claim),
+/// since the agent joined (its `members` row) and its owner's newest `/new`
+/// for it, read back from `chat` until the note is full; `work` back from
+/// the claim to their turns' starts, for their tools; and the names of
+/// whoever else said them (`__people`; unread, they are `Someone`). One
+/// `Budget`, each read complete or none. `None` when the runtime forgot
+/// nothing here, there is nothing to tell, or the chat did not answer.
 async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
-    if ts.forgotten.is_empty() {
+    if !ts.forgotten {
         return None;
     }
     let claim = ts.claim_seq?;
-    let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
-    let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "forgotten": ts.forgotten.len(), "error": e.why() });
-    let started = |rs: &[Record]| ts.forgotten.iter().all(|t| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == t.as_str()));
-    let (work, _) = read_back(api, agent, chat, records::WORK, claim, started, &mut Budget::default()).await.map_err(unread).ok()?;
-    // their causes in this chat: the chat read back to the oldest of them
-    let causes: Vec<u64> = work
-        .iter()
-        .filter(|r| r.principal == me && r.body["kind"] == "turn.start" && ts.forgotten.iter().any(|t| r.body["turn"] == t.as_str()))
-        .filter(|r| r.body["cause"]["fragment"] == chat && r.body["cause"]["channel"] == records::CHAT)
-        .filter_map(|r| r.body["cause"]["seq"].as_u64())
-        .collect();
-    let oldest = causes.iter().min().copied().unwrap_or(0);
-    let said = async {
-        let tail = api.channels(agent, chat).await?.into_iter().find(|c| c.name == records::CHAT).map_or(0, |c| c.seq);
-        read_back(api, agent, chat, records::CHAT, tail + 1, |rs| rs.first().is_some_and(|r| r.seq <= oldest), &mut Budget::default()).await
-    };
-    let said: Vec<Record> = said.await.map_err(unread).map(|(rs, _)| rs).unwrap_or_default();
-    let items = note::forgotten(&work, &said, me, &ts.forgotten);
-    if items.is_empty() {
-        crate::ev!("note.unread", { "turn": ts.turn, "why": "no forgotten turn's start among the records read", "forgotten": ts.forgotten.len() });
+    let (agent, chat, me, owner) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str(), ts.agent.owner.as_str());
+    let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "forgotten": true, "error": e.why() });
+    // the turn's claim names what started it; the agent's row, when it joined
+    let (claimed, members) = tokio::join!(api.records(agent, chat, records::WORK, claim.saturating_sub(1), 1), api.members(agent, chat));
+    let claimed = claimed.map_err(|e| unread(e.into())).ok()?.records.into_iter().find(|r| r.seq == claim && r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == ts.turn.as_str());
+    let since = members.map_err(|e| unread(e.into())).ok()?.into_iter().find(|m| m.principal == me).map(|m| m.added_at);
+    let (Some(claimed), Some(since)) = (claimed, since) else {
+        crate::ev!("note.unread", { "turn": ts.turn, "forgotten": true, "why": "its claim, or its agent's membership, is not where the turn says" });
         return None;
-    }
-    let text = note::forgotten_text(&items, ts.forgotten_more);
-    crate::ev!("note", { "turn": ts.turn, "forgotten": items.len(), "more": ts.forgotten_more, "bytes": text.len() });
+    };
+    let cause = serde_json::from_value::<Cause>(claimed.body["cause"].clone()).ok();
+    let in_chat = cause.as_ref().filter(|c| c.fragment == chat && c.channel == records::CHAT).map(|c| c.seq);
+    let until = if in_chat.is_some() { i64::MAX } else { claimed.at };
+    let mut budget = Budget::default();
+    let before = match in_chat {
+        Some(seq) => seq,
+        None => {
+            budget.request().map_err(unread).ok()?;
+            api.channels(agent, chat).await.map_err(|e| unread(e.into())).ok()?.into_iter().find(|c| c.name == records::CHAT).map_or(0, |c| c.seq).saturating_add(1)
+        }
+    };
+    let full = |rs: &[Record]| {
+        let (said, begins) = note::exchanges(rs, me, owner, since, until);
+        begins || note::recap_bytes(&said) >= limits::HISTORY_NOTE_MAX_BYTES
+    };
+    let (read, from_start) = read_back(api, agent, chat, records::CHAT, before, full, &mut budget).await.map_err(unread).ok()?;
+    let (said, begins) = note::exchanges(&read, me, owner, since, until);
+    let Some(oldest) = said.first().map(|r| r.at) else {
+        crate::ev!("note.none", { "turn": ts.turn, "forgotten": true, "why": "nothing said here before it to tell" });
+        return None;
+    };
+    // their turns' starts and steps: `work` back from the claim to before
+    // the oldest of them, and to the start of each turn a reply names
+    let replied: Vec<&str> = said.iter().filter(|r| note::own_words(&r.principal, &r.body, me, owner)).filter_map(|r| r.body["turn"].as_str()).collect();
+    let started = |rs: &[Record]| rs.first().is_some_and(|r| r.at < oldest) && replied.iter().all(|t| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == *t));
+    let (work, _) = read_back(api, agent, chat, records::WORK, claim, started, &mut budget).await.map_err(unread).ok()?;
+    let mut others: Vec<String> = said.iter().map(|r| r.principal.clone()).filter(|p| p != me && p != owner).collect();
+    others.sort();
+    others.dedup();
+    let names = if others.is_empty() {
+        BTreeMap::new()
+    } else {
+        api.people(agent, chat, &others).await.unwrap_or_else(|e| {
+            crate::ev!("note.names_unread", { "turn": ts.turn, "error": e.to_string() });
+            BTreeMap::new()
+        })
+    };
+    let text = note::recap(&said, &work, me, owner, &names, chat, begins || from_start)?;
+    crate::ev!("note", { "turn": ts.turn, "forgotten": true, "messages": said.len(), "bytes": text.len() });
     Some(text)
 }
 
