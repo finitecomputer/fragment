@@ -299,11 +299,14 @@ impl Call for Routine {
 /// A record of `fragment`'s channel that this fragment's agent follows
 /// there (subscriptions.rs, a follow), from that fragment's outbox
 /// (deliveries.rs): its `followed` triggers' runs, at `depth` (jobs.rs
-/// `followed`). `subscriber` is the follow's, which must be its agent.
+/// `heard_followed`). `subscriber` is the follow's, which must be its
+/// agent; `incarnation` the life of `fragment` it was posted in (a name
+/// made again counts its records again).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Followed {
     pub subscriber: String,
     pub fragment: String,
+    pub incarnation: String,
     pub record: fragment_proto::ChannelRecord,
     pub depth: u32,
 }

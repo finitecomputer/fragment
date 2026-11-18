@@ -120,6 +120,11 @@ pub(crate) struct Started {
     pub replayed: bool,
 }
 
+/// How long a followed record's runs outlive newer runs (`trim_runs`): past
+/// every try its source's outbox makes (deliveries.rs).
+const FOLLOWED_KEPT_MS: i64 = 24 * 3600 * 1000;
+const _: () = assert!(FOLLOWED_KEPT_MS > crate::deliveries::OUTBOX_TRIES_MAX_MS && FOLLOWED_KEPT_MS < limits::RUN_RETENTION_MS);
+
 /// Why a step did not produce a value: for good (the job sees an error it
 /// may catch), or for now (the Workflow retries the step).
 pub(crate) enum StepFail {
@@ -1101,8 +1106,9 @@ impl FragmentCell {
         let (fragment, channel, seq) = (f.fragment.as_str(), f.record.channel.as_str(), f.record.seq);
         // as a channel trigger's input (`fire_channel`), with where it was heard
         let input = json!({ "fragment": fragment, "channel": channel, "record": f.record });
+        let life = f.incarnation.as_str();
         for op in &ops()? {
-            let call_id = format!("followed:{fragment}:{channel}:{seq}:{op}");
+            let call_id = format!("followed:{fragment}@{life}:{channel}:{seq}:{op}");
             let sha = crate::ops::input_sha(op, &fragment_proto::canonical_json(&input));
             self.start_run(NewRun {
                 op,
@@ -1463,11 +1469,19 @@ impl FragmentCell {
         }
     }
 
-    /// From the alarm: finished runs past their retention go.
+    /// From the alarm: finished runs past their retention go. A followed
+    /// record's runs are what keep it from running twice, so they stay,
+    /// however many runs came after, while its source may hand it again.
     pub(crate) fn trim_runs(&self) -> CellResult<()> {
+        let now = js::now_ms();
         self.exec(
-            "DELETE FROM runs WHERE status NOT IN ('queued', 'running') AND (finished_at < ? OR id <= (SELECT MAX(id) FROM runs) - ?)",
-            vec![SqlStorageValue::Integer(js::now_ms() - limits::RUN_RETENTION_MS), SqlStorageValue::Integer(limits::RUNS_KEPT)],
+            "DELETE FROM runs WHERE status NOT IN ('queued', 'running') AND (finished_at < ? OR (id <= (SELECT MAX(id) FROM runs) - ? AND NOT (via = ? AND finished_at >= ?)))",
+            vec![
+                SqlStorageValue::Integer(now - limits::RUN_RETENTION_MS),
+                SqlStorageValue::Integer(limits::RUNS_KEPT),
+                Via::Followed.as_str().into(),
+                SqlStorageValue::Integer(now - FOLLOWED_KEPT_MS),
+            ],
         )?;
         // a run's charges, what its steps bought and asked for go with it (the ledger keeps the month's usage)
         self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs)", vec![])?;

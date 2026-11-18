@@ -59,6 +59,8 @@ const CLAIM_MS: i64 = 60_000;
 /// wait doubling to ten minutes, about two and a half hours of a queue
 /// that will not take it.
 const OUTBOX_ATTEMPTS_MAX: i64 = 20;
+/// The longest one row is tried: each try's wait at its longest, and its claim.
+pub(crate) const OUTBOX_TRIES_MAX_MS: i64 = OUTBOX_ATTEMPTS_MAX * (fragment_core::backoff::OUTBOX_RETRY_S_MAX * 1000 + CLAIM_MS);
 
 const _: () = assert!(QUEUE_BATCH * (PUSH_BATCHES_MAX - 1) >= limits::PUSH_SUBS_MAX as usize, "a push's batches cover every subscription");
 
@@ -286,8 +288,7 @@ impl FragmentCell {
                 }
                 Woken::Refused(why) => {
                     self.outbox_done(f.id);
-                    let _ = self.exec("DELETE FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(f.sub)]);
-                    self.event("subscription.gone", &format!("{} follows no more: {why}", f.follower), json!({ "sub": f.sub }));
+                    let _ = self.unfollow(f.sub, &f.follower, &why);
                 }
                 Woken::Later(why) => self.outbox_failed(&mut failed, f.id, f.attempts, &why),
             }

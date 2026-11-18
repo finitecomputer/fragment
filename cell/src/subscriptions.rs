@@ -51,7 +51,8 @@ const SUBS_MAX: u64 = 32;
 const SUB_URL_MAX_BYTES: usize = 1024;
 
 impl FragmentCell {
-    /// The subscriber: a member whose role may read `channel`.
+    /// The subscriber: a member whose role may read `channel`, as it reads
+    /// it (an agent held below its owner, at its hold).
     fn subscriber(&self, caller: &Caller, channel: &str) -> CellResult<String> {
         let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "subscribing needs a signed request"))?;
         let Some(role) = self.member_role(&principal)? else {
@@ -60,7 +61,8 @@ impl FragmentCell {
         if !valid_channel_name(channel) {
             return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
         }
-        if role < self.channel_read_role(channel)? {
+        let read = self.channel_read_role(channel)?;
+        if role < read || self.require(caller, false, read).is_err() {
             return Err(CellError::new(ErrorCode::Forbidden, format!("your role may not read {channel}")));
         }
         Ok(principal)
@@ -76,7 +78,13 @@ impl FragmentCell {
             if body.get("url").is_some() {
                 return Err(CellError::invalid("a follow names no URL: the agent's own fragment follows"));
             }
+            // the audit trail is read, never handed on: its records skip the outbox
+            if matches!(channel, "events" | "ops") {
+                return Err(CellError::invalid(format!("{channel} is read, not followed")));
+            }
             let follower = self.follower(&principal).await?;
+            // asked again after the registry's answer: a member removed meanwhile follows nothing
+            let principal = self.subscriber(caller, channel)?;
             let id = self.add_subscription(&principal, channel, &format!("{FOLLOW_PREFIX}{follower}"))?;
             return json_response(&Following { id, channel, follow: &follower });
         }
@@ -155,6 +163,13 @@ impl FragmentCell {
         self.exec("DELETE FROM subs WHERE principal = ?", vec![principal.into()])
     }
 
+    /// A follow that ends, saying why.
+    pub(crate) fn unfollow(&self, sub: i64, follower: &str, why: &str) -> CellResult<()> {
+        self.exec("DELETE FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
+        self.event("subscription.gone", &format!("{follower} follows no more: {why}"), json!({ "sub": sub }));
+        Ok(())
+    }
+
     /// A new record's deliveries, one per subscription to its channel,
     /// written to the delivery outbox in the same step as the record (the
     /// caller appends, then calls this, with no await between; channels.rs
@@ -207,13 +222,23 @@ impl FragmentCell {
         let subs = self.rows("SELECT url, principal FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
         let Some(row) = subs.first() else { return Ok(None) };
         let (url, subscriber) = (row["url"].as_str().expect("subs.url is TEXT"), row["principal"].as_str().expect("subs.principal is TEXT"));
-        let Some(record) = self.read_channel(channel, seq - 1, 1)?.into_iter().next().filter(|r| r.seq == seq) else { return Ok(None) };
+        let record = self.read_channel(channel, seq - 1, 1)?.into_iter().next().filter(|r| r.seq == seq);
+        if let Some(follower) = url.strip_prefix(FOLLOW_PREFIX) {
+            // a follow is its member's while its role may read the channel
+            if !self.member_role(subscriber)?.zip(self.channel_read_role(channel).ok()).is_some_and(|(role, read)| role >= read) {
+                self.unfollow(sub, follower, "its agent may read the channel no more")?;
+                return Ok(None);
+            }
+            let Some(record) = record else {
+                self.event("delivery.failed", &format!("record {seq} of {channel} was past its retention before {follower} heard it"), json!({ "sub": sub, "seq": seq }));
+                return Ok(None);
+            };
+            let call = Followed { subscriber: subscriber.to_string(), fragment: fragment.to_string(), incarnation: incarnation.to_string(), record, depth };
+            return Ok(Some(Delivered::Follow { follower: follower.to_string(), call }));
+        }
+        let Some(record) = record else { return Ok(None) };
         if url.starts_with(crate::deliveries::WAKE_PREFIX) {
             return Ok(Some(Delivered::Wake { computer: url.to_string(), at: record.at }));
-        }
-        if let Some(follower) = url.strip_prefix(FOLLOW_PREFIX) {
-            let call = Followed { subscriber: subscriber.to_string(), fragment: fragment.to_string(), record, depth };
-            return Ok(Some(Delivered::Follow { follower: follower.to_string(), call }));
         }
         // serialized as it is: the record's body goes out as the text the cell stored
         let delivery = fragment_proto::Delivery { kind: DeliveryType::Record, fragment: fragment.to_string(), channel: channel.to_string(), record };
