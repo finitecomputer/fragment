@@ -1702,6 +1702,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     desktop_settle_ui(s, &mut b, &page)?;
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
+    agent_share_ui(s, api, &mut b, &page, &me, &shots)?;
     // and a third agent, which none of the checks above counts
     add_agent_ui(s, api, &mut b, &page, &session, &shots)?;
     remove_agent_ui(s, api, &mut b, &page, &session, &shots)?;
@@ -5952,6 +5953,52 @@ fn replies(api: &Api, session: &str, chat: &str, agent: &str, said: &str) -> usi
 fn screen_landed(s: &mut Suite, b: &mut Browser, page: &Page, agent: &str) -> bool {
     let landed = format!("/p/6080/?agent={agent}");
     s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, &landed, "location.search").ok() == Some(json!(format!("?agent={agent}"))))
+}
+
+/// An agent's own is its owner's alone (FIN-544): its profile's Share…
+/// opens a sheet with no invite, no link and no public, which says so in
+/// one line. Shot at 1280 and 390 px, light and dark (`agent-share-*`).
+fn agent_share_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    b.viewport(page, 1280, 900, false)?;
+    let r = shell(api, me.session, "GET", "/api/computers", None, &[])?;
+    let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
+    let agent = agents.iter().filter_map(|a| a["fragment"].as_str()).find(|f| label_of(f) == me.first).unwrap_or("").to_string();
+    anyhow::ensure!(!agent.is_empty(), "the first agent: {r}");
+    // its profile, from its hero's menu, and the window's Share…
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("agent:{agent}"))))?;
+    let profile = menu_item(b, page, "Its profile")?;
+    let pane = format!("#stack .pane[data-key={}]", js(&format!("app:{agent}")));
+    let share = js(&format!("{pane} button[aria-label=\"Share…\"]"));
+    let offered = profile && b.until(page, &format!("!!document.querySelector({share})"), wait);
+    b.eval(page, &format!("(document.querySelector({share})?.click(), true)"))?;
+    let drawn = format!(
+        "(() => document.body.innerText.includes({}) && !document.querySelector('input[type=email]') && !document.querySelector('button[value=link], button[value=public]'))()",
+        js("An agent's own page stays private to its owner.")
+    );
+    let open = "document.getElementById('sheet').open && document.getAnimations().length === 0";
+    let sheet = b.until(page, open, wait) && s.eventually(wait, || b.eval_in_frame(page, "/share/", &drawn).ok() == Some(Value::Bool(true)));
+    let said = b.eval_in_frame(page, "/share/", "document.body.innerText").unwrap_or(Value::Null);
+    let mut shown = sheet;
+    for (width, height, phone) in [(1280, 900, false), (390, 844, true)] {
+        b.viewport(page, width, height, phone)?;
+        for scheme in ["light", "dark"] {
+            b.color_scheme(page, scheme)?;
+            shown &= b.until(page, open, wait);
+            let _ = b.screenshot(page, &shots.join(format!("agent-share-{width}-{scheme}.png")));
+        }
+    }
+    b.color_scheme(page, "light")?;
+    b.viewport(page, 1280, 900, false)?;
+    let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+    let closed = b.until(page, "!document.getElementById('sheet').open", wait);
+    b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&format!("{pane} button[aria-label=Close]"))))?;
+    s.ok(
+        "FIN-544: an agent's profile offers Share…, whose sheet offers no invite, no link and no public, and says in one line that an agent's own page stays private to its owner, at 1280 and 390, light and dark",
+        offered && shown && closed,
+        json!({ "profile": profile, "offered": offered, "sheet": sheet, "shown": shown, "closed": closed, "said": said }),
+    );
+    Ok(())
 }
 
 /// Clicks the open menu's item named `text` (a script's click: a menu's

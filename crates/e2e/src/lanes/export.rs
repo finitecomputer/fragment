@@ -164,6 +164,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = s.create(api, &paul, &agent_name)?;
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(SOUL))]);
     s.deploy(&agent);
+    super::computers::members_only(api, &paul, &agent_name)?;
     let r = api.signed(&paul, "PUT", &format!("/api/computers/{computer}/agents/{agent_name}"), Some(&json!({})))?;
     let agent_id = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     let chat_name = s.named(api, &paul, "export-chat")?;
