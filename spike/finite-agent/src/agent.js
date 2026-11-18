@@ -17,7 +17,7 @@
 // COMPUTER, which wakes it only when a tool is called.
 
 import { DurableObject } from "cloudflare:workers";
-import { AssistantEntry, Harness, LiveDoc, createRegistry, defineExtension, defineTool, section } from "@earendil-works/pi-durable";
+import { AssistantEntry, Harness, createRegistry, defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { DurableObjectSqliteDatabase } from "@earendil-works/chord/sqlite/cloudflare";
 import { BACKGROUND_CONTEXT as BG } from "@earendil-works/chord/context";
@@ -252,7 +252,7 @@ export class App extends DurableObject {
     const watch = await conversation.watch(BG);
     watch.start(async (call) => {
       if (call.kind !== "value" || this.#current(conversation.id)?.id !== id) return;
-      const text = textOf(call.value.docs?.[LiveDoc.kind]?.generation?.message);
+      const text = textOf(call.value.docs?.["pi.live"]?.generation?.message);
       if (!text || Date.now() - lastDraft < DRAFT_EVERY_MS) return;
       lastDraft = Date.now();
       if (t.firstDraft === null) t.firstDraft = Date.now() - received;
