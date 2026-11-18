@@ -1151,8 +1151,8 @@ fn a_card_only_this_life_can_take_holds_its_computer() {
     let turn = started(&said(&mut e, &a, &v, 6, "npub1paul", json!({ "text": "sign me in" }), t45)).expect("started").turn;
     ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options: code(), ttl_ms: Some(limits::PROMPT_TTL_MS_MAX) }, t45 + 1);
     let bound = limits::LEFT_RUNNING_HOLD_MS;
-    assert_eq!(keepalive(&e.step(Input::Slice { from: t45 + hold + 1, over: true }, t45 + hold + 1 + limits::LOAD_SLICE_MS)), None, "the card's bound, and work left running after it");
-    assert_eq!(keepalive(&e.step(Input::Slice { from: t45 + bound - limits::LOAD_SLICE_MS, over: true }, t45 + bound)), None);
+    assert_eq!(keepalive(&e.step(Input::Slice { from: t45 + hold + 1, over: Some(true) }, t45 + hold + 1 + limits::LOAD_SLICE_MS)), None, "the card's bound, and work left running after it");
+    assert_eq!(keepalive(&e.step(Input::Slice { from: t45 + bound - limits::LOAD_SLICE_MS, over: Some(true) }, t45 + bound)), None);
     assert_eq!(keepalive(&e.step(Input::Tick, t45 + 1 + bound)), Some(false), "two hours from the card's start");
     e.step(heard(Event::End { turn, outcome: Outcome::Idle }), t45 + 2 + bound);
 
