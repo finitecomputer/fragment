@@ -1025,7 +1025,7 @@ unfinished design, not debt.
 ## Files depend on code.storage, a hosted service with no self-hosted twin
 
 - **Shortcut:** files live in code.storage through its REST API
-  (cell/src/cs.rs, cli/src/sync.rs); the only twin is the fake.
+  (cell/src/cs.rs, cli/src/sync/); the only twin is the fake.
 - **Risk:** not self-hostable; one outage stops every fragment's files.
 - **Delete when:** a self-hostable service answers the same REST subset
   with the fake's rules as its conformance suite and the e2e passing on
