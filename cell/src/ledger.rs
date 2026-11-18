@@ -8,10 +8,13 @@
 //! The head (plan, seat, balance) is kept whole as one
 //! JSON row, small and bounded; what grows with use (references, batches,
 //! commands, each fragment's spend by month, caps) is in tables, read and
-//! written through `SqlStore`. Each route is one `transactionSync` over
-//! both: the core decides before it writes, so a refusal changes nothing
-//! but the month it rolled to, and a store that failed rolls the whole
-//! route back. Its alarm runs `sweep` at the head's `next_sweep_ms`.
+//! written through `SqlStore`. Each route that may change them is one
+//! `transactionSync` over both: the core decides before it writes, so a
+//! refusal changes nothing but the month it rolled to, and a store that
+//! failed rolls the whole route back. A route whose core function only
+//! reads them (`read`: the gate's questions and the statuses) writes
+//! nothing, its head included, once a call has made the ledger (F14). Its
+//! alarm runs `sweep` at the head's `next_sweep_ms`.
 //!
 //! Nothing is held before a paid call (decision 62): a head or an entry
 //! the releases before kept (holds, reservations) loads, its holds
@@ -629,12 +632,10 @@ impl Store for SqlStore {
     }
 }
 
-/// The head as this cell keeps it, bound as an org's when its name is an
-/// org's (`Ledger::bind_org`), or a new one: an org's, with no credit
-/// (`Ledger::new_org`), or a person's, a guest with no credit
-/// (`Ledger::new`), then the deployment's default plan for new people
-/// (decision 25: `FRAGMENT_DEFAULT_PLAN`).
-fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
+/// What this cell keeps of its ledger: an org's terms when it is an org's,
+/// and its head as last written, bound as an org's then
+/// (`Ledger::bind_org`); no head until a call has written one (`head`).
+fn stored(store: &SqlStore) -> CellResult<(Option<core::org::OrgTerms>, Option<Ledger>)> {
     // an org's terms are never in its head (an older release's sweep
     // rewrites the head it reads): that it is an org's is its name, kept
     // as its first call named it, and its budget a row of its own
@@ -649,12 +650,22 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
         }
         _ => None,
     };
-    if let Some(row) = rows.into_iter().next() {
-        let mut ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
-        if let Some(terms) = org {
-            ledger.bind_org(terms);
-        }
-        ledger.assert_valid();
+    let Some(row) = rows.into_iter().next() else { return Ok((org, None)) };
+    let mut ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+    if let Some(terms) = org {
+        ledger.bind_org(terms);
+    }
+    ledger.assert_valid();
+    Ok((org, Some(ledger)))
+}
+
+/// The head as this cell keeps it (`stored`), or a new one: an org's, with
+/// no credit (`Ledger::new_org`), or a person's, a guest with no credit
+/// (`Ledger::new`), then the deployment's default plan for new people
+/// (decision 25: `FRAGMENT_DEFAULT_PLAN`).
+fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
+    let (org, ledger) = stored(store)?;
+    if let Some(ledger) = ledger {
         return Ok(ledger);
     }
     if org.is_some() {
@@ -743,6 +754,30 @@ impl LedgerCell {
         if self.armed.get().is_none_or(|armed| next < armed) {
             self.arm(next).await?;
         }
+        self.told();
+        answer.map_err(Failed::Refused)
+    }
+
+    /// A route whose core function only reads (it takes `&Ledger` and
+    /// `&impl Store`, as `may_spend`, `fragment_open`, `status` and
+    /// `org_status` do): `op` answers from the head as last written and the
+    /// store, at the ledger's now, in one synchronous step (no other call
+    /// runs between), and nothing is written: not the head, which `op`
+    /// cannot change, nor the alarm, which the write that made the head
+    /// set and each sweep sets again (F14). Its person is told when what
+    /// the ledger says changed by the clock alone (`told`, which writes
+    /// only then), as after a mutation. A ledger no call has written yet
+    /// is made by its first (`head`: a person's default plan is a command
+    /// it keeps), so that call is a mutation, writing it.
+    async fn read<T: 'static>(&self, op: impl FnOnce(&Ledger, &SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
+        let now = js::now_ms() + self.offset_ms()?;
+        let store = SqlStore::new(self.sql());
+        let Some(ledger) = stored(&store)?.1 else {
+            return self.mutate(move |l, s, now| op(l, s, now)).await;
+        };
+        let answer = op(&ledger, &store, now);
+        store.checked()?;
+        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok())));
         self.told();
         answer.map_err(Failed::Refused)
     }
@@ -841,11 +876,11 @@ impl LedgerCell {
                 if self.cfg.test_hooks && matches!(q.spend, Spend::AgentTurn | Spend::AiStep) {
                     self.paid_calls()?;
                 }
-                reply(done(self.mutate(move |l, s, now| l.may_spend(s, q.spend, q.fragment.as_deref(), q.by_owner, now)).await?))
+                reply(done(self.read(move |l, s, now| l.may_spend(s, q.spend, q.fragment.as_deref(), q.by_owner, now)).await?))
             }
             FragmentOpen::PATH => {
                 let q: FragmentOpen = decode(&body)?;
-                reply(done(self.mutate(move |l, s, now| l.fragment_open(s, &q.fragment, now)).await?))
+                reply(done(self.read(move |l, s, now| l.fragment_open(s, &q.fragment, now)).await?))
             }
             <GrantCredit as Route>::PATH => {
                 let c: GrantCredit = decode(&body)?;
@@ -874,7 +909,7 @@ impl LedgerCell {
             Status::PATH => {
                 let Status {} = decode(&body)?;
                 let book = &self.cfg.book;
-                reply(self.mutate(move |l, s, now| if l.is_org() { Err(Refused::PersonsOnly) } else { Ok(l.status(s, now, book)) }).await?)
+                reply(self.read(move |l, s, now| if l.is_org() { Err(Refused::PersonsOnly) } else { Ok(l.status(s, now, book)) }).await?)
             }
             NoticesOf::PATH => {
                 // read alone, outside any transaction, as nothing is written:
@@ -896,7 +931,7 @@ impl LedgerCell {
                 let OrgStatus {} = decode(&body)?;
                 let Some(Payer::Org(org)) = Payer::parse(&payer) else { return Err(Failed::Refused(Refused::OrgsOnly)) };
                 let book = &self.cfg.book;
-                reply(self.mutate(move |l, s, now| l.org_status(&org, s, now, book)).await?)
+                reply(self.read(move |l, s, now| l.org_status(&org, s, now, book)).await?)
             }
             <OrgBudget as Route>::PATH => {
                 let c: OrgBudget = decode(&body)?;
