@@ -30,6 +30,7 @@
 mod across;
 mod ai;
 mod address;
+mod app_members;
 mod assets;
 mod auth;
 mod billing;

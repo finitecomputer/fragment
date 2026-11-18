@@ -135,7 +135,7 @@ impl FragmentCell {
         self.exec(
             &format!(
                 "INSERT INTO search_outbox (principal, sent, attempts, next_at)
-                 SELECT principal, 0, 0, ? FROM members WHERE ({who}) AND (kind IS NULL OR kind != 'agent')
+                 SELECT principal, 0, 0, ? FROM members WHERE ({who}) AND (kind IS NULL OR kind = 'person')
                  ON CONFLICT (principal) DO NOTHING"
             ),
             all,

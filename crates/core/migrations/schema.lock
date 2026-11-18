@@ -13,6 +13,7 @@ step Fragment 6 installed_forward_only ca46b28bd2c487d0
 step Fragment 7 making df7c73337a08c512
 step Fragment 8 newest b439b2eb5ec07074
 step Fragment 9 inbox_forward_only ece226038ced1436
+step Fragment 10 member_apps 1048a293e4b380af
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -75,6 +76,9 @@ Fragment table invites: CREATE TABLE invites ( email TEXT PRIMARY KEY, role TEXT
 Fragment table joined_outbox: CREATE TABLE joined_outbox ( principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
 Fragment table listed: CREATE TABLE listed ( channel TEXT NOT NULL, principal TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, fields TEXT NOT NULL, last INTEGER NOT NULL, PRIMARY KEY (channel, principal))
 Fragment table making: CREATE TABLE making (key TEXT PRIMARY KEY, run INTEGER NOT NULL, attempt INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment table member_apps: CREATE TABLE member_apps ( principal TEXT PRIMARY KEY, name TEXT NOT NULL, owner TEXT NOT NULL, incarnation INTEGER NOT NULL)
+Fragment index member_apps_name: CREATE INDEX member_apps_name ON member_apps (name)
+Fragment table member_of: CREATE TABLE member_of ( name TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL)
 Fragment table members: CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT)
 Fragment index members_owner: CREATE INDEX members_owner ON members (owner) WHERE owner IS NOT NULL
 Fragment table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)

@@ -314,7 +314,7 @@ impl FragmentCell {
         }
     }
 
-    fn created(&self) -> CellResult<()> {
+    pub(crate) fn created(&self) -> CellResult<()> {
         self.must(MetaKey::CreatedAt).map(drop).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))
     }
 

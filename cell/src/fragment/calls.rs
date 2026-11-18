@@ -124,6 +124,50 @@ impl Call for Picture {
     type Answer = worker::Response;
 }
 
+/// A fragment, the target, asks this one, an app, in at `role`, for their
+/// one owner `owner` (app_members.rs), at the target's life `incarnation`
+/// and change `version`: the app answers who it shows, and records that it
+/// is joining in the same turn; or refuses, saying why in one line.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AppAsked {
+    pub target: String,
+    /// The target's title, as the app's refusals name it.
+    pub title: String,
+    pub incarnation: i64,
+    pub version: i64,
+    pub owner: String,
+    pub role: Role,
+}
+
+/// The app's own key, its life, its title, and its audience
+/// (`fragment_core::app_member::audience`): each person, with what they do
+/// to it.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AppAnswer {
+    pub npub: String,
+    pub incarnation: i64,
+    pub title: String,
+    pub audience: Vec<(String, Role)>,
+}
+
+impl Call for AppAsked {
+    const PATH: &'static str = "/call/app/asked";
+    type Answer = AppAnswer;
+}
+
+/// A change between an app and a target, as a list takes one
+/// (`IndexChange`, by the fragment that sends it): the target's word on the
+/// app's role there (none: it is out), or the app's, at its life's end,
+/// that it is gone. 404 from a fragment with no life: nothing to take.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct AppTold(pub crate::principal::calls::IndexChange);
+
+impl Call for AppTold {
+    const PATH: &'static str = "/call/app/told";
+    type Answer = ();
+}
+
 /// `agent`, just made by `person` (members.rs `agent_made`), comes in
 /// beside them when they are a member here who is not its owner, at their
 /// role. Anything else changes nothing.

@@ -2651,6 +2651,7 @@ fn run(cli: Cli) -> Result<()> {
                 for m in &v.members {
                     // an agent's owner, named with what it is
                     let owned = match (&m.owner, m.kind) {
+                        _ if m.app.is_some() => format!("\tthe app {} of {}", m.app.as_ref().map_or("", |a| a.name.as_str()), m.owner.as_deref().unwrap_or("?")),
                         (Some(o), Some(kind)) => format!("\t{} of {o}", kind.as_str()),
                         (Some(o), None) => format!("\towned by {o}"),
                         (None, _) => String::new(),
@@ -2690,11 +2691,14 @@ fn run(cli: Cli) -> Result<()> {
                             }
                         }
                     }
-                    auth::Member::Npub(npub) => c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{npub}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?,
+                    auth::Member::Npub(who) | auth::Member::App(who) => c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?,
                 };
                 json_exit(j, &v);
-                println!("{} is now {} on {name}", v.principal, v.role.as_str());
-                if let Some(owner) = &v.owner {
+                match &v.app {
+                    Some(app) => println!("the app {} is now {} on {name}: it shows no one more than they can open here", app.name, v.role.as_str()),
+                    None => println!("{} is now {} on {name}", v.principal, v.role.as_str()),
+                }
+                if let (Some(owner), None) = (&v.owner, &v.app) {
                     println!("  an agent: its owner {owner} can read {name} too");
                 }
             }

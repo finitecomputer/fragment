@@ -658,6 +658,30 @@ Decline, and the page a sign-in to its fragment shows first
 `{type: "changed"}` on `GET /api/fragments/watch`, as for any notice
 (`invited`, sent before FIN-458, no more).
 
+### An app as a member
+
+A fragment may be a member of another, as a viewer or an editor (decision
+72): an app, such as a dashboard over its owner's other fragments. It
+shows no one more than they can already open (`fragment_core::app_member`).
+For now it is its owner's alone: its owner (or their agent for them) adds
+an app they own to a fragment they own, `PUT members/{the app's name}`.
+
+- The fragment asks the app, which answers in one turn and records that
+  it is joining: it must be its owner's, `members` visibility, with no one
+  else in it and no invite waiting, and an agent fragment never joins.
+  Each refusal is 403 with one line naming the fix, such as "Board is
+  shared by link. Make it members only first."; owning one, 400.
+- Its row in `GET members` leaves out `kind` and names `app: {name}` and
+  its `owner`, who reads nothing through it. It is no guest in its owner's
+  row's `sharing`, and has no list of its own.
+- While it is a member anywhere, the app's `link` or `public` visibility
+  and its invites are 403 ("Board is in tracker, so it stays members
+  only.").
+- `DELETE members/{its name or npub}` takes it out. Deleting the app takes
+  it out of each fragment it is in, and deleting a fragment lets each app
+  in it go. Each side is told as a person's list is, by the same outbox
+  and versions, so a late word never undoes a newer one.
+
 ### Who has access to what
 
 `GET /api/access` (a person, signed or with the shell's session; an agent
@@ -694,8 +718,8 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/f/{name}/status` | viewer | → `FragmentStatus` (docs/wire, `fragments.status`), as the caller's role sees it: the share link's and the inbox's tokens only for those who hold them |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main; none 404 |
 | `GET /api/f/{name}/members` | viewer | → `MemberList` (docs/wire, `members.list`); to the owner, and their agent for them, each person's `email` too, as the share sheet shows it (decision 48). A member that is another fragment, an app (decision 72), names it in `app` and leaves out `kind`, which older clients read as `person` or `agent` alone |
-| `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer \| editor}` (another field 400) → the member, added or its role changed. A new member this way is one of the owner's own agents alone; anyone else 403 (invite them). An email no one signs in as, 404. A person's agents follow their role (an agent's own 400). A chat's lead agent (the first added) is never set below `editor` (400). An agent on a computer is told (`joined` on its `tasks`) and its computer woken. Its waits, in `Server-Timing`: `identity`, `list`, `joined` |
-| `DELETE /api/f/{name}/members/{id\|npub\|email\|me}` | owner, or their agent for them; the member | → `{ok, removed}`, closing their feeds. A person goes with their agents in it, and such an agent takes its person and their other agents (decision 64). A chat's lead agent is removed by no one else (400); it may leave |
+| `PUT /api/f/{name}/members/{id\|npub\|email\|app}` | owner, or their agent for them | `{role: viewer \| editor}` (another field 400) → the member, added or its role changed. A new member this way is one of the owner's own agents alone, or an app of theirs by its name (An app as a member); anyone else 403 (invite them). An email no one signs in as, 404. A person's agents follow their role (an agent's own 400). A chat's lead agent (the first added) is never set below `editor` (400). An agent on a computer is told (`joined` on its `tasks`) and its computer woken. Its waits, in `Server-Timing`: `identity`, `list`, `joined` |
+| `DELETE /api/f/{name}/members/{id\|npub\|email\|app\|me}` | owner, or their agent for them; the member | → `{ok, removed}`, closing their feeds. A person goes with their agents in it, and such an agent takes its person and their other agents (decision 64). A chat's lead agent is removed by no one else (400); it may leave |
 | `POST /api/f/{name}/invites` | owner, or their agent for them | `{email, role}` → `{invited: {email, role, expiresAt, createdBy}}` (Invites by email). In it already 400 |
 | `GET /api/f/{name}/invites` | the same | → `{invites: [{email, role, expiresAt, createdBy}]}`, oldest first |
 | `DELETE /api/f/{name}/invites/{email}` | the same | → `{ok, revoked}`; none 404 |

@@ -1036,6 +1036,8 @@ impl FragmentCell {
             Picture::PATH => self.picture().await,
             DoorCheck::PATH => reply::<DoorCheck>(self.door_check(decode(body)?)),
             DoorActor::PATH => reply::<DoorActor>(self.door_actor(decode(body)?)),
+            calls::AppAsked::PATH => reply::<calls::AppAsked>(self.app_asked(decode(body)?)),
+            calls::AppTold::PATH => reply::<calls::AppTold>(self.app_told(decode(body)?)),
             FaceOf::PATH => reply::<FaceOf>(self.face_of()),
             ReachOf::PATH => reply::<ReachOf>(self.reach_of()),
             AgentMade::PATH => reply::<AgentMade>(self.agent_with_person(decode(body)?).await),

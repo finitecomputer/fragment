@@ -7,6 +7,7 @@ mod agent_restart;
 mod agent_smoke;
 mod ai_tools;
 mod app;
+mod apps;
 mod appfiles;
 mod blobs;
 mod board;
@@ -95,6 +96,7 @@ const LANES: &[Lane] = &[
     levers::levers,
     members::secrets,
     members::reach,
+    apps::apps,
     delegation::delegation,
     plane::files,
     plane::deploy,
@@ -214,7 +216,7 @@ pub const SHARDS: [&[&str]; 5] = [
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
         "identities", "signin", "door", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
-        "members", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp",
+        "members", "apps", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp",
     ],
 ];
 

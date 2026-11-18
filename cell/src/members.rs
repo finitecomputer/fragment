@@ -42,7 +42,7 @@ use fragment_core::access;
 use fragment_core::ended::Failure;
 use fragment_core::npub;
 use fragment_proto::{
-    limits, CreateInvite, ErrorCode, FragmentKind, Identity, IdentityKind, Invite, InviteList, Member, MemberList, PutSecret, Role, Rotated, SecretInfo,
+    limits, CreateInvite, ErrorCode, FragmentKind, Identity, IdentityKind, Invite, InviteList, Member, MemberApp, MemberList, PutSecret, Role, Rotated, SecretInfo,
     SecretList, SetRole, SetVisibility, Shared, Sharing, Visibility,
 };
 use futures_util::future::join_all;
@@ -50,7 +50,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::calls::{AgentMade, InviteAnswer};
+use crate::fragment::calls::{AgentMade, AppTold, InviteAnswer};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
 use crate::principal::calls::{Face, IndexChange, List};
@@ -120,9 +120,9 @@ fn member_json(r: &Value) -> CellResult<Member> {
         added_by: npub::display(&s("added_by")?),
         added_at: r["added_at"].as_i64().unwrap_or(0),
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
-        owner: r["owner"].as_str().map(str::to_string),
+        owner: r["owner"].as_str().or(r["app_owner"].as_str()).map(str::to_string),
         email: None,
-        app: None,
+        app: r["app"].as_str().map(|name| MemberApp { name: name.to_string() }),
     })
 }
 
@@ -131,13 +131,13 @@ fn opt(v: Option<&str>) -> SqlStorageValue {
 }
 
 /// Who changes a fragment's sharing in one request, and with what role.
-struct Actor {
+pub(crate) struct Actor {
     /// A person's own membership (anyone's own, leaving); an agent sharing
     /// for its owner, its owner's role, lent (`access::agent_shares`).
     role: Option<Role>,
     /// Who made the change: members' `added_by`, invites' `created_by`,
     /// the events' `by`.
-    by: String,
+    pub(crate) by: String,
     /// The owner an agent shared for: the events' `for`.
     for_owner: Option<String>,
 }
@@ -145,7 +145,7 @@ struct Actor {
 impl Actor {
     /// The words a change's summary ends with: an agent's names it and the
     /// owner it acted for; a person's, nothing (the owner made it).
-    fn said(&self) -> String {
+    pub(crate) fn said(&self) -> String {
         match &self.for_owner {
             Some(owner) => format!(", by {} (an agent, for {owner})", self.by),
             None => String::new(),
@@ -154,7 +154,7 @@ impl Actor {
 
     /// A change's event data, naming who made it (`by`), and the owner an
     /// agent made it for (`for`).
-    fn noted(&self, mut data: Value) -> Value {
+    pub(crate) fn noted(&self, mut data: Value) -> Value {
         assert!(data.is_object(), "an event's data is an object");
         data["by"] = json!(self.by);
         if let Some(owner) = &self.for_owner {
@@ -187,9 +187,8 @@ impl FragmentCell {
     /// `rows` selects, all of them at one new version: one statement,
     /// however many (a list orders the changes it takes of one fragment by
     /// version, and each of these is newer than any sent it before).
-    fn index_rows(&self, rows: &str, binds: Vec<SqlStorageValue>) -> CellResult<()> {
-        let version: i64 = self.meta(MetaKey::IndexVersion)?.and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
-        self.set_meta(MetaKey::IndexVersion, &version.to_string())?;
+    pub(crate) fn index_rows(&self, rows: &str, binds: Vec<SqlStorageValue>) -> CellResult<()> {
+        let version = self.index_version_next()?;
         let mut all = vec![SqlStorageValue::Integer(version), SqlStorageValue::Integer(js::now_ms())];
         all.extend(binds);
         self.exec(
@@ -205,6 +204,14 @@ impl FragmentCell {
         self.listed_moved.set(true);
         self.later();
         Ok(())
+    }
+
+    /// A new version of its changes, newer than every one it sent: an index
+    /// change's, or an app's ask (app_members.rs).
+    pub(crate) fn index_version_next(&self) -> CellResult<i64> {
+        let version: i64 = self.meta(MetaKey::IndexVersion)?.and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
+        self.set_meta(MetaKey::IndexVersion, &version.to_string())?;
+        Ok(version)
     }
 
     /// What its members' lists show of it, at each install of live: its
@@ -237,7 +244,7 @@ impl FragmentCell {
         // statement for their changes, one for their search cursors
         self.index_rows(
             "SELECT ? AS principal, ? AS role UNION ALL
-             SELECT principal, role FROM members WHERE principal != ? AND role IN (SELECT value FROM json_each(?))",
+             SELECT principal, role FROM members WHERE principal != ? AND kind IS NOT 'app' AND role IN (SELECT value FROM json_each(?))",
             vec![owner.as_str().into(), Role::Owner.as_str().into(), owner.as_str().into(), roles.as_str().into()],
         )?;
         self.search_follow_rows("principal = ? OR role IN (SELECT value FROM json_each(?))", vec![owner.as_str().into(), roles.as_str().into()])
@@ -254,6 +261,17 @@ impl FragmentCell {
     /// it was not taken (`fragment_core::ended::list_told`): the list's
     /// refusal, or a failure a later try may pass.
     pub(crate) async fn tell_index(&self, principal: &str, change: &IndexChange) -> Result<(), Failure> {
+        // an app, or a fragment an app is in, takes it by its name
+        // (app_members.rs): one with no life has nothing to take
+        if fragment_proto::valid_fragment_name(principal) {
+            let told = AppTold(IndexChange { role: change.role, ..IndexChange::gone(change.fragment.clone(), change.incarnation, change.version) });
+            return match crate::fragment::call(&self.env, principal, &told).await {
+                Ok(()) => Ok(()),
+                Err(e) if e.code == ErrorCode::NotFound => Ok(()),
+                Err(e) if e.release_refused.is_some() => fragment_core::ended::list_told(None, &e.message),
+                Err(e) => fragment_core::ended::list_told(Some(e.code.status()), &e.message),
+            };
+        }
         match crate::principal::ask(&self.env, principal, change).await {
             Ok(_) => Ok(()),
             // a list of another release refused it unread (a deploy going out): a later try's
@@ -313,6 +331,11 @@ impl FragmentCell {
                 }
             };
             let mut change = IndexChange { role, ..IndexChange::gone(name.clone(), incarnation, version) };
+            // an app's: its role alone (app_members.rs)
+            if fragment_proto::valid_fragment_name(&principal) {
+                batch.push((principal, version, attempts, Some(change)));
+                continue;
+            }
             // every row a role names: the channels searched, the
             // fragment's face and its agents, and the listed records of the
             // channels its role reads, as they are now
@@ -499,7 +522,7 @@ impl FragmentCell {
         let mut list = self.member_list()?;
         if self.shares(caller) {
             // bounded: at most MEMBERS_MAX, asked PROFILES_MAX at a time
-            let people = list.members.iter().filter(|m| m.kind != Some(IdentityKind::Agent)).map(|m| m.principal.clone()).collect();
+            let people = list.members.iter().filter(|m| m.kind != Some(IdentityKind::Agent) && m.app.is_none()).map(|m| m.principal.clone()).collect();
             let profiles = crate::share::profiles(&self.env, people).await;
             for m in &mut list.members {
                 m.email = profiles.get(&m.principal).and_then(|p| p.email.clone());
@@ -511,7 +534,11 @@ impl FragmentCell {
     /// Every member, the first added first (a chat's lead is its first
     /// agent): the API's list, and a page's (`__members`, serve.rs).
     pub(crate) fn member_list(&self) -> CellResult<MemberList> {
-        let rows = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members ORDER BY added_at, principal"), vec![])?;
+        let rows = self.rows(
+            "SELECT m.principal, m.role, m.added_by, m.added_at, m.kind, m.owner, a.name AS app, a.owner AS app_owner
+             FROM members m LEFT JOIN member_apps a USING (principal) ORDER BY m.added_at, m.principal",
+            vec![],
+        )?;
         Ok(MemberList { members: rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()? })
     }
 
@@ -527,7 +554,7 @@ impl FragmentCell {
 
     /// `adding` new members (a person, and the agents in with them) need
     /// room under `MEMBERS_MAX`; a role change needs none.
-    fn room_for(&self, adding: u64) -> CellResult<()> {
+    pub(crate) fn room_for(&self, adding: u64) -> CellResult<()> {
         if adding > 0 && self.count("SELECT COUNT(*) AS n FROM members")? + adding > limits::MEMBERS_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} members (a person's agents count, in with them)", limits::MEMBERS_MAX)));
         }
@@ -559,6 +586,10 @@ impl FragmentCell {
         if actor.role != Some(Role::Owner) {
             let why = access::refuse_set_role(actor.role, None, body.role).expect("only the owner manages members");
             return Err(refusal(false, why));
+        }
+        // a fragment's name: an app of its owner's (app_members.rs)
+        if fragment_proto::valid_fragment_name(who) {
+            return json_response(&self.add_app(&actor, who, body.role).await?);
         }
         // what it waited on, for its client (`Server-Timing`)
         let mut laps = crate::js::Laps::start();
@@ -698,6 +729,7 @@ impl FragmentCell {
             _ if who == "me" => me.clone(),
             Some(key) if self.member_role(&npub::identity_of(&key))?.is_some() => npub::identity_of(&key),
             Some(_) => self.named(who).await?.id,
+            None if fragment_proto::valid_fragment_name(who) => self.app_named(who)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{who} is no member here")))?,
             None if fragment_core::mail::valid_address(who) => self.named(&who.to_ascii_lowercase()).await?.id,
             None => return Err(CellError::invalid(format!("{who:?} is not an email, an npub, or a 64-hex key"))),
         };
@@ -713,6 +745,11 @@ impl FragmentCell {
                 None => CellError::new(ErrorCode::NotFound, why),
                 Some(_) => refusal(actor.role == Some(Role::Owner), why),
             });
+        }
+        if let Some(app) = self.app_of(&target)? {
+            self.remove_app(&actor, &target, &app)?;
+            self.flush_index().await;
+            return json_response(&json!({ "ok": true, "removed": npub::display(&target) }));
         }
         // the whole entity goes (decision 64): a person with the agents in
         // with them, or such an agent with its person and theirs
@@ -834,6 +871,8 @@ impl FragmentCell {
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
         }
+        // decided in the invite's own turn, as an app's ask is (app_members.rs)
+        self.stays_alone()?;
         let now = js::now_ms();
         let expires_at = now + limits::INVITE_TTL_S * 1000;
         let write = |role: &str, expires_at: i64, by: &str, at: i64| {
@@ -1102,7 +1141,7 @@ impl FragmentCell {
         }
         let counts: Vec<Counts> = self.typed(
             "SELECT (SELECT COUNT(*) FROM members) AS members,
-                    (SELECT COUNT(*) FROM members m WHERE principal != ? AND (owner IS NULL OR owner != ?)
+                    (SELECT COUNT(*) FROM members m WHERE principal != ? AND (owner IS NULL OR owner != ?) AND kind IS NOT 'app'
                        AND NOT EXISTS (SELECT 1 FROM members p WHERE p.principal = m.owner)) AS guests,
                     (SELECT COUNT(*) FROM invites WHERE expires_at > ?) AS invites",
             vec![owner.as_str().into(), owner.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
@@ -1118,6 +1157,7 @@ impl FragmentCell {
         // members only narrows it; its link or public, not with reach (reach.rs)
         if body.visibility != Visibility::Members {
             self.share_while_private()?;
+            self.stays_members_only()?;
         }
         let before = self.visibility()?;
         self.set_meta(MetaKey::Visibility, body.visibility.as_str())?;

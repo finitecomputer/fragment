@@ -70,20 +70,26 @@ pub enum Member {
     /// An npub or a 64-hex key, as its npub: the identity, or the one
     /// holding the key.
     Npub(String),
+    /// A fragment's name: an app of its owner's, as a member (decision 72).
+    App(String),
 }
 
 impl std::fmt::Display for Member {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Member::Email(e) => f.write_str(e),
-            Member::Npub(n) => f.write_str(n),
+            Member::Npub(n) | Member::App(n) => f.write_str(n),
         }
     }
 }
 
-/// An email, or an npub or a 64-hex key, checked and made canonical.
+/// An email, an npub or a 64-hex key, or a fragment's name, checked and
+/// made canonical.
 pub fn member_of(input: &str) -> Result<Member> {
     let s = input.trim();
+    if fragment_proto::valid_fragment_name(s) {
+        return Ok(Member::App(s.to_string()));
+    }
     if s.contains('@') {
         let email = s.to_ascii_lowercase();
         if !fragment_core::mail::valid_address(&email) {
@@ -91,7 +97,7 @@ pub fn member_of(input: &str) -> Result<Member> {
         }
         return Ok(Member::Email(email));
     }
-    let hex = npub::parse(s).ok_or_else(|| anyhow!("'{s}' is not an email, an npub, or a 64-hex key"))?;
+    let hex = npub::parse(s).ok_or_else(|| anyhow!("'{s}' is not an email, an npub, a 64-hex key, or a fragment's name"))?;
     Ok(Member::Npub(npub::encode(&hex)))
 }
 
@@ -129,7 +135,8 @@ mod tests {
         assert_eq!(member_of(&format!(" {} ", id.pubkey_hex().to_uppercase())).unwrap(), Member::Npub(id.npub()));
         assert_eq!(member_of(" Bea@Example.com ").unwrap(), Member::Email("bea@example.com".into()));
         assert_eq!(member_of("paul@finite.vip").unwrap().to_string(), "paul@finite.vip", "an email, never a NIP-05 name");
-        for bad in ["npub1xyz", "@x", "bea@", "bea@example", "a b@example.com", ""] {
+        assert_eq!(member_of(" board--k3x9 ").unwrap(), Member::App("board--k3x9".into()), "a fragment's name: an app (decision 72)");
+        for bad in ["npub1xyz", "@x", "bea@", "bea@example", "a b@example.com", "", "board", "board--K3X9"] {
             assert!(member_of(bad).is_err(), "{bad:?}");
         }
     }
