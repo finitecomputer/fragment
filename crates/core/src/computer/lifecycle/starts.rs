@@ -5,7 +5,7 @@
 use fragment_proto::computer::LifeEnd;
 
 use super::{Action, Ended, Lifecycle, Phase, Retry, Saving, Step};
-use crate::computer::limits::{RETRY_PAUSE_MS, STARTS_FAILED_MAX};
+use crate::computer::limits::{RETRY_PAUSE_MS, STARTS_FAILED_MAX, TAB_USED_EVERY_MS};
 
 impl Lifecycle {
     /// Starts of this wake that failed in a row.
@@ -93,23 +93,39 @@ impl Lifecycle {
         if std::mem::take(&mut self.ready) {
             assert!(step.ended.is_none(), "one event ends one life");
             let restarting = matches!(self.phase, Phase::Sleeping { restarting: true, .. });
-            let (quiet, unchanged) = (self.quiet(), self.kept_ms > 0 && self.changed_ms() < self.kept_ms);
+            let unheard = self.tab_unheard_ms(now_ms);
+            let (quiet, unchanged) = (self.quiet(now_ms), self.kept_ms > 0 && self.changed_ms().max(unheard) < self.kept_ms);
             assert!(!quiet || unchanged, "a life nothing was done on changed nothing");
             step.ended = Some(Ended { generation: self.generation, by, saved, at_ms: now_ms, restart: restarting && by == LifeEnd::Sleep, quiet, unchanged });
         }
     }
 
     /// Nothing was done on this life since its newest save that worked, or
-    /// since it came up when it has none: what it ran is in that save.
-    fn quiet(&self) -> bool {
-        self.kept_ms > 0 && self.worked_ms < self.kept_ms
+    /// since it came up when it has none, as far as was heard by `now`:
+    /// what it ran is in that save.
+    fn quiet(&self, now_ms: i64) -> bool {
+        self.kept_ms > 0 && self.worked_ms.max(self.tab_unheard_ms(now_ms)) < self.kept_ms
+    }
+
+    /// The latest a person's use of an open port tab, not heard yet, may
+    /// have reached its container by `now`: a use is heard
+    /// `TAB_USED_EVERY_MS` after the last one heard at most (cell/entry.mjs),
+    /// or with its tab's close, and one its container took with it as it
+    /// stopped never is. 0 with no tab open, or none used.
+    fn tab_unheard_ms(&self, now_ms: i64) -> i64 {
+        if self.tabs > 0 && self.tab_used_ms > 0 {
+            now_ms.min(self.tab_used_ms + TAB_USED_EVERY_MS)
+        } else {
+            0
+        }
     }
 
     /// Whether its container, stopped now though nothing asked, ends a sleep
     /// and not a crash: a life that came up, awake, no keepalive open (a
     /// port tab open holds nothing: its use since its save is work), no save
     /// under way, a save it made since it was last awake (`Awake`'s
-    /// `since_ms`) holds all it did (`quiet`), and no record or join woke
+    /// `since_ms`) holds all it did (`quiet`, a tab's use not heard yet
+    /// counted done), and no record or join woke
     /// it that its guest has not taken up (`owed_ms`). A host stops
     /// containers for its own reasons (its maintenance, a node short of
     /// memory); stopped so, such a computer loses nothing and leaves nothing
@@ -118,9 +134,9 @@ impl Lifecycle {
     /// with no save of its own may have been woken for work it has not
     /// begun, so either stop stays a crash, started again while that wake
     /// holds it.
-    pub(super) fn idle_and_kept(&self) -> bool {
+    pub(super) fn idle_and_kept(&self, now_ms: i64) -> bool {
         let Phase::Awake { since_ms, .. } = self.phase else { return false };
-        self.ready && !self.open() && self.saving.is_none() && self.quiet() && self.kept_ms > since_ms && self.owed_ms.is_none()
+        self.ready && !self.open() && self.saving.is_none() && self.quiet(now_ms) && self.kept_ms > since_ms && self.owed_ms.is_none()
     }
 
     /// Its container stopped unasked while it was idle and kept
@@ -130,7 +146,7 @@ impl Lifecycle {
     /// wakes it from that save. Always on, it is wanted still: it starts
     /// again, as after its owner's sleep of it.
     pub(super) fn slept_unasked(&mut self, now_ms: i64, step: &mut Step) {
-        assert!(self.idle_and_kept(), "only an idle computer whose work is kept sleeps unasked");
+        assert!(self.idle_and_kept(now_ms), "only an idle computer whose work is kept sleeps unasked");
         self.held_until_ms = now_ms;
         self.life_ended(LifeEnd::Sleep, true, now_ms, step);
         self.gone(now_ms, step);

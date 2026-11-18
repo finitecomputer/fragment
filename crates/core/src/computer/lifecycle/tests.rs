@@ -184,6 +184,108 @@ fn a_tab_wakes_it_after_it_slept_under_it() {
     assert!(matches!(l.phase, Phase::Awake { .. }) && l.held_until_ms() == back + 3_500 + IDLE_MS, "held IDLE_MS from the tab's opening: {l:?}");
 }
 
+/// A turn on `l` (a keepalive opened at `at`, closed a second on), and the
+/// save its end asks for once it settles, answered as the DO does: when
+/// that save was asked.
+fn turn_saved_at(l: &mut Lifecycle, at: i64) -> i64 {
+    let g = l.generation();
+    l.apply(Event::Opened { socket: Socket::Keepalive }, at);
+    l.apply(Event::Closed { socket: Socket::Keepalive }, at + 1_000);
+    let asked = at + 1_000 + SAVE_SETTLE_MS;
+    assert_eq!(l.apply(Event::Alarm, asked).actions.last(), Some(&Action::Hold { generation: g }));
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, asked + 100));
+    l.apply(Event::Saved { generation: g, seq }, asked + 200);
+    asked
+}
+
+/// Goal (review, 2026-11-18): a person's use of an open port tab is heard
+/// a minute apart at most (`TAB_USED_EVERY_MS`), so one after a save may
+/// not be heard when its container stops: a stop within that minute of a
+/// use heard before the save is a crash, its loss told, never a quiet
+/// sleep that drops it unsaid. A save past that minute holds all it did:
+/// the same stop is a sleep. On the reviewed head it was a quiet sleep.
+/// Method: a use, a save inside its minute, then the container's exit.
+#[test]
+fn a_tab_use_not_heard_yet_is_work_at_a_stop() {
+    let mut l = Lifecycle::new();
+    let g = started(&mut l, T);
+    l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
+    l.apply(Event::TabUsed, T + 60_000);
+    let saved = turn_saved_at(&mut l, T + 61_000);
+    assert!(saved < T + 60_000 + TAB_USED_EVERY_MS, "the save is within the use's minute");
+    let s = l.apply(Event::Exited { generation: g }, saved + 5_000);
+    let ended = s.ended.expect("a life ends");
+    assert_eq!((ended.by, ended.quiet, ended.unchanged), (LifeEnd::Exit, false, false), "a crash, its loss told: {ended:?}");
+    // past the minute, a save holds every use: the same stop is a sleep
+    let mut l = Lifecycle::new();
+    let g = started(&mut l, T);
+    l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
+    l.apply(Event::TabUsed, T + 60_000);
+    let saved = turn_saved_at(&mut l, T + 60_000 + TAB_USED_EVERY_MS);
+    let s = l.apply(Event::Exited { generation: g }, saved + 5_000);
+    let ended = s.ended.expect("a life ends");
+    assert_eq!((ended.by, ended.saved, ended.quiet), (LifeEnd::Sleep, true, true), "{ended:?}");
+}
+
+/// Goal (review, 2026-11-18): its person back at a port tab as its idle
+/// sleep saves (past the hold, which a use cancels) keeps it awake: what
+/// they do now is in no save, and its stop would drop it unsaid. Its save
+/// is kept, and it is held from that use. Its owner's sleep goes on: they
+/// asked. On the reviewed head the idle sleep stopped, saved.
+#[test]
+fn a_tab_used_as_an_idle_sleep_saves_keeps_it_awake() {
+    for owner in [false, true] {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
+        let at = match owner {
+            false => {
+                let at = T + 10_000 + IDLE_MS;
+                assert_eq!(l.apply(Event::Alarm, at).actions.last(), Some(&Action::Sleep { generation: g }), "idle, it sleeps");
+                at
+            }
+            true => {
+                l.apply(Event::Sleep, T + 20_000);
+                T + 20_000
+            }
+        };
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 500));
+        assert!(l.apply(Event::TabUsed, at + 2_000).actions.is_empty(), "its save under way: nothing at once");
+        let s = l.apply(Event::Saved { generation: g, seq }, at + 4_000);
+        if owner {
+            assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }], "its owner's sleep goes on");
+            continue;
+        }
+        assert_eq!(s.actions, vec![Action::Unhold { generation: g }], "awake again, held no more: {s:?}");
+        assert_eq!((l.phase.clone(), l.held_until_ms(), s.note), (Phase::Awake { generation: g, since_ms: at + 4_000 }, at + 2_000 + IDLE_MS, SaveNote::Clear));
+        // what it does from here is saved as any use is: no further use, it sleeps again, saved
+        let (_, slept) = run_alarms(&mut l, at + 3 * IDLE_MS);
+        assert_eq!(slept, Some(at + 2_000 + IDLE_MS), "it sleeps IDLE_MS after that use");
+    }
+}
+
+/// Goal (review, 2026-11-18): a deploy can cut a tab's socket without a
+/// close the lifecycle hears, so it counts that tab open for good. A tab
+/// used since the last save asked is saved once its close settles, however
+/// many it still counts; one never used asks no save while another is
+/// counted, as before. On the reviewed head only the last tab's close saved.
+#[test]
+fn closing_a_used_tab_saves_whatever_else_is_counted() {
+    let mut l = Lifecycle::new();
+    started(&mut l, T);
+    // one cut by a deploy: counted open, never closed
+    l.apply(Event::Opened { socket: Socket::Tab }, T + 5_000);
+    l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
+    let s = l.apply(Event::Closed { socket: Socket::Tab }, T + 20_000);
+    assert_eq!(l.save_due_ms, None, "a tab never used asks no save while another is counted: {s:?}");
+    l.apply(Event::Opened { socket: Socket::Tab }, T + 30_000);
+    l.apply(Event::TabUsed, T + 40_000);
+    let s = l.apply(Event::Closed { socket: Socket::Tab }, T + 50_000);
+    assert_eq!((l.tabs, l.save_due_ms, s.alarm_ms), (1, Some(T + 50_000 + SAVE_SETTLE_MS), Some(T + 50_000 + SAVE_SETTLE_MS)), "its work ended: saved once it settles");
+    let (saves, _) = run_alarms(&mut l, T + 50_000 + SAVE_SETTLE_MS);
+    assert_eq!(saves, vec![T + 50_000 + SAVE_SETTLE_MS]);
+}
+
 /// Goal: a pre-wake that nothing follows stops after a minute, and one
 /// a record follows holds the full twenty.
 #[test]

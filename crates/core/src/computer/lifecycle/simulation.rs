@@ -37,7 +37,7 @@ fn simulated_interleavings_keep_the_invariants() {
     }
     // the sim's bound is shorter than the default, so it is reached
     let rules = Rules { unsaved_max_ms: 10 * 60_000 };
-    let mut reached = [0u32; 18];
+    let mut reached = [0u32; 19];
     // the images deploys pin, one after another and back
     let deployed = [IMAGE, "registry/stub@sha256:2", "registry/stub@sha256:3"];
     for seed0 in 1..=8u64 {
@@ -133,7 +133,7 @@ fn simulated_interleavings_keep_the_invariants() {
             let start_failed = !own_destroy && matches!(&event, Event::Exited { generation: e } | Event::StartFailed { generation: e, .. } if matches!(l.phase, Phase::Starting { generation, .. } if generation == *e));
             let failures_before = l.failures;
             // an exit nothing asked for, of an idle life whose work is kept
-            let unasked_sleep = matches!(&event, Event::Exited { generation: e } if matches!(l.phase, Phase::Awake { generation, .. } if generation == *e)) && l.idle_and_kept();
+            let unasked_sleep = matches!(&event, Event::Exited { generation: e } if matches!(l.phase, Phase::Awake { generation, .. } if generation == *e)) && l.idle_and_kept(now);
             let coming_up = matches!(&event, Event::Ready { generation: e } if matches!(l.phase, Phase::Starting { generation, .. } if generation == *e));
             let kept = match &event {
                 Event::Saved { generation: e, seq } if l.running() == Some(*e) => matches!(l.saving, Some(Saving::Save { seq: s, .. }) if s == *seq).then_some(*seq),
@@ -149,6 +149,8 @@ fn simulated_interleavings_keep_the_invariants() {
                     _ => false,
                 };
             let cancels = (matches!(&event, Event::Opened { socket: Socket::Keepalive }) || (matches!(&event, Event::TabUsed) && l.tabs > 0)) && matches!(l.phase, Phase::Sleeping { owner: false, .. }) && matches!(l.saving, Some(Saving::Hold { .. }));
+            // an idle sleep's save answered, a port tab used since it began
+            let came_back = matches!(&event, Event::Saved { generation: e, .. } if l.running() == Some(*e)) && matches!(l.phase, Phase::Sleeping { owner: false, .. }) && l.tab_used_ms >= l.save_asked_ms && matches!(l.saving, Some(Saving::Save { .. }));
             let free_before = l.unmetered;
             let running_before = l.running();
             if matches!(l.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) && now > l.shown_up_ms() + ALARM_LATE_MS {
@@ -170,9 +172,18 @@ fn simulated_interleavings_keep_the_invariants() {
                 saves.saved(of, rec(&format!("b{seed0}-{seq}")), now, held);
                 newest_save_ms = at;
                 reached[0] += 1;
-                (life_kept, life_save) = (at, Some(format!("b{seed0}-{seq}")));
+                // what a life did is kept in it: a start that never came up
+                // (put to sleep as it started, its save failing, awake with
+                // no life of its own) is no life, and holds none of one's
+                if came_up.contains(&of) {
+                    (life_kept, life_save) = (at, Some(format!("b{seed0}-{seq}")));
+                }
             }
             reached[3] += u32::from(cancels);
+            if came_back && s.actions.iter().any(|a| matches!(a, Action::Unhold { .. })) {
+                assert!(matches!(l.phase, Phase::Awake { .. }) && l.wanted(now), "its person back as its idle sleep saved: awake, held (seed {seed0}, step {step}): {l:?}");
+                reached[18] += 1;
+            }
             if let Some(e) = s.ended {
                 assert!(came_up.contains(&e.generation), "only a start that came up ends a life (seed {seed0})");
                 assert!(ended.insert(e.generation), "a life ends once (seed {seed0})");
@@ -257,6 +268,16 @@ fn simulated_interleavings_keep_the_invariants() {
                     }
                     Action::Save { generation: g, held, seq } => {
                         assert!(taken.insert(*seq, (*g, now, *held)).is_none(), "a save's number is asked for once");
+                        // its person comes back to a port tab as a sleep
+                        // saves, heard before its save's answer or after
+                        if matches!(l.phase, Phase::Sleeping { .. }) && l.ready && rng(&mut seed).is_multiple_of(2) {
+                            for e in [Event::Opened { socket: Socket::Tab }, Event::TabUsed] {
+                                let heard = l.apply_with(e, now, &rules);
+                                assert!(heard.actions.is_empty() && heard.ended.is_none(), "a save under way: nothing at once (seed {seed0}): {heard:?}");
+                            }
+                            life_worked = now;
+                            last_tab_work_ms = last_tab_work_ms.max(now);
+                        }
                         if rng(&mut seed).is_multiple_of(fails_one_in) {
                             pending.push(Event::SaveFailed { generation: *g, seq: *seq, why: "sim".into() });
                             reached[1] += 1;
@@ -375,5 +396,5 @@ fn simulated_interleavings_keep_the_invariants() {
         assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
     }
     // every kind of save the lifecycle has was reached, across the seeds
-    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over, idle exits slept, tab work due, slept under an open tab, tab use saves due: {reached:?}");
+    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over, idle exits slept, tab work due, slept under an open tab, tab use saves due, idle sleeps whose save their person came back to: {reached:?}");
 }

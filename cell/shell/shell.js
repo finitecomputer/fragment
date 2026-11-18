@@ -2198,6 +2198,9 @@ addEventListener("message", (event) => {
 // of the frame's own chat.
 addEventListener("message", (event) => {
   if (event.data?.fragment !== KIND.said) return;
+  // a message sent from a chat it frames: its person is at the shell, so
+  // the screen beside it keeps streaming (its frame's keys reach no one else)
+  if (frameOfWindow(event.source)) screensActive();
   const name = frameOfWindow(event.source)?.dataset.fragment;
   if (name && byName(name)?.kind === "chat" && byName(name).archived) setArchived(name, false);
 });

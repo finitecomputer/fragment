@@ -730,7 +730,8 @@ struct TestLever {
 }
 
 /// `computer/tab` (entry.mjs, `port`): a port tab opened, closed, or used
-/// (`used`: its page spoke, told a minute apart at most).
+/// (`used`: its page spoke, told `TAB_USED_EVERY_MS` apart at most; on a
+/// close, a use not told before it).
 #[derive(Deserialize)]
 struct Tab {
     open: bool,
@@ -2975,12 +2976,13 @@ impl ComputerCell {
             "computer/tab" => {
                 let b: Tab = body_json(&mut req).await?;
                 let socket = Socket::Tab;
-                self.drive(match (b.open, b.used) {
-                    (true, true) => Event::TabUsed,
-                    (true, false) => Event::Opened { socket },
-                    (false, _) => Event::Closed { socket },
-                })
-                .await?;
+                // a close that carries a use not told yet: the use, then the close
+                if b.used {
+                    self.drive(Event::TabUsed).await?;
+                }
+                if !(b.open && b.used) {
+                    self.drive(if b.open { Event::Opened { socket } } else { Event::Closed { socket } }).await?;
+                }
                 json_response(&json!({ "ok": true }))
             }
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
@@ -3507,7 +3509,8 @@ impl ComputerCell {
         if !matches!(life.phase, Phase::Awake { .. }) {
             self.wake(Wake::Tab).await?;
         }
-        let out = self.call("port", &[JsValue::from_f64(f64::from(port)), JsValue::from(req.inner())]).await?;
+        let every = JsValue::from_f64(fragment_core::computer::TAB_USED_EVERY_MS as f64);
+        let out = self.call("port", &[JsValue::from_f64(f64::from(port)), JsValue::from(req.inner()), every]).await?;
         let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the port answered no Response"))?;
         Ok(Response::from(resp))
     }

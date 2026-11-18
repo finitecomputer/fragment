@@ -27,7 +27,8 @@ export const USES = Object.freeze(["press", "move"]);
 
 // live: streaming; paused: stopped for want of anyone, its computer up;
 // gone: its sockets closed, opened again only by a press; waking: a press
-// opened them, and the page waits to hear whether they came up.
+// opened them, and the page waits to hear whether they came up (another
+// press tries its stream again).
 export function attention({ now, setTimer, clearTimer, pause, resume, wake, pauseMs = PAUSE_MS }) {
   if (!(pauseMs > 0)) throw new Error("a pause is a span of time");
   let state = "live";
@@ -58,6 +59,10 @@ export function attention({ now, setTimer, clearTimer, pause, resume, wake, paus
       } else if (state === "gone" && kind === "press") {
         state = "waking";
         wake();
+      } else if (state === "waking" && kind === "press") {
+        // a press while it waits: a stream that has not come is tried
+        // again (its sockets are open; the page opens only what is not)
+        resume();
       }
     },
     // its sockets came up after a press woke them: live, its pause counted

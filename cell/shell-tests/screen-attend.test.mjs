@@ -90,10 +90,14 @@ test("a screen whose sockets went opens them again only on its person's press, o
   assert.deepEqual([s.a.state(), s.did.wake], ["gone", 0], "a hand passing over it wakes nothing");
   s.a.used("press");
   assert.deepEqual([s.a.state(), s.did.wake], ["waking", 1], "a press opens them, once");
-  s.a.used("press");
   s.a.used("move");
-  assert.equal(s.did.wake, 1, "presses while they open open nothing more");
+  assert.deepEqual([s.did.wake, s.did.resume], [1, 0], "a hand passing while they open opens nothing");
   assert.equal(s.a.attended(), true, "a stream slow to come may try again, for its person");
+  // its stream never came, its tries ran out: stuck no longer than the next press
+  s.by(PAUSE_MS);
+  assert.deepEqual([s.a.state(), s.a.attended()], ["waking", false], "no try by itself past PAUSE_MS");
+  s.a.used("press");
+  assert.deepEqual([s.a.state(), s.did.wake, s.did.resume, s.a.attended()], ["waking", 1, 1, true], "a press tries its stream again (the page opens only what is not open), never its sockets twice");
   // replay: they did not come up (still starting, say): the next press tries again
   s.a.gone();
   s.by(DAY);
@@ -101,6 +105,8 @@ test("a screen whose sockets went opens them again only on its person's press, o
   s.a.used("press");
   s.a.up();
   assert.deepEqual([s.a.state(), s.did.wake], ["live", 2]);
+  s.a.up();
+  assert.equal(s.a.state(), "live", "an up heard twice is the same");
   s.by(PAUSE_MS - 1);
   assert.equal(s.a.state(), "live", "its pause counts from that press");
   s.by(1);

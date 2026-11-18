@@ -49,6 +49,13 @@ pub const RETRY_PAUSE_MS: i64 = 5_000;
 /// After the guest's last keepalive closes, a save is asked for this much
 /// later, unless one opens first: turns back to back save once.
 pub const SAVE_SETTLE_MS: i64 = 30_000;
+/// A port tab's use (a message from its page) is told to the lifecycle at
+/// most this often, the first at once and the rest at the window's end or
+/// its tab's close (cell/entry.mjs, `#used`: one lifecycle write a minute
+/// for a person at work, not one a keystroke). So a use the lifecycle has
+/// not heard yet is never more than this after the last it heard, while
+/// that tab stays open (`Lifecycle`'s `tab_used_ms`).
+pub const TAB_USED_EVERY_MS: i64 = 60_000;
 /// While a keepalive stays open, it is saved this often (Cloudflare's
 /// auto-save guide: a sandbox that never goes idle is saved on a timer).
 pub const SAVE_EVERY_MS: i64 = 15 * 60_000;
@@ -107,6 +114,7 @@ pub const KEEPALIVES_LOST_MAX: u32 = 16;
 const _: () = assert!(PREWAKE_MS < IDLE_MS, "a pre-wake holds less than a record");
 const _: () = assert!(RETRY_PAUSE_MS << STARTS_FAILED_MAX < START_DEADLINE_MS, "retries stay within a start's deadline");
 const _: () = assert!(SAVE_SETTLE_MS < IDLE_MS, "work that ended is saved before an idle sleep would save it");
+const _: () = assert!(TAB_USED_EVERY_MS < IDLE_MS && TAB_USED_EVERY_MS < SAVE_EVERY_MS, "a tab in use is heard well within its hold and its saves");
 const _: () = assert!(SAVE_RETRY_MS < SAVE_EVERY_MS && SAVE_EVERY_MS < UNSAVED_MAX_MS_DEFAULT, "a failed save is tried again within its bound");
 const _: () = assert!(HOLD_WAIT_MS < HOLD_DEADLINE_MS, "a hold's wait fits its deadline");
 const _: () = assert!(SAVES_KEPT >= 2, "a save to fall back to");

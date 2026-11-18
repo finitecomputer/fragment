@@ -200,6 +200,11 @@ pub struct Lifecycle {
     /// as one is while a keepalive is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     used_since_ms: Option<i64>,
+    /// When a person's use of its port tabs was last heard (`TabUsed`): one
+    /// since may not be heard yet, up to `TAB_USED_EVERY_MS` after it,
+    /// while a tab is open (`Lifecycle::tab_unheard_ms`). 0 for none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    tab_used_ms: i64,
     /// When this life last ran something that may change its files: a
     /// turn (a keepalive opened or closed) or a person's use of a port tab
     /// (`changed`). Narrower than `worked_ms`, which a tab's opening or a
@@ -249,6 +254,7 @@ impl Lifecycle {
             owed_ms: None,
             opened_ms: 0,
             used_since_ms: None,
+            tab_used_ms: 0,
             changed_ms: None,
         }
     }
@@ -345,11 +351,16 @@ impl Lifecycle {
     }
 
     /// A person used one of its open port tabs (its page spoke): work, held
-    /// `IDLE_MS` as a tab's opening is, and counted for its saves.
+    /// `IDLE_MS` as a tab's opening is, and counted for its saves; for a
+    /// start that came up only, as all work is (`worked`).
     fn tab_used(&mut self, now_ms: i64) {
         assert!(self.tabs > 0, "a use is of a tab it counts open");
+        if !self.ready {
+            return;
+        }
         self.worked(now_ms);
         self.changed(now_ms);
+        self.tab_used_ms = self.tab_used_ms.max(now_ms);
         if self.used_since_ms.is_none_or(|since| since < self.save_asked_ms) {
             self.used_since_ms = Some(now_ms);
         }
@@ -594,7 +605,7 @@ impl Lifecycle {
                 self.failed(format!("its container kept stopping: start {generation} stopped before it was ready"), now_ms);
             }
             // stopped unasked while idle, all it did kept: a sleep
-            (Phase::Awake { generation, .. }, Event::Exited { generation: g }) if g == generation && self.idle_and_kept() => self.slept_unasked(now_ms, &mut step),
+            (Phase::Awake { generation, .. }, Event::Exited { generation: g }) if g == generation && self.idle_and_kept(now_ms) => self.slept_unasked(now_ms, &mut step),
             (Phase::Awake { generation, .. }, Event::Exited { generation: g }) if g == generation => {
                 // a guest that died busy had turns open: its next life ends
                 // them, so it is held as a record holds it, and starts again
@@ -653,8 +664,19 @@ impl Lifecycle {
                     }
                 }
                 self.saved(now_ms, &mut step);
-                self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
-                step.actions.push(Action::Stop { generation, saved: true });
+                if matches!(self.phase, Phase::Sleeping { owner: false, .. }) && self.tab_used_ms >= self.save_asked_ms {
+                    // its person came back to a port tab as its idle sleep
+                    // saved (its hold, which a use cancels, was over): what
+                    // they do now is in no save, so it stays awake, held from
+                    // that use, as a turn would keep it
+                    self.phase = Phase::Awake { generation, since_ms: now_ms };
+                    self.saving = None;
+                    self.hold(self.tab_used_ms + IDLE_MS);
+                    step.actions.push(Action::Unhold { generation });
+                } else {
+                    self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
+                    step.actions.push(Action::Stop { generation, saved: true });
+                }
             }
             (Phase::Awake { generation, .. }, Event::SaveFailed { generation: g, seq, why }) if g == generation && self.answers(seq) => {
                 // awake, it is tried again after a pause; a sleep saves anyway
@@ -733,7 +755,11 @@ impl Lifecycle {
                 if matches!(self.phase, Phase::Starting { .. } | Phase::Awake { .. }) {
                     self.hold(now_ms + IDLE_MS);
                 }
-                if was == 1 && matches!(self.phase, Phase::Awake { .. }) {
+                // a tab used since the last save asked: its person's work
+                // through it ended, whatever other tabs it counts (one a
+                // deploy cut may be counted still)
+                let used = socket == Socket::Tab && was > 0 && self.used_since_ms.is_some_and(|since| since >= self.save_asked_ms);
+                if (was == 1 || used) && matches!(self.phase, Phase::Awake { .. }) {
                     // work ended, its turns' or what its owner did through its
                     // ports: it is saved once it settles (a close within it
                     // puts that off, so a burst of them saves once)
