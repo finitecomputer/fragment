@@ -215,7 +215,12 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   `DISK_TOLD_FREE_MAX` (5 GB) free: the room left, told until a read finds
   clearly more (at most `DISK_CLEAR_USED_PCT`, 70%, used, or at least
   `DISK_CLEAR_FREE_MIN`, 6 GB, free), so a disk at the edge never shows
-  and clears it in turn. Each read logs a `disk` line of its own.
+  and clears it in turn. Each read logs a `disk` line of its own. It
+  tells its owner to ask their agent to move big files to storage: the
+  agent reads the same disk (`df`, the relay hint's `DISK`), and its
+  `disk-space-finite` skill makes room with `fragment offload`, which
+  removes a file only once its copy in a members-only fragment of the
+  owner's reads back as it was (cli/GUIDE.md, "Moving files off a disk").
 - `unsaved`: this life's saves are failing (a sleep's at once, awake ones
   from the second in a row): since when its work is in no save, and when
   the bound stops it.
