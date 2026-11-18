@@ -1111,8 +1111,11 @@ async fn begin(cfg: &ClaudeConfig, ts: &TurnStart, cwd: &Path, id: &str, proc: &
     }
     let p = proc.as_mut().expect("started");
     let started = p.started;
-    if let Err(e) = write(&mut p.stdin, &user_message(&message)).await {
-        crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() });
+    match write(&mut p.stdin, &user_message(&message)).await {
+        Ok(()) => {
+            let _ = events.send(Event::Taken { turn: ts.turn.clone() }).await;
+        }
+        Err(e) => crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() }),
     }
     *turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), drafted_at: None, draft_due: false, calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false });
 }

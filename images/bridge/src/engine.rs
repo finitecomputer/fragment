@@ -2213,7 +2213,7 @@ impl Engine {
                 Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } | Event::Interim { turn, .. } => Some(turn.clone()),
                 Event::Called { turn, .. } | Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
                 Event::Child { change: ChildChange::Started { turn, .. }, .. } => Some(turn.clone()),
-                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } | Event::Child { change: ChildChange::Ended, .. } => None,
+                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } | Event::Child { change: ChildChange::Ended, .. } | Event::Taken { .. } => None,
             }
         };
         if let Some(id) = turn_of(&event) {
@@ -2240,6 +2240,8 @@ impl Engine {
             }
         }
         match event {
+            // the driver's (crate::seen), which keeps it from here
+            Event::Taken { .. } => {}
             Event::Working(working) => self.runtimes.get_mut(from).expect("checked").working = working,
             Event::Connected(connected) => {
                 let r = self.runtimes.get_mut(from).expect("checked");

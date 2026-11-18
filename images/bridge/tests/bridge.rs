@@ -1859,6 +1859,42 @@ async fn a_recap_that_did_not_read_is_told_at_the_next_turn() {
     bridge.stop().await;
 }
 
+/// Goal (M17; Codex on #1358, round 2): a runtime whose journal reads
+/// back too far to say whether it is behind (another agent's records fill
+/// `work`) keeps its marker, so the turn after, nearer, is told the chat.
+#[tokio::test]
+async fn a_marker_stays_when_the_journal_cannot_say() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("marker-unknown");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    let one = said_and_ended(&fake, &chat, "one").await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::lose_memory(&dir);
+    // more of another's records on `work` than a note reads back
+    fake.with(|w| {
+        for i in 0..fragment_bridge::limits::NOTE_SCAN_RECORDS_MAX + 50 {
+            w.append(&chat, "work", "npub1rowan", json!({ "kind": "rowan.busy", "n": i }));
+        }
+    });
+    let bridge = support::start_killable(cfg, support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    let two = said_and_ended(&fake, &chat, "two").await;
+    assert_eq!(marker(&dir, &chat), None, "it could not say: its marker stays");
+    let three = said_and_ended(&fake, &chat, "three").await;
+    fake.with(|w| {
+        assert_eq!(reply_text(w, &chat, &two), "echo: [paul] two");
+        let told = reply_text(w, &chat, &three);
+        assert!(told_the_chat(&told, "three", "\nYour owner: two\nYou: echo: [paul] two"), "{told}");
+    });
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(three.as_str()));
+    let _ = one;
+    bridge.stop().await;
+}
+
 /// Goal (M17; Codex on #1358): a turn handed while the computer is held
 /// (claimed as the hold came) moves its runtime's marker only once the hold
 /// is gone, so a save never holds a marker newer than the runtime's own

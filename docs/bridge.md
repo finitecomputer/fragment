@@ -228,7 +228,7 @@ it. Then the runtime has forgotten turns the chat's records hold (Paul,
 The runtime says when it is behind (`seen.rs`). Beside its memory of
 each agent (`Runtime::memory`: the profile; Claude Code's project
 directory), the bridge keeps one marker per chat, `fragment-seen/<chat>`,
-naming the turn it last handed the runtime there. The marker goes back,
+naming the turn the runtime last took there. The marker goes back,
 and is lost, exactly when that memory does. As it hands a turn, the
 bridge reads the chat's `work` back from the turn's claim
 (`note::behind`). If a turn of the agent's there ran after the marker's
@@ -236,21 +236,24 @@ turn, or there is no marker, the runtime is behind. Refusals never
 reached a runtime and don't count; a stop does (its words are on
 `chat`). A chat the agent never took a turn in is behind nothing, and a
 `/new` is a turn like any other. A behind runtime's turn is told the
-chat (`note::recap`), and once it is handed the marker names it. So a
+chat (`note::recap`), and once the runtime has the turn
+(`Event::Taken`: Hermes acked it, Claude Code was given it), or ended it
+without taking it, the marker names it. So a
 sleep before anyone writes in a chat loses nothing, and a profile lost
 alone is noticed. In the end state the agent fragment compares, and the
 marker stays where it is.
 
 - **A read that failed** (the journal, or the recap, answered too
-  slowly or not at all) leaves the marker as it was, so the next turn
-  asks again.
+  slowly or not at all), or one that does not reach back far enough to
+  say, leaves the marker as it was, so the next turn asks again.
 - **Under a hold** a marker moves only once the hold is gone, so a save
   never holds a marker newer than Hermes' own copies, which the hold
   took first.
 - **The runtime's user may change its memory's directory**, and the
-  bridge is root. It follows no link there, reads only a plain file, and
-  writes a file of its own making. A directory it makes is its parent's
-  owner's.
+  bridge is root. Each directory is opened once, never through a link,
+  and everything in it is done relative to it. It reads only a plain
+  file and writes a file of its own making. A directory it makes is its
+  parent's owner's.
 - **No marker at all** means a fresh computer or a lost memory, and also,
   once, every chat on a computer that first runs this release. So the
   recap's head says the memory "is behind, or may be".

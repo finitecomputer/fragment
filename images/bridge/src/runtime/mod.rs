@@ -452,6 +452,11 @@ pub enum Event {
     /// next message in its chat, which the bridge hands it (`Command::Tell`)
     /// instead of queueing it as a turn behind this one.
     Asked { turn: String },
+    /// The runtime holds the turn in its own memory now (Relay: Hermes
+    /// acked its inbound; Claude Code: its process was given the message;
+    /// the scripted agent: at once): the marker of its memory may name it
+    /// (crate::seen; the driver's, never the engine's).
+    Taken { turn: String },
     /// The turn is over.
     End { turn: String, outcome: crate::records::Outcome },
     /// Something the runtime said with no turn running (a reminder it set):

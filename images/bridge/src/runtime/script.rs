@@ -256,6 +256,7 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
         turns.retain(|_, tx| !tx.is_closed());
         match c {
             Command::Start(ts) => {
+                let _ = io.events.send(Event::Taken { turn: ts.turn.clone() }).await;
                 let (tx, rx) = mpsc::channel(8);
                 turns.insert(ts.turn.clone(), tx);
                 tokio::spawn(turn(cfg.clone(), *ts, rx, io.events.clone()));

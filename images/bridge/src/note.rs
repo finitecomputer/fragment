@@ -160,7 +160,7 @@ pub fn behind(work: &[Record], agent: &str, seen: Option<&str>, from_start: bool
         if seen == Some(turn) {
             return Some(false);
         }
-        if !ends.iter().any(|(t, e)| *t == turn && refused(e)) {
+        if !ends.iter().find(|(t, _)| *t == turn).is_some_and(|(_, e)| refused(e)) {
             return Some(true);
         }
     }

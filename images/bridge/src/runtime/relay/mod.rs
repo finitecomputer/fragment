@@ -923,6 +923,7 @@ impl Loop {
                             let _ = self.send(frame);
                         }
                         crate::ev!("relay.acked", { "turn": buffer_id });
+                        self.emit(Event::Taken { turn: buffer_id.clone() }).await;
                     }
                 } else {
                     self.answers.retain(|a| a.buffer != buffer_id);
