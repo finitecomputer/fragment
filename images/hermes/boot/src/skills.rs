@@ -85,8 +85,9 @@ const COMPUTER_PAGE: &str = include_str!("computer.md");
 const PLATFORM_DESCRIPTION: &str = "You are an agent on a Fragment computer: what that is, and the `fragment` CLI in your terminal, which acts as you. Load it before you list, read, make, change, deploy or share your owner's fragments (apps, sites, brains, chats), when asked what you can do here, to ask another of your owner's agents (`fragment ask`), for anything later or recurring (`fragment schedule`), to search past conversations and brains (`fragment search`), and for your owner's connections (Google: GOOGLE_OAUTH_ACCESS_TOKEN) or your desktop.";
 /// The platform skill is a page or two, not a manual. 20 KiB since
 /// 2026-10-22: the computer's page's "Files your owner sends you" took it
-/// past 16 KiB, which it had all but reached.
-pub const PLATFORM_MAX_BYTES: usize = 20 * 1024;
+/// past 16 KiB, which it had all but reached. 21 KiB since 2026-11-18:
+/// what a sleep ends took it past 20 KiB, which it had reached exactly.
+pub const PLATFORM_MAX_BYTES: usize = 21 * 1024;
 
 /// The platform skill: `cli_skill` (what `fragment skill` prints, a skill
 /// named `fragment`) with the computer's page before its body, and the
@@ -731,7 +732,7 @@ mod tests {
     #[test]
     fn an_agent_is_told_a_sleep_ends_its_processes() {
         let page = COMPUTER_PAGE.split_whitespace().collect::<Vec<_>>().join(" ");
-        for said in ["a sleep or a restart ends every process you started: a server, a background command, a download", "Nothing starts them again", "What must outlive your turn is a routine, or an app"] {
+        for said in ["A sleep or a restart ends every process you started (a server, a background command, a loop, crontab, `hermes cron`), and nothing starts it again", "a schedule on yourself, kept through every restart and sleep", "What should run without you (frequent checks, or for others) is an app"] {
             assert!(page.contains(said), "computer.md says {said}");
         }
     }
