@@ -16,9 +16,9 @@ use std::collections::BTreeMap;
 
 use fragment_core::codestorage::TreeEntry;
 use fragment_core::tree::{self, Indexed};
-use fragment_core::{face, manifest, npub, site};
+use fragment_core::{manifest, npub, site};
 use fragment_proto::{
-    limits, valid_listed_field, valid_listed_kind, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, FragmentKind, IdentityKind, ListedDecl, OpDecl, OpKind, Role,
+    limits, valid_listed_field, valid_listed_kind, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, IdentityKind, ListedDecl, OpDecl, OpKind, Role,
     StorageAccess, TriggerDecl, TriggerOn,
 };
 use fragment_templates::{blessed, File};
@@ -529,8 +529,7 @@ impl FragmentCell {
         if self.pin("live")?.is_some() {
             return Ok(());
         }
-        let title = self.meta(MetaKey::TemplateTitle)?;
-        let bytes = crate::publish::blessed_manifest_bytes(&which, title.as_deref());
+        let bytes = crate::publish::blessed_manifest_bytes(&which);
         let manifest = manifest::parse(&bytes).map_err(|e| CellError::host(format!("the {which} template's own fragment.json: {e}")))?;
         assert_eq!(manifest.template.as_deref(), Some(which.as_str()), "a pending template's manifest names it");
         // test fleets: `hold-install` holds it here, its manifest read and
@@ -591,16 +590,6 @@ impl FragmentCell {
                 }
             }
         };
-        // an agent's picture, checked as a write of it is (docs/api.md, "An
-        // agent's name and picture"): a live commit with one that is not is refused
-        // (none before its first commit: a pending install's)
-        let picture = match (manifest.kind(), repo) {
-            (FragmentKind::Agent, Some((cs, repo))) => match self.read_picture(cs, repo, sha).await? {
-                Ok(p) => p,
-                Err(why) => return self.code_refused(sha, &why),
-            },
-            _ => None,
-        };
         // Installed triggers start their runs in the step that installs, so
         // the owner's standing (which blocks them past the overdraft) is
         // read before it, and only when there are any.
@@ -633,18 +622,11 @@ impl FragmentCell {
             Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template whose manifest was read is blessed")))?,
             None => self.del_meta(MetaKey::Blessed)?,
         }
-        let shown = match &picture {
-            Some((hash, mime)) => {
-                self.set_meta(MetaKey::Picture, &format!("{hash} {mime} {sha}"))?;
-                Some(face::picture_path(&self.must(MetaKey::Npub)?, hash))
-            }
-            None => {
-                self.del_meta(MetaKey::Picture)?;
-                // any other fragment's picture is its icon (icon.rs)
-                self.icon_shown(manifest.kind())?
-            }
-        };
-        self.face_is(manifest.kind(), manifest.title(), manifest.role(), shown.as_deref())?;
+        // its kind is its code's; its title and role its own (docs/api.md, "A
+        // fragment's name and an agent's picture"): a manifest's title is a
+        // default, taken by a face that has none
+        let now = self.face_now()?;
+        self.face_is(manifest.kind(), now.title.as_deref().or(manifest.title()), now.role.as_deref())?;
         // how its inbox knows a delivery, as its code says (InboxDecl)
         match &manifest.inbox {
             Some(i) => self.set_meta(MetaKey::InboxSecret, &i.stored())?,
@@ -757,22 +739,6 @@ impl FragmentCell {
             modules.insert(path, text);
         }
         Ok(Ok((source, modules, format!("app:{}", hex::encode(hasher.finalize())))))
-    }
-
-    /// An agent fragment's picture at live (`face::AGENT_PICTURE`): none,
-    /// its SHA-256 and type, checked as a write of it is, or why it is
-    /// refused.
-    async fn read_picture(&self, cs: &Cs<'_>, repo: &str, sha: &str) -> CellResult<Result<Option<(String, &'static str)>, String>> {
-        let path = face::AGENT_PICTURE;
-        let Some(row) = self.tree_row("live", path)? else { return Ok(Ok(None)) };
-        // a blob's pointer (1 MiB and up), or a file past the limit, is too large unread
-        let pointed = self.rows("SELECT size FROM pointers WHERE ref = 'live' AND path = ?", vec![path.into()])?.first().and_then(|r| r["size"].as_u64());
-        let size = pointed.unwrap_or(row.size);
-        if pointed.is_some() || size > limits::PICTURE_MAX_BYTES as u64 {
-            return Ok(Err(face::Refused::TooLarge(size).message(path)));
-        }
-        let bytes = cs.read(repo, sha, path, limits::PICTURE_MAX_BYTES).await?.unwrap_or_default();
-        Ok(face::check_picture(&bytes).map(|mime| Some((hex::encode(Sha256::digest(&bytes)), mime))).map_err(|r| r.message(path)))
     }
 
     fn code_refused(&self, sha: &str, why: &str) -> CellResult<()> {

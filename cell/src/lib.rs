@@ -580,8 +580,8 @@ pub(crate) fn picture_refused(r: fragment_core::face::Refused, what: &str) -> Ce
 
 /// `GET /api/identities/<npub>/picture`: anyone may see an identity's
 /// picture (a page shows it beside their name). A person's is the
-/// registry's; an agent's is its agent fragment's `avatar.png` at live,
-/// which that fragment answers (docs/api.md, "An agent's name and picture").
+/// registry's; an agent's is its agent fragment's icon, which that
+/// fragment answers (docs/api.md, "A fragment's name and an agent's picture").
 async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
     if !npub::is_identity(identity) {
         return Err(CellError::new(ErrorCode::NotFound, format!("{identity:?} is no identity")));

@@ -25,9 +25,10 @@
 
 use fragment_core::grants::Grants;
 use fragment_core::{connectors::Action, door, npub};
-use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
+use fragment_proto::{limits, valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
@@ -106,22 +107,67 @@ impl FragmentCell {
         policy.authorize(&owner, &agent, door, action).map_err(|why| CellError::new(ErrorCode::Forbidden, format!("door {door} {why}")))
     }
 
-    /// `calls::Picture`: an agent fragment's picture, for `GET
-    /// /api/identities/<npub>/picture`: its bytes from the commit live's
-    /// install checked them at (`MetaKey::Picture`: `<sha256> <type>
-    /// <commit>`), so a later commit never serves bytes no install checked.
+    /// `calls::Picture`: an agent's picture, for `GET
+    /// /api/identities/<npub>/picture`: its own icon (icon.rs), its bytes
+    /// as kept. One kept before its picture was its icon is taken first
+    /// (`take_picture`).
     pub(crate) async fn picture(&self) -> CellResult<Response> {
         let none = || CellError::new(ErrorCode::NotFound, "this agent has no picture");
         self.must(MetaKey::CreatedAt).map_err(|_| none())?;
-        let stored = self.meta(MetaKey::Picture)?.ok_or_else(none)?;
-        let [_, mime, commit] = stored.splitn(3, ' ').collect::<Vec<_>>()[..] else { return Err(CellError::host(format!("its stored picture {stored:?} is not `<sha256> <type> <commit>`"))) };
-        let upstream = self.cs()?.stream(&self.must(MetaKey::Repo)?, commit, fragment_core::face::AGENT_PICTURE).await?;
-        let headers = Headers::new();
-        headers.set("content-type", mime)?;
-        headers.set("cache-control", "public, max-age=300")?;
-        headers.set("x-content-type-options", "nosniff")?;
-        let (_, body) = upstream.into_parts();
-        Ok(Response::from_body(body)?.with_headers(headers))
+        self.take_picture().await?;
+        let sha = self.meta(MetaKey::Icon)?.ok_or_else(none)?;
+        let mut resp = self.icon_body(&crate::icon::Shown::Own(sha)).await?;
+        let h = resp.headers_mut();
+        h.set("cache-control", "public, max-age=300")?;
+        h.set("x-content-type-options", "nosniff")?;
+        Ok(resp)
+    }
+
+    /// An agent's picture as a release before kept it, until taken
+    /// (`MetaKey::Picture`: `<sha256> <type> <commit>`, its `avatar.png`
+    /// at that commit, which that install checked).
+    pub(crate) fn picture_untaken(&self) -> CellResult<Option<(String, String, String)>> {
+        let Some(stored) = self.meta(MetaKey::Picture)? else { return Ok(None) };
+        match stored.splitn(3, ' ').collect::<Vec<_>>()[..] {
+            [sha, mime, commit] if fragment_core::blob::valid_sha(sha) => Ok(Some((sha.into(), mime.into(), commit.into()))),
+            _ => Err(CellError::host(format!("its stored picture {stored:?} is not `<sha256> <type> <commit>`"))),
+        }
+    }
+
+    /// Takes an agent's picture kept as a release before kept it, once:
+    /// its bytes, read at the commit its install checked, kept as one of
+    /// its blobs and named as its icon, its row gone, an `events` row
+    /// saying so; its face's address names the same bytes, so it does not
+    /// move. Asked by its picture's fetch and by the alarm's daily pass, so
+    /// every row is taken within a day of this release (the debt ledger).
+    /// Asked twice at once, or again after a restart cut it short, it takes
+    /// it once: a blob is put by its hash, and the row is read again,
+    /// unchanged, after the awaits. Bytes git no longer holds as checked
+    /// are said and let go: there is nothing else to take.
+    pub(crate) async fn take_picture(&self) -> CellResult<()> {
+        let Some(untaken) = self.picture_untaken()? else { return Ok(()) };
+        let (sha, mime, commit) = &untaken;
+        let read = self.cs()?.read(&self.must(MetaKey::Repo)?, commit, fragment_core::face::AGENT_PICTURE, limits::PICTURE_MAX_BYTES).await?;
+        let kept = read.filter(|b| hex::encode(Sha256::digest(b)) == *sha && fragment_core::blob::served_type(mime) == Some(mime.as_str()));
+        let found = kept.is_some();
+        if let Some(bytes) = kept {
+            self.put_blob_typed(sha, bytes, Some(mime)).await?;
+        }
+        // taken meanwhile (another ask, a new icon or none): nothing more
+        if self.picture_untaken()?.as_ref() != Some(&untaken) {
+            return Ok(());
+        }
+        self.del_meta(MetaKey::Picture)?;
+        if !found {
+            self.event("picture.lost", "its avatar.png from before its picture was its icon is no longer in git as checked: it has no picture", json!({ "sha256": sha, "commit": commit }));
+            let now = self.face_now()?;
+            return self.face_is(now.kind, now.title.as_deref(), now.role.as_deref());
+        }
+        if self.meta(MetaKey::Icon)?.is_none() {
+            self.set_meta(MetaKey::Icon, sha)?;
+        }
+        self.event("picture.taken", "its picture is its icon now, taken from its avatar.png", json!({ "sha256": sha, "commit": commit }));
+        Ok(())
     }
 
     /// `computer/grants`: what this agent may use of its owner's

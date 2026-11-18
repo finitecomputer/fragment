@@ -1,20 +1,18 @@
-// A fragment's display name, kept in its manifest. Its address stays put.
-// Shared by Apps, chats and agents; the shell supplies its API and list.
+// A fragment's display name, kept by its cell (its face: docs/api.md, "A
+// fragment's name and an agent's picture"), set with no commit and no
+// deploy. Its address stays put. Shared by Apps, chats and agents; the
+// shell supplies its API and list.
 export function createTitles({ $, api, seg, byName, titleOf, reload, heard, ApiError }) {
-  async function retitle(name, title, message) {
-    const manifest = await api("GET", `/api/f/${seg(name)}/manifest`);
-    const old = manifest.meta?.title;
-    manifest.meta = { ...(manifest.meta ?? {}), title };
-    const files = [{ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" }];
-    // an agent's job says its new name where it said an old one, in the same
-    // commit: its name at main, and the one the shell's first job gave it
-    if (byName(name)?.kind === "agent") {
-      const job = await jobOf(name);
-      const renamed = job === null ? null : jobRenamed(job, [old, jobFirstName(job)], title);
-      if (renamed !== null) files.push({ path: JOB, text: renamed });
-    }
-    await api("POST", `/api/f/${seg(name)}/files`, { message, files });
-    await api("POST", `/api/f/${seg(name)}/deploy`, {});
+  // With `was`, only while its title is that (409 otherwise).
+  async function retitle(name, title, was) {
+    // an agent's job says its new name where it said an old one, in a
+    // commit of its own (on main, where its computer reads it): its name
+    // as its list says it, and the one the shell's first job gave it
+    const agent = byName(name)?.kind === "agent";
+    const job = agent ? await jobOf(name) : null;
+    const renamed = job === null ? null : jobRenamed(job, [byName(name)?.title, jobFirstName(job)], title);
+    await api("PUT", `/api/f/${seg(name)}/face`, was === undefined ? { title } : { title, was });
+    if (renamed !== null) await api("POST", `/api/f/${seg(name)}/files`, { message: "its job, renamed", files: [{ path: JOB, text: renamed }] });
   }
   // An agent's job (its SOUL.md) as its owner's rename leaves it (docs/api.md,
   // "An agent's name and picture"; `fragment_core::face::job_renamed`, which
@@ -90,7 +88,7 @@ export function createTitles({ $, api, seg, byName, titleOf, reload, heard, ApiE
     save.textContent = "Saving…";
     error.hidden = true;
     try {
-      await retitle(name, title, "rename");
+      await retitle(name, title);
       dialog.close();
       await reload();
     } catch (err) {

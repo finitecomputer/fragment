@@ -13,9 +13,10 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Meta {
+    /// The title a template's fragment starts with, and a page's Open
+    /// Graph title until its face names one (docs/api.md, "A fragment's
+    /// name and an agent's picture"): never its face itself.
     pub title: Option<String>,
-    /// An agent's role ("chief of staff"): its face's tag, beside its name.
-    pub role: Option<String>,
     pub description: Option<String>,
     pub image: Option<String>,
 }
@@ -180,14 +181,10 @@ impl Manifest {
         self.kind.unwrap_or_default()
     }
 
-    /// Its title, if its `meta` names one.
+    /// Its title, if its `meta` names one: a default, taken by a face
+    /// that has none.
     pub fn title(&self) -> Option<&str> {
         self.meta.as_ref().and_then(|m| m.title.as_deref())
-    }
-
-    /// Its role, if its `meta` names one (an agent's: `meta.role`).
-    pub fn role(&self) -> Option<&str> {
-        self.meta.as_ref().and_then(|m| m.role.as_deref())
     }
 }
 
@@ -228,7 +225,6 @@ pub fn on_template(own: &Manifest, blessed: &Manifest) -> Result<Manifest, Strin
         let theirs = blessed.meta.clone().unwrap_or_default();
         m.meta = Some(Meta {
             title: mine.title.clone().or(theirs.title),
-            role: mine.role.clone().or(theirs.role),
             description: mine.description.clone().or(theirs.description),
             image: mine.image.clone().or(theirs.image),
         });
@@ -542,8 +538,9 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         None | Some(Value::Null) => {}
         Some(meta @ Value::Object(_)) => {
             m.meta = Some(Meta {
-                title: text(meta, "title", limits::TITLE_MAX_CHARS)?,
-                role: text(meta, "role", limits::ROLE_MAX_CHARS)?,
+                // a default, never a refusal: one past its limit, or no
+                // text, names nothing (a face is set by its route)
+                title: text(meta, "title", limits::TITLE_MAX_CHARS).ok().flatten(),
                 description: text(meta, "description", 400)?,
                 image: text(meta, "image", 500)?,
             })
@@ -655,20 +652,19 @@ mod tests {
         assert!(on_template(&parse(b"{}").unwrap(), &blessed).is_err(), "only a fragment that names a template");
     }
 
-    /// Goal: an agent's role is its `meta.role`, a few words, its own over
-    /// its template's (decision for several agents, Paul, 2026-10-30).
+    /// Goal: a face is its cell's, never its manifest's (the audit's
+    /// move 4): a `meta.title` is a default a face with none takes, and a
+    /// face never refuses an install. Valid: a title up to its limit.
+    /// Invalid: one past it, or no text, names nothing and refuses
+    /// nothing; a `meta.role` (a release before's) is no one's.
     #[test]
-    fn an_agents_role_is_its_meta() {
-        let blessed = parse(br#"{"kind":"agent","meta":{"description":"An agent"}}"#).unwrap();
-        let own = parse(br#"{"template":"agent","meta":{"title":"Rowan","role":"project manager"}}"#).unwrap();
-        let m = on_template(&own, &blessed).unwrap();
-        assert_eq!((m.title(), m.role()), (Some("Rowan"), Some("project manager")));
-        assert_eq!(on_template(&parse(br#"{"template":"agent","meta":{"title":"Rowan"}}"#).unwrap(), &blessed).unwrap().role(), None, "none given, none");
-        let most = "r".repeat(limits::ROLE_MAX_CHARS);
-        assert_eq!(parse(format!(r#"{{"meta":{{"role":"{most}"}}}}"#).as_bytes()).unwrap().role(), Some(most.as_str()));
-        let refused = parse(format!(r#"{{"meta":{{"role":"{most}r"}}}}"#).as_bytes()).unwrap_err();
-        assert_eq!(refused, format!("meta.role is longer than {} characters", limits::ROLE_MAX_CHARS));
-        assert_eq!(parse(br#"{"meta":{"role":7}}"#).unwrap_err(), "meta.role must be a string");
+    fn a_manifests_title_is_a_default_and_refuses_nothing() {
+        let most = "t".repeat(limits::TITLE_MAX_CHARS);
+        assert_eq!(parse(format!(r#"{{"meta":{{"title":"{most}"}}}}"#).as_bytes()).unwrap().title(), Some(most.as_str()));
+        assert_eq!(parse(format!(r#"{{"meta":{{"title":"{most}t","description":"d"}}}}"#).as_bytes()).unwrap().title(), None, "too long: no default");
+        assert_eq!(parse(br#"{"meta":{"title":7}}"#).unwrap().title(), None, "no text: no default");
+        let old = parse(format!(r#"{{"template":"agent","meta":{{"title":"Rowan","role":"{}"}}}}"#, "r".repeat(limits::ROLE_MAX_CHARS + 1)).as_bytes()).unwrap();
+        assert_eq!(old.title(), Some("Rowan"), "a role, even past what a face takes, refuses nothing");
         assert_eq!(crate::face::role(Some("  ")), None, "a role of spaces is none: no blank tag");
         assert_eq!(crate::face::role(Some(" dev ")), Some("dev"));
     }
@@ -774,7 +770,7 @@ mod tests {
             let back = db.rows("SELECT value FROM meta WHERE key = 'inbox_secret'").expect("its row");
             assert_eq!(back[0]["value"].as_str().map(InboxDecl::from_stored), Some(Ok(decl)), "rolled forward, it reads as written");
         }
-        assert_eq!((newest, FRAGMENT.steps[8].name), (9, "inbox_forward_only"));
+        assert!(newest >= 9 && FRAGMENT.steps[8].name == "inbox_forward_only", "the inbox's step is step 9");
     }
 
     #[test]
@@ -1107,7 +1103,6 @@ mod tests {
             br#"{"operations":{"x":{"kind":"query","rol":"public"}}}"#,
             br#"{"operations":{"x":{"kind":"query","role":"admin"}}}"#,
             br#"{"operations":{"x":{"kind":"query","input":"string"}}}"#,
-            br#"{"meta":{"title":7}}"#,
             br#"{"operations":{"x":{"kind":"query","input":{"pattern":"^a"}}}}"#,
             br#"{"channels":{"events":{}}}"#,
             br#"{"operations":{"fetch":{"kind":"query"}}}"#,

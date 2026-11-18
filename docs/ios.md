@@ -56,7 +56,7 @@ The live service uses these routes already (`docs/api.md` is authoritative):
 | Earlier messages | `GET /api/f/{chat}/channels/chat?before=&limit=50`; never advance live cursors from this page |
 | List invalidation | `GET /api/fragments/watch`; refetch the authenticated list on `changed`, a burst as one read 200 ms after (the web's `LIST_SETTLE_MS`) |
 | What the person is told | `GET /api/notices` with every list read (a 404, a platform from before it: none): each notice drawn the same way whatever its `kind`, which is never read; an action posts its `body` to its `post` route, then reads again, or opens its `open` page; `until` is counted down to and the notice dropped as it passes; while an action of a notice is out, every action of it is off; a refused action says the server's words under its notice, and, once the notice is gone (an invite taken back), on a line of its own until OK; one that must be answered (`mustAnswer`) shows alone in a full-screen cover, never in the band, until the read after one of its actions has it no more, a read that failed said in it with Try again (`ios/Sources/Notices.swift`, as the web's band and its cover) |
-| Chat title | A chat of the person's still titled "New chat" with a message: `GET /api/f/{chat}/channels/chat?after=0&limit=20`, then its manifest's `meta.title` from its first line with words (48 characters at most), written and deployed only if the manifest still says "New chat" (the web's `titleFromFirst`) |
+| Chat title | A chat of the person's still titled "New chat" with a message: `GET /api/f/{chat}/channels/chat?after=0&limit=20`, then its face's title from its first line with words (48 characters at most), `PUT /api/f/{chat}/face` with `was: "New chat"`, so a rename made meanwhile is kept (the web's `titleFromFirst`) |
 | Launcher search | `GET /api/search?q=` → fragments by title/label and messages by text, archived included; a message result opens its conversation |
 | Read marker | `PUT /api/fragments/{chat}/seen`, after the visible chat catches up |
 | App URL | `GET /api/f/{name}/status` → `urls.canonical` |
@@ -200,8 +200,8 @@ still in flight for one no longer shown is never kept. A chat opened is loading
 shown at its end at once: never as an empty chat, nor its backlog streaming in. No
 turn is said to run while no connection is open, nor until each connection has
 read its `work`, so a catch-up's replayed start never shows as running. Titling
-checks the manifest it read, not its write, as the web's does: a rename landing
-between them is overwritten, as `POST files` takes no expectation. Its view observes what each part draws (rows, drafts,
+asks its face to take the title only while it is "New chat" (`was`), as the
+web's does: a rename landing meanwhile is kept. Its view observes what each part draws (rows, drafts,
 running turns), each set only when it changes, so a reply's words redraw that
 reply alone. Pictures are read once a session, kept by their versioned URL. Links
 in a message are found as the web's renderer finds them (bare http(s) URLs too)

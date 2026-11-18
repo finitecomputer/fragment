@@ -1,10 +1,10 @@
-// The agent's page: its name (the fragment's title), its picture
-// (`avatar.png`, else its image in its colour, by its identity as the shell
-// and its chats choose it), the model it runs (`runs`, below), its job
-// (`SOUL.md`) and the skills in its repo, read from the fragment's own
-// files (`__file`, `__files`). Its name and picture are changed from
-// Settings, or by the agent (`fragment agent`: docs/api.md, "An agent's
-// name and picture").
+// The agent's page: its name (the fragment's title), its picture (its
+// icon, as `__people` says it, else its image in its colour, by its
+// identity as the shell and its chats choose it), the model it runs
+// (`runs`, below), its job (`SOUL.md`) and the skills in its repo, read
+// from the fragment's own files (`__file`, `__files`). Its name and
+// picture are changed from Settings, or by the agent (`fragment agent`:
+// docs/api.md, "A fragment's name and an agent's picture").
 import { colorOf } from "./agent-color.js";
 
 // This fragment's name, at the start of its host (docs/api.md, Names).
@@ -18,15 +18,17 @@ const text = async (path) => {
 };
 const json = (path) => fetch(path, { headers: { accept: "application/json" }, credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
 
-// Its identity: of its agent members (`__members`; once its computer took
-// it, it is an editor of its own fragment), the one made from this
-// fragment (`__people`'s `fragment`); none before a computer takes it.
+// Its identity and its picture's address: of its agent members
+// (`__members`; once its computer took it, it is an editor of its own
+// fragment), the one made from this fragment (`__people`'s `fragment`);
+// none before a computer takes it.
 async function identity() {
   const here = location.hostname.match(NAME_AT)?.[0];
   const agents = ((await json("__members"))?.members ?? []).filter((m) => m.kind === "agent").map((m) => m.principal).slice(0, PEOPLE_MAX);
   if (!here || !agents.length) return null;
   const people = await json(`__people?${agents.map((id) => `id=${encodeURIComponent(id)}`).join("&")}`);
-  return agents.find((id) => people?.profiles?.[id]?.fragment === here) ?? null;
+  const id = agents.find((id) => people?.profiles?.[id]?.fragment === here);
+  return id ? { id, picture: people.profiles[id].picture ?? null } : null;
 }
 
 // The model it runs, by its id, as its owner's shell says their computer
@@ -48,7 +50,7 @@ function runs(settings, me, models) {
 async function main() {
   let settings = null, roster = null;
   const here = location.hostname.match(NAME_AT)?.[0];
-  // Its name (docs/api.md, "An agent's name and picture"): the Open Graph
+  // Its name (docs/api.md, "A fragment's name and an agent's picture"): the Open Graph
   // title the platform puts on its page, its name as every reader shows it
   // (its title, trimmed; none, or only spaces, its label:
   // `fragment_core::face::agent_name`), whether it runs on a computer yet
@@ -57,7 +59,7 @@ async function main() {
   let shown = null;
   // Its job (SOUL.md) as its files say it now (main's: its computer's sync
   // writes there, and its owner's rename says its new name there:
-  // docs/api.md, "An agent's name and picture"), read again whenever it
+  // docs/api.md, "A fragment's name and an agent's picture"), read again whenever it
   // moves (`watchJob`) and as its name changes; only the newest read is
   // shown, whatever order the reads answer in
   let jobReads = 0;
@@ -122,14 +124,15 @@ async function main() {
   if (!settings || typeof settings !== "object") settings = {};
   model();
   const avatar = document.getElementById("avatar");
-  avatar.style.setProperty("--agent-color", colorOf(await who));
+  const me = await who;
+  avatar.style.setProperty("--agent-color", colorOf(me?.id ?? null));
   const picture = new Image();
   picture.alt = "";
   picture.onload = () => {
     avatar.classList.add("picture");
     avatar.replaceChildren(picture);
   };
-  picture.src = "__file?path=avatar.png";
+  if (me?.picture) picture.src = me.picture;
   watchJob();
   await showJob();
   const files = (await json("__files")) ?? { files: [] };

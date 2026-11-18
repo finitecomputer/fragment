@@ -235,8 +235,8 @@ folder, from the platform's own templates: one of `blank`, `todo`,
 `inbox`, `calories`, `doc` is copied in as its first commit (`board`,
 `notes`, `slides` are `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
 `skills`, `sessions`, `telegram`, runs the platform's current release and is named in its
-`fragment.json`. Either way `--title` gives it its own title, its
-`fragment.json`'s `meta.title`, over the template's. Any other is
+`fragment.json`. Either way `--title` gives it its own title, over the
+template's: its name, set by `fragment rename` after. Any other is
 refused, naming them.
 
 `fragment status my-thing` shows the URLs, the view token (the share
@@ -307,7 +307,7 @@ Without `--title`, scaffolded apps and copied templates use a name derived
 from their label instead of a template placeholder such as "Blank".
 
 ```
-fragment rename meal-planner "Meals this week"     # changes meta.title, deploys; address stays put
+fragment rename meal-planner "Meals this week"     # its name, at once, deploying nothing; address stays put
 fragment icon generate meal-planner --hint "a cooking pot"   # generates and sets the best candidate
 fragment icon set meal-planner pot.png             # or upload an image
 fragment icon remove meal-planner                  # restore the default (a brain's icon, or the glyph)
@@ -1064,11 +1064,10 @@ read whatever it can read (as a viewer), but you never act through it.
 fragment members add my-thing <agent id> --role editor   # now it can call my-thing's operations
 ```
 
-An agent's name and picture are its agent fragment's: its title
-(`fragment.json`'s `meta.title`) and its `avatar.png` (a PNG, JPEG, WebP
-or GIF of at most 256 KiB), as live has them. Every page shows the agent
-by them (your shell, its chats, the share sheet, push notifications),
-and so does its runtime (its teammates are told it), within seconds of a change:
+An agent's name and picture are its agent fragment's face: its title and
+its icon. Every page shows the agent by them (your shell, its chats, the
+share sheet, push notifications), and so does its runtime (its teammates
+are told it), within seconds of a change:
 
 ```
 fragment agent juniper--k3x9 --name Frank          # its name
@@ -1076,13 +1075,12 @@ fragment agent juniper--k3x9 --picture frank.jpg   # its picture (--no-picture t
 fragment agent juniper--k3x9                       # what they are now
 ```
 
-`fragment agent` checks the picture, writes both in one commit and puts
-it live; an agent on a computer leaves its own name out. A new name is
-said in its job too (`SOUL.md`), in the same commit, wherever the job
-said its old one as a word. A picture too
-large or that is no picture is refused before anything is written; one
-committed by hand is refused when it is deployed (`fragment deploy` and
-`fragment status` say why), and the last good name and picture stay.
+`fragment agent` sets them at once, deploying nothing; an agent on a
+computer leaves its own name out. A new name is said in its job too
+(`SOUL.md`), in a commit beside it, wherever the job said its old one as
+a word. A picture (a PNG, JPEG, WebP or GIF of at most 256 KiB) is kept
+as it is; a larger image is cropped to a square; a file that is no
+picture is refused. Its `fragment.json` and an `avatar.png` name neither.
 Its `@name`, the word that mentions it, stays its label. Its runtime's
 own files (Hermes' `profile.yaml`) are written from its name: never edit
 them to rename it.

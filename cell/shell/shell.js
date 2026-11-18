@@ -193,7 +193,7 @@ const originAt = (name) => ORIGIN.replace("{name}", name);
 const originOf = (name) => Promise.resolve(originAt(name));
 // An agent's face: its colour, by its identity (agent-color.js, the one
 // its own page and its chats' pages choose by), and its picture (its agent
-// fragment's avatar.png, as the person's list last said: an address on this
+// fragment's icon, as the person's list last said: an address on this
 // platform), shown instead of its tinted image when it has one.
 const agentFace = (fragment, id) => ({ color: colorOf(id), picture: byName(fragment)?.picture ?? null });
 const faceOf = (id) => agentFace(state.agents.get(id)?.fragment, id);
@@ -955,7 +955,7 @@ const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? n
 // never by its agent: the agent's name is its fragment's alone.
 const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-chat`) ?? null;
 const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption } = createAgentSettings({
-  api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), retitle: (name, title) => retitle(name, title, "rename"), load, nameScreen, renderNames,
+  api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), retitle: (name, title) => retitle(name, title), load, nameScreen, renderNames,
   computer: () => state.computer, homePicker: (a, said) => homePicker(a, said), addAgent: (spec) => onboarding.addAgent(spec),
   primaryAgent: () => primaryAgent(), chats, own, me: () => state.me,
 });
@@ -1636,9 +1636,8 @@ async function titleFromFirst(name) {
     if (!said) return asks.letGo(title);
     const words = said.trim().split("\n").find((l) => l.trim()).replace(/\s+/g, " ").trim();
     const titled = [...words].length > TITLE_MAX_CHARS ? `${[...words].slice(0, TITLE_MAX_CHARS - 1).join("").trimEnd()}…` : words;
-    const manifest = await api("GET", `/api/f/${seg(name)}/manifest`);
-    if (manifest.meta?.title !== UNTITLED) return;
-    await retitle(name, titled, "its title, from its first message");
+    // only while it is still untitled: a rename meanwhile keeps its name (409)
+    await retitle(name, titled, UNTITLED);
   } catch {
     asks.letGo(title);
   }

@@ -1,14 +1,18 @@
-//! An agent's name, role and picture (docs/api.md, "An agent's name and
-//! picture"): its agent fragment's title, `meta.role` and `avatar.png` at
-//! live, the one source everything shows it by. Renamed and given a picture through the
-//! routes Settings and `fragment agent` use (its files, then a deploy), it
-//! reaches its owner's list (what the shell draws), a chat's `__people`
-//! (what its page draws), the share sheet, the access view and its
-//! picture's own address. The same change again commits nothing new and
-//! changes no address (replay); a picture too large, one that is no
-//! picture (written, or pushed through git), a title too long, and someone
-//! else's agent are refused, the last good face kept; taken away, the
-//! picture is gone everywhere. A node's restart keeps it (restart.rs).
+//! A fragment's name and an agent's picture (docs/api.md, "A fragment's
+//! name and an agent's picture"): its face, kept by its cell, with no
+//! commit and no deploy: its title and an agent's role set through `PUT
+//! /api/f/{name}/face`, its picture its icon (`PUT /api/f/{name}/icon`),
+//! the routes Settings and `fragment agent` use. It reaches its owner's
+//! list (what the shell draws), a chat's `__people` (what its page draws),
+//! the share sheet, the access view and its picture's own address. The same
+//! change again changes nothing (replay); a title blank or too long, a role
+//! too long or a chat's, a file that is no picture, and someone else's
+//! agent are refused, the face kept; a `fragment.json` names no face once
+//! it has one, and refuses no install; taken away, the picture is gone
+//! everywhere. A picture kept by the release before (its `avatar.png` at
+//! the commit an install checked) is taken once, by its first fetch or the
+//! alarm's pass, and one git no longer holds is let go (valid, invalid,
+//! replay); a node's restart keeps it all (restart.rs).
 
 use std::time::Duration;
 
@@ -66,33 +70,35 @@ pub(super) fn agent_of(s: &Suite, api: &Api, owner: &Keys, base: &str, title: &s
     Ok((json!({ "name": name, "repo": made["repo"] }), id))
 }
 
-/// An agent's name and picture as Settings and `fragment agent` write them:
-/// its fragment.json with `title` (when one), its `avatar.png` (`Some`
-/// bytes, or `None` to take it away; untouched when not asked), in one
-/// commit (`key`, when one), then a deploy. The files' answer, and the
-/// deploy's (none when the files were refused).
-pub(super) fn set_face(api: &Api, keys: &Keys, agent: &str, title: Option<&str>, avatar: Option<Option<&[u8]>>, key: Option<&str>) -> Result<(Reply, Option<Reply>)> {
-    let mut files = vec![];
-    if let Some(title) = title {
-        let mut manifest = api.signed(keys, "GET", &format!("/api/f/{agent}/manifest"), None)?.body;
-        manifest["meta"]["title"] = json!(title);
-        files.push(json!({ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }));
-    }
-    match avatar {
-        Some(Some(bytes)) => files.push(json!({ "path": "avatar.png", "base64": base64::engine::general_purpose::STANDARD.encode(bytes) })),
-        Some(None) => files.push(json!({ "path": "avatar.png", "delete": true })),
-        None => {}
-    }
-    let mut body = json!({ "message": "its name and picture", "files": files });
-    if let Some(key) = key {
-        body["key"] = json!(key);
-    }
-    let wrote = api.signed(keys, "POST", &format!("/api/f/{agent}/files"), Some(&body))?;
-    if wrote.status != 200 {
-        return Ok((wrote, None));
-    }
+/// An agent's name and picture as Settings and `fragment agent` set them:
+/// its title through its face (when one), its picture as its icon (`Some`
+/// bytes, or `None` to take it away; untouched when not asked). Each
+/// answer, when asked.
+pub(super) fn set_face(api: &Api, keys: &Keys, agent: &str, title: Option<&str>, picture: Option<Option<&[u8]>>) -> Result<(Option<Reply>, Option<Reply>)> {
+    let named = title.map(|t| api.signed(keys, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": t })))).transpose()?;
+    let url = format!("{}/api/f/{agent}/icon", api.base);
+    let pictured = match picture {
+        Some(Some(bytes)) => Some(api.call(Call { method: "PUT", url, body: Some(bytes.to_vec()), content_type: Some("application/octet-stream"), keys: Some(keys), ..Call::default() })?),
+        Some(None) => Some(api.signed(keys, "DELETE", &format!("/api/f/{agent}/icon"), None)?),
+        None => None,
+    };
+    Ok((named, pictured))
+}
+
+/// An agent's picture as the release before kept it (`fragment_core::face::
+/// AGENT_PICTURE` at the commit an install checked, and the row naming
+/// it): `bytes` committed there and deployed, then the row written by the
+/// test lever, no icon. The commit.
+pub(super) fn legacy_picture(api: &Api, keys: &Keys, agent: &str, bytes: &[u8]) -> Result<String> {
+    let files = json!({ "message": "its picture, as a release before kept it", "files": [{ "path": "avatar.png", "base64": base64::engine::general_purpose::STANDARD.encode(bytes) }] });
+    let wrote = api.signed(keys, "POST", &format!("/api/f/{agent}/files"), Some(&files))?;
     let deployed = api.signed(keys, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?;
-    Ok((wrote, Some(deployed)))
+    let live = deployed.body["live"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(wrote.status == 200 && deployed.status == 200 && !live.is_empty(), "its avatar.png committed and deployed: {wrote} {deployed}");
+    let row = format!("{} image/png {live}", hex::encode(Sha256::digest(bytes)));
+    let r = super::ledger::lever(api, agent, "legacy-picture", json!({ "row": row }))?;
+    anyhow::ensure!(r.status == 200, "its row, as a release before kept it: {r}");
+    Ok(live)
 }
 
 /// `name`'s row in `keys`' list (`GET /api/fragments`): what the shell draws.
@@ -112,6 +118,41 @@ pub(super) fn fetched(api: &Api, path: &str) -> Result<Reply> {
     api.call(Call { method: "GET", url: format!("{}{path}", api.base), ..Call::default() })
 }
 
+/// How many of `kind` a fragment's newest events hold.
+fn events(api: &Api, keys: &Keys, name: &str, kind: &str) -> usize {
+    super::site::event_kinds(api, keys, name).iter().filter(|k| *k == kind).count()
+}
+
+/// A JPEG's width and height, from its first frame's header (SOF0 to
+/// SOF2), or none.
+fn jpeg_size(bytes: &[u8]) -> Option<(u16, u16)> {
+    let mut at = 2;
+    // bounded by the bytes: each segment moves past its own length
+    while at + 9 < bytes.len() && bytes[at] == 0xFF {
+        let (marker, len) = (bytes[at + 1], u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]) as usize);
+        if (0xC0..=0xC2).contains(&marker) {
+            return Some((u16::from_be_bytes([bytes[at + 7], bytes[at + 8]]), u16::from_be_bytes([bytes[at + 5], bytes[at + 6]])));
+        }
+        at += 2 + len;
+    }
+    None
+}
+
+/// A JPEG past what a picture may be (`PICTURE_MAX_BYTES`), its picture
+/// the icon lane's 40×24 photograph: comment segments after its start.
+fn heavy_jpeg() -> Vec<u8> {
+    let photo = super::icons::photo();
+    let mut out = photo[..2].to_vec();
+    let comment = vec![b'x'; 60_000];
+    while out.len() <= fragment_proto::limits::PICTURE_MAX_BYTES {
+        out.extend_from_slice(&[0xFF, 0xFE]);
+        out.extend_from_slice(&((comment.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&comment);
+    }
+    out.extend_from_slice(&photo[2..]);
+    out
+}
+
 pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("faces", &[crate::Need::Computers]) {
         return Ok(());
@@ -127,29 +168,32 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "the chat: {r}");
     let cookie = site_cookie(api, &session, &chat)?;
     let path_of = |bytes: &[u8]| picture_path(&agent_id, bytes);
+    let pins = |name: &str| api.status(&paul, name).map(|r| r.body["pins"].clone()).unwrap_or(Value::Null);
 
     // made: its title, no picture
     let made = row(api, &paul, &agent);
     let asked = people(api, &chat, &cookie, &agent_id);
     let none = fetched(api, &format!("/api/identities/{agent_id}/picture"))?;
     s.ok(
-        "an agent fresh from the agent template shows by its fragment's title, with no picture (404 at its address)",
+        "an agent fresh from the agent template shows by the title it was made with, with no picture (404 at its address)",
         made["title"] == "Juniper" && made.get("picture").is_none() && asked["title"] == "Juniper" && asked["name"] == label.as_str() && asked["picture"].is_null() && none.status == 404,
         json!({ "row": made, "people": asked, "picture": none.status }),
     );
 
-    // renamed, and given a picture, as Settings and `fragment agent` do
-    let (wrote, deployed) = set_face(api, &paul, &agent, Some("Frank"), Some(Some(&orange)), Some("face-1"))?;
-    let deployed = deployed.with_context(|| format!("the files: {wrote}"))?;
+    // renamed, and given a picture, as Settings and `fragment agent` do:
+    // its face, with no commit and no deploy
+    let before = pins(&agent);
+    let (named, pictured) = set_face(api, &paul, &agent, Some("Frank"), Some(Some(&orange)))?;
+    let (named, pictured) = (named.context("named")?, pictured.context("pictured")?);
     let shown = path_of(&orange);
     let listed = s.eventually(WAIT, || {
         let r = row(api, &paul, &agent);
         r["title"] == "Frank" && r["picture"] == shown.as_str()
     });
     s.ok(
-        "renamed and given a picture through its files and a deploy, its owner's list (what the shell draws) names it and shows its picture's address",
-        wrote.status == 200 && deployed.status == 200 && listed,
-        json!({ "files": wrote.body, "deploy": deployed.body, "row": row(api, &paul, &agent) }),
+        "renamed and given a picture through its face and its icon, at once: its owner's list (what the shell draws) names it and shows its picture's address, and nothing was committed or deployed",
+        named.status == 200 && named.body["title"] == "Frank" && pictured.status == 200 && pictured.body["icon"] == shown.as_str() && listed && pins(&agent) == before,
+        json!({ "face": named.body, "icon": pictured.body, "row": row(api, &paul, &agent), "pins": [before, pins(&agent)] }),
     );
     let asked = people(api, &chat, &cookie, &agent_id);
     s.ok(
@@ -159,7 +203,7 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let got = fetched(api, &shown)?;
     s.ok(
-        "its picture is served at its identity's address to anyone, the bytes its install checked, as an image",
+        "its picture is served at its identity's address to anyone, the bytes it was given (a picture is kept as it is), as an image",
         got.status == 200 && got.bytes == orange && got.header("content-type") == "image/png" && got.header("cache-control").contains("public"),
         json!({ "status": got.status, "type": got.header("content-type"), "bytes": got.bytes.len() }),
     );
@@ -178,95 +222,149 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     let access = api.signed(&paul, "GET", "/api/access", None)?;
     let member = access.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == agent.as_str()).and_then(|f| f["members"].as_array()?.iter().find(|m| m["principal"] == agent_id.as_str()).cloned());
     s.ok("who has access to what names it so too (its title, beside its label)", member.as_ref().is_some_and(|m| m["title"] == "Frank" && m["name"] == label.as_str()), &access);
+    // a viewer is no editor: Bob renames nothing
+    let (theirs, _) = set_face(api, &bob, &agent, Some("Bobbed"), None)?;
     let r = api.signed(&paul, "DELETE", &format!("/api/f/{agent}/members/{bob_id}"), None)?;
     anyhow::ensure!(r.status == 200, "Bob, out again: {r}");
 
-    // replay: the same change again, by its key or by its files, commits nothing new
-    let tip = wrote.body["commit"].clone();
-    let (again, redeployed) = set_face(api, &paul, &agent, Some("Frank"), Some(Some(&orange)), Some("face-1"))?;
-    let (same, _) = set_face(api, &paul, &agent, Some("Frank"), Some(Some(&orange)), None)?;
+    // its history: each change an `events` row; the same change again
+    // changes nothing, and writes none
+    let changes = events(api, &paul, &agent, "face.changed");
+    let (again, same) = set_face(api, &paul, &agent, Some(" Frank "), Some(Some(&orange)))?;
     let kept = row(api, &paul, &agent);
     s.ok(
-        "the same change again, under its key or as the same files, commits nothing new, and its name and picture's address stay",
-        again.body["commit"] == tip && same.body["commit"] == tip && redeployed.is_some_and(|d| d.status == 200) && kept["title"] == "Frank" && kept["picture"] == shown.as_str(),
-        json!({ "first": tip, "again": again.body, "same": same.body, "row": kept }),
+        "each change is a `face.changed` event, its history; the same change again (padded, the same picture) answers the same face, writes no event, and its name and picture's address stay",
+        changes == 1 && again.is_some_and(|r| r.status == 200 && r.body["title"] == "Frank") && same.is_some_and(|r| r.status == 200) && events(api, &paul, &agent, "face.changed") == 1 && kept["title"] == "Frank" && kept["picture"] == shown.as_str(),
+        json!({ "events": super::site::event_kinds(api, &paul, &agent), "row": kept }),
     );
 
-    // invalid: written through the platform, refused before anything is committed
-    let mut big = b"\x89PNG\r\n\x1a\n".to_vec();
-    big.resize(fragment_proto::limits::PICTURE_MAX_BYTES + 1, 0);
-    let (large, _) = set_face(api, &paul, &agent, None, Some(Some(&big)), None)?;
-    let (text, _) = set_face(api, &paul, &agent, None, Some(Some(b"hello, I am no picture")), None)?;
-    let unmoved = api.signed(&paul, "GET", &format!("/api/f/{agent}/status"), None)?.body["pins"]["main"].clone();
-    s.ok(
-        "a picture past 256 KiB is 413 and one that is no picture 400, each naming avatar.png and why, and nothing is committed",
-        large.status == 413
-            && large.text.contains("avatar.png")
-            && large.text.contains("262144")
-            && text.status == 400
-            && text.text.contains("avatar.png is not a picture")
-            && unmoved == tip,
-        json!({ "large": large.to_string(), "text": text.to_string(), "main": unmoved, "tip": tip }),
-    );
-    // a title too long, and (locally) a picture pushed through git that is none: refused at the install, the last good face kept
-    let long = "F".repeat(121);
-    let (_, refused) = set_face(api, &paul, &agent, Some(&long), None, None)?;
-    let said = api.status(&paul, &agent)?.body["code"]["error"].clone();
+    // invalid: refused, nothing changed
+    let face = |body: Value, keys: &Keys| api.signed(keys, "PUT", &format!("/api/f/{agent}/face"), Some(&body));
+    let long = face(json!({ "title": "F".repeat(fragment_proto::limits::TITLE_MAX_CHARS + 1) }), &paul)?;
+    let blank = face(json!({ "title": "   " }), &paul)?;
+    let nothing = face(json!({}), &paul)?;
+    let pictured = face(json!({ "picture": shown }), &paul)?;
+    let (_, text) = set_face(api, &paul, &agent, None, Some(Some(b"hello, I am no picture")))?;
+    let text = text.context("its picture")?;
     let kept = row(api, &paul, &agent);
     s.ok(
-        "a title past 120 characters is refused at its deploy, saying why, and the last good name and picture stay",
-        refused.is_some_and(|d| d.status == 200) && said.as_str().is_some_and(|e| e.contains("title")) && kept["title"] == "Frank" && kept["picture"] == shown.as_str(),
-        json!({ "error": said, "row": kept }),
+        "a title past 120 characters, one of only spaces, a change naming nothing or a picture, are refused (400) saying why; a file that is no picture is refused (400); its name and picture stay",
+        [&long, &blank, &nothing, &pictured, &text].iter().all(|r| r.status == 400)
+            && long.text.contains("1 to 120 characters")
+            && pictured.text.contains("icon")
+            && kept["title"] == "Frank"
+            && kept["picture"] == shown.as_str()
+            && events(api, &paul, &agent, "face.changed") == 1,
+        json!({ "long": long.to_string(), "blank": blank.to_string(), "nothing": nothing.to_string(), "picture": pictured.to_string(), "text": text.to_string(), "row": kept }),
     );
-    if s.hosted() {
-        s.skip("a picture pushed through git that is no picture is refused at its install", "a preview's git is written through the platform's files route, which refuses it first (above)");
-    } else {
-        s.commit(&created, &[("fragment.json", Some(br#"{"template":"agent","meta":{"title":"Frank"}}"#)), ("avatar.png", Some(b"<svg/>"))]);
-        s.deploy(&created);
-        let said = api.status(&paul, &agent)?.body["code"]["error"].clone();
-        let served = fetched(api, &shown)?;
-        let kept = row(api, &paul, &agent);
-        s.ok(
-            "a picture pushed through git that is no picture is refused at its install, saying why (`fragment deploy` prints it), and the last good one is still served",
-            said.as_str().is_some_and(|e| e.contains("avatar.png is not a picture")) && served.status == 200 && served.bytes == orange && kept["picture"] == shown.as_str(),
-            json!({ "error": said, "served": served.status, "row": kept }),
-        );
-    }
-    // someone else's agent: Bob, no member of it now, changes nothing
-    let (theirs, _) = set_face(api, &bob, &agent, None, Some(Some(&blue)), None)?;
-    let deploy = api.signed(&bob, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?;
+    // someone else's agent: Bob, a viewer then, and no member now, changes nothing
+    let (bobs, bobs_picture) = set_face(api, &bob, &agent, Some("Bobbed"), Some(Some(&blue)))?;
     let kept = row(api, &paul, &agent);
     s.ok(
-        "someone else's agent: another person writes its picture and deploys it, refused (403 or 404), its name and picture unchanged",
-        matches!(theirs.status, 403 | 404) && matches!(deploy.status, 403 | 404) && kept["picture"] == shown.as_str(),
-        json!({ "files": theirs.to_string(), "deploy": deploy.to_string(), "row": kept }),
+        "someone else's agent: a viewer renames it (403), and someone not in it renames it and sets its picture (403 or 404), its name and picture unchanged",
+        theirs.is_some_and(|r| r.status == 403) && bobs.is_some_and(|r| matches!(r.status, 403 | 404)) && bobs_picture.is_some_and(|r| matches!(r.status, 403 | 404)) && kept["title"] == "Frank" && kept["picture"] == shown.as_str(),
+        json!({ "row": kept }),
     );
     let nobody = fetched(api, "/api/identities/npub1nobody/picture")?;
     s.ok("an address that names no identity serves no picture (404)", nobody.status == 404, &nobody);
-    // an app's avatar.png is a file like any other: only an agent's is its picture
-    let app = s.named(api, &paul, "faces-app")?;
-    s.create(api, &paul, &app)?;
-    let r = api.signed(&paul, "POST", &format!("/api/f/{app}/files"), Some(&json!({ "files": [{ "path": "avatar.png", "text": "not a picture, and no one's face" }] })))?;
-    s.ok("an app's avatar.png is a file like any other (only an agent fragment's is a picture)", r.status == 200, &r);
+
+    // a `fragment.json` names no face once it has one, and refuses no
+    // install: a title or a role there (even one past a face's limits),
+    // and an `avatar.png`, committed and deployed, change nothing, and say
+    // nothing in `code.error`
+    let manifest = json!({ "template": "agent", "meta": { "title": "From git", "role": "r".repeat(fragment_proto::limits::ROLE_MAX_CHARS + 1) } });
+    let files = json!({ "message": "a face in git", "files": [{ "path": "fragment.json", "text": manifest.to_string() }, { "path": "avatar.png", "base64": base64::engine::general_purpose::STANDARD.encode(&blue) }] });
+    let wrote = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&files))?;
+    let deployed = api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?;
+    let status = api.status(&paul, &agent)?.body;
+    let kept = row(api, &paul, &agent);
+    s.ok(
+        "a fragment.json's title and role, and an avatar.png, committed and deployed, name no face: its name and picture stay, and its install refuses nothing (no code.error)",
+        wrote.status == 200 && deployed.status == 200 && status["code"]["error"].is_null() && status["title"] == "Frank" && kept["title"] == "Frank" && kept["picture"] == shown.as_str() && kept.get("agentRole").is_none(),
+        json!({ "status": status, "row": kept }),
+    );
+
+    // a picture past what one is kept as (256 KiB) is cropped by Images to
+    // fill the icon's square (it is shown round), a JPEG, at its owner's charge
+    if s.makes_icons() {
+        let heavy = heavy_jpeg();
+        let (_, put) = set_face(api, &paul, &agent, None, Some(Some(&heavy)))?;
+        let put = put.context("its heavy picture")?;
+        let at = put.body["icon"].as_str().unwrap_or("").to_string();
+        let got = fetched(api, &at)?;
+        let moved = s.eventually(WAIT, || row(api, &paul, &agent)["picture"] == at.as_str());
+        s.ok(
+            "a picture past 256 KiB is cropped to fill a 256×256 square, a JPEG within 256 KiB, served at its identity's new address",
+            heavy.len() > fragment_proto::limits::PICTURE_MAX_BYTES
+                && put.status == 200
+                && at.starts_with(&format!("/api/identities/{agent_id}/picture?v="))
+                && got.status == 200
+                && got.header("content-type") == "image/jpeg"
+                && got.bytes.len() <= fragment_proto::limits::PICTURE_MAX_BYTES
+                && jpeg_size(&got.bytes) == Some((256, 256))
+                && moved,
+            json!({ "put": put.to_string(), "type": got.header("content-type"), "bytes": got.bytes.len(), "size": jpeg_size(&got.bytes) }),
+        );
+    } else {
+        s.skip_icon("a picture past 256 KiB is cropped to fill a 256×256 square");
+    }
 
     // a new picture is a new address; taken away, it is gone everywhere
-    let fixed = set_face(api, &paul, &agent, Some("Frank"), Some(Some(&blue)), None)?;
+    let (_, fixed) = set_face(api, &paul, &agent, None, Some(Some(&blue)))?;
     let renewed = path_of(&blue);
     let moved = s.eventually(WAIT, || row(api, &paul, &agent)["picture"] == renewed.as_str());
     let got = fetched(api, &renewed)?;
     s.ok(
         "a new picture is a new address, serving it",
-        fixed.1.is_some_and(|d| d.status == 200) && moved && renewed != shown && got.status == 200 && got.bytes == blue,
+        fixed.is_some_and(|d| d.status == 200) && moved && renewed != shown && got.status == 200 && got.bytes == blue,
         json!({ "row": row(api, &paul, &agent), "status": got.status }),
     );
-    let (gone, _) = set_face(api, &paul, &agent, None, Some(None), None)?;
+    let (_, gone) = set_face(api, &paul, &agent, None, Some(None))?;
     let removed = s.eventually(WAIT, || row(api, &paul, &agent).get("picture").is_none());
     let asked = people(api, &chat, &cookie, &agent_id);
     let none = fetched(api, &format!("/api/identities/{agent_id}/picture"))?;
     s.ok(
-        "its picture taken away (avatar.png deleted, deployed), no list, page or address shows one, and its name stays",
-        gone.status == 200 && removed && asked["picture"].is_null() && asked["title"] == "Frank" && none.status == 404,
+        "its picture taken away (its icon removed), no list, page or address shows one, and its name stays",
+        gone.is_some_and(|r| r.status == 200) && removed && asked["picture"].is_null() && asked["title"] == "Frank" && none.status == 404,
         json!({ "row": row(api, &paul, &agent), "people": asked, "picture": none.status }),
+    );
+
+    // the release before's picture, taken once: an agent whose row names
+    // its avatar.png at the commit an install checked shows it at once (the
+    // same address), and its first fetch takes it into its icon, writing
+    // `picture.taken`; fetched again, it is served the same and taken no
+    // more (replay)
+    let taken_before = events(api, &paul, &agent, "picture.taken");
+    legacy_picture(api, &paul, &agent, &orange)?;
+    let shows = s.eventually(WAIT, || row(api, &paul, &agent)["picture"] == shown.as_str());
+    let first = fetched(api, &shown)?;
+    let second = fetched(api, &shown)?;
+    let icon = api.signed(&paul, "GET", &format!("/api/f/{agent}/icon"), None)?;
+    s.ok(
+        "a picture the release before kept (its avatar.png at a checked commit) shows at once, is served by its first fetch, the same bytes, and is its icon from then on; fetched again, it is taken no more",
+        shows && first.status == 200 && first.bytes == orange && first.header("content-type") == "image/png" && second.bytes == orange && icon.bytes == orange && events(api, &paul, &agent, "picture.taken") == taken_before + 1,
+        json!({ "row": row(api, &paul, &agent), "first": first.status, "icon": icon.status, "events": super::site::event_kinds(api, &paul, &agent) }),
+    );
+    // taken by the alarm's pass, unasked: within a day of the release,
+    // every row is taken, fetched or not
+    let live = legacy_picture(api, &paul, &agent, &blue)?;
+    let r = super::ledger::lever(api, &agent, "poll-now", json!({}))?;
+    let passed = r.status == 200 && s.eventually(WAIT, || events(api, &paul, &agent, "picture.taken") == taken_before + 2);
+    let icon = api.signed(&paul, "GET", &format!("/api/f/{agent}/icon"), None)?;
+    s.ok(
+        "one never fetched is taken by the alarm's pass, the bytes its install checked",
+        passed && icon.bytes == blue && row(api, &paul, &agent)["picture"] == renewed.as_str(),
+        json!({ "events": super::site::event_kinds(api, &paul, &agent), "row": row(api, &paul, &agent) }),
+    );
+    // invalid: a row whose commit holds other bytes than it names is let
+    // go, said, and it shows no picture
+    let r = super::ledger::lever(api, &agent, "legacy-picture", json!({ "row": format!("{} image/png {live}", "a".repeat(64)) }))?;
+    let lost = fetched(api, &format!("/api/identities/{agent_id}/picture"))?;
+    let dropped = s.eventually(WAIT, || row(api, &paul, &agent).get("picture").is_none());
+    s.ok(
+        "a row whose commit no longer holds the bytes it names is let go (`picture.lost`): no picture is served or shown",
+        r.status == 200 && lost.status == 404 && dropped && events(api, &paul, &agent, "picture.lost") == 1,
+        json!({ "lost": lost.to_string(), "row": row(api, &paul, &agent) }),
     );
 
     // the CLI, as its person uses it (cli/GUIDE.md): `fragment agent
@@ -275,7 +373,7 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     // `fragment access` names it by its name, never its label
     let home = super::shell::cli_home(s, api, &session, "faces-cli")?;
     // its job named it (one an owner or the agent wrote): the rename says
-    // the new name there too, in its own commit (Paul, 2026-10-27)
+    // the new name there too, in a commit of its own (Paul, 2026-10-27)
     let job = |text: &str| api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "its job", "files": [{ "path": "SOUL.md", "text": text }] })));
     let job_now = || api.signed(&paul, "GET", &format!("/api/f/{agent}/file?path=SOUL.md"), None).map(|r| r.text).unwrap_or_default();
     anyhow::ensure!(job("Frank keeps the garden; Frankly, Frank_ and frank are other words.\n")?.status == 200, "its job written");
@@ -318,23 +416,24 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         again.is_ok() && recovered == "You are Frances, paul@example.com's default agent: the first one they talk to.\nFrances keeps the garden.\n" && replay.is_ok() && replayed == (recovered.clone(), tip.clone()),
         json!({ "recovered": recovered, "replayed": replayed.0, "tips": [tip, replayed.1] }),
     );
-    // invalid: a title of only spaces is no name: every reader falls back to
-    // its label alike, never a blank; and an agent made with no title is
-    // untitled, never a word it was not given ("Agent")
-    let (_, blank) = set_face(api, &paul, &agent, Some("   "), None, None)?;
-    let untitled = s.eventually(WAIT, || row(api, &paul, &agent).get("title").is_none_or(Value::is_null));
-    let status = api.status(&paul, &agent)?.body["title"].clone();
-    let asked = people(api, &chat, &cookie, &agent_id);
-    let said = s.cli_json(api, &home, &["agent", &agent, "--json"]);
+    // `fragment agent --picture` sets its icon, and `--no-picture` takes it away
+    let file = s.dir("faces-cli-picture").join("me.png");
+    std::fs::write(&file, &orange)?;
+    let set = s.cli_json(api, &home, &["agent", &agent, "--picture", &file.display().to_string(), "--json"]);
+    let set_shows = s.eventually(WAIT, || row(api, &paul, &agent)["picture"] == shown.as_str());
+    let unset = s.cli_json(api, &home, &["agent", &agent, "--no-picture", "--json"]);
+    let unset_shows = s.eventually(WAIT, || row(api, &paul, &agent).get("picture").is_none());
     s.ok(
-        "a title of only spaces is none: no list row, status or page says a blank, and `fragment agent` says its label",
-        blank.is_some_and(|d| d.status == 200) && untitled && status.is_null() && asked["title"].is_null() && asked["name"] == label.as_str() && said.as_ref().is_ok_and(|v| v["name"] == label.as_str()),
-        json!({ "row": row(api, &paul, &agent), "status": status, "people": asked, "cli": said.map_err(|e| e.to_string()) }),
+        "`fragment agent --picture` gives it a picture, and `--no-picture` takes it away, each shown on its list",
+        set.is_ok_and(|v| v["changed"] == true) && set_shows && unset.is_ok_and(|v| v["changed"] == true) && unset_shows,
+        json!({ "row": row(api, &paul, &agent) }),
     );
     // its job as its computer's sync leaves it: on main, never deployed
     // (images/hermes/boot/src/sync.rs). Its page reads it there (`__file`,
     // main first for an agent), with no deploy; an app's file stays live's
     // until it deploys (Paul, 2026-10-27: his agent's page kept its first job)
+    let app = s.named(api, &paul, "faces-app")?;
+    s.create(api, &paul, &app)?;
     let write = |name: &str, path: &str, text: &str| api.signed(&paul, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "message": "a change", "files": [{ "path": path, "text": text }] })));
     let deploy = |name: &str| api.signed(&paul, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})));
     let read = |name: &str, path: &str| -> Result<String> {
@@ -357,42 +456,35 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "an agent with no title: {r}");
     s.owned(&r.body, &paul);
     let made = s.eventually(WAIT, || row(api, &paul, &bare)["kind"] == "agent");
-    let shown = row(api, &paul, &bare);
+    let shown_bare = row(api, &paul, &bare);
     let status = api.status(&paul, &bare)?.body["title"].clone();
+    let said = s.cli_json(api, &home, &["agent", &bare, "--json"]);
     s.ok(
-        "an agent made with no title is untitled (its label shows), never called by the template's word",
-        made && shown.get("title").is_none_or(Value::is_null) && status.is_null(),
-        json!({ "row": shown, "status": status }),
+        "an agent made with no title is untitled (its label shows, and `fragment agent` says it), never called by the template's word",
+        made && shown_bare.get("title").is_none_or(Value::is_null) && status.is_null() && said.is_ok_and(|v| v["name"] == label_of(&bare)),
+        json!({ "row": shown_bare, "status": status }),
     );
-    // its role (`meta.role`): the tag beside its name, on its owner's list
-    // as its name is (Paul, 2026-10-30: one source, live everywhere); one of
-    // spaces is none, one too long is refused at its deploy and the last
+    // its role: the tag beside its name, on its owner's list as its name is
+    // (Paul, 2026-10-30: one source, live everywhere), set through its face;
+    // one of spaces takes it away, one too long is refused and the last
     // kept, and a role is an agent's alone
-    let role_is = |name: &str, title: Option<&str>, role: &str| -> Result<()> {
-        let mut manifest = api.signed(&paul, "GET", &format!("/api/f/{name}/manifest"), None)?.body;
-        if let Some(t) = title {
-            manifest["meta"]["title"] = json!(t);
-        }
-        manifest["meta"]["role"] = json!(role);
-        let files = json!({ "message": "its role", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }] });
-        let wrote = api.signed(&paul, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
-        let deployed = api.signed(&paul, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;
-        anyhow::ensure!(wrote.status == 200 && deployed.status == 200, "its role written: {wrote} {deployed}");
-        Ok(())
-    };
-    role_is(&agent, None, " project manager ")?;
-    let given = s.eventually(WAIT, || row(api, &paul, &agent)["agentRole"] == "project manager") && api.status(&paul, &agent)?.body["agentRole"] == "project manager";
-    role_is(&agent, None, &"r".repeat(fragment_proto::limits::ROLE_MAX_CHARS + 1))?;
-    let said = api.status(&paul, &agent)?.body["code"]["error"].clone();
+    let role = |name: &str, role: &str| api.signed(&paul, "PUT", &format!("/api/f/{name}/face"), Some(&json!({ "role": role })));
+    let given = role(&agent, " project manager ")?.status == 200
+        && s.eventually(WAIT, || row(api, &paul, &agent)["agentRole"] == "project manager")
+        && api.status(&paul, &agent)?.body["agentRole"] == "project manager";
+    let too_long = role(&agent, &"r".repeat(fragment_proto::limits::ROLE_MAX_CHARS + 1))?;
     let kept = row(api, &paul, &agent);
-    role_is(&agent, None, "   ")?;
-    let blank = s.eventually(WAIT, || row(api, &paul, &agent).get("agentRole").is_none());
-    role_is(&chat, Some("Garden plans"), "a chat")?;
-    let chats = s.eventually(WAIT, || row(api, &paul, &chat)["title"] == "Garden plans") && row(api, &paul, &chat).get("agentRole").is_none();
+    let blank = role(&agent, "   ")?.status == 200 && s.eventually(WAIT, || row(api, &paul, &agent).get("agentRole").is_none());
+    let chats = role(&chat, "a chat")?;
     s.ok(
-        "its role (its fragment.json's meta.role) shows on its owner's list beside its name, and on its status, trimmed; one past 48 characters is refused at its deploy, saying why, the last kept; one of spaces is none; a chat's is never carried",
-        given && said.as_str().is_some_and(|e| e.contains("meta.role")) && kept["agentRole"] == "project manager" && blank && chats,
-        json!({ "error": said, "kept": kept, "row": row(api, &paul, &agent), "chat": row(api, &paul, &chat) }),
+        "its role, set through its face, shows on its owner's list beside its name, and on its status, trimmed; one past 48 characters is refused (400), the last kept; one of spaces takes it away; a chat's is refused (400)",
+        given && too_long.status == 400 && too_long.text.contains("48") && kept["agentRole"] == "project manager" && blank && chats.status == 400 && row(api, &paul, &chat).get("agentRole").is_none(),
+        json!({ "long": too_long.to_string(), "kept": kept, "row": row(api, &paul, &agent), "chat": chats.to_string() }),
     );
     Ok(())
+}
+
+/// A fragment's label (`juniper` of `juniper--k3x9`).
+fn label_of(name: &str) -> &str {
+    fragment_proto::split_fragment_name(name).map_or(name, |(label, _)| label)
 }

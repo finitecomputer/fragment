@@ -1,14 +1,14 @@
-//! An identity's face: what a page shows it by. An agent's is its agent
-//! fragment's, at live: its title (`fragment.json`'s `meta.title`) and
-//! its picture (`avatar.png`), which the cell reads at each install of
-//! live (docs/api.md, "An agent's name and picture"). A person's picture
-//! is the registry's. Both pictures are served at
-//! `/api/identities/<npub>/picture` and take the same images.
+//! An identity's face: what a page shows it by. A fragment's is its own,
+//! kept by its cell (`meta`): its title, an agent's role, set through its
+//! face route, and its picture, its icon (docs/api.md, "A fragment's name
+//! and an agent's picture"). A person's picture is the registry's. Both
+//! pictures are served at `/api/identities/<npub>/picture`.
 
 use fragment_proto::limits;
 
-/// Where an agent fragment keeps its picture: one path, whatever the
-/// image's type, which its bytes tell.
+/// Where an agent fragment's `avatar.png` was its picture, before its
+/// picture was its icon: read once, at the commit its last install
+/// checked, by the hand-over (the debt ledger).
 pub const AGENT_PICTURE: &str = "avatar.png";
 
 /// A picture's type from its first bytes (a request's content-type and a
@@ -60,10 +60,31 @@ pub fn title(title: Option<&str>) -> Option<&str> {
     title.map(str::trim).filter(|t| !t.is_empty())
 }
 
-/// An agent's role as its face keeps it (`meta.role`), as its title is:
-/// trimmed when it says anything, else none, so no reader shows a blank tag.
+/// An agent's role as its face keeps it, as its title is: trimmed when
+/// it says anything, else none, so no reader shows a blank tag.
 pub fn role(role: Option<&str>) -> Option<&str> {
     self::title(role)
+}
+
+/// A change to a fragment's face, as its route takes it (`PUT
+/// /api/f/{name}/face`): a title, trimmed, of 1 to `TITLE_MAX_CHARS`
+/// characters; a role, an agent's alone, trimmed, of at most
+/// `ROLE_MAX_CHARS`, none when it says nothing. What each becomes (the
+/// outer `None`: not asked), or why it is refused.
+pub fn change<'a>(title: Option<&'a str>, role: Option<&'a str>, agent: bool) -> Result<(Option<&'a str>, Option<Option<&'a str>>), String> {
+    let title = match title.map(str::trim) {
+        Some(t) if t.is_empty() || t.chars().count() > limits::TITLE_MAX_CHARS => return Err(format!("a title is 1 to {} characters", limits::TITLE_MAX_CHARS)),
+        t => t,
+    };
+    let role = match role.map(str::trim) {
+        Some(_) if !agent => return Err("a role is an agent's alone".into()),
+        Some(r) if r.chars().count() > limits::ROLE_MAX_CHARS => return Err(format!("a role is at most {} characters", limits::ROLE_MAX_CHARS)),
+        r => r.map(|r| self::role(Some(r))),
+    };
+    if title.is_none() && role.is_none() {
+        return Err("name its title, its role, or both".into());
+    }
+    Ok((title, role))
 }
 
 /// What an agent is called in the platform's own words (the CLI's, and any
@@ -93,8 +114,8 @@ pub fn job_first_name(job: &str) -> Option<&str> {
 }
 
 /// An agent's job as its owner's rename leaves it (the shell's Rename and
-/// `fragment agent --name`, in the commit that renames it; docs/api.md, "An
-/// agent's name and picture"): each whole-word mention of one of `olds`
+/// `fragment agent --name`, a commit beside the rename; docs/api.md, "A
+/// fragment's name and an agent's picture"): each whole-word mention of one of `olds`
 /// (case and all; a mention is whole when no letter, digit or `_` touches
 /// it) said as `name` instead, in one pass, the longest old name first.
 /// None when there is nothing to rewrite: no old name but `name` itself,
@@ -213,6 +234,47 @@ mod tests {
             assert_eq!(job_first_name(other), None, "{other:?}");
         }
         assert_eq!(job_first_name("You are Bliss, the Great, paul's default agent: x"), Some("Bliss, the Great"), "the owner holds no \", \"");
+    }
+
+    /// Valid: a title, a role, both, trimmed; a role of spaces taken away.
+    /// Invalid: neither, a blank or too long title, a role too long, and a
+    /// role for anything but an agent, each saying why.
+    #[test]
+    fn a_face_change_is_a_title_or_an_agents_role() {
+        assert_eq!(change(Some(" Garden "), None, false), Ok((Some("Garden"), None)));
+        assert_eq!(change(None, Some(" chief of staff "), true), Ok((None, Some(Some("chief of staff")))));
+        assert_eq!(change(Some("Rowan"), Some("   "), true), Ok((Some("Rowan"), Some(None))), "a role of spaces is none");
+        let most = "t".repeat(limits::TITLE_MAX_CHARS);
+        assert_eq!(change(Some(&most), None, false), Ok((Some(most.as_str()), None)));
+        let role = "r".repeat(limits::ROLE_MAX_CHARS);
+        assert_eq!(change(None, Some(&role), true), Ok((None, Some(Some(role.as_str())))));
+        assert_eq!(change(None, None, true), Err("name its title, its role, or both".into()));
+        assert_eq!(change(Some("  "), None, false), Err("a title is 1 to 120 characters".into()));
+        assert_eq!(change(Some(&format!("{most}t")), None, false), Err("a title is 1 to 120 characters".into()));
+        assert_eq!(change(None, Some(&format!("{role}r")), true), Err("a role is at most 48 characters".into()));
+        assert_eq!(change(Some("Garden"), Some("a chat"), false), Err("a role is an agent's alone".into()));
+    }
+
+    /// Goal: a face the cell keeps never meets the release before, which
+    /// read it from live at each install (it would write a rename away)
+    /// and served the picture from git (no taken one). An object that took
+    /// Fragment step 10 is refused by the code of the step before, so
+    /// rollout's `eligible` never rolls back across it; rolled forward, it
+    /// runs as it was (valid, rollback, restart). Method: an object made by
+    /// this code, started by the code one step before, then by this again.
+    #[test]
+    fn a_face_of_its_own_makes_the_release_forward_only() {
+        use crate::migrate::{self, host::Lite, Db, Ran, SchemaError, FRAGMENT};
+        let newest = FRAGMENT.steps.len() as u32;
+        assert_eq!(FRAGMENT.steps[9].name, "face_forward_only", "the face's step is step 10");
+        let before = migrate::Class { steps: &FRAGMENT.steps[..9], ..FRAGMENT };
+        let db = Lite::new();
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &FRAGMENT, 0)), Ok(Ran::Made { version: newest }));
+        db.exec(r#"INSERT INTO meta (key, value) VALUES ('face', '{"kind":"agent","title":"Rowan"}')"#).expect("written as the cell writes it");
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &before, 100)), Err(SchemaError::Newer { class: "Fragment", held: newest, known: 9 }), "the release before refuses the object");
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &FRAGMENT, 200)), Ok(Ran::Current { version: newest }));
+        let back = db.rows("SELECT value FROM meta WHERE key = 'face'").expect("its row");
+        assert_eq!(back[0]["value"], r#"{"kind":"agent","title":"Rowan"}"#, "rolled forward, its face is as it was");
     }
 
     /// The address names the picture's hash, so a new one is a new address.

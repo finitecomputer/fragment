@@ -1,5 +1,5 @@
 // An agent's mark: its picture when it has one (its agent fragment's
-// avatar.png: docs/api.md, "An agent's name and picture"), else its image,
+// icon: docs/api.md, "A fragment's name and an agent's picture"), else its image,
 // tinted to its colour (shell.css, .agent-avatar). A picture that does not
 // load leaves the tinted image.
 export function avatar(identity, extra = '') {

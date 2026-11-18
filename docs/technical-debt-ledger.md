@@ -88,6 +88,24 @@ unfinished design, not debt.
   computers something touched, so its silence alone is not enough: say
   so if cutting on it.
 
+## An agent's picture from before it was its icon is taken at its first use
+
+- **Shortcut:** an agent's picture moved from its `avatar.png` at live
+  into its icon (the audit's move 4; Fragment step 10 makes the release
+  forward only). A release before kept it as the `meta` `picture` row
+  (`<sha256> <type> <commit>`); `take_picture` (cell/src/runs_on.rs)
+  reads those bytes from git once, keeps them as a blob named as its icon,
+  and drops the row (`picture.taken`; `picture.lost` when git no longer
+  holds them), at the picture's first fetch or the fragment's next daily
+  pass. Until then `icon_shown` reads the row for its address. The test
+  lever `legacy-picture` writes such a row.
+- **Risk:** none lost: a row is taken whole or kept; one whose bytes are
+  gone from git was unservable already.
+- **Delete when:** this release has run in production for a day (every
+  fragment's daily pass has taken its row) and a sweep finds no `picture`
+  row. Then `MetaKey::Picture`, `take_picture`, `picture_untaken`,
+  `face::AGENT_PICTURE`, the lever and the pass's step go.
+
 ## A chat wiped while its seed runs can keep its template's repo
 
 - **Shortcut:** a chat's create answers before its repo is made
@@ -96,9 +114,12 @@ unfinished design, not debt.
   wipe (none was made when it ended), and the seed, seeing the life gone,
   stops and keeps what it made, as a delete keeps a repo
   (`publish.rs` `seed`). A wipe in that second leaves the repo holding
-  the chat's first `fragment.json` (its template and title), or nothing.
-- **Risk:** one chat's title outlives its owner's wipe at code.storage,
-  when the wipe lands within about a second of that chat's making.
+  the chat's first `fragment.json` (its template alone: its title is its
+  face's), or nothing.
+- **Risk:** an empty chat's repo outlives its owner's wipe at
+  code.storage, when the wipe lands within about a second of that chat's
+  making; nothing of theirs is in it (chats made before the face moved to
+  `meta` held their title there).
 - **Delete when:** a wipe deletes its person's repos by their name
   (`codestorage::repo_name`, the owner's digest), not only those its
   fragments' lives recorded.

@@ -156,7 +156,7 @@ struct FragmentAPI: Sendable {
         return status.npub
     }
 
-    /// A chat's or an app's name, in its manifest, as a person typed it
+    /// A chat's or an app's name, its face's title, as a person typed it
     /// (trimmed). An agent's name is its job's too, which only the shell and
     /// the CLI rewrite today.
     func rename(_ fragment: FragmentSummary, title: String) async throws {
@@ -165,26 +165,17 @@ struct FragmentAPI: Sendable {
         try await retitle(fragment, exactly: clean)
     }
 
-    /// A title written exactly as given, as the web's `retitle` writes it.
-    /// With `from`, only a manifest still titled so when read is renamed
-    /// (one renamed before the manifest read keeps its name; a rename after
-    /// it is overwritten, as `POST files` takes no expectation); whether it was.
-    @discardableResult
-    func retitle(_ fragment: FragmentSummary, exactly title: String, from: String? = nil, message: String = "Rename from Finite for iOS") async throws -> Bool {
+    /// A title set exactly as given, as the web's `retitle` sets it: its
+    /// face's (`PUT /api/f/{name}/face`), at once, with no commit and no
+    /// deploy (docs/api.md, "A fragment's name and an agent's picture").
+    /// With `was`, only while its title is that: refused (409) once it is
+    /// renamed, so a rename made meanwhile keeps its name.
+    func retitle(_ fragment: FragmentSummary, exactly title: String, was: String? = nil) async throws {
         precondition(fragment.kind != "agent", "an agent is renamed where its job is rewritten with it")
         precondition(!title.isEmpty, "a title is never empty")
-        let manifest: JSONValue = try await request("api/f/\(fragment.name)/manifest")
-        guard case .object(var fields) = manifest else { throw APIError.invalidResponse }
-        var meta: [String: JSONValue] = [:]
-        if case .object(let existing) = fields["meta"] { meta = existing }
-        if let from, meta["title"]?.string != from { return false }
-        meta["title"] = .string(title); fields["meta"] = .object(meta)
-        let text = String(decoding: try JSONEncoder().encode(JSONValue.object(fields)), as: UTF8.self)
-        let _: JSONValue = try await request("api/f/\(fragment.name)/files", method: "POST", body: .object([
-            "message": .string(message), "files": .array([.object(["path": .string("fragment.json"), "text": .string(text)])])
-        ]))
-        let _: JSONValue = try await request("api/f/\(fragment.name)/deploy", method: "POST", body: .object([:]))
-        return true
+        var body: [String: JSONValue] = ["title": .string(title)]
+        if let was { body["was"] = .string(was) }
+        let _: JSONValue = try await request("api/f/\(fragment.name)/face", method: "PUT", body: .object(body))
     }
 
     func post(_ fragment: String, id: String, body: JSONValue) async throws -> ChannelRecord {

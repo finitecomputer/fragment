@@ -427,7 +427,7 @@ enum Cmd {
     /// Show or set who can see a fragment: public | link | members
     Visibility { name: String, value: Option<String> },
     /// Show or change an agent's name and picture, as every page shows it:
-    /// its agent fragment's title and its avatar.png, put live at once
+    /// its agent fragment's title and its icon, set at once
     Agent {
         /// The agent fragment (`juniper--k3x9`); an agent on a computer
         /// names itself by leaving it out
@@ -435,7 +435,7 @@ enum Cmd {
         /// Its new name
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
-        /// Its picture: a PNG, JPEG, WebP or GIF of at most 256 KiB
+        /// Its picture: a PNG, JPEG, WebP or GIF (one past 256 KiB is cropped to fit)
         #[arg(long, value_name = "FILE", conflicts_with = "no_picture")]
         picture: Option<PathBuf>,
         /// Take its picture away
@@ -2904,26 +2904,19 @@ fn run(cli: Cli) -> Result<()> {
             let Some(agent) = agent.or_else(|| c.agent().map(|m| m.agent.clone())) else {
                 return Err(usage("name the agent fragment: `fragment agent juniper--k3x9 --name Frank`"));
             };
-            let files = agent_face_writes(&c, &agent, name.as_deref(), picture.as_deref(), no_picture)?;
-            if !files.is_empty() {
-                // one commit, keyed by what it writes: the same change sent again commits nothing twice
-                let key = format!("agent-face-{}", &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(serde_json::to_vec(&files)?))[..16]);
-                c.call_as::<Value>(c.post_json(&format!("/api/f/{agent}/files"), &json!({ "files": files, "message": "its name and picture", "key": key }))?)?;
-                let Deployed::Live { live_tip, .. } = deploy(&c, &agent, None, None)? else { unreachable!("a deploy of no folder syncs nothing") };
-                refused_live(&c, &agent, &live_tip)?;
-            }
-            // as its list says it: the platform's face of it, a moment after a change
+            let changed = agent_face(&c, &agent, name.as_deref(), picture.as_deref(), no_picture)?;
+            // as its list says it: the platform's face of it
             let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
             let row = list.fragments.into_iter().find(|f| f.name == agent);
             let shown_name = name.unwrap_or_else(|| fragment_core::face::agent_name(row.as_ref().and_then(|r| r.title.as_deref()), &agent).to_string());
-            let shown_picture = if files.is_empty() { row.and_then(|r| r.picture) } else { None };
-            json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": !files.is_empty() }));
+            let shown_picture = if changed { None } else { row.and_then(|r| r.picture) };
+            json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": changed }));
             println!("{agent}: {shown_name}");
             match (&picture, no_picture, shown_picture) {
                 (Some(p), _, _) => println!("picture: {} (it shows everywhere within seconds)", p.display()),
                 (None, true, _) => println!("no picture"),
                 (None, false, Some(url)) => println!("picture: {url}"),
-                (None, false, None) if files.is_empty() => println!("no picture"),
+                (None, false, None) if !changed => println!("no picture"),
                 _ => {}
             }
         }
@@ -3012,8 +3005,8 @@ fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>) -
 }
 
 /// A fragment's status after a deploy to `live_tip`, or the refusal of
-/// what it put live: the deploy installed live (or refused its code, an
-/// agent's picture among it) before it answered.
+/// what it put live: the deploy installed live (or refused its code)
+/// before it answered.
 fn refused_live(c: &api::Client, name: &str, live_tip: &str) -> Result<FragmentStatus> {
     let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
     if let Some(why) = st.code.error.as_deref().filter(|_| st.code.sha.as_deref() != Some(live_tip)) {
@@ -3025,41 +3018,38 @@ fn refused_live(c: &api::Client, name: &str, live_tip: &str) -> Result<FragmentS
     Ok(st)
 }
 
-/// What `fragment agent` writes to an agent fragment for a new name (its
-/// `fragment.json`'s `meta.title`, as live says it now), a new picture
-/// (`avatar.png`, checked here as the platform checks it), or none: the
-/// files of one `POST …/files` (docs/api.md, "An agent's name and
-/// picture").
-fn agent_face_writes(c: &api::Client, agent: &str, name: Option<&str>, picture: Option<&Path>, no_picture: bool) -> Result<Vec<Value>> {
-    let mut files = vec![];
+/// What `fragment agent` changes of an agent (docs/api.md, "A fragment's
+/// name and an agent's picture"): a new name, its face's title, said in its
+/// job (`SOUL.md`, a commit beside it) wherever the job said an old one as
+/// a word; a new picture, its icon, which the platform checks; or none. Each
+/// is set at once, with no deploy. Whether it asked for any change.
+fn agent_face(c: &api::Client, agent: &str, name: Option<&str>, picture: Option<&Path>, no_picture: bool) -> Result<bool> {
     if let Some(name) = name.map(str::trim) {
         if name.is_empty() || name.chars().count() > fragment_proto::limits::TITLE_MAX_CHARS {
             return Err(usage(format!("a name is 1 to {} characters", fragment_proto::limits::TITLE_MAX_CHARS)));
         }
-        let mut manifest: Value = c.call_as(c.get(&format!("/api/f/{agent}/manifest"))?)?;
-        anyhow::ensure!(manifest.is_object(), "{agent}'s fragment.json is not an object: {manifest}");
-        let old = manifest["meta"]["title"].as_str().map(str::to_string);
-        manifest["meta"]["title"] = json!(name);
-        files.push(json!({ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }));
-        // its job says its new name where it said an old one, in the same
-        // commit (docs/api.md, "An agent's name and picture"): its name at
-        // main, and the one the shell's first job gave it
-        if let Some(job) = agent_job(c, agent)? {
-            let olds: Vec<&str> = old.as_deref().into_iter().chain(fragment_core::face::job_first_name(&job)).collect();
+        // its name now, and its job, read before anything changes
+        let old: FragmentStatus = c.call_as(c.get(&format!("/api/f/{agent}/status"))?)?;
+        let job = agent_job(c, agent)?;
+        c.call_as::<Value>(c.put_json(&format!("/api/f/{agent}/face"), &fragment_proto::FaceChange { title: Some(name.to_string()), ..Default::default() })?)?;
+        // its name now, and the one the shell's first job gave it
+        if let Some(job) = job {
+            let olds: Vec<&str> = old.title.as_deref().into_iter().chain(fragment_core::face::job_first_name(&job)).collect();
             if let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, name) {
-                files.push(json!({ "path": fragment_core::face::JOB, "text": renamed }));
+                // keyed by what it writes: sent again, it commits nothing twice
+                let key = format!("agent-job-{}", &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(renamed.as_bytes()))[..16]);
+                let files = json!([{ "path": fragment_core::face::JOB, "text": renamed }]);
+                c.call_as::<Value>(c.post_json(&format!("/api/f/{agent}/files"), &json!({ "files": files, "message": "its job, renamed", "key": key }))?)?;
             }
         }
     }
-    let at = fragment_core::face::AGENT_PICTURE;
     if let Some(path) = picture {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        fragment_core::face::check_picture(&bytes).map_err(|r| usage(r.message(&path.display().to_string())))?;
-        files.push(json!({ "path": at, "base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes) }));
+        c.call_as::<Value>(c.put_bytes(&format!("/api/f/{agent}/icon"), bytes)?)?;
     } else if no_picture {
-        files.push(json!({ "path": at, "delete": true }));
+        c.call_as::<Value>(c.delete(&format!("/api/f/{agent}/icon"))?)?;
     }
-    Ok(files)
+    Ok(name.is_some() || picture.is_some() || no_picture)
 }
 
 /// An agent's job (`SOUL.md`) at main, as text: none when it has none, or
@@ -3287,36 +3277,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Goal: `fragment agent --picture` checks the picture as the platform
-    /// does (fragment_core::face) before anything is sent, and writes the
-    /// one path an agent's picture has. Valid: a PNG becomes its
-    /// `avatar.png`, base64; `--no-picture` deletes it. Invalid: text, and
-    /// a picture past 256 KiB, each refused as usage (exit 2), naming the
-    /// file, with no request made (the host here answers nothing).
+    /// Goal: `fragment agent --name` refuses a name the platform would,
+    /// before anything is sent (the host here answers nothing): a blank, or
+    /// one past 120 characters, is usage (exit 2).
     #[test]
-    fn an_agents_picture_is_checked_before_anything_is_sent() {
+    fn an_agents_name_is_checked_before_anything_is_sent() {
         let c = api::Client::new("http://127.0.0.1:9", auth::fixed(7));
-        let dir = std::env::temp_dir().join(format!("fragment-agent-face-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let png = dir.join("me.png");
-        std::fs::write(&png, b"\x89PNG\r\n\x1a\n-a-tiny-picture").unwrap();
-        let writes = agent_face_writes(&c, "j--k3x9", None, Some(&png), false).unwrap();
-        assert_eq!(writes, vec![json!({ "path": "avatar.png", "base64": "iVBORw0KGgotYS10aW55LXBpY3R1cmU=" })]);
-        assert_eq!(agent_face_writes(&c, "j--k3x9", None, None, true).unwrap(), vec![json!({ "path": "avatar.png", "delete": true })]);
-        assert!(agent_face_writes(&c, "j--k3x9", None, None, false).unwrap().is_empty(), "nothing asked, nothing written");
-        let text = dir.join("me.txt");
-        std::fs::write(&text, "not a picture").unwrap();
-        let big = dir.join("big.png");
-        std::fs::write(&big, [&b"\x89PNG"[..], &vec![0u8; fragment_proto::limits::PICTURE_MAX_BYTES]].concat()).unwrap();
-        for (file, said) in [(&text, "is not a picture"), (&big, "a picture is at most 262144")] {
-            let err = agent_face_writes(&c, "j--k3x9", None, Some(file), false).unwrap_err();
-            assert_eq!(classify_err(&err), Code::InvalidUsage, "{}", file.display());
-            let err = agent_face_writes(&c, "j--k3x9", None, Some(file), false).unwrap_err().to_string();
-            assert!(err.contains(&file.display().to_string()) && err.contains(said), "{err}");
+        for name in ["  ", &"n".repeat(fragment_proto::limits::TITLE_MAX_CHARS + 1)] {
+            let err = agent_face(&c, "j--k3x9", Some(name), None, false).unwrap_err();
+            assert_eq!(classify_err(&err), Code::InvalidUsage);
+            assert!(err.to_string().contains("1 to 120 characters"), "{err}");
         }
-        let err = agent_face_writes(&c, "j--k3x9", Some("  "), None, false).unwrap_err().to_string();
-        assert!(err.contains("1 to 120 characters"), "{err}");
-        std::fs::remove_dir_all(&dir).ok();
+        assert!(!agent_face(&c, "j--k3x9", None, None, false).unwrap(), "nothing asked, nothing sent");
     }
 
     fn coded(code: Code) -> anyhow::Error {

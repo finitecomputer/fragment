@@ -12,12 +12,13 @@
 //! lists; an upload is fitted; a making whose drawings are all tiles offers
 //! none and says why. Refused: a viewer's making, keeping and removing, a
 //! hint too long or not text, an upload that is no image or past the body
-//! limit, an agent fragment's icon, and the hour's eleventh making, also
+//! limit, and the hour's eleventh making, also
 //! when the makings come at once and the ledger is slow to answer. At its
 //! cap a fragment's making is its owner's and their agents' alone, and
 //! read-only (its owner past the overdraft) its icon is neither kept nor
 //! removed, nothing fitted. That a node's restart keeps the icon is not
-//! checked here: it needs the node (`Need::Node`), restart.rs's.
+//! checked here: it needs the node (`Need::Node`), restart.rs's. An
+//! agent's icon is its picture: faces.rs.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -307,20 +308,6 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
         "an upload that is no image is refused (400), one past the body limit (2 MiB) 413, and the icon stays",
         text.status == 400 && text.code() == Some(ErrorCode::InvalidRequest) && large.status == 413 && unmoved.bytes == fitted.bytes,
         format!("{text} / {large}"),
-    );
-
-    // ---- an agent fragment's picture is its avatar
-    let agent = s.named(api, &owner, "icons-agent")?;
-    let r = api.create_with(&owner, json!({ "name": agent, "template": "agent", "title": "Juniper" }))?;
-    anyhow::ensure!(r.status == 200, "the agent fragment: {r}");
-    s.owned(&r.body, &owner);
-    let known = s.eventually(WAIT, || row(api, &owner, &agent)["kind"] == "agent");
-    let before = s.ai.calls().len();
-    let (m, p) = (make(api, &owner, &agent, json!({}))?, put(api, &owner, &agent, &chosen)?);
-    s.ok(
-        "an agent fragment takes no icon (its picture is its avatar.png): its making and an upload are refused (400), nothing called",
-        known && [&m, &p].iter().all(|r| r.status == 400 && r.code() == Some(ErrorCode::InvalidRequest)) && s.ai.calls().len() == before,
-        format!("make {m} / put {p}"),
     );
 
     // ---- removed

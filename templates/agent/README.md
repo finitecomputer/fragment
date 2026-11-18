@@ -7,19 +7,18 @@ model of a provider its owner connected, `{provider, id}`: docs/computers.md,
 "An agent's own model"; its page shows the model it runs by its id, as its
 owner's shell hands over their computer's view of it; `reasoning` how hard
 it thinks, `"low"` or `"high"`, high when absent, which its owner picks
-beside its model in Settings: docs/computers.md, "Our images"), its picture
-(`avatar.png`: a PNG, JPEG, WebP or GIF
-of at most 256 KiB), and what its runtime keeps
-(`memories/`, `skills/`); the platform serves this template's manifest and
-page from its release. A fragment on it names it in its own
-`fragment.json`: `{"template": "agent", "meta": {"title": "Juniper"}}`.
+beside its model in Settings: docs/computers.md, "Our images"), and what
+its runtime keeps (`memories/`, `skills/`); the platform serves this
+template's manifest and page from its release. A fragment on it names it
+in its own `fragment.json`: `{"template": "agent"}`.
 
-Its name is that title, and its picture that `avatar.png`, as live has
-them: every page and the platform show the agent by them (docs/api.md,
-"An agent's name and picture"). Its owner changes them in Settings, and
-the agent with `fragment agent --name <name> --picture <file>`; either
-writes them and puts them live. A runtime's own files (Hermes'
-`profile.yaml`) are written from them, never the other way. Its colour
+Its name and picture are its face, kept by its cell: its title and its
+icon (docs/api.md, "A fragment's name and an agent's picture"), never a
+file. Every page and the platform show the agent by them. Its owner
+changes them in Settings, and the agent with `fragment agent --name
+<name> --picture <file>`; either sets them at once, deploying nothing. A
+runtime's own files (Hermes' `profile.yaml`) are written from them, never
+the other way. Its colour
 is chosen by its identity (`site/agent-color.js`, which the chat
 template's page and the shell link to), never stored.
 

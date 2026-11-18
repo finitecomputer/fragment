@@ -745,18 +745,32 @@ fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Re
     s.cli_json(api, home, &["create", &name, "--template", "blank", "--visibility", "public", "--json"])?;
     let before = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
     s.ok("CLI template creation gives the app its own display name instead of Blank", before.body["meta"]["title"].as_str().is_some_and(|t| !t.is_empty() && t != "Blank"), &before.body);
+    // work waiting on main, undeployed; then a rename (FIN-541)
+    let waiting = api.signed(keys, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "message": "not yet", "files": [{ "path": "waiting.txt", "text": "not deployed\n" }] })))?;
+    let pins = api.status(keys, &name)?.body["pins"].clone();
     let renamed = s.cli_json(api, home, &["rename", &name, "Meals this week", "--json"])?;
+    let status = api.status(keys, &name)?;
+    let served = api.page(&name, "waiting.txt", None)?;
+    s.ok(
+        "CLI rename of an app with undeployed work on main deploys none of it (FIN-541): its pins stay, its page serves nothing of main's, and its name changes",
+        waiting.status == 200 && status.body["pins"] == pins && served.status == 404 && status.body["title"] == "Meals this week",
+        json!({ "pins": [pins, status.body["pins"]], "served": served.status, "title": status.body["title"] }),
+    );
     let after = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
     let again = s.cli_json(api, home, &["rename", &name, "Meals this week", "--json"])?;
-    s.ok("CLI rename deploys the name, preserves the other metadata and is safe to repeat", after.body["meta"]["title"] == "Meals this week" && after.body["meta"]["description"] == before.body["meta"]["description"] && renamed["title"] == again["title"], &after.body);
+    s.ok(
+        "CLI rename commits nothing (its fragment.json as it was), and is safe to repeat",
+        after.body == before.body && renamed["title"] == again["title"] && api.status(keys, &name)?.body["pins"] == pins,
+        json!({ "manifest": after.body, "renamed": renamed, "again": again }),
+    );
     let mut titles = vec![];
     for title in ["Meal archive", "Meals this week", "Meals this week"] {
         s.cli_json(api, home, &["rename", &name, title, "--json"])?;
-        let manifest = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
         let status = api.status(keys, &name)?;
-        titles.push(json!({ "wanted": title, "main": manifest.body["meta"]["title"], "live": status.body["title"] }));
+        let listed = super::faces::row(api, keys, &name);
+        titles.push(json!({ "wanted": title, "status": status.body["title"], "list": listed["title"] }));
     }
-    s.ok("CLI rename A to B to A and an immediate repeat each change main and the live display name", titles.iter().all(|r| r["wanted"] == r["main"] && r["wanted"] == r["live"]), json!(titles));
+    s.ok("CLI rename A to B to A and an immediate repeat each change the name its status and list show", titles.iter().all(|r| r["wanted"] == r["status"] && r["wanted"] == r["list"]), json!(titles));
     if s.shoots_cards() {
         let receipt = s.cli_json(api, home, &["preview", &name, "--json"])?;
         s.ok("CLI preview asks for a screenshot and returns its completion receipt", receipt["since"].is_i64() && receipt["live"].is_string(), &receipt);

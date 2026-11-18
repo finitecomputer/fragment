@@ -42,7 +42,7 @@ use fragment_core::access;
 use fragment_core::ended::Failure;
 use fragment_core::npub;
 use fragment_proto::{
-    limits, CreateInvite, ErrorCode, FragmentKind, Identity, IdentityKind, Invite, InviteList, Member, MemberList, PutSecret, Role, Rotated, SecretInfo,
+    limits, CreateInvite, ErrorCode, FaceChange, FragmentKind, Identity, IdentityKind, Invite, InviteList, Member, MemberList, PutSecret, Role, Rotated, SecretInfo,
     SecretList, SetRole, SetVisibility, Shared, Sharing, Visibility,
 };
 use futures_util::future::join_all;
@@ -206,17 +206,55 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// What its members' lists show of it, at each install of live: its
-    /// kind and title, an agent's role and picture (and its agents, read as
-    /// each row is sent). A change is sent to every member's list (at most
-    /// `MEMBERS_MAX`) and its owner's, as an agent's joining or leaving is.
-    pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> CellResult<()> {
-        let face = face(kind, title, role, picture);
+    /// Its face as kept (`MetaKey::Face`): an untitled app's before any.
+    pub(crate) fn face_now(&self) -> CellResult<Face> {
+        Ok(self.meta(MetaKey::Face)?.and_then(|f| crate::json_text::<Face>(&f).ok()).unwrap_or_default())
+    }
+
+    /// What its members' lists show of it (and its agents, read as each
+    /// row is sent): its kind, as its live manifest last said; its title
+    /// and an agent's role, its own (its making's, its face route's:
+    /// docs/api.md, "A fragment's name and an agent's picture"); its
+    /// picture, its icon (icon.rs `icon_shown`). A change is sent to every
+    /// member's list (at most `MEMBERS_MAX`) and its owner's, as an agent's
+    /// joining or leaving is.
+    pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>, role: Option<&str>) -> CellResult<()> {
+        if kind == FragmentKind::Other {
+            return Err(CellError::host("its face names a kind this release does not know"));
+        }
+        let face = face(kind, title, role, self.icon_shown(kind)?.as_deref());
         if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
             return Ok(());
         }
         self.set_meta(MetaKey::Face, &face)?;
         self.reindex()
+    }
+
+    /// `PUT /api/f/{name}/face` (editors and up; a connector's owner
+    /// alone): its title, an agent's role, or both (`face::change`), kept
+    /// here alone, with no commit and no deploy. Each change is an `events`
+    /// row (`face.changed`), its history; its lists follow in this request.
+    /// A write: refused while its owner's fragments are read-only.
+    pub(crate) async fn face_put(&self, caller: &Caller, body: FaceChange) -> CellResult<Response> {
+        self.require(caller, false, Role::Editor)?;
+        self.writable().await?;
+        if body.picture.is_some() {
+            return Err(CellError::invalid("a picture is its icon: PUT /api/f/{name}/icon"));
+        }
+        let now = self.face_now()?;
+        if body.was.as_ref().is_some_and(|was| now.title.as_ref() != Some(was)) {
+            return Err(CellError::new(ErrorCode::Conflict, format!("its title is no longer {:?}: nothing was changed", body.was.unwrap_or_default())));
+        }
+        let (title, role) = fragment_core::face::change(body.title.as_deref(), body.role.as_deref(), now.kind == FragmentKind::Agent).map_err(CellError::invalid)?;
+        let (title, role) = (title.or(now.title.as_deref()), role.unwrap_or(now.role.as_deref()));
+        if (title, role) != (now.title.as_deref(), now.role.as_deref()) {
+            self.face_is(now.kind, title, role)?;
+            let by = self.caller_id(caller)?.to_string();
+            self.event("face.changed", &format!("its name is {:?}{}", title.unwrap_or(""), role.map(|r| format!(", its role {r:?}")).unwrap_or_default()), json!({ "title": title, "role": role, "by": by }));
+            self.flush_index().await;
+        }
+        let shown = self.face_now()?;
+        json_response(&FaceChange { title: shown.title, role: shown.role, picture: shown.picture, was: None })
     }
 
     /// Every list's row is sent again: its owner's and each member's.
@@ -1316,11 +1354,10 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
     Ok(hosts)
 }
 
-/// A fragment's face as its members' lists keep it (`MetaKey::Face`): an
-/// agent fragment's with its role and its picture's address, when it has
-/// them. Its kind is a manifest's, which names only kinds this release
-/// knows: the fallback a newer platform's kind reads as is never stored as
-/// one.
+/// A fragment's face as its members' lists keep it (`MetaKey::Face`): its
+/// picture's address when it has one, and an agent's role. Its kind is a
+/// manifest's, which names only kinds this release knows: the fallback a
+/// newer platform's kind reads as is never stored as one.
 pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> String {
     assert_ne!(kind, FragmentKind::Other, "a face's kind is its manifest's, one this release knows");
     // a title of nothing but spaces is none: every reader then falls back alike

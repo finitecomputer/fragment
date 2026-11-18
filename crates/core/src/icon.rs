@@ -119,8 +119,6 @@ pub enum Refusal {
     Busy,
     /// An upload that is no PNG, JPEG, WebP or GIF by its bytes.
     NotAnImage,
-    /// An agent's picture is its `avatar.png` (crate::face).
-    Agent,
 }
 
 impl Refusal {
@@ -129,7 +127,6 @@ impl Refusal {
             Refusal::Hint => format!("an icon's hint is text of at most {HINT_MAX_CHARS} characters"),
             Refusal::Busy => format!("{MAKINGS_PER_HOUR} icons were made for this fragment in the last hour: try again later"),
             Refusal::NotAnImage => "an icon is made from a PNG, JPEG, WebP or GIF".into(),
-            Refusal::Agent => "an agent's picture is its avatar.png: set it in Settings, Agents".into(),
         }
     }
 }
@@ -422,6 +419,13 @@ pub fn fit(trim: Option<Value>) -> Vec<Value> {
     }
     steps.push(json!({ "width": SIZE, "height": SIZE, "fit": "pad", "background": "rgba(0,0,0,0)" }));
     steps
+}
+
+/// An agent's picture past what one is kept as (`face::check_picture`),
+/// as Images makes it one: `SIZE` square, cropped to fill (a picture is
+/// shown round).
+pub fn cover() -> Vec<Value> {
+    vec![json!({ "width": SIZE, "height": SIZE, "fit": "cover" })]
 }
 
 /// The questions Clef is asked of one icon (`decide::bound`'s request,

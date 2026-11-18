@@ -55,7 +55,7 @@ use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::npub;
 use fragment_core::seed;
 use fragment_proto::{
-    limits, search, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, Pins, Role, Urls,
+    limits, search, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentKind, FragmentStatus, IdentityKind, Pins, Role, Urls,
     Visibility,
 };
 use fragment_templates::blessed;
@@ -330,7 +330,8 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
-    /// The title a template's fragment starts with (`TemplatePending`'s).
+    /// The title a copied template's fragment starts with
+    /// (`TemplatePending`'s), stamped into its `fragment.json`.
     TemplateTitle,
     /// The commits the cell pins (plane.rs).
     PinMain,
@@ -360,11 +361,13 @@ pub(crate) enum MetaKey {
     /// The blessed template live runs and its release (`<name>@<release>`,
     /// blessed.rs in crates/templates), when it names one.
     Blessed,
-    /// What its members' lists show of it (`{kind, title, picture?}`), as
-    /// last sent.
+    /// What its members' lists show of it (`{kind, title?, role?,
+    /// picture?}`): its title and an agent's role are kept here alone, set
+    /// at its making and through its face route (members.rs `face_put`).
     Face,
-    /// An agent fragment's picture as live's install read it (`<sha256>
-    /// <type> <commit>`): what `calls::Picture` answers.
+    /// An agent's picture as a release before kept it (`<sha256> <type>
+    /// <commit>`, its `avatar.png` there), until taken as its icon
+    /// (runs_on.rs `take_picture`; the debt ledger).
     Picture,
     /// The channels that list records, their kinds, fields and read
     /// roles, as the rows last carried them (listed.rs `listed_fence`).
@@ -1207,6 +1210,10 @@ impl FragmentCell {
                 let bytes = req.bytes().await?;
                 self.upload_card(&caller, bytes).await
             }
+            (Method::Put, ["api", "face"]) => {
+                let body = body_json(&mut req).await?;
+                self.face_put(&caller, body).await
+            }
             (Method::Get, ["api", "icon"]) => self.icon_get(&caller, &req).await,
             (Method::Put, ["api", "icon"]) => self.icon_put(&caller, &mut req).await,
             (Method::Delete, ["api", "icon"]) => self.icon_delete(&caller).await,
@@ -1382,18 +1389,19 @@ impl FragmentCell {
             };
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             laps.lap("key");
-            // a blessed template's face is known now: the owner's list says
-            // it is a chat or an agent from the start, not once it installs
-            // (a read of the release that fails leaves it to the install,
-            // which sets it from the same manifest)
+            // its face from the start, its own from then on (docs/api.md, "A
+            // fragment's name and an agent's picture"): the title given, else
+            // its blessed template's; that template's kind, so the owner's
+            // list says it is a chat or an agent at once. A copied template's
+            // (an app), or a blessed one whose manifest did not read, is an
+            // app's until its install says, and its title, if none was given,
+            // the install's default
             let face = match body.template.as_deref() {
                 Some(t) => {
-                    let face = match crate::assets::blessed_manifest(&self.env, t).await {
-                        Ok(Ok(m)) => Some(crate::members::face(m.kind(), body.title.as_deref().map(str::trim).or(m.title()), m.role(), None)),
-                        _ => None,
-                    };
+                    let blessed = crate::assets::blessed_manifest(&self.env, t).await.ok().and_then(Result::ok);
                     laps.lap("manifest");
-                    face
+                    let (kind, title) = blessed.as_ref().map_or((FragmentKind::App, None), |m| (m.kind(), m.title()));
+                    Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None))
                 }
                 None => None,
             };
@@ -1684,6 +1692,10 @@ impl FragmentCell {
             self.trim_writes()?;
             if self.pins_may_lag()? {
                 self.poll().await;
+            }
+            // before the blobs' collection: the picture it takes is one of them
+            if let Err(e) = self.take_picture().await {
+                self.event("picture.take-failed", &e.message, json!({ "code": e.code }));
             }
             if let Err(e) = self.collect_blobs().await {
                 self.event("blobs.collect-failed", &e.message, json!({ "code": e.code }));

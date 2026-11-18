@@ -2,7 +2,7 @@
 //! template as a new fragment's first commit and first deploy,
 //! `POST /api/files` (one commit to `main`, as a CLI sync makes), and
 //! `POST /api/deploy` (`live` to `main`'s tip, as `fragment deploy` does).
-//! The shell uses the same two routes (an agent's settings, a rename).
+//! The shell uses the same two routes (an agent's settings and job).
 
 use std::collections::BTreeMap;
 
@@ -47,14 +47,11 @@ pub(crate) fn repo_name(cfg: &crate::config::Config, fragment: &str, owner: &str
 }
 
 /// A blessed template's `fragment.json` as its seed commits it: the
-/// template named, and its title. What runs before the commit lands
-/// (`install_pending`) is read from these same bytes.
-pub(crate) fn blessed_manifest_bytes(which: &str, title: Option<&str>) -> Vec<u8> {
-    let mut manifest = json!({ "template": which });
-    if let Some(title) = title {
-        manifest["meta"] = json!({ "title": title });
-    }
-    serde_json::to_vec_pretty(&manifest).expect("a manifest serializes")
+/// template named, nothing else (its face is its cell's, from its making).
+/// What runs before the commit lands (`install_pending`) is read from
+/// these same bytes.
+pub(crate) fn blessed_manifest_bytes(which: &str) -> Vec<u8> {
+    serde_json::to_vec_pretty(&json!({ "template": which })).expect("a manifest serializes")
 }
 
 /// A template a fragment can start from (`fragment_templates::CATALOG`):
@@ -225,12 +222,11 @@ impl FragmentCell {
             }
             Effect::Commit => {
                 let which = self.must(MetaKey::TemplatePending)?;
-                let title = self.meta(MetaKey::TemplateTitle)?;
                 let files = match (template(&which), blessed::template(&which)) {
-                    (Some(t), _) => stamped(&self.env, t, name, title.as_deref()).await?,
+                    (Some(t), _) => stamped(&self.env, t, name, self.meta(MetaKey::TemplateTitle)?.as_deref()).await?,
                     // a blessed template is named, not copied: the release serves it
                     (None, Some(_)) => {
-                        let bytes = blessed_manifest_bytes(&which, title.as_deref());
+                        let bytes = blessed_manifest_bytes(&which);
                         vec![FileWrite { path: RepoPath::parse("fragment.json").expect("fragment.json is a repo path"), bytes: Some(bytes) }]
                     }
                     (None, None) => return Err(CellError::host(format!("no template {which}"))),
@@ -342,13 +338,6 @@ impl FragmentCell {
         let total: usize = writes.iter().filter_map(|w| w.bytes.as_ref().map(Vec::len)).sum();
         if total > fragment_proto::limits::API_FILES_WRITE_MAX_BYTES {
             return Err(CellError::too_large("the files written", total, fragment_proto::limits::API_FILES_WRITE_MAX_BYTES));
-        }
-        // an agent's picture is refused here, before it is committed, as its
-        // install refuses one (docs/api.md, "An agent's name and picture")
-        if let Some(bytes) = writes.iter().find(|w| w.path == fragment_core::face::AGENT_PICTURE).and_then(|w| w.bytes.as_deref()) {
-            if self.kind()? == fragment_proto::FragmentKind::Agent {
-                fragment_core::face::check_picture(bytes).map_err(|r| crate::picture_refused(r, fragment_core::face::AGENT_PICTURE))?;
-            }
         }
         let message = body["message"].as_str().map_or_else(|| format!("write {} file(s)", writes.len()), str::to_string);
         let key = format!("api:{who}:{}", body["key"].as_str().map_or_else(js::random_hex::<16>, str::to_string));
