@@ -153,9 +153,13 @@
   // could not be reached. The stream goes with it, its last frame kept.
   const lost = (code, reason) => {
     const why = code === 4000 ? reason : "";
+    // a press's sockets refused (one still going to sleep wakes after it):
+    // not yet, and the next press tries again
+    const pressed = waking !== null;
     closed =
       why === "asleep" ? { state: "asleep", text: "Your computer is asleep. Press anywhere to wake it." }
       : why === "restarting" ? { state: "restarting", text: "Your computer is restarting. Press anywhere to see it again." }
+      : pressed ? { state: "closed", text: "Not connected yet. Press anywhere to try again." }
       : { state: "closed", text: "Disconnected. Press anywhere to connect again." };
     waking = null;
     attn.gone();

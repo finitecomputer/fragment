@@ -1764,6 +1764,13 @@ impl ComputerCell {
             }
             return Event::SaveFailed { generation, seq: 0, why: "its container is not running".into() };
         }
+        if sleeping {
+            // a sleep closes its port tabs as it begins, before its hold,
+            // saying why (docs/computers.md, Ports): nothing a person sends
+            // after reaches the container its save holds
+            let why = if matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { restarting: true, .. })) { "restarting" } else { "asleep" };
+            let _ = self.call("closeTabs", &[why.into()]).await;
+        }
         let t0 = js::now_ms();
         if let Err(e) = self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await {
             // a guest the DO cannot mark is saved as it is
@@ -1946,10 +1953,6 @@ impl ComputerCell {
         let t0 = js::now_ms();
         let mut exited = None;
         if self.container_running().await {
-            // its port tabs told why they close, before its container's
-            // end of them goes unexplained (docs/computers.md, Ports)
-            let why = if matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { restarting: true, .. })) { "restarting" } else { "asleep" };
-            let _ = self.call("closeTabs", &[why.into()]).await;
             let saves = self.saves().ok();
             let newest = saves.as_ref().and_then(|s| s.all().first().cloned()).filter(|s| s.generation == generation);
             // a restart's start is fresh from the image: no snapshot for it
@@ -3504,8 +3507,14 @@ impl ComputerCell {
             return Err(CellError::new(ErrorCode::Unauthenticated, "sign in to this computer: its owner opens it from the platform"));
         }
         let port: u16 = req.headers().get(PORT_HEADER)?.and_then(|p| p.parse().ok()).filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("name a port"))?;
-        // a request to a sleeping computer's port wakes it, as a tab does
+        // a request to a sleeping computer's port wakes it, as a tab does;
+        // one going to sleep is woken after, and reaches none of the
+        // container its sleep saved (its tabs closed as it began)
         let life = self.lifecycle()?;
+        if matches!(life.phase, Phase::Sleeping { .. }) {
+            self.wake(Wake::Tab).await?;
+            return Ok(Response::error("its computer is going to sleep, and wakes again after: try again in a moment", 503)?);
+        }
         if !matches!(life.phase, Phase::Awake { .. }) {
             self.wake(Wake::Tab).await?;
         }

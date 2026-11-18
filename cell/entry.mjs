@@ -590,10 +590,10 @@ class ContainerHost {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // A sleep or a restart is about to stop the container: each open port
-  // tab closes first with 4000 and `why` ("asleep" or "restarting"), which
-  // the container's own end of it, gone with it, could not say (its page
-  // says so, and waits for its person: images/hermes/screen/index.html).
+  // A sleep (or a restart's) begins, before its hold: each open port tab
+  // closes with 4000 and `why` ("asleep" or "restarting"), so nothing its
+  // page sends after reaches the container the sleep saves, and its page
+  // says why and waits for its person (images/hermes/screen/index.html).
   // Answers how many it closed.
   closeTabs(why) {
     const tabs = [...this.#tabs];

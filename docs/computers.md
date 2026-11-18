@@ -739,8 +739,11 @@ agent; their account pays.
   minute at a time), hold it `IDLE_MS`; one whose page says nothing lets
   it sleep, and a page that stops speaking when no one is at it lets it
   sleep under an open tab. The container may speak first; its words hold
-  nothing. A close at either end closes the other. A sleep or a restart
-  closes each first, with 4000 and `asleep` or `restarting`.
+  nothing. A close at either end closes the other. A sleep (a restart's
+  too) closes each as it begins, before its hold, with 4000 and `asleep`
+  or `restarting`, so nothing a page sends after reaches the container its
+  save holds; a request to a port while it sleeps wakes it after, and is
+  answered 503.
 - **The screen** (decision 11) is a page on port 6080, one for each
   agent, at `/p/6080/?agent=<agent fragment>`. The platform carries the
   query and reads nothing in it: which desktop is the agent's, and

@@ -30,8 +30,9 @@
 //! - **Sleeping.** Its hold and its save, then its stop (snapshot, signal,
 //!   wait, destroy), reported back by `Asleep`. A keepalive that opens
 //!   during an idle sleep's hold cancels the sleep: the guest took work as
-//!   it was held, so it stays awake (docs/computers.md, Lifecycle); so
-//!   does a port tab's use (its person came back).
+//!   it was held, so it stays awake (docs/computers.md, Lifecycle). Its
+//!   port tabs close as it begins (the cell's), so nothing a person sends
+//!   after reaches the container its save holds.
 //!   A sleep whose save fails keeps its container and is tried again, for
 //!   at most `Rules::unsaved_max_ms`; then it sleeps unsaved, and says so.
 //!   A container its host stops unasked while it is idle, with all this

@@ -2642,7 +2642,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("asleep, with a new chat deployed", deployed && slept, &last);
     let closed = tab.and_then(|mut c| c.closed(8));
     s.ok(
-        "its sleep closed the socket open on its port first, saying why (4000, asleep), as the container's own end, gone with it, could not: its page says so, and waits for its person",
+        "its sleep closed the socket open on its port as it began, before its hold, saying why (4000, asleep): nothing its page sends after reaches the container its save holds, and its page says so and waits for its person",
         closed.as_ref().is_ok_and(|(code, why)| *code == 4000 && why == "asleep"),
         format!("{closed:?}"),
     );

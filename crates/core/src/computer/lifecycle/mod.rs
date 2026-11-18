@@ -514,9 +514,10 @@ impl Lifecycle {
                     // the start under way is the restart's
                     Phase::Starting { .. } => {}
                     Phase::Awake { generation, .. } => {
-                        // its sockets close with its container, as at its owner's sleep
+                        // its keepalives close with its container, as at its
+                        // owner's sleep; its tabs close as the sleep begins,
+                        // each close (and a use it carries) heard
                         self.keepalives = 0;
-                        self.tabs = 0;
                         self.sleep(generation, now_ms, (true, true, true), &mut step);
                     }
                     Phase::Sleeping { generation, since_ms, .. } => {
@@ -664,19 +665,8 @@ impl Lifecycle {
                     }
                 }
                 self.saved(now_ms, &mut step);
-                if matches!(self.phase, Phase::Sleeping { owner: false, .. }) && self.tab_used_ms >= self.save_asked_ms {
-                    // its person came back to a port tab as its idle sleep
-                    // saved (its hold, which a use cancels, was over): what
-                    // they do now is in no save, so it stays awake, held from
-                    // that use, as a turn would keep it
-                    self.phase = Phase::Awake { generation, since_ms: now_ms };
-                    self.saving = None;
-                    self.hold(self.tab_used_ms + IDLE_MS);
-                    step.actions.push(Action::Unhold { generation });
-                } else {
-                    self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
-                    step.actions.push(Action::Stop { generation, saved: true });
-                }
+                self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
+                step.actions.push(Action::Stop { generation, saved: true });
             }
             (Phase::Awake { generation, .. }, Event::SaveFailed { generation: g, seq, why }) if g == generation && self.answers(seq) => {
                 // awake, it is tried again after a pause; a sleep saves anyway
@@ -773,18 +763,12 @@ impl Lifecycle {
             // its container went) is nothing
             (_, Event::TabUsed) if self.tabs == 0 || self.running().is_none() => {}
             (phase, Event::TabUsed) => {
+                // a sleep closes its tabs as it begins, before its hold (the
+                // cell's): a use heard during it was sent before, and is in
+                // its save; it holds nothing up, nor cancels it
                 self.tab_used(now_ms);
-                match phase {
-                    Phase::Starting { .. } | Phase::Awake { .. } => self.hold(now_ms + IDLE_MS),
-                    Phase::Sleeping { generation, owner: false, .. } if matches!(self.saving, Some(Saving::Hold { .. })) => {
-                        // its person came back as its idle sleep held it: it
-                        // stays awake, held no more, as a keepalive keeps it
-                        self.phase = Phase::Awake { generation, since_ms: now_ms };
-                        self.saving = None;
-                        self.hold(now_ms + IDLE_MS);
-                        step.actions.push(Action::Unhold { generation });
-                    }
-                    _ => {}
+                if matches!(phase, Phase::Starting { .. } | Phase::Awake { .. }) {
+                    self.hold(now_ms + IDLE_MS);
                 }
             }
             (Phase::Starting { generation, .. } | Phase::Awake { generation, .. }, Event::Sleep) => {
@@ -795,7 +779,6 @@ impl Lifecycle {
                 }
                 self.held_until_ms = now_ms;
                 self.keepalives = 0;
-                self.tabs = 0;
                 self.sleep(generation, now_ms, (true, false, false), &mut step);
             }
             (Phase::Sleeping { generation, since_ms, .. }, Event::Sleep) => {

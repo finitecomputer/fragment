@@ -148,9 +148,11 @@ fn simulated_interleavings_keep_the_invariants() {
                     Event::Wake { why } => matches!(why, Wake::Record | Wake::Joined),
                     _ => false,
                 };
-            let cancels = (matches!(&event, Event::Opened { socket: Socket::Keepalive }) || (matches!(&event, Event::TabUsed) && l.tabs > 0)) && matches!(l.phase, Phase::Sleeping { owner: false, .. }) && matches!(l.saving, Some(Saving::Hold { .. }));
-            // an idle sleep's save answered, a port tab used since it began
-            let came_back = matches!(&event, Event::Saved { generation: e, .. } if l.running() == Some(*e)) && matches!(l.phase, Phase::Sleeping { owner: false, .. }) && l.tab_used_ms >= l.save_asked_ms && matches!(l.saving, Some(Saving::Save { .. }));
+            let cancels = matches!(&event, Event::Opened { socket: Socket::Keepalive }) && matches!(l.phase, Phase::Sleeping { owner: false, .. }) && matches!(l.saving, Some(Saving::Hold { .. }));
+            // a tab's use heard as a sleep runs (sent before it began: its
+            // tabs closed as it began), which changes nothing of the sleep
+            let late_use = matches!(&event, Event::TabUsed) && l.tabs > 0 && l.ready && matches!(l.phase, Phase::Sleeping { .. });
+            let sleep_before = (l.phase.clone(), l.saving);
             let free_before = l.unmetered;
             let running_before = l.running();
             if matches!(l.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) && now > l.shown_up_ms() + ALARM_LATE_MS {
@@ -180,8 +182,8 @@ fn simulated_interleavings_keep_the_invariants() {
                 }
             }
             reached[3] += u32::from(cancels);
-            if came_back && s.actions.iter().any(|a| matches!(a, Action::Unhold { .. })) {
-                assert!(matches!(l.phase, Phase::Awake { .. }) && l.wanted(now), "its person back as its idle sleep saved: awake, held (seed {seed0}, step {step}): {l:?}");
+            if late_use {
+                assert_eq!((s.actions.len(), (l.phase.clone(), l.saving)), (0, sleep_before), "a use heard as it sleeps neither cancels nor moves its sleep (seed {seed0}, step {step})");
                 reached[18] += 1;
             }
             if let Some(e) = s.ended {
@@ -268,15 +270,11 @@ fn simulated_interleavings_keep_the_invariants() {
                     }
                     Action::Save { generation: g, held, seq } => {
                         assert!(taken.insert(*seq, (*g, now, *held)).is_none(), "a save's number is asked for once");
-                        // its person comes back to a port tab as a sleep
-                        // saves, heard before its save's answer or after
-                        if matches!(l.phase, Phase::Sleeping { .. }) && l.ready && rng(&mut seed).is_multiple_of(2) {
-                            for e in [Event::Opened { socket: Socket::Tab }, Event::TabUsed] {
-                                let heard = l.apply_with(e, now, &rules);
-                                assert!(heard.actions.is_empty() && heard.ended.is_none(), "a save under way: nothing at once (seed {seed0}): {heard:?}");
-                            }
-                            life_worked = now;
-                            last_tab_work_ms = last_tab_work_ms.max(now);
+                        // a tab's use sent before the sleep began, heard as
+                        // it saves (a report a minute late at most, or its
+                        // tab's close's)
+                        if matches!(l.phase, Phase::Sleeping { .. }) && l.ready && l.tabs > 0 && rng(&mut seed).is_multiple_of(2) {
+                            pending.push(Event::TabUsed);
                         }
                         if rng(&mut seed).is_multiple_of(fails_one_in) {
                             pending.push(Event::SaveFailed { generation: *g, seq: *seq, why: "sim".into() });
@@ -396,5 +394,5 @@ fn simulated_interleavings_keep_the_invariants() {
         assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
     }
     // every kind of save the lifecycle has was reached, across the seeds
-    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over, idle exits slept, tab work due, slept under an open tab, tab use saves due, idle sleeps whose save their person came back to: {reached:?}");
+    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over, idle exits slept, tab work due, slept under an open tab, tab use saves due, tab uses heard as it slept: {reached:?}");
 }

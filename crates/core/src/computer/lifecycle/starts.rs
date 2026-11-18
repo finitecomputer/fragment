@@ -46,6 +46,9 @@ impl Lifecycle {
         self.kept_ms = now_ms;
         self.worked_ms = if self.open() { now_ms } else { 0 };
         self.changed_ms = Some(self.worked_ms);
+        // a tab's use is its life's: none of an earlier one counts here
+        self.tab_used_ms = 0;
+        self.used_since_ms = None;
     }
 
     /// Something was done on this life: a keepalive or a port tab opened or
