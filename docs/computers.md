@@ -44,8 +44,8 @@ an image may rely on this:
 - **It stays awake** while a port tab is open or the guest holds its
   keepalive socket, and `IDLE_MS` (20 minutes) after neither does. An
   always-on seat's computer never sleeps (decision 25; docs/billing.md).
-- **It is saved** when its work ends (its last keepalive closes and 30 s
-  pass with none opened again), every 15 minutes while a keepalive stays
+- **It is saved** when its work ends (its last keepalive or its last
+  port tab closes, and 30 s pass with no keepalive opened again), every 15 minutes while a keepalive stays
   open, and at every sleep (below, "Saves and what a wake restores").
 - **A sleep** is, in order: the hold, the save, a container snapshot
   (only after a save that worked), SIGTERM, up to 5 s for the guest to
@@ -60,6 +60,19 @@ an image may rely on this:
   outside `/data`. That start is owed, made by its alarm (asleep or
   won't wake, the start alone), so the restart answers `starting` on
   every path, and its owner's page follows it to awake.
+- **A stop nothing asked for, while idle, is a sleep.** A host may stop
+  a container for its own reasons (its maintenance, a host short of
+  memory). One that stops while its computer is awake with nothing open
+  (no keepalive, no port tab), no save under way, all this life did in a
+  save it made since it came up, and no message or join it was woken for
+  that its guest has not taken up, has slept: no strike, no rollback,
+  nothing told, and nothing starts it again, though the hold after its
+  last work had not run out. Its next wake restores that save. A message
+  or a join's notice posted after its guest last opened a keepalive, with
+  none open then or since, is work not taken up (a record's wake carries
+  when it was posted; a guest at work queues what comes), and a
+  life with no save of its own may have been woken for work it has not
+  begun, so either stop is a crash (below), as is every other.
 - **A crash** (the container stopped on its own) starts it again while
   something wants it; a guest that died holding its keepalive is started
   again however long its turn ran, and its next life ends what was cut.
@@ -108,7 +121,7 @@ back in time without changing what happens.
 | Fact | Its one authority | A cache of it |
 |---|---|---|
 | What was said | the chat's `chat` channel | the runtime's transcript |
-| Which turns started, which calls they asked for, what they did, how they ended, each card's answer | the chat's `work` channel, the journal (docs/chat-records.md) | the bridge's `state.json` |
+| Which turns started, which calls they asked for, what they did, how they ended, each card's answer | the chat's `work` channel, the journal (docs/chat-records.md) | the bridge's state (`/data/bridge`) |
 | The agent's self (`SOUL.md`, memories, skills) | the agent fragment's repo | the profile's checkout |
 | The runtime's context and the agent's working files | `/data`, as of its newest save | the snapshot, for one image |
 | Which save is current, and what a wake restored | the Computer DO | |
@@ -665,12 +678,11 @@ provider's own hosts.
   person through their computer's routes. The computer asks the agent's
   fragment for them at each request it swaps and each read of a view,
   and keeps none: a provider taken away is refused from the next request.
-  A computer from before held them itself (`agents.connections`,
-  `agent_accounts`): an agent's first ask after the deploy carries that
-  row, taken whole by a fragment holding none of its own and ignored by
-  one that does (`grants::answered`), then marked moved and sent no more.
-  The release is forward only (the Computer's step 5): the release before
-  refuses every computer, so it never writes those rows again.
+  A computer from before held them itself; the rows its agents'
+  fragments had not taken when its step 6 dropped them it owes
+  (`grants::Owed`): an agent's next ask carries its row, taken whole by a
+  fragment holding none of its own and ignored by one that does
+  (`grants::answered`), then forgotten.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
@@ -821,8 +833,22 @@ payment card fill still asks. A card is its owner's alone to answer
 
 Every turn also tells the agent that a file attached in the chat is
 already on its computer, at the path the attachment note names, scratch
-until it copies it into its work (`hermes::FILES`); and that a reply line
-`MEDIA:<absolute path>` attaches a file there (`hermes::SENDING`).
+until it copies it into its work (`hermes::FILES`); that a voice memo
+arrives already transcribed, its words the quote above Hermes' audio
+note, its file only for work on the recording (`hermes::VOICE`); and that a
+reply line `MEDIA:<absolute path>` attaches a file there
+(`hermes::SENDING`). Hermes keeps the system prompt a chat's session
+began with and replays it on every later turn (rebuilding it only at a
+compression, a model change or `/new`), so whenever what it is built
+from changes (the relay hint, or a skill file Hermes indexes into it: the
+platform skill's, a bundled one, the owner's managed set;
+`hermes::prompt_inputs`), every session is asked to rebuild its prompt
+once, on its next turn, as Hermes' own `hermes sessions refresh-prompts`
+does (`hermes::REFRESH_PROMPTS`): at boot, its skills settled, against
+what the computer last stamped (`hermes::PROMPT_STAMP`), and after each
+install of the managed skills while it runs. An open chat has the change
+at its next turn, its conversation kept, at one prompt-cache miss; the
+same inputs ask nothing.
 
 ### Its name, in our Hermes image
 

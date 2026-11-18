@@ -433,10 +433,10 @@ const CRASH_CHECKS: [&str; 10] = [
     "the lever answers its saves: the newest, the one its last start restored",
     "a think turn and a key's fetch turn run once each, before the crash",
     "awake, their end is saved: a save newer than the sleep's",
-    "the lever's kill (SIGKILL to the guest's PID 1) is a crash: it comes back at once, from the save after its last turn",
-    "a crash wakes it from its last save, and nothing that started runs again (P1)",
-    "its wake says what it restored: after the kill, a rollback is counted",
-    "a turn cut by a crash ends once, as an error, and its model was called once (P1)",
+    "the lever's kill (SIGKILL to the guest's PID 1) between its turns, all it did saved, is a sleep: it stays asleep, nothing told and no rollback counted",
+    "the next message wakes it from its last save, and nothing that started runs again (P1)",
+    "its wake says what it restored: the save after its last turn, after a sleep, no rollback",
+    "a turn cut by a crash (the kill as it runs) comes back at once and counts a rollback; the turn ends once, as an error, and its model was called once (P1)",
     "the cut turn is continued once, by the computer, told what the crash cut, from the journal; the messages after it are answered, told nothing (P5, phase 4)",
 ];
 
@@ -502,28 +502,40 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     s.eventually(SAVED_AFTER_WORK, || newest_save(api, c.id)["atMs"].as_i64().is_some_and(|at| at > last_at));
     let save = newest_save(api, c.id)["id"].as_str().unwrap_or("").to_string();
     s.ok(CRASH_CHECKS[4], !save.is_empty() && save != slept, format!("the sleep's save {slept}, its turns' {save}"));
-    // the crash
+    // the kill between its turns, all it did saved: a sleep (docs/computers.md,
+    // "A stop nothing asked for, while idle, is a sleep"). A crash would
+    // say starting at once, its turns' hold still running
     let generation = restored["generation"].as_u64().unwrap_or(0);
     let killed = lever(api, c.id, "kill")?;
-    let back = |after: u64| {
-        let v = view();
-        v["phase"] == "awake" && v["restored"]["generation"].as_u64().is_some_and(|g| g > after)
-    };
-    let came_back = killed.status == 200 && s.eventually(c.wake, || back(generation));
-    let restored = view()["restored"].clone();
+    let mut slept = Value::Null;
+    let asleep = killed.status == 200
+        && s.eventually(c.wake, || {
+            slept = view();
+            slept["phase"] != "awake"
+        })
+        && slept["phase"] == "asleep";
     s.ok(
         CRASH_CHECKS[5],
-        came_back && killed.body["killed"] == generation && restored["from"] == "backup" && restored["save"] == save.as_str() && restored["after"] == "exit",
-        format!("{killed} / {restored}"),
+        asleep && killed.body["killed"] == generation && slept["restored"]["generation"] == restored["generation"] && slept["rollbacks"].as_u64() == Some(rollbacks) && notice(&slept, "went_back").is_null(),
+        format!("{killed} / {slept}"),
     );
-    // one more message: turns of a chat run in order, so by its end every
-    // turn the restore made it read again was run again or fenced
+    // one more message wakes it: turns of a chat run in order, so by its end
+    // every turn its start made it read again was run again or fenced
     let after = say(52, "after the crash")?;
     let answered = s.eventually(c.wake, || replied(seq_of(&after)).is_some());
     let again = runs(s, api, c.owner, c.owner_id, c.id);
     s.ok(CRASH_CHECKS[6], answered && again == ran, format!("before the crash {ran:?}, after it {again:?}"));
     let v = view();
-    s.ok(CRASH_CHECKS[7], v["restored"]["rollback"] == true && v["rollbacks"].as_u64() == rollbacks.checked_add(1), &v);
+    let woke = &v["restored"];
+    s.ok(
+        CRASH_CHECKS[7],
+        woke["generation"].as_u64().is_some_and(|g| g > generation) && woke["from"] == "backup" && woke["save"] == save.as_str() && woke["after"] == "sleep" && woke["rollback"] == false && v["rollbacks"].as_u64() == Some(rollbacks),
+        &v,
+    );
+    let back = |after: u64| {
+        let v = view();
+        v["phase"] == "awake" && v["restored"]["generation"].as_u64().is_some_and(|g| g > after)
+    };
     // a turn cut by a crash: its model call is held, and the guest killed under it
     let generation = v["restored"]["generation"].as_u64().unwrap_or(0);
     let called = s.ai.chats().len();
@@ -533,6 +545,8 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let in_flight = s.eventually(c.wake, || s.ai.chats().len() > called);
     let killed = lever(api, c.id, "kill")?;
     let came_back = in_flight && killed.status == 200 && s.eventually(c.wake, || back(generation));
+    let crashed = view();
+    let rolled_back = crashed["restored"]["after"] == "exit" && crashed["restored"]["rollback"] == true && crashed["rollbacks"].as_u64() == rollbacks.checked_add(1);
     let ends = || work_of(&records(api, c.owner, c.chat, "work"), &cut_turn).into_iter().filter(|r| r["body"]["kind"] == "turn.end").collect::<Vec<_>>();
     let ended = came_back && s.eventually(c.wake, || !ends().is_empty());
     let next = say(54, "and after the cut")?;
@@ -540,8 +554,8 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let ends = ends();
     s.ok(
         CRASH_CHECKS[8],
-        ended && ends.len() == 1 && ends[0]["body"]["outcome"] == "error" && replied(seq_of(&cut)).is_none() && s.ai.chats().len() == called + 1,
-        format!("{} model calls since; {}", s.ai.chats().len() - called, json!(work_of(&records(api, c.owner, c.chat, "work"), &cut_turn))),
+        rolled_back && ended && ends.len() == 1 && ends[0]["body"]["outcome"] == "error" && replied(seq_of(&cut)).is_none() && s.ai.chats().len() == called + 1,
+        format!("{} model calls since; {}; {}", s.ai.chats().len() - called, json!(work_of(&records(api, c.owner, c.chat, "work"), &cut_turn)), crashed["restored"]),
     );
     // the cut turn is continued in its place, before the next message: said
     // by the computer and told once what the crash cut (P5; the stub echoes
@@ -1962,6 +1976,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         heard && notices[0]["principal"] == agent_npub.as_str() && notices[0]["body"] == json!({ "kind": "joined", "fragment": chat_name }),
         json!(notices),
     );
+    // made an editor of its own fragment as it was assigned (before its
+    // computer held it): its home, no join, so nothing is posted for it
+    let home = told(api, &owner, &agent_name, &agent_name);
+    s.ok("its own fragment is no join: nothing is posted for it", home.is_empty(), json!(home));
     // awake, the guest follows the chat as the agent
     let woke = s.eventually(wake, || phase(api, &owner, &id) == "awake");
     s.ok("and wakes its computer, unasked", woke, phase(api, &owner, &id));

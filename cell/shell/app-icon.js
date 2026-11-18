@@ -6,6 +6,7 @@
 // (`appIcon`).
 import { appIcon } from "./icons.js";
 import { activity } from "./activity.js";
+import { closeOnOutsidePress } from "./dialog.js";
 
 const SHELL = { "x-fragment-shell": "1" };
 // An icon's address names its bytes (`?v=`), so one read is kept for the
@@ -234,7 +235,7 @@ export function createIconEditor(h, name, title, f, inline = false) {
   };
   if (!inline) {
     done.onclick = () => dialog.close();
-    dialog.onclick = (e) => { if (e.target === dialog) dialog.close(); };
+    closeOnOutsidePress(dialog);
     dialog.onclose = dispose;
   }
   showCurrent();
