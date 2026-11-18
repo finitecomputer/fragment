@@ -219,9 +219,6 @@ const BACKUPS_MS: i64 = ALARM_WALL_MS - ALARM_OTHER_MS - HOLD_STEPS_MS - MARK_EX
 /// start fits an alarm of its own (a retry's, or one owed after a sleep:
 /// `Lifecycle::start_due`).
 const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS - DISK_READ_MS - ALARM_OTHER_MS;
-/// How often a save the lever's `hold-saves` holds looks whether it was
-/// let go.
-const LEVER_LOOK_MS: u64 = 100;
 /// The lever's `slow-tell` waits at most this: a restart's request is held
 /// no longer than a request's wait in the lane.
 const SLOW_TELL_MAX_MS: u64 = 30_000;
@@ -1816,9 +1813,10 @@ impl ComputerCell {
         let budget = self.meta(MetaKey::HangBackups).ok().flatten().and_then(|ms| ms.parse::<i64>().ok()).filter(|ms| (1..=BACKUPS_MS).contains(ms)).unwrap_or(BACKUPS_MS);
         let until = js::now_ms() + budget;
         // the lever's `hold-saves`: held here, within its backups' budget,
-        // until the lever lets it go (a test posts as a sleep saves)
+        // until the lever lets it go (a test posts as a sleep saves), looked
+        // at every 100 ms
         while self.meta(MetaKey::HoldSaves).ok().flatten().is_some() && js::now_ms() < until {
-            Delay::from(std::time::Duration::from_millis(LEVER_LOOK_MS)).await;
+            Delay::from(std::time::Duration::from_millis(100)).await;
         }
         for dir in SAVED_DIRS {
             // the guest's own state leaves its work out (a record of its
@@ -2564,7 +2562,8 @@ impl ComputerCell {
     /// `hang-backups {ms}` makes its container's backups never answer, as a
     /// sick one's (r4, r6), and bounds its saves' backups by `ms` (0: its
     /// shim back); `hold-saves {on}` holds each save before its backups
-    /// until it is let go (`on: false`), within their budget; `alive-check {ms, freeze}` makes its next start wait
+    /// until it is let go (`on: false`), within their budget; `alive-check
+    /// {ms, freeze}` makes its next start wait
     /// `ms` for its guest to read its view, as a start from a snapshot does,
     /// with `freeze` its guest stopped so it never does (#362); `always-on
     /// {on}` is its owner's plan changing (the plan itself does not reach a
@@ -2623,10 +2622,7 @@ impl ComputerCell {
                 // its saves wait before their backups while on (off: the one
                 // waiting goes on), so a test acts as one is under way
                 let on = b.on.ok_or_else(|| CellError::invalid("hold-saves names on: true or false"))?;
-                match on {
-                    true => self.set_meta(MetaKey::HoldSaves, "1")?,
-                    false => self.delete_meta(MetaKey::HoldSaves)?,
-                }
+                if on { self.set_meta(MetaKey::HoldSaves, "1")? } else { self.delete_meta(MetaKey::HoldSaves)? }
                 console_log!("{}", json!({ "computer": id, "lever": "hold-saves", "on": on }));
                 Ok(json!({ "computer": id, "holdSaves": on }))
             }
