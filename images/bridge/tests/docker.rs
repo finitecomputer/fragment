@@ -738,7 +738,6 @@ fn cold_steps(logs: &str, from: u64, fake: &Fake, chat: &str, message: &serde_js
         ("configured", first("boot.configured", false)),
         ("last life ended", first("boot.cut_turns_settled", false)),
         ("gateway told", first("boot.ready", false)),
-        ("profiles rewritten", first("boot.profiles_rewritten", false)),
         ("bridge following", first("follow.live", false)),
         ("turn claimed", first("turn.claiming", true)),
         ("gateway up", first("relay.connected", false)),
@@ -754,11 +753,9 @@ fn events_since(logs: &str, from: u64) -> Vec<serde_json::Value> {
     logs.lines().filter_map(|l| serde_json::from_str(l.trim()).ok()).filter(|e: &serde_json::Value| e["at"].as_u64().is_some_and(|at| at >= from)).collect()
 }
 
-/// Where in `events` each agent's profile was written, and where the
-/// gateway was told to start: (the profiles' positions, the gateway's).
-fn profiles_and_gateway(events: &[serde_json::Value], agents: &[&str]) -> (Vec<Option<usize>>, Option<usize>) {
-    let written = agents.iter().map(|a| events.iter().position(|e| e["event"] == "profile.written" && e["agent"] == *a)).collect();
-    (written, events.iter().position(|e| e["event"] == "boot.ready"))
+/// Where the first `name` event in `events` is (and of `agent`, if given).
+fn at_event(events: &[serde_json::Value], name: &str, agent: Option<&str>) -> Option<usize> {
+    events.iter().position(|e| e["event"] == name && agent.is_none_or(|a| e["agent"] == a))
 }
 
 /// Each call's hop to the platform in `a_cold_wake_by_its_steps`: a guess
@@ -771,9 +768,9 @@ const HOP_MS: u64 = 50;
 /// a SIGTERM and a start with the disk as the last life left it and no
 /// restore pending (a container snapshot keeps files, not processes), its
 /// message waiting as it starts, as a wake's is. Each wake answers; each
-/// prints its steps since its start. A first start writes each profile
-/// before its gateway starts; a snapshot's wake starts its gateway on the
-/// profiles the last life left and writes each again after.
+/// prints its steps since its start. Each wake ends the last life and
+/// writes each profile before its gateway starts; one whose agent left
+/// while it slept is retired only after the last life's sweep.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_cold_wake_by_its_steps() {
@@ -793,10 +790,6 @@ async fn a_cold_wake_by_its_steps() {
     let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
     fake.until(180_000, "the first start's reply", answered(&first)).await;
     eprintln!("hermes: a first start, its steps since docker run: {}", cold_steps(&c.logs(), from, &fake, &chat, &first, &model));
-    let agents = ["juniper--k3x9", "rowan--k3x9"];
-    // no profile on disk yet: each is written before the gateway starts
-    let (written, gateway) = profiles_and_gateway(&events_since(&c.logs(), from), &agents);
-    assert!(gateway.is_some() && written.iter().all(|w| w.is_some() && *w < gateway), "a first start writes each profile, then starts the gateway: {written:?} {gateway:?}");
     for wake in 1..=5 {
         let (_, code) = c.sigterm();
         assert_eq!(code, 0, "a clean stop before wake {wake}");
@@ -805,12 +798,28 @@ async fn a_cold_wake_by_its_steps() {
         c.start();
         fake.until(180_000, "a snapshot wake's reply", answered(&message)).await;
         eprintln!("hermes: snapshot wake {wake}, its steps since its start: {}", cold_steps(&c.logs(), from, &fake, &chat, &message, &model));
-        // the last life's profiles: the gateway starts on them, each written again after
+        // the last life is ended, and each profile written, before the gateway starts
         let events = events_since(&c.logs(), from);
-        let (written, gateway) = profiles_and_gateway(&events, &agents);
-        assert!(gateway.is_some() && written.iter().all(|w| w.is_some() && *w > gateway), "a snapshot's wake starts the gateway, then writes each profile again: {written:?} {gateway:?}");
-        assert!(events.iter().any(|e| e["event"] == "boot.profiles_rewritten" && e["agents"] == 2), "both owed");
+        let gateway = at_event(&events, "boot.ready", None);
+        let before = |name: &str, agent: Option<&str>| at_event(&events, name, agent).is_some_and(|at| Some(at) < gateway);
+        assert!(before("boot.cut_turns_settled", None) && before("profile.written", Some("juniper--k3x9")) && before("profile.written", Some("rowan--k3x9")), "wake {wake}: the last life ended, each profile written, then the gateway");
     }
+    // Unassigned while asleep: the wake's sweep of the last life takes rowan's
+    // database too (it starts before the agents are read), and only then is
+    // its profile retired, before the gateway; juniper answers.
+    c.sigterm();
+    fake.remove_agent("rowan");
+    let message = fake.say(&chat, &person("paul"), json!({ "text": "rowan left" }));
+    let from = fragment_bridge::log::now_ms();
+    c.start();
+    fake.until(180_000, "the wake's reply after rowan left", answered(&message)).await;
+    let events = events_since(&c.logs(), from);
+    let swept = at_event(&events, "boot.cut_turns_settled", None);
+    let retired = at_event(&events, "boot.profile_retired", Some("rowan--k3x9"));
+    let gateway = at_event(&events, "boot.ready", None);
+    assert!(swept.is_some() && swept < retired && retired < gateway, "swept, then rowan's profile retired, then the gateway: {swept:?} {retired:?} {gateway:?}");
+    assert_eq!(events[swept.unwrap()]["dbs"], 3, "the home's database, juniper's and rowan's: {}", events[swept.unwrap()]);
+    assert_eq!(events[retired.unwrap()]["ok"], true);
 }
 
 /// The Hermes image, running against the fake API and the scripted model,

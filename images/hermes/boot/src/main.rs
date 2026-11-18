@@ -680,7 +680,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     chown(&dir, ids);
     work_dirs(&dir, a, ids);
     // Which agent this profile is: what retiring it later reads.
-    let _ = std::fs::write(dir.join(hermes::PROFILE_MARKER), &a.fragment);
+    let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
     let face = read_face(api, a).await;
     let main = write_config(api, a, &dir, ids, route, credential_env, high_on, &face, team).await;
     // who the agent is and its credentials, for Hermes and its terminal (the
@@ -813,7 +813,7 @@ fn retire_profiles(agents: &[Agent], home: &Path, ids: Option<(u32, u32)>) {
     chown(&profiles_root, ids);
     if let Ok(entries) = std::fs::read_dir(&profiles_root) {
         for e in entries.filter_map(Result::ok) {
-            let marker = std::fs::read_to_string(e.path().join(hermes::PROFILE_MARKER)).unwrap_or_default();
+            let marker = std::fs::read_to_string(e.path().join(".fragment-agent")).unwrap_or_default();
             if !marker.is_empty() && !agents.iter().any(|a| a.fragment == marker) {
                 let to = PathBuf::from("/data/hermes-retired").join(format!("{}-{}", e.file_name().to_string_lossy(), fragment_bridge::log::now_ms()));
                 let _ = std::fs::create_dir_all("/data/hermes-retired");
@@ -1315,16 +1315,6 @@ async fn boot_main() {
         tokio::time::sleep(Duration::from_millis(backoff.next_ms())).await;
     };
     let hermes_agents = agents::hermes(&agents);
-    // A snapshot's wake (no restore pending) finds each profile as its last
-    // life wrote it: the gateway starts on those, and each is written again
-    // just after (`owed`), as it is while awake (agents read every
-    // AGENTS_EVERY_MS, models every MODEL_EVERY_MS). Safe stale: its
-    // credentials are placeholders the platform fills on the way out, and an
-    // agent unassigned while asleep is in no ready file, so nothing runs as
-    // it. A full wake (a restore), a first start, and an agent with no whole
-    // profile yet are written before the gateway, as ever.
-    let restore_pending = env("RESTORE_PENDING").as_deref() == Some("1");
-    let (mut owed, now): (Vec<Agent>, Vec<Agent>) = hermes_agents.iter().cloned().partition(|a| !restore_pending && hermes::profile_whole(&home, &a.fragment));
     let mut credential_env = computer.credential_env.clone();
     let mut route = hermes::Route::new(&model, computer.models.as_ref());
     ev!("boot.model_ids", { "given": computer.models.is_some(), "ids": route.ids });
@@ -1334,8 +1324,10 @@ async fn boot_main() {
     let card_timeout_s = hermes::card_timeout_s(env("HERMES_BOOT_CARD_TIMEOUT_S").as_deref());
     // HERMES_BOOT_SCREEN_IDLE_MS: a test's shorter idle bound for desktops
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
-    // each agent's route, in the gateway's config (bots.rs, `profile_routes`)
-    let routes = bots::profile_routes(&hermes_agents, &route_chats(&api, &hermes_agents).await);
+    // each agent's route, in the gateway's config (bots.rs, `profile_routes`),
+    // and every agent as its teammates' (whatever runs it), read together
+    let (routed, (_, mut team)) = tokio::join!(route_chats(&api, &hermes_agents), team_of(&api, &agents, &home));
+    let routes = bots::profile_routes(&hermes_agents, &routed);
     let managed = hermes::managed_config(&lean, card_timeout_s) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
@@ -1351,18 +1343,27 @@ async fn boot_main() {
     // Hermes skips an external dir it does not find, until the profile's
     // config changes. What it holds is installed off the boot's path.
     managed_dir();
-    // every agent is its teammates', whatever runs it
-    let mut team = if now.is_empty() { Vec::new() } else { team_of(&api, &agents, &home).await.1 };
-    retire_profiles(&hermes_agents, &home, ids);
-    write_profiles(&api, &now, &home, ids, &route, &credential_env, &team).await;
-    ev!("boot.configured", { "agents": agents.len(), "owed": owed.len(), "ms": t0.elapsed().as_millis() as u64 });
+    write_profiles(&api, &hermes_agents, &home, ids, &route, &credential_env, &team).await;
+    ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
-    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), ending).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => ev!("boot.end_previous_life_failed", { "error": e.to_string() }),
+    let ended = match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), ending).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            ev!("boot.end_previous_life_failed", { "error": e.to_string() });
+            true
+        }
         // SQLite's own waits make this a wedged database: the gateway starts
         // anyway, as it would find it
-        Err(_) => ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
+        Err(_) => {
+            ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX });
+            false
+        }
+    };
+    // Only once the last life ended, whose sweep names every profile's
+    // database on disk: one moved aside under it would cut it short. A sweep
+    // still running leaves them to the next start.
+    if ended {
+        retire_profiles(&hermes_agents, &home, ids);
     }
     write_ready(&agents, &home);
     let mut bridge = spawn_bridge(card_timeout_s);
@@ -1454,15 +1455,6 @@ async fn boot_main() {
                 return;
             }
             let _busy = Busy::new(&quiet);
-            // the profiles the gateway started on (a snapshot's wake), written
-            // again at the first pass, before anything else waits on the platform
-            if !owed.is_empty() {
-                let t = Instant::now();
-                (_, team) = team_of(&api, &agents, &home).await;
-                write_profiles(&api, &owed, &home, ids, &route, &credential_env, &team).await;
-                ev!("boot.profiles_rewritten", { "agents": owed.len(), "ms": t.elapsed().as_millis() as u64 });
-                owed.clear();
-            }
             // The computer's agents may change while it runs (docs/computers.md).
             if last_agents.elapsed() >= Duration::from_millis(AGENTS_EVERY_MS) {
                 last_agents = Instant::now();
