@@ -151,7 +151,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     });
     s.ok("the person's list says it is a brain, and its title", listed, "");
     let m = api.signed(&keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
-    s.ok("its repo names the template and its face, nothing else", m.body == json!({ "template": "brain", "meta": { "title": "Garden" } }), &m);
+    s.ok("its repo names the template, nothing else (its face is its cell's)", m.body == json!({ "template": "brain" }), &m);
     let st = api.status(&keys, &name)?;
     let ops = &st.body["code"]["operations"];
     let release = fragment_templates::blessed::release("brain").map(|r| format!("blessed:brain@{r}"));

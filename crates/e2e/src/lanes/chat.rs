@@ -1166,11 +1166,11 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let failed = chrome.eval(&page, "import('./response-actions.js').then(async (a) => { Object.defineProperty(navigator, 'share', { configurable: true, value: async () => { throw new Error('Unavailable'); } }); const result = await a.share({text: 'fallback', title: 'Chat'}); delete navigator.share; return result === 'Copied' && window.__copied === 'fallback'; })")?;
     s.ok("a failed native share falls back to copy too", failed == true, "");
 
-    // renamed while its chat's page is open (its fragment's title, put
-    // live), the agent is named so on that page, which no shell frames, as
-    // its next turn ends (docs/chat-records.md, "Who is who")
-    s.commit(&agent, &[("fragment.json", Some(br#"{ "channels": { "tasks": { "read": "editor", "post": "editor" } }, "meta": { "title": "Juniper Renamed" } }"#))]);
-    s.deploy(&agent);
+    // renamed while its chat's page is open (its face's title, at once), the
+    // agent is named so on that page, which no shell frames, as its next
+    // turn ends (docs/chat-records.md, "Who is who")
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{agent_name}/face"), Some(&json!({ "title": "Juniper Renamed" })))?;
+    anyhow::ensure!(r.status == 200, "renamed: {r}");
     chrome.front(&page)?;
     say(&mut chrome, "after your rename")?;
     let renamed = shows(

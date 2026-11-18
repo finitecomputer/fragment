@@ -121,7 +121,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let list = shell(api, &session, "GET", "/api/fragments", None, &[])?;
     s.ok("the person's list says it is an agent, and its title", landed, &list);
     let manifest = shell(api, &session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?;
-    s.ok("its repo names the template and its face, nothing else", manifest.body == json!({ "template": "agent", "meta": { "title": "Juniper" } }), &manifest);
+    s.ok("its repo names the template, nothing else (its face is its cell's)", manifest.body == json!({ "template": "agent" }), &manifest);
     let page = api.call(Call { method: "GET", url: api.site_url(&agent, ""), cookie: None, ..Call::default() })?;
     let owner_page = shell_site(s, api, &session, &agent, "")?;
     s.ok(

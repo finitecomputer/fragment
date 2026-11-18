@@ -321,6 +321,16 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     let r = conditional("", &format!("\"other\", {page}"))?;
     s.ok("a page revalidates too, by any tag in the list", r.status == 304 && r.header("cache-control") == "private, no-cache", &r);
     s.ok("revalidating asks code.storage for nothing", s.fake.requests(&repo, "GET file") == reads, s.fake.requests(&repo, "GET file") - reads);
+    // its name is its face's, set with no commit: a rename is a new page
+    // tag, so a page revalidated says the new name in its Open Graph title
+    let titled = api.page(&name, "", Some(&cookie))?;
+    let renamed = api.signed(&owner, "PUT", &format!("/api/f/{name}/face"), Some(&json!({ "title": "Site renamed" })))?;
+    let r = conditional("", &page)?;
+    s.ok(
+        "its page's Open Graph title is its face's (the first install's manifest title, unnamed till then), and a rename, deploying nothing, answers a revalidation with the new name under a new tag",
+        titled.text.contains(r#"og:title" content="Site &lt;Test&gt;""#) && renamed.status == 200 && r.status == 200 && r.header("etag") != page && r.text.contains(r#"og:title" content="Site renamed""#) && s.fake.branch(&repo, "live").as_deref() == Some(live.as_str()),
+        format!("{renamed} / {} {}", r.status, r.header("etag")),
+    );
     for (path, file, mime) in [
         ("__fragment.js", &fragment_templates::CLIENT_JS, "text/javascript; charset=utf-8"),
         ("__fragment.css", &fragment_templates::CLIENT_CSS, "text/css; charset=utf-8"),
