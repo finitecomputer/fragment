@@ -1020,6 +1020,16 @@ async fn a_claude_agents_self_outlasts_its_computer() {
     for p in [format!("{memory}/MEMORY.md"), memory.into(), "/data/hermes/.claude".into(), format!("{work}/CLAUDE.md"), work.into()] {
         assert_eq!(owner(&c, &p), "hermes", "the agents' own, as Claude Code runs: {p}");
     }
+    // another Claude agent assigned while it runs: its soul is in its
+    // folder by the time the ready file names it
+    fake.add_agent_with("hazel", r#"{"tier":"cheap","runtime":"claude"}"#);
+    fake.with(|w| w.fragments.get_mut("hazel--k3x9").unwrap().files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Hazel.\n")));
+    let t = Instant::now();
+    while !c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]).contains("hazel--k3x9") {
+        assert!(t.elapsed() < Duration::from_secs(60), "the ready file never named hazel");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(c.exec_out(&["cat", "/data/work/hazel--k3x9/SOUL.md"]), "You are Hazel.\n", "its soul before the bridge runs it");
     let kept: Vec<String> = fake.with(|w| w.fragments["rowan--k3x9"].files.keys().cloned().collect());
     assert_eq!(kept, ["CLAUDE.md", "SOUL.md", "agent.json", "memories/claude/MEMORY.md", "memories/claude/tomatoes.md"], "main whole: nothing deleted by the empty disk");
 }

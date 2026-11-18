@@ -1010,8 +1010,10 @@ gates it.
   keeps its `SOUL.md` and its own `CLAUDE.md` in its work directory (its
   `AGENTS.md` imports the soul), and Claude Code's auto memory for it as
   the fragment's `memories/claude/`. Each folder keeps what was agreed
-  beside its files, so one lost alone deletes nothing. A computer whose
-  `/data` is lost or new brings all of it back from the fragment.
+  beside its files, so one lost alone deletes nothing, and a file deleted
+  from its work directory comes back rather than leaving the fragment. A
+  computer whose `/data` is lost or new, or an agent newly assigned to
+  it, has all of it back before the bridge runs the agent.
 
 ## Billing
 

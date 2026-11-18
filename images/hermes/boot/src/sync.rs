@@ -86,19 +86,21 @@ pub enum Action {
 /// Where an agent's own files are kept on its computer: each entry a file,
 /// or a folder (ending in `/`), of the agent's repo, and where it is here.
 /// What was agreed is kept in `root`, beside its files; what a pull makes
-/// below `base` is the agent's (`own`).
+/// below `base` is the agent's (`own`). A file deleted here is deleted on
+/// main only where `deletes`; elsewhere main's comes back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     pub entries: Vec<(&'static str, PathBuf)>,
     pub root: PathBuf,
     pub base: PathBuf,
+    pub deletes: bool,
 }
 
 impl Place {
     /// A Hermes profile: the repo's `SOUL.md`, `memories/` and `skills/`,
     /// at the same paths.
     pub fn hermes(profile: &Path) -> Place {
-        Place { entries: ["SOUL.md", "memories/", "skills/"].map(|e| (e, profile.join(e.trim_end_matches('/')))).to_vec(), root: profile.into(), base: profile.into() }
+        Place { entries: ["SOUL.md", "memories/", "skills/"].map(|e| (e, profile.join(e.trim_end_matches('/')))).to_vec(), root: profile.into(), base: profile.into(), deletes: true }
     }
 
     /// A Claude agent's (FIN-542): its `SOUL.md`, which its `AGENTS.md`
@@ -107,11 +109,13 @@ impl Place {
     /// `memories/claude/` (its index is a `MEMORY.md` too). Two places, each
     /// agreeing beside its own files: one lost alone (the work is saved as
     /// a record of its own) starts from nothing, deleting nothing on main.
+    /// The working folder is where the agent works, so a file deleted there
+    /// (a cleanup of its folder) comes back, never deleting its soul.
     pub fn claude(work: &Path, memory: &Path, home: &Path) -> [Place; 2] {
         let base = work.parent().expect("a working folder in the work directory");
         [
-            Place { entries: vec![("SOUL.md", work.join("SOUL.md")), ("CLAUDE.md", work.join("CLAUDE.md"))], root: work.into(), base: base.into() },
-            Place { entries: vec![("memories/claude/", memory.into())], root: memory.into(), base: home.into() },
+            Place { entries: vec![("SOUL.md", work.join("SOUL.md")), ("CLAUDE.md", work.join("CLAUDE.md"))], root: work.into(), base: base.into(), deletes: false },
+            Place { entries: vec![("memories/claude/", memory.into())], root: memory.into(), base: home.into(), deletes: true },
         ]
     }
 
@@ -136,9 +140,10 @@ impl Place {
     }
 }
 
-/// The sync's steps, given main, what was agreed, the profile, and the
-/// paths either side has but does not sync (left as they are).
-pub fn plan(main: &[MainFile], known: &Manifest, local: &[Local], unsynced: &BTreeSet<String>) -> Vec<Action> {
+/// The sync's steps, given main, what was agreed, the place, the paths
+/// either side has but does not sync (left as they are), and whether a
+/// file deleted here is deleted on main (`Place::deletes`).
+pub fn plan(main: &[MainFile], known: &Manifest, local: &[Local], unsynced: &BTreeSet<String>, deletes: bool) -> Vec<Action> {
     let main: BTreeMap<&str, &MainFile> = main.iter().map(|m| (m.path.as_str(), m)).collect();
     let local: BTreeMap<&str, &Local> = local.iter().map(|l| (l.path.as_str(), l)).collect();
     let paths: BTreeSet<&str> = main.keys().copied().chain(local.keys().copied()).chain(known.keys().map(String::as_str)).collect();
@@ -147,7 +152,7 @@ pub fn plan(main: &[MainFile], known: &Manifest, local: &[Local], unsynced: &BTr
         let (m, k, l) = (main.get(p), known.get(p), local.get(p));
         let action = match (m, k, l) {
             (Some(m), Some(k), Some(l)) if m.commit == k.commit => (l.hash != k.hash).then(|| Action::Push(p.into())),
-            (Some(m), Some(k), None) if m.commit == k.commit => Some(Action::PushDelete(p.into())),
+            (Some(m), Some(k), None) if m.commit == k.commit && deletes => Some(Action::PushDelete(p.into())),
             (Some(_), _, _) => Some(Action::Fetch(p.into())),
             (None, Some(k), Some(l)) if l.hash == k.hash => Some(Action::DeleteLocal(p.into())),
             (None, Some(_), Some(_)) => Some(Action::Push(p.into())),
@@ -329,7 +334,7 @@ async fn settle(api: &Api, agent: &Agent, place: &Place, listing: &[FileEntry], 
     let local_by: BTreeMap<String, Local> = local.files.iter().map(|l| (l.path.clone(), l.clone())).collect();
     let mut push: Vec<FileChange> = Vec::new();
     let mut pushed: Vec<(String, Option<String>)> = Vec::new();
-    for action in plan(&main.files, &known, &local.files, &unsynced) {
+    for action in plan(&main.files, &known, &local.files, &unsynced, place.deletes) {
         match action {
             Action::Fetch(p) => {
                 let bytes = api.file(&agent.fragment, &agent.fragment, &p, FILE_MAX_BYTES).await?;
@@ -506,7 +511,7 @@ mod tests {
         .collect();
         let main = vec![m("SOUL.md", "c1"), m("memories/a.md", "c1"), m("memories/b.md", "c2"), m("memories/d.md", "c1"), m("memories/new-main.md", "c3")];
         let local = vec![l("SOUL.md", "h1"), l("memories/a.md", "ha2"), l("memories/b.md", "hb"), l("memories/c.md", "hc"), l("memories/new-local.md", "hn")];
-        let got = plan(&main, &known, &local, &BTreeSet::new());
+        let got = plan(&main, &known, &local, &BTreeSet::new(), true);
         assert_eq!(
             got,
             vec![
@@ -521,14 +526,16 @@ mod tests {
         );
         // Invalid: a path either side does not sync is left as it is, whatever the rest
         let every: BTreeSet<String> = known.keys().chain(main.iter().map(|m| &m.path)).chain(local.iter().map(|l| &l.path)).cloned().collect();
-        assert!(plan(&main, &known, &local, &every).is_empty());
+        assert!(plan(&main, &known, &local, &every, true).is_empty());
+        // a place that keeps main's files: deleted here, it comes back
+        assert!(plan(&main, &known, &local, &BTreeSet::new(), false).contains(&Action::Fetch("memories/d.md".into())));
     }
 
     #[test]
     fn replay_a_settled_sync_does_nothing() {
         let known: Manifest = [("SOUL.md".into(), k("c1", "h1"))].into_iter().collect();
-        assert!(plan(&[m("SOUL.md", "c1")], &known, &[l("SOUL.md", "h1")], &BTreeSet::new()).is_empty());
-        assert!(plan(&[], &Manifest::new(), &[], &BTreeSet::new()).is_empty());
+        assert!(plan(&[m("SOUL.md", "c1")], &known, &[l("SOUL.md", "h1")], &BTreeSet::new(), true).is_empty());
+        assert!(plan(&[], &Manifest::new(), &[], &BTreeSet::new(), true).is_empty());
     }
 
     #[test]
@@ -760,6 +767,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(memory.join("tomatoes.md")).unwrap(), "Paul likes tomatoes.");
         assert_eq!(std::fs::read_to_string(work.join("SOUL.md")).unwrap(), "You are Rowan.");
         assert_eq!(w.repo.lock().unwrap().files.len(), 5, "main whole");
+
+        // Invalid: its folder cleaned, what was agreed kept: its soul and
+        // notes come back, never deleted on main
+        for p in ["SOUL.md", "CLAUDE.md"] {
+            std::fs::remove_file(work.join(p)).unwrap();
+        }
+        let d = round(&w.api, &w.agent, &places, &own).await.unwrap();
+        assert_eq!((d.pulled, d.pushed), (2, 0));
+        assert_eq!(std::fs::read_to_string(work.join("SOUL.md")).unwrap(), "You are Rowan.");
+        assert_eq!(w.main("SOUL.md").as_deref(), Some(&b"You are Rowan."[..]));
     }
 
     /// A profile and its agent's repo behind the fake files route.

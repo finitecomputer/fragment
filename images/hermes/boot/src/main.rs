@@ -1627,6 +1627,11 @@ async fn boot_main() {
                         }
                         let (read, _) = with_runtimes(&api, c.agents, &runtime_names, again).await;
                         let change = agents::diff(&agents::hermes(&agents), &agents::hermes(&read));
+                        // another runtime's agent new here, or switched to it:
+                        // its own files back before the ready file names it
+                        for a in read.iter().filter(|a| !agents::of_hermes(a) && !agents.iter().any(|b| b.fragment == a.fragment && b.runtime == a.runtime)) {
+                            sync_own(&api, a, &home, &own).await;
+                        }
                         if !change.is_empty() || agents::ready_file(&agents) != agents::ready_file(&read) {
                             follow_agents(&api, &change, &read, &home, ids, &route, &credential_env, &team).await;
                         }
