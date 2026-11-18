@@ -1437,6 +1437,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, &format!("({icon}?.dispatchEvent(new PointerEvent('pointerleave')), true)"))?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
     icon_ui(s, &mut b, &page, &groceries, &shots)?;
+    light_dismiss_ui(s, &mut b, &page)?;
     deploying_uploads_ui(s, &mut b, &page, &groceries, &shots)?;
     compose_elsewhere_ui(s, api, &mut b, &page, &session, &asked_in, &groceries)?;
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
@@ -1606,6 +1607,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("Settings have no Sharing section: who has access is the Apps page's", settings && none == true, b.eval(&page, "[...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent)")?);
     let skills = own_skills(api, &session)?.into_iter().next().context("the person's skills fragment")?;
     apps_ui(s, &mut b, &page, &skills, &groceries, &chat, &shots)?;
+    apps_archive_delete_ui(s, api, &mut b, &page, &session, &shots)?;
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
@@ -3924,6 +3926,106 @@ fn deploying_uploads_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, 
     );
     b.eval(page, "(window.__held.restore(), history.back(), true)")?;
     b.until(page, "location.pathname !== '/settings'", wait);
+    Ok(())
+}
+
+/// A modal closed by a press outside it (cell/shell/dialog.js), as a hand
+/// presses: words selected across its field's edge, either way, and a
+/// press in its card's own padding, leave it open with what was typed (each
+/// closed it before, the words lost); a press outside closes it. The
+/// launcher, whose outside is its own empty space, and an app's icon
+/// sheet, whose is its backdrop. Each gesture's pointerdown and click, as
+/// the page heard them, are its proof it pressed what it meant to.
+fn light_dismiss_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let settle = |b: &mut Browser| b.eval(page, "new Promise((r) => setTimeout(() => r(true), 500))");
+    // a point, as the page reckons it (none: nothing to press there)
+    let at = |b: &mut Browser, expr: &str| -> Result<Option<(f64, f64)>> {
+        let p = b.eval(page, expr)?;
+        Ok(p[0].as_f64().zip(p[1].as_f64()))
+    };
+    let middle = |sel: &str| format!("(() => {{ const e = document.querySelector({}); if (!e) return null; const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()", js(sel));
+    // what each press reached since the last read, by its target's id, name or class
+    b.eval(
+        page,
+        "(() => { if (!window.__pressed) { window.__pressed = []; for (const t of ['pointerdown', 'click']) addEventListener(t, (e) => window.__pressed.push(`${t} ${e.target.id || e.target.name || e.target.className}`), true); } window.__pressed.length = 0; return true; })()",
+    )?;
+    let pressed = |b: &mut Browser| b.eval(page, "window.__pressed.splice(0)");
+    let gesture = |down: &str, click: &str| json!([format!("pointerdown {down}"), format!("click {click}")]);
+
+    let draft = "Plan a picnic for Saturday";
+    b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+    let open = b.until(page, "document.getElementById('search-dialog').open && document.activeElement === document.getElementById('workspace-search')", wait);
+    b.eval(page, &fill("#workspace-search", draft))?;
+    let field = at(b, &middle("#workspace-search"))?;
+    let empty = at(b, "(() => { const d = document.getElementById('search-dialog'), p = [10, innerHeight - 10]; return document.elementFromPoint(...p) === d ? p : null; })()")?;
+    let still = format!("(() => {{ const d = document.getElementById('search-dialog'); return d.open && !d.inert && document.getElementById('workspace-search').value === {}; }})()", js(draft));
+    pressed(b)?;
+    let (mut out, mut into, mut away) = (Value::Null, Value::Null, Value::Null);
+    let (mut kept_out, mut kept_in) = (false, false);
+    if let (Some(field), Some(empty)) = (field, empty) {
+        b.drag(page, field, empty)?;
+        settle(b)?;
+        (out, kept_out) = (pressed(b)?, b.eval(page, &still)? == true);
+        b.drag(page, empty, field)?;
+        settle(b)?;
+        (into, kept_in) = (pressed(b)?, b.eval(page, &still)? == true);
+        b.click_at(page, empty)?;
+        b.until(page, "!document.getElementById('search-dialog').open", wait);
+        away = pressed(b)?;
+    }
+    let closed = b.eval(page, "!document.getElementById('search-dialog').open")? == true;
+    s.ok(
+        "the launcher's words selected from its box onto its empty space, and from there into the box: it stays open with them; a press on that empty space closes it",
+        open && kept_out && kept_in && closed
+            && out == gesture("workspace-search", "search-dialog")
+            && into == gesture("search-dialog", "search-dialog")
+            && away == gesture("search-dialog", "search-dialog"),
+        json!({ "field": field, "empty": empty, "out": [out, kept_out], "into": [into, kept_in], "away": away, "closed": closed }),
+    );
+    b.eval(page, "(document.getElementById('search-dialog').open && document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    b.until(page, "!document.getElementById('search-dialog').open", wait);
+
+    let item = "[...document.querySelectorAll('#menu [role=menuitem]')].find((b) => b.textContent === 'Icon…')";
+    b.eval(page, "([...document.querySelectorAll('#stack .pane button[aria-label=More]')].pop()?.click(), true)")?;
+    let offered = b.until(page, &format!("!!{item}"), wait);
+    b.eval(page, &format!("({item}?.click(), true)"))?;
+    let sheet = offered && b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
+    let hint = "a lighthouse at dusk";
+    b.eval(page, &fill("dialog.icon-sheet input[name=hint]", hint))?;
+    // beside the card's middle: `x` in its padding (24 px), or left of it on the backdrop
+    let beside = |b: &mut Browser, x: &str| {
+        at(b, &format!("(() => {{ const d = document.querySelector('dialog.icon-sheet[open]'); if (!d) return null; const r = d.getBoundingClientRect(), p = [{x}, r.y + r.height / 2]; return r.x > 16 && document.elementFromPoint(...p) === d ? p : null; }})()"))
+    };
+    let padding = beside(b, "r.x + 8")?;
+    let backdrop = beside(b, "r.x / 2")?;
+    let field = at(b, &middle("dialog.icon-sheet input[name=hint]"))?;
+    let still = format!("document.querySelector('dialog.icon-sheet[open] input[name=hint]')?.value === {}", js(hint));
+    pressed(b)?;
+    let (mut padded, mut out, mut away) = (Value::Null, Value::Null, Value::Null);
+    let (mut kept_padded, mut kept_out) = (false, false);
+    if let (Some(padding), Some(field), Some(backdrop)) = (padding, field, backdrop) {
+        b.click_at(page, padding)?;
+        settle(b)?;
+        (padded, kept_padded) = (pressed(b)?, b.eval(page, &still)? == true);
+        b.drag(page, field, backdrop)?;
+        settle(b)?;
+        (out, kept_out) = (pressed(b)?, b.eval(page, &still)? == true);
+        b.click_at(page, backdrop)?;
+        b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+        away = pressed(b)?;
+    }
+    let closed = b.eval(page, "!document.querySelector('dialog.icon-sheet')")? == true;
+    s.ok(
+        "an app's icon sheet stays open on a press in its card's padding, and on its description selected past the card onto the backdrop, what was typed kept; a press on the backdrop closes it",
+        sheet && kept_padded && kept_out && closed
+            && padded == gesture("icon-sheet", "icon-sheet")
+            && out == gesture("hint", "icon-sheet")
+            && away == gesture("icon-sheet", "icon-sheet"),
+        json!({ "padding": padding, "field": field, "backdrop": backdrop, "padded": [padded, kept_padded], "out": [out, kept_out], "away": away, "closed": closed }),
+    );
+    b.eval(page, "(document.querySelector('dialog.icon-sheet[open]')?.close(), true)")?;
+    b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
     Ok(())
 }
 
@@ -8547,6 +8649,124 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     let linked = visibility(b, "link")? && b.until(page, &format!("{row}?.querySelector('.app-row-access')?.textContent.includes('Anyone with the link')"), wait);
     s.ok("Sharing expands its isolated view inline; made Public there, its row says Public, and back to Anyone with the link", public && linked, b.eval(page, &format!("{row}?.innerText ?? null"))?);
 
+    // back to settings, where the checks after these are
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-data')", wait);
+    Ok(())
+}
+
+/// Archive and Delete on the Brains page, as on Apps (apps-page.js; Paul,
+/// 2026-11-17). Goal: Archive is on every live row, the person's own view
+/// whatever their role, and folds it into Archived; Delete is on their own
+/// alone, asks again under its row with its name typed back and what goes,
+/// then deletes it for good; each row moves only once the list says so.
+/// Invalid: a brain shared with them (an editor) offers no Delete, and the
+/// platform refuses them its delete.
+fn apps_archive_delete_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let in_page = |method: &str, path: &str, body: &str| {
+        format!("fetch({}, {{ method: {}, headers: {{ 'x-fragment-shell': '1', 'content-type': 'application/json' }}, body: {body}, credentials: 'same-origin' }}).then(async (r) => ({{ status: r.status, body: await r.json().catch(() => null) }}))", js(path), js(method))
+    };
+    let made = b.eval(page, &in_page("POST", "/api/fragments", &js(&json!({ "label": "old-notes", "template": "brain", "title": "Old notes" }).to_string())))?;
+    let mine = made["body"]["name"].as_str().unwrap_or_default().to_string();
+    anyhow::ensure!(made["status"] == 200 && !mine.is_empty(), "their brain was not made: {made}");
+    let me = api.who(session)?["id"].as_str().context("the person's identity")?.to_string();
+    let other = api.person()?;
+    let theirs = api.qualified(&other, "lent-notes")?;
+    let r = api.create_with(&other, json!({ "name": theirs, "template": "brain", "title": "Lent notes" }))?;
+    anyhow::ensure!(r.status == 200, "the other person's brain: {r}");
+    let r = api.share(&theirs, &me, "editor")?;
+    anyhow::ensure!(r.status == 200, "shared with them: {r}");
+
+    let row = |name: &str| format!("document.querySelector({})", js(&format!("#brains-page .app-row[data-fragment=\"{name}\"]")));
+    let live = |name: &str| format!("!!document.querySelector({})", js(&format!("#brains-page .apps-layout > .apps-list > .app-row[data-fragment=\"{name}\"]")));
+    let folded = |name: &str| format!("!!document.querySelector({})", js(&format!("#brains-page .apps-archived .app-row[data-fragment=\"{name}\"]")));
+    let control = |name: &str, action: &str| format!("{}?.querySelector('[data-action={action}]')", row(name));
+    // the row's actions a person sees, by name
+    let actions = |name: &str| format!("[...({}?.querySelectorAll('button[data-action]') ?? [])].filter((b) => b.checkVisibility()).map((b) => b.dataset.action)", row(name));
+    b.eval(page, "(document.getElementById('brains-link').click(), true)")?;
+    let shown = b.until(page, &format!("location.pathname === '/brains' && {} && {}", live(&mine), live(&theirs)), wait);
+    let (own, lent) = (b.eval(page, &actions(&mine))?, b.eval(page, &actions(&theirs))?);
+    let has = |v: &Value, a: &str| v.as_array().is_some_and(|l| l.iter().any(|x| x == a));
+    s.ok(
+        "on Brains, their own brain has Archive and Delete; one shared with them as an editor has Archive and no Delete",
+        shown && has(&own, "archive") && has(&own, "delete") && has(&lent, "archive") && !has(&lent, "delete"),
+        json!({ "own": own, "lent": lent }),
+    );
+    let refused = b.eval(page, &in_page("DELETE", &format!("/api/f/{theirs}"), "undefined"))?;
+    let kept = api.status(&other, &theirs)?;
+    s.ok("the platform refuses an editor's delete of it (403), and it stays", refused["status"] == 403 && kept.status == 200, json!({ "refused": refused, "status": kept.status }));
+
+    // Archive: their own and the lent one, each folded once the list says so
+    b.eval(page, &format!("({}?.click(), true)", control(&mine, "archive")))?;
+    let one = b.until(page, &format!("{} && !{}", folded(&mine), live(&mine)), wait);
+    b.eval(page, &format!("({}?.click(), true)", control(&theirs, "archive")))?;
+    let both = b.until(page, &format!("{} && !{} && document.querySelector('#brains-page .apps-archived summary')?.textContent === 'Archived (2)'", folded(&theirs), live(&theirs)), wait);
+    b.eval(page, "(document.querySelector('#brains-page .apps-archived').open = true, true)")?;
+    let (own_folded, lent_folded) = (b.eval(page, &actions(&mine))?, b.eval(page, &actions(&theirs))?);
+    let owners = api.signed(&other, "GET", "/api/fragments", None)?;
+    let owners_row = owners.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == theirs.as_str()).cloned()).unwrap_or_default();
+    let _ = b.screenshot(page, &shots.join("brains-archived.png"));
+    s.ok(
+        "Archive folds each into Archived for them alone: Unarchive there (and Delete on their own), no Archive, and its owner's list unchanged",
+        one && both
+            && has(&own_folded, "unarchive") && has(&own_folded, "delete") && !has(&own_folded, "archive")
+            && has(&lent_folded, "unarchive") && !has(&lent_folded, "delete") && !has(&lent_folded, "archive")
+            && owners_row["name"] == theirs.as_str() && owners_row["archived"] != true,
+        json!({ "own": own_folded, "lent": lent_folded, "owners": owners_row }),
+    );
+    for name in [&mine, &theirs] {
+        b.eval(page, &format!("({}?.click(), true)", control(name, "unarchive")))?;
+        b.until(page, &live(name), wait);
+    }
+    // settled: each its Archive again, pressable, never left saying Archiving…
+    let settled = |name: &str| format!("{} && {}?.textContent === 'Archive' && !{}.disabled", live(name), control(name, "archive"), control(name, "archive"));
+    let back = b.until(page, &format!("{} && {} && document.querySelector('#brains-page .apps-archived')?.hidden", settled(&mine), settled(&theirs)), wait);
+    s.ok("Unarchive brings each back to the list, its Archive pressable again", back, b.eval(page, "document.getElementById('brains-page')?.innerText ?? null")?);
+
+    // Delete: asked again under the row, its name typed back
+    let form = format!("document.querySelector({})", js(&format!("#brains-page [data-delete-confirm=\"{mine}\"]")));
+    let sure = format!("{form}?.querySelector('[data-action=delete-sure]')");
+    b.eval(page, &format!("({}?.click(), true)", control(&mine, "delete")))?;
+    let asked = b.until(page, &format!("{form}?.checkVisibility() && document.activeElement === {form}.querySelector('input') && {sure}.disabled"), wait);
+    let says = b.eval(page, &format!("{form}?.innerText ?? null"))?;
+    let typed = |b: &mut Browser, text: &str| b.eval(page, &format!("(() => {{ const i = {form}.querySelector('input'); i.value = {}; i.dispatchEvent(new Event('input', {{ bubbles: true }})); return {sure}.disabled; }})()", js(text)));
+    let title_typed = typed(b, "Old notes")?;
+    for (scheme, name) in [("light", "brains-delete-1280-light.png"), ("dark", "brains-delete-1280-dark.png")] {
+        b.color_scheme(page, scheme)?;
+        let _ = b.screenshot(page, &shots.join(name));
+    }
+    b.viewport(page, 390, 844, true)?;
+    let fits = b.until(page, &format!("document.documentElement.scrollWidth <= innerWidth && {form}?.checkVisibility() && {form}.scrollWidth <= {form}.clientWidth"), wait);
+    for (scheme, name) in [("light", "brains-delete-390-light.png"), ("dark", "brains-delete-390-dark.png")] {
+        b.color_scheme(page, scheme)?;
+        b.eval(page, &format!("({form}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+        let _ = b.screenshot(page, &shots.join(name));
+    }
+    b.color_scheme(page, "light")?;
+    b.viewport(page, 1280, 800, false)?;
+    s.ok(
+        "Delete asks again under its row, saying what goes for everyone and that it can't be undone, with Delete unpressable until its name (not its title) is typed; it fits a phone's width",
+        asked && title_typed == true
+            && says.as_str().is_some_and(|t| t.contains("Delete Old notes?") && t.contains("Its pages, data and files go for everyone in it. This can't be undone.") && t.contains(&format!("Type {mine} to confirm")))
+            && fits,
+        json!({ "says": says, "titleTyped": title_typed, "fits": fits }),
+    );
+    let ready = typed(b, &mine)? == false;
+    let _ = b.screenshot(page, &shots.join("brains-delete-ready.png"));
+    b.eval(page, &format!("({sure}?.click(), true)"))?;
+    let gone = b.until(page, &format!("!{} && {}", row(&mine), live(&theirs)), wait);
+    let after = b.eval(page, &in_page("GET", &format!("/api/f/{mine}/status"), "undefined"))?;
+    s.ok(
+        "its name typed, Delete deletes it: its row leaves with the list, and it is gone (404)",
+        ready && gone && after["status"] == 404,
+        json!({ "ready": ready, "gone": gone, "status": after["status"] }),
+    );
+
+    // its owner deletes theirs: it leaves their page too, as their list is told
+    let r = api.signed(&other, "DELETE", &format!("/api/f/{theirs}"), None)?;
+    anyhow::ensure!(r.status == 200, "{theirs} was not deleted: {r}");
+    anyhow::ensure!(b.until(page, &format!("!{}", row(&theirs)), wait), "{theirs}, deleted by its owner, stayed on their Brains page");
     // back to settings, where the checks after these are
     b.eval(page, "(document.getElementById('settings').click(), true)")?;
     b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-data')", wait);

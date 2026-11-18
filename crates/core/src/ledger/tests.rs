@@ -16,7 +16,7 @@ use crate::price::{KeyCall, KeyPrice, PriceBook, StorageClass, UsageFault, USD};
 const FLASH: &str = "@cf/zai-org/glm-5.3-flash";
 /// A month after T0: 2026-11-01T00:00:00Z.
 const NOVEMBER: i64 = T0 + 31 * DAY_MS;
-/// A Flash turn of $0.004 at list, charged $0.0063 (price.rs).
+/// A Flash turn of $0.004 at list, charged $0.0063 (price/defaults.rs).
 const TURN: i64 = 6_300;
 
 fn flash(input: u64, output: u64) -> Usage {
