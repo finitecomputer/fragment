@@ -524,6 +524,7 @@ export class App extends AuthorApp {
   get otherFragments() {
     const cap = this.env.FRAGMENTS;
     return {
+      post: () => Promise.reject(new Error("a post in another fragment is a job's step (job.otherFragments.post): it carries its run's depth and is made once")),
       draft: (name, channel, draft) => answered(cap.draft(String(name), String(channel), draft)),
       records: (name, channel, page = {}) => answered(cap.records(String(name), String(channel), page)),
     };

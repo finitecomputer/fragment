@@ -368,6 +368,7 @@ impl FragmentCell {
         let name = self.name()?;
         let message = format!("deploy {name}{}", body["note"].as_str().map(|n| format!(": {n}")).unwrap_or_default());
         let live = self.go_live(&who, &message).await?;
+        self.vouch(&who)?;
         json_response(&json!({ "live": live, "canonical": self.cfg.canonical(&caller.url, &name) }))
     }
 }

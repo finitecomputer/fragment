@@ -427,8 +427,8 @@ pub(crate) enum MetaKey {
     /// The agent identity its own key holds, once it ran on a computer.
     AgentIdentity,
     /// The installed code (its loader id) that may act elsewhere as its
-    /// agent: put live while its owner and its agent alone could edit it
-    /// (acting.rs).
+    /// agent: its owner's or its agent's deploy, or a blessed release
+    /// (acting.rs `vouch`).
     ActsAs,
     /// What this agent may use of its owner's (`fragment_core::grants`):
     /// set by its owner in person, through their computer (runs_on.rs), or

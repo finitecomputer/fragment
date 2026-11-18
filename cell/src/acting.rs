@@ -11,9 +11,11 @@
 //! for routes no act names (`fragment_core::access::reserved`).
 //!
 //! The code that acts is its owner's and its agent's alone: it acts only
-//! while no one else may edit the fragment, and only code installed while
-//! that held (plane.rs records it, as `MetaKey::ActsAs`), so a former
-//! editor's code acts nowhere.
+//! while no one else may edit the fragment, and only code its owner or its
+//! agent put live themselves (`vouch`, at their deploy or refresh) or a
+//! blessed template's release (`MetaKey::ActsAs`, which each install
+//! clears or sets: plane.rs), so an editor's code acts nowhere, even once
+//! they are gone, nor a deploy of theirs that lands after.
 //!
 //! A post is a job's step: it carries its run's hop depth, as a job's
 //! fetch and publish do, so fragments triggering one another stop at
@@ -70,15 +72,35 @@ impl FragmentCell {
         Ok(!rows.is_empty())
     }
 
+    /// Its owner or its agent (`who`) put live, or confirmed, the code
+    /// installed now, while they alone may edit it: that code acts as its
+    /// agent (`vouched`). Anyone else's deploy or refresh vouches for none.
+    pub(crate) fn vouch(&self, who: &str) -> CellResult<()> {
+        let [owner, agent, live] = self.metas([MetaKey::Owner, MetaKey::AgentIdentity, MetaKey::PinLive])?;
+        if (Some(who) != owner.as_deref() && Some(who) != agent.as_deref()) || self.others_edit()? {
+            return Ok(());
+        }
+        #[derive(serde::Deserialize)]
+        struct Installed {
+            sha: String,
+            loader_id: String,
+        }
+        let code: Vec<Installed> = self.typed("SELECT sha, loader_id FROM code WHERE id = 1", vec![])?;
+        if let Some(code) = code.into_iter().find(|c| Some(&c.sha) == live.as_ref()) {
+            self.set_meta(MetaKey::ActsAs, &code.loader_id)?;
+        }
+        Ok(())
+    }
+
     /// Its code acts as its agent only while its owner and its agent alone
-    /// may edit it, and only the code installed while they alone could.
+    /// may edit it, and only the code they vouched for (`vouch`).
     fn vouched(&self) -> CellResult<()> {
         let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("its code acts as its agent elsewhere only {why}"));
         if self.others_edit()? {
             return Err(refused("while its owner and its agent alone may edit it"));
         }
         if self.meta(MetaKey::ActsAs)?.is_none_or(|code| self.installed_code().ok().flatten() != Some(code)) {
-            return Err(refused("from code put live while its owner and its agent alone could edit it: deploy it again"));
+            return Err(refused("from code its owner or its agent put live themselves: deploy it again"));
         }
         Ok(())
     }
