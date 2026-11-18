@@ -106,7 +106,7 @@ fn usage_of(item: &Planned, models: &Models) -> Result<Usage, (Option<String>, U
         }
         Planned::Model(m) => {
             let id = match models.named(Some(&m.model), None) {
-                Ok(named) => models.route(named).map_err(|_| (Some(m.model.clone()), Unquoted::NoPrice))?.id().to_string(),
+                Ok(named) => models.route(named).id().to_string(),
                 Err(_) => m.model.clone(),
             };
             Ok(Usage::Tokens { model: id, input: m.input, cached_input: m.cached_input, cache_write: m.cache_write, output: m.output })
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn each_item_is_quoted_what_the_ledger_charges_for_it() {
         let models = Models::defaults();
-        let cheap = models.route(models.named(Some("cheap"), None).unwrap()).unwrap().id().to_string();
+        let cheap = models.route(models.named(Some("cheap"), None).unwrap()).id().to_string();
         let items = [
             // 300 clips of about 200 characters, and an audiobook's 60,000 in one
             key("elevenlabs:speech", Some(200), Some(300)),

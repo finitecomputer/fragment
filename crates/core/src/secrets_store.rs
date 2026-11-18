@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(operator_key("perplexity"), "OPERATOR_KEY_PERPLEXITY");
         assert_eq!(operator_key("google-places"), "OPERATOR_KEY_GOOGLE_PLACES");
         assert!(std::panic::catch_unwind(|| operator_key("Not A Name")).is_err());
-        assert_eq!(crate::models::SLOTS.map(model_key), ["MODEL_KEY_CHEAP", "MODEL_KEY_MEDIUM", "MODEL_KEY_FALLBACK", "MODEL_KEY_VISION"]);
+        assert_eq!(["cheap", "private_deep", "fallback"].map(model_key), ["MODEL_KEY_CHEAP", "MODEL_KEY_PRIVATE_DEEP", "MODEL_KEY_FALLBACK"]);
         assert_eq!(model_key("standard_fallback"), "MODEL_KEY_STANDARD_FALLBACK", "a route's own slot's");
         assert!(std::panic::catch_unwind(|| model_key("High")).is_err(), "no slot's name");
         // none is a name an earlier deploy's Worker secret had
