@@ -704,9 +704,10 @@ async fn catch_up_after_a_restart_without_a_duplicate() {
 /// agent's owner, carried by a key that is none of the chat's members, is
 /// its owner's only in a chat whose members mark the agent's row as that
 /// door (`door`, a connector's binding while open): a hosted connector's,
-/// its row marked after the bridge read the chat and named its key (a door
-/// bound since), read live or caught up by a new life, is asked as its
-/// owner.
+/// its row marked only after the bridge read one of its records with no
+/// door marked (an unlink, and a link again moments later, the agent a
+/// member throughout), read live or caught up by a new life, is asked as
+/// its owner.
 /// The same record in a chat that is no door of its (a record an editor
 /// scheduled, fired as the chat's own key before the bridge read it), or
 /// from a connector whose platform marks no row (one before `door`), is
@@ -725,11 +726,12 @@ async fn a_relayed_record_is_its_owners_only_through_its_door() {
     let cfg = support::config(&fake.url(), &dir, support::settings());
     let bridge = support::start(cfg.clone(), support::script());
     following(&fake, 4).await;
-    // the connector says something of its own first: its key is a writer
-    // the chat's view knows, read with the door it had then (none)
-    let notice = fake.say(&door, "npub1tgdoor", json!({ "text": "the bot is connected" }));
-    fake.until(WAIT, "its notice's turn", |w| asker(w, &door, &notice).is_some()).await;
-    // its owner binds the connector now, the agent already in it: its row says so
+    // read while no door is marked (unlinked: what came before its unlink,
+    // read after): its carrier's, and the chat's view knows its key now
+    let stale = fake.say(&door, "npub1tgdoor", relayed("said before the unlink"));
+    fake.until(WAIT, "the stale relay's turn", |w| asker(w, &door, &stale).is_some()).await;
+    fake.with(|w| assert_eq!(asker(w, &door, &stale), Some(json!("npub1tgdoor")), "no door marked: its carrier's"));
+    // its owner links it again at once, the agent a member throughout: its row says so
     fake.with(|w| w.fragments.get_mut(&door).unwrap().members.iter_mut().find(|m| m.principal == "npub1juniper").unwrap().door = Some("telegram".into()));
     let live = fake.say(&door, "npub1tgdoor", relayed("from telegram"));
     let unmarked = fake.say(&old, "npub1olddoor", relayed("from an older platform"));

@@ -808,12 +808,11 @@ async fn list_follows(api: &Api, agent: &Agent, only: Option<Vec<String>>) -> Re
 }
 
 /// A chat's members and names, read again after `VIEW_TTL_MS`, or for its
-/// door when a record needs one (`door_due`).
+/// door when a record needs one (`feed`).
 struct ViewCache {
     view: ChatView,
     since: i64,
     read_at: Option<Instant>,
-    door_read_at: Option<Instant>,
 }
 
 impl ViewCache {
@@ -823,12 +822,6 @@ impl ViewCache {
         self.read_at.is_some_and(|t| t.elapsed() < Duration::from_millis(limits::VIEW_TTL_MS) && joined.is_none_or(|j| j < t))
     }
 
-    /// Whether to read the chat's members again for its door: when its
-    /// agent's row named none, and none was asked for in
-    /// `DOOR_READ_EVERY_MS`.
-    fn door_due(&self) -> bool {
-        self.view.door.is_none() && self.door_read_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(limits::DOOR_READ_EVERY_MS))
-    }
 
     /// Reads the chat's agents (in the order they were added), its writers'
     /// names, and when this agent joined: records from before are history.
@@ -887,7 +880,7 @@ enum Ended {
 /// or the agent leaves it.
 async fn follow(api: Api, agent: Agent, fragment: String, channel: String, inbox: mpsc::Sender<Msg>, shared: Arc<Shared>, stop: watch::Receiver<bool>) {
     let mut backoff = Backoff::default();
-    let mut view = ViewCache { view: ChatView::default(), since: 0, read_at: None, door_read_at: None };
+    let mut view = ViewCache { view: ChatView::default(), since: 0, read_at: None };
     let tasks = channel == records::TASKS;
     let mut subscribed = false;
     // bounded by the bridge's life (or the agent's membership): one
@@ -1074,22 +1067,20 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         // its owner's words carried by another key: whether this chat is a
         // door of the agent's, as its row says now (the engine takes them
         // as its owner's only through that door: `relayed_for`), read again
-        // if its view named none, so a door bound since it was read is
-        // seen. That read failing in a way asking again may pass ends the
-        // follow, which reads the record again from the cursor, so an
-        // owner's message is never taken for its carrier's for a blip.
+        // whenever its view names none, so a door bound since it was read
+        // (an unlink and a link again, its agent a member throughout, which
+        // no join announces) is seen at its first record. One read a
+        // record, beside the turn the record starts either way. That read
+        // failing in a way asking again may pass ends the follow, which
+        // reads the record again from the cursor, so an owner's message is
+        // never taken for its carrier's for a blip.
         let relays = record.at >= view.since && record.principal != agent.identity && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment);
-        let door = relays && view.door_due();
+        let door = relays && view.view.door.is_none();
         if !view.fresh(shared.joined_at(fragment)) || unknown || door {
             match view.read(api, agent, fragment, Some(&record.principal)).await {
                 Ok(()) => {}
                 Err(e) if door && e.retryable() => return Some(Ended::Again(format!("its members did not read for its door (seq {}): {e}", record.seq))),
                 Err(e) => crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() }),
-            }
-            // asked for its door: not again for a while, whatever it said
-            // (a failure asking again may pass asks again, above)
-            if door {
-                view.door_read_at = Some(Instant::now());
             }
         }
         (Some(view.view.clone()), view.since)
