@@ -357,6 +357,10 @@ pub struct Prompt {
     pub computer: Vec<String>,
     pub expires_at: u64,
     pub closed: bool,
+    /// Until when it holds the computer (0, never): an option for the
+    /// computer is this life's alone (`COMPUTER_CARD_HOLD_MS`). Never kept.
+    #[serde(skip)]
+    pub holds_until: u64,
     /// Its owner's answer, held from the runtime until its closure is on
     /// `work` (`Effect::Fence`). A restart ends its turn, so never kept.
     #[serde(skip)]
@@ -954,6 +958,9 @@ impl Engine {
     fn finish(&mut self) -> Step {
         let working = self.runtimes.values().any(|r| r.working);
         let busy = working || self.state.turns.values().any(|t| t.phase == Phase::Queued || (t.phase == Phase::Running && !t.asking));
+        // a card only this life can take holds it too; it waits on a
+        // person, so work left running counts from its start
+        let card = self.state.turns.values().any(|t| t.active() && t.prompts.iter().any(|p| !p.closed && self.now < p.holds_until));
         if self.busy && !busy {
             self.left_from = Some(self.now);
         }
@@ -969,7 +976,7 @@ impl Engine {
             self.left = left;
             crate::ev!("keepalive.left", { "hold": left, "from": self.left_from });
         }
-        let hold = busy || left;
+        let hold = busy || card || left;
         if hold != self.keepalive {
             self.keepalive = hold;
             self.out.push(Effect::Keepalive(hold));
@@ -2645,7 +2652,9 @@ impl Engine {
         let expires_at = self.now + ttl;
         let t = self.state.turns.get_mut(id).expect("checked");
         let Some(owner) = self.agents.iter().find(|a| a.fragment == t.agent).map(|a| a.owner.clone()) else { return };
-        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words && !o.computer).map(|o| o.id.clone()).collect(), computer: options.iter().filter(|o| o.computer).map(|o| o.id.clone()).collect(), expires_at, closed: false, held: None });
+        let computer: Vec<String> = options.iter().filter(|o| o.computer).map(|o| o.id.clone()).collect();
+        let holds_until = if computer.is_empty() { 0 } else { expires_at.min(self.now + limits::COMPUTER_CARD_HOLD_MS) };
+        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words && !o.computer).map(|o| o.id.clone()).collect(), computer, expires_at, closed: false, holds_until, held: None });
         t.phase = Phase::Waiting;
         self.dirty = true;
         let (agent, fragment) = (t.agent.clone(), t.fragment.clone());

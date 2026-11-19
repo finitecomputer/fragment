@@ -133,7 +133,8 @@ running, delegated work still running after its parent replied
 (decision 65; docs/bridge.md, "Runtime work outside a turn"), or work
 left running while the computer is working, up to 2 hours after the last
 of those (docs/bridge.md, "Work left running"). Waiting on a person
-never holds it. That work is never saved: a restarted runtime has none
+never holds it, but for a card only this life can take, up to 10 minutes
+(docs/bridge.md, "An answer for the computer"). That work is never saved: a restarted runtime has none
 of it.
 
 - **P1, one life per turn.** A turn runs only in the life of the bridge

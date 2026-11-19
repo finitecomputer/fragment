@@ -332,6 +332,10 @@ pub const KEEPALIVE_PING_MS: u64 = 15_000;
 /// Work left running (load.rs) holds the computer at most this long after
 /// its agents' work last did: what a forgotten loop costs, at most.
 pub const LEFT_RUNNING_HOLD_MS: u64 = 2 * 60 * 60 * 1000;
+/// A card only this life can take (a sign-in's code) holds the computer
+/// at most this long while open, or to its expiry if sooner: a person
+/// signs in within minutes.
+pub const COMPUTER_CARD_HOLD_MS: u64 = 10 * 60 * 1000;
 /// The counters are read every slice; the computer works while one of its
 /// last `LOAD_SLICES` was over a floor (a pause in the work holds on).
 pub const LOAD_SLICE_MS: u64 = 20_000;
