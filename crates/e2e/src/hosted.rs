@@ -340,6 +340,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         wiper: None,
         cli,
         scratch,
+        ram: None,
         project: PathBuf::new(),
         shape: Shape::Plain,
         door_url: None,

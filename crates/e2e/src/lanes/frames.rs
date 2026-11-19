@@ -302,7 +302,7 @@ fn over_http(s: &mut Suite, api: &Api, (owner_session, guest_session, stranger_s
 pub(super) fn safari_like(s: &Suite) -> Result<Option<Browser>> {
     let args = ["--test-third-party-cookie-phaseout", "--disable-site-isolation-trials"];
     let blocking = json!({ "profile": { "cookie_controls_mode": 1, "block_third_party_cookies": true } });
-    Browser::launch_with(&s.scratch, &args, Some(&blocking))
+    Browser::launch_with(s.disposable(), &args, Some(&blocking))
 }
 
 /// The shell's page at `/settings`, loaded (`ready`: `SIGNED_IN` or `SIGNED_OUT`),

@@ -723,6 +723,11 @@ pub struct NodeOptions {
     /// as it reaches xtask: in a group of its own, it outlived a Ctrl-C,
     /// holding its port.
     pub own_group: bool,
+    /// miniflare's local trace store (`X_LOCAL_OBSERVABILITY`): every
+    /// invocation's trace, in a SQLite of the node's state, for its local
+    /// explorer. `xtask dev` keeps it; the e2e reads none, and it was three
+    /// quarters of what a run wrote (2026-11-19: 3.0 of a whole run's 3.9 GB).
+    pub trace_store: bool,
 }
 
 impl NodeOptions {
@@ -967,6 +972,9 @@ impl Node {
         cmd.current_dir(&opts.project)
             .env("WRANGLER_LOG_PATH", &opts.log_dir)
             .env("WRANGLER_REGISTRY_PATH", opts.project.join(".wrangler/registry"));
+        if !opts.trace_store {
+            cmd.env("X_LOCAL_OBSERVABILITY", "false");
+        }
         for var in WRANGLER_VARS_CLEARED {
             cmd.env_remove(var);
         }

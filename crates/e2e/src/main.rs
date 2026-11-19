@@ -13,7 +13,10 @@
 //! A run's scratch (`target/e2e/<run>`: the staged cell, each node boot's
 //! log, the lanes' directories and screenshots) is
 //! removed when every check passes, and kept when one fails (or when
-//! `FRAGMENT_E2E_KEEP` is set).
+//! `FRAGMENT_E2E_KEEP` is set). `FRAGMENT_E2E_SCRATCH=<dir>` (a tmpfs) puts
+//! what is disposable, the staged cell with its node's state and Chrome's
+//! profiles, in RAM, with room to spare, and the node's state is copied to
+//! the scratch when the run does not pass (scratch.rs).
 //!
 //! The hosted lane (`--hosted`, hosted.rs) runs the same sections against
 //! a branch deployment on real vendors: each section says what it needs
@@ -33,6 +36,7 @@ mod browser;
 mod hosted;
 mod lanes;
 mod needs;
+mod scratch;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -483,6 +487,9 @@ pub struct Suite {
     pub wiper: Option<Keys>,
     pub cli: PathBuf,
     pub scratch: PathBuf,
+    /// The run's directory in RAM, where its node's project and Chrome's
+    /// profiles go (`FRAGMENT_E2E_SCRATCH`, scratch.rs); `None`: the scratch.
+    ram: Option<scratch::Ram>,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
     /// The identity door a node shaped `Shape::Door` signs people in
@@ -506,6 +513,11 @@ impl Drop for Suite {
         drop(self.node.take());
         if let Err(e) = self.remove_containers() {
             println!("      could not remove this run's containers: {e:#}");
+        }
+        // what is in RAM, kept on disk as a failed run's is (`finish`)
+        if let Some(ram) = self.ram.take() {
+            self.chrome.close();
+            ram.end(true);
         }
     }
 }
@@ -976,6 +988,7 @@ impl Suite {
             log_dir: self.scratch.clone(),
             // a crash kills wrangler and workerd as one
             own_group: true,
+            trace_store: false,
         };
         let (node, _) = match &self.celld {
             None => devstack::Node::start(tools, &opts)?,
@@ -1265,6 +1278,11 @@ impl Suite {
             .and_then(|v| v["secret_key"].as_str().and_then(Keys::from_secret_hex))
     }
 
+    /// Where the run's Chromes keep their profiles: in RAM, or the scratch.
+    pub fn disposable(&self) -> &Path {
+        self.ram.as_ref().map_or(&self.scratch, |r| r.dir())
+    }
+
     /// A fresh directory in this run's scratch.
     pub fn dir(&self, name: &str) -> PathBuf {
         let d = self.scratch.join(name);
@@ -1383,7 +1401,10 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
     make_scratch(&scratch)?;
-    let project = devstack::stage_project(&scratch.join("cell"))?;
+    // the node's project and Chrome's profiles: in RAM, or beside the logs
+    let ram = scratch::place(&run, &scratch)?;
+    let disposable = ram.as_ref().map_or(scratch.clone(), |r| r.dir().to_path_buf());
+    let project = devstack::stage_project(&disposable.join("cell"))?;
     // the runtime: wrangler dev's workerd, or celld (docs/self-host.md, seam 1)
     let celld = match std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() {
         Err(_) | Ok("wrangler") => None,
@@ -1397,6 +1418,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // then removes the containers it left (on celld's krun engine, its VMs)
     let leftovers = project.clone();
     let engine = celld.as_ref().map(|c| c.engine.clone());
+    let in_ram = ram.clone();
     devstack::signals::on_termination(move |signal| {
         println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers");
         let krun = engine.as_ref().map_or(Ok(0), |e| e.remove(&leftovers));
@@ -1404,7 +1426,13 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
             Ok(n) => println!("      (removed {n} containers of this run)"),
             Err(e) => println!("      could not remove this run's containers: {e:#}"),
         }
+        if let Some(ram) = in_ram {
+            ram.end(true);
+        }
     })?;
+    if let Some(r) = &ram {
+        r.watch()?;
+    }
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
         lanes::hermes::stage_images(&project)?;
     }
@@ -1449,7 +1477,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         recovery_due: false,
         lost: None,
         cron: None,
-        chrome: browser::Shared::new(&scratch),
+        chrome: browser::Shared::new(&disposable),
         tools: Some(tools),
         celld,
         openbao,
@@ -1474,6 +1502,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         wiper: Some(Keys::generate()),
         cli,
         scratch,
+        ram,
         project,
         shape: Shape::Plain,
         door_url: None,
@@ -1563,9 +1592,13 @@ fn finish(s: &mut Suite) -> Result<()> {
         false => "skipped (the hosted lane's)",
     };
     println!("\n{} passed, {} failed, {} {skipped}", s.passed, s.failed.len(), s.skipped.len());
+    let ram = s.ram.take();
     if !s.failed.is_empty() {
         for f in &s.failed {
             println!("  FAIL {f}");
+        }
+        if let Some(ram) = ram {
+            ram.end(true);
         }
         match s.hosted() {
             true => println!("kept for a look: {}", s.scratch.display()),
@@ -1573,7 +1606,11 @@ fn finish(s: &mut Suite) -> Result<()> {
         }
         std::process::exit(1);
     }
-    if std::env::var_os("FRAGMENT_E2E_KEEP").is_some() {
+    let keep = std::env::var_os("FRAGMENT_E2E_KEEP").is_some();
+    if let Some(ram) = ram {
+        ram.end(keep);
+    }
+    if keep {
         println!("kept: {}", s.scratch.display());
     } else if let Err(e) = std::fs::remove_dir_all(&s.scratch) {
         println!("could not remove {}: {e}", s.scratch.display());
