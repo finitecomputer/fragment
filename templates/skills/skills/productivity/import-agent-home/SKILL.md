@@ -219,9 +219,9 @@ or the move is paused for Finite's team. Run this as one command, then
 write the stage in `progress.md`:
 
 ```sh
-stage="<the stage>" && mkdir -p "$HOME/home-import" "/tmp/home-import-$stage" && \
+stage="<the stage>" && mkdir -p "$HOME/home-import" && \
 curl -fsS -X POST -H "x-fragment-agent: $FRAGMENT_AS_AGENT" -o "$HOME/home-import/stage.json" "http://api.fragment.internal/api/migrations/stages/$stage/open" && \
-jq '.manifest | {layout, zip_bytes, zip_sha256, left_more, left: (.left // [] | group_by(.why) | map({why: .[0].why, files: length, bytes: (map(.bytes) | add)}))}' "$HOME/home-import/stage.json" && df -h /tmp
+jq '.manifest | {layout, zip_bytes, files, left_more, left: (.left // [] | group_by(.why) | map({why: .[0].why, files: length, bytes: (map(.bytes) | add)}))}' "$HOME/home-import/stage.json"
 ```
 
 - **Refused** (403, 404 or 409): the stage isn't yours to read now. If
@@ -231,37 +231,19 @@ jq '.manifest | {layout, zip_bytes, zip_sha256, left_more, left: (.left // [] | 
   stage you can't read may be gone.
 - **Another error:** wait a minute and run it again, up to five times.
   Still failing: tell your owner it's paused, as above, and stop.
-- **Room:** `/tmp` needs the manifest's `zip_bytes` free, with room to
-  spare. If it doesn't have that, end the import as not done (below),
-  why "not enough room for the zip".
 
 The layout is the manifest's `layout`, its file
 `${HERMES_SKILL_DIR}/profiles/<layout>.layout.json`. The manifest's `left`
 is what the old platform kept back, by kind (each file is listed in
 `stage.json`). Keep `stage.json`: the report (step 8) uses it.
 
-**Download the zip** into `/tmp/home-import-<the stage>/`, never into your
-home: your computer saves your home, and the zip is large and only needed
-once. That folder is this stage's alone: your owner's other agents share
-this computer's `/tmp`, and may be bringing theirs over at the same time. Run this in
-the background, without `notify`, and wait for it with your `process`
-tool. Each try goes on where the last stopped:
-
-```sh
-stage="<the stage>" && z="/tmp/home-import-$stage/home.zip" && want="$(jq -r .manifest.zip_bytes "$HOME/home-import/stage.json")" && \
-for try in 1 2 3 4 5 6 7 8 9 10; do
-  have="$(stat -c %s "$z" 2>/dev/null || echo 0)"; [ "$have" -ge "$want" ] && break
-  curl -fsS -C - -H "x-fragment-agent: $FRAGMENT_AS_AGENT" -o "$z" "http://api.fragment.internal/api/migrations/stages/$stage/zip" || sleep 10
-done; \
-echo "bytes: $(stat -c %s "$z" 2>/dev/null || echo 0) of $want"; \
-echo "sha256: $(sha256sum "$z" | cut -d' ' -f1) of $(jq -r .manifest.zip_sha256 "$HOME/home-import/stage.json")"
-```
-
-Both pairs must match. If they don't, delete
-`/tmp/home-import-<the stage>/home.zip` and download it again, once. Wrong again: end the import as not done,
-why "the zip did not arrive whole". If you are started again and the zip
-is gone (a restart clears `/tmp`), open the stage again and download it
-again: both answer the same until you say `done`.
+**Read it where it is: never download it.** An old agent's home can be
+larger than your whole disk. Every `fragment home` and `fragment session
+import` command below reads the stage in place, named
+`stage:<the stage>`: only what it reads is fetched, and only what the
+import keeps comes onto your disk. Each can read it until you say
+`done`. One that stops partway (the network) is run again the same way:
+it goes on where it stopped.
 
 **What the old platform kept back.** Name it in the report (step 8),
 grouped by its `why`, in plain words, with how many files and how large:
@@ -276,7 +258,7 @@ grouped by its `why`, in plain words, with how many files and how large:
 `left_more`, when there, is how many more were kept back past the list.
 
 **End the import with `done`.** After it, the stage can't be read again,
-so send it only once nothing reads the zip any more: the chats' import has
+so send it only once nothing reads the stage any more: the chats' import has
 finished (step 2) and `report.md` is written (step 8). Send it within a
 day of the message, or the move is paused for Finite's team. Write in
 `progress.md` that you sent it.
@@ -294,8 +276,8 @@ curl -fsS -X POST -H "x-fragment-agent: $FRAGMENT_AS_AGENT" -H "content-type: ap
 It answers the move's state, `retiring`: finite.computer now switches the
 old agent off for good. Then tell your owner as step 8 says.
 
-When the import can't be finished (the stage can't be read, the zip never
-arrives whole, there isn't room, or the survey fails), say so in one line:
+When the import can't be finished (the stage can't be read, there isn't
+room, or the survey fails), say so in one line:
 
 ```sh
 stage="<the stage>" why="<one short line: what stopped it>" && \
@@ -309,9 +291,9 @@ two: you couldn't finish your upgrade, why in plain words, and that
 Finite's team will pick it up. Ask them to do nothing. Don't promise
 nothing is lost: you can't tell whether its stage is still kept.
 
-Below, `<source>` is `~/home-import/home.zip`, the stage's
-`/tmp/home-import-<the stage>/home.zip`, or the path you were given, and `<L>` is
-`hermes` or the layout file's path.
+Below, `<source>` is `~/home-import/home.zip`, `stage:<the stage>` in a
+move, or the path you were given, and `<L>` is `hermes` or the layout
+file's path.
 
 ## 1. Survey
 
@@ -555,8 +537,7 @@ Write the full detail to `~/home-import/report.md` too, and mark every
 step done in `progress.md`. In a move, write `report.md` before your
 message, then send `done` ("From a move's stage"), then the message. Then
 delete `~/home-import/home.zip`, `~/home-import/home/` and
-`~/home-import/skills/`, and in a move your stage's own
-`/tmp/home-import-<the stage>/` (never another folder in `/tmp`): everything is in its place now, and your
+`~/home-import/skills/`: everything is in its place now, and your
 computer saves your whole home each time it sleeps. Keep `report.md`,
 `progress.md`, `stage.json`, `~/old-agent/`, `~/self-before-import/` and
 every earlier import's folder.

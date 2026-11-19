@@ -414,6 +414,12 @@ impl Client {
     /// it has one.
     #[allow(clippy::too_many_arguments)]
     fn send(&self, method: &str, path: &str, body: Bytes, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
+        self.send_with(method, path, body, replay, signed, timeout, content_type, None)
+    }
+
+    /// `send`, asking for one `range` of the answer's bytes when given.
+    #[allow(clippy::too_many_arguments)]
+    fn send_with(&self, method: &str, path: &str, body: Bytes, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>, range: Option<&str>) -> Result<Resp> {
         let path = &self.resolved(path)?;
         let url = self.url(method, path);
         let verb: reqwest::Method = method.parse()?;
@@ -423,6 +429,9 @@ impl Client {
             let mut req = self.http.request(verb.clone(), &url).header(header, value).timeout(timeout);
             if let Some(t) = content_type {
                 req = req.header("content-type", t);
+            }
+            if let Some(r) = range {
+                req = req.header("range", r);
             }
             if body.is_empty() { req } else { req.body(attempt_body(&body)) }
         };
@@ -477,6 +486,20 @@ impl Client {
     /// the time that takes.
     pub fn get_sized(&self, path: &str, bytes: u64) -> Result<Resp> {
         self.send("GET", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
+    }
+    /// `len` bytes of what `path` answers, from `offset` (a `Range` the
+    /// answer must honor whole, 206), or its refusal.
+    pub fn get_range(&self, path: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        assert!(len > 0, "a range holds a byte");
+        let range = format!("bytes={offset}-{}", offset + len - 1);
+        let resp = self.send_with("GET", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(len), None, Some(&range))?;
+        if !resp.ok() {
+            return Err(anyhow::Error::new(resp.refusal()).context(format!("{path}, {range}")));
+        }
+        if resp.status != 206 || resp.body.len() as u64 != len {
+            anyhow::bail!("{path}, {range}: answered {} with {} bytes, not that range", resp.status, resp.body.len());
+        }
+        Ok(resp.body)
     }
     /// A signed GET whose answer goes to `to` as it arrives (an export's
     /// archive, which may be tens of gigabytes), never held whole, given
