@@ -28,8 +28,6 @@
 //! Its row in the target names no owner (members.rs `standing` reads one as
 //! an agent's): its owner reads nothing through it.
 
-use std::collections::BTreeMap;
-
 use fragment_core::app_member::{self, Audience};
 use fragment_proto::{ErrorCode, FragmentKind, Member, Role};
 use serde_json::json;
@@ -128,15 +126,15 @@ impl FragmentCell {
         if self.incarnation().ok() != Some(incarnation) || self.must(MetaKey::Owner)? != owner || newest.is_empty() || !ended.is_empty() {
             return Err(CellError::new(ErrorCode::Conflict, "it changed while its app was asked: ask again"));
         }
-        // bounded: an app's audience is its members and their owners
-        let mut held = BTreeMap::new();
-        for (person, _) in &answer.audience {
-            held.insert(person.clone(), self.member_role(person)?);
-        }
         // its owner's alone: no yes here waits on the app (that list comes
-        // with the audience's growing)
-        let audience: Audience = answer.audience.iter().cloned().collect();
-        if let Err(refused) = app_member::join(role, &Audience::new(), audience, |p| held.get(p).copied().flatten()) {
+        // with the audience's growing); bounded, its members and their
+        // owners, and built by insertion: a collect sorts, with code of its
+        // own for the pair's type
+        let mut audience = Audience::new();
+        for (person, power) in &answer.audience {
+            audience.insert(person.clone(), *power);
+        }
+        if let Err(refused) = app_member::join(role, &Audience::new(), audience, |p| self.member_role(p).ok().flatten()) {
             let person = match &refused {
                 app_member::Refusal::Audience(short) => fragment_core::npub::display(&short.person),
                 _ => String::new(),
