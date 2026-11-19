@@ -59,6 +59,10 @@ A team's brain has one home: two would split what the team writes.
   them. Until then, keep a reference copy ("A brain you don't make",
   below). Keep one even if it is here already, in `fragment list`, until
   you have checked it ("Once you are in the real one").
+- **Made by an earlier import** (`SKILL.md`, "You may be someone
+  already"): don't make it again, and push nothing into it: what it
+  holds now may be newer than the old copy. Keep a reference copy, and
+  check it against that brain ("Once you are in the real one").
 - **No one can say** (`unknown`, or no `owner`): keep a reference copy
   too, and ask your owner in the report whether it is theirs or a
   team's. Say if it was a team's (`kind`): a team's brain holds what
@@ -137,6 +141,11 @@ tar -C "$H" --exclude=AGENTS.md --exclude=_index.md --exclude=.keep --exclude=_w
 ls "$C" && find "$C" -type f | wc -l
 ```
 
+In a move, its files are kept whole in your storage too (`SKILL.md`,
+step 3). A copy that won't fit your disk's room comfortably, keep none
+of: its note under `~/old-agent/home/workspace/finitebrain/` brings it
+back when you need it, and the README line says so.
+
 Bring its assets in as above, into the copy. Then mark what it is:
 - In `$HOME/old-finite-brains/README.md`, a line for it: its name, whose
   it was, and that it is a copy from finite.computer (the old Finite),
@@ -173,7 +182,8 @@ is theirs.
 ### Sites, as apps
 
 Each `sites/<site>/` is the site's files, as its repository held them.
-Copy it out first:
+One whose old address `site-map.json` names came over already: skip it.
+Copy each other out first:
 
 ```sh
 fragment home extract <source> sites/<site> --to "$HOME/home-import/home" --layout <L>
@@ -313,7 +323,8 @@ jq -c '.projects[] | select(.role == "owner" and .site != null) | {slug, site: .
   times. Still failing: say finite.site didn't answer, and stop this part.
 
 **Which.** A site's folder in the zip is its slug (`sites/<slug>/`).
-- **In an import:** every site listed whose slug the zip didn't hold.
+- **In an import:** every site listed whose slug the zip didn't hold,
+  and that `site-map.json` doesn't name (it came over before).
   For one it held, the listing's `url` is its old address: put that in
   `site-map.json` in place of any other for it.
 - **Alone:** the ones your owner named, else every one. A site that

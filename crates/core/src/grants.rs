@@ -294,7 +294,7 @@ mod tests {
     fn step_6_owes_each_row_not_taken() {
         use crate::migrate::{self, Ran, SchemaError, COMPUTER};
         let newest = COMPUTER.steps.len() as u32;
-        assert_eq!((newest, COMPUTER.steps.last().map(|s| s.name)), (6, Some("grants_owed")), "the drop's step is the newest");
+        assert_eq!(COMPUTER.steps.get(5).map(|s| s.name), Some("grants_owed"), "the drop's step is step 6");
         let db = at_step_5(&[
             ("taken--a1", r#"["-"]"#, &[("google", "data_stale")]),
             ("narrowed--b2", r#"["github"]"#, &[("google", "data_1")]),
@@ -335,7 +335,7 @@ mod tests {
         use crate::migrate::{self, Ran, COMPUTER};
         for rows in [&[][..], &[("taken--a1", r#"["-"]"#, &[][..]), ("default--c3", "null", &[][..])][..]] {
             let db = at_step_5(rows);
-            assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 100)), Ok(Ran::Migrated { from: 5, version: 6 }));
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 100)), Ok(Ran::Migrated { from: 5, version: COMPUTER.steps.len() as u32 }));
             assert_eq!(owed_of(&db), None, "{rows:?} owes nothing");
         }
     }

@@ -20,6 +20,8 @@ serde = { version = "1", features = ["derive"] }
 # raw_value: record bodies pass through as the text the cell stored (no crates added).
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
+# a move's stage copy's CRC-32, checked against the old file's (migrations.rs)
+crc32fast = "1.5"
 hex = "0.4"
 base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

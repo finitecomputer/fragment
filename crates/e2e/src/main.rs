@@ -1227,6 +1227,19 @@ impl Suite {
         c
     }
 
+    /// `cli` as an agent's computer whose disk has `room` bytes runs it:
+    /// its HOME and its temporary folder in `home`, and no file it writes
+    /// may grow past `room` (the kernel's `RLIMIT_FSIZE`, the write
+    /// refused: `with_room`).
+    pub fn cli_in_room(&self, api: &Api, home: &Path, room: u64, args: &[&str]) -> Output {
+        let mut c = self.cli_command(api, home, args);
+        let tmp = home.join("tmp");
+        std::fs::create_dir_all(&tmp).expect("a computer's temporary folder");
+        c.env("TMPDIR", &tmp);
+        with_room(&mut c, room);
+        c.output().expect("run the fragment CLI")
+    }
+
     fn cli_command(&self, api: &Api, home: &Path, args: &[&str]) -> Command {
         let mut c = self.bare_cli();
         c.args(args).env("HOME", home).env("FRAGMENT_HOST", &api.base).env_remove("FRAGMENT_OUTPUT");
@@ -1276,8 +1289,25 @@ impl Suite {
     }
 }
 
+/// `c` runs as on a disk of `room` bytes: no file it writes grows past
+/// them (`RLIMIT_FSIZE`), a write past them refused (`EFBIG`, `SIGXFSZ`
+/// ignored), as a full disk refuses one.
+pub fn with_room(c: &mut Command, room: u64) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: between fork and exec, two async-signal-safe calls, no allocation
+    unsafe {
+        c.pre_exec(move || {
+            let limit = libc::rlimit { rlim_cur: room as libc::rlim_t, rlim_max: room as libc::rlim_t };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 || libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 /// The `data` of a `--json` CLI answer (`args`, its command, for errors).
-fn cli_data(args: &[&str], out: &Output) -> Result<Value> {
+pub fn cli_data(args: &[&str], out: &Output) -> Result<Value> {
     let v: Value = serde_json::from_slice(&out.stdout)
         .with_context(|| format!("fragment {args:?}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))?;
     if v["ok"] != true {
