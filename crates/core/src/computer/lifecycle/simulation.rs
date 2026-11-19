@@ -37,7 +37,7 @@ fn simulated_interleavings_keep_the_invariants() {
     }
     // the sim's bound is shorter than the default, so it is reached
     let rules = Rules { unsaved_max_ms: 10 * 60_000 };
-    let mut reached = [0u32; 19];
+    let mut reached = [0u32; 20];
     // the images deploys pin, one after another and back
     let deployed = [IMAGE, "registry/stub@sha256:2", "registry/stub@sha256:3"];
     for seed0 in 1..=8u64 {
@@ -80,7 +80,7 @@ fn simulated_interleavings_keep_the_invariants() {
                 pending.remove(i)
             } else {
                 let seq = l.save_seq.saturating_sub(rng(&mut seed) % 2);
-                match rng(&mut seed) % 18 {
+                match rng(&mut seed) % 19 {
                     // its owner's restart, of the newest start or an earlier one
                     14 if rng(&mut seed).is_multiple_of(2) => {
                         if l.restarts(g) && !matches!(l.phase, Phase::Starting { .. }) {
@@ -114,6 +114,8 @@ fn simulated_interleavings_keep_the_invariants() {
                     13 => Event::SaveFailed { generation: g, seq, why: "sim".into() },
                     // its person's port tab speaks (or a late report of it)
                     16 => Event::TabUsed,
+                    // a start the container before it held up
+                    17 if rng(&mut seed).is_multiple_of(2) => Event::StartBlocked { generation: g },
                     _ => Event::Alarm,
                 }
             };
@@ -132,6 +134,7 @@ fn simulated_interleavings_keep_the_invariants() {
             let own_destroy = matches!(&event, Event::Exited { generation: e } if matches!(l.phase, Phase::Starting { generation, destroying: true, .. } if generation == *e));
             let start_failed = !own_destroy && matches!(&event, Event::Exited { generation: e } | Event::StartFailed { generation: e, .. } if matches!(l.phase, Phase::Starting { generation, .. } if generation == *e));
             let failures_before = l.failures;
+            let blocked = matches!(&event, Event::StartBlocked { generation: e } if matches!(l.phase, Phase::Starting { generation, .. } if generation == *e));
             // an exit nothing asked for, of an idle life whose work is kept
             let unasked_sleep = matches!(&event, Event::Exited { generation: e } if matches!(l.phase, Phase::Awake { generation, .. } if generation == *e)) && l.idle_and_kept(now);
             let coming_up = matches!(&event, Event::Ready { generation: e } if matches!(l.phase, Phase::Starting { generation, .. } if generation == *e));
@@ -232,6 +235,15 @@ fn simulated_interleavings_keep_the_invariants() {
                 assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "a failed start waits its pause (seed {seed0}): {s:?}");
                 assert!(matches!(l.phase, Phase::Failed { .. }) || matches!(l.phase, Phase::Asleep { retry: Some(_) }), "{l:?}");
             }
+            if blocked {
+                // it started nothing: made again at once, a strike only past its bound
+                if l.failures == failures_before {
+                    assert!(l.start_due(now) && l.starting(now) && s.alarm_ms == Some(now), "a start held up is made again at once (seed {seed0}): {l:?}");
+                    reached[19] += 1;
+                } else {
+                    assert_eq!(l.failures, failures_before + 1, "past its bound, one strike (seed {seed0}): {l:?}");
+                }
+            }
             if matches!(s.note, SaveNote::Says(ref why) if why.contains("slept unsaved")) {
                 reached[2] += 1;
             }
@@ -291,6 +303,13 @@ fn simulated_interleavings_keep_the_invariants() {
                         pending.push(Event::Asleep { generation: *g });
                         if rng(&mut seed).is_multiple_of(2) {
                             pending.push(Event::Exited { generation: *g });
+                        }
+                    }
+                    Action::Look { generation: g } => {
+                        assert!(matches!(l.saving, Some(Saving::Stop { .. })) && *g == l.generation(), "only a stop under way is looked at");
+                        // its container gone (its own report lost, or not yet heard)
+                        if rng(&mut seed).is_multiple_of(2) {
+                            pending.push(Event::Asleep { generation: *g });
                         }
                     }
                 }
@@ -394,5 +413,5 @@ fn simulated_interleavings_keep_the_invariants() {
         assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
     }
     // every kind of save the lifecycle has was reached, across the seeds
-    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over, idle exits slept, tab work due, slept under an open tab, tab use saves due, tab uses heard as it slept: {reached:?}");
+    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over, idle exits slept, tab work due, slept under an open tab, tab use saves due, tab uses heard as it slept, starts held up: {reached:?}");
 }

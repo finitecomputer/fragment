@@ -84,10 +84,10 @@ pub use awake::awake_batch;
 pub use disk::{disk_clear, disk_filling, disk_of_df, reads_disk_after, ComputerDisk, DISK_CLEAR_FREE_MIN, DISK_CLEAR_USED_PCT, DISK_READ, DISK_TOLD_FREE_MAX, DISK_TOLD_USED_PCT};
 pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_MAX, LEFT_OUT_PATTERN_MAX_BYTES, SAVED_DIRS, UNHELD_MAX_BYTES};
 pub use images::{does_simplex, image_running, valid_version, version_now, version_of, version_running, Images, VERSION_HEX};
-pub use lifecycle::{alive, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};
+pub use lifecycle::{alive, unplanned_start, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};
 pub use limits::{
     ALARM_LATE_MS, ALIVE_MS, AWAKE_ROW_MAX_MS, FAILED_WHY_MAX_BYTES, HOLD_DEADLINE_MS, HOLD_WAIT_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, RETRY_PAUSE_MS, SAVES_KEPT, SAVE_DEADLINE_MS, SAVE_EVERY_MS, SAVE_RETRY_MS,
-    SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, STARTS_OWED_MAX, START_DEADLINE_MS, TAB_USED_EVERY_MS, UNSAVED_MAX_MS_DEFAULT, UNSAVED_NOTICE_FAILURES, WONT_WAKE_RETRY_MS,
+    SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, STARTS_OWED_MAX, START_DEADLINE_MS, STOP_LOOK_MS, TAB_USED_EVERY_MS, UNSAVED_MAX_MS_DEFAULT, UNSAVED_NOTICE_FAILURES, WONT_WAKE_RETRY_MS,
 };
 pub use notices::{notices, support_url_ok, SUPPORT_URL_MAX_BYTES};
 pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};

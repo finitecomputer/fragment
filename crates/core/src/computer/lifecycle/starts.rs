@@ -6,6 +6,7 @@ use fragment_proto::computer::LifeEnd;
 
 use super::{Action, Ended, Lifecycle, Phase, Retry, Saving, Step};
 use crate::computer::limits::{RETRY_PAUSE_MS, STARTS_FAILED_MAX, TAB_USED_EVERY_MS};
+use crate::computer::Saves;
 
 impl Lifecycle {
     /// Starts of this wake that failed in a row.
@@ -216,6 +217,19 @@ impl Lifecycle {
     /// generation the start it restarted until the alarm's start is made.
     pub fn starting(&self, now_ms: i64) -> bool {
         matches!(self.phase, Phase::Starting { .. }) || (self.start_due(now_ms) && self.retry().is_some_and(|r| r.owed || self.wanted(now_ms)))
+    }
+}
+
+/// The start under way that has planned nothing yet (`Saves::start_from`
+/// names none for it): it is still making sure the container before it is
+/// gone (the cell's `earlier_runs`, its first step), so a container that
+/// runs now is that one, never its own. A new isolate reports such a start
+/// held up (`Event::StartBlocked`) rather than take that container over as
+/// its own, and a port's request is not passed to it.
+pub fn unplanned_start(life: &Lifecycle, saves: &Saves) -> Option<u64> {
+    match life.phase {
+        Phase::Starting { generation, destroying: false, .. } if saves.start_from(generation).is_none() => Some(generation),
+        _ => None,
     }
 }
 
@@ -461,6 +475,114 @@ mod tests {
         assert!(stored["phase"].as_object_mut().unwrap().remove("since_ms").is_some());
         let (mut old, _) = Lifecycle::read(&stored.to_string()).unwrap();
         assert_eq!(old.apply(Event::Wake { why: Wake::Tab }, T).actions, vec![Action::Start { generation: 1 }]);
+    }
+
+    /// Goal (big-disk snapshot wakes on preview, 2026-11-18: 4 of 14 wakes
+    /// on master failed so): a sleep's snapshot the runtime still takes
+    /// holds its container past the sleep's destroy, so the start after it
+    /// finds that container running. That start started nothing: no strike.
+    /// It is made again at once (owed: its alarm's, or the waiting
+    /// request's), told as starting all along, until the container before
+    /// it has had a stop's deadline since the first such try; past that
+    /// each try is a failure as any, so one that never goes gives up as
+    /// failing starts do. Valid (held up, then up, its count clean), invalid
+    /// (an earlier start's report; past the bound), replay (the same report
+    /// twice), restart (the chain read back from storage keeps its bound).
+    /// Method: the lifecycle's steps, as the DO hears them, each try a
+    /// destroy's 15 s wait.
+    #[test]
+    fn a_start_held_up_by_the_container_before_it_waits_without_a_strike() {
+        let mut l = Lifecycle::new();
+        assert_eq!(l.apply(Event::Wake { why: Wake::Owner }, T).actions, vec![Action::Start { generation: 1 }]);
+        let first = T + 15_000;
+        let s = l.apply(Event::StartBlocked { generation: 1 }, first);
+        assert!(s.actions.is_empty() && l.failures() == 0, "no strike, and no start in its own step: {s:?} {l:?}");
+        assert_eq!(s.alarm_ms, Some(first), "its alarm at once");
+        assert!(l.start_due(first) && l.starting(first), "told as starting: {l:?}");
+        // replay, and an earlier start's report: nothing
+        let before = l.clone();
+        l.apply(Event::StartBlocked { generation: 1 }, first + 1);
+        l.apply(Event::StartBlocked { generation: 0 }, first + 2);
+        assert_eq!(l, before);
+        let (mut at, mut g) = (first, 1);
+        for _ in 0..3 {
+            let s = l.apply(Event::Alarm, at);
+            g += 1;
+            assert_eq!(s.actions, vec![Action::Start { generation: g }]);
+            at += 15_000;
+            l.apply(Event::StartBlocked { generation: g }, at);
+            assert!(l.failures() == 0 && l.starting(at), "{l:?}");
+            // its isolate gone: read back, the same chain and bound
+            let (read, _) = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap();
+            assert_eq!(read, l);
+        }
+        // the container before it goes: the next comes up, its count clean
+        let s = l.apply(Event::Alarm, at);
+        assert_eq!(s.actions, vec![Action::Start { generation: g + 1 }]);
+        l.apply(Event::Ready { generation: g + 1 }, at + 3_000);
+        assert!(matches!(l.phase, Phase::Awake { .. }) && l.failures() == 0 && l.blocked_since_ms.is_none(), "{l:?}");
+
+        // one that never goes: tried at once for a stop's deadline, then
+        // each try a strike, and it gives up as failing starts do
+        let mut l = Lifecycle::new();
+        l.apply(Event::Wake { why: Wake::Record }, T);
+        let (mut at, mut g, mut struck_at) = (T, 1, None);
+        // bounded: SLEEP_DEADLINE_MS of tries 15 s apart, then the strikes
+        while !matches!(l.phase, Phase::Failed { .. }) {
+            assert!(g < 64, "the bound ends the tries: {l:?}");
+            at += 15_000;
+            let s = l.apply(Event::StartBlocked { generation: g }, at);
+            if l.failures() > 0 {
+                struck_at.get_or_insert(at);
+            } else {
+                assert_eq!(s.alarm_ms, Some(at), "no strike yet: made again at once");
+            }
+            if let Some(next) = s.alarm_ms {
+                at = at.max(next);
+                g += 1;
+                assert_eq!(l.apply(Event::Alarm, at).actions, vec![Action::Start { generation: g }]);
+            }
+        }
+        let struck_at = struck_at.expect("struck");
+        assert!((T + 15_000 + SLEEP_DEADLINE_MS..T + 30_000 + SLEEP_DEADLINE_MS).contains(&struck_at), "the first strike once a stop's deadline passed: {struck_at}");
+        assert!(matches!(&l.phase, Phase::Failed { why, .. } if why.contains("still ran")), "{l:?}");
+        assert!(l.failures() == STARTS_FAILED_MAX);
+    }
+
+    /// Goal (Codex on #1380): a start held up by the container before it
+    /// is in `Starting` while it waits for that container to go, having
+    /// planned nothing. Its isolate gone then (a deploy), the new one must
+    /// not take that container over as the start's own (its exit would be
+    /// a strike, and nothing of the start ran): the start is reported held
+    /// up and made again. Valid (unplanned: held up), invalid (planned,
+    /// destroying, awake: taken over as before), replay (once reported, it
+    /// is asleep with its start owed: nothing more), restart (both read back
+    /// from storage give the same answer). Method: the lifecycle and the
+    /// saves as the DO keeps them.
+    #[test]
+    fn a_start_still_clearing_the_one_before_it_is_never_taken_over() {
+        let mut c = Computer::new();
+        assert_eq!(c.apply(Event::Wake { why: Wake::Tab }).actions, vec![Action::Start { generation: 1 }]);
+        assert_eq!(unplanned_start(&c.life, &c.saves), Some(1), "nothing planned: whatever runs is not its own");
+        // restart: stored and read back, the same answer
+        let (life, _) = Lifecycle::read(&serde_json::to_string(&c.life).unwrap()).unwrap();
+        let saves: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
+        assert_eq!(unplanned_start(&life, &saves), Some(1));
+        // the new isolate's report: held up, no strike, made again at once
+        let s = c.apply(Event::StartBlocked { generation: 1 });
+        assert!(c.life.failures() == 0 && c.life.start_due(c.now) && s.alarm_ms == Some(c.now), "{:?}", c.life);
+        assert_eq!(unplanned_start(&c.life, &c.saves), None, "replay: asleep, its start owed");
+        let s = c.apply(Event::Alarm);
+        assert_eq!(s.actions, vec![Action::Start { generation: 2 }]);
+        // planned (past the container before it): its own, taken over as before
+        c.saves.starting(2, RestoreSource::Nothing);
+        assert_eq!(unplanned_start(&c.life, &c.saves), None);
+        // destroying what it started, or awake: never this question
+        c.apply(Event::StartFailing { generation: 2 });
+        assert_eq!(unplanned_start(&c.life, &c.saves), None);
+        let mut l = Lifecycle::new();
+        started(&mut l, T);
+        assert_eq!(unplanned_start(&l, &Saves::default()), None, "awake");
     }
 
     /// Goal: a container that stops on its own is started again while it

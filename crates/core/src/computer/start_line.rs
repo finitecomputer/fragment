@@ -104,6 +104,9 @@ pub enum Failed {
     Exit,
     /// It did not come up within `START_DEADLINE_MS`.
     Deadline,
+    /// The container before it still ran past its destroy: it started
+    /// nothing, and is made again (`Event::StartBlocked`).
+    Blocked,
     Other,
 }
 
@@ -116,6 +119,7 @@ impl Failed {
             Failed::Unusable => "unusable",
             Failed::Exit => "exit",
             Failed::Deadline => "deadline",
+            Failed::Blocked => "blocked",
             Failed::Other => "other",
         }
     }
@@ -128,6 +132,7 @@ impl Failed {
             Event::RestoreFailed { .. } => Failed::Unusable,
             Event::Exited { .. } => Failed::Exit,
             Event::Alarm => Failed::Deadline,
+            Event::StartBlocked { .. } => Failed::Blocked,
             _ => Failed::Other,
         }
     }
@@ -667,6 +672,42 @@ mod tests {
     /// up asks nothing; an older ask no start answered (it won't wake) is
     /// not counted, and a restart is its own; a start begun while another's
     /// line is under way ends that one as replaced. Method: `Starts` alone.
+    /// Goal (#1380): a start held up by the container before it says so,
+    /// `blocked`, whether its own step said it or only the lifecycle's
+    /// report did, and the start made again after it counts from the same
+    /// wake, so the line that comes up shows the whole wait. Valid (held
+    /// up, then up), replay (its report heard twice writes one line).
+    /// Method: `Starts` beside the lifecycle, as the DO drives them.
+    #[test]
+    fn a_held_up_start_says_blocked_and_the_next_counts_from_its_wake() {
+        let mut starts = Starts::default();
+        let mut life = Lifecycle::new();
+        starts.asked(Woke::Wake(Wake::Owner), &life.phase, 10_000);
+        life.apply(Event::Wake { why: Wake::Owner }, 10_000);
+        assert!(starts.begin("computer:1", 1, 10_000).is_none());
+        // its own step names it (the DO's `start`), and its report ends it
+        starts.failing(1, Failed::Blocked);
+        let blocked = Event::StartBlocked { generation: 1 };
+        life.apply(blocked.clone(), 25_000);
+        let line = starts.after(&blocked, &life, 25_000).expect("its line, as it ends");
+        assert!(line.contains(r#""generation":1,"end":"failed","failed":"blocked","woke":"owner","beganMs":0}"#), "{line}");
+        assert!(starts.after(&blocked, &life, 25_001).is_none(), "one line");
+        // the lifecycle's report alone names it too
+        let mut alone = Starts::default();
+        let mut l = Lifecycle::new();
+        alone.asked(Woke::Wake(Wake::Record), &l.phase, 0);
+        l.apply(Event::Wake { why: Wake::Record }, 0);
+        alone.begin("computer:1", 1, 0);
+        l.apply(Event::StartBlocked { generation: 1 }, 15_000);
+        assert!(alone.after(&Event::StartBlocked { generation: 1 }, &l, 15_000).is_some_and(|line| line.contains(r#""failed":"blocked""#)));
+        // made again: its line counts from the owner's wake, 15 s before
+        life.apply(Event::Alarm, 25_000);
+        assert!(starts.begin("computer:1", 2, 25_000).is_none());
+        life.apply(Event::Ready { generation: 2 }, 28_000);
+        assert!(starts.after(&Event::Ready { generation: 2 }, &life, 28_000).is_none(), "up, its line waits for a turn");
+        assert_eq!(starts.line.as_ref().map(|l| (l.from_ms, l.began_ms)), Some((10_000, 25_000)), "from the wake, not its own beginning");
+    }
+
     #[test]
     fn a_start_counts_from_the_wake_that_asked() {
         let sleeping = Phase::Sleeping { generation: 1, since_ms: 0, owner: false, restarting: false, owes_start: false };

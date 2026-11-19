@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
@@ -228,9 +228,22 @@ const LEVER_FAILS_MAX: u32 = 10;
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
 const FORGET_PASS_MS: i64 = 30_000;
-/// A sleep's snapshot answers within this, or its sleep goes on without
-/// one (its wake then restores the save): one takes 5–6 s (spike S3b).
-const SNAPSHOT_MS: i64 = 30_000;
+/// A sleep's snapshot answers within what its steps' bound
+/// (`SLEEP_STEPS_MS`) leaves once its hold and save are done, less the
+/// stop's steps after it (`snapshot_ms`), or its sleep goes on without one
+/// (its wake then restores the save): never less than this, the share a
+/// hold and a save that took all of theirs leave it. A snapshot is
+/// incremental: one after little changed takes 4–8 s, and the first after
+/// a disk grew 27 s for 1 GB and about 85 s for 9 GB (preview, 2026-11-18),
+/// so 30 s for every snapshot lost each one over about 1.5 GB.
+const SNAPSHOT_MIN_MS: i64 = 30_000;
+/// The most a sleep's snapshot is given: those measures (about 20 s and
+/// 7.3 s a GB of new data) put a full 20 GB disk's first snapshot near
+/// 165 s, and this is nearly twice it. Neither bound frees the container
+/// sooner: the runtime's snapshot takes no signal, and holds it until it
+/// ends. This one bounds how long a wake that came during the stop
+/// (`owes_start`) waits for a sick one.
+const SNAPSHOT_MAX_MS: i64 = 5 * 60_000;
 /// A destroy, and the wait for `running` to fall after it, end within
 /// this: the wait was 10 s, after a destroy whose own answer was awaited
 /// for good.
@@ -245,11 +258,13 @@ const HOLD_STEPS_MS: i64 = MARK_EXEC_MS + HOLD_WAIT_MS + UNHELD_EXEC_MS;
 /// A save's: the read of the held guest's answer, its backups, a pass of
 /// deletes.
 const SAVE_STEPS_MS: i64 = MARK_EXEC_MS + BACKUPS_MS + FORGET_PASS_MS;
-/// A sleep's end: its snapshot, five seconds for the guest, its destroy, a
-/// word to a container that outlived it; or, its save failed, its hold let
-/// go.
+/// A stop's steps after its snapshot: five seconds for the guest, its
+/// destroy, a word to a container that outlived it.
+const AFTER_SNAPSHOT_MS: i64 = EXIT_WAIT_MS + DESTROY_MS + UNMARK_EXEC_MS;
+/// A sleep's end, its share of the sleep's steps: its snapshot's least,
+/// and the steps after it; or, its save failed, its hold let go.
 const STOP_STEPS_MS: i64 = {
-    let stop = SNAPSHOT_MS + EXIT_WAIT_MS + DESTROY_MS + UNMARK_EXEC_MS;
+    let stop = SNAPSHOT_MIN_MS + AFTER_SNAPSHOT_MS;
     if stop > MARK_EXEC_MS {
         stop
     } else {
@@ -260,9 +275,15 @@ const STOP_STEPS_MS: i64 = {
 /// answers within the sum of its steps' bounds (docs/api.md), beside the
 /// Durable Objects it tells (its owner's ledger, their open pages).
 const SLEEP_STEPS_MS: i64 = HOLD_STEPS_MS + SAVE_STEPS_MS + STOP_STEPS_MS;
+/// What a sleep's snapshot is given at `now_ms` (`SNAPSHOT_MIN_MS`), its
+/// sleep's steps to end by `until_ms`.
+fn snapshot_ms(until_ms: i64, now_ms: i64) -> i64 {
+    (until_ms - now_ms - AFTER_SNAPSHOT_MS).clamp(SNAPSHOT_MIN_MS, SNAPSHOT_MAX_MS)
+}
 const _: () = assert!(HOLD_STEPS_MS < HOLD_DEADLINE_MS, "a hold reports before its deadline");
 const _: () = assert!(SAVE_STEPS_MS < SAVE_DEADLINE_MS, "a save reports before its deadline, which then only catches a report its isolate lost");
-const _: () = assert!(STOP_STEPS_MS < SLEEP_DEADLINE_MS, "a stop reports before its deadline");
+const _: () = assert!(SNAPSHOT_MIN_MS < SNAPSHOT_MAX_MS && SNAPSHOT_MAX_MS + AFTER_SNAPSHOT_MS < SLEEP_STEPS_MS, "a sleep's snapshot is given more when its hold and save leave it room");
+const _: () = assert!(SNAPSHOT_MAX_MS + AFTER_SNAPSHOT_MS < SLEEP_DEADLINE_MS, "a stop, its snapshot given the most, reports before its deadline");
 const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS + MARK_EXEC_MS <= START_DEADLINE_MS && EXEC_READY_MS + DISK_READ_MS + MARK_EXEC_MS + ALIVE_MS < START_DEADLINE_MS, "a start's waits, its disk's read among them, fit its deadline");
 const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
 const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS + MARK_EXEC_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, its disk's read among its steps, and an alarm's other events fit an alarm of its own");
@@ -282,6 +303,9 @@ const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
 const ANSWER_HIDDEN_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// A port number the platform proxies to.
 const PORT_MAX: u16 = 65_535;
+/// A port's request to a computer still starting is asked again after
+/// this: one held-up try's destroy wait (`DESTROY_MS`).
+const PORT_RETRY_MS: u64 = DESTROY_MS as u64;
 /// Awake intervals one flush sends (one is made every five minutes awake).
 const METER_ROWS_MAX: u64 = 64;
 
@@ -333,6 +357,12 @@ enum MetaKey {
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
     SlowTell,
+    /// The test lever's slow snapshot for its next sleep (`slow-snapshot`),
+    /// in ms.
+    SlowSnapshot,
+    /// The test lever's bound on its next sleep's snapshot
+    /// (`snapshot-bound`), in ms.
+    SnapshotBound,
     /// The test lever's wait between a failing start's `StartFailing` and
     /// its destroy (`stall-failing-start`), in ms.
     StallFailingStart,
@@ -370,6 +400,8 @@ impl MetaKey {
             MetaKey::RelayDay => "relay_day",
             MetaKey::ClockOffset => "clock_offset",
             MetaKey::SlowTell => "slow_tell",
+            MetaKey::SlowSnapshot => "slow_snapshot",
+            MetaKey::SnapshotBound => "snapshot_bound",
             MetaKey::StallFailingStart => "stall_failing_start",
             MetaKey::FailStarts => "fail_starts",
             MetaKey::StallTakeOver => "stall_take_over",
@@ -708,7 +740,8 @@ struct TestLever {
     times: Option<u32>,
     #[serde(default)]
     on: Option<bool>,
-    /// `hang-backups`' bound, `alive-check`'s, and `slow-tell`'s.
+    /// `hang-backups`' bound, `alive-check`'s, `slow-tell`'s,
+    /// `slow-snapshot`'s and `snapshot-bound`'s.
     #[serde(default)]
     ms: Option<u32>,
     /// `alive-check`'s: its start's guest stopped as it starts.
@@ -884,7 +917,8 @@ impl ComputerCell {
     /// alarm its events asked for, an invocation of its own, since an alarm
     /// ends at `ALARM_WALL_MS` and its sleep's steps took most of this one.
     /// An owner's restart leaves its start to the alarm too, so it answers
-    /// the same on every path (`restart`).
+    /// the same on every path (`restart`), and so does its sleep, so it
+    /// answers within its steps' bound (docs/api.md).
     async fn drive_with(&self, first: Option<Event>, asked: bool) -> CellResult<Option<String>> {
         self.drive_answering(first, asked, None).await
     }
@@ -928,6 +962,13 @@ impl ComputerCell {
     /// its ms before its owner is told, as a slow principal answers.
     async fn slow_tell(&self) {
         self.lever_wait(MetaKey::SlowTell, SLOW_TELL_MAX_MS).await;
+    }
+
+    /// A lever's ms (`key`'s), taken once.
+    fn take_ms(&self, key: MetaKey) -> Option<i64> {
+        let ms = self.meta(key).ok().flatten()?.parse::<i64>().ok();
+        let _ = self.delete_meta(key);
+        ms
     }
 
     /// A lever's wait (`key`'s ms, at most `max_ms`), taken once: the wait
@@ -1068,6 +1109,8 @@ impl ComputerCell {
     /// owner's notification however slow (Codex on #1053: the alarm could
     /// make the start and its `Ready` while the request awaited that).
     async fn drive_events(&self, first: Option<Event>, mut answer: Option<&mut Option<Unasked>>) -> CellResult<Option<String>> {
+        // a sleep's steps these events lead to end by then (`snapshot_ms`)
+        let until_ms = js::now_ms() + SLEEP_STEPS_MS;
         let mut queue: Vec<Event> = first.into_iter().collect();
         if let Some(exited) = self.take_over().await? {
             // the event that brought this isolate up applies after the exit
@@ -1118,7 +1161,7 @@ impl ComputerCell {
             }
             self.alarm_at(step.alarm_ms).await?;
             refused = refused.or(step.refused.clone());
-            for next in self.perform(step).await? {
+            for next in self.perform(step, until_ms).await? {
                 queue.push(next);
             }
             // its disk, once an awake save worked (a start reads its own
@@ -1193,6 +1236,12 @@ impl ComputerCell {
             }
             return Ok(Some(Event::StartFailed { generation, why: "its start failed, and the isolate that saw why went before it said so".into() }));
         }
+        if let Some(generation) = unplanned_start(&life, &self.saves()?) {
+            // its isolate went as the start made sure the container before
+            // it was gone: whatever runs is that one, never taken over as
+            // this start's; the start is made again, as one held up
+            return Ok(Some(Event::StartBlocked { generation }));
+        }
         let Some(generation) = life.running() else { return Ok(None) };
         let g = JsValue::from_f64(generation as f64);
         if self.call("adopt", std::slice::from_ref(&g)).await?.as_bool() != Some(true) {
@@ -1216,8 +1265,9 @@ impl ComputerCell {
         Ok(())
     }
 
-    /// Performs a step's actions: the events they report, in order.
-    async fn perform(&self, step: Step) -> CellResult<Vec<Event>> {
+    /// Performs a step's actions: the events they report, in order, a
+    /// sleep's steps ending by `until_ms`.
+    async fn perform(&self, step: Step, until_ms: i64) -> CellResult<Vec<Event>> {
         let mut reported = vec![];
         for action in step.actions {
             match action {
@@ -1226,7 +1276,12 @@ impl ComputerCell {
                 Action::Hold { generation } => reported.push(self.hold(generation, false).await),
                 Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
                 Action::Unhold { generation } => self.unhold(generation).await,
-                Action::Stop { generation, saved } => reported.push(self.stop(generation, saved).await),
+                Action::Stop { generation, saved } => reported.push(self.stop(generation, saved, until_ms).await),
+                Action::Look { generation } => {
+                    if !self.container_running().await {
+                        reported.push(Event::Asleep { generation });
+                    }
+                }
                 Action::Meter { from_ms, to_ms } => {
                     // kept until the owner's ledger has it: a flush that fails
                     // is tried again at the next interval, or the next wake
@@ -1458,6 +1513,22 @@ impl ComputerCell {
     async fn start(&self, generation: u64) -> Event {
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         log_start(self.starts.borrow_mut().begin(&id, generation, js::now_ms()));
+        // lesson 6: a container a new isolate found running is never ours to
+        // reuse half-known, nor is an earlier start's that is not gone yet:
+        // it goes before this one starts. One that outlives its destroy (a
+        // sleep's snapshot the runtime still takes holds it) holds this
+        // start up: nothing of it ran or was planned, and nothing is forgotten
+        match self.earlier_runs().await {
+            Ok(false) => {}
+            Ok(true) => {
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Blocked);
+                return Event::StartBlocked { generation };
+            }
+            Err(e) => {
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Start);
+                return Event::StartFailed { generation, why: e.message };
+            }
+        }
         let planned = match self.plan(generation).await {
             Ok(p) => p,
             Err(e) => {
@@ -1570,15 +1641,15 @@ impl ComputerCell {
         Ok(Some((ms, v["freeze"] == true)))
     }
 
+    /// Whether a container still runs here once destroyed (`0`: whatever
+    /// runs, an earlier start's or one an isolate before this one left).
+    async fn earlier_runs(&self) -> CellResult<bool> {
+        Ok(js::invoke(&self.host()?, "running", &[]).await?.as_bool() == Some(true) && !self.destroy(0, "a new start").await?)
+    }
+
     async fn try_start(&self, generation: u64, planned: &Planned) -> Result<(), Unstarted> {
         let id = self.must(MetaKey::Id)?;
         let g = JsValue::from_f64(generation as f64);
-        // lesson 6: a container a new isolate found running is never ours to
-        // reuse half-known, nor is an earlier start's that is not gone yet:
-        // it goes before this one starts (`0`: whatever runs)
-        if js::invoke(&self.host()?, "running", &[]).await?.as_bool() == Some(true) && !self.destroy(0, "a new start").await? {
-            return Err(CellError::host(format!("an earlier container still runs {}s after its destroy", DESTROY_MS / 1000)).into());
-        }
         let env = js::to_js(&self.guest_env(&id, &planned.image, planned.plan == Restore::Backup));
         let snapshot_js = match &planned.plan {
             Restore::Snapshot { id } => JsValue::from_str(id),
@@ -1992,9 +2063,10 @@ impl ComputerCell {
     /// A sleep's end (docs/computers.md): its snapshot (only after its save
     /// worked, since a snapshot is only ever a cache of a save, and only of
     /// that save), the signal, five seconds for the guest, the destroy, each
-    /// within its bound (`STOP_STEPS_MS` together). A snapshot that fails
-    /// forgets nothing: the one kept is still its own save's.
-    async fn stop(&self, generation: u64, saved: bool) -> Event {
+    /// within its bound, its sleep's steps by `until_ms` (`snapshot_ms`). A
+    /// snapshot that fails forgets nothing: the one kept is still its own
+    /// save's.
+    async fn stop(&self, generation: u64, saved: bool, until_ms: i64) -> Event {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         let t0 = js::now_ms();
@@ -2004,8 +2076,10 @@ impl ComputerCell {
             let newest = saves.as_ref().and_then(|s| s.all().first().cloned()).filter(|s| s.generation == generation);
             // a restart's start is fresh from the image: no snapshot for it
             let fresh = saves.as_ref().is_some_and(Saves::fresh);
-            if let (true, true, false, Some(save)) = (saved, self.cfg.computer_snapshots, fresh, newest) {
-                self.snapshot(generation, &save.id).await;
+            // the lever's `slow-snapshot` takes one where the runtime takes none
+            let snapshots = self.cfg.computer_snapshots || (self.cfg.test_hooks && self.meta(MetaKey::SlowSnapshot).ok().flatten().is_some());
+            if let (true, true, false, Some(save)) = (saved, snapshots, fresh, newest) {
+                self.snapshot(generation, &save.id, until_ms).await;
             }
             let _ = self.call("signal", &[g.clone(), JsValue::from_f64(15.0)]).await;
             exited = self.call("exited", &[JsValue::from_f64(EXIT_WAIT_MS as f64)]).await.ok().and_then(|r| r.as_bool());
@@ -2028,16 +2102,24 @@ impl ComputerCell {
 
     /// A sleep's snapshot, taken after its save `save`: kept as that save's
     /// cache, for the image its start ran (not the one pinned now: a pin
-    /// while it ran is the next start's).
-    async fn snapshot(&self, generation: u64, save: &str) {
+    /// while it ran is the next start's), within what its sleep's steps
+    /// leave it by `until_ms` (`snapshot_ms`).
+    async fn snapshot(&self, generation: u64, save: &str, until_ms: i64) {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         let name = format!("{}-{generation}", id.replace(':', "-"));
-        let taken = self.call("snapshot", &[g, name.into(), JsValue::from_f64(SNAPSHOT_MS as f64)]).await.map(|s| s.as_string());
+        // the levers', each taken once on a test fleet: `snapshot-bound`,
+        // what a slow save would leave it; `slow-snapshot`, where the
+        // runtime takes none, one made up that takes its ms
+        let lever = |key| if self.cfg.test_hooks { self.take_ms(key) } else { None };
+        let (t0, bound) = (js::now_ms(), lever(MetaKey::SnapshotBound).unwrap_or_else(|| snapshot_ms(until_ms, js::now_ms())));
+        let slow = if self.cfg.computer_snapshots { 0 } else { lever(MetaKey::SlowSnapshot).unwrap_or(0) };
+        let taken = self.call("snapshot", &[g, name.into(), JsValue::from_f64(bound as f64), JsValue::from_f64(slow as f64)]).await.map(|s| s.as_string());
         let reference = self.saves().ok().and_then(|s| s.image_of(generation).map(str::to_string));
         match (taken, reference) {
             (Ok(Some(snapshot)), Some(reference)) => match self.update_saves(|s| s.snapshotted(save, &snapshot, &reference)) {
-                Ok(true) => {}
+                // one line per snapshot (lesson 14): how long it took, of what it was given
+                Ok(true) => console_log!("{}", json!({ "computer": id, "snapshot": "kept", "generation": generation, "ms": js::now_ms() - t0, "bound": bound })),
                 Ok(false) => console_log!("{}", json!({ "computer": id, "snapshot": "unkept", "generation": generation, "why": "its save is no longer the current one" })),
                 Err(e) => console_error!("{}", json!({ "computer": id, "snapshot": "unkept", "generation": generation, "error": e.message })),
             },
@@ -2622,7 +2704,11 @@ impl ComputerCell {
     /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
     /// past its time; `legacy-grants {agent, row?}` makes an agent's row from
     /// before the grants' move owed, as step 6 keeps one its fragment had not
-    /// taken (`fragment_core::grants::Owed`), then reads what is owed.
+    /// taken (`fragment_core::grants::Owed`), then reads what is owed;
+    /// `slow-snapshot {ms}` makes its next sleep's snapshot one that takes
+    /// `ms` (0: none), taken whether or not the deployment takes snapshots,
+    /// holding its container meanwhile as the runtime's does;
+    /// `snapshot-bound {ms}` gives its next sleep's snapshot `ms`.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         if b.op == "schema" {
@@ -2669,6 +2755,32 @@ impl ComputerCell {
                 self.set_meta(MetaKey::AliveCheck, &json!({ "ms": ms, "freeze": freeze }).to_string())?;
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
+            }
+            "snapshot-bound" => {
+                // its next sleep's snapshot is given `ms`, as one after a
+                // slow save is (0: what its sleep leaves it)
+                let ms = b.ms.map(i64::from).filter(|ms| *ms <= SNAPSHOT_MAX_MS).ok_or_else(|| CellError::invalid(format!("snapshot-bound names its ms, 0 to {SNAPSHOT_MAX_MS}")))?;
+                match ms {
+                    0 => self.delete_meta(MetaKey::SnapshotBound)?,
+                    ms => self.set_meta(MetaKey::SnapshotBound, &ms.to_string())?,
+                }
+                console_log!("{}", json!({ "computer": id, "lever": "snapshot-bound", "ms": ms }));
+                Ok(json!({ "computer": id, "snapshotBound": ms }))
+            }
+            "slow-snapshot" => {
+                // its next sleep's snapshot takes `ms`, as a disk's first
+                // snapshot after it grew does (local workerd takes none); a
+                // deployment that takes real ones keeps no made-up one
+                if self.cfg.computer_snapshots {
+                    return Err(CellError::invalid("this deployment takes snapshots of its own: slow-snapshot makes one where none is taken"));
+                }
+                let ms = b.ms.map(i64::from).filter(|ms| *ms <= SNAPSHOT_MAX_MS).ok_or_else(|| CellError::invalid(format!("slow-snapshot names its ms, 0 to {SNAPSHOT_MAX_MS}")))?;
+                match ms {
+                    0 => self.delete_meta(MetaKey::SlowSnapshot)?,
+                    ms => self.set_meta(MetaKey::SlowSnapshot, &ms.to_string())?,
+                }
+                console_log!("{}", json!({ "computer": id, "lever": "slow-snapshot", "ms": ms }));
+                Ok(json!({ "computer": id, "slowSnapshot": ms }))
             }
             "slow-tell" => {
                 // its next restart's owner is told `ms` late (0: on time),
@@ -3096,7 +3208,9 @@ impl ComputerCell {
                 json_response(&self.view().await?)
             }
             (Method::Post, ["sleep"]) => {
-                self.drive(Event::Sleep).await?;
+                // a start a wake during its stop owes is its alarm's, as a
+                // restart's is: the sleep answers within its steps' bound
+                self.drive_with(Some(Event::Sleep), false).await?;
                 json_response(&self.view().await?)
             }
             (Method::Post, ["restart"]) => {
@@ -3551,6 +3665,13 @@ impl ComputerCell {
         // a request to a sleeping computer's port wakes it, as a tab does
         if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) {
             self.wake(Wake::Tab).await?;
+            // only to its own start's container: still asleep (a start owed,
+            // one held up), or not yet past the container before it, the one
+            // that answers would be that earlier one
+            let life = self.lifecycle()?;
+            if matches!(life.phase, Phase::Asleep { .. }) || unplanned_start(&life, &self.saves()?).is_some() {
+                return Err(CellError::new(ErrorCode::Conflict, "its computer is still starting: try again in a moment").retry_after(PORT_RETRY_MS));
+            }
         }
         // one going to sleep, read after any wait (a sleep may have begun
         // during the wake's): woken after it, and its container, which the
