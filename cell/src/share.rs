@@ -232,7 +232,8 @@ pub(crate) fn sheet_html(sheet: &str, title: &str, body: &str) -> String {
 const FRAMED: &str = "<script>if(parent!==window)document.documentElement.classList.add(\"framed\")</script>";
 
 /// A page on the platform's origin, in the onboarding's look: the base
-/// sheet and platform-pages.css over it, and the pointer-following rim's
+/// sheet and platform-pages.css over it, in the platform's type
+/// (fonts.css), and the pointer-following rim's
 /// script (platform-pages.js, a module: it waits for the page, and nothing
 /// waits for it), each linked by its version and kept by the browser
 /// (shell.rs `versioned`); the logo only where it shows (lazy: a framed
@@ -240,9 +241,10 @@ const FRAMED: &str = "<script>if(parent!==window)document.documentElement.classL
 pub(crate) fn platform_html(title: &str, body: &str) -> String {
     use crate::shell::versioned;
     let head = format!(
-        "{FRAMED}<link rel=\"stylesheet\" href=\"{}\"><link rel=\"stylesheet\" href=\"{}\"><script type=\"module\" src=\"{}\"></script>\
+        "{FRAMED}<link rel=\"stylesheet\" href=\"{}\"><link rel=\"stylesheet\" href=\"{}\"><link rel=\"stylesheet\" href=\"{}\"><script type=\"module\" src=\"{}\"></script>\
          <div class=\"platform-brand\"><img src=\"/__shell/finite-logo.svg\" alt=\"Finite\" width=\"44\" height=\"46\" loading=\"lazy\"></div>",
         versioned("sheet.css"),
+        versioned("fonts.css"),
         versioned("platform-pages.css"),
         versioned("platform-pages.js"),
     );

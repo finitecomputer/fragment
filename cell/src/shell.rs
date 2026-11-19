@@ -7,10 +7,9 @@
 //! the person's platform session (lib.rs `shell_session`) and frames their
 //! fragments, each signed in on its own origin by the platform's frame mint.
 //!
-//! Its policy: scripts and styles from this origin only (and Google
-//! Fonts' stylesheet and files); frames of this origin (the share sheet,
-//! the frame mint's redirects) and of the fragments' and computers' hosts
-//! under the suffix; never framed itself.
+//! Its policy: scripts, styles and fonts from this origin only; frames of
+//! this origin (the share sheet, the frame mint's redirects) and of the
+//! fragments' and computers' hosts under the suffix; never framed itself.
 
 use fragment_proto::ErrorCode;
 use fragment_templates::File;
@@ -72,6 +71,25 @@ pub async fn fragment_sheet_asset(req: &Request, env: &Env) -> CellResult<Respon
     asset(req, env, "sheet.css").await?.ok_or_else(|| CellError::host("the shell publishes sheet.css"))
 }
 
+/// Where the platform's type sits on a fragment's own origin: the shell's
+/// fonts.css and the fonts it names beside it, so a page there
+/// (cell/fragment.css, the chat's) loads its fonts from its own origin,
+/// never from another domain (xtask/src/remote_loads.rs).
+const FRAGMENT_FONTS: &str = "__fonts/";
+
+/// The shell's file a path on a fragment's origin names under
+/// `__fonts/`: fonts.css, or a font the shell publishes
+/// (`fragment_templates::fragment_font`).
+pub(crate) fn fragment_font(rest: &str) -> Option<&str> {
+    rest.strip_prefix(FRAGMENT_FONTS).filter(|name| fragment_templates::fragment_font(name))
+}
+
+/// `GET /__fonts/<name>` on a fragment's origin: the shell's file,
+/// kept or revalidated as `asset` keeps it.
+pub async fn fragment_font_asset(req: &Request, env: &Env, name: &str) -> CellResult<Response> {
+    asset(req, env, name).await?.ok_or_else(|| CellError::host(format!("the shell publishes {name}")))
+}
+
 /// Whether the request's `If-None-Match` names `tag`, by the weak
 /// comparison it uses (RFC 9110 13.1.2): Cloudflare weakens the tag of an
 /// answer it compresses (`W/"s-…"`), and the browser sends it back so.
@@ -113,7 +131,7 @@ pub async fn page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     h.set(
         "content-security-policy",
         &format!(
-            "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; frame-src {}; manifest-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src {}; manifest-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
             frame_src(cfg, url)
         ),
     )?;

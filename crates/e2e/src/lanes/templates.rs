@@ -180,6 +180,9 @@ fn template_pages(s: &mut Suite, api: &Api, todo: &str, todo_cookie: &str, blank
             }
         }
         if label == "blank" {
+            // the platform's stylesheet brings the platform's type, from this origin
+            let seen = own_type(&mut b, &page)?;
+            s.ok("a page that links __fragment.css draws in Funnel Sans and JetBrains Mono, fetched from its own origin (__fonts/), and fetches nothing from another", drawn_in_own_type(&seen, "/__fonts/"), &seen);
             stylesheet(s, &mut b, &page)?;
         }
         b.close(page)?;
@@ -220,6 +223,8 @@ fn telegram_page(s: &mut Suite, api: &Api, owner: &Keys, session: &str) -> Resul
         started && seen == json!({ "setup": false }) && chat.is_some() && chat == telegram,
         json!({ "seen": seen, "chat": chat, "telegram": telegram }),
     );
+    let seen = own_type(&mut b, &page)?;
+    s.ok("the chat's page draws in Funnel Sans and JetBrains Mono, fetched from its own origin (__fonts/), and fetches nothing from another", drawn_in_own_type(&seen, "/__fonts/"), &seen);
     b.close(page)?;
 
     // its setup page, in a tab of its own
@@ -237,6 +242,35 @@ fn telegram_page(s: &mut Suite, api: &Api, owner: &Keys, session: &str) -> Resul
     );
     b.close(page)?;
     Ok(())
+}
+
+/// The platform's type a page draws in, and where it came from: each face
+/// `document.fonts.load` finds (its weights' statuses), the path of each
+/// font file the page fetched, and every resource it fetched from another
+/// origin (none may be: no page of ours loads from another domain,
+/// xtask/src/remote_loads.rs).
+pub(super) fn own_type(b: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<Value> {
+    b.eval(
+        page,
+        r#"(async () => {
+      const faces = {};
+      for (const face of ['400 1em "Funnel Sans"', '600 1em "Funnel Sans"', '400 1em "JetBrains Mono"', '500 1em "JetBrains Mono"']) {
+        faces[face] = await document.fonts.load(face).then((got) => got.map((f) => f.status).join() || 'none', (e) => 'failed: ' + e);
+      }
+      const fetched = performance.getEntriesByType('resource').map((e) => new URL(e.name));
+      const fonts = fetched.filter((u) => /\.(ttf|woff2?)$/.test(u.pathname)).map((u) => u.pathname).sort();
+      const elsewhere = fetched.filter((u) => u.origin !== location.origin).map((u) => u.href);
+      return { faces, fonts, elsewhere };
+    })()"#,
+    )
+}
+
+/// Whether `own_type` found every face loaded, its fonts fetched from
+/// `folder` of the page's own origin, and nothing from another origin.
+pub(super) fn drawn_in_own_type(seen: &Value, folder: &str) -> bool {
+    let faces = seen["faces"].as_object().is_some_and(|f| f.len() == 4 && f.values().all(|s| s == "loaded"));
+    let fonts = seen["fonts"].as_array().is_some_and(|f| f.len() >= 4 && f.iter().all(|p| p.as_str().is_some_and(|p| p.starts_with(folder))));
+    faces && fonts && seen["elsewhere"] == json!([])
 }
 
 /// Author CSS keeps control even when declared before the platform link;
