@@ -2790,6 +2790,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         // preview's computer is put to sleep, so it bills no awake time after
         s.skip("after a crash of the platform, the computer answers what comes next, once", "it crashes the node");
         s.skip("at zero credit no wake starts, nor does a record wake it", "it needs the deployment's operator (to make its owner a guest)");
+        for label in START_LINE_CHECKS {
+            s.skip(label, "it reads the node's logs, a local run's");
+        }
         std::thread::sleep(QUEUE_DRAIN);
         let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
         s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
@@ -2976,5 +2979,53 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({})))?;
     let v = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
     s.ok("nor does its owner's restart: the ledger refuses it too, and it stays asleep", r.status == 403 && r.text.contains("a guest pays for nothing") && v.body["phase"] == "asleep", &r);
+    start_line_checks(s, &id);
     Ok(())
+}
+
+const START_LINE_CHECKS: [&str; 4] = [
+    "each start of its computer writes one log line at most, plain and bounded, naming the computer by its id alone",
+    "its first start, woken by its agent's join, logs a fresh path, ready, its guest heard",
+    "a wake after a sleep that saved logs a whole restore (this fleet takes no snapshots) with the bytes it restored, each step's time from the wake in order, to its guest's first turn",
+    "a start that fails logs that it failed, and where",
+];
+
+/// Its starts' lines (docs/computers.md, "The start line"), as the run's
+/// node logs have them: one at most per start (a start whose isolate the
+/// lane crashed has none), the first start's fresh, a whole restore after
+/// a sleep that saved, and the `fail-starts` lever's starts failed. This
+/// fleet takes no snapshots: a snapshot wake's line is the core's test
+/// (`start_line::every_start_writes_one_line_with_its_path`).
+fn start_line_checks(s: &mut Suite, id: &str) {
+    let logs = super::vault::logs(s);
+    let lines: Vec<(usize, Value)> = logs
+        .lines()
+        .filter_map(|l| l.find(r#"{"start":{"generation":"#).map(|at| &l[at..]))
+        .filter_map(|l| {
+            let mut read = serde_json::Deserializer::from_str(l).into_iter::<Value>();
+            read.next().and_then(Result::ok).map(|v| (read.byte_offset(), v))
+        })
+        .filter(|(_, v)| v["computer"] == id)
+        .collect();
+    let starts: Vec<&Value> = lines.iter().map(|(_, v)| &v["start"]).collect();
+    let mut generations: Vec<u64> = starts.iter().filter_map(|l| l["generation"].as_u64()).collect();
+    generations.sort_unstable();
+    let once = generations.windows(2).all(|w| w[0] < w[1]) && generations.len() == lines.len();
+    let plain = lines.iter().all(|(len, v)| *len <= fragment_core::computer::start_line::LINE_MAX_BYTES && v.as_object().is_some_and(|o| o.len() == 2) && ["ready", "failed", "replaced"].iter().any(|e| v["start"]["end"] == *e));
+    s.ok(START_LINE_CHECKS[0], lines.len() >= 4 && once && plain, json!({ "generations": generations, "lines": lines.len() }));
+    let first = starts.iter().find(|l| l["generation"] == 1);
+    let ms = |l: &Value, k: &str| l[k].as_i64();
+    s.ok(
+        START_LINE_CHECKS[1],
+        first.is_some_and(|l| l["end"] == "ready" && l["path"] == "fresh" && l["woke"] == "joined" && ms(l, "readyMs").is_some() && ms(l, "heardMs").is_some() && l.get("why").is_none() && l.get("upMs").is_none()),
+        json!(first),
+    );
+    let in_order = |l: &Value| {
+        let steps: Vec<Option<i64>> = ["beganMs", "upMs", "dataMs", "readyMs", "turnMs"].iter().map(|k| ms(l, k)).collect();
+        steps.iter().all(Option::is_some) && steps.windows(2).all(|w| w[0] <= w[1]) && ms(l, "heardMs").is_some()
+    };
+    let restored = starts.iter().find(|l| l["end"] == "ready" && l["path"] == "restore" && l["why"] == "off" && l["woke"] == "owner" && l["bytes"].as_u64().is_some_and(|b| b > 0) && in_order(l));
+    s.ok(START_LINE_CHECKS[2], restored.is_some(), json!({ "restored": restored, "restores": starts.iter().filter(|l| l["path"] == "restore").collect::<Vec<_>>() }));
+    let failed: Vec<&&Value> = starts.iter().filter(|l| l["end"] == "failed" && l["failed"] == "start" && l["path"] == "restore" && l.get("readyMs").is_none()).collect();
+    s.ok(START_LINE_CHECKS[3], failed.len() >= 2, json!(failed));
 }

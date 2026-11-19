@@ -136,6 +136,7 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>, origin: &str
 #[cfg(feature = "platform")]
 const SHELL_PUBLISHED: &[(&str, &str)] = &[
     // the operators' admin page (`/admin`)
+    ("admin-glance.js", "text/javascript; charset=utf-8"),
     ("admin.css", "text/css; charset=utf-8"),
     ("admin.js", "text/javascript; charset=utf-8"),
     // every agent's image, tinted to its colour (shell.css; CREDITS.md)
