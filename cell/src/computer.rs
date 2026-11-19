@@ -2776,6 +2776,7 @@ impl ComputerCell {
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 v["holdSaves"] = json!(self.meta(MetaKey::HoldSaves)?.is_some());
+                v["stallUnhold"] = json!(self.meta(MetaKey::StallUnhold)?.is_some());
                 Ok(v)
             }
             "legacy-grants" => {

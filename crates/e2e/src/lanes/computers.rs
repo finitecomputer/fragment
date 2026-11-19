@@ -514,6 +514,9 @@ fn cancel_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str)
     let stall = lever_with(api, c.id, json!({ "op": "stall-unhold", "ms": UNHOLD_STALL.as_millis() as u64 }))?;
     let opened = lever_with(api, c.id, json!({ "op": "hold-saves", "on": false }))?;
     let saved = s.eventually(Duration::from_secs(30), || saves_of(api, c.id)["saving"].is_null());
+    // its let-go took the stall: past its look (no save under way), its
+    // command not sent yet
+    let stalling = s.eventually(Duration::from_secs(30), || saves_of(api, c.id)["stallUnhold"] == false);
     let stalled_at = std::time::Instant::now();
     let gate_again = lever_with(api, c.id, json!({ "op": "hold-saves", "on": true }))?;
     // its owner's sleep: its request is given up on here, as a page's would
@@ -541,6 +544,7 @@ fn cancel_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str)
             && stall.status == 200
             && opened.status == 200
             && saved
+            && stalling
             && gate_again.status == 200
             && held
             && quiet
