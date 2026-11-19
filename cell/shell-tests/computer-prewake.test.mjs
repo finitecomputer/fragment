@@ -12,6 +12,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createComputer } from "../shell/computer.js";
+import { createLauncher } from "../shell/launcher.js";
+import { KIND } from "../shell/frame-messages.js";
 
 const COMPUTER = "computer:aa";
 const WAKE = `/api/computers/${COMPUTER}/wake`;
@@ -159,4 +161,56 @@ test("a wake refused (no credit, a deploy) is quiet, and the next is asked on th
   await settle();
   assert.deepEqual(p.posted(), [WAKE, WAKE]);
   assert.equal(p.shell.computer.phase, "awake");
+});
+
+// The launcher as far as its pre-wake (review of #1351): the person's own
+// opening (its button, ⌘K in the shell) races their computer's start; a
+// framed page's ask (`openLauncher`, which a page's code may send on its
+// own, late, while its frame keeps focus) opens it and asks nothing. The
+// real `createLauncher`, its page stood in for by elements that take
+// whatever is asked of them.
+function element(own = {}) {
+  const t = { dataset: {}, style: { setProperty() {} }, children: [], classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, value: "", hidden: false, open: false, offsetParent: null, textContent: "", ...own };
+  return new Proxy(t, {
+    get: (o, k) => (k in o || typeof k === "symbol" ? o[k] : () => element()),
+    set: (o, k, v) => ((o[k] = v), true),
+  });
+}
+function launcherPage(t) {
+  const listeners = [];
+  const els = new Map();
+  const $ = (id) => {
+    if (!els.has(id)) els.set(id, element(id === "search-dialog" ? { showModal() { this.open = true; } } : {}));
+    return els.get(id);
+  };
+  const frameWindow = {};
+  const frame = element({ dataset: { fragment: "talk--k3x9" }, contentWindow: frameWindow });
+  globalThis.document = { activeElement: frame, querySelectorAll: () => [frame], elementFromPoint: () => null, addEventListener() {}, removeEventListener() {} };
+  globalThis.addEventListener = (type, fn) => listeners.push({ type, fn });
+  globalThis.matchMedia = () => ({ matches: true });
+  t.after(() => { delete globalThis.addEventListener; delete globalThis.matchMedia; });
+  const woken = [];
+  createLauncher({
+    $, el: () => element(), api: async () => ({}), seg: (s) => s, state: { fragments: [], agents: new Map(), current: null },
+    byName: (name) => ({ name, kind: "chat" }), isChat: () => true, titleOf: (n) => n, chatTitle: (n) => n, mark: () => element(), iconOf: () => element(),
+    primaryAgent: () => null, newChatAgent: () => null, agentsOwnChat: () => null, UNTITLED: "New chat",
+    openChat() {}, openApp() {}, chatFrame() {}, composeIn() {}, newChat: async () => null, leaveSidebar() {}, closeMenu() {}, notice() {},
+    prewake: () => woken.push("wake"), originOf: async () => "https://talk--k3x9.example", offers: () => false,
+    views: () => 0, busy: () => false, setupChat: () => null,
+  });
+  const fire = async (type, event) => { for (const l of listeners.filter((l) => l.type === type)) await l.fn(event); };
+  return { $, woken, frame, frameWindow, fire };
+}
+
+test("a framed page's ask opens the launcher and wakes nothing, however late it comes: only the person's own opening races their computer", async (t) => {
+  const p = launcherPage(t);
+  await p.fire("message", { data: { fragment: KIND.openLauncher }, source: p.frameWindow, origin: "https://talk--k3x9.example" });
+  assert.equal(p.$("search-dialog").open, true, "the frame's ask opened it");
+  assert.deepEqual(p.woken, [], "a page's ask, which it may send on its own, renews no hold");
+  p.$("search-dialog").open = false;
+  p.$("sidebar-new-chat").onclick();
+  assert.deepEqual(p.woken, ["wake"], "its button, pressed in the shell");
+  p.$("search-dialog").open = false;
+  await p.fire("keydown", { metaKey: true, code: "KeyK", preventDefault() {} });
+  assert.deepEqual(p.woken, ["wake", "wake"], "⌘K in the shell");
 });

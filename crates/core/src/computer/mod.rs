@@ -7,8 +7,8 @@
 //!
 //! What it decides:
 //! - **Waking.** A record on a subscribed channel, an open port tab,
-//!   typing begun on a page of a fragment it follows (a pre-wake), one of
-//!   its agents added to a fragment, or the owner. A wake while asleep
+//!   its owner's typing begun on a page of a fragment it follows (a
+//!   pre-wake), one of its agents added to a fragment, or the owner. A wake while asleep
 //!   starts the container; one while it starts or is awake holds it
 //!   longer; one while it is going to sleep starts it again once it is
 //!   asleep (the newest push wins: lesson 3 of docs/cloudflare-v1.md).

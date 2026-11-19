@@ -39,12 +39,13 @@ an image may rely on this:
 
 - **It is woken** by a record on a channel one of its agents subscribed
   to with `wake: true`, one of its agents added to a fragment, an open
-  port tab, its owner, or a person beginning to use it: in its owner's
-  shell a chat picked or the launcher opened (their own wake), and on
-  any page of a fragment one of its agents follows, typing begun by one
-  who may post there (the page's presence `typing` turning on, decision
-  39). Never by its own guest's traffic, a page loading, a tab shown
-  again, a socket reconnecting, or a timer.
+  port tab, or its owner, also as they begin to use it: in their shell
+  a chat picked, or the launcher opened by its button or ⌘K (their own
+  wake); on any page of a fragment one of its agents follows, their
+  typing begun (the page's presence `typing` turning on, decision 39).
+  Never by anyone else's typing, a framed page's ask, its own guest's
+  traffic, a page loading, a tab shown again, a socket reconnecting, or
+  a timer.
 - **It stays awake** while the guest holds its keepalive socket, and
   `IDLE_MS` (20 minutes) after what last held it: a keepalive's close, a
   wake, or a port tab's opening, close or use (a message from its page).

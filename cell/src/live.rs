@@ -47,7 +47,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fragment_core::live::{may_post, presence_admit, typing_began, QueryBudget, QueryRefused};
+use fragment_core::live::{presence_admit, typing_began, QueryBudget, QueryRefused};
 use fragment_core::facet::Answered;
 use fragment_core::npub;
 use fragment_proto::live::{Answer, Cursor, LiveIn, LiveOut, Present, Query, Subscribe};
@@ -452,8 +452,7 @@ impl FragmentCell {
                     return Err(CellError::new(ErrorCode::RateLimited, format!("presence changes past {} a second are dropped", limits::PRESENCE_PER_S)));
                 };
                 let had = st.presence.is_some();
-                // typing begun by one who may post here (read only then)
-                let began = typing_began(st.presence.as_ref(), &data) && self.declared_channels().is_ok_and(|c| may_post(st.role, st.signed(), c.values()));
+                let began = typing_began(st.presence.as_ref(), &data);
                 st.presence = (!data.is_null()).then_some(data);
                 st.presence_at = at;
                 ws.serialize_attachment(&st)?;

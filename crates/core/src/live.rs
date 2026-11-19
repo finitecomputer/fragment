@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use fragment_proto::{limits, ChannelDecl, IdentityKind, Role};
+use fragment_proto::limits;
 use serde_json::Value;
 
 /// Why a socket's query was not run.
@@ -90,9 +90,9 @@ pub fn presence_admit(due_ms: i64, now_ms: i64) -> Option<i64> {
 }
 
 /// Whether a socket's presence change says its person began typing (a
-/// use of the agents its fragment wakes, decision 39, when `may_post`
-/// says they may post here): `typing` is `true` now and was not on this
-/// socket before. The chat's composer turns it on at the first keystroke
+/// use of their own computer, when its agents follow the fragment:
+/// `computer::prewoken`, decision 39): `typing` is `true` now and was not
+/// on this socket before. The chat's composer turns it on at the first keystroke
 /// after a pause and off after a send or `TYPING_MS` of quiet; nothing
 /// else of a presence is read. A page sends its presence again as its
 /// socket reconnects, and as its tab is shown or hidden: none of those is
@@ -100,17 +100,6 @@ pub fn presence_admit(due_ms: i64, now_ms: i64) -> Option<i64> {
 pub fn typing_began(before: Option<&Value>, now: &Value) -> bool {
     let typing = |v: &Value| v.get("typing") == Some(&Value::Bool(true));
     typing(now) && !before.is_some_and(typing)
-}
-
-/// Whether one at `role` (`signed`: signed in) may post to one of a
-/// fragment's `channels`, as each channel's declaration admits a poster:
-/// only their typing pre-wakes, since a post of theirs would wake the
-/// same computers. A reader who may not post (a public visitor of a
-/// public fragment) wakes nothing: the awake time is the agents' owners'
-/// to pay. A channel only agents post to (`from: agent`) is none a
-/// person types into.
-pub fn may_post<'a>(role: Role, signed: bool, channels: impl IntoIterator<Item = &'a ChannelDecl>) -> bool {
-    channels.into_iter().any(|c| c.from != Some(IdentityKind::Agent) && c.post.is_some_and(|needs| role >= needs) && (signed || !c.signed_in))
 }
 
 #[cfg(test)]
@@ -231,31 +220,5 @@ mod tests {
         for other in [serde_json::json!({ "typing": "yes" }), serde_json::json!({ "typing": 1 }), serde_json::json!(null), serde_json::json!([true]), serde_json::json!("typing"), serde_json::json!({ "x": 1, "y": 2 })] {
             assert!(!typing_began(None, &other), "{other}");
         }
-    }
-
-    /// Goal (review of #1351): typing pre-wakes for whoever may post here,
-    /// as the channel admits them, and for no reader who may not. Valid
-    /// (a chat's invited viewer, its editors and owner), invalid (a public
-    /// visitor of a public chat, a signed-in-only channel's anonymous
-    /// visitor, a channel of agents' posts, one that takes none).
-    #[test]
-    fn only_one_who_may_post_here_pre_wakes() {
-        let channel = |read: Role, post: Option<Role>| ChannelDecl { read, post, signed_in: false, from: None, listed: None, newest: vec![] };
-        // the chat template's: `chat` read public, posted by viewers; `work` the agents'
-        let work = ChannelDecl { from: Some(IdentityKind::Agent), ..channel(Role::Viewer, Some(Role::Editor)) };
-        let chat = [channel(Role::Public, Some(Role::Viewer)), work.clone()];
-        for role in [Role::Viewer, Role::Editor, Role::Owner] {
-            assert!(may_post(role, true, &chat), "{role:?}: an invited member, who may post");
-        }
-        assert!(!may_post(Role::Public, false, &chat) && !may_post(Role::Public, true, &chat), "a public visitor of a public chat reads it, and may not post");
-        assert!(!may_post(Role::Editor, true, &[work]), "a channel only agents post to");
-        assert!(may_post(Role::Editor, true, &[ChannelDecl { from: Some(IdentityKind::Person), ..channel(Role::Viewer, Some(Role::Editor)) }]), "one only people post to");
-        assert!(!may_post(Role::Owner, true, &[channel(Role::Viewer, None)]), "a channel that takes no posts");
-        assert!(!may_post(Role::Owner, true, &[]), "no channel");
-        // a guestbook the public may post to: a visitor's post would wake it too
-        let book = [channel(Role::Public, Some(Role::Public))];
-        assert!(may_post(Role::Public, false, &book));
-        let signed_only = [ChannelDecl { signed_in: true, ..channel(Role::Public, Some(Role::Public)) }];
-        assert!(!may_post(Role::Public, false, &signed_only) && may_post(Role::Public, true, &signed_only), "signed in only");
     }
 }

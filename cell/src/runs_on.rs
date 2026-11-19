@@ -553,41 +553,36 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// The computers `principal`'s typing on this fragment pre-wakes: those
-    /// its channels wake, but none that `principal`'s own wake subscriptions
-    /// name (`fragment_core::computer::prewoken`; at most `SUBS_MAX` rows).
-    pub(crate) fn woken_computers(&self, principal: &str) -> CellResult<Vec<String>> {
+    /// The computer `principal`'s typing on this fragment pre-wakes: their
+    /// own, when its channels wake it (`fragment_core::computer::prewoken`;
+    /// at most `SUBS_MAX` rows).
+    fn woken_computer(&self, principal: &str) -> CellResult<Option<String>> {
         let rows = self.rows("SELECT principal, url FROM subs WHERE url LIKE 'computer:%' ORDER BY id", vec![])?;
         let subs: Vec<(&str, &str)> = rows.iter().filter_map(|r| Some((r["principal"].as_str()?, r["url"].as_str()?))).collect();
-        Ok(fragment_core::computer::prewoken(&subs, principal).into_iter().map(|u| format!("computer:{}", u.trim_start_matches("computer:"))).collect())
+        Ok(fragment_core::computer::prewoken(&subs, principal).map(|u| format!("computer:{}", u.trim_start_matches("computer:"))))
     }
 
     /// `principal` began typing on a page of this fragment (its socket's
-    /// presence, `fragment_core::live::typing_began`): the computers its
-    /// channels wake may hear from them soon, so each starts now, held as
-    /// any wake is (decision 39), at most every `PREWAKE_EVERY_MS`. A
-    /// socket's opening is no use of them: a tab left open reconnects on
-    /// its own. Each wake runs on its own, so the socket never waits for a
-    /// start; a failed pre-wake costs only the wait. An agent's own socket
-    /// pre-wakes no computer it runs on.
+    /// presence, `fragment_core::live::typing_began`): their own computer,
+    /// when this fragment's channels wake it, may hear from them soon, so it
+    /// starts now, held as any wake is (decision 39), at most every
+    /// `PREWAKE_EVERY_MS`. No one else's typing wakes it, and a socket's
+    /// opening is no use of it: a tab left open reconnects on its own. The
+    /// wake runs on its own, so the socket never waits for a start; a
+    /// failed pre-wake costs only the wait.
     pub(crate) fn prewake(&self, principal: &str) {
         let now = crate::js::now_ms();
         let due = self.meta(MetaKey::PrewakeAt).ok().flatten().and_then(|v| v.parse::<i64>().ok()).is_none_or(|at| now >= at);
         if !due {
             return;
         }
-        let Ok(computers) = self.woken_computers(principal) else { return };
-        if computers.is_empty() {
-            return;
-        }
+        let Ok(Some(c)) = self.woken_computer(principal) else { return };
         let _ = self.set_meta(MetaKey::PrewakeAt, &(now + PREWAKE_EVERY_MS).to_string());
-        for c in computers {
-            let env = self.env.clone();
-            worker::wasm_bindgen_futures::spawn_local(async move {
-                if let Err(e) = crate::computer::ask(&env, &c, "computer/wake", &json!({ "why": "presence" })).await {
-                    console_log!("{{\"fragment\":\"prewake\",\"computer\":{},\"error\":{}}}", json!(c), json!(e.message));
-                }
-            });
-        }
+        let env = self.env.clone();
+        worker::wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = crate::computer::ask(&env, &c, "computer/wake", &json!({ "why": "presence" })).await {
+                console_log!("{{\"fragment\":\"prewake\",\"computer\":{},\"error\":{}}}", json!(c), json!(e.message));
+            }
+        });
     }
 }

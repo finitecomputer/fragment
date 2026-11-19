@@ -28,7 +28,7 @@ impl Default for Rules {
 pub enum Wake {
     /// A record on a channel one of its agents subscribed to.
     Record,
-    /// Someone began typing on a page of a fragment it subscribes to
+    /// Its owner began typing on a page of a fragment it subscribes to
     /// (decision 39's pre-wake).
     Presence,
     /// A port tab is opening.

@@ -1,4 +1,4 @@
-//! Which computer: a person's own, and the ones a page pre-wakes.
+//! Which computer: a person's own, and the one their typing pre-wakes.
 
 use sha2::{Digest, Sha256};
 
@@ -11,21 +11,20 @@ pub fn default_computer_of(owner: &str) -> String {
     format!("computer:{}", &hex::encode(digest)[..24])
 }
 
-/// The computers `by` beginning to type on a fragment pre-wakes (decision
-/// 39): each one the fragment's wake subscriptions (`(principal,
-/// computer)`) name, but none that `by`'s own name. A computer's agents
-/// never pre-wake their own computer, as what they post never wakes it:
-/// one as it goes to sleep would start it again from that sleep's save.
-/// Each once, in the order first named.
-pub fn prewoken<'a>(subs: &[(&'a str, &'a str)], by: &str) -> Vec<&'a str> {
-    let own: Vec<&str> = subs.iter().filter(|(principal, _)| *principal == by).map(|(_, computer)| *computer).collect();
-    let mut out: Vec<&str> = Vec::with_capacity(subs.len());
-    for (_, computer) in subs {
-        if !own.contains(computer) && !out.contains(computer) {
-            out.push(computer);
-        }
+/// The computer `by` beginning to type on a fragment pre-wakes (decision
+/// 39): their own (`default_computer_of`), when one of the fragment's wake
+/// subscriptions (`(principal, computer URL)`) names it, but never one
+/// `by`'s own subscriptions name (an agent's socket wakes no computer it
+/// runs on). Anyone else's typing wakes nothing, whatever they may read or
+/// post there: their message wakes it when posted, and its awake time is
+/// its owner's to pay.
+pub fn prewoken<'a>(subs: &[(&'a str, &'a str)], by: &str) -> Option<&'a str> {
+    let own = default_computer_of(by);
+    let names = |url: &str| url.trim_start_matches("computer:") == own.trim_start_matches("computer:");
+    if subs.iter().any(|(principal, url)| *principal == by && names(url)) {
+        return None;
     }
-    out
+    subs.iter().map(|(_, url)| *url).find(|url| names(url))
 }
 
 #[cfg(test)]
@@ -40,18 +39,27 @@ mod tests {
         assert!(a.starts_with("computer:") && a.len() == "computer:".len() + 24 && a[9..].bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
-    /// Goal: a person's page pre-wakes every computer that follows the
-    /// fragment, each once; a computer's own agent's socket (its guest
-    /// following the fragment, as it boots or after a drop, also while it
-    /// goes to sleep) pre-wakes none of its own, only other computers'.
+    /// Goal (review of #1351): typing pre-wakes only the typer's own
+    /// computer, never anyone else's, whatever they may read or post
+    /// there. Valid (its owner, among other owners' computers), invalid (an
+    /// anonymous reader of a public guestbook, an invited member, the
+    /// owner of a computer the fragment does not follow), and an agent's
+    /// own socket wakes none.
     #[test]
-    fn a_page_prewakes_the_computers_but_an_agent_never_its_own() {
-        let subs = [("id:juniper", "computer:a"), ("id:juniper", "computer:a"), ("id:maple", "computer:a"), ("id:oak", "computer:b")];
-        assert_eq!(prewoken(&subs, "id:paul"), ["computer:a", "computer:b"], "a person's page");
-        assert_eq!(prewoken(&subs, "anon:3f"), ["computer:a", "computer:b"], "a visitor's page");
-        assert_eq!(prewoken(&subs, "id:juniper"), ["computer:b"], "an agent of computer a");
-        assert_eq!(prewoken(&subs, "id:maple"), ["computer:b"], "another agent of the same computer");
-        assert_eq!(prewoken(&subs, "id:oak"), ["computer:a"], "an agent of computer b");
-        assert!(prewoken(&[], "id:paul").is_empty(), "no computer follows it");
+    fn only_its_owners_typing_prewakes_a_computer() {
+        let (paul, ann) = (default_computer_of("npub1paul"), default_computer_of("npub1ann"));
+        // a chat (or a public guestbook with an editors' channel) followed
+        // by two people's agents, each from its owner's computer
+        let subs = [("npub1juniper", paul.as_str()), ("npub1juniper", paul.as_str()), ("npub1maple", ann.as_str())];
+        let woken = |by: &str| prewoken(&subs, by).into_iter().collect::<Vec<_>>();
+        assert_eq!(woken("npub1paul"), [paul.as_str()], "its owner: their own computer, once, never another's");
+        assert_eq!(woken("npub1ann"), [ann.as_str()], "the other owner: theirs alone");
+        assert!(woken("anon:3f").is_empty(), "an anonymous reader (a public guestbook's)");
+        assert!(woken("npub1bob").is_empty(), "an invited member who owns none of them");
+        assert!(woken("npub1juniper").is_empty() && woken("npub1maple").is_empty(), "an agent's own socket");
+        assert!(prewoken(&[("npub1maple", ann.as_str())], "npub1paul").into_iter().next().is_none(), "an owner whose computer does not follow it");
+        // a subscription names its computer as the URL `computer:<id>` (runs_on.rs)
+        let url = format!("computer:{}", paul.trim_start_matches("computer:"));
+        assert_eq!(prewoken(&[("npub1juniper", url.as_str())], "npub1paul").into_iter().collect::<Vec<_>>(), [url.as_str()]);
     }
 }
