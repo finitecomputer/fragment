@@ -7,6 +7,7 @@ mod codestorage;
 mod home;
 mod mcp;
 mod notice;
+mod offload;
 mod operator;
 mod quote;
 mod search;
@@ -172,8 +173,8 @@ enum Cmd {
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
     /// Delete a fragment you own, for everyone in it: its pages, data and
-    /// blobs go, and its name is free; its repo's history stays. At a
-    /// terminal it asks you to type its name first, unless --yes
+    /// files go, and its name is free. At a terminal it asks you
+    /// to type its name first, unless --yes
     Rm {
         name: String,
         /// Delete without asking (only a terminal asks)
@@ -332,6 +333,20 @@ enum Cmd {
     Blob {
         #[command(subcommand)]
         sub: BlobCmd,
+    },
+    /// Move a file or folder off this disk into a members-only fragment
+    /// you edit: copied, read back and checked, and only then removed
+    /// here, a note (`<name>.offloaded.md`) left in its place. `--back`
+    /// brings it back from that note, checked; the fragment keeps its copy
+    Offload {
+        /// The file or folder to move; with --back, its note (or where it was)
+        path: PathBuf,
+        /// The fragment it goes into
+        #[arg(long, required_unless_present = "back", conflicts_with = "back")]
+        into: Option<String>,
+        /// Bring it back from its note
+        #[arg(long)]
+        back: bool,
     },
     /// Search fragments' own indexes by their words and their meaning, as
     /// one (a reader's, in each): each result a section of one of their
@@ -2114,7 +2129,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Rm { name, yes } => {
             let name = c.fragment(&name)?;
             if !yes && std::io::stdin().is_terminal() {
-                eprintln!("Delete {name} for everyone in it? Its pages, data and blobs go. This can't be undone.");
+                eprintln!("Delete {name} for everyone in it? Its pages, data and files go. This can't be undone.");
                 eprint!("Type {name} to delete it: ");
                 let mut typed = String::new();
                 std::io::stdin().read_line(&mut typed)?;
@@ -2124,7 +2139,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             c.call(c.delete(&format!("/api/f/{name}"))?)?;
             json_exit(j, &json!({ "deleted": true, "name": name }));
-            println!("deleted {name} for everyone in it: its pages, data and blobs are gone, and the name is free. Its repo's history stays, and comes back if you make {name} again.");
+            println!("deleted {name} for everyone in it: its pages, data and files go, and the name is free.");
         }
         Cmd::Archive { name } => {
             let done = set_archived(&c, &name, true)?;
@@ -2824,6 +2839,19 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &v);
             println!("{sha}");
         }
+        Cmd::Offload { path, into, back } => match (into, back) {
+            (Some(into), false) => {
+                let moved = offload::offload(&c, &path, &into)?;
+                json_exit(j, &moved);
+                offload::print(&moved);
+            }
+            (None, true) => {
+                let back = offload::back(&c, &path)?;
+                json_exit(j, &back);
+                offload::print_back(&back);
+            }
+            _ => unreachable!("clap requires --into or --back, never both"),
+        },
         Cmd::Mcp { name, write } => {
             // stdout carries the protocol's messages and nothing else
             mcp::serve(&c, &name, write, std::io::stdin().lock(), std::io::stdout().lock())?;

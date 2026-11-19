@@ -145,7 +145,13 @@ weekday at 8") is a schedule on itself: a scheduled record on its own
 agent fragment's `tasks` (Scheduled records, below), which the platform
 keeps and fires through every restart and sleep of its computer. Never
 a background loop, `sleep`, crontab or `hermes cron` on the computer:
-they die with it. The agent is an editor of its own fragment, so it adds
+they die with it. The computer sleeps a while after nothing holds it
+awake (a turn, a port tab open on it), and a sleep or a restart ends
+every process an agent started: a server, a background command, a
+download. Nothing starts those again. One still working (a build, a
+download) keeps the computer awake up to 2 hours after the agent's last
+turn; an idle server does not. What must outlive that is a routine, or
+an app (its crons and triggers run on the platform). The agent is an editor of its own fragment, so it adds
 one as any editor does; on a computer `fragment schedule` acts on the
 agent's own fragment unless another is named, and `--routine` builds the
 routine record:
@@ -1052,6 +1058,42 @@ folder left out, its size, and why. A fragment with no `fragment.json`
 gets one whose page is the files view (`fragment deploy` shows it).
 Running it again sends only what is missing.
 
+## Moving files off a disk
+
+A computer's disk holds 20 GB, and a full one stops it saving. When it
+fills, move big files you are not using (downloads, datasets, finished
+outputs) into a members-only fragment of your owner's, one per agent:
+
+```
+fragment create juniper-storage --visibility members              # once: what you move goes here
+fragment offload ~/Downloads/talk.mp4 --into juniper-storage--k3x9   # a note, talk.mp4.offloaded.md, in its place
+fragment offload ~/data/census --into juniper-storage--k3x9           # a folder, and all in it
+fragment deploy juniper-storage--k3x9                               # once, after the first: its page lists what is there
+fragment offload --back ~/Downloads/talk.mp4.offloaded.md           # back where it was
+```
+
+`offload` copies each file into the fragment, under a folder of its own
+named for when and where it was (`2026-11-18T103102Z-3fa9/data/work/…`):
+1 MiB and up as a blob, and a file larger than one upload in parts. It
+reads each back from the fragment and checks its sha256, and only then
+writes the note and removes the files. Anything that fails leaves every
+file where it was. The note says where they went, how to bring them
+back, and each file's size and sha256. `--back` brings each file into
+place, checked against the note, never over a file that is there, and a
+folder's folders, the empty ones too, with their permissions; the note
+goes last. The fragment keeps its copy, so a computer that goes
+back to an earlier save can still bring it back; remove it there only
+once nobody needs it. Either one cut off finishes when run again.
+Refused: a fragment that is not members-only, not an app's (a chat, a
+brain), or that you only view; a link, a folder holding one, a folder
+of more than 10,000 files, a file whose name says it may hold a
+password or key (`.env`, a private key) or a folder holding one, and
+anything in the runtime's own home (`$HERMES_HOME`: its memory, skills
+and sessions) or holding it. One move or back works in a folder at a
+time. A file that changes after its copy is made stays where it is. What
+is stored is paid from the fragment's owner's ledger, as any fragment's
+blobs are (Your ledger).
+
 ## Agents
 
 An agent is an identity of its own, and you own it: an agent fragment
@@ -1211,6 +1253,8 @@ fragment read <name> <path>              # one file at main, as a viewer may
 fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment write <name> <path>... --dir D [--message M]   # several files from D, one commit: all land or none
 fragment blob put <name> <file>          # prints its sha256: its pages read it at __blob/<sha256>
+fragment offload <path> --into <name>    # a file or folder off this disk: copied, checked, removed, a note in its place
+fragment offload --back <path>           # back from its note, checked; the fragment keeps its copy
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name> [--yes]               # for everyone in it; a terminal asks for its name typed back, unless --yes
 fragment archive|unarchive <name>        # your own lists only

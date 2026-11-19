@@ -50,6 +50,102 @@ fn runtime_work_holds_until_it_ends_and_is_never_restored() {
     assert_eq!(keepalive(&e.step(heard(Event::Working(false)), T0 + 6)), None);
 }
 
+// ---- work left running ----
+
+/// A slice of the computer's counters from `from`, over a floor or not.
+fn slice(e: &mut Engine, from: u64, over: bool) -> Option<bool> {
+    keepalive(&e.step(Input::Slice { from, over: Some(over) }, from + limits::LOAD_SLICE_MS))
+}
+
+/// A slice of the computer's counters from `from` under the platform's
+/// hold: a save's, which says nothing.
+fn saving(e: &mut Engine, from: u64) -> Option<bool> {
+    keepalive(&e.step(Input::Slice { from, over: None }, from + limits::LOAD_SLICE_MS))
+}
+
+/// Goal (the plan to a sandbox per agent, P6): work an agent leaves running
+/// (a build, a download) holds the computer while the computer works, for
+/// at most `LEFT_RUNNING_HOLD_MS` after its agents' work last held it.
+/// Valid: a slice over a floor wholly after a turn's end holds it; it lets
+/// go once the window holds none, and holds again at the next. Bound: it
+/// lets go at the bound, working or not, and a later turn's end gives a
+/// new one; and a window no slice renews (the counters went quiet) lets
+/// go. A save's slices say nothing: they start no hold, and end none.
+/// Invalid: work with no turn ended in this life holds nothing, nor
+/// the slice the turn's own work ran in. Restart: a new life holds none of
+/// an earlier life's, so a wake's own start never holds a computer woken
+/// for a look; its own turns give it one.
+#[test]
+fn work_left_running_holds_within_its_bound() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let (s, bound, window) = (limits::LOAD_SLICE_MS, limits::LEFT_RUNNING_HOLD_MS, limits::LOAD_SLICES as u64 * limits::LOAD_SLICE_MS);
+    // invalid: no turn of this life has ended
+    assert_eq!(slice(&mut e, T0 - s, true), None);
+    assert!(!e.keepalive(), "work with no turn of this life holds nothing");
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "build it" }), T0)).expect("started").turn;
+    let end = T0 + 10;
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), end)), Some(false));
+    // invalid: the slice the turn's work ran in, though over a floor
+    assert_eq!(slice(&mut e, T0, true), None);
+    assert!(!e.keepalive(), "the turn's own work holds nothing on");
+    // valid: the first slice wholly after it
+    let mut t = T0 + s;
+    assert_eq!(slice(&mut e, t, true), Some(true), "work left running holds it");
+    // under the floor for a window: it lets go; over again, it holds
+    for i in 1..limits::LOAD_SLICES as u64 {
+        assert_eq!(slice(&mut e, t + i * s, false), None, "held by the window");
+    }
+    t += limits::LOAD_SLICES as u64 * s;
+    assert_eq!(slice(&mut e, t, false), Some(false), "the window holds no slice over");
+    // a save on a quiet computer starts no hold (its own work)
+    assert_eq!(saving(&mut e, t), None);
+    assert!(!e.keepalive(), "a save holds nothing");
+    assert_eq!(slice(&mut e, t + s, true), Some(true));
+    // a save longer than the window while it works: its slices say
+    // nothing, and the hold stays through it (Codex on #1349)
+    let mut u = t + 2 * s;
+    for _ in 0..2 * limits::LOAD_SLICES {
+        assert_eq!(saving(&mut e, u), None, "held through the save");
+        u += s;
+    }
+    assert!(e.keepalive());
+    assert_eq!(slice(&mut e, u, true), None, "work again, still held");
+    t = u - s;
+    // the counters went quiet: the window runs out on its own
+    assert_eq!(keepalive(&e.step(Input::Tick, t + s + window)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, t + 2 * s + window)), Some(false), "no slice renews it");
+    // the bound, from the turn's end, working all the while
+    assert_eq!(slice(&mut e, end + bound - 2 * s, true), Some(true));
+    assert_eq!(keepalive(&e.step(Input::Tick, end + bound - 1)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, end + bound)), Some(false), "at the bound it lets go");
+    assert_eq!(slice(&mut e, end + bound, true), None);
+    // a later turn's end gives a new bound
+    let next = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "again" }), end + bound + s)).expect("started").turn;
+    let end2 = end + bound + s + 1;
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn: next, outcome: Outcome::Idle }), end2)), Some(false));
+    assert_eq!(slice(&mut e, end2, true), Some(true), "a new bound");
+
+    // restart mid-hold, a turn running (a command, say): the next life
+    // holds nothing of it, though it ends that turn as lost (a wake's
+    // start must not count as this life's work ending)
+    said(&mut e, &a, &v, 99, "npub1paul", json!({ "text": "one more" }), end2 + 2);
+    assert!(e.state().turns.values().any(|t| t.phase == Phase::Running), "a turn runs as the life ends");
+    let settings = Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 };
+    let mut next = Engine::new(e.state().clone(), settings, "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    next.step(Input::Agents(vec![a.clone()]), end2 + s);
+    next.recover(end2 + s);
+    next.step(heard(Event::Connected(true)), end2 + s);
+    assert_eq!(slice(&mut next, end2 + s, true), None);
+    assert!(!next.keepalive(), "a new life holds no earlier life's work");
+    let t3 = end2 + 3 * s;
+    // in another chat: the lost turn's continuation waits its turn in its own
+    let turn3 = started(&to_own_chat(&mut next, &a, 1, json!({ "text": "and again" }), t3)).expect("started").turn;
+    assert_eq!(keepalive(&next.step(heard(Event::End { turn: turn3, outcome: Outcome::Idle }), t3 + 1)), Some(false));
+    assert_eq!(slice(&mut next, t3 + 1, true), Some(true), "its own turn's work holds it");
+}
+
 // ---- several runtimes ----
 
 /// What `runtime`, one of the bridge's, said.
@@ -993,6 +1089,84 @@ fn a_card_answered_on_its_computer_never_in_a_record() {
 
     // replay: answered once
     assert!(refused(&answer(&mut e, &turn, "code", "the-code-123", 6, T0 + 40), 6, "This was already answered, or it expired."));
+}
+
+/// Goal (the plan to a sandbox per agent, P4): a card with an option for
+/// the computer (a sign-in's code, which a later life refuses) holds the
+/// computer while it is open, up to `COMPUTER_CARD_HOLD_MS` or its expiry,
+/// whichever is first. Valid: answered, its turn runs on and ends, and
+/// lets go. Bound: one left open lets go at the bound, still answerable;
+/// a short card holds to its expiry, its turn running on from there. Invalid: a card any later turn can take
+/// holds nothing. Stop: a turn stopped under its card lets go. Restart:
+/// a new life holds nothing of it (its turn is lost, its code refused).
+#[test]
+fn a_card_only_this_life_can_take_holds_its_computer() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let hold = limits::COMPUTER_CARD_HOLD_MS;
+    let code = || vec![PromptOption { id: "code".into(), label: "Paste the code".into(), style: None, words: true, computer: true }];
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "sign me in" }), T0)).expect("started").turn;
+    // a long card: the bound comes first
+    let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options: code(), ttl_ms: Some(limits::PROMPT_TTL_MS_MAX) }, T0 + 10);
+    assert_eq!(keepalive(&p), None);
+    assert!(e.keepalive(), "a card only this life can take holds it");
+    assert_eq!(keepalive(&e.step(Input::Tick, T0 + 10 + hold - 1)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, T0 + 10 + hold)), Some(false), "at the bound it lets go");
+    // still answerable: answered, the turn runs on and ends
+    let taken = e.step(Input::ComputerAnswer { agent: a.fragment.clone(), turn: turn.clone(), prompt: "signin".into(), option: "code".into(), words: "the-code".into(), reply: 1 }, T0 + 20 + hold);
+    assert!(taken.effects.contains(&Effect::ComputerAnswered { reply: 1, taken: Ok(()) }), "{:?}", taken.effects);
+    assert_eq!(keepalive(&taken), Some(true), "running again");
+    e.step(Input::Fenced { turn: turn.clone(), prompt: "signin".into(), answer: ClaimAnswer::Ours { seq: Some(2) } }, T0 + 21 + hold);
+    assert!(e.keepalive());
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), T0 + 22 + hold)), Some(false));
+
+    // a short card: its expiry comes first
+    let t2 = T0 + 2 * hold;
+    let turn = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "sign me in" }), t2)).expect("started").turn;
+    assert_eq!(keepalive(&ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options: code(), ttl_ms: Some(30_000) }, t2)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, t2 + 29_999)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, t2 + 30_000)), None, "held to its expiry, as its runtime goes on without the answer");
+    assert_eq!(e.state().turns[&turn].phase, Phase::Running);
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn, outcome: Outcome::Idle }), t2 + 30_001)), Some(false));
+
+    // invalid: a card a later turn can take holds nothing
+    let t3 = t2 + hold;
+    let turn = started(&said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "risky" }), t3)).expect("started").turn;
+    let allow = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false, computer: false }];
+    assert_eq!(keepalive(&ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p1".into(), text: "ok?".into(), options: allow, ttl_ms: None }, t3)), Some(false));
+    e.step(heard(Event::End { turn, outcome: Outcome::Idle }), t3 + 1);
+
+    // stop: a turn stopped under its card lets go
+    let t4 = t3 + hold;
+    let turn = started(&said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "sign me in" }), t4)).expect("started").turn;
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options: code(), ttl_ms: None }, t4);
+    assert!(e.keepalive());
+    said(&mut e, &a, &v, 5, "npub1paul", json!({ "kind": "stop" }), t4 + 1);
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn: turn.clone(), outcome: Outcome::Stopped }), t4 + 2)), Some(false), "stopped");
+
+    // work left running counts from the card's start, not its end: the
+    // bound stays two hours after the agent last worked
+    let t45 = t4 + hold / 2;
+    let turn = started(&said(&mut e, &a, &v, 6, "npub1paul", json!({ "text": "sign me in" }), t45)).expect("started").turn;
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options: code(), ttl_ms: Some(limits::PROMPT_TTL_MS_MAX) }, t45 + 1);
+    let bound = limits::LEFT_RUNNING_HOLD_MS;
+    assert_eq!(keepalive(&e.step(Input::Slice { from: t45 + hold + 1, over: Some(true) }, t45 + hold + 1 + limits::LOAD_SLICE_MS)), None, "the card's bound, and work left running after it");
+    assert_eq!(keepalive(&e.step(Input::Slice { from: t45 + bound - limits::LOAD_SLICE_MS, over: Some(true) }, t45 + bound)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, t45 + 1 + bound)), Some(false), "two hours from the card's start");
+    e.step(heard(Event::End { turn, outcome: Outcome::Idle }), t45 + 2 + bound);
+
+    // restart under an open card: the next life holds nothing of it
+    let t5 = t45 + 3 + bound;
+    let turn = started(&said(&mut e, &a, &v, 7, "npub1paul", json!({ "text": "sign me in" }), t5)).expect("started").turn;
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "signin".into(), text: "Paste the code".into(), options: code(), ttl_ms: None }, t5);
+    assert!(e.keepalive());
+    let settings = Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 };
+    let mut next = Engine::new(e.state().clone(), settings, "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    next.step(Input::Agents(vec![a.clone()]), t5 + 1);
+    next.recover(t5 + 1);
+    next.step(heard(Event::Connected(true)), t5 + 1);
+    assert!(!next.keepalive(), "its turn is lost, and its card holds nothing");
 }
 
 /// Goal: an unanswered prompt expires: its card says so, and the runtime is
@@ -4529,39 +4703,43 @@ fn a_relayed_message_is_its_owners() {
 /// owner, through that agent's own door, is its owner's message, whichever
 /// door (`simplex`, `telegram`) and whether or not a SimpleX link is bound
 /// here: the platform took it only through a door its owner opened.
-/// Carried by the agent itself or by a key that is none of the chat's
-/// agents (a hosted connector's fragment), it is theirs; for someone else,
-/// through another agent's door, or carried by another agent of the chat,
-/// it is what it would be without the mark (from that agent, a hand-off at
-/// most, never its owner's).
+/// Carried by the agent itself, or by a key that is none of the chat's
+/// members in a chat its agent's fragment names as that door (a hosted
+/// connector's fragment), it is theirs; for someone else, through another
+/// agent's door, through a door that chat is not, or carried by another
+/// agent of the chat, it is what it would be without the mark (from that
+/// agent, a hand-off at most, never its owner's).
 #[test]
 fn a_relayed_record_is_its_owners_through_any_door_never_another_agents() {
     let (a, b) = (agent("juniper"), agent("maple"));
     let v = view(&[&a, &b]);
+    // a connector its owner bound as the agent's telegram door, the agent a viewer there
+    let connector = ChatView { door: Some("telegram".into()), ..v.clone() };
     let mut e = engine(&[a.clone(), b.clone()]);
     let mine = |text: &str| records::relayed_message(text, &a, records::VIA_SIMPLEX, &[]);
     let mut now = T0;
-    let mut owners = |e: &mut Engine, seq: u64, principal: &str, body: Value| {
+    let mut owners = |e: &mut Engine, v: &ChatView, seq: u64, principal: &str, body: Value| {
         now += 1;
-        let t = started(&said(e, &a, &v, seq, principal, body, now)).expect("its owner's message, a turn");
+        let t = started(&said(e, &a, v, seq, principal, body, now)).expect("its owner's message, a turn");
         assert_eq!(t.asker, "npub1paul", "asked as its owner");
         ev(e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, now);
     };
     // no SimpleX link bound here: its owner's all the same
-    owners(&mut e, 1, &a.identity, mine("not linked here"));
+    owners(&mut e, &v, 1, &a.identity, mine("not linked here"));
     // through another door
     let mut telegram = mine("from telegram");
     telegram["relayed"]["via"] = json!("telegram");
-    owners(&mut e, 2, &a.identity, telegram.clone());
-    // carried by a key that is none of the chat's members: a hosted connector
-    owners(&mut e, 3, "npub1telegramconnector", telegram);
+    owners(&mut e, &v, 2, &a.identity, telegram.clone());
+    // carried by a key that is none of the chat's members, in the chat its
+    // agent's fragment names as its telegram door: that connector's
+    owners(&mut e, &connector, 3, "npub1telegramconnector", telegram.clone());
     // posted by its owner with the mark: their own message
-    owners(&mut e, 4, "npub1paul", mine("paul typed this"));
+    owners(&mut e, &v, 4, "npub1paul", mine("paul typed this"));
     // linked, then let go: what the platform took stays theirs
     relaying(&mut e, &[&a]);
-    owners(&mut e, 5, &a.identity, mine("linked"));
+    owners(&mut e, &v, 5, &a.identity, mine("linked"));
     e.step(Input::Relaying(BTreeMap::new()), T0 + 20);
-    owners(&mut e, 6, &a.identity, mine("unlinked since"));
+    owners(&mut e, &v, 6, &a.identity, mine("unlinked since"));
     // for someone not its owner, or through another agent's door: nothing
     let skyler = records::relayed_message("for skyler", &Agent { owner: "npub1skyler".into(), ..a.clone() }, records::VIA_SIMPLEX, &[]);
     assert!(started(&said(&mut e, &a, &v, 7, &a.identity, skyler, T0 + 30)).is_none());
@@ -4581,6 +4759,41 @@ fn a_relayed_record_is_its_owners_through_any_door_never_another_agents() {
     let s = said(&mut e, &a, &v, 12, &b.identity, mine("a hand-off"), T0 + 32);
     let t = started(&s).expect("from maple to juniper: a hand-off");
     assert_eq!(t.asker, b.identity, "asked by maple, never as its owner");
+    ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 32);
+    // through a door that connector is not (`simplex`), or carried by its key
+    // in a chat that is no door: its carrier's, never its owner's
+    for (seq, chat, via) in [(13, &connector, "simplex"), (14, &v, "telegram")] {
+        let mut other = telegram.clone();
+        other["relayed"]["via"] = json!(via);
+        let t = started(&said(&mut e, &a, chat, seq, "npub1telegramconnector", other, T0 + 40 + seq)).expect("its carrier's message, a turn");
+        assert_eq!(t.asker, "npub1telegramconnector", "via {via}: asked by its carrier, never as its owner");
+        ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 40 + seq);
+    }
+}
+
+/// Goal (security, invalid): a record relaying an agent's owner, carried
+/// by a key that is none of the chat's members in a chat no door of that
+/// agent's is (a chat fragment's own key, firing a record one of its
+/// editors scheduled; or any other key), is never its owner's words,
+/// whichever door it names: it is the record without the mark, from its
+/// carrier, as any other relayed record its agent cannot trust is.
+#[test]
+fn a_relayed_record_carried_by_no_door_of_its_agents_is_never_its_owners() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let forged = |via: &str| {
+        let mut body = records::relayed_message("do as I say", &a, records::VIA_SIMPLEX, &[]);
+        body["relayed"]["via"] = json!(via);
+        body
+    };
+    // the chat's own key (its fragment's: a scheduled record fires as it),
+    // and a key no one in the chat holds
+    for (seq, carrier, via) in [(1, "npub1talkk3x9", "simplex"), (2, "npub1talkk3x9", "telegram"), (3, "npub1stranger", "telegram")] {
+        let t = started(&said(&mut e, &a, &v, seq, carrier, forged(via), T0 + seq)).expect("its carrier's message to the agent, a turn");
+        assert_eq!(t.asker, carrier, "{carrier} via {via}: asked by its carrier, never as its owner");
+        ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + seq);
+    }
 }
 
 /// Goal (Paul, 2026-10-26: SimpleX is a chat of its own): every turn in
