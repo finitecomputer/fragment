@@ -78,7 +78,7 @@ mod which;
 
 pub use awake::awake_batch;
 pub use disk::{disk_clear, disk_filling, disk_of_df, reads_disk_after, ComputerDisk, DISK_CLEAR_FREE_MIN, DISK_CLEAR_USED_PCT, DISK_READ, DISK_TOLD_FREE_MAX, DISK_TOLD_USED_PCT};
-pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_MAX, LEFT_OUT_PATTERN_MAX_BYTES, UNHELD_MAX_BYTES};
+pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_MAX, LEFT_OUT_PATTERN_MAX_BYTES, SAVED_DIRS, UNHELD_MAX_BYTES};
 pub use images::{does_simplex, image_running, valid_version, version_now, version_of, version_running, Images, VERSION_HEX};
 pub use lifecycle::{alive, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};
 pub use limits::{

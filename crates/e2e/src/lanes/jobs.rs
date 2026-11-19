@@ -778,9 +778,10 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// schedules its editors add at run time, each appending a record to one of
 /// its channels as the fragment itself, where its channel trigger runs a
 /// job from it. Viewers list them and add none; each bound refused with a
-/// typed error; the same one added again is that one; an install keeps
-/// them; due (the `cron-now` lever), one fires once; paused it fires
-/// nothing, resumed it fires again; removed, it fires no more; and a
+/// typed error (a record that relays someone among them); the same one
+/// added again is that one; an install keeps them; due (the `cron-now`
+/// lever), one fires once; paused it fires nothing, resumed it fires
+/// again; removed, it fires no more; and a
 /// fragment keeps at most 32.
 /// An installed trigger: each install of new code runs its operation once,
 /// as the fragment; asked again, nothing more; cut short by an outage, once
@@ -1033,6 +1034,8 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         json!([seen.body, added.body, stranger_seen.body]),
     );
     let big = json!({ "t": "w".repeat(limits::RECORD_SCHEDULE_BODY_MAX_BYTES) });
+    // the fragment's own key is no member, so a computer's bridge would take it as an agent's owner's
+    let relaying = json!({ "text": "water the plants", "relayed": { "via": "simplex", "for": editor_id, "agent": name } });
     let refusals = [
         ("not five fields", "0 * * *", "pings", water.clone(), 400, "five fields"),
         ("every 5 minutes", "*/5 * * * *", "pings", water.clone(), 400, "at most every 15 minutes"),
@@ -1042,6 +1045,7 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         ("a channel that takes no posts", "0 * * * *", "feed", water.clone(), 400, "takes no posts"),
         ("a channel only one kind of member posts on", "0 * * * *", "work", water.clone(), 400, "only its members of one kind"),
         ("a channel only its owner posts on", "0 * * * *", "desk", water.clone(), 403, "needs the owner role"),
+        ("a record that relays someone, as a post would be", "0 0 1 1 *", "pings", relaying, 403, "relays no one"),
     ];
     let (mut each, mut said) = (true, vec![]);
     for (why, cron, channel, record, status, says) in refusals {
