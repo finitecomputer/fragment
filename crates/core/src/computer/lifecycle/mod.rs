@@ -18,7 +18,7 @@ mod tests;
 
 pub use event::{Action, Ended, Event, Rules, SaveNote, Socket, Step, Wake};
 pub use saving::Saving;
-pub use starts::{alive, Alive};
+pub use starts::{alive, unplanned_start, Alive};
 pub use unsaved::{Failing, Unsaved};
 
 /// Where its lifecycle is, each phase with what is only true of it. A

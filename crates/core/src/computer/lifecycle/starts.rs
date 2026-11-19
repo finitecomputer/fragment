@@ -6,6 +6,7 @@ use fragment_proto::computer::LifeEnd;
 
 use super::{Action, Ended, Lifecycle, Phase, Retry, Saving, Step};
 use crate::computer::limits::{RETRY_PAUSE_MS, STARTS_FAILED_MAX};
+use crate::computer::Saves;
 
 impl Lifecycle {
     /// Starts of this wake that failed in a row.
@@ -177,6 +178,19 @@ impl Lifecycle {
     /// generation the start it restarted until the alarm's start is made.
     pub fn starting(&self, now_ms: i64) -> bool {
         matches!(self.phase, Phase::Starting { .. }) || (self.start_due(now_ms) && self.retry().is_some_and(|r| r.owed || self.wanted(now_ms)))
+    }
+}
+
+/// The start under way that has planned nothing yet (`Saves::start_from`
+/// names none for it): it is still making sure the container before it is
+/// gone (the cell's `earlier_runs`, its first step), so a container that
+/// runs now is that one, never its own. A new isolate reports such a start
+/// held up (`Event::StartBlocked`) rather than take that container over as
+/// its own, and a port's request is not passed to it.
+pub fn unplanned_start(life: &Lifecycle, saves: &Saves) -> Option<u64> {
+    match life.phase {
+        Phase::Starting { generation, destroying: false, .. } if saves.start_from(generation).is_none() => Some(generation),
+        _ => None,
     }
 }
 
@@ -496,6 +510,42 @@ mod tests {
         assert!((T + 15_000 + SLEEP_DEADLINE_MS..T + 30_000 + SLEEP_DEADLINE_MS).contains(&struck_at), "the first strike once a stop's deadline passed: {struck_at}");
         assert!(matches!(&l.phase, Phase::Failed { why, .. } if why.contains("still ran")), "{l:?}");
         assert!(l.failures() == STARTS_FAILED_MAX);
+    }
+
+    /// Goal (Codex on #1380): a start held up by the container before it
+    /// is in `Starting` while it waits for that container to go, having
+    /// planned nothing. Its isolate gone then (a deploy), the new one must
+    /// not take that container over as the start's own (its exit would be
+    /// a strike, and nothing of the start ran): the start is reported held
+    /// up and made again. Valid (unplanned: held up), invalid (planned,
+    /// destroying, awake: taken over as before), replay (once reported, it
+    /// is asleep with its start owed: nothing more), restart (both read back
+    /// from storage give the same answer). Method: the lifecycle and the
+    /// saves as the DO keeps them.
+    #[test]
+    fn a_start_still_clearing_the_one_before_it_is_never_taken_over() {
+        let mut c = Computer::new();
+        assert_eq!(c.apply(Event::Wake { why: Wake::Presence }).actions, vec![Action::Start { generation: 1 }]);
+        assert_eq!(unplanned_start(&c.life, &c.saves), Some(1), "nothing planned: whatever runs is not its own");
+        // restart: stored and read back, the same answer
+        let (life, _) = Lifecycle::read(&serde_json::to_string(&c.life).unwrap()).unwrap();
+        let saves: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
+        assert_eq!(unplanned_start(&life, &saves), Some(1));
+        // the new isolate's report: held up, no strike, made again at once
+        let s = c.apply(Event::StartBlocked { generation: 1 });
+        assert!(c.life.failures() == 0 && c.life.start_due(c.now) && s.alarm_ms == Some(c.now), "{:?}", c.life);
+        assert_eq!(unplanned_start(&c.life, &c.saves), None, "replay: asleep, its start owed");
+        let s = c.apply(Event::Alarm);
+        assert_eq!(s.actions, vec![Action::Start { generation: 2 }]);
+        // planned (past the container before it): its own, taken over as before
+        c.saves.starting(2, RestoreSource::Nothing);
+        assert_eq!(unplanned_start(&c.life, &c.saves), None);
+        // destroying what it started, or awake: never this question
+        c.apply(Event::StartFailing { generation: 2 });
+        assert_eq!(unplanned_start(&c.life, &c.saves), None);
+        let mut l = Lifecycle::new();
+        started(&mut l, T);
+        assert_eq!(unplanned_start(&l, &Saves::default()), None, "awake");
     }
 
     /// Goal: a container that stops on its own is started again while it

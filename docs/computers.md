@@ -97,6 +97,10 @@ an image may rely on this:
   stop's deadline (`SLEEP_DEADLINE_MS`, 6 minutes) since the first such
   try; after that each try is a strike, so one that never goes gives up
   as failing starts do. Nothing it would have started from is forgotten.
+  A new isolate that finds such a start (it planned nothing yet) never
+  takes the running container over as its own: it reports the start held
+  up. A port's request meanwhile answers that the computer is still
+  starting (409, try again) rather than reach the earlier container.
 - **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
   share `RESTORE_MS`), never one that follows a restore's progress: a
   restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,

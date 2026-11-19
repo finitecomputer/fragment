@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::ledger::{MeterRow, Month, Spend};
@@ -309,6 +309,9 @@ const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
 const ANSWER_HIDDEN_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// A port number the platform proxies to.
 const PORT_MAX: u16 = 65_535;
+/// A port's request to a computer still starting is asked again after
+/// this: one held-up try's destroy wait (`DESTROY_MS`).
+const PORT_RETRY_MS: u64 = DESTROY_MS as u64;
 /// Awake intervals one flush sends (one is made every five minutes awake).
 const METER_ROWS_MAX: u64 = 64;
 
@@ -1210,6 +1213,12 @@ impl ComputerCell {
                 return Err(CellError::host(format!("start {generation}'s container still runs {}s after its destroy", DESTROY_MS / 1000)));
             }
             return Ok(Some(Event::StartFailed { generation, why: "its start failed, and the isolate that saw why went before it said so".into() }));
+        }
+        if let Some(generation) = unplanned_start(&life, &self.saves()?) {
+            // its isolate went as the start made sure the container before
+            // it was gone: whatever runs is that one, never taken over as
+            // this start's; the start is made again, as one held up
+            return Ok(Some(Event::StartBlocked { generation }));
         }
         let Some(generation) = life.running() else { return Ok(None) };
         let g = JsValue::from_f64(generation as f64);
@@ -3568,6 +3577,13 @@ impl ComputerCell {
         let life = self.lifecycle()?;
         if !matches!(life.phase, Phase::Awake { .. }) {
             self.wake(Wake::Tab).await?;
+            // only to its own start's container: still asleep (a start owed,
+            // one held up), or not yet past the container before it, the one
+            // that answers would be that earlier one
+            let life = self.lifecycle()?;
+            if matches!(life.phase, Phase::Asleep { .. }) || unplanned_start(&life, &self.saves()?).is_some() {
+                return Err(CellError::new(ErrorCode::Conflict, "its computer is still starting: try again in a moment").retry_after(PORT_RETRY_MS));
+            }
         }
         let out = self.call("port", &[JsValue::from_f64(f64::from(port)), JsValue::from(req.inner())]).await?;
         let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the port answered no Response"))?;

@@ -107,7 +107,8 @@ pub enum Event {
     StartFailing { generation: u64 },
     /// The start `generation` found the container before it still running
     /// past its destroy (a snapshot the runtime still takes holds a sleep's
-    /// container until it ends) and started nothing: made again at once, no
+    /// container until it ends), or its isolate went as it looked
+    /// (`unplanned_start`), and started nothing: made again at once, no
     /// strike, until that container has had a stop's deadline
     /// (`SLEEP_DEADLINE_MS`) since the first such try; a failure after.
     StartBlocked { generation: u64 },

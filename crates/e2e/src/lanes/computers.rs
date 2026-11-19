@@ -508,7 +508,7 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
         let text = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
         text.lines().filter(|l| l.contains(c.id) && l.contains(&format!("\"event\":\"{event}\""))).count()
     };
-    let (failed_before, held_before) = (log("start_failed"), log("start_blocked"));
+    let (failed_before, held_before, ready_before) = (log("start_failed"), log("start_blocked"), log("ready"));
     let t0 = std::time::Instant::now();
     let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
     let outlived = lever(api, c.id, "saves")?;
@@ -516,7 +516,7 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
     let up = s.eventually(WAKE, || phase(api, c.owner, c.id) == "awake");
     let took = t0.elapsed();
     let after = api.signed(c.owner, "GET", &path(""), None)?;
-    let (failed, held) = (log("start_failed") - failed_before, log("start_blocked") - held_before);
+    let (failed, held, ready) = (log("start_failed") - failed_before, log("start_blocked") - held_before, log("ready") - ready_before);
     s.ok(
         BOUND_CHECKS[7],
         woke.body["phase"] == "awake"
@@ -529,8 +529,9 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
             && took >= hold
             && failed == 0
             && held >= 1
+            && ready == 1
             && after.body["generation"].as_u64().is_some_and(|n| n > g + 2),
-        format!("up in {took:.1?}, {held} starts held up, {failed} failed; {slept} / {outlived} / {answered} / {after}"),
+        format!("up in {took:.1?}, {held} starts held up, {failed} failed, {ready} came up; {slept} / {outlived} / {answered} / {after}"),
     );
     std::thread::sleep(QUEUE_DRAIN);
     let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
