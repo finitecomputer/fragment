@@ -364,8 +364,10 @@ impl FragmentCell {
     /// Its reach (fragment/calls.rs `ReachOf`).
     pub(crate) fn reach_of(&self) -> CellResult<Reach> {
         self.created()?;
-        let shared = self.alone()?.is_some() && self.shared_past_owner()?;
-        Ok(Reach { kind: self.kind()?, reach: self.reaches()?, beyond: self.sharing_counts()?.beyond(), shared })
+        // its sharing read once: its reach, its link, and past its owner
+        let sharing = self.sharing_counts()?;
+        let shared = self.alone()?.is_some() && crate::alone::past_owner(&sharing);
+        Ok(Reach { kind: self.kind()?, reach: sharing.reach, beyond: sharing.beyond(), shared })
     }
 
     /// The finite.computer move's routine (`Routine`), with no chat,
