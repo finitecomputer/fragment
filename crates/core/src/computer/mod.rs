@@ -63,6 +63,7 @@
 //! something was done on the life it lost after the save it went back to.
 
 pub mod said;
+pub mod start_line;
 
 mod awake;
 mod disk;
