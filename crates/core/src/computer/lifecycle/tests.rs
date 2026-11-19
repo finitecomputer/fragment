@@ -328,11 +328,11 @@ fn closing_a_used_tab_saves_whatever_else_is_counted() {
 }
 
 /// Goal (Paul, 2026-11-18: one number): every wake holds the computer
-/// the idle wait, a pre-wake as a record does, and a later one holds it
-/// from then.
+/// the idle wait, its owner's (the shell's pre-wake) as a record does, and
+/// a later one holds it from then.
 #[test]
 fn every_wake_holds_it_the_idle_wait() {
-    for why in [Wake::Record, Wake::Presence, Wake::Tab, Wake::Owner, Wake::Joined] {
+    for why in [Wake::Record, Wake::Tab, Wake::Owner, Wake::Joined] {
         let mut l = Lifecycle::new();
         let s = l.apply(Event::Wake { why }, T);
         let Action::Start { generation } = s.actions[0] else { panic!("{why:?}: {s:?}") };
@@ -342,9 +342,9 @@ fn every_wake_holds_it_the_idle_wait() {
         assert!(l.apply(Event::Alarm, T + IDLE_MS).actions.contains(&Action::Sleep { generation }), "{why:?}");
     }
     let mut l = Lifecycle::new();
-    l.apply(Event::Wake { why: Wake::Presence }, T);
+    l.apply(Event::Wake { why: Wake::Tab }, T);
     l.apply(Event::Ready { generation: 1 }, T + 2_000);
-    l.apply(Event::Wake { why: Wake::Presence }, T + 3_000);
+    l.apply(Event::Wake { why: Wake::Tab }, T + 3_000);
     let s = l.apply(Event::Alarm, T + IDLE_MS);
     assert!(!s.actions.iter().any(|a| matches!(a, Action::Sleep { .. })));
     assert_eq!(l.held_until_ms(), T + 3_000 + IDLE_MS);

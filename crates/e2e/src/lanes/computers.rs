@@ -1695,25 +1695,23 @@ fn put_to_sleep(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> (bool, V
     (slept, last)
 }
 
-/// A page left open on an agent's chat, with its computer asleep (Paul,
+/// A page left open on its agent's chat, with its computer asleep (Paul,
 /// 2026-11-18: only real interaction is a use, and a tab nobody uses keeps
 /// nothing awake). Its socket opened, then opened again as a page's
-/// reconnect does (a deploy, a network change, or its cookie's check
-/// after the fragment woke from hibernation), each sending its presence as
-/// a page does on each (and again as its tab is shown), wakes nothing.
-/// Typing begun there, its presence's `typing` turning on, wakes it
-/// (decision 39).
-const OPEN_PAGE_CHECKS: [&str; 2] = [
-    "a page open on its agent's chat wakes nothing: its socket opened and reconnected, its presence sent with each, nothing typed, its computer stays asleep",
-    "typing begun on that page (its presence's typing turning on) wakes it",
-];
+/// reconnect does (a deploy, a network change, or its cookie's check after
+/// the fragment woke from hibernation), each sending its presence as a
+/// page does on each (and again as its tab is shown), wakes nothing; nor
+/// does a presence that says it types, which a page's own script may send
+/// with no one there (decision 39).
+const OPEN_PAGE_CHECK: &str =
+    "a page open on its agent's chat wakes nothing: its socket opened and reconnected, its presence sent with each, one saying it types too, its computer stays asleep";
 /// How long an asleep computer is watched for a wake nothing should
 /// bring: a socket's opening that woke it reached it within a second.
 const NOTHING_WAKES_WITHIN: Duration = Duration::from_secs(5);
 
-fn open_page_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, chat: &str, wake: Duration) -> Result<()> {
+fn open_page_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, chat: &str) -> Result<()> {
     let (slept, last) = put_to_sleep(s, api, owner, id);
-    anyhow::ensure!(slept, "its computer put to sleep for the open page's checks: {last}");
+    anyhow::ensure!(slept, "its computer put to sleep for the open page's check: {last}");
     let here = |typing: bool| json!({ "type": "presence", "data": { "typing": typing, "looking": true } });
     let opened = || -> Result<Socket> {
         let mut page = Socket::open(api, chat, "__live", Some(owner), None)?;
@@ -1724,11 +1722,10 @@ fn open_page_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, cha
     };
     opened()?.close();
     let mut page = opened()?;
-    let woke = s.eventually(NOTHING_WAKES_WITHIN, || phase(api, owner, id) != "asleep");
-    s.ok(OPEN_PAGE_CHECKS[0], !woke, phase(api, owner, id));
     page.send(&here(true))?;
-    let up = s.eventually(wake, || phase(api, owner, id) == "awake");
-    s.ok(OPEN_PAGE_CHECKS[1], up, phase(api, owner, id));
+    page.until_where("presence", 5, |p| p["data"]["typing"] == true)?;
+    let woke = s.eventually(NOTHING_WAKES_WITHIN, || phase(api, owner, id) != "asleep");
+    s.ok(OPEN_PAGE_CHECK, !woke, phase(api, owner, id));
     page.close();
     Ok(())
 }
@@ -2356,7 +2353,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         }
     }
 
-    open_page_checks(s, api, &owner, &id, &chat_name, wake)?;
+    open_page_checks(s, api, &owner, &id, &chat_name)?;
 
     // a second agent on the same computer: @mentioned it answers, else the lead
     let maple_name = s.named(api, &owner, "maple")?;

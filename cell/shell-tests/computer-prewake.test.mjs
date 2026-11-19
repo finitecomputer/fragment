@@ -12,6 +12,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createComputer } from "../shell/computer.js";
+import { createLauncher } from "../shell/launcher.js";
+import { KIND } from "../shell/frame-messages.js";
+import { readFileSync } from "node:fs";
 
 const COMPUTER = "computer:aa";
 const WAKE = `/api/computers/${COMPUTER}/wake`;
@@ -159,4 +162,89 @@ test("a wake refused (no credit, a deploy) is quiet, and the next is asked on th
   await settle();
   assert.deepEqual(p.posted(), [WAKE, WAKE]);
   assert.equal(p.shell.computer.phase, "awake");
+});
+
+// The launcher as far as its pre-wake (review of #1351): the person's own
+// opening (its button, ⌘K in the shell) races their computer's start; a
+// framed page's ask (`openLauncher`, which a page's code may send on its
+// own, late, while its frame keeps focus) opens it and asks nothing. The
+// real `createLauncher`, its page stood in for by elements that take
+// whatever is asked of them.
+function element(own = {}) {
+  const t = { dataset: {}, style: { setProperty() {} }, children: [], classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, value: "", hidden: false, open: false, offsetParent: null, textContent: "", ...own };
+  return new Proxy(t, {
+    get: (o, k) => (k in o || typeof k === "symbol" ? o[k] : () => element()),
+    set: (o, k, v) => ((o[k] = v), true),
+  });
+}
+function launcherPage(t) {
+  const listeners = [];
+  const els = new Map();
+  // the input keeps what listens to it; every element made is kept (`made`)
+  const listening = () => ({ heard: {}, addEventListener(type, fn) { this.heard[type] = fn; } });
+  const $ = (id) => {
+    if (!els.has(id)) els.set(id, element(id === "search-dialog" ? { showModal() { this.open = true; } } : id === "workspace-search" ? listening() : {}));
+    return els.get(id);
+  };
+  const made = [];
+  const frameWindow = {};
+  const frame = element({ dataset: { fragment: "talk--k3x9" }, contentWindow: frameWindow });
+  globalThis.document = { activeElement: frame, querySelectorAll: () => [frame], elementFromPoint: () => null, addEventListener() {}, removeEventListener() {} };
+  globalThis.addEventListener = (type, fn) => listeners.push({ type, fn });
+  globalThis.matchMedia = () => ({ matches: true });
+  t.after(() => { delete globalThis.addEventListener; delete globalThis.matchMedia; });
+  const woken = [];
+  createLauncher({
+    $, el: (tag, cls) => { const e = element({ tag, cls }); made.push(e); return e; },
+    api: async (method, path) => (path.startsWith("/api/search") ? { fragments: [{ name: "talk--k3x9", kind: "chat" }], messages: [] } : {}),
+    seg: (s) => s, state: { fragments: [], agents: new Map(), current: null },
+    byName: (name) => ({ name, kind: "chat" }), isChat: () => true, titleOf: (n) => n, chatTitle: (n) => n, mark: () => element(), iconOf: () => element(),
+    primaryAgent: () => null, newChatAgent: () => null, agentsOwnChat: () => null, UNTITLED: "New chat",
+    openChat() {}, openApp() {}, chatFrame() {}, composeIn() {}, newChat: async () => null, leaveSidebar() {}, closeMenu() {}, notice() {},
+    prewake: () => woken.push("wake"), originOf: async () => "https://talk--k3x9.example", offers: () => false,
+    views: () => 0, busy: () => false, setupChat: () => null,
+  });
+  const fire = async (type, event) => { for (const l of listeners.filter((l) => l.type === type)) await l.fn(event); };
+  return { $, woken, frame, frameWindow, fire, made };
+}
+
+test("a framed page's ask opens the launcher and wakes nothing, however late it comes: only the person's own opening races their computer", async (t) => {
+  const p = launcherPage(t);
+  await p.fire("message", { data: { fragment: KIND.openLauncher }, source: p.frameWindow, origin: "https://talk--k3x9.example" });
+  assert.equal(p.$("search-dialog").open, true, "the frame's ask opened it");
+  assert.deepEqual(p.woken, [], "a page's ask, which it may send on its own, renews no hold");
+  p.$("search-dialog").open = false;
+  p.$("sidebar-new-chat").onclick();
+  assert.deepEqual(p.woken, ["wake"], "its button, pressed in the shell");
+  p.$("search-dialog").open = false;
+  await p.fire("keydown", { metaKey: true, code: "KeyK", preventDefault() {} });
+  assert.deepEqual(p.woken, ["wake", "wake"], "⌘K in the shell");
+});
+
+test("a chat picked from the launcher's results is a pick: it races the computer, however the launcher was opened or long ago", async (t) => {
+  const p = launcherPage(t);
+  // opened by a framed page's ask: no wake for that
+  await p.fire("message", { data: { fragment: KIND.openLauncher }, source: p.frameWindow, origin: "https://talk--k3x9.example" });
+  assert.deepEqual(p.woken, []);
+  const input = p.$("workspace-search");
+  input.value = "talk";
+  input.heard.input();
+  await new Promise((r) => setTimeout(r, 300));
+  const row = p.made.find((e) => e.cls === "row search-result" && e.dataset.fragment === "talk--k3x9");
+  assert.ok(row, "the chat found is a row");
+  row.onclick();
+  assert.deepEqual(p.woken, ["wake"], "the person's pick of a result");
+});
+
+// shell.js itself does not load here (it is the page), so its wirings
+// are read from its source: Continue's Open (continue.js
+// `navigation.openChat`) is a pick, through `pickChat`; the chat its start
+// opens (`?chat=` included, which any page may send its tab to) is not.
+test("shell.js: Continue's chats are picks (`pickChat`); the chat its start opens, `?chat=` included, is no pick", () => {
+  const shell = readFileSync(new URL("../shell/shell.js", import.meta.url), "utf8");
+  const continuing = shell.slice(shell.indexOf("const continuing = createContinue("), shell.indexOf("const sessionArchive = createSessionArchive("));
+  assert.match(continuing, /navigation: \{ openChat: pickChat, leaveSidebar \}/, "Continue opens its chats as picks");
+  const start = shell.slice(shell.indexOf("async function start(open)"), shell.indexOf("// ---- a guest"));
+  assert.match(start, /else if \(pick\) openChat\(pick\);/, "start opens its chat as a load, not a pick");
+  assert.doesNotMatch(start, /\b(pickChat|prewake)\(/, "nothing in start wakes the computer");
 });

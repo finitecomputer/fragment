@@ -921,7 +921,7 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
 const continuing = createContinue({
   api, ui: { el, notice },
   data: { allFragments: () => state.fragments, agents: () => state.agents, primaryAgent: () => primaryAgent(), titleOf, seg, chatBase: (agent) => chatBase(agent) },
-  navigation: { openChat, leaveSidebar }, load: () => load(), store,
+  navigation: { openChat: pickChat, leaveSidebar }, load: () => load(), store,
 });
 const sessionArchive = createSessionArchive({
   api, ui: { renderHeading: () => renderHeading() },
@@ -2261,6 +2261,10 @@ async function start(open) {
   else if (settings && location.pathname === SCHEDULES) openSchedules(false);
   else if (settings && location.pathname === MOVE) openMove(false);
   else if (settings) await openSettings(false);
+  // a chat an alert's click opened with no shell open (`?chat=`) too:
+  // `?chat=` is an address any page may send its tab to, so its load is
+  // no sign. An alert comes as its agent replies, so its computer is
+  // awake then, and for the idle wait after (computer.js `prewake`).
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");

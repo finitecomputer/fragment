@@ -213,13 +213,14 @@ mod tests {
         let mut c = Computer::new();
         c.wake();
         c.sleep(Some("b1"));
-        // a turn, its end saved, then only a page's presence, its owner's
-        // port tab open since before that save and unused: its exit loses
-        // nothing, and is a sleep (an open tab holds nothing: only its use)
+        // a turn, its end saved, then only a wake that brings no work (a
+        // port tab's), its owner's port tab open since before that save and
+        // unused: its exit loses nothing, and is a sleep (an open tab holds
+        // nothing: only its use)
         let g = c.wake().generation;
         c.apply(Event::Opened { socket: Socket::Tab });
         c.turn_saved("b2");
-        c.apply(Event::Wake { why: Wake::Presence });
+        c.apply(Event::Wake { why: Wake::Tab });
         let next = c.crash();
         assert_eq!(went_back(&c), None, "it starts again from b2, which holds all it did");
         assert!(!c.saves.saw(g), "nothing told, so nothing to see");

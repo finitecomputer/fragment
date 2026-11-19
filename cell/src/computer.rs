@@ -3490,16 +3490,18 @@ impl ComputerCell {
             return Err(CellError::new(ErrorCode::Unauthenticated, "sign in to this computer: its owner opens it from the platform"));
         }
         let port: u16 = req.headers().get(PORT_HEADER)?.and_then(|p| p.parse().ok()).filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("name a port"))?;
-        // a request to a sleeping computer's port wakes it, as a tab does;
-        // one going to sleep is woken after, and reaches none of the
-        // container its sleep saved (its tabs closed as it began)
-        let life = self.lifecycle()?;
-        if matches!(life.phase, Phase::Sleeping { .. }) {
+        // a request to a sleeping computer's port wakes it, as a tab does
+        if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) {
+            self.wake(Wake::Tab).await?;
+        }
+        // one going to sleep, read after any wait (a sleep may have begun
+        // during the wake's): woken after it, and its container, which the
+        // sleep saves, hears nothing of this request. Nothing is awaited
+        // from here until entry.mjs's `port` has read the sleeps begun,
+        // which closes one that begins as its upgrade waits
+        if matches!(self.lifecycle()?.phase, Phase::Sleeping { .. }) {
             self.wake(Wake::Tab).await?;
             return Ok(Response::error("its computer is going to sleep, and wakes again after: try again in a moment", 503)?);
-        }
-        if !matches!(life.phase, Phase::Awake { .. }) {
-            self.wake(Wake::Tab).await?;
         }
         let every = JsValue::from_f64(fragment_core::computer::TAB_USED_EVERY_MS as f64);
         let out = self.call("port", &[JsValue::from_f64(f64::from(port)), JsValue::from(req.inner()), every]).await?;
