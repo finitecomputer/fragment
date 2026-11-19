@@ -97,6 +97,9 @@ one made earlier, it skips them, and you make your own.
 - **Files:** always into a new app (step 3), never into one an earlier
   import made: sending there would replace a file changed since. Say in
   the report that the earlier one is there too.
+- **Storage is yours, not an import's:** keep the rest in your own
+  storage (step 3) even when an earlier import made it, in a notes
+  folder of this import's own: what is kept there is never written over.
 - **Brains:** never push into a brain an earlier import made, or make a
   second of one: keep a reference copy, and compare it with that brain
   (the profile's "Once you are in the real one").
@@ -219,9 +222,9 @@ or the move is paused for Finite's team. Run this as one command, then
 write the stage in `progress.md`:
 
 ```sh
-stage="<the stage>" && mkdir -p "$HOME/home-import" "/tmp/home-import-$stage" && \
+stage="<the stage>" && mkdir -p "$HOME/home-import" && \
 curl -fsS -X POST -H "x-fragment-agent: $FRAGMENT_AS_AGENT" -o "$HOME/home-import/stage.json" "http://api.fragment.internal/api/migrations/stages/$stage/open" && \
-jq '.manifest | {layout, zip_bytes, zip_sha256, left_more, left: (.left // [] | group_by(.why) | map({why: .[0].why, files: length, bytes: (map(.bytes) | add)}))}' "$HOME/home-import/stage.json" && df -h /tmp
+jq '.manifest | {layout, zip_bytes, files, left_more, left: (.left // [] | group_by(.why) | map({why: .[0].why, files: length, bytes: (map(.bytes) | add)}))}' "$HOME/home-import/stage.json"
 ```
 
 - **Refused** (403, 404 or 409): the stage isn't yours to read now. If
@@ -231,37 +234,24 @@ jq '.manifest | {layout, zip_bytes, zip_sha256, left_more, left: (.left // [] | 
   stage you can't read may be gone.
 - **Another error:** wait a minute and run it again, up to five times.
   Still failing: tell your owner it's paused, as above, and stop.
-- **Room:** `/tmp` needs the manifest's `zip_bytes` free, with room to
-  spare. If it doesn't have that, end the import as not done (below),
-  why "not enough room for the zip".
 
 The layout is the manifest's `layout`, its file
 `${HERMES_SKILL_DIR}/profiles/<layout>.layout.json`. The manifest's `left`
 is what the old platform kept back, by kind (each file is listed in
 `stage.json`). Keep `stage.json`: the report (step 8) uses it.
 
-**Download the zip** into `/tmp/home-import-<the stage>/`, never into your
-home: your computer saves your home, and the zip is large and only needed
-once. That folder is this stage's alone: your owner's other agents share
-this computer's `/tmp`, and may be bringing theirs over at the same time. Run this in
-the background, without `notify`, and wait for it with your `process`
-tool. Each try goes on where the last stopped:
+**Read it where it is: never download it.** An old agent's home can be
+larger than your whole disk. Every `fragment home` and `fragment session
+import` command below reads the stage in place, named
+`stage:<the stage>`: only what it reads is fetched, and only what the
+import keeps comes onto your disk. Each can read it until you say
+`done`. One that stops partway (the network) is run again the same way:
+it goes on where it stopped.
 
-```sh
-stage="<the stage>" && z="/tmp/home-import-$stage/home.zip" && want="$(jq -r .manifest.zip_bytes "$HOME/home-import/stage.json")" && \
-for try in 1 2 3 4 5 6 7 8 9 10; do
-  have="$(stat -c %s "$z" 2>/dev/null || echo 0)"; [ "$have" -ge "$want" ] && break
-  curl -fsS -C - -H "x-fragment-agent: $FRAGMENT_AS_AGENT" -o "$z" "http://api.fragment.internal/api/migrations/stages/$stage/zip" || sleep 10
-done; \
-echo "bytes: $(stat -c %s "$z" 2>/dev/null || echo 0) of $want"; \
-echo "sha256: $(sha256sum "$z" | cut -d' ' -f1) of $(jq -r .manifest.zip_sha256 "$HOME/home-import/stage.json")"
-```
-
-Both pairs must match. If they don't, delete
-`/tmp/home-import-<the stage>/home.zip` and download it again, once. Wrong again: end the import as not done,
-why "the zip did not arrive whole". If you are started again and the zip
-is gone (a restart clears `/tmp`), open the stage again and download it
-again: both answer the same until you say `done`.
+**Nothing is left behind.** In a move, every file of the old home comes:
+what you bring in the steps below, and the rest kept whole in your
+storage, with a note where each was (step 3). Only the files whose names
+say they may hold a password or key stay with the old platform, unread.
 
 **What the old platform kept back.** Name it in the report (step 8),
 grouped by its `why`, in plain words, with how many files and how large:
@@ -276,7 +266,7 @@ grouped by its `why`, in plain words, with how many files and how large:
 `left_more`, when there, is how many more were kept back past the list.
 
 **End the import with `done`.** After it, the stage can't be read again,
-so send it only once nothing reads the zip any more: the chats' import has
+so send it only once nothing reads the stage any more: the chats' import has
 finished (step 2) and `report.md` is written (step 8). Send it within a
 day of the message, or the move is paused for Finite's team. Write in
 `progress.md` that you sent it.
@@ -294,8 +284,8 @@ curl -fsS -X POST -H "x-fragment-agent: $FRAGMENT_AS_AGENT" -H "content-type: ap
 It answers the move's state, `retiring`: finite.computer now switches the
 old agent off for good. Then tell your owner as step 8 says.
 
-When the import can't be finished (the stage can't be read, the zip never
-arrives whole, there isn't room, or the survey fails), say so in one line:
+When the import can't be finished (the stage can't be read, there isn't
+room, or the survey fails), say so in one line:
 
 ```sh
 stage="<the stage>" why="<one short line: what stopped it>" && \
@@ -309,9 +299,9 @@ two: you couldn't finish your upgrade, why in plain words, and that
 Finite's team will pick it up. Ask them to do nothing. Don't promise
 nothing is lost: you can't tell whether its stage is still kept.
 
-Below, `<source>` is `~/home-import/home.zip`, the stage's
-`/tmp/home-import-<the stage>/home.zip`, or the path you were given, and `<L>` is
-`hermes` or the layout file's path.
+Below, `<source>` is `~/home-import/home.zip`, `stage:<the stage>` in a
+move, or the path you were given, and `<L>` is `hermes` or the layout
+file's path.
 
 ## 1. Survey
 
@@ -338,7 +328,10 @@ survey:
 - Your home needs the bytes of the `parts` free (each brain and site is
   copied out to be made), plus a fifth more.
 
-If there isn't room, tell your owner how much is needed, and stop.
+If there isn't room, tell your owner how much is needed, and stop. In a
+move, don't stop: everything is kept in storage (step 3) whatever you
+bring here, so bring what fits, a brain or the chats at a time, and say
+in the report what stayed in storage for lack of room.
 
 **Files left out unread.** `source.skipped` names each file whose name
 says it may hold a password or key (an `.env`, a private key). The
@@ -381,13 +374,18 @@ don't read them into your memory or a brain.
 
 ## 3. Files, into an app
 
-When the survey's `files.brought.files` is more than 0 (make it once, as
-the rules say):
+When the survey's `files.brought.files` is more than 0, or in a move
+(make each fragment once, as the rules say):
 
 ```sh
 fragment create old-files --visibility members
-fragment home files <source> --layout <L> --into <its name>
 fragment rename <its name> "Files from <the old platform>"
+```
+
+Not in a move:
+
+```sh
+fragment home files <source> --layout <L> --into <its name>
 fragment deploy <its name>
 ```
 
@@ -395,6 +393,47 @@ It brings the cap's pick: photos, video, audio and documents first, the
 newest first, up to 10 GiB. It writes `left-behind.md` beside them,
 listing what stayed and why. Its page shows the files. If it stops
 partway, run it again: it sends only what is missing.
+
+**In a move, nothing stays behind.** The rest of the old home is kept
+whole in your storage: the one members-only fragment of your owner's
+that holds what you move off your disk (`disk-space-finite`). Use yours
+if `fragment list` has it, else make it once, named for you
+(`fragment create <your name>-storage --visibility members`), and write
+its full name in `progress.md`. A big home takes a while: when the
+survey's files are more than 5 GB, first tell your owner in one short
+sentence that your upgrade is under way and will take a while, and that
+you'll tell them when it's done. Then run this in the background,
+without `notify`, and wait for it with your `process` tool:
+
+```sh
+fragment home files <source> --layout <L> --into <its name> --store <your storage> --notes "$HOME/old-agent/home" --json
+```
+
+If `~/old-agent/home/` is there already (an earlier import kept its
+files there), use `--notes "$HOME/old-agent/home-<the stage>"` in its
+place, here and below, and write that folder in `progress.md`.
+
+It brings the cap's pick as above, and keeps every other file of the old
+home (its self, its brains' files, what the cap leaves) whole in your
+storage, copied there by the platform, never through your disk. Each
+folder or file kept gets a note in that folder, laid out as the old
+home was, as `fragment offload` leaves one: `fragment offload --back
+<its note>` brings it back when you need it (only once there is room for
+it). Its answer counts the home's files: here, in storage, and unread.
+- **It stops partway:** run it again the same way. It goes on.
+- **`stored.more`:** your storage is full (a fragment holds about 20,000
+  files). Make another, `<your name>-storage-2`, write its name in
+  `progress.md`, and run it again with `--store` naming that one.
+- **It says the notes keep other bytes than this home's:** an earlier
+  upgrade kept another copy of it. Keep this one beside it: run it again
+  with `--notes "$HOME/old-agent/home-<the stage>"`, and write that
+  folder in `progress.md` and the report.
+
+Then deploy each, once: `fragment deploy <its name>` and
+`fragment deploy <your storage>`. And save one memory: the rest of your
+old home is kept in your storage, a note for each folder or file in that
+notes folder, and `fragment offload --back <its note>` brings one back
+(one you saved before for an earlier import: add this folder to it).
 
 ## 4. Personality
 
@@ -533,14 +572,18 @@ in), then the rest:
   the profile made. The old chats are in their History (how many, as
   the import printed), where search finds them by what was said. The old
   memories are kept whole on your computer, in its `old-agent` folder
-  (`report.md` names the path).
+  (`report.md` names the path). In a move, the rest of the old home is
+  kept whole in their storage (its link), and you can bring any of it
+  back when they ask: say how many files and how large.
 - **What came over:** your personality, how many memories, the skills (by
   name), and the routines (when they run, in your owner's time).
 - **What didn't, and why**, a sentence each:
   - every skill left out;
   - the jobs that are no routine;
-  - the files left behind, by kind (the survey's `files.left_by_why`:
-    how many videos, archives and the like, with the largest by name);
+  - not in a move, the files left behind, by kind (the survey's
+    `files.left_by_why`: how many videos, archives and the like, with the
+    largest by name); in a move, none are: say what stayed in storage for
+    lack of room here, if anything did;
   - the files left out unread for holding what may be a password or
     key (`source.skipped`), by name;
   - in a move, what the old platform kept back (the manifest's `left`);
@@ -555,8 +598,7 @@ Write the full detail to `~/home-import/report.md` too, and mark every
 step done in `progress.md`. In a move, write `report.md` before your
 message, then send `done` ("From a move's stage"), then the message. Then
 delete `~/home-import/home.zip`, `~/home-import/home/` and
-`~/home-import/skills/`, and in a move your stage's own
-`/tmp/home-import-<the stage>/` (never another folder in `/tmp`): everything is in its place now, and your
+`~/home-import/skills/`: everything is in its place now, and your
 computer saves your whole home each time it sleeps. Keep `report.md`,
 `progress.md`, `stage.json`, `~/old-agent/`, `~/self-before-import/` and
 every earlier import's folder.
