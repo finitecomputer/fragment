@@ -1169,7 +1169,9 @@ A service the agent's owner connected (Settings → Connections) is called
 with `fragment connection call`: it finds that connection's placeholder
 in the environment, sends it as a bearer token to the address named (one
 of the service's own hosts, where the computer swaps in a short-lived
-token), and prints the answer. Each connection's skill says its
+token), and prints the answer as it came, byte for byte. A variable
+holding the connection's placeholder (`fcx_`) is used before one holding
+a key's of the same name (`fck_`). Each connection's skill says its
 addresses and quirks; the command is the same for all of them:
 
 ```
