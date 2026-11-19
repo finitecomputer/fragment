@@ -329,7 +329,7 @@ fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
 /// The bound checks (r4, r6: a sick container after a wake, and a sleep
 /// that never ended; #362: a start from a snapshot that came up dead), each
 /// skipped off the stub and the fakes.
-const BOUND_CHECKS: [&str; 7] = [
+const BOUND_CHECKS: [&str; 8] = [
     "a start that waits for its guest, as one from a snapshot does, is up once its guest reads its view",
     "one whose guest never reads it came up dead: the same wake starts it again from its save (#362)",
     "a sleep whose backups never answer (a sick container's) fails at their bound, and keeps its container, saying why",
@@ -337,6 +337,7 @@ const BOUND_CHECKS: [&str; 7] = [
     "a sleep whose snapshot takes 45 s (a big disk's first, which 30 s cut) waits for it and keeps it, its container gone",
     "the wake after it starts once, nothing failed",
     "a wake during a slow stop starts it once the stop ends, by its alarm: its owner's sleep never waits for that start",
+    "a snapshot that outruns its bound holds its container past the sleep: the wake after it waits for it, no start failed, and comes up",
 ];
 
 /// A start that waits for its guest, as a start from a snapshot does (local
@@ -346,7 +347,9 @@ const BOUND_CHECKS: [&str; 7] = [
 /// `hang-backups`: the container's `sandbox-shim` never answers, and its
 /// saves' backups are bounded by the lever's few seconds), and a sleep
 /// whose snapshot is slow (the lever's `slow-snapshot`: one made up that
-/// takes its ms, as a big disk's first does). Starts and ends asleep.
+/// takes its ms, as a big disk's first does, holding the container
+/// meanwhile as the runtime's does; with `snapshot-bound`, past its bound).
+/// Starts and ends asleep.
 fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
     let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
     let asleep = api.signed(c.owner, "GET", &path(""), None)?.body;
@@ -485,6 +488,50 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
             && up
             && after.body["generation"].as_u64() == Some(g + 1),
         format!("{slept} / {during} / {after}"),
+    );
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    anyhow::ensure!(slept.body["phase"] == "asleep", "it sleeps again: {slept}");
+    // a snapshot that outruns its bound (a slow save left it little): the
+    // runtime's goes on, holding the container past the sleep's destroy, and
+    // the wake after it waits for that container, each start it holds up no
+    // failure, where three strikes said "won't wake" before
+    let g = slept.body["generation"].as_u64().unwrap_or(0);
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    std::thread::sleep(QUEUE_DRAIN);
+    let (bound, hold) = (Duration::from_secs(10), Duration::from_secs(120));
+    let set = [
+        lever_with(api, c.id, json!({ "op": "snapshot-bound", "ms": bound.as_millis() as u64 }))?,
+        lever_with(api, c.id, json!({ "op": "slow-snapshot", "ms": hold.as_millis() as u64 }))?,
+    ];
+    let log = |event: &str| {
+        let text = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
+        text.lines().filter(|l| l.contains(c.id) && l.contains(&format!("\"event\":\"{event}\""))).count()
+    };
+    let (failed_before, held_before, ready_before) = (log("start_failed"), log("start_blocked"), log("ready"));
+    let t0 = std::time::Instant::now();
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let outlived = lever(api, c.id, "saves")?;
+    let answered = api.patient(hold * 2).signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let up = s.eventually(WAKE, || phase(api, c.owner, c.id) == "awake");
+    let took = t0.elapsed();
+    let after = api.signed(c.owner, "GET", &path(""), None)?;
+    let (failed, held, ready) = (log("start_failed") - failed_before, log("start_blocked") - held_before, log("ready") - ready_before);
+    s.ok(
+        BOUND_CHECKS[7],
+        woke.body["phase"] == "awake"
+            && set.iter().all(|r| r.status == 200)
+            && slept.body["phase"] == "asleep"
+            && outlived.body["running"] == true
+            && answered.status == 200
+            && notice(&answered.body, "wont_wake").is_null()
+            && up
+            && took >= hold
+            && failed == 0
+            && held >= 1
+            && ready == 1
+            && after.body["generation"].as_u64().is_some_and(|n| n > g + 2),
+        format!("up in {took:.1?}, {held} starts held up, {failed} failed, {ready} came up; {slept} / {outlived} / {answered} / {after}"),
     );
     std::thread::sleep(QUEUE_DRAIN);
     let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;

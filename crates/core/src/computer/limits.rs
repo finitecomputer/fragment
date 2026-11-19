@@ -94,7 +94,9 @@ pub const SAVES_KEPT: usize = 3;
 /// once): the one after its container went, one past a snapshot that
 /// would not start, and one past each kept save that would not restore
 /// (`restore_fallbacks`); the next failure is a strike, retried after a
-/// pause. A request makes them all as it waits (the cell's `drive_with`).
+/// pause. A request makes them all as it waits (the cell's `drive_with`),
+/// as it does starts the container before them held up
+/// (`Event::StartBlocked`), and its alarm the rest.
 pub const STARTS_OWED_MAX: u32 = SAVES_KEPT as u32 + 2;
 /// A start from a snapshot is up only once its guest has read its own view
 /// (`GET /api/computer`, which an image reads as its entrypoint starts:

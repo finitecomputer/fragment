@@ -89,6 +89,18 @@ an image may rely on this:
   container still running, tells nothing and tries again at the next
   event, an alarm it keeps a minute on at the latest (on its last strike
   nothing else may come).
+- **A start held up by the container before it** is no failure. A
+  sleep's snapshot the runtime still takes holds its container past the
+  sleep's destroy (it takes no signal), so the next start can find that
+  container still running. That start started nothing: it is made again
+  at once, told as `starting`, no strike, until the container has had a
+  stop's deadline (`SLEEP_DEADLINE_MS`, 6 minutes) since the first such
+  try; after that each try is a strike, so one that never goes gives up
+  as failing starts do. Nothing it would have started from is forgotten.
+  A new isolate that finds such a start (it planned nothing yet) never
+  takes the running container over as its own: it reports the start held
+  up. A port's request meanwhile answers that the computer is still
+  starting (409, try again) rather than reach the earlier container.
 - **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
   share `RESTORE_MS`), never one that follows a restore's progress: a
   restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,
@@ -481,7 +493,9 @@ minute), or its life ends, whichever is first.
   start), `dead` (its guest never read its view within its wait: a
   snapshot that came up dead, or the `alive-check` lever),
   `unusable` (its save would not restore), `exit` (its container stopped
-  first), `deadline`, `other`.
+  first), `deadline`, `blocked` (the container before it still ran: it
+  started nothing, and the start made again counts from the same wake),
+  `other`.
 - `woke`: what asked for the wake it answers: `record`, `presence`, `tab`,
   `owner`, `joined`, `restart`; `itself` when nothing did (a start after a
   crash, an always-on start, or an ask an earlier isolate heard). A wake's
