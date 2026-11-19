@@ -8964,7 +8964,53 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         renamed && back && hits == json!([]),
         json!({ "renamed": renamed, "back": back, "hits": hits }),
     );
-    pinned_agent_ui(s, api, b, page, session, first_title, reader, reader_chat, shots)
+    pinned_agent_ui(s, api, b, page, session, first_title, reader, reader_chat, shots)?;
+    hero_edge_kept_ui(s, api, b, page, session, reader)
+}
+
+/// What a hero drawn again shows of the edge it kept, read as it is drawn
+/// (`HERO` its selector): its edge's three properties, and what the
+/// page's CSP refused meanwhile.
+const HERO_EDGE_WATCH: &str = r#"(() => {
+  const was = document.querySelector(HERO), seen = { refused: [], drawn: null };
+  window.__heroEdge = seen;
+  document.addEventListener("securitypolicyviolation", (e) => seen.refused.push(`${e.violatedDirective} ${e.sourceFile}:${e.lineNumber}`), true);
+  // lit as the pointer lights it (chat-list.js `lightEdge`)
+  for (const [prop, value] of [["--edge-x", "12px"], ["--edge-y", "7px"], ["--edge-light", "0.5"]]) was.style.setProperty(prop, value);
+  new MutationObserver((_, watch) => {
+    const now = document.querySelector(HERO);
+    if (!now || now === was || !now.querySelector(".pin-mark")) return;
+    seen.drawn = ["--edge-x", "--edge-y", "--edge-light"].map((prop) => now.style.getPropertyValue(prop));
+    watch.disconnect();
+  }).observe(document.getElementById("chats"), { childList: true });
+  return true;
+})()"#;
+
+/// An agent's hero drawn again keeps the edge its pointer lit
+/// (chat-list.js `hero`), copied by the CSSOM: the shell's CSP refuses a
+/// style attribute set from a string, so a copy by `setAttribute` never
+/// applied and was a violation in the console at every drawing (Paul's
+/// preview console, 2026-11-19). Method: the Reader's hero lit as the
+/// pointer lights it, then pinned by the API (the list's watch draws it
+/// again: a new node, with its pin mark), the new node read as it is
+/// drawn; unpinned after.
+fn hero_edge_kept_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, reader: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let hero = format!("#chats [data-key={}]", js(&format!("agent:{reader}")));
+    let pin = |on: bool| shell(api, session, "PUT", &format!("/api/fragments/{reader}/pinned"), Some(&json!({ "pinned": on })), &[]);
+    anyhow::ensure!(b.eval(page, &HERO_EDGE_WATCH.replace("HERO", &js(&hero)))? == true, "the Reader's hero is drawn");
+    let r = pin(true)?;
+    anyhow::ensure!(r.status == 200, "pinning the Reader: {r}");
+    let drawn = b.until(page, "window.__heroEdge.drawn !== null", wait);
+    let seen = b.eval(page, "window.__heroEdge")?;
+    s.ok(
+        "an agent's hero drawn again (pinned elsewhere) keeps the edge its pointer lit, and the shell's CSP refuses nothing as it is drawn",
+        drawn && seen["drawn"] == json!(["12px", "7px", "0.5"]) && seen["refused"] == json!([]),
+        &seen,
+    );
+    let r = pin(false)?;
+    anyhow::ensure!(r.status == 200 && b.until(page, &format!("!document.querySelector({})", js(&format!("{hero} .pin-mark"))), wait), "unpinning the Reader: {r}");
+    Ok(())
 }
 
 /// Their agents' order in the sidebar (FIN-404; Paul, 2026-11-07: a
