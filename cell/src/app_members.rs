@@ -214,16 +214,13 @@ impl FragmentCell {
             "INSERT INTO app_asks (name, version) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET version = excluded.version",
             vec![name.into(), SqlStorageValue::Integer(version)],
         )?;
-        let asked = AppAsked { target: me, title: title.clone(), incarnation, version, owner: owner.clone(), role };
+        let asked = AppAsked { target: me, title: title.clone(), incarnation, version, owner: owner.clone(), role, key: key.map(str::to_string) };
         let taken = match crate::fragment::call(&self.env, name, &asked).await {
             Ok(answer) => {
                 self.test_hold("app-answer").await;
                 // each person by their email, as the owner sees them, should a line name one
                 let names = self.emails(answer.audience.iter().map(|(p, _)| p.clone()).collect()).await;
-                match key.is_some_and(|k| k != answer.npub) {
-                    true => Err(CellError::new(ErrorCode::Conflict, "that app is no longer the one asked for: open its sheet again")),
-                    false => self.app_answered(actor, name, role, (incarnation, version, &owner, &title), &answer, &names),
-                }
+                self.app_answered(actor, name, role, (incarnation, version, &owner, &title), &answer, &names)
             }
             Err(e) => Err(e),
         };
@@ -344,6 +341,11 @@ impl FragmentCell {
     /// recorded in the same turn, or why not.
     pub(crate) fn app_asked(&self, a: AppAsked) -> CellResult<AppAnswer> {
         self.created()?;
+        // asked for another life of this name (a stale sheet's): it records nothing
+        let npub = self.must(MetaKey::Npub)?;
+        if a.key.as_ref().is_some_and(|k| *k != npub) {
+            return Err(CellError::new(ErrorCode::Conflict, "that app is no longer the one asked for: open its sheet again"));
+        }
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let refused = |why: String| CellError::new(ErrorCode::Forbidden, why);
         // within one person (decision 63): no one adds another's app
@@ -373,7 +375,7 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Conflict, "an older ask: it was asked again since"));
         }
         self.event("app.joining", &format!("asked into {} as {}, by its owner", a.target, a.role.as_str()), json!({ "target": a.target, "role": a.role }));
-        Ok(AppAnswer { npub: self.must(MetaKey::Npub)?, incarnation: self.incarnation()?, title, audience })
+        Ok(AppAnswer { npub, incarnation: self.incarnation()?, title, audience })
     }
 
     /// A change between an app and a target (`AppTold`). To the app: the
