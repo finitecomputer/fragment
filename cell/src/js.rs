@@ -511,12 +511,23 @@ pub async fn object_size(env: &Env, bucket: &str, key: &str) -> CellResult<Optio
     Ok(env.bucket(bucket)?.head(key).await?.map(|o| o.size()))
 }
 
-/// The SHA-256 (hex) of a stream's bytes, read to its end: piped into
-/// `crypto.DigestStream` by the runtime, none of it through Wasm.
-pub async fn digest(body: ReadableStream) -> CellResult<String> {
+/// The SHA-256 (hex) and CRC-32 of a stream's bytes, read to its end:
+/// each chunk summed here for its CRC-32 (a zip's own check of a file,
+/// which nothing native computes), then handed to `crypto.DigestStream`,
+/// in series, as `blob_put` hashes.
+pub async fn digest_and_crc(body: ReadableStream) -> CellResult<(String, u32)> {
+    use futures_util::StreamExt;
     let digest = DigestStream::new(DigestStreamAlgorithm::Sha256);
-    JsFuture::from(body.pipe_to(digest.raw().unchecked_ref::<WritableStream>())).await.map_err(|e| CellError::host(format!("hashing the bytes: {}", js_message(&e))))?;
-    Ok(hex::encode(digest.digest().await?.to_vec()))
+    let writer = digest.raw().get_writer().map_err(|e| CellError::host(format!("hashing the bytes: {}", js_message(&e))))?;
+    let mut crc = crc32fast::Hasher::new();
+    let mut chunks = worker::ByteStream::from(body);
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|e| CellError::host(format!("reading the bytes: {e}")))?;
+        crc.update(&chunk);
+        JsFuture::from(writer.write_with_chunk(&js_sys::Uint8Array::from(chunk.as_slice()))).await.map_err(|e| CellError::host(format!("hashing the bytes: {}", js_message(&e))))?;
+    }
+    JsFuture::from(writer.close()).await.map_err(|e| CellError::host(format!("hashing the bytes: {}", js_message(&e))))?;
+    Ok((hex::encode(digest.digest().await?.to_vec()), crc.finalize()))
 }
 
 /// A blob's bytes as a stream: (body, whole size, the served range as

@@ -988,11 +988,11 @@ fn stage_route(st: &mut State, req: &Request) -> Option<Response> {
                 }
             }
             let bytes = zip[offset as usize..(offset + len) as usize].to_vec();
-            let sha = fragment_core::blob::sha256_hex(&bytes);
+            let (sha, crc32) = (fragment_core::blob::sha256_hex(&bytes), crc32fast::hash(&bytes));
             let Some(blobs) = st.host_blobs.as_mut() else { return Some(Response::json(404, &json!({ "error": "not_found", "message": "this host keeps no blobs" }))) };
             blobs.insert((into, sha.clone()), bytes);
             st.stage_copies = (st.stage_copies.0 + 1, st.stage_copies.1 + len);
-            Response::json(200, &json!({ "sha256": sha, "bytes": len }))
+            Response::json(200, &json!({ "sha256": sha, "bytes": len, "crc32": crc32 }))
         }
         ("GET", "zip") => {
             let range = req.header("range").and_then(|r| r.strip_prefix("bytes=")).and_then(|r| r.split_once('-')).and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));

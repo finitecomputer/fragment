@@ -1216,11 +1216,12 @@ out. The manifest as written, by its SHA-256 (hex): what the mover's `staged` re
 
 ### `StageCopied`
 
-out. `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=`: one range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer: the blob it is, by its bytes' SHA-256 (hex), and their length.
+out. `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=`: one range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer: the blob it is, by its bytes' SHA-256 (hex), their length, and their CRC-32, which the caller checks against the zip entry's own.
 
 | field | type | | |
 | --- | --- | --- | --- |
 | `bytes` | `integer` | required |  |
+| `crc32` | `integer` | required |  |
 | `sha256` | `string` | required |  |
 
 ### `StageDone`

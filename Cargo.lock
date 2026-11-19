@@ -714,6 +714,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "base64",
+ "crc32fast",
  "fragment-core",
  "fragment-nip98",
  "fragment-proto",
