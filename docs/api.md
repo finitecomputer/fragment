@@ -2171,7 +2171,10 @@ nor speak through one (`fragment_core::door`):
   signature of the SHA-256 of `fragment door record
   1\n<via>\n<fragment>\n<channel>\n<post id>\n` followed by the body as
   canonical JSON (keys in order, no space) less `relayed.sig`, within ten
-  minutes of `at` (ms). Anything else saying `relayed` is 403; an app's
+  minutes of `at` (ms), and only into a fragment its owner (`for`) owns:
+  the signature names the fragment, not its life, and a deleted name is
+  free at once (`door::lands_in_owners`). Anything else saying `relayed`
+  is 403; an app's
   operation or job publishes none (400), but a hosted door's.
 - **A hosted door** is a fragment made from a blessed connector template
   (`blessed::CONNECTORS`: `telegram`, templates/telegram) that has never
