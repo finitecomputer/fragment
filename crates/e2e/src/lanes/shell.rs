@@ -1699,10 +1699,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     );
     phone_ui(s, api, &mut b, &page, &session, &shots)?;
     phone_sheet_still(s, &mut b, &page, &shots)?;
+    // before the desktop's settling, which draws it afresh after
+    agent_share_ui(s, api, &mut b, &page, &me, &shots)?;
     desktop_settle_ui(s, &mut b, &page)?;
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
-    agent_share_ui(s, api, &mut b, &page, &me, &shots)?;
     // and a third agent, which none of the checks above counts
     add_agent_ui(s, api, &mut b, &page, &session, &shots)?;
     remove_agent_ui(s, api, &mut b, &page, &session, &shots)?;
@@ -5960,13 +5961,17 @@ fn screen_landed(s: &mut Suite, b: &mut Browser, page: &Page, agent: &str) -> bo
 /// one line. Shot at 1280 and 390 px, light and dark (`agent-share-*`).
 fn agent_share_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
-    b.viewport(page, 1280, 900, false)?;
     let r = shell(api, me.session, "GET", "/api/computers", None, &[])?;
     let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
     let agent = agents.iter().filter_map(|a| a["fragment"].as_str()).find(|f| label_of(f) == me.first).unwrap_or("").to_string();
     anyhow::ensure!(!agent.is_empty(), "the first agent: {r}");
+    // a desktop's page, drawn afresh after the phone's checks
+    let hero = format!("#chats [data-key={}]", js(&format!("agent:{agent}")));
+    b.viewport(page, 1280, 900, false)?;
+    b.reload(page)?;
+    b.until(page, &format!("!document.getElementById('layout').hidden && document.querySelector({})?.getClientRects().length > 0", js(&hero)), wait);
     // its profile, from its hero's menu, and the window's Share…
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("agent:{agent}"))))?;
+    b.click(page, &hero)?;
     let profile = menu_item(b, page, "Its profile")?;
     let pane = format!("#stack .pane[data-key={}]", js(&format!("app:{agent}")));
     let share = js(&format!("{pane} button[aria-label=\"Share…\"]"));
@@ -5989,7 +5994,6 @@ fn agent_share_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
         }
     }
     b.color_scheme(page, "light")?;
-    b.viewport(page, 1280, 900, false)?;
     let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
     let closed = b.until(page, "!document.getElementById('sheet').open", wait);
     b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&format!("{pane} button[aria-label=Close]"))))?;

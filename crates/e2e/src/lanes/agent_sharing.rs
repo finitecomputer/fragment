@@ -178,8 +178,8 @@ pub fn agent_sharing(s: &mut Suite, api: &Api) -> Result<()> {
 
     // 7. the other way: a fragment shared past its owner is not made an
     // agent until it is theirs alone again
-    let app = s.named(api, &owner, "agent-sharing-notes")?;
-    let r = api.create_with(&owner, json!({ "name": app, "template": "notes" }))?;
+    let app = s.named(api, &owner, "agent-sharing-todo")?;
+    let r = api.create_with(&owner, json!({ "name": app, "template": "todo" }))?;
     anyhow::ensure!(r.status == 200, "the app: {r}");
     s.owned(&r.body, &owner);
     let computer = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?.body["computer"].as_str().context("its computer")?.to_string();

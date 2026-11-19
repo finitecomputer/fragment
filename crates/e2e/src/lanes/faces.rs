@@ -170,15 +170,18 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         &sheet,
     );
     // who has access to what asks the members of what someone else is in:
-    // Bob, a viewer of it for a moment
+    // the agent in Paul's chat, and Bob a viewer there for a moment (its own
+    // fragment is Paul's alone: FIN-544)
     let (bob, _) = person(api)?;
     let bob_id = api.identity(&bob)?;
-    let r = api.share(&agent, &bob_id, "viewer")?;
+    let r = api.signed(&paul, "PUT", &format!("/api/f/{chat}/members/{agent_id}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent in the chat: {r}");
+    let r = api.share(&chat, &bob_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "Bob, a viewer: {r}");
     let access = api.signed(&paul, "GET", "/api/access", None)?;
-    let member = access.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == agent.as_str()).and_then(|f| f["members"].as_array()?.iter().find(|m| m["principal"] == agent_id.as_str()).cloned());
+    let member = access.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == chat.as_str()).and_then(|f| f["members"].as_array()?.iter().find(|m| m["principal"] == agent_id.as_str()).cloned());
     s.ok("who has access to what names it so too (its title, beside its label)", member.as_ref().is_some_and(|m| m["title"] == "Frank" && m["name"] == label.as_str()), &access);
-    let r = api.signed(&paul, "DELETE", &format!("/api/f/{agent}/members/{bob_id}"), None)?;
+    let r = api.signed(&paul, "DELETE", &format!("/api/f/{chat}/members/{bob_id}"), None)?;
     anyhow::ensure!(r.status == 200, "Bob, out again: {r}");
 
     // replay: the same change again, by its key or by its files, commits nothing new
