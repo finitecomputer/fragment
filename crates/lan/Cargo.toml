@@ -1,0 +1,37 @@
+[package]
+name = "fragment-lan"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "LAN mode: a self-hosted box's own DNS zone, a TLS front door on the one address its operator names, and the box's own certificate authority, constrained to the zone (docs/self-host.md, seam 9)."
+
+[dependencies]
+# the door and DNS: one tokio runtime, HTTP/1.1 with upgrades both ways
+# (all four already in the lock, beneath reqwest)
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "io-util", "signal", "macros"] }
+hyper = { version = "1", default-features = false, features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false }
+# TLS: rustls on ring, as reqwest's already is here (both in the lock)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# the CA and the zone's certificate: rcgen, the rustls project's X.509
+# writer, over ring (new to the lock: rcgen, yasna, pem and time; its
+# x509-parser is a weak feature the lock lists but nothing builds).
+# Nothing here writes or parses ASN.1 by hand
+rcgen = { version = "=0.14.10", default-features = false, features = ["pem", "ring"] }
+time = "0.3"
+# randomness for the certificates' serials and DNS ids: rustls's own ring
+ring = "0.17"
+# DNS messages: simple-dns's wire format, one crate (new to the lock, on
+# bitflags, already there). hickory-proto was weighed and not taken: it
+# brings two dozen crates for this. The server itself is ours because it
+# is tiny: the zone's answers alone, every other name refused, no resolver
+simple-dns = "=0.13.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+

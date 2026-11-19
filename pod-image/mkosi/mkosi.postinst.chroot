@@ -1,0 +1,35 @@
+#!/bin/bash
+# Runs inside the image after its packages and extra trees are in, before
+# mkosi applies the presets (10-pod.preset decides what starts at boot).
+set -euo pipefail
+variant="$(cat /usr/lib/pod/variant)"
+
+# The stack's user: uid 1001, gid 1002, the owner of the data volume's
+# files (the demo VM's first user). HOME is on the volume.
+getent group alex > /dev/null || groupadd -g 1002 alex
+getent passwd alex > /dev/null || useradd -u 1001 -g 1002 -G docker -d /srv/private/home -M -s /usr/sbin/nologin alex
+[[ "$(id -u alex):$(id -g alex)" == 1001:1002 ]]
+
+# The platform's code is root's; the tree is the user's, because it is the
+# lower layer of the overlay at /srv/private/home/fragment-home, and a
+# copy-up keeps owner and mode.
+chown -R root:root /usr/lib/pod
+chown -R 1001:1002 /usr/lib/pod/fragment-home
+install -d -m 0755 /srv/private
+# the open hook writes the zone's names into /run/pod/hosts (pod-addr)
+ln -sfn /run/pod/hosts /etc/hosts
+
+# No login on any console in either variant: no getty at all, root locked.
+for u in getty@.service serial-getty@.service console-getty.service container-getty@.service \
+  getty-static.service autovt@.service; do
+  ln -sfn /dev/null "/etc/systemd/system/$u"
+done
+passwd -q -l root
+
+if [[ "$variant" == P-debug ]]; then
+  # SSH with one key for the stack's user, sudo without a password
+  usermod -s /bin/bash -p '*' alex
+  chmod 0440 /etc/sudoers.d/pod-debug
+  chmod 0755 /etc/ssh/authorized_keys
+  chmod 0644 /etc/ssh/authorized_keys/alex
+fi

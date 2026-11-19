@@ -1,0 +1,28 @@
+diff -ru a/xtask/src/lan.rs b/xtask/src/lan.rs
+--- a/xtask/src/lan.rs
++++ b/xtask/src/lan.rs
+@@ -496,6 +496,7 @@
+ fn door_bin(s: &Settings) -> Result<PathBuf> {
+     let bin = match &s.bin {
+         Some(b) => b.clone(),
++        None if std::env::var_os("FRAGMENT_PREBUILT").is_some() => bail!("FRAGMENT_PREBUILT runs no cargo: set FRAGMENT_LAN_BIN"),
+         None => {
+             let root = devstack::repo_root();
+             let status = Command::new("cargo").args(["build", "--quiet", "--release", "-p", "fragment-lan", "--manifest-path"]).arg(root.join("Cargo.toml")).status().context("cargo build -p fragment-lan")?;
+diff -ru a/xtask/src/main.rs b/xtask/src/main.rs
+--- a/xtask/src/main.rs
++++ b/xtask/src/main.rs
+@@ -233,7 +233,12 @@
+     let shift = dev_shift()?;
+     let at = |port: u16| port.wrapping_add(shift);
+     let dev_port = at(DEV_PORT);
+-    build()?;
++    // FRAGMENT_PREBUILT: the cell, its assets and every tool are already in
++    // this tree (a measured pod image ships it read-only: poc/pod/image), so
++    // nothing is built, installed or fetched at start
++    if std::env::var_os("FRAGMENT_PREBUILT").is_none() {
++        build()?;
++    }
+     let clean = args.iter().any(|a| a == "--clean");
+     if clean {
+         // the node's state, before the fleet seeds its local store again

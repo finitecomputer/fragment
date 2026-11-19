@@ -1,0 +1,11 @@
+{
+  "fetched_at": 1794351287,
+  "fmspc": "00806F050000",
+  "ca": "platform",
+  "urls": [
+    "https://api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc=00806F050000",
+    "https://api.trustedservices.intel.com/tdx/certification/v4/qe/identity",
+    "https://api.trustedservices.intel.com/sgx/certification/v4/pckcrl?ca=platform&encoding=der",
+    "https://certificates.trustedservices.intel.com/IntelSGXRootCA.der"
+  ]
+}

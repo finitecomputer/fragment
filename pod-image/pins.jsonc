@@ -1,0 +1,23 @@
+// The tools the pod image is built with, pinned: `cargo xtask pod image`
+// reads this file (xtask/src/pod/pins.rs) and refuses a build whose tools
+// are not these. The package set is pinned in mkosi/mkosi.conf
+// (`Snapshot=`, Ubuntu's snapshot service), and the platform the image
+// carries in pinned-platform/pins.jsonc.
+{
+  // mkosi, the builder (a UKI, a dm-verity root and systemd-repart):
+  // cloned at this tag and checked to be this commit.
+  "mkosi": {
+    "url": "https://github.com/systemd/mkosi",
+    "tag": "v27.1",
+    "commit": "ecf7f5702bb2052b7a69cab3fe7d37bc3b9ad77b"
+  },
+  // systemd-stub 257 from Debian trixie's systemd-boot-efi, the version
+  // mkosi's tools tree runs. Unlike Ubuntu noble's 255 it measures each
+  // UKI section, and a command line passed in, into RTMR2 when there is
+  // no TPM in the TD (docs/explorations/private-pod-findings.md,
+  // 2026-11-10-cmdline-swap). The image's UKI wraps the kernel in it.
+  "stub": {
+    "url": "http://deb.debian.org/debian/pool/main/s/systemd/systemd-boot-efi_257.13-1~deb13u1_amd64.deb",
+    "sha256": "390ecdcef9bbb753f51bb6d8f696bdae2f1dbedde7239c49ccb2512f137a8933"
+  }
+}

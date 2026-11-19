@@ -32,6 +32,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # crates, whole. Its target is the layers' own (no cache mount), so CI's
 # BuildKit cache keeps the dependencies' build. Unoptimized: the stub's
 # agents make a few calls with it, and it builds in a third of the time.
+# Without default features, as our Hermes image's (that one says why).
 # Its inputs are the CLI's alone, as our Hermes image's CLI stage is (that
 # one says why each), and xtask's host test
 # `the_cli_stage_copies_what_the_cli_builds_from` keeps them so.
@@ -48,11 +49,15 @@ COPY crates/devstack/Cargo.toml crates/devstack/Cargo.toml
 COPY crates/e2e/Cargo.toml crates/e2e/Cargo.toml
 COPY crates/fakes/Cargo.toml crates/fakes/Cargo.toml
 COPY crates/identity-door/Cargo.toml crates/identity-door/Cargo.toml
+COPY crates/lan/Cargo.toml crates/lan/Cargo.toml
+COPY crates/pod/Cargo.toml crates/pod/Cargo.toml
+COPY crates/pod-init/Cargo.toml crates/pod-init/Cargo.toml
+COPY crates/pod-keyd/Cargo.toml crates/pod-keyd/Cargo.toml
 COPY xtask/Cargo.toml xtask/Cargo.toml
 RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
-    for m in crates/core crates/nip98 crates/proto crates/templates crates/devstack crates/e2e crates/fakes crates/identity-door xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
+    for m in crates/core crates/nip98 crates/proto crates/templates crates/devstack crates/e2e crates/fakes crates/identity-door crates/lan crates/pod crates/pod-init crates/pod-keyd xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
  && mkdir -p cli/src && echo 'fn main() {}' > cli/src/main.rs && echo 'fn main() {}' > crates/templates/build.rs \
- && cargo build --release --locked -p fragment-cli
+ && cargo build --release --locked -p fragment-cli --no-default-features
 COPY cli cli
 COPY crates/core crates/core
 COPY crates/nip98 crates/nip98
@@ -68,7 +73,7 @@ COPY templates/slides templates/slides
 COPY templates/todo templates/todo
 RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
     find cli crates templates -type f -exec touch {} + \
- && cargo build --release --locked -p fragment-cli \
+ && cargo build --release --locked -p fragment-cli --no-default-features \
  && mkdir -p /out && cp target/release/fragment /out/
 
 # busybox for the few commands the Computer DO runs in a container (`true`

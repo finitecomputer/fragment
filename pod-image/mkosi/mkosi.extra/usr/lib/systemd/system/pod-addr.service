@@ -1,0 +1,9 @@
+[Unit]
+Description=pod: where the front door listens, decided once the volume is open
+Requires=tailscaled.service
+After=tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/pod/pod-addr

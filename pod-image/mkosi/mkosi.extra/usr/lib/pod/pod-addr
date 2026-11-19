@@ -1,0 +1,46 @@
+#!/bin/bash
+# pod-addr: where the front door, the zone's DNS and the root's page bind,
+# and what the zone answers. A volume whose Tailscale state has a logged-in
+# node (an earlier `tailscale up` on it) gets the tailnet address alone for
+# both, as the demo VM did. Otherwise (a blank pod) the door binds the VM's
+# internal address and the zone answers its external one. This never runs
+# `tailscale up`: joining a tailnet is the owner's act, over the debug
+# image or a later release's own flow.
+set -euo pipefail
+ZONE=private.home.arpa
+ipv4='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+
+tailnet_addr() {
+  local st i
+  for i in $(seq 1 60); do
+    st="$(tailscale status --json 2> /dev/null | grep -o '"BackendState": *"[A-Za-z]*"' | grep -o '[A-Za-z]*"$' | tr -d '"' || true)"
+    case "$st" in
+      Running) tailscale ip -4 2> /dev/null | head -1; return 0 ;;
+      NeedsLogin | NeedsMachineAuth | Stopped) return 0 ;;
+    esac
+    sleep 1
+  done
+}
+
+metadata() {
+  curl -fsS --max-time 3 -H 'Metadata-Flavor: Google' \
+    "http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/$1" 2> /dev/null || true
+}
+
+ts="$(tailnet_addr)"
+if [[ "$ts" =~ $ipv4 ]]; then
+  mode=tailnet bind="$ts" addr="$ts"
+else
+  mode=vpc
+  bind="$(ip -4 route get 169.254.169.254 | grep -o 'src [0-9.]*' | cut -d' ' -f2)"
+  addr="$(metadata access-configs/0/external-ip)"
+  [[ "$addr" =~ $ipv4 ]] || addr="$bind"
+fi
+[[ "$bind" =~ $ipv4 && "$addr" =~ $ipv4 ]] || { echo "pod-addr: no address (bind '$bind', zone '$addr')" >&2; exit 1; }
+
+install -d -m 0755 /run/pod
+printf 'FRAGMENT_LAN_BIND=%s\nFRAGMENT_LAN_ADDR=%s\n' "$bind" "$addr" > /run/pod/stack.env.tmp
+mv /run/pod/stack.env.tmp /run/pod/stack.env
+{ cat /usr/lib/pod/hosts.base; printf '%s %s dex.%s\n' "$bind" "$ZONE" "$ZONE"; } > /run/pod/hosts.tmp
+mv /run/pod/hosts.tmp /run/pod/hosts
+echo "pod-addr: $mode: the door binds $bind, the zone answers $addr" >&2

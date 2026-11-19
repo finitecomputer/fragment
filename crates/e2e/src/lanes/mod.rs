@@ -40,6 +40,7 @@ mod identities;
 mod isolation;
 pub(crate) mod jobs;
 mod keys;
+mod lan;
 mod levers;
 mod ledger;
 mod limits;
@@ -180,6 +181,8 @@ const LANES: &[Lane] = &[
     moves::move_import,
     moves::move_ui,
     moves::move_comp,
+    // a self-hosted box in LAN mode: its node started so, and plain after
+    lan::lan,
     restart::restart,
 ];
 
@@ -216,7 +219,7 @@ pub const SHARDS: [&[&str]; 5] = [
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
         "identities", "signin", "door", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
-        "members", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp",
+        "members", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp", "lan",
     ],
 ];
 

@@ -89,11 +89,19 @@ enum Shape {
     /// client and key bound as `WORKOS_CLIENT` and `WORKOS_KEY`, and no
     /// Pipes connection in its catalog (Pipes stay absent on self-host).
     Door,
+    /// As `Plain`, served as a self-hosted box in LAN mode serves it
+    /// (crates/lan; docs/self-host.md, seam 9): the platform at
+    /// `Suite::lan_platform` (`https://<LAN_ZONE>:<the door's port>`), the
+    /// fragments under `LAN_ZONE`, behind fragment-lan's door.
+    Lan,
 }
 
 /// The identity door's client, as a node shaped `Shape::Door` is bound to it.
 pub const DOOR_CLIENT: &str = "client_fragment_e2e_door";
 pub const DOOR_KEY: &str = "sk_door_e2e";
+
+/// The zone a node shaped `Shape::Lan` serves.
+pub const LAN_ZONE: &str = "lan.home.arpa";
 
 /// Finite Private's key on a node shaped as the private tier (`Shape::PrivateTier`):
 /// a test value, in `fpk_live_`'s shape, which the model fake asks for.
@@ -490,6 +498,8 @@ pub struct Suite {
     door_url: Option<String>,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
+    /// The platform's origin on a node shaped `Shape::Lan` (`start_as_lan_box`).
+    lan_platform: Option<String>,
     /// Where the node's secrets are (`FRAGMENT_E2E_SECRETS`, `secrets_of`):
     /// wrangler's local store, or celld's secrets backend.
     secrets: devstack::Secrets,
@@ -821,6 +831,16 @@ impl Suite {
         started
     }
 
+    /// Starts the node as a box in LAN mode serves it (`Shape::Lan`), its
+    /// platform at `platform` (the door's https origin for `LAN_ZONE`).
+    pub fn start_as_lan_box(&mut self, platform: &str) -> Result<Api> {
+        self.lan_platform = Some(platform.to_string());
+        self.shape = Shape::Lan;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     /// Starts the node with one operator key more in its catalog
     /// (`Shape::OneKeyMore`).
     pub fn start_with_a_key_more(&mut self) -> Result<Api> {
@@ -870,7 +890,7 @@ impl Suite {
             ai_gateway: None,
             models: match self.shape {
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
-                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::Door => Some(plain_models().to_string()),
+                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::Door | Shape::Lan => Some(plain_models().to_string()),
                 Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
             },
             model_keys: {
@@ -916,6 +936,7 @@ impl Suite {
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
                 Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => format!("http://127.0.0.1:{}", self.port),
+                Shape::Lan => self.lan_platform.clone().context("a node shaped Lan names its platform (start_as_lan_box)")?,
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -991,6 +1012,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
+            Shape::Lan => LAN_ZONE,
             Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => SUFFIX,
         }
     }
@@ -1477,6 +1499,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         project,
         shape: Shape::Plain,
         door_url: None,
+        lan_platform: None,
         secrets,
         containers_removed: false,
     };

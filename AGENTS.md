@@ -35,6 +35,18 @@ platform concept.
 - `crates/identity-door`: a self-hosted box's sign-in, an OpenID Connect
   relying party behind the WorkOS endpoints the cell calls
   (docs/self-host.md, seam 4).
+- `crates/lan`: LAN mode, a self-hosted box's own DNS zone, TLS front
+  door and certificate authority (docs/self-host.md, seam 9).
+- `crates/pod`: a pod, one owner's self-hosted stack in a confidential VM
+  (`docs/pod.md`): its unlock protocol, quote layout and event log, and,
+  by feature, the verifier, the release checks and the owner's side;
+  `crates/pod-init`: `pod-init`, the service in the pod's TD that keeps
+  the owner's volume; `crates/pod-keyd`: `pod-keyd`, the key service that
+  unlocks a pod after a restart on its owner's terms.
+- `pod-image/`: the pod's measured image (mkosi), its locked variant
+  and debug sibling, beside `images/` and no input of the computer
+  images; `pod-image/pinned-platform/` is the platform it carries,
+  pinned (debt ledger).
 - `templates/`: fragment templates; `applib/`: reusable app code.
 - `images/`: a separate Rust workspace (bridge, stub, Hermes).
 - `bench/search/`: the benchmark behind each fragment's search index
@@ -84,6 +96,12 @@ supports wasm32 (Apple's does not; `brew install llvm`, Nix, or
   `cargo clippy --workspace --all-targets -- -D warnings`.
   `cargo test -p fragment-bridge --test docker -- --ignored` builds and
   tests the real images with Docker.
+- `cargo xtask pod image build|platform|publish --config <file>`,
+  `pod image compare`, `pod measure` and `pod vm create|start|stop|describe|delete`:
+  the pod's image built on a Linux build host, its release measured from
+  its bytes, published and booted on Compute Engine (`docs/pod.md`, "The
+  image"). `--dry-run` prints every command; what spends or deletes needs
+  its own `--confirm-…` flag. The config lives outside the repo.
 - Deployment commands: `cargo xtask secret set|gen|list`, `stripe check|setup`,
   `deploy --config <file> [--branch <name>]`, `image push|copy`.
   Read `xtask/src/main.rs` and the module before running them.

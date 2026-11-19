@@ -26,4 +26,10 @@ fragment-templates = { path = "../crates/templates", features = ["embed"] }
 fragment-fakes = { path = "../crates/fakes" }
 # dev's sign-in on celld, as a self-hosted box's (main.rs `dev_door`)
 fragment-identity-door = { path = "../crates/identity-door" }
+# dev's LAN mode, as a self-hosted box serves it (dev_lan.rs)
+fragment-lan = { path = "../crates/lan" }
+# `pod measure`: the registers an image's boot must show, from its bytes
+# (`verify`: its disk reader and the prediction lined up against a boot)
+fragment-pod = { path = "../crates/pod", features = ["verify"] }
+hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

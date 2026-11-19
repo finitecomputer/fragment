@@ -28,12 +28,17 @@ pub enum Code {
     StorageFull,
     Unavailable,
     OutcomeUnknown,
+    /// A pod failed a check or refused a key (`fragment pod`): the CLI's own.
+    /// Named in every build, so the list of codes is one; only the `pod`
+    /// feature's commands make it.
+    #[cfg_attr(not(feature = "pod"), allow(dead_code))]
+    PodRefused,
     ServerError,
 }
 
 impl Code {
     #[cfg(test)]
-    pub const ALL: [Code; 16] = [
+    pub const ALL: [Code; 17] = [
         Code::InvalidUsage,
         Code::InvalidRequest,
         Code::AuthFailed,
@@ -49,6 +54,7 @@ impl Code {
         Code::StorageFull,
         Code::Unavailable,
         Code::OutcomeUnknown,
+        Code::PodRefused,
         Code::ServerError,
     ];
 
@@ -109,6 +115,7 @@ impl Code {
             Code::StorageFull => "storage_full",
             Code::Unavailable => "unavailable",
             Code::OutcomeUnknown => "outcome_unknown",
+            Code::PodRefused => "pod_refused",
             Code::ServerError => "server_error",
         }
     }
@@ -131,6 +138,7 @@ impl Code {
             Code::StorageFull => "the app's database is at its cap and the change was rolled back: delete data before writing more",
             Code::Unavailable => "usually transient; retrying is safe",
             Code::OutcomeUnknown => "the change may have been applied: check (`fragment status`, `fragment list`, `fragment events`) before repeating it",
+            Code::PodRefused => "the message names the check that failed or what the pod refused; `fragment pod status <pod>` shows every check",
             Code::ServerError => "see `fragment events <name>` if it persists",
         }
     }
