@@ -1859,6 +1859,41 @@ async fn a_recap_that_did_not_read_is_told_at_the_next_turn() {
     bridge.stop().await;
 }
 
+/// Goal (M17; Alex's bot on #1358): a turn that was to tell a runtime
+/// behind the chat, ended by its runtime without taking it, keeps the
+/// marker, so the next turn it takes is told the chat; one ended untaken
+/// while its memory was current moves it (the turn never reached it).
+#[tokio::test]
+async fn a_recap_its_runtime_never_took_is_told_again() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("recap-untaken");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let start = |cfg: &fragment_bridge::driver::Config| support::start_killable(cfg.clone(), support::refusing(support::script_remembering(&dir, PACE)));
+    let bridge = start(&cfg);
+    following(&fake, 2).await;
+    let one = said_and_ended(&fake, &chat, "remember the codeword zebra").await;
+    let refused = said_and_ended(&fake, &chat, "refuse this one").await;
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(refused.as_str()), "untaken, its memory current: it never reached it");
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::lose_memory(&dir);
+    let bridge = start(&cfg);
+    following(&fake, 2).await;
+    let untaken = said_and_ended(&fake, &chat, "refuse again").await;
+    assert_eq!(marker(&dir, &chat), None, "the recap was never heard: no marker");
+    let asked = said_and_ended(&fake, &chat, "what was the codeword?").await;
+    fake.with(|w| {
+        assert!(ends_of(w, &chat, &untaken)[0]["outcome"] == "error", "it ended untaken");
+        let told = reply_text(w, &chat, &asked);
+        assert!(told_the_chat(&told, "what was the codeword?", "\nYour owner: refuse again"), "{told}");
+        assert!(told.contains("\nYour owner: remember the codeword zebra\nYou: echo: [paul] remember the codeword zebra\n"), "{told}");
+    });
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(asked.as_str()));
+    let _ = one;
+    bridge.stop().await;
+}
+
 /// Goal (M17; Codex on #1358, round 2): a runtime whose journal reads
 /// back too far to say whether it is behind (another agent's records fill
 /// `work`) keeps its marker, so the turn after, nearer, is told the chat.

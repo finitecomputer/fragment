@@ -346,6 +346,53 @@ impl Runtime for Counting {
     }
 }
 
+/// `inner`, but a turn whose message says `refuse` ends at once, as a
+/// runtime that could not take it (Claude Code stopped while it signs in):
+/// an error, never `Event::Taken`.
+pub fn refusing(inner: Box<dyn Runtime>) -> Box<dyn Runtime> {
+    Box::new(Refusing { inner })
+}
+
+struct Refusing {
+    inner: Box<dyn Runtime>,
+}
+
+impl Runtime for Refusing {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn memory(&self) -> Option<fragment_bridge::runtime::Memory> {
+        self.inner.memory()
+    }
+
+    fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
+        let RuntimeIo { mut commands, events, shutdown, held, unquiet } = io;
+        let (to_inner, inner_commands) = mpsc::channel::<Command>(256);
+        let refused = events.clone();
+        let inner = self.inner.run(RuntimeIo { commands: inner_commands, events, shutdown, held, unquiet });
+        Box::pin(async move {
+            // On the bridge's runtime, so a kill ends it with the bridge.
+            tokio::spawn(async move {
+                // bounded by the bridge: ends when it drops its sender
+                while let Some(c) = commands.recv().await {
+                    if let Command::Start(ts) = &c {
+                        if ts.text.contains("refuse") {
+                            let outcome = fragment_bridge::records::Outcome::Error("it could not take it".into());
+                            let _ = refused.send(fragment_bridge::runtime::Event::End { turn: ts.turn.clone(), outcome }).await;
+                            continue;
+                        }
+                    }
+                    if to_inner.send(c).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            inner.await
+        })
+    }
+}
+
 /// One HTTP/1.1 request to the screen port, read to its end: its status
 /// and body.
 pub async fn http(base: &fragment_bridge::net::Base, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> (u16, String) {

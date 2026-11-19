@@ -66,7 +66,7 @@ pub fn write(memory: &Path, chat: &str, turn: &str) -> std::io::Result<()> {
     if !records::valid_post_id(turn) {
         return Err(invalid("the turn's id"));
     }
-    let seen = made(&memory.join(DIR))?;
+    let seen = child(&made(memory)?, DIR.as_ref())?;
     // a file of its own: whatever is at the temporary name goes (a link
     // itself, never what it names), and the new one is made, not opened
     let tmp = format!(".{chat}.tmp");
@@ -77,22 +77,29 @@ pub fn write(memory: &Path, chat: &str, turn: &str) -> std::io::Result<()> {
 }
 
 /// `dir`, opened (never through a link at its own name), and made first
-/// with any parent it lacks, each made in its opened parent as that
-/// parent's owner.
+/// with any parent it lacks (`child`).
 fn made(dir: &Path) -> std::io::Result<File> {
     match open_at(None, dir.as_os_str(), libc::O_DIRECTORY, 0) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         opened => return opened,
     }
     let (Some(parent), Some(own)) = (dir.parent(), dir.file_name()) else { return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no directory above")) };
-    let parent = made(parent)?;
-    let owner = parent.metadata()?;
-    match at(&parent, own, |d, n| unsafe { libc::mkdirat(d, n, 0o755) }) {
+    child(&made(parent)?, own)
+}
+
+/// The directory `n` in the opened directory `parent`, opened (never
+/// through a link), and made first when it is not there, as `parent`'s
+/// owner's.
+fn child(parent: &File, n: &OsStr) -> std::io::Result<File> {
+    match at(parent, n, |d, n| unsafe { libc::mkdirat(d, n, 0o755) }) {
+        Ok(()) => {
+            let owner = parent.metadata()?;
+            at(parent, n, |d, n| unsafe { libc::fchownat(d, n, owner.uid(), owner.gid(), libc::AT_SYMLINK_NOFOLLOW) })?;
+        }
         Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
-        _ => {}
+        Err(_) => {}
     }
-    at(&parent, own, |d, n| unsafe { libc::fchownat(d, n, owner.uid(), owner.gid(), libc::AT_SYMLINK_NOFOLLOW) })?;
-    open_at(Some(&parent), own, libc::O_DIRECTORY, 0)
+    open_at(Some(parent), n, libc::O_DIRECTORY, 0)
 }
 
 fn name(n: &OsStr) -> std::io::Result<CString> {
@@ -167,6 +174,15 @@ mod tests {
         std::os::unix::fs::symlink(&swapped, &linked).unwrap();
         assert!(write(&linked, "talk--k3x9", "aa88").is_err() && read(&linked, "talk--k3x9").is_none(), "a memory that is a link is never used");
         assert_eq!(std::fs::read_to_string(elsewhere.join("talk--k3x9")).unwrap(), "ff66", "nothing outside was touched");
+        // Alex's bot on #1358: a memory that is a link to one with a real
+        // marker's directory is never written through either
+        let real = root.join("real-memory");
+        std::fs::create_dir_all(real.join(DIR)).unwrap();
+        std::fs::write(real.join(DIR).join("talk--k3x9"), "ff66").unwrap();
+        let to_real = root.join("to-real-memory");
+        std::os::unix::fs::symlink(&real, &to_real).unwrap();
+        assert!(write(&to_real, "talk--k3x9", "aa99").is_err() && read(&to_real, "talk--k3x9").is_none());
+        assert_eq!(std::fs::read_to_string(real.join(DIR).join("talk--k3x9")).unwrap(), "ff66", "nothing through it was touched");
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

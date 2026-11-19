@@ -318,8 +318,10 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
         tokio::spawn(async move {
             // bounded by the runtime: ends when it drops its sender
             while let Some(event) = event_rx.recv().await {
-                if let Event::Taken { turn } | Event::End { turn, .. } = &event {
-                    marks.taken(turn);
+                match &event {
+                    Event::Taken { turn } => marks.taken(turn, true),
+                    Event::End { turn, .. } => marks.taken(turn, false),
+                    _ => {}
                 }
                 if inbox_tx.send(Msg::Input(Input::Runtime { runtime: serves.clone(), event })).await.is_err() {
                     return;
@@ -1687,7 +1689,7 @@ impl RuntimeLane {
                         let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), note_for(&api, ts, seen)).await;
                         read.unwrap_or_else(|_| {
                             crate::ev!("note.unread", { "turn": ts.turn, "why": "the journal answered too slowly" });
-                            (None, false)
+                            (None, None)
                         })
                     };
                     let quote = async {
@@ -1698,10 +1700,10 @@ impl RuntimeLane {
                             None
                         })
                     };
-                    let (files, (note, current), quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
+                    let (files, (note, due), quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
                     // due before its runtime hears of it, which may say at once
-                    if let Some(m) = memory.filter(|_| current) {
-                        marks.due(&ts.turn, m, &ts.fragment);
+                    if let (Some(m), Some(told)) = (memory, due) {
+                        marks.due(&ts.turn, m, &ts.fragment, told);
                     }
                     keep(&ts.turn, &files);
                     ts.files = files;
@@ -1733,9 +1735,10 @@ impl RuntimeLane {
 /// holds a marker newer than the runtime's own copies, which the hold took
 /// first (docs/computers.md, "The hold"). A turn is due its marker only
 /// when what its runtime missed was told (`note_for`). One that its runtime
-/// ended without taking (stopped while it signed in, refused) moves it too:
-/// it never reached that memory, which was current. A write that fails
-/// tells the turn after the chat again, never less.
+/// ended without taking (stopped while it signed in, refused) moves it too,
+/// when that memory was current before it: the turn never reached it. One
+/// that was to tell it the chat does not: it never heard it. A write that
+/// fails tells the turn after the chat again, never less.
 #[derive(Clone)]
 struct Marks {
     due: Arc<Mutex<MarksDue>>,
@@ -1745,10 +1748,11 @@ struct Marks {
 /// A runtime's memory, and a chat in it.
 type MemoryChat = (PathBuf, String);
 
-/// By turn, where each due one's marker is; and the markers to write.
+/// By turn, where each due one's marker is, and whether it tells the chat;
+/// and the markers to write.
 #[derive(Default)]
 struct MarksDue {
-    due: HashMap<String, MemoryChat>,
+    due: HashMap<String, (MemoryChat, bool)>,
     ready: BTreeMap<MemoryChat, String>,
 }
 
@@ -1759,18 +1763,20 @@ impl Marks {
 
     /// One turn of an agent runs in a chat at a time: one due there before
     /// is over, its runtime's word on it lost (a turn the engine let go of).
-    fn due(&self, turn: &str, memory: PathBuf, chat: &str) {
+    fn due(&self, turn: &str, memory: PathBuf, chat: &str, told: bool) {
         let at = (memory, chat.to_string());
         let mut d = self.due.lock().expect("marks");
-        d.due.retain(|_, a| *a != at);
-        d.due.insert(turn.to_string(), at);
+        d.due.retain(|_, (a, _)| *a != at);
+        d.due.insert(turn.to_string(), (at, told));
     }
 
-    /// Its runtime took the turn, or ended it (taken or never).
-    fn taken(&self, turn: &str) {
+    /// Its runtime took the turn (`taken`), or ended it, taken or never.
+    fn taken(&self, turn: &str, taken: bool) {
         let mut d = self.due.lock().expect("marks");
-        if let Some(at) = d.due.remove(turn) {
-            d.ready.insert(at, turn.to_string());
+        if let Some((at, told)) = d.due.remove(turn) {
+            if taken || !told {
+                d.ready.insert(at, turn.to_string());
+            }
         }
         drop(d);
         self.write();
@@ -1941,11 +1947,12 @@ async fn card_history(api: &Api, agent: &Agent, fragment: &str, record: &Record)
 /// late card answer's turn carries its card's turn as its note already
 /// (`TurnStart::note`), in the cut note's place: that turn is the one a
 /// restart cut, most often, and is told once. With it, whether its runtime
-/// is current once it has the turn: false when whether it was behind did
-/// not read, or the journal read does not reach far enough to say, or what
-/// it missed did not read (its marker stays, and the next turn is asked
-/// again).
-async fn note_for(api: &Api, ts: &TurnStart, seen: Option<Option<String>>) -> (Option<String>, bool) {
+/// is current once it has the turn (`Some`), and whether only by being told
+/// the chat (`true`: then only taking the turn makes it so). `None` when
+/// whether it was behind did not read, or the journal read does not reach
+/// far enough to say, or what it missed did not read: its marker stays, and
+/// the next turn is asked again.
+async fn note_for(api: &Api, ts: &TurnStart, seen: Option<Option<String>>) -> (Option<String>, Option<bool>) {
     let (before, history) = tokio::join!(before(api, ts, seen.as_ref().map(Option::as_deref)), history_note(api, ts));
     let (before, behind) = before.map_or((None, None), |(b, behind)| (Some(b), behind));
     if behind == Some(true) {
@@ -1955,10 +1962,10 @@ async fn note_for(api: &Api, ts: &TurnStart, seen: Option<Option<String>>) -> (O
     let forgot = async { if behind == Some(true) { forgotten_note(api, ts).await } else { Some(None) } };
     let (cut, forgot) = tokio::join!(cut, forgot);
     assert!(history.is_none() || behind != Some(true), "a history or a recap, never both");
-    let current = behind.is_some() && forgot.is_some();
+    let due = behind.and(forgot.as_ref()).map(Option::is_some);
     let note = [history, cut, forgot.flatten()].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
     assert!(note.len() <= limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 2, "a turn's notes are bounded");
-    ((!note.is_empty()).then_some(note), current)
+    ((!note.is_empty()).then_some(note), due)
 }
 
 /// What a chat continued from its owner's Session Archive was (note.rs,
@@ -2271,8 +2278,9 @@ mod tests {
     use serde_json::json;
 
     /// Goal (M17; Codex on #1358): a marker moves to a turn only once its
-    /// runtime has it (`Event::Taken`), or ended it untaken (it never
-    /// reached that memory); under a hold only once the hold is gone.
+    /// runtime has it (`Event::Taken`), or ended it untaken when that memory
+    /// was current (it never reached it), never one that was to tell it the
+    /// chat; under a hold only once the hold is gone.
     #[tokio::test]
     async fn a_marker_names_a_turn_its_runtime_took() {
         let root = std::env::temp_dir().join(format!("marks-{}", std::process::id()));
@@ -2283,22 +2291,30 @@ mod tests {
         let marks = Marks::new(held);
         tokio::spawn(marks.clone().after_holds());
         let seen = || crate::seen::read(&memory, "talk--k3x9");
-        marks.due("t1", memory.clone(), "talk--k3x9");
+        marks.due("t1", memory.clone(), "talk--k3x9", false);
         assert_eq!(seen(), None, "due, not taken");
-        marks.taken("t1");
+        marks.taken("t1", true);
         assert_eq!(seen().as_deref(), Some("t1"));
-        marks.due("t2", memory.clone(), "talk--k3x9");
-        marks.taken("t2");
-        marks.taken("t2");
-        assert_eq!(seen().as_deref(), Some("t2"), "taken (or ended untaken), then ended: once");
-        marks.due("lost", memory.clone(), "talk--k3x9");
-        marks.due("t2b", memory.clone(), "talk--k3x9");
-        marks.taken("lost");
-        assert_eq!(seen().as_deref(), Some("t2"), "one let go of is no longer due");
-        marks.taken("t2b");
+        marks.taken("t1", false);
+        assert_eq!(seen().as_deref(), Some("t1"), "taken, then ended: once");
+        marks.due("t2", memory.clone(), "talk--k3x9", false);
+        marks.taken("t2", false);
+        assert_eq!(seen().as_deref(), Some("t2"), "ended untaken, its memory current before: it never reached it");
+        // Alex's bot on #1358: one that was to tell the chat, ended untaken
+        marks.due("told", memory.clone(), "talk--k3x9", true);
+        marks.taken("told", false);
+        assert_eq!(seen().as_deref(), Some("t2"), "the chat never heard: the marker stays");
+        marks.due("told2", memory.clone(), "talk--k3x9", true);
+        marks.taken("told2", true);
+        assert_eq!(seen().as_deref(), Some("told2"), "the chat heard");
+        marks.due("lost", memory.clone(), "talk--k3x9", false);
+        marks.due("t2b", memory.clone(), "talk--k3x9", false);
+        marks.taken("lost", true);
+        assert_eq!(seen().as_deref(), Some("told2"), "one let go of is no longer due");
+        marks.taken("t2b", true);
         hold.send_replace(true);
-        marks.due("t3", memory.clone(), "talk--k3x9");
-        marks.taken("t3");
+        marks.due("t3", memory.clone(), "talk--k3x9", false);
+        marks.taken("t3", true);
         assert_eq!(seen().as_deref(), Some("t2b"), "held: it waits");
         hold.send_replace(false);
         for _ in 0..100 {

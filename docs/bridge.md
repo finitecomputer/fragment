@@ -237,8 +237,10 @@ reached a runtime and don't count; a stop does (its words are on
 `chat`). A chat the agent never took a turn in is behind nothing, and a
 `/new` is a turn like any other. A behind runtime's turn is told the
 chat (`note::recap`), and once the runtime has the turn
-(`Event::Taken`: Hermes acked it, Claude Code was given it), or ended it
-without taking it, the marker names it. So a
+(`Event::Taken`: Hermes acked it, Claude Code was given it), the marker
+names it. One it ended without taking moves the marker too when its
+memory was current (the turn never reached it), never one that was to
+tell it the chat. So a
 sleep before anyone writes in a chat loses nothing, and a profile lost
 alone is noticed. In the end state the agent fragment compares, and the
 marker stays where it is.
