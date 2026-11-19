@@ -313,10 +313,16 @@ impl Starts {
     /// keepalive (a turn), or the lifecycle runs it no more (it ended).
     /// Answers its line, when that ends it.
     pub fn after(&mut self, event: &Event, life: &Lifecycle, now_ms: i64) -> Option<String> {
-        // a wake that leaves it awake was answered by the container it has
-        // (it cancelled an idle sleep): no start comes for its ask. An
-        // owner's restart asked meanwhile still brings its own start
-        if matches!(event, Event::Wake { .. }) && matches!(life.phase, Phase::Awake { .. }) && !matches!(self.asked, Some((_, Woke::Restart))) {
+        // left awake, no start comes for the ask: a wake's was answered by
+        // the container it has (it cancelled an idle sleep), and a restart
+        // that changed nothing named an earlier start, made already. An
+        // owner's restart asked meanwhile, still to apply, keeps its own
+        let answered = match event {
+            Event::Wake { .. } => !matches!(self.asked, Some((_, Woke::Restart))),
+            Event::Restart { .. } => true,
+            _ => false,
+        };
+        if answered && matches!(life.phase, Phase::Awake { .. }) {
             self.asked = None;
         }
         let l = self.line.as_mut()?;
@@ -744,5 +750,20 @@ mod tests {
         d.turn();
         let l = d.line(g3);
         assert!(l["woke"] == "restart" && ms(&l, "beganMs") > 0, "{l}");
+        // a duplicate of that restart, asked once its start came up (its
+        // ledger's answer slow: #1357's review): its restart names an
+        // earlier start, made already, so its ask goes with it; a wake, then
+        // its container stopping under a turn: that start is no restart's
+        d.starts.asked(Woke::Restart, &d.c.life.phase, d.c.now);
+        d.apply(Event::Restart { generation: g });
+        assert!(matches!(d.c.life.phase, Phase::Awake { .. }) && d.starts.asked.is_none(), "{:?}", d.starts.asked);
+        d.wake(Wake::Owner);
+        d.apply(Event::Opened { socket: Socket::Keepalive });
+        let s = d.apply(Event::Exited { generation: g3 });
+        let s = d.owed(&s);
+        let (g4, _) = d.start(&s, Outcome::Ready);
+        d.turn();
+        let l = d.line(g4);
+        assert_eq!((&l["woke"], ms(&l, "beganMs")), (&"itself".into(), 0), "{l}");
     }
 }
