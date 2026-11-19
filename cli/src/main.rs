@@ -7,6 +7,7 @@ mod codestorage;
 mod home;
 mod mcp;
 mod notice;
+mod offload;
 mod operator;
 mod quote;
 mod search;
@@ -332,6 +333,20 @@ enum Cmd {
     Blob {
         #[command(subcommand)]
         sub: BlobCmd,
+    },
+    /// Move a file or folder off this disk into a members-only fragment
+    /// you edit: copied, read back and checked, and only then removed
+    /// here, a note (`<name>.offloaded.md`) left in its place. `--back`
+    /// brings it back from that note, checked; the fragment keeps its copy
+    Offload {
+        /// The file or folder to move; with --back, its note (or where it was)
+        path: PathBuf,
+        /// The fragment it goes into
+        #[arg(long, required_unless_present = "back", conflicts_with = "back")]
+        into: Option<String>,
+        /// Bring it back from its note
+        #[arg(long)]
+        back: bool,
     },
     /// Search fragments' own indexes by their words and their meaning, as
     /// one (a reader's, in each): each result a section of one of their
@@ -2824,6 +2839,19 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &v);
             println!("{sha}");
         }
+        Cmd::Offload { path, into, back } => match (into, back) {
+            (Some(into), false) => {
+                let moved = offload::offload(&c, &path, &into)?;
+                json_exit(j, &moved);
+                offload::print(&moved);
+            }
+            (None, true) => {
+                let back = offload::back(&c, &path)?;
+                json_exit(j, &back);
+                offload::print_back(&back);
+            }
+            _ => unreachable!("clap requires --into or --back, never both"),
+        },
         Cmd::Mcp { name, write } => {
             // stdout carries the protocol's messages and nothing else
             mcp::serve(&c, &name, write, std::io::stdin().lock(), std::io::stdout().lock())?;
