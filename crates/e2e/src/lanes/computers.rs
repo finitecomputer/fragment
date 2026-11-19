@@ -2428,8 +2428,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     if fakes && scripted {
         let crashing = Crashing { owner: &owner, owner_id: &owner_id, id: &id, chat: &chat_name, agent: &agent_name, identity: &identity, wake };
         replies_so_far += save_checks(s, api, &crashing, &|n, text| say(n, text))?;
-        bound_checks(s, api, &crashing)?;
+        // (before the bound checks, whose frozen guests a loaded box's
+        // Docker removes slowly: each starts and ends asleep)
         replies_so_far += cancel_checks(s, api, &crashing, &|n, text| say(n, text))?;
+        bound_checks(s, api, &crashing)?;
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
         disk_checks(s, api, &crashing)?;
