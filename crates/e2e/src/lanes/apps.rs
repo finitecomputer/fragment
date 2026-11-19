@@ -279,5 +279,77 @@ pub fn apps(s: &mut Suite, api: &Api) -> Result<()> {
         out.status == 200 && row_in(&team, &bobs)?.is_none() && open.status == 200 && row_in(&team, &mine)?.is_some(),
         format!("{out} {open}"),
     );
+    races(s, api, &owner)
+}
+
+/// The races the reviews found, each interleaved by the hold lever
+/// (ops.rs `test_hold`): a request held at a named step while another
+/// request, or a restart, goes between its turns.
+fn races(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let wait = std::time::Duration::from_secs(20);
+    let lever = |name: &str, op: &str, step: Option<&str>| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": op, "step": step })));
+    let hold = |name: &str, step: Option<&str>| lever(name, "hold", step);
+    let held_at = |name: &str| lever(name, "hold-at", None).ok().and_then(|r| r.body["at"].as_str().map(str::to_string)).unwrap_or_default();
+    let made = |s: &Suite, keys: &Keys, base: &str| -> Result<String> {
+        let name = s.named(api, keys, base)?;
+        s.create(api, keys, &name)?;
+        Ok(name)
+    };
+    let members_only = |keys: &Keys, name: &str| api.signed(keys, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })));
+    let members = |keys: &Keys, name: &str| -> Vec<Value> { api.signed(keys, "GET", &format!("/api/f/{name}/members"), None).ok().and_then(|r| r.body["members"].as_array().cloned()).unwrap_or_default() };
+    let row = |keys: &Keys, target: &str, app: &str| members(keys, target).into_iter().find(|m| m["app"]["name"] == app);
+
+    // ---- a join's look outlives a restart: Robin leaves the app between its
+    // answer and the target's commit (the app's word to look finds no row
+    // yet), and the node restarts before the target looks again
+    let (target, app) = (made(s, owner, "apps-recon-t")?, made(s, owner, "apps-recon-a")?);
+    members_only(owner, &app)?;
+    let robin = api.person()?;
+    let robin_id = api.identity(&robin)?;
+    api.share(&target, &robin_id, "viewer")?;
+    api.share(&app, &robin_id, "viewer")?;
+    hold(&target, Some("app-answer"))?;
+    let reached = std::thread::scope(|scope| -> Result<bool> {
+        let join = scope.spawn(|| api.signed(owner, "PUT", &format!("/api/f/{target}/members/{app}"), Some(&json!({ "role": "viewer" }))));
+        let answered = s.eventually(wait, || held_at(&target) == "app-answer");
+        let left = api.signed(owner, "DELETE", &format!("/api/f/{app}/members/{robin_id}"), None)?.status == 200;
+        hold(&target, Some("app-committed"))?;
+        let committed = s.eventually(wait, || held_at(&target) == "app-committed");
+        s.reload()?;
+        let _ = join.join();
+        Ok(answered && left && committed)
+    })?;
+    hold(&target, None)?;
+    lever(&target, "poll-now", None)?;
+    let joined = row(owner, &target, &app).is_some();
+    let out = api.signed(owner, "DELETE", &format!("/api/f/{target}/members/{robin_id}"), None)?;
+    let resumed = s.eventually(wait, || row(owner, &target, &app).is_some_and(|m| m["app"].get("paused").is_none()));
+    s.ok(
+        "a join taken with someone who left the app meanwhile is looked at again, a restart between: their leaving the target pauses nothing",
+        reached && joined && out.status == 200 && resumed,
+        format!("reached {reached} joined {joined} {out} {:?}", row(owner, &target, &app)),
+    );
+
+    // ---- a failed resend restores only what its own write replaced: the
+    // invite revoked while its growth was asked stays revoked
+    let ann = api.person()?;
+    api.share(&target, &api.identity(&ann)?, "editor")?;
+    let invite_ann = |role: &str| api.signed(owner, "POST", &format!("/api/f/{app}/invites"), Some(&json!({ "email": Api::email_of(&ann), "role": role })));
+    let first = invite_ann("editor")?;
+    hold(&app, Some("invite-asked"))?;
+    let (revoked, resent) = std::thread::scope(|scope| -> Result<(u16, u16)> {
+        let resend = scope.spawn(|| invite_ann("viewer"));
+        s.eventually(wait, || held_at(&app) == "invite-asked");
+        let revoked = api.signed(owner, "DELETE", &format!("/api/f/{app}/invites/{}", Api::email_of(&ann)), None)?.status;
+        s.mail.fail_next("E_SEND_FAILED");
+        hold(&app, None)?;
+        Ok((revoked, resend.join().expect("the resend's thread")?.status))
+    })?;
+    let waiting = api.signed(owner, "GET", &format!("/api/f/{app}/invites"), None)?;
+    s.ok(
+        "a resend whose mail fails, the invite revoked while it was asked, brings back no invite",
+        first.status == 200 && revoked == 200 && resent != 200 && waiting.body["invites"].as_array().is_some_and(|i| i.is_empty()),
+        format!("{first} revoked {revoked} resent {resent} {waiting}"),
+    );
     Ok(())
 }

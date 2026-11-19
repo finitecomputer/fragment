@@ -280,7 +280,7 @@ impl FragmentCell {
         // its own (app_members.rs): one with no life has nothing to take
         let to = |key: &str| principal.strip_prefix(key).filter(|name| fragment_proto::valid_fragment_name(name));
         if let Some((name, from_app)) = to(crate::app_members::TO_APP).map(|n| (n, false)).or_else(|| to(crate::app_members::FROM_APP).map(|n| (n, true))) {
-            let told = AppTold { from_app, change: IndexChange { role: change.role, ..IndexChange::gone(change.fragment.clone(), change.incarnation, change.version) } };
+            let told = AppTold { from_app, fragment: change.fragment.clone(), role: change.role, incarnation: change.incarnation, version: change.version };
             return match crate::fragment::call(&self.env, name, &told).await {
                 Ok(()) => Ok(()),
                 Err(e) if e.code == ErrorCode::NotFound => Ok(()),
@@ -918,10 +918,6 @@ impl FragmentCell {
             Err(e) => return Err(e),
         }
         self.drop_spent_invites().await?;
-        let before = self.rows("SELECT email, role, expires_at, created_by, created_at, app, app_key FROM invites WHERE email = ?", vec![email.as_str().into()])?;
-        if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
-            return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
-        }
         // an app in other fragments: each says yes to whoever signs in as
         // the email, asked again at their yes (`claim_invite`); no one signs
         // in as it, none can (app_members.rs)
@@ -939,10 +935,13 @@ impl FragmentCell {
             // at theirs, so none is kept for the invite meanwhile
             let noted = self.ask_growth(&person, body.role).await?;
             self.given_up(noted).await?;
-            // the cap again, in the write's turn: another invite may have taken the room meanwhile
-            if self.rows("SELECT 1 AS x FROM invites WHERE email = ?", vec![email.as_str().into()])?.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
-                return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
-            }
+        }
+        self.test_hold("invite-asked").await;
+        // the write's own turn, after every wait: the invite it replaces
+        // (what a failed mail brings back) and the cap, read now
+        let before = self.rows("SELECT email, role, expires_at, created_by, created_at, app, app_key FROM invites WHERE email = ?", vec![email.as_str().into()])?;
+        if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
+            return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
         }
         let now = js::now_ms();
         let expires_at = now + limits::INVITE_TTL_S * 1000;
