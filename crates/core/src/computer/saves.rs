@@ -402,6 +402,17 @@ impl Saves {
         &self.forgetting
     }
 
+    /// Whether a save of start `generation` begun at `since_ms` was
+    /// overtaken as it ran: the newest kept save is that start's, kept
+    /// after it began (an owner's sleep's, asked once an awake save let go
+    /// of its hold and its guest went on). The DO lets its records go:
+    /// never the newest kept ahead of a newer capture. One only asked, not
+    /// kept, overtakes nothing: a capture is kept until a newer one is
+    /// (Codex on #1378).
+    pub fn overtaken(&self, generation: u64, since_ms: i64) -> bool {
+        self.saves.first().is_some_and(|s| s.generation == generation && s.at_ms > since_ms)
+    }
+
     /// Every record a wipe deletes (docs/api.md, Operators): each kept
     /// save's, newest first, then each let go of and not deleted yet. A
     /// record is a save's or waits to be deleted, never both.
@@ -782,6 +793,23 @@ mod tests {
         let mut s = Saves::default();
         s.saved(1, rec("a"), T, true);
         s.let_go(rec("a"));
+    }
+
+    /// Goal (P9, Codex on #1378): an awake save that a newer save of its
+    /// start overtook as it ran (kept after it began) is never kept ahead
+    /// of it; one only asked, or an older save, or another start's,
+    /// overtakes nothing, so a completed capture is kept. Restart: stored
+    /// and read back, the same.
+    #[test]
+    fn a_save_is_overtaken_only_by_a_newer_one_kept() {
+        let mut s = Saves::default();
+        assert!(!s.overtaken(1, T), "none kept");
+        s.saved(1, rec("a"), T + 10, true);
+        assert!(!s.overtaken(1, T + 20), "kept before it began");
+        assert!(s.overtaken(1, T + 5), "kept after it began");
+        assert!(!s.overtaken(2, T + 5), "another start's");
+        let s: Saves = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(s.overtaken(1, T + 5) && !s.overtaken(1, T + 20));
     }
 
     #[test]
