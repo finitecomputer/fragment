@@ -248,9 +248,9 @@ impl FragmentCell {
     /// target's word on its role there, taken when newer than the row it
     /// keeps (only a row it answered for). To the target: an app member's
     /// life ended, and with it any ask on its way.
-    pub(crate) fn app_told(&self, AppTold { from_app, change: c }: AppTold) -> CellResult<()> {
+    pub(crate) fn app_told(&self, c: AppTold) -> CellResult<()> {
         self.created()?;
-        if !from_app {
+        if !c.from_app {
             let role = c.role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
             let (inc, ver) = (SqlStorageValue::Integer(c.incarnation), SqlStorageValue::Integer(c.version));
             // a role changes only a row it answered for; an end (none) is kept

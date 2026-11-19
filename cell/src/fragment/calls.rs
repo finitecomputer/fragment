@@ -155,15 +155,18 @@ impl Call for AppAsked {
     type Answer = AppAnswer;
 }
 
-/// A change between an app and a target, as a list takes one
-/// (`IndexChange`, by the fragment that sends it): the target's word on the
-/// app's role there (none: it is out); or, `from_app`, the app's, at its
-/// life's end, that it is gone. 404 from a fragment with no life: nothing
-/// to take.
+/// A change between an app and a target, by the fragment that sends it
+/// (`fragment`, its life and change), as a list's row is versioned: the
+/// target's word on the app's role there (none: it is out); or,
+/// `from_app`, the app's, at its life's end, that it is gone. 404 from a
+/// fragment with no life: nothing to take.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AppTold {
     pub from_app: bool,
-    pub change: crate::principal::calls::IndexChange,
+    pub fragment: String,
+    pub role: Option<Role>,
+    pub incarnation: i64,
+    pub version: i64,
 }
 
 impl Call for AppTold {
