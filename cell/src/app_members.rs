@@ -122,10 +122,12 @@ impl FragmentCell {
         // bounded: the fragments an app is in hold it as a member
         let answers = join_all(targets.iter().map(|t| crate::fragment::call(&self.env, t, &asked))).await;
         let refused = answers.iter().find_map(|a| a.as_ref().err().filter(|e| e.code != ErrorCode::NotFound));
-        // all yes, and its note still kept: the caller writes the growth in
-        // this same turn. A note the alarm took as run out meanwhile had
-        // every fragment look again, so their yes may be gone: ask again
-        let kept = !self.rows("SELECT 1 AS x FROM app_growth WHERE id = ?", vec![SqlStorageValue::Integer(id)])?.is_empty();
+        // all yes, and its note still fresh as a look reads it: the caller
+        // writes the growth in this same turn. A note run out meanwhile
+        // (taken by the alarm or not) left the looks since without it, so a
+        // yes may be gone: ask again
+        let fresh = js::now_ms() - GROWTH_NOTED_MS;
+        let kept = !self.rows("SELECT 1 AS x FROM app_growth WHERE id = ? AND at >= ?", vec![SqlStorageValue::Integer(id), SqlStorageValue::Integer(fresh)])?.is_empty();
         let refused = match (refused, kept) {
             (None, true) => return Ok(Some(id)),
             (Some(refused), _) => CellError::new(refused.code, refused.message.clone()),
