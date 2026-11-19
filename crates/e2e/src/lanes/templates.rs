@@ -183,6 +183,8 @@ fn template_pages(s: &mut Suite, api: &Api, todo: &str, todo_cookie: &str, blank
             // the platform's stylesheet brings the platform's type, from this origin
             let seen = own_type(&mut b, &page)?;
             s.ok("a page that links __fragment.css draws in Funnel Sans and JetBrains Mono, fetched from its own origin (__fonts/), and fetches nothing from another", drawn_in_own_type(&seen, "/__fonts/"), &seen);
+            let sandboxed = sandboxed_type(&mut b, &page)?;
+            s.ok("and so does a page of it in a sandboxed frame (an opaque origin, whose fonts' fetch is cross-origin)", sandboxed == "loaded", &sandboxed);
             stylesheet(s, &mut b, &page)?;
         }
         b.close(page)?;
@@ -271,6 +273,29 @@ pub(super) fn drawn_in_own_type(seen: &Value, folder: &str) -> bool {
     let faces = seen["faces"].as_object().is_some_and(|f| f.len() == 4 && f.values().all(|s| s == "loaded"));
     let fonts = seen["fonts"].as_array().is_some_and(|f| f.len() >= 4 && f.iter().all(|p| p.as_str().is_some_and(|p| p.starts_with(folder))));
     faces && fonts && seen["elsewhere"] == json!([])
+}
+
+/// What a page of `page`'s origin in a sandboxed frame (an opaque origin
+/// of its own, as a board shows an agent's page) gets when it links the
+/// platform's type (`__fonts/fonts.css`, which `__fragment.css` imports;
+/// linked directly, as a sandboxed frame sends no cookie for a fragment
+/// that is not public): JetBrains Mono's status, as the frame tells it.
+/// A font is fetched with CORS, so from an opaque origin it loads only if
+/// `__fonts/` lets any origin read it.
+fn sandboxed_type(b: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<Value> {
+    b.eval(
+        page,
+        r#"new Promise((resolve) => {
+      const frame = document.createElement('iframe');
+      frame.sandbox = 'allow-scripts';
+      addEventListener('message', (e) => { if (e.source === frame.contentWindow) resolve(e.data); });
+      const sheet = new URL('__fonts/fonts.css', location.href).href;
+      const tell = 'addEventListener("load", () => document.fonts.load(\'400 1em "JetBrains Mono"\').then((got) => parent.postMessage(got.map((f) => f.status).join() || "none", "*"), (e) => parent.postMessage("failed: " + e.name, "*")))';
+      frame.srcdoc = `<link rel="stylesheet" href="${sheet}"><script>${tell}<\/script><p>sandboxed</p>`;
+      document.body.append(frame);
+      setTimeout(() => resolve('no answer in 10 s'), 10000);
+    })"#,
+    )
 }
 
 /// Author CSS keeps control even when declared before the platform link;

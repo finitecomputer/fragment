@@ -85,9 +85,15 @@ pub(crate) fn fragment_font(rest: &str) -> Option<&str> {
 }
 
 /// `GET /__fonts/<name>` on a fragment's origin: the shell's file,
-/// kept or revalidated as `asset` keeps it.
+/// kept or revalidated as `asset` keeps it, to any origin: a browser
+/// fetches a font with CORS, and a page of this origin in a sandboxed
+/// frame (a board's, `__file`'s HTML) is an opaque origin of its own,
+/// whose fonts would fail without it. The files are the release's, no
+/// one's, and a font's fetch sends no credentials to another origin.
 pub async fn fragment_font_asset(req: &Request, env: &Env, name: &str) -> CellResult<Response> {
-    asset(req, env, name).await?.ok_or_else(|| CellError::host(format!("the shell publishes {name}")))
+    let mut resp = asset(req, env, name).await?.ok_or_else(|| CellError::host(format!("the shell publishes {name}")))?;
+    resp.headers_mut().set("access-control-allow-origin", "*")?;
+    Ok(resp)
 }
 
 /// Whether the request's `If-None-Match` names `tag`, by the weak
