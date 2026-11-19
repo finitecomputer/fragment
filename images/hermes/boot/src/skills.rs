@@ -327,6 +327,42 @@ pub fn withheld(dir: &Path, installed: &Installed, providers: &BTreeSet<String>,
     names.into_iter().collect()
 }
 
+/// A profile's hidden connection skills as its `config.yaml` says them
+/// (`hermes::profile_config`'s `skills.disabled` line, under `skills:`),
+/// or nothing when it hides none.
+pub fn hidden_of(config: &str) -> String {
+    let mut in_skills = false;
+    for line in config.lines() {
+        if !line.starts_with(' ') {
+            in_skills = line == "skills:";
+        } else if in_skills && line.starts_with("  disabled: ") {
+            return line.to_string();
+        }
+    }
+    String::new()
+}
+
+/// Each profile's hidden connection skills under `profiles` (its
+/// `<profile>/config.yaml`), as prompt inputs (`hermes::prompt_inputs`):
+/// its path and its line, for each profile that hides any. Bounded by the
+/// profiles a computer holds; a config never followed through a link.
+pub fn hidden_lists(profiles: &Path) -> Vec<(String, Vec<u8>)> {
+    let Ok(entries) = std::fs::read_dir(profiles) else { return Vec::new() };
+    let mut found = Vec::new();
+    for e in entries.flatten().take(FILES_MAX) {
+        let path = e.path().join("config.yaml");
+        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file() && m.len() <= FILE_MAX_BYTES as u64) {
+            continue;
+        }
+        let line = hidden_of(&std::fs::read_to_string(&path).unwrap_or_default());
+        if !line.is_empty() {
+            found.push((format!("{} skills.disabled", path.display()), line.into_bytes()));
+        }
+    }
+    found.sort();
+    found
+}
+
 /// The name Hermes gives the skill whose `SKILL.md` reads `text`, in a
 /// directory named `dir_name`: its frontmatter's `name` (quoted or not),
 /// else the directory's.
@@ -659,6 +695,37 @@ mod tests {
         assert!(cut, "the managed set past its budget is cut, and said");
         assert_eq!(found.iter().filter(|(p, _)| p.starts_with(&managed.display().to_string())).count(), FILES_MAX);
         assert!(found.iter().any(|(p, _)| p.ends_with("/view/fragment/SKILL.md")), "the view keeps its own budget");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A profile's hidden connection skills are a prompt input: its
+    /// `skills.disabled` line alone (a model change is not one), each
+    /// profile's that hides any, so a connect or a disconnect asks the open
+    /// chats to rebuild their prompts.
+    #[test]
+    fn a_profiles_hidden_skills_are_a_prompt_input() {
+        let config = |model: &str, hidden: &[&str]| {
+            let line = if hidden.is_empty() { String::new() } else { format!("  disabled: [{}]\n", hidden.iter().map(|h| format!("\"{h}\"")).collect::<Vec<_>>().join(", ")) };
+            format!("model:\n  default: {model}\n  disabled: [\"x\"]\nskills:\n  external_dirs: [\"/m\"]\n{line}plugins:\n  disabled:\n    - p\n")
+        };
+        assert_eq!(hidden_of(&config("a", &["linear-finite"])), "  disabled: [\"linear-finite\"]");
+        assert_eq!(hidden_of(&config("a", &[])), "", "none hidden: no line, nor another block's");
+        assert_eq!(hidden_of(&config("a", &["linear-finite"])), hidden_of(&config("b", &["linear-finite"])), "a model change is not one");
+        let root = std::env::temp_dir().join(format!("hermes-boot-hidden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let put = |profile: &str, text: &str| {
+            std::fs::create_dir_all(root.join(profile)).unwrap();
+            std::fs::write(root.join(profile).join("config.yaml"), text).unwrap();
+        };
+        put("juniper--k3x9", &config("a", &["google-workspace-finite", "linear-finite"]));
+        put("fred--k3x9", &config("a", &[]));
+        let before = hidden_lists(&root);
+        assert_eq!(before.len(), 1, "only a profile that hides any: {before:?}");
+        put("juniper--k3x9", &config("b", &["google-workspace-finite", "linear-finite"]));
+        assert_eq!(hidden_lists(&root), before, "a model change asks nothing");
+        put("juniper--k3x9", &config("b", &["linear-finite"]));
+        assert_ne!(hidden_lists(&root), before, "a connect is a change");
+        assert!(hidden_lists(&root.join("gone")).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
