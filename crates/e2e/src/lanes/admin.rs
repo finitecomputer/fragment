@@ -412,7 +412,7 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
             && read["computersAwakeWeek"] == 2
             && read["fragmentsAwakeNow"] == 2
             && trouble.first() == Some(&json!({ "computer": theirs, "kind": "wont_wake", "lines": 2, "npub": ivy_id, "email": ivy_email }))
-            && trouble.get(1) == Some(&json!({ "computer": saver, "kind": "saves_failing", "lines": 2, "npub": null, "email": null, "why": { "at": now - 15_000, "text": "backup '/data': open /data/…: Permission denied (os error 13)" } }))
+            && trouble.get(1) == Some(&json!({ "computer": saver, "kind": "saves_failing", "lines": 2, "npub": null, "email": null, "why": { "at": now - 15_000, "text": "backup '/data': …: Permission denied (os error 13)" } }))
             && trouble.get(2) == Some(&json!({ "computer": stranger, "kind": "disk_filling", "lines": 1, "npub": null, "email": null }))
             && trouble.len() == 3
             && read.get("whyUnread").is_none(),
