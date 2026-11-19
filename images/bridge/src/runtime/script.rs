@@ -214,7 +214,7 @@ const HASH_BYTES_MAX: u64 = 256 << 20;
 /// opened, and files are read as they hash, at most `HASH_BYTES_MAX` in all.
 async fn hash_data(root: &std::path::Path, rel: &str) -> String {
     use sha2::Digest;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let Some(top) = data_path(root, rel) else { return format!("hash refused: {rel:?} is no path under the data") };
     if std::fs::symlink_metadata(&top).is_err() {
         return format!("hash {rel}: none");
@@ -241,7 +241,16 @@ async fn hash_data(root: &std::path::Path, rel: &str) -> String {
             h.update(std::fs::read_link(&path).map(|t| t.display().to_string()).unwrap_or_default().as_bytes());
         } else if meta.is_file() {
             let left = HASH_BYTES_MAX - read;
-            let copied = std::fs::File::open(&path).and_then(|f| std::io::copy(&mut std::io::Read::take(f, left + 1), &mut h));
+            // opened without blocking, and read only if what it opened is a
+            // regular file still (one swapped for a FIFO is never read)
+            let opened = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&path).and_then(|f| {
+                if f.metadata()?.is_file() {
+                    Ok(f)
+                } else {
+                    Err(std::io::Error::other("no longer a regular file"))
+                }
+            });
+            let copied = opened.and_then(|f| std::io::copy(&mut std::io::Read::take(f, left + 1), &mut h));
             match copied {
                 Ok(n) if n > left => return format!("hash refused: more than {HASH_BYTES_MAX} bytes"),
                 Ok(n) => read += n,

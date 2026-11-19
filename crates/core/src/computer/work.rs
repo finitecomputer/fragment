@@ -99,10 +99,15 @@ pub const STAMP_NEXT: &str = concat!(
     "sync -f . || exit 1\n",
 );
 
-/// Once the save `$2` is kept with the new work record `$3`: its stamp is
-/// that record's, the only one (another save's under way, ended first,
-/// loses its own, and copies next time).
-pub const STAMP_TAKEN: &str = "cd \"$1/.work-stamps\" && test -f \"./next-$2\" || exit 1\nfor f in *; do [ \"$f\" = \"next-$2\" ] || rm -f \"./$f\"; done\nmv \"./next-$2\" \"./$3\"\n";
+/// Once the save `$2` took the new work record `$3`: its stamp is that
+/// record's, the only one (another save's under way, ended first, loses
+/// its own, and copies next time). None while anything is mounted under
+/// the work: a mount made after the stamp may be what the record copied
+/// (Codex on #1379).
+pub const STAMP_TAKEN: &str = concat!(
+    no_mount!(),
+    "cd \"$1/.work-stamps\" && test -f \"./next-$2\" || exit 1\nfor f in *; do [ \"$f\" = \"next-$2\" ] || rm -f \"./$f\"; done\nmv \"./next-$2\" \"./$3\"\n",
+);
 
 /// Once a start restored its save, the work's record `$2` among it, and
 /// before its check and its gate: that record's stamp, the only one, named
@@ -342,6 +347,9 @@ mod tests {
         assert_eq!(run_env(WORK_CHANGED, &d, &[ID], &fake).0, Some(3));
         assert_eq!(run_env(STAMP_NEXT, &d, &["11"], &fake).0, Some(3));
         assert_eq!(run_env(STAMP_RESTORED, &d, &[ID], &fake).0, Some(3));
+        assert_eq!(run(STAMP_NEXT, &d, &["12"]).0, Some(0));
+        assert_eq!(run_env(STAMP_TAKEN, &d, &["12", "0d6b3c35-7a73-4d4e-8a4f-9e1d2f3a4b5c"], &fake).0, Some(3), "a mount made after the stamp: no record's stamp");
+        assert!(d.join(".work-stamps/next-12").exists() && !d.join(".work-stamps/0d6b3c35-7a73-4d4e-8a4f-9e1d2f3a4b5c").exists());
         assert!(d.join(format!(".work-stamps/{ID}")).exists(), "a refused restore's stamp touched nothing");
         let none = [("MOUNTINFO", "/nonexistent/mountinfo")];
         assert_eq!(run_env(WORK_CHANGED, &d, &[ID], &none).0, Some(3));
