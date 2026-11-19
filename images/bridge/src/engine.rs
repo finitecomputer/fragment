@@ -512,10 +512,10 @@ pub struct ChatView {
     pub people: Vec<String>,
     /// What to call its writers, by identity.
     pub names: BTreeMap<String, String>,
-    /// The door this chat is of the agent reading it, when its agent
-    /// fragment's `door.hosted` events name the chat (a hosted door:
-    /// docs/api.md, "An agent's doors"): `telegram`, …. None for any other
-    /// chat, and until the driver has read it (driver.rs, `hosted_door`).
+    /// The door this chat is of the agent reading it, as the agent's own row
+    /// of its members says (`door`: a connector bound as the agent's door,
+    /// while open: docs/api.md, "An agent's doors"): `telegram`, …. None for
+    /// any other chat, and from a platform before the row said it.
     pub door: Option<String>,
 }
 
@@ -1174,8 +1174,8 @@ impl Engine {
     /// - **the agent itself**: its SimpleX door's, which the platform took
     ///   only signed by the door key its owner's ticket registered;
     /// - **a hosted door**: a key none of the chat's members (a connector
-    ///   publishes as its own fragment), in a chat its agent's fragment
-    ///   names as that door (`ChatView::door`), whose `via` it is.
+    ///   publishes as its own fragment), in a chat whose members mark the
+    ///   agent's row as that door (`ChatView::door`), whose `via` it is.
     ///
     /// Any other key that is none of the chat's members (the chat's own,
     /// firing a record one of its editors scheduled, which the platform
@@ -1193,7 +1193,7 @@ impl Engine {
         }
         let door = v.door.as_deref() == Some(r.via.as_str());
         if !door {
-            crate::ev!("relayed.untrusted", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "principal": record.principal, "via": r.via, "door": v.door, "why": "carried by a key none of the chat's members, in a chat its agent's fragment names as no such door: its carrier's, never its owner's" });
+            crate::ev!("relayed.untrusted", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "principal": record.principal, "via": r.via, "door": v.door, "why": "carried by a key none of the chat's members, in a chat whose members mark no such door on its agent's row: its carrier's, never its owner's" });
         }
         door
     }

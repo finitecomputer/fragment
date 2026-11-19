@@ -807,8 +807,8 @@ async fn list_follows(api: &Api, agent: &Agent, only: Option<Vec<String>>) -> Re
     Ok(out)
 }
 
-/// A chat's members and names, read again after `VIEW_TTL_MS`; and the
-/// door it is of its agent's, once a record needs it (`hosted_door`).
+/// A chat's members and names, read again after `VIEW_TTL_MS`, or for its
+/// door when a record needs one (`door_due`).
 struct ViewCache {
     view: ChatView,
     since: i64,
@@ -823,9 +823,9 @@ impl ViewCache {
         self.read_at.is_some_and(|t| t.elapsed() < Duration::from_millis(limits::VIEW_TTL_MS) && joined.is_none_or(|j| j < t))
     }
 
-    /// Whether to read the chat's door: a door found is kept for the
-    /// follow's life (a door unbound since relays nothing more); none found
-    /// is asked again after `DOOR_READ_EVERY_MS`.
+    /// Whether to read the chat's members again for its door: when its
+    /// agent's row named none, and none was asked for in
+    /// `DOOR_READ_EVERY_MS`.
     fn door_due(&self) -> bool {
         self.view.door.is_none() && self.door_read_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(limits::DOOR_READ_EVERY_MS))
     }
@@ -838,6 +838,9 @@ impl ViewCache {
         self.view.agents = members.iter().filter(|m| m.kind == "agent").map(|m| m.principal.clone()).collect();
         self.view.people = members.iter().filter(|m| m.kind != "agent").map(|m| m.principal.clone()).collect();
         self.since = members.iter().find(|m| m.principal == agent.identity).map(|m| m.added_at).unwrap_or(0);
+        // the door this chat is of this agent's, as its own row says (the
+        // connector's binding, while open: docs/api.md, "An agent's doors")
+        self.view.door = members.iter().find(|m| m.principal == agent.identity).and_then(|m| m.door.clone()).filter(|d| records::door_ok(d));
         // Who to name, at most `PEOPLE_MAX` (one `__people`): the writer whose
         // record asked first, then its people, then its other agents (an
         // agent's message, a hand-off, is told by its name: its title, as
@@ -1068,25 +1071,26 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         // a writer the view has no name for (a person or another agent past
         // the last read's bound, or new): read again, with it first
         let unknown = records::is_identity(&record.principal) && record.principal != agent.identity && !view.view.names.contains_key(&record.principal);
-        if !view.fresh(shared.joined_at(fragment)) || unknown {
-            if let Err(e) = view.read(api, agent, fragment, Some(&record.principal)).await {
-                crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() });
-            }
-        }
         // its owner's words carried by another key: whether this chat is a
-        // door of the agent's (the engine takes them as its owner's only
-        // through that door: `relayed_for`). A read that failed in a way
-        // asking again may pass ends the follow, which reads the record
-        // again from the cursor, so an owner's message is never taken for
-        // its carrier's for a blip.
+        // door of the agent's, as its row says now (the engine takes them
+        // as its owner's only through that door: `relayed_for`), read again
+        // if its view named none, so a door bound since it was read is
+        // seen. That read failing in a way asking again may pass ends the
+        // follow, which reads the record again from the cursor, so an
+        // owner's message is never taken for its carrier's for a blip.
         let relays = record.at >= view.since && record.principal != agent.identity && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment);
-        if relays && view.door_due() {
-            match hosted_door(api, agent, fragment).await {
-                Ok(door) => view.view.door = door,
-                Err(e) if e.retryable() => return Some(Ended::Again(format!("its doors did not read (seq {}): {e}", record.seq))),
-                Err(e) => crate::ev!("door.unread", { "agent": agent.fragment, "fragment": fragment, "error": e.to_string() }),
+        let door = relays && view.door_due();
+        if !view.fresh(shared.joined_at(fragment)) || unknown || door {
+            match view.read(api, agent, fragment, Some(&record.principal)).await {
+                Ok(()) => {}
+                Err(e) if door && e.retryable() => return Some(Ended::Again(format!("its members did not read for its door (seq {}): {e}", record.seq))),
+                Err(e) => crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() }),
             }
-            view.door_read_at = Some(Instant::now());
+            // asked for its door: not again for a while, whatever it said
+            // (a failure asking again may pass asks again, above)
+            if door {
+                view.door_read_at = Some(Instant::now());
+            }
         }
         (Some(view.view.clone()), view.since)
     };
@@ -1130,33 +1134,6 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
     };
     let fed = inbox.send(Msg::Input(input)).await;
     fed.is_err().then_some(Ended::Stopped)
-}
-
-/// The door `fragment` is of `agent`'s, as the agent's fragment says: the
-/// last `door.hosted` its `events` hold that names it, which the platform
-/// writes as its owner binds that connector to it (docs/api.md, "An
-/// agent's doors"; docs/MODEL.md), and the only record of the binding the
-/// agent reads. None when none does. Its owner binds it before it relays
-/// anything, so a record it relays finds it here.
-async fn hosted_door(api: &Api, agent: &Agent, fragment: &str) -> Result<Option<String>, ApiError> {
-    let mut door = None;
-    let mut after = 0;
-    for _ in 0..limits::DOOR_EVENT_PAGES_MAX {
-        let page = api.records(&agent.fragment, &agent.fragment, "events", after, limits::CATCHUP_PAGE_RECORDS).await?;
-        let more = page.more || page.records.len() as u32 >= limits::CATCHUP_PAGE_RECORDS;
-        for r in &page.records {
-            after = after.max(r.seq);
-            let data = &r.body["data"];
-            if r.kind == "door.hosted" && r.principal == "platform" && data["actor"] == fragment {
-                door = data["door"].as_str().filter(|d| records::door_ok(d)).map(str::to_string);
-            }
-        }
-        if !more || page.records.is_empty() {
-            return Ok(door);
-        }
-    }
-    crate::ev!("door.bounded", { "agent": agent.fragment, "fragment": fragment, "pages": limits::DOOR_EVENT_PAGES_MAX });
-    Ok(door)
 }
 
 /// The chat an agent's home names now (`api::home_chat`): its `agent.json`,

@@ -388,6 +388,11 @@ pub struct Member {
     pub added_at: i64,
     #[serde(default)]
     pub owner: Option<String>,
+    /// On a connector bound as an agent's door, that agent's row alone:
+    /// the door it is (`telegram`), while it is open (docs/api.md, "An
+    /// agent's doors"). None from a platform before it.
+    #[serde(default)]
+    pub door: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -410,15 +415,11 @@ pub struct Posted {
     pub seq: Option<u64>,
 }
 
-/// A page of records: `{channel, records, next, more}`.
+/// A page of records: `{channel, records, next}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub records: Vec<Record>,
     pub next: u64,
-    /// Records remain past it: a page its bytes cut short says so (none
-    /// from a platform before `more`).
-    #[serde(default)]
-    pub more: bool,
 }
 
 /// One file of a fragment at main (`GET /api/f/{name}/files`).

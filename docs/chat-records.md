@@ -143,10 +143,10 @@ mirrors:
   `{via, for, agent}`.
 - Only that agent's own bridge honors it, and only when its door carried
   it: the agent itself (SimpleX's), or a key that is none of the chat's
-  members in a chat the agent fragment's events name as that door
-  (`door.hosted`, written as its owner binds it: a hosted door's). Then
-  it is the owner's message, asked as them, whether or not a link is
-  bound now. Any other `relayed` is read as the record without it:
+  members in a chat whose members list marks that agent's row as that
+  door (`door`, a connector's binding while open: a hosted door's). Then
+  it is the owner's message, asked as them, whether or not a SimpleX
+  link is bound now. Any other `relayed` is read as the record without it:
   another `for`, another agent's door, a `via` that is no door's id,
   carried by another member, or by any other key (a chat's own, firing a
   record an editor scheduled, say).

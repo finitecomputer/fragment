@@ -38,6 +38,9 @@ pub struct Member {
     pub role: String,
     pub kind: String,
     pub added_at: i64,
+    /// On a connector bound as this agent's door, the door, as the
+    /// platform's list says it on the bound agent's row.
+    pub door: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -222,15 +225,6 @@ impl World {
         record
     }
 
-    /// An event on `fragment`'s `events`, as the platform writes one: by
-    /// `platform`, its `kind` the event's, its body `{summary, data}`.
-    pub fn event(&mut self, fragment: &str, kind: &str, data: Value) {
-        let at = self.now();
-        let c = self.fragments.get_mut(fragment).expect("a fragment of the fake").channels.entry("events".into()).or_default();
-        let seq = c.records.len() as u64 + 1;
-        c.records.push(json!({ "channel": "events", "seq": seq, "at": at, "principal": "platform", "kind": kind, "body": { "summary": kind, "data": data } }));
-    }
-
     pub fn records(&self, fragment: &str, channel: &str) -> Vec<Value> {
         self.fragments.get(fragment).and_then(|f| f.channels.get(channel)).map(|c| c.records.clone()).unwrap_or_default()
     }
@@ -271,8 +265,8 @@ fn agent_fragment(identity: &str) -> Frag {
     let label = identity.trim_start_matches("npub1");
     let title = label.get(..1).map(|c| c.to_uppercase() + &label[1..]).unwrap_or_default();
     let mut f = Frag { kind: "agent".into(), title, ..Frag::default() };
-    f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
-    f.members.push(Member { principal: identity.into(), role: "editor".into(), kind: "agent".into(), added_at: 2 });
+    f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1, door: None });
+    f.members.push(Member { principal: identity.into(), role: "editor".into(), kind: "agent".into(), added_at: 2, door: None });
     f.channels.insert("tasks".into(), Chan { post: Some("editor".into()), ..Chan::default() });
     f
 }
@@ -363,9 +357,9 @@ impl Fake {
         let name = name.to_string();
         self.with(|w| {
             let mut f = Frag { kind: "chat".into(), ..Frag::default() };
-            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1, door: None });
             for (i, a) in agents.iter().enumerate() {
-                f.members.push(Member { principal: format!("npub1{a}"), role: "editor".into(), kind: "agent".into(), added_at: 10 + i as i64 });
+                f.members.push(Member { principal: format!("npub1{a}"), role: "editor".into(), kind: "agent".into(), added_at: 10 + i as i64, door: None });
             }
             f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
             f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
@@ -377,20 +371,20 @@ impl Fake {
     /// A connector `<label>--k3x9` of paul's, bound as agent `agent`'s
     /// `door` door, as the platform binds one (docs/api.md, "An agent's
     /// doors"): the agent a viewer of its chat, which takes its posts on
-    /// `chat` and `work`, and its fragment's `events` saying so
-    /// (`door.hosted`). Its own key, which its records relaying paul are
-    /// by, is none of its members: say, `npub1<label>`.
-    pub fn connector(&self, label: &str, agent: &str, door: &str) -> String {
+    /// `chat` and `work`, its row of the members saying the door (`None`:
+    /// as a platform before it says nothing). Its own key, which its
+    /// records relaying paul are by, is none of its members: say,
+    /// `npub1<label>`.
+    pub fn connector(&self, label: &str, agent: &str, door: Option<&str>) -> String {
         let name = format!("{label}--k3x9");
         self.with(|w| {
             let at = w.now();
             let mut f = Frag { kind: "chat".into(), ..Frag::default() };
-            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
-            f.members.push(Member { principal: format!("npub1{agent}"), role: "viewer".into(), kind: "agent".into(), added_at: at });
+            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1, door: None });
+            f.members.push(Member { principal: format!("npub1{agent}"), role: "viewer".into(), kind: "agent".into(), added_at: at, door: door.map(str::to_string) });
             f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
             f.channels.insert("work".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
             w.fragments.insert(name.clone(), f);
-            w.event(&format!("{agent}--k3x9"), "door.hosted", json!({ "door": door, "actor": name }));
         });
         name
     }
@@ -401,7 +395,7 @@ impl Fake {
         let name = format!("{label}--k3x9");
         self.with(|w| {
             let mut f = Frag { kind: "skills".into(), ..Frag::default() };
-            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1, door: None });
             for (path, text) in files {
                 f.files.insert(path.to_string(), Bytes::from(text.to_string()));
             }
@@ -445,7 +439,7 @@ impl Fake {
     pub fn join(&self, fragment: &str, label: &str) {
         self.with(|w| {
             let at = w.now();
-            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: format!("npub1{label}"), role: "editor".into(), kind: "agent".into(), added_at: at });
+            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: format!("npub1{label}"), role: "editor".into(), kind: "agent".into(), added_at: at, door: None });
             w.append(&format!("{label}--k3x9"), "tasks", "npub1paul", json!({ "kind": "joined", "fragment": fragment }));
         });
     }
@@ -453,7 +447,7 @@ impl Fake {
     pub fn add_member(&self, fragment: &str, principal: &str, role: &str) {
         self.with(|w| {
             let at = w.now();
-            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: principal.into(), role: role.into(), kind: "person".into(), added_at: at });
+            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: principal.into(), role: role.into(), kind: "person".into(), added_at: at, door: None });
         });
     }
 
@@ -757,8 +751,8 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         }
         let at = w.now();
         let mut f = Frag { kind: "chat".into(), title: v["title"].as_str().unwrap_or("").to_string(), ..Frag::default() };
-        f.members.push(Member { principal: owner.clone(), role: "owner".into(), kind: "person".into(), added_at: at });
-        f.members.push(Member { principal: me.clone(), role: "editor".into(), kind: "agent".into(), added_at: at });
+        f.members.push(Member { principal: owner.clone(), role: "owner".into(), kind: "person".into(), added_at: at, door: None });
+        f.members.push(Member { principal: me.clone(), role: "editor".into(), kind: "agent".into(), added_at: at, door: None });
         f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
         f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
         w.fragments.insert(name.to_string(), f);
@@ -820,7 +814,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             let at = w.now();
             let f = w.fragments.get_mut(&fragment).unwrap();
             if !f.members.iter().any(|m| m.principal == who) {
-                f.members.push(Member { principal: who.clone(), role: added.clone(), kind: if agent_fragment.is_some() { "agent" } else { "person" }.into(), added_at: at });
+                f.members.push(Member { principal: who.clone(), role: added.clone(), kind: if agent_fragment.is_some() { "agent" } else { "person" }.into(), added_at: at, door: None });
                 if let Some(a) = agent_fragment {
                     w.append(&a, "tasks", &who, json!({ "kind": "joined", "fragment": fragment }));
                 }
@@ -828,7 +822,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             answer(StatusCode::OK, json!({ "principal": who, "role": added }))
         }
         (Method::GET, ["members"]) => {
-            let list: Vec<Value> = f.members.iter().map(|m| json!({ "principal": m.principal, "role": m.role, "kind": m.kind, "addedAt": m.added_at, "addedBy": "npub1paul" })).collect();
+            let list: Vec<Value> = f.members.iter().map(|m| json!({ "principal": m.principal, "role": m.role, "kind": m.kind, "addedAt": m.added_at, "addedBy": "npub1paul", "door": m.door })).collect();
             answer(StatusCode::OK, json!({ "members": list }))
         }
         (Method::GET, ["subscriptions"]) => {

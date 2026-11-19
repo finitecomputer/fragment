@@ -345,14 +345,15 @@ pub const CATCHUP_PAGE_RECORDS: u32 = 1000;
 /// computer's agents joins it).
 pub const VIEW_TTL_MS: u64 = 30_000;
 
-/// Whether a chat is one of its agent's hosted doors is read from the agent
-/// fragment's `events` (driver.rs, `hosted_door`), at most this many pages
-/// (`CATCHUP_PAGE_RECORDS` each): more than a fragment keeps (docs/api.md,
-/// `AUDIT_KEPT`), so a read ends on its last page, not on this.
-pub const DOOR_EVENT_PAGES_MAX: u32 = 16;
-/// A chat its agent's fragment names as no door of its own is read again
-/// at most this often, as a record relaying its owner asks.
-pub const DOOR_READ_EVERY_MS: u64 = 60_000;
+/// A chat whose members name no door of its agent's (no `door` on its row)
+/// is read again for one at most this often, as a record relaying its
+/// owner from a key none of its members asks (driver.rs, `feed`): a door
+/// bound since its view was read is seen at its first record, and a
+/// backlog of records no door carried reads the members once a while, not
+/// once a record. Far under the view's own life (`VIEW_TTL_MS`), which
+/// sees a door within it whatever this says.
+pub const DOOR_READ_EVERY_MS: u64 = 5_000;
+const _: () = assert!(DOOR_READ_EVERY_MS < VIEW_TTL_MS);
 
 /// Joins of the computer's agents to fragments remembered at once, each for
 /// a view's life (`VIEW_TTL_MS`): past it they are forgotten, and a view

@@ -702,17 +702,21 @@ async fn catch_up_after_a_restart_without_a_duplicate() {
 
 /// Goal (security; valid, invalid and restart): a record relaying the
 /// agent's owner, carried by a key that is none of the chat's members, is
-/// its owner's only in a chat its agent's fragment names as that door
-/// (`door.hosted`, as its owner's binding writes it): a hosted connector's,
-/// read live or caught up by a new life, is asked as its owner. The same
-/// record in a chat that is no door of its (a record an editor scheduled,
-/// fired as the chat's own key before the bridge read it) is asked by its
-/// carrier, never as its owner.
+/// its owner's only in a chat whose members mark the agent's row as that
+/// door (`door`, a connector's binding while open): a hosted connector's,
+/// its row marked after the bridge read the chat and named its key (a door
+/// bound since), read live or caught up by a new life, is asked as its
+/// owner.
+/// The same record in a chat that is no door of its (a record an editor
+/// scheduled, fired as the chat's own key before the bridge read it), or
+/// from a connector whose platform marks no row (one before `door`), is
+/// asked by its carrier, never as its owner.
 #[tokio::test]
 async fn a_relayed_record_is_its_owners_only_through_its_door() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
-    let door = fake.connector("tgdoor", "juniper", "telegram");
+    let door = fake.connector("tgdoor", "juniper", None);
+    let old = fake.connector("olddoor", "juniper", None);
     let relayed = |text: &str| json!({ "text": text, "to": ["npub1juniper"], "relayed": { "via": "telegram", "for": "npub1paul", "agent": "juniper--k3x9" } });
     let asker = |w: &World, chat: &str, said: &Value| w.bodies(chat, "work", "turn.start").into_iter().find(|t| t["turn"] == turn_of("juniper", chat, seq(said))).map(|t| t["asker"].clone());
     // appended before the bridge reads the chat: a forgery its cursor is behind
@@ -720,12 +724,20 @@ async fn a_relayed_record_is_its_owners_only_through_its_door() {
     let dir = support::dir("relayed-door");
     let cfg = support::config(&fake.url(), &dir, support::settings());
     let bridge = support::start(cfg.clone(), support::script());
-    following(&fake, 3).await;
+    following(&fake, 4).await;
+    // the connector says something of its own first: its key is a writer
+    // the chat's view knows, read with the door it had then (none)
+    let notice = fake.say(&door, "npub1tgdoor", json!({ "text": "the bot is connected" }));
+    fake.until(WAIT, "its notice's turn", |w| asker(w, &door, &notice).is_some()).await;
+    // its owner binds the connector now, the agent already in it: its row says so
+    fake.with(|w| w.fragments.get_mut(&door).unwrap().members.iter_mut().find(|m| m.principal == "npub1juniper").unwrap().door = Some("telegram".into()));
     let live = fake.say(&door, "npub1tgdoor", relayed("from telegram"));
-    fake.until(WAIT, "both turns", |w| asker(w, &chat, &forged).is_some() && asker(w, &door, &live).is_some()).await;
+    let unmarked = fake.say(&old, "npub1olddoor", relayed("from an older platform"));
+    fake.until(WAIT, "the three turns", |w| asker(w, &chat, &forged).is_some() && asker(w, &door, &live).is_some() && asker(w, &old, &unmarked).is_some()).await;
     fake.with(|w| {
         assert_eq!(asker(w, &chat, &forged), Some(json!("npub1talkk3x9")), "the chat's own key: its own message, never its owner's");
-        assert_eq!(asker(w, &door, &live), Some(json!("npub1paul")), "its door's: its owner's");
+        assert_eq!(asker(w, &door, &live), Some(json!("npub1paul")), "its door's, bound since the chat was read: its owner's");
+        assert_eq!(asker(w, &old, &unmarked), Some(json!("npub1olddoor")), "no row says a door: its carrier's");
     });
     // a new life, one more said through the door meanwhile
     bridge.stop().await;
@@ -1061,7 +1073,7 @@ async fn names_hold_past_one_people_call() {
     fake.with(|w| {
         let f = w.fragments.get_mut(&crowd).expect("the chat");
         for i in 0..63 {
-            f.members.push(support::fake::Member { principal: person(&format!("p{i}")), role: "editor".into(), kind: "person".into(), added_at: 100 + i });
+            f.members.push(support::fake::Member { principal: person(&format!("p{i}")), role: "editor".into(), kind: "person".into(), added_at: 100 + i, door: None });
             w.names.insert(person(&format!("p{i}")), format!("p{i}@example.test"));
         }
     });
