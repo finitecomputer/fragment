@@ -512,6 +512,11 @@ pub struct ChatView {
     pub people: Vec<String>,
     /// What to call its writers, by identity.
     pub names: BTreeMap<String, String>,
+    /// The door this chat is of the agent reading it, as the agent's own row
+    /// of its members says (`door`: a connector bound as the agent's door,
+    /// while open: docs/api.md, "An agent's doors"): `telegram`, …. None for
+    /// any other chat, and from a platform before the row said it.
+    pub door: Option<String>,
 }
 
 impl ChatView {
@@ -1064,10 +1069,12 @@ impl Engine {
         match record.channel.as_str() {
             // its owner's words through one of its doors (docs/chat-records.md,
             // "A relayed message") are their message, as theirs, whichever
-            // door and whoever carried them: the platform takes such a record
-            // only through a door its owner opened, so no door need be linked
-            // on this computer. Another agent of the chat carrying them is a
-            // hand-off from that agent at most, never its owner.
+            // door: the platform takes such a record only through a door its
+            // owner opened, so no door need be linked on this computer. Only
+            // a carrier that is that door counts (`relayed_for`); from any
+            // other it is the record without the mark: another agent of the
+            // chat carrying them is a hand-off from that agent at most, never
+            // its owner.
             records::CHAT if self.relayed_for(&agent, fragment, &record) => {
                 let via = records::relayed(&record.body).map(|r| r.via).unwrap_or_default();
                 crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": via });
@@ -1162,13 +1169,33 @@ impl Engine {
     }
 
     /// Whether `record` relays `agent`'s owner through `agent`'s own door,
-    /// carried by the agent itself or by a key that is none of the chat's
-    /// members (a hosted connector publishes as its own fragment's key), as
-    /// the chat's page reads it.
+    /// carried by that door (docs/api.md, "An agent's doors"):
+    ///
+    /// - **the agent itself**: its SimpleX door's, which the platform took
+    ///   only signed by the door key its owner's ticket registered;
+    /// - **a hosted door**: a key none of the chat's members (a connector
+    ///   publishes as its own fragment), in a chat whose members mark the
+    ///   agent's row as that door (`ChatView::door`), whose `via` it is.
+    ///
+    /// Any other key that is none of the chat's members (the chat's own,
+    /// firing a record one of its editors scheduled, which the platform
+    /// took until it refused relaying schedules; or one no one holds)
+    /// speaks for no one: the record is its carrier's, without the mark,
+    /// and is logged as such.
     fn relayed_for(&self, agent: &Agent, fragment: &str, record: &Record) -> bool {
-        let member = |v: &ChatView| v.agents.contains(&record.principal) || v.people.contains(&record.principal);
-        let carrier = record.principal == agent.identity || self.views.get(fragment).is_some_and(|v| !member(v));
-        carrier && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment)
+        let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) else { return false };
+        if record.principal == agent.identity {
+            return true;
+        }
+        let Some(v) = self.views.get(fragment) else { return false };
+        if v.agents.contains(&record.principal) || v.people.contains(&record.principal) {
+            return false;
+        }
+        let door = v.door.as_deref() == Some(r.via.as_str());
+        if !door {
+            crate::ev!("relayed.untrusted", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "principal": record.principal, "via": r.via, "door": v.door, "why": "carried by a key none of the chat's members, in a chat whose members mark no such door on its agent's row: its carrier's, never its owner's" });
+        }
+        door
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {

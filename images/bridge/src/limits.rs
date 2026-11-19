@@ -345,6 +345,7 @@ pub const CATCHUP_PAGE_RECORDS: u32 = 1000;
 /// computer's agents joins it).
 pub const VIEW_TTL_MS: u64 = 30_000;
 
+
 /// Joins of the computer's agents to fragments remembered at once, each for
 /// a view's life (`VIEW_TTL_MS`): past it they are forgotten, and a view
 /// may be stale until its life ends.
