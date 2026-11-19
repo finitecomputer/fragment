@@ -52,7 +52,7 @@ same one. Its answers:
 
 | Answer | Does |
 |---|---|
-| Upgrade <name> (Yes) | Opens `/move` (F6), which asks what the import needs, makes the new agent, and posts `yes {agent}` |
+| Upgrade <name> (Yes) | Opens `/move` (F6), which asks what the import needs, makes the new agent (or takes one the person has), and posts `yes {agent}` |
 | Not now | `POST /api/migrations/offers/{old}/later`: asked again after `LATER_MS` (a day) |
 | Never | `POST …/never`: asked no more until `POST …/ask-again` (from `/move`) |
 
@@ -89,18 +89,43 @@ it, the offer's cover stands aside: it is answered there.
 - The one question: which to upgrade. Each new agent takes its old
   one's name (the import brings who it is; it is renamed as any agent). A
   Never'd one has Ask again.
+- **Into an agent they have.** Someone with an agent here already (one
+  who moved by hand, Paul 11-19) is asked, for each old agent: "You
+  already have an agent here. Make a new one for this upgrade, or use
+  <name>?", its answers "Make a new one" and each of theirs, nothing
+  chosen for them; Upgrade waits for each answer. Theirs are their own
+  agents on a computer and on Hermes (the import is a Hermes skill) that
+  no move is bound to, and none made for another old agent still to
+  answer. An agent takes in one move, ever: two would share its import
+  folder, its SimpleX staging and its keys' names in the Vault, and
+  staff's retry of the first could start while the second imports. The
+  server refuses a Yes into an agent another move is bound to (409,
+  `fragment_core::migrations::yes_into`), whatever that move's state,
+  and staff's retry that would stage or import into such an agent again
+  (`retry_into`; one that only retires goes on), and choosing it for a
+  second old agent on the page takes it from the first. One of theirs is taken as it is: its Yes alone, nothing made,
+  nothing written to it. Until that Yes lands nothing is decided, so a
+  reload asks again; once it lands the move names the agent (the
+  offer's `agent`), and nothing is asked. An old agent that an agent was
+  made for already (`from`, bound to no other move) is not asked: that
+  agent is its answer. Upgrade goes on only with old agents the move's
+  opening still answers askable (another tab may have answered one).
+  The import into one of theirs adds to it and never replaces what it
+  was (`import-agent-home`, "You may be someone already").
 - Upgrade: `POST /api/migrations/offers` opens the move (binds them;
   the comp, once), the page waits for the seat to reach the ledger, then
   for each, one at a time, a new agent is made as Settings' Add makes one
-  (`addAgent`, its chat made but not opened), and `…/offers/{old}/yes
-  {agent}` posted: the old agent is stopped then. One new agent per old
-  agent: its agent.json keeps the old one it was made for (`from`), and
-  the page hands that agent back to Add (`agent`), which goes on with
-  what it lacks, its chat too; one cut short before its agent.json is
-  found by its name, the old one's each time. A Yes that never arrived, a
-  reload, or a lost answer never makes a second. An agent.json that could
-  not be read (not missing) makes nothing: the page stops, to be tried
-  again. A refusal shows the server's words.
+  (`addAgent`, its chat made but not opened), or one of theirs taken, and
+  `…/offers/{old}/yes {agent}` posted: the old agent is stopped then. One
+  new agent per old agent: its agent.json keeps the old one it was made
+  for (`from`), and the page hands that agent back to Add (`agent`),
+  which goes on with what it lacks, its chat too; one cut short before
+  its agent.json is found by its name, the old one's each time. A Yes
+  that never arrived, a reload, or a lost answer never makes a second.
+  Upgrade reads each of their agent.json files first: one that could not
+  be read (not missing) makes nothing, and the page stops, to be tried
+  again; a question new since the page drew is asked first. A refusal
+  shows the server's words.
 - Once its new agent exists, a move is that agent's to tell: it imports
   in its own chat, and asks its person there. Each row with a new agent
   (the offer's `agent`) has Open chat, that agent's own chat. An import
@@ -427,7 +452,7 @@ staff read a move's state and act on it here.
 | Route | Answer |
 |---|---|
 | `GET /api/admin/migrations[?after=<old>]` | `AdminMoves`: each move by old id, a page at a time, with staff's `why` on each they withdrew |
-| `POST /api/admin/migrations/{old}` `AdminAct {op, why?}` | `AdminMove`, after `op`: `retry` (a held move, or a good import waiting for staff, asked again as a new attempt), `restart-old` (the old agent started again, the move offered again), `retire` (the old agent retired as migrated: a good import waiting for staff's word, or a held move), `withdraw` with `why` (the move out of the roster's hands: offered no more), or `include` (staff's withdrawal taken back); `null` once the move is gone |
+| `POST /api/admin/migrations/{old}` `AdminAct {op, why?}` | `AdminMove`, after `op`: `retry` (a held move, or a good import waiting for staff, asked again as a new attempt; 409 when that would import into an agent another move is bound to), `restart-old` (the old agent started again, the move offered again), `retire` (the old agent retired as migrated: a good import waiting for staff's word, or a held move), `withdraw` with `why` (the move out of the roster's hands: offered no more), or `include` (staff's withdrawal taken back); `null` once the move is gone |
 
 ### The will-not-move list
 

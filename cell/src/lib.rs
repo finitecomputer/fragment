@@ -670,7 +670,8 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 }
 
 /// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
-/// signer's (an agent's: its owner's); the deployment's operators grant
+/// signer's (an agent's: its owner's), and `GET uses` its agents' uses; the
+/// deployment's operators grant
 /// credit and set a person's plan and overdraft, the person named by email
 /// or identity, and grant an org's own credit and set its budget, named
 /// `org:<org id>` (orgs pay out of band: Paul, 2026-10-30). A seat's state
@@ -681,6 +682,19 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     if let (Method::Get, []) = (req.method(), rest) {
         let who = signer(env, &req, url, &body).await?;
         return json_answer(&ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?);
+    }
+    // what the signer's agents (an agent's: its owner's) used of each
+    // provider, this month or `YYYY-MM`'s (docs/ledger.md, "Usage"),
+    // passed on as its ledger answered it
+    if let (Method::Get, ["uses", month @ ..]) = (req.method(), rest) {
+        let who = signer(env, &req, url, &body).await?;
+        let month = match month {
+            [] => None,
+            [m] => Some(fragment_core::ledger::Month::parse(m).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?),
+            _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route GET {}", url.path()))),
+        };
+        let q = serde_json::to_string(&ledger::UsesOf { month }).expect("a month serializes");
+        return crate::json_response::json_bytes(ledger::asked(env, &payer_of(&who)?, <ledger::UsesOf as ledger::Route>::PATH, q).await?);
     }
     // a quote (FIN-448): a planned job priced with this release's book, as
     // its payer's ledger would charge it, beside that ledger; it reads and

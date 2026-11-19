@@ -267,6 +267,11 @@ pub enum Refused {
     /// Its old agent may be stopped or retired: a person's Yes, or the
     /// cutoff, began its move (409).
     Begun,
+    /// A Yes into an agent another move is bound to (409).
+    Taken,
+    /// Staff's retry that would import into its agent again while another
+    /// move is bound to that agent (409).
+    RetryTaken,
 }
 
 impl Refused {
@@ -279,6 +284,8 @@ impl Refused {
             Refused::Unfit(why) => (*why).into(),
             Refused::Why => format!("a withdrawal says why, in 1 to {WHY_MAX_BYTES} bytes"),
             Refused::Begun => "its move began (its person said Yes, or the cutoff took it): its old agent may be stopped or retired, so it is not offered again; bring it over by hand".into(),
+            Refused::Taken => "that agent took in another upgrade already: make a new one, or choose another".into(),
+            Refused::RetryTaken => "its agent took in another upgrade since: a retry would import into it beside that one; retire this move, or restart its old agent".into(),
         }
     }
 }
@@ -589,6 +596,19 @@ pub fn ask_again(m: &Move, now: i64) -> Outcome {
         MoveState::Open => Ok(None),
         s => Err(Refused::NotNow(s)),
     }
+}
+
+/// "Yes" into `agent`, a new one or one the person had already (Paul
+/// 11-19), `bound_elsewhere` when another move of theirs is bound to it:
+/// refused then, whatever that move's state, else as `yes`. An agent takes
+/// in one move, ever: two would share its one import folder, its SimpleX
+/// staging and its keys' names in the Vault, and staff's retry of the
+/// first could start while the second imports.
+pub fn yes_into(m: &Move, agent: &str, bound_elsewhere: bool, now: i64) -> Outcome {
+    if bound_elsewhere {
+        return Err(Refused::Taken);
+    }
+    yes(m, agent, now)
 }
 
 /// "Yes", bound to `agent` (the object checked it is the person's own):
@@ -917,6 +937,20 @@ pub fn retry(m: &Move, now: i64) -> Outcome {
     Ok(Some(Step { to, effects }))
 }
 
+/// Staff's `retry`, `bound_elsewhere` when another move is bound to its
+/// agent: one that would stage or import into that agent again (phase 1
+/// asked again, phase 2's kept stage imported again) is refused then, both
+/// moves left as they were, as a Yes into it is (`yes_into`): two imports
+/// would share the agent's one import folder. A retry that only retires,
+/// or stages an archive no Yes bound to an agent, goes on.
+pub fn retry_into(m: &Move, bound_elsewhere: bool, now: i64) -> Outcome {
+    let step = retry(m, now)?;
+    if bound_elsewhere && step.as_ref().is_some_and(|s| matches!(s.to.state, MoveState::Asked | MoveState::Importing)) {
+        return Err(Refused::RetryTaken);
+    }
+    Ok(step)
+}
+
 /// The old agent started again and offered again: a person who changed
 /// their mind after Yes, or a move staff give up on (a good import's too,
 /// until staff retire it). Never once its retirement began.
@@ -1186,6 +1220,21 @@ mod tests {
         assert_eq!(to(yes(&to(never(&open_move(), T0)), AGENT, T0)).state, MoveState::Asked, "from never too");
     }
 
+    /// Goal: an agent the person had already may take in an old agent, one
+    /// move, ever (Paul 11-19). Valid: no other move bound to it. Invalid:
+    /// another bound to it, whatever its state, a kept stage's import too.
+    /// Replay: this move's own Yes again changes nothing.
+    #[test]
+    fn a_yes_into_an_agent_another_move_is_bound_to_is_refused() {
+        let a = to(yes_into(&open_move(), AGENT, false, T0));
+        assert_eq!((a.state, a.agent.as_deref()), (MoveState::Asked, Some(AGENT)));
+        assert_eq!(yes_into(&a, AGENT, false, T0 + 1), Ok(None), "replay");
+        assert_eq!(yes_into(&open_move(), AGENT, true, T0), Err(Refused::Taken));
+        let archived = Move { state: MoveState::Archived, phase: Phase::P2, attempt: 1, staged_ms: Some(T0), ..open_move() };
+        assert_eq!(yes_into(&archived, AGENT, true, T0), Err(Refused::Taken), "a kept stage's import too");
+        assert_eq!(to(yes_into(&archived, AGENT, false, T0)).state, MoveState::Importing);
+    }
+
     #[test]
     fn the_mover_down_holds_the_move() {
         let a = to(yes(&open_move(), AGENT, T0));
@@ -1423,6 +1472,43 @@ mod tests {
         assert_eq!(withdraw(&w, WHY, T0), Ok(None), "replay");
         assert_eq!(relisted(&restarted(&w), "user_1", true, T0), None);
         assert_eq!(withdraw(&staging(), WHY, T0), Err(Refused::NotNow(MoveState::Staging)), "in flight: restart it first");
+    }
+
+    /// Goal: staff's retry never starts a second import into an agent
+    /// (fragment#1393's review). The sequence: A imported into the agent and
+    /// waits for staff's retire; B bound to the same agent (a row an older
+    /// release wrote, or one restart-old freed) and importing; then staff
+    /// retry A. Invalid: that retry (phase 1, staged again), and a held
+    /// phase 2 import's retry into its kept stage: 409, A as it was.
+    /// Valid: the same retries with the agent free; a retry that only
+    /// retires; an archive staged again, which no Yes bound to an agent.
+    #[test]
+    fn a_retry_never_imports_into_an_agent_another_move_is_bound_to() {
+        let a = to(done(&to(open(&importing(), AGENT, "prj_1.p1.1")), AGENT, "prj_1.p1.1", &ok(), T0 + 100));
+        assert!(a.awaits_retire());
+        let b = to(yes(&Move::listed("prj_2", "user_1", true, T0), AGENT, T0 + 200));
+        let b = to(report(&b, &report_on(&b, 1, "stopped"), T0 + 201));
+        let b = to(report(&b, &report_on(&b, 2, staged_event()), T0 + 202));
+        assert_eq!((b.state, b.agent.as_deref()), (MoveState::Importing, Some(AGENT)));
+        assert_eq!(retry_into(&restarted(&a), true, T0 + 300), Err(Refused::RetryTaken), "A staged again beside B");
+        let again = to(retry_into(&a, false, T0 + 300));
+        assert_eq!((again.state, again.attempt, again.agent.as_deref()), (MoveState::Asked, 2, Some(AGENT)), "the agent free");
+        // a retirement held for staff retires again, whatever its agent took in since
+        let held = tick(&to(retire(&a, T0 + 400)), T0 + 400 + RETIRE_MS).expect("its day").to;
+        assert_eq!((held.state, held.held_from), (MoveState::Held, Some(MoveState::Retiring)));
+        assert_eq!(to(retry_into(&held, true, T0 + 500)).state, MoveState::Retiring);
+        // phase 2: an archive staged again (no agent); a held late import's kept stage
+        let cut = T0;
+        let p2 = cutoff(&Move::listed("o", "u", true, T0), cut, cut).unwrap().to;
+        let stalled = Move { state: MoveState::Held, held_from: Some(MoveState::Archiving), reason: Some(HeldReason::StageFailed), ..p2.clone() };
+        assert_eq!(to(retry_into(&stalled, true, cut + 1)).state, MoveState::Archiving, "an archive, bound to no agent, staged again");
+        let s = to(report(&p2, &report_on(&p2, 1, "stopped"), cut + 1));
+        let st = to(report(&s, &report_on(&s, 2, staged_event()), cut + 2));
+        let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
+        let failed = StageDone { ok: false, report_sha256: None, why: Some("x".into()) };
+        let f = to(done(&to(yes(&ar, AGENT, cut + 10)), AGENT, "o.p2.1", &failed, cut + 11));
+        assert_eq!(retry_into(&f, true, cut + 12), Err(Refused::RetryTaken), "its kept stage, beside B");
+        assert_eq!(to(retry_into(&f, false, cut + 12)).state, MoveState::Importing);
     }
 
     #[test]

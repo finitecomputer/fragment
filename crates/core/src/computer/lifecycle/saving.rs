@@ -262,6 +262,50 @@ mod tests {
     /// A hold or a stop that never reports is asked for again at its
     /// deadline; a save that never reports failed
     /// (`a_save_that_never_answers_fails_at_its_deadline`).
+    /// Goal (Codex on #1375): a stop's deadline is minutes, for its
+    /// snapshot, yet one whose end its isolate lost is found within a minute,
+    /// as when the deadline was one: its alarm looks every `STOP_LOOK_MS`
+    /// whether its container is gone (`Action::Look`), even once a new
+    /// isolate adopted it as it went down, whose exit no report ends (Codex's
+    /// second round). A wake that came during the stop starts then, and the
+    /// sleep is metered to that look, no later. Valid (a look finds it gone),
+    /// replay (a look that finds it still stopping changes nothing, and looks
+    /// again), the bound (asked again at its deadline). Method: the
+    /// lifecycle's steps, as the DO hears them, its report lost.
+    #[test]
+    fn a_stop_whose_end_was_lost_is_found_within_a_minute() {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        let slept = T + IDLE_MS;
+        l.apply(Event::Alarm, slept);
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, slept + 500));
+        let stop = slept + 4_000;
+        let s = l.apply(Event::Saved { generation: g, seq }, stop);
+        assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }]);
+        assert_eq!(s.alarm_ms, Some(stop + STOP_LOOK_MS), "looked at within a minute, its deadline minutes away");
+        // a wake as it stops: a start once it ends
+        let s = l.apply(Event::Wake { why: Wake::Record }, stop + 2_000);
+        assert!(s.actions.is_empty() && s.alarm_ms == Some(stop + STOP_LOOK_MS), "{s:?}");
+        // a look that finds it still stopping (its snapshot runs on, or a
+        // new isolate adopted it as it went down): nothing more
+        let before = l.clone();
+        let s = l.apply(Event::Alarm, stop + STOP_LOOK_MS);
+        assert!(s.actions == vec![Action::Look { generation: g }] && l == before, "a look, nothing else: {s:?}");
+        assert_eq!(s.alarm_ms, Some(stop + 2 * STOP_LOOK_MS), "it looks again");
+        // its end lost with its isolate: the next look finds its container
+        // gone and reports it asleep (`Action::Look`)
+        let found = stop + 2 * STOP_LOOK_MS;
+        assert_eq!(l.apply(Event::Alarm, found).actions, vec![Action::Look { generation: g }]);
+        let s = l.apply(Event::Asleep { generation: g }, found);
+        assert!(s.actions.iter().any(|a| matches!(a, Action::Meter { to_ms, .. } if *to_ms == found)), "metered to the look: {s:?}");
+        assert_eq!(l.apply(Event::Alarm, found).actions, vec![Action::Start { generation: g + 1 }], "the wake's start");
+        // the bound: never found, its stop is asked again at its deadline
+        let mut l = before;
+        let s = l.apply(Event::Alarm, stop + SLEEP_DEADLINE_MS - 1);
+        assert!(s.actions == vec![Action::Look { generation: g }] && s.alarm_ms == Some(stop + SLEEP_DEADLINE_MS), "its last look is its deadline: {s:?}");
+        assert_eq!(l.apply(Event::Alarm, stop + SLEEP_DEADLINE_MS).actions, vec![Action::Stop { generation: g, saved: true }]);
+    }
+
     #[test]
     fn a_sleep_holds_then_saves_then_stops() {
         let mut l = Lifecycle::new();
@@ -274,7 +318,7 @@ mod tests {
         assert_eq!(s.alarm_ms, Some(T + IDLE_MS + 500 + SAVE_DEADLINE_MS));
         let s = l.apply(Event::Saved { generation: g, seq: 1 }, T + IDLE_MS + 4_000);
         assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }], "then its stop, a snapshot of the save first");
-        assert_eq!(s.alarm_ms, Some(T + IDLE_MS + 4_000 + SLEEP_DEADLINE_MS));
+        assert_eq!(s.alarm_ms, Some(T + IDLE_MS + 4_000 + STOP_LOOK_MS), "looked at in a minute (its deadline is `SLEEP_DEADLINE_MS`)");
         let s = l.apply(Event::Asleep { generation: g }, T + IDLE_MS + 12_000);
         assert_eq!(s.actions, vec![Action::Meter { from_ms: T + IDLE_MS, to_ms: T + IDLE_MS + 12_000 }]);
         assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: T + IDLE_MS + 12_000, restart: false, quiet: true }));
