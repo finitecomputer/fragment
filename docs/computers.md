@@ -744,6 +744,10 @@ provider's own hosts.
   when its owner's gate refuses (402, 403). A body goes as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
+- **An operator key never comes back.** It is the platform's own at its
+  vendor, so an answer to a request that carried one names each echo of
+  it `{{provider}}`, in its headers and its body, as a Vault's fills are
+  named (`Plan::operator_keys`; docs/secrets.md, "Echoes are hidden").
 - **An account's own host.** A connection whose accounts each live at a
   host of their own (a Salesforce org at its My Domain) names the suffix
   they are under and the Pipes metadata field naming each account's
