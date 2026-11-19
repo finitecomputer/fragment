@@ -366,12 +366,12 @@ export function createMovePage(root, h) {
       throw new Error(`Choose again for ${lost.o.name}.`);
     }
     // the server's offers as it opens the move: one answered since the page
-    // drew (another tab) is gone on with no further, nothing made for it
+    // drew (another tab), or gone (withdrawn), is gone on with no further,
+    // nothing made for it
     let now = (await api("POST", "/api/migrations/offers", {}))?.offers ?? [];
     await seated();
     for (const { o, name, theirs } of picks) {
-      const at = now.find((x) => x.old === o.old);
-      if (at && !ASKABLE.has(at.state)) continue;
+      if (!ASKABLE.has(now.find((x) => x.old === o.old)?.state)) continue;
       if (theirs) {
         // one of theirs: its Yes alone, nothing made or written
         doing = { old: o.old, said: `Starting ${o.name}'s upgrade…` };

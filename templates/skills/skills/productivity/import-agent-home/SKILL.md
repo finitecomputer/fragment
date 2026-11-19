@@ -88,7 +88,10 @@ fragment schedule list > "$c/routines.txt" 2>&1; ls "$c"
 
 **What came over before is not brought again.** An earlier import's
 folder (`~/home-import-<n>/`) says what it brought: its `report.md`, the
-fragments its `progress.md` names, and its `site-map.json`.
+fragments its `progress.md` names, and its `site-map.json`. Every
+fragment an earlier import's `progress.md` names is that import's, never
+this one's: when "Make each fragment once" looks in `fragment list` for
+one made earlier, it skips them, and you make your own.
 - **Sites:** add every earlier `site-map.json`'s entries to this
   import's: those sites came over already, and the profile skips them.
 - **Files:** always into a new app (step 3), never into one an earlier

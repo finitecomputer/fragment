@@ -109,7 +109,7 @@ test("Upgrade: the move opened (the comp), a seat waited for, then each a new ag
   await settle();
   p.button("Upgrade").onclick();
   await settle();
-  p.next("POST", "/api/migrations/offers").ok({ offers: [] });
+  p.next("POST", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a\'s upgrade is ready.")] });
   await settle();
   p.next("GET", "/api/ledger").ok({ plan: "seat" });
   await settle();
@@ -177,7 +177,7 @@ test("one new agent an old one: the agent made for it before (a Yes that never a
     await settle();
     reads();
     await settle();
-    p.next("POST", "/api/migrations/offers").ok({ offers: [] });
+    p.next("POST", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a\'s upgrade is ready.")] });
     await settle();
     p.next("GET", "/api/ledger").ok({ plan: "seat" });
     await settle();
@@ -293,7 +293,7 @@ test("Upgrade into a move that imports at once (a kept stage's): the person is t
   await settle();
   p.button("Upgrade").onclick();
   await settle();
-  p.next("POST", "/api/migrations/offers").ok({ offers: [] });
+  p.next("POST", "/api/migrations/offers").ok({ offers: [offer("a", "archived", "Old a is kept.")] });
   await settle();
   p.next("GET", "/api/ledger").ok({ plan: "seat" });
   await settle();
@@ -395,14 +395,14 @@ async function opened(p, agents, offers = [offer("a", "open", READY)]) {
 }
 // Upgrade pressed: their agents read again, whole, then the move opened
 // and a seat waited for
-async function upgraded(p, agents) {
+async function upgraded(p, agents, offers = [offer("a", "open", READY)]) {
   p.button("Upgrade").onclick();
   await settle();
   for (const [fragment, json] of agents) {
     answerRead(p.next("GET", `/api/f/${fragment}/file?path=agent.json`), json);
   }
   await settle();
-  p.next("POST", "/api/migrations/offers").ok({ offers: [] });
+  p.next("POST", "/api/migrations/offers").ok({ offers });
   await settle();
   p.next("GET", "/api/ledger").ok({ plan: "seat" });
   await settle();
@@ -595,4 +595,19 @@ test("an old agent answered in another tab since the page drew: Upgrade makes no
   assert.equal(p.made.length, 0, "no agent made");
   assert.equal(p.calls.filter((c) => c.path.endsWith("/yes")).length, 0, "no Yes");
   assert.deepEqual(p.rows()[0].words, ["Old a", "Pausing Old a for its upgrade…"]);
+});
+
+test("an old agent the server no longer offers as Upgrade opens the move (withdrawn meanwhile): nothing made for it, no Yes", async (t) => {
+  const p = page(t);
+  await opened(p, []);
+  p.button("Upgrade").onclick();
+  await settle();
+  p.next("POST", "/api/migrations/offers").ok({ offers: [] });
+  await settle();
+  p.next("GET", "/api/ledger").ok({ plan: "seat" });
+  await settle();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [] });
+  await settle();
+  assert.equal(p.made.length, 0, "no agent made");
+  assert.equal(p.calls.length, 0, "no Yes");
 });
