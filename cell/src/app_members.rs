@@ -114,9 +114,18 @@ impl FragmentCell {
         // bounded: the fragments an app is in hold it as a member
         let answers = join_all(targets.iter().map(|t| crate::fragment::call(&self.env, t, &asked))).await;
         let refused = answers.iter().find_map(|a| a.as_ref().err().filter(|e| e.code != ErrorCode::NotFound));
-        let Some(refused) = refused else { return Ok(Some(id)) };
+        // all yes, and its note still kept: the caller writes the growth in
+        // this same turn. A note the alarm took as run out meanwhile had
+        // every fragment look again, so their yes may be gone: ask again
+        let kept = !self.rows("SELECT 1 AS x FROM app_growth WHERE id = ?", vec![SqlStorageValue::Integer(id)])?.is_empty();
+        let refused = match (refused, kept) {
+            (None, true) => return Ok(Some(id)),
+            (Some(refused), _) => CellError::new(refused.code, refused.message.clone()),
+            (None, false) => CellError::new(ErrorCode::Conflict, "asking the fragments it is in took too long: try again"),
+        };
+        // each looks again, a yes given after the alarm's look too
         self.given_up(Some(id)).await?;
-        Err(CellError::new(refused.code, refused.message.clone()))
+        Err(refused)
     }
 
     /// When the oldest growth note runs out, if one is noted (for the alarm).
