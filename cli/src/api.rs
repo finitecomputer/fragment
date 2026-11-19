@@ -483,6 +483,13 @@ impl Client {
     /// the time its `bytes` take: its bytes. A refusal is read whole, as
     /// any other's is.
     pub fn download(&self, path: &str, to: &std::path::Path, bytes: u64) -> Result<u64> {
+        let mut file = None;
+        self.download_into(path, bytes, || std::fs::File::create(to).with_context(|| format!("writing {}", to.display())).map(|f| file.insert(f)))
+    }
+    /// `download`'s answer into what `open` gives once the answer is a
+    /// success (a file, or a hash of the bytes as they arrive: `fragment
+    /// offload`'s checks), never held whole: its bytes.
+    pub fn download_into<W: std::io::Write>(&self, path: &str, bytes: u64, open: impl FnOnce() -> Result<W>) -> Result<u64> {
         let url = self.url("GET", path);
         let (header, value) = self.signer.header("GET", &url, &[]);
         if self.verbose {
@@ -494,8 +501,8 @@ impl Client {
             let body = resp.bytes().map(owned).unwrap_or_default();
             return Err(anyhow::Error::new(Resp { status, body }.refusal()));
         }
-        let mut file = std::fs::File::create(to).with_context(|| format!("writing {}", to.display()))?;
-        let n = resp.copy_to(&mut file).with_context(|| format!("GET {path}: the download broke off"))?;
+        let mut into = open()?;
+        let n = resp.copy_to(&mut into).with_context(|| format!("GET {path}: the download broke off"))?;
         Ok(n)
     }
     pub fn head(&self, path: &str) -> Result<Resp> {
