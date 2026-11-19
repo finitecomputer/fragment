@@ -442,6 +442,11 @@ pub struct ComputerCell {
     /// #1079: a deadline's alarm applied during that destroy failed the
     /// start for good, its container left running).
     taking_over: futures_util::lock::Mutex<()>,
+    /// One hold marker command at a time (`hold`, `unhold`): a touch waits
+    /// for a let-go in flight, so a let-go never lands after a newer touch;
+    /// a let-go never waits for a touch in flight, whose answer lets go
+    /// again if its sleep was cancelled (`Lifecycle`'s late `Held`).
+    marking: futures_util::lock::Mutex<()>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
     /// guest's view lists, and what a swap may use: a token is asked of
@@ -489,6 +494,7 @@ impl DurableObject for ComputerCell {
             env,
             adopted: std::cell::Cell::new(false),
             taking_over: futures_util::lock::Mutex::new(()),
+            marking: futures_util::lock::Mutex::new(()),
             states: RefCell::default(),
             accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
@@ -1774,7 +1780,11 @@ impl ComputerCell {
             return Event::SaveFailed { generation, seq: 0, why: "its container is not running".into() };
         }
         let t0 = js::now_ms();
-        if let Err(e) = self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await {
+        let marked = {
+            let _marking = self.marking.lock().await;
+            self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await
+        };
+        if let Err(e) = marked {
             // a guest the DO cannot mark is saved as it is
             console_error!("{}", json!({ "computer": id, "hold": "failed", "generation": generation, "error": e.message }));
             return Event::Held { generation, held: false };
@@ -1951,8 +1961,11 @@ impl ComputerCell {
     /// Lets go of the guest's hold: an awake save's end, or a sleep that
     /// kept its container. A container that is gone has nothing to let go,
     /// and one a newer hold, save or stop holds now is that one's (its
-    /// owner's sleep just after a wake cancelled one): left as it is.
+    /// owner's sleep just after a wake cancelled one): left as it is. It
+    /// takes the marker's turn (`marking`) for its look and its command, so
+    /// a newer touch waits for it; with a touch in flight it does nothing.
     async fn unhold(&self, generation: u64) {
+        let Some(_marking) = self.marking.try_lock() else { return };
         if !self.container_running().await || self.lifecycle().is_ok_and(|l| l.saving().is_some()) {
             return;
         }
