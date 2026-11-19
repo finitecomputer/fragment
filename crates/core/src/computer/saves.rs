@@ -389,10 +389,15 @@ impl Saves {
     /// (`forgot`). A record several saves hold (a work's, kept unchanged by a
     /// later save) is deleted only once no kept save holds it. Answers those
     /// pushed past `FORGETTING_MAX`, oldest first, which no one will delete.
-    pub fn let_go(&mut self, mut records: Vec<Value>) -> Vec<Value> {
+    pub fn let_go(&mut self, records: Vec<Value>) -> Vec<Value> {
         assert!(records.iter().all(|r| r["id"].as_str().is_some_and(|id| !id.is_empty())), "a record has an id: {records:?}");
-        records.retain(|r| !self.holds(r) && !self.forgetting.contains(r));
-        self.forgetting.extend(records);
+        // each once, by its id: one batch may name a record several of its
+        // saves held (Codex on #1377)
+        for r in records {
+            if !self.holds(&r) && !self.forgetting.iter().any(|f| f["id"] == r["id"]) {
+                self.forgetting.push(r);
+            }
+        }
         let over = self.forgetting.len().saturating_sub(FORGETTING_MAX);
         let lost: Vec<Value> = self.forgetting.drain(..over).collect();
         assert!(self.forgetting.len() <= FORGETTING_MAX, "at most FORGETTING_MAX records to delete");
@@ -817,6 +822,11 @@ mod tests {
         assert_eq!(ids(&s.forgetting()), ["h1", "h5", "h2", "h3"]);
         s.saved(1, save("h8", "w2"), T + 12, true);
         assert_eq!(ids(&s.forgetting()), ["h1", "h5", "h2", "h3", "h4", "w1"]);
+        // one batch that names a record twice (two saves pushed out
+        // together, both holding it) queues it once
+        let mut once = Saves::default();
+        once.let_go([save("x1", "wx"), save("x2", "wx")].concat());
+        assert_eq!(ids(&once.forgetting()), ["x1", "wx", "x2"]);
         // invalid: a stored list of records to delete that names one a kept
         // save holds (`let_go` admits none) never hands it out to delete
         let mut v = serde_json::to_value(&s).unwrap();

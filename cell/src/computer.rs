@@ -1893,7 +1893,7 @@ impl ComputerCell {
         for record in &lost {
             console_error!("{}", json!({ "computer": id, "unforgotten": record["id"] }));
         }
-        let pending = self.saves().map(|s| s.forgetting().to_vec()).unwrap_or_default();
+        let pending = self.saves().map(|s| s.forgetting()).unwrap_or_default();
         let until = js::now_ms() + FORGET_PASS_MS;
         // bounded: at most FORGETTING_MAX, within FORGET_PASS_MS
         for (i, record) in pending.iter().enumerate() {
