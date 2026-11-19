@@ -606,7 +606,7 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     // a model turn and a key turn, each run once
     let before = runs(s, api, c.owner, c.owner_id, c.id);
     let think = say(50, "think before the crash")?;
-    let fetch = say(51, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let fetch = say(51, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY posting {}")?;
     let answered = s.eventually(c.wake, || replied(seq_of(&think)).is_some() && replied(seq_of(&fetch)).is_some());
     let once = Runs { model_calls: before.model_calls + 1, model_rows: before.model_rows + 1, key_rows: before.key_rows + 1, uses: before.uses + 1 };
     // the key's meter and use land just after the provider answered
@@ -2494,7 +2494,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // fenced: decision 44); removed from the computer, its tags are refused
     if fakes && scripted {
         let theirs = placeholder(s, &id, &maple_name, "perplexity");
-        let said = fetched(s, 24, &format!("fetch http://api.perplexity.ai/search with {theirs}"))?;
+        let said = fetched(s, 24, &format!("fetch http://api.perplexity.ai/search with {theirs} posting {{}}"))?;
         replies_so_far += 1;
         let uses = || api.signed(&owner, "GET", &format!("/api/computers/{id}/uses"), None).map(|r| r.body).unwrap_or(Value::Null);
         let maples = |u: &Value| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == "perplexity" && x["agent"] == maple_name.as_str() && x["calls"] == 1));
@@ -2502,7 +2502,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("another agent's placeholder on the same computer is that agent's: its call is counted as the second agent's", said.starts_with("fetched 200") && counted, json!({ "said": said, "uses": uses() }));
         let r = api.signed(&owner, "DELETE", &format!("/api/computers/{id}/agents/{maple_name}"), None)?;
         let seen_before = s.upstream.seen().len();
-        let said = fetched(s, 25, &format!("fetch http://api.perplexity.ai/search with {theirs}"))?;
+        let said = fetched(s, 25, &format!("fetch http://api.perplexity.ai/search with {theirs} posting {{}}"))?;
         replies_so_far += 1;
         s.ok(
             "an agent removed from the computer: its tags are refused, reaching no provider",

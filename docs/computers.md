@@ -718,7 +718,9 @@ provider's own hosts.
   metered to the agent's owner at its row's `price`, else the price
   book's; or an `own` key the person gives), its
   hosts, where its credential goes on a request, and its environment
-  variables. Adding a provider is a row; no code names one.
+  variables. Adding a provider is a row; no code names one, but an
+  operator key's calls (`operator_routes`), so a new operator row is lent
+  for nothing until its routes are listed there.
   deploy/example.jsonc has the platform's. Connecting one is
   docs/api.md's, Connections; its consent is browser-bound
   (docs/pipes-browser-binding.md), and a connection holds only the scopes
@@ -740,8 +742,11 @@ provider's own hosts.
   placeholder sent to a host not its provider's, in a place its row does
   not name, forged or naming an agent not on this computer now, of a
   provider its agent was narrowed from, or of a connection not connected
-  or an own key not given (403 `not_connected`); and an operator key's
-  when its owner's gate refuses (402, 403). A body goes as it came, and a
+  or an own key not given (403 `not_connected`); an operator key's on a
+  call none of the platform's features makes (403: the platform's shared
+  key is lent only for the methods and paths its own callers send,
+  `fragment_core::operator_routes`, each route's source beside it); and an
+  operator key's when its owner's gate refuses (402, 403). A body goes as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
 - **An account's own host.** A connection whose accounts each live at a

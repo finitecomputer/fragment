@@ -308,10 +308,10 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     anyhow::ensure!(gone.status == 200, "the account host's checks cleared: {gone}");
 
     // the operator's keys: a bearer token, a header of the provider's own, a query parameter
-    let said = say(s, 107, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let said = say(s, 107, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY posting {}")?;
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     s.ok(SWAP_CHECKS[7], said.starts_with("fetched 200") && seen["host"] == "api.perplexity.ai" && seen["auth"]["authorization"] == format!("Bearer {}", key_value("perplexity")), json!({ "said": said, "seen": seen }));
-    let said = say(s, 108, "fetch http://api.elevenlabs.io/v1/music with $ELEVENLABS_API_KEY in xi-api-key")?;
+    let said = say(s, 108, "fetch http://api.elevenlabs.io/v1/music with $ELEVENLABS_API_KEY in xi-api-key posting {}")?;
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     s.ok(SWAP_CHECKS[8], said.starts_with("fetched 200") && seen["host"] == "api.elevenlabs.io" && seen["auth"]["xi-api-key"] == key_value("elevenlabs"), json!({ "said": said, "seen": seen }));
     // text to speech on the same key, its body as it came (FIN-443): charged below by its characters
@@ -329,7 +329,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         refused_said.push(say(s, n, &format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice?e2e_status={code} with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}"))?);
     }
     let refused_sent = refused_said.iter().zip(["fetched 400", "fetched 429"]).all(|(said, code)| said.starts_with(code));
-    let said = say(s, 109, "fetch http://places.googleapis.com/v1/places:searchText?fields=name with $GOOGLE_PLACES_API_KEY in query key")?;
+    let said = say(s, 109, "fetch http://places.googleapis.com/v1/places:searchText?fields=name with $GOOGLE_PLACES_API_KEY in query key posting {}")?;
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     s.ok(
         SWAP_CHECKS[9],
@@ -345,15 +345,19 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let photo_sent = said.starts_with("fetched 200");
 
     // Hermes' tool vendors share the existing upstream fake: each real
-    // host and SDK header, with no vendor-specific response simulation.
-    for (i, (n, name, host, env, header, scheme)) in [
-        (130, "firecrawl", "api.firecrawl.dev", "FIRECRAWL_API_KEY", "authorization", "Bearer "),
-        (131, "fal", "queue.fal.run", "FAL_KEY", "authorization", "Key "),
-        (132, "browser-use", "api.browser-use.com", "BROWSER_USE_API_KEY", "x-browser-use-api-key", ""),
-        (133, "xai", "api.x.ai", "XAI_API_KEY", "authorization", "Bearer "),
-        (134, "x", "api.x.com", "X_API_BEARER_TOKEN", "authorization", "Bearer "),
+    // host and SDK header, with no vendor-specific response simulation,
+    // each on a call its feature makes (`operator_routes`) that is charged
+    // nothing: a search, a queued request's status, a task on a session, a
+    // plain chat, a lookup
+    for (i, (n, name, host, path, env, header, scheme)) in [
+        (130, "firecrawl", "api.firecrawl.dev", "/v2/search posting {}", "FIRECRAWL_API_KEY", "authorization", "Bearer "),
+        (131, "fal", "queue.fal.run", "/fal-ai/flux-2/requests/e2e/status", "FAL_KEY", "authorization", "Key "),
+        (132, "browser-use", "api.browser-use.com", r#"/api/v4/runs posting {"task":"e2e","sessionId":"e2e-session"}"#, "BROWSER_USE_API_KEY", "x-browser-use-api-key", ""),
+        (133, "xai", "api.x.ai", "/v1/chat/completions posting {}", "XAI_API_KEY", "authorization", "Bearer "),
+        (134, "x", "api.x.com", "/2/tweets?ids=20", "X_API_BEARER_TOKEN", "authorization", "Bearer "),
     ].into_iter().enumerate() {
-        let said = say(s, n, &format!("fetch http://{host}/e2e with ${env} in {header}"))?;
+        let (path, posted) = path.split_once(" posting ").map_or((path, String::new()), |(p, body)| (p, format!(" posting {body}")));
+        let said = say(s, n, &format!("fetch http://{host}{path} with ${env} in {header}{posted}"))?;
         let seen = s.upstream.seen().last().cloned().unwrap_or_default();
         s.ok(SWAP_CHECKS[22 + i],
             said.starts_with("fetched 200") && seen["host"] == host && seen["auth"][header] == format!("{scheme}{}", key_value(name)),
@@ -400,14 +404,14 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
 
     // refusals: the wrong place, the wrong host, a forged tag, another computer's
     let seen_before = s.upstream.seen().len();
-    let place = say(s, 110, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY in x-api-key")?;
+    let place = say(s, 110, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY in x-api-key posting {}")?;
     s.ok(SWAP_CHECKS[10], place.starts_with("fetched 400") && place.contains("goes in authorization: Bearer {}") && s.upstream.seen().len() == seen_before, &place);
     let host = say(s, 111, &format!("fetch http://{SWAP_CONNECTION_HOST}/x with $PERPLEXITY_API_KEY"))?;
     s.ok(SWAP_CHECKS[11], host.starts_with("fetched 403") && host.contains("is for api.perplexity.ai, not www.googleapis.com") && s.upstream.seen().len() == seen_before, &host);
-    let forged = say(s, 112, &format!("fetch http://api.perplexity.ai/search with fck_perplexity_{}", "0".repeat(fragment_core::swap::TAG_HEX)))?;
+    let forged = say(s, 112, &format!("fetch http://api.perplexity.ai/search with fck_perplexity_{} posting {{}}", "0".repeat(fragment_core::swap::TAG_HEX)))?;
     s.ok(SWAP_CHECKS[12], forged.starts_with("fetched 403") && forged.contains("names no agent on this computer") && s.upstream.seen().len() == seen_before, &forged);
     let elsewhere = fragment_core::computer::default_computer_of(&api.identity(w.stranger)?);
-    let other = say(s, 113, &format!("fetch http://api.perplexity.ai/search with {}", placeholder(s, &elsewhere, w.agent, "perplexity")))?;
+    let other = say(s, 113, &format!("fetch http://api.perplexity.ai/search with {} posting {{}}", placeholder(s, &elsewhere, w.agent, "perplexity")))?;
     s.ok(SWAP_CHECKS[13], other.starts_with("fetched 403") && other.contains("names no agent on this computer") && s.upstream.seen().len() == seen_before, &other);
 
     // an own key, behind basic auth
@@ -489,7 +493,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let capped = cap(0)?;
     forget_gate(api, &owner_id)?;
     let seen_before = s.upstream.seen().len();
-    let refused = say(s, 118, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let refused = say(s, 118, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY posting {}")?;
     let uncapped = cap(u64::from(u32::MAX))?;
     forget_gate(api, &owner_id)?;
     s.ok(
@@ -521,7 +525,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let seen_before = s.upstream.seen().len();
     let paused = say(s, 157, &speak(SPOKEN))?;
     let unreached = s.upstream.seen().len() == seen_before;
-    let other = say(s, 158, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let other = say(s, 158, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY posting {}")?;
     let went = other.starts_with("fetched 200") && s.upstream.seen().last().is_some_and(|l| l["host"] == "api.perplexity.ai");
     let uncharged = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows + calls as usize + 1) && eleven_calls() == counted_before + calls as u64;
     s.ok(
