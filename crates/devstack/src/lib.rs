@@ -122,7 +122,10 @@ pub const SHIM_FILES: [&str; 2] = ["entry.mjs", "backup-reads.mjs"];
 /// `build` step: a staged copy has no source to build), its shim, and its
 /// `build/`, so a node run from it keeps its state and variables apart from
 /// the source tree, where `xtask dev` runs. Only the release's finished
-/// build is staged (built.rs): never one `xtask dev` rebuilt.
+/// build is staged (built.rs): never one `xtask dev` rebuilt. The packages
+/// the shim imports (`@cloudflare/sandbox`) come from the repo's
+/// `node_modules`, linked beside it: a copy outside the repo (an e2e run's
+/// in RAM) has none above it to find.
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         fs::create_dir_all(to)?;
@@ -145,6 +148,10 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
     for shim in SHIM_FILES {
         fs::copy(from.join(shim), dir.join(shim)).with_context(|| format!("stage {shim}"))?;
+    }
+    let modules = dir.join("node_modules");
+    if fs::symlink_metadata(&modules).is_err() {
+        std::os::unix::fs::symlink(repo_root().join("node_modules"), &modules).with_context(|| format!("link {}", modules.display()))?;
     }
     let _ = fs::remove_dir_all(dir.join("build"));
     // no build writes among the files as they are copied
