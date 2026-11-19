@@ -331,3 +331,65 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     );
     Ok(())
 }
+
+/// A trial is for a seat of one (docs/billing.md, "Trials"; team trials
+/// are not in v1): while its org's subscription is trialing, its admin
+/// offers no further paid seat, so no one is granted a seat's included
+/// credit on a trial's place they did not redeem (the security audit's
+/// finding 5, 2026-11-18). Checkout alone refused it: `add_seat` asked only
+/// that the org pays, and a trialing one does.
+pub fn trial_seats(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("trial-seats", &[Need::Fakes, Need::Deployment]) {
+        return Ok(());
+    }
+    let op_session = api.sign_in("operator@e2e.test")?;
+    let _ = api.approve(&op_session, &s.operator);
+    let operator = s.operator.clone();
+    let ledger = |k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/ledger", None).map(|r| r.body).unwrap_or(Value::Null);
+
+    // ---- a code of one place, redeemed with no card: an org of one, trialing
+    let r = api.signed(&operator, "POST", "/api/admin/trials", Some(&json!({ "name": "One seat", "kind": "seat_always_on", "days": 30, "capacity": 1 })))?;
+    let code = r.body["code"].as_str().unwrap_or("").to_string();
+    let kim = api.person()?;
+    let r = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })))?;
+    s.stripe.complete(r.body["session"].as_str().unwrap_or("")).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(s.eventually(PUSHED, || seat(api, &kim)["seat"]["good"] == true), "the trial's seat holds: {}", seat(api, &kim));
+    let sub = s.stripe.requests().iter().rev().find_map(|a| a.path.strip_prefix("/v1/subscriptions/").map(str::to_string)).context("the trial's subscription")?;
+    let seats = |s: &Suite| s.stripe.subscription(&sub).map(|x| (x.status.clone(), x.items.iter().map(|(_, _, q)| *q).sum::<u64>()));
+    anyhow::ensure!(seats(s) == Some(("trialing".to_string(), 1)), "a trial of one seat: {:?}", seats(s));
+
+    // ---- someone who redeemed nothing: a guest (the e2e's people are
+    // seats, so an operator makes them one; the month's grant of the seat
+    // they had stays, so what counts is that it does not rise)
+    let lee = api.person()?;
+    let lee_id = api.identity(&lee)?;
+    let r = api.signed(&operator, "POST", &format!("/api/ledger/{lee_id}/plan"), Some(&json!({ "id": "trial-seats-guest", "plan": "guest" })))?;
+    anyhow::ensure!(r.status == 200, "making a guest: {r}");
+    let before = ledger(&lee);
+    anyhow::ensure!(before["plan"] == "guest", "a guest: {before}");
+
+    let offered = api.signed(&kim, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&lee) })))?;
+    let row = offered.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    // were it offered, Stripe's count would follow it
+    let billed = offered.status == 200 && s.eventually(PUSHED, || seats(s).is_some_and(|(_, q)| q > 1));
+    let view = api.signed(&kim, "GET", "/api/org", None)?;
+    s.ok(
+        "while its trial runs, an org's admin offers no further paid seat (a trial is for a seat of one): refused, no offer made, and Stripe's subscription stays one seat, trialing",
+        (400..500).contains(&offered.status) && view.body["members"].as_array().map(Vec::len) == Some(1) && !billed && seats(s) == Some(("trialing".to_string(), 1)),
+        json!({ "offered": [offered.status, offered.body.clone()], "members": view.body["members"], "stripe": format!("{:?}", seats(s)) }),
+    );
+    // were it offered, its accept would seat them, and their ledger follow
+    let took = match row.is_empty() {
+        true => None,
+        false => Some(api.signed(&lee, "POST", &format!("/api/seat/offers/{row}/accept"), Some(&json!({})))?),
+    };
+    let seated = took.as_ref().is_some_and(|r| r.status == 200);
+    let granted = seated && s.eventually(PUSHED, || ledger(&lee)["includedGrantedMicros"] != before["includedGrantedMicros"]);
+    let after = ledger(&lee);
+    s.ok(
+        "so no one is granted a seat's included credit on a trial's place they did not redeem: who was offered it holds no seat, and their ledger is as it was (a guest, granted nothing more)",
+        !seated && !granted && seat(api, &lee)["seat"].is_null() && after["plan"] == "guest" && after["includedGrantedMicros"] == before["includedGrantedMicros"] && after["balanceMicros"] == before["balanceMicros"],
+        json!({ "accept": took.map(|r| r.status), "seat": seat(api, &lee)["seat"], "before": before, "after": after }),
+    );
+    Ok(())
+}

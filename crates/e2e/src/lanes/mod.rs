@@ -155,6 +155,7 @@ const LANES: &[Lane] = &[
     governance::governance,
     billing::billing_page,
     trials::trials,
+    trials::trial_seats,
     admin::admin,
     admin::admin_page,
     shell::shell_platform,
@@ -211,7 +212,7 @@ pub const SHARDS: [&[&str]; 5] = [
     &[
         "lockdown", "templates", "faces", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
         "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "offload", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
-        "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "transcribe",
+        "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "trial-seats", "transcribe",
     ],
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
