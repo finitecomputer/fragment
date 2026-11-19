@@ -275,7 +275,7 @@ const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS 
 const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
 const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS + MARK_EXEC_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, its disk's read among its steps, and an alarm's other events fit an alarm of its own");
 const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
-const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + UNMARK_EXEC_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + 2 * UNMARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the disk's read after it fit the one alarm they run in");
 const _: () = assert!(SAVE_STEPS_MS + UNMARK_EXEC_MS < SAVE_DEADLINE_MS, "an awake save, its unhold past its home among its steps, reports before its deadline");
 const _: () = assert!(BACKUPS_MS - WORK_CHECK_MS - WORK_STAMP_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least, after its work's check and stamp");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
@@ -1212,7 +1212,7 @@ impl ComputerCell {
                 Action::Sleep { generation } => reported.push(self.hold(generation, true).await),
                 Action::Hold { generation } => reported.push(self.hold(generation, false).await),
                 Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
-                Action::Unhold { generation } => self.unhold(generation, MARK_EXEC_MS).await,
+                Action::Unhold { generation } => self.unhold(generation).await,
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved).await),
                 Action::Meter { from_ms, to_ms } => {
                     // kept until the owner's ledger has it: a flush that fails
@@ -1613,7 +1613,12 @@ impl ComputerCell {
                 self.exec_ready(&g).await?;
                 // its disk, before its guest is let go (as a restore's)
                 self.read_disk(generation).await;
-                self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
+                // unless its owner's sleep held it meanwhile (`lets_go`), as
+                // any unhold (Codex on #1378)
+                let _marking = self.marking.lock().await;
+                if self.lifecycle()?.lets_go(generation) {
+                    self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
+                }
             }
             Restore::Nothing => {}
         }
@@ -1770,9 +1775,11 @@ impl ComputerCell {
             return Event::SaveFailed { generation, seq: 0, why: "its container is not running".into() };
         }
         let t0 = js::now_ms();
+        // its mark's bound counts the wait for an unhold under way (at most
+        // `UNMARK_EXEC_MS`): the hold's steps stay within `HOLD_STEPS_MS`
         let marked = {
             let _marking = self.marking.lock().await;
-            self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await
+            self.mark(&g, HOLD_MARK, (MARK_EXEC_MS - (js::now_ms() - t0)).max(1)).await
         };
         if let Err(e) = marked {
             // a guest the DO cannot mark is saved as it is
@@ -1886,15 +1893,15 @@ impl ComputerCell {
             }
         }
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
-        // a newer save was asked as this one ran (its owner's sleep, once its
-        // guest went on): never the newest kept, ahead of a newer capture
-        if self.lifecycle().is_ok_and(|l| l.superseded(seq)) {
-            console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "superseded": true, "ms": js::now_ms() - t0 }));
+        // a newer save of its start was kept as this one ran (its owner's
+        // sleep, once its guest went on): never kept ahead of it
+        if self.saves().is_ok_and(|s| s.overtaken(generation, t0)) {
+            console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "overtaken": true, "ms": js::now_ms() - t0 }));
             match self.update_saves(|s| s.let_go(records)) {
                 Ok(lost) => self.forget(lost).await,
                 Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
             }
-            return Event::SaveFailed { generation, seq, why: "a newer save was asked as it ran".into() };
+            return Event::SaveFailed { generation, seq, why: "a newer save was kept as it ran".into() };
         }
         match self.keep_save(generation, records, held).await {
             Ok(save) => {
@@ -1931,7 +1938,7 @@ impl ComputerCell {
                 assert!(step.ended.is_none() && step.note == SaveNote::Same, "a save's home ends no life and says nothing of its saves");
                 for action in step.actions {
                     let Action::Unhold { generation } = action else { unreachable!("a save's home asks for its unhold alone: {action:?}") };
-                    self.unhold(generation, UNMARK_EXEC_MS).await;
+                    self.unhold(generation).await;
                 }
             }
             // held on to its end, as before: its end lets go
@@ -2064,19 +2071,19 @@ impl ComputerCell {
         }
     }
 
-    /// Lets go of the guest's hold, within `ms`: an awake save past its home
-    /// or at its end, or a sleep that kept its container. A container that
-    /// is gone has nothing to let go, and one a newer hold, save or stop
-    /// holds now is that one's (`Lifecycle::lets_go`): asked as it unmarks,
-    /// one mark at a time (`marking`), so a sleep's hold asked meanwhile
-    /// lands after it.
-    async fn unhold(&self, generation: u64, ms: i64) {
+    /// Lets go of the guest's hold, within `UNMARK_EXEC_MS` (an `rm`): an
+    /// awake save past its home or at its end, or a sleep that kept its
+    /// container. A container that is gone has nothing to let go, and one a
+    /// newer hold, save or stop holds now is that one's
+    /// (`Lifecycle::lets_go`): asked as it unmarks, one mark at a time
+    /// (`marking`), so a sleep's hold asked meanwhile lands after it.
+    async fn unhold(&self, generation: u64) {
         let _marking = self.marking.lock().await;
         if !self.lifecycle().is_ok_and(|l| l.lets_go(generation)) || !self.container_running().await {
             return;
         }
         let g = JsValue::from_f64(generation as f64);
-        if let Err(e) = self.mark(&g, HOLD_UNMARK, ms).await {
+        if let Err(e) = self.mark(&g, HOLD_UNMARK, UNMARK_EXEC_MS).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unhold": "failed", "generation": generation, "error": e.message }));
         }
     }
