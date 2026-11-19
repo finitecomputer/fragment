@@ -1695,7 +1695,6 @@ async fn boot_main() {
                             last_runtimes = Instant::now();
                         }
                         let (read, _) = with_runtimes(&api, c.agents, &runtime_names, again).await;
-                        let change = agents::diff(&agents::hermes(&agents), &agents::hermes(&read));
                         // another runtime's agent new here, switched to it, or
                         // whose last try failed: its own files restored on
                         // their own, and it ready for that runtime once they
@@ -1706,18 +1705,14 @@ async fn boot_main() {
                             (r.done.clone(), r.running.keys().cloned().collect::<BTreeSet<String>>())
                         };
                         // one switched back to Hermes while a restore of its
-                        // files runs: its profile is written (and synced) once
-                        // that ended, so one sync at a time pushes its files;
-                        // the change waits for a read after it
-                        if let Some(a) = change.added.iter().find(|a| running.contains(&a.fragment)) {
-                            ev!("agents.waiting", { "agent": a.fragment, "why": "a restore of its files is still under way" });
-                        } else {
-                            if !change.is_empty() || agents::ready_file(&read, &restored) != ready_now {
-                                ready_now = follow_agents(&api, &change, &read, &restored, &home, ids, &route, &credential_env, &team).await;
-                            }
-                            published = restored;
-                            agents = read;
+                        // files runs waits alone (agents.rs, `until_restored`)
+                        let now = agents::until_restored(&agents, read, &running);
+                        let change = agents::diff(&agents::hermes(&agents), &agents::hermes(&now));
+                        if !change.is_empty() || agents::ready_file(&now, &restored) != ready_now {
+                            ready_now = follow_agents(&api, &change, &now, &restored, &home, ids, &route, &credential_env, &team).await;
                         }
+                        published = restored;
+                        agents = now;
                     }
                     // once per outage: the next read that answers ends it
                     Err(e) if !agents_unread => {

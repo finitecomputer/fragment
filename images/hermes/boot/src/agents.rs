@@ -83,6 +83,26 @@ pub fn places(a: &Agent, home: &Path) -> Vec<Place> {
     Place::claude(&work, &claude::memory_dir(&claude::config_dir(home), &work), home).into()
 }
 
+/// The agents to run now, as `read`, but for one newly Hermes' (switched
+/// back, or assigned again) while a restore of its files is still running
+/// (`running`, by fragment): it stays as it was `before` (another
+/// runtime's, its files not restored for it, so ready for none and its
+/// turns held), or not here yet if it was not, until a read after that
+/// restore ended. Its profile, written and synced as it becomes Hermes',
+/// waits so (one sync of an agent's files at a time); every other agent
+/// goes on.
+pub fn until_restored(before: &[Agent], read: Vec<Agent>, running: &BTreeSet<String>) -> Vec<Agent> {
+    read.into_iter()
+        .filter_map(|a| {
+            let waits = of_hermes(&a) && running.contains(&a.fragment) && !before.iter().any(|b| b.fragment == a.fragment && of_hermes(b));
+            if !waits {
+                return Some(a);
+            }
+            before.iter().find(|b| b.fragment == a.fragment).cloned()
+        })
+        .collect()
+}
+
 /// The runtime an agent's `agent.json` names, as the bridge reads it.
 pub fn runtime_of(a: &Agent) -> &str {
     a.runtime.as_deref().unwrap_or(fragment_bridge::runtime::DEFAULT)
@@ -223,6 +243,33 @@ mod tests {
         let roots: Vec<_> = rowan.iter().map(|p| p.root.to_string_lossy().into_owned()).collect();
         assert_eq!(roots, ["/data/work/rowan--k3x9", "/data/hermes/.claude/projects/-data-work-rowan--k3x9/memory"]);
         assert!(places(&named("oak", Some("nobody-runs-this")), home).is_empty());
+    }
+
+    /// Goal (FIN-542): an agent switched back to Hermes while a restore of
+    /// its Claude files runs waits alone: it stays Claude's (ready for none,
+    /// its turns held), and no profile of it is written, until that restore
+    /// ended; an agent assigned meanwhile, and one switched to Claude, go
+    /// on. Valid: once the restore ended, it is Hermes' and its profile is
+    /// written. Invalid: one coming back as Hermes' while a stale restore
+    /// of its runs is not here yet.
+    #[test]
+    fn a_switch_back_to_hermes_waits_alone_for_its_restore() {
+        let named = |label: &str, runtime: Option<&str>| Agent { runtime: runtime.map(str::to_string), ..agent(label) };
+        let before = [named("rowan", Some("claude")), named("maple", None), named("hazel", Some("claude"))];
+        let read = vec![named("rowan", None), named("maple", Some("claude")), named("hazel", Some("claude")), named("oak", None)];
+        let running = BTreeSet::from(["rowan--k3x9".to_string(), "maple--k3x9".to_string()]);
+        let now = until_restored(&before, read.clone(), &running);
+        assert_eq!(now.iter().map(|a| (a.fragment.as_str(), runtime_of(a))).collect::<Vec<_>>(), [("rowan--k3x9", "claude"), ("maple--k3x9", "claude"), ("hazel--k3x9", "claude"), ("oak--k3x9", "hermes")]);
+        let c = diff(&hermes(&before), &hermes(&now));
+        assert_eq!((names(&c.added), names(&c.removed)), (vec!["oak--k3x9"], vec!["maple--k3x9"]), "oak's profile now, maple leaves Hermes; rowan's waits");
+        let restored = Restored::from([("hazel--k3x9".to_string(), "claude".to_string())]);
+        let file = fragment_bridge::ready::parse(ready_file(&now, &restored).as_bytes()).unwrap();
+        assert_eq!(fragment_bridge::ready::unready(&read, &file).into_iter().collect::<Vec<_>>(), ["maple--k3x9", "rowan--k3x9"], "rowan held as Hermes', maple until restored; hazel and oak run");
+        // its restore ended: Hermes' now, its profile written
+        let later = until_restored(&now, read.clone(), &BTreeSet::from(["maple--k3x9".to_string()]));
+        assert_eq!(names(&diff(&hermes(&now), &hermes(&later)).added), vec!["rowan--k3x9"]);
+        // a stale restore of one not here before: not here yet
+        assert!(until_restored(&[], vec![named("rowan", None)], &BTreeSet::from(["rowan--k3x9".to_string()])).is_empty());
     }
 
     #[test]
