@@ -275,7 +275,8 @@ const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS 
 const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
 const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS + MARK_EXEC_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, its disk's read among its steps, and an alarm's other events fit an alarm of its own");
 const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
-const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + UNMARK_EXEC_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(SAVE_STEPS_MS + UNMARK_EXEC_MS < SAVE_DEADLINE_MS, "an awake save, its unhold past its home among its steps, reports before its deadline");
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
 const _: () = assert!(ALARM_WALL_MS + ALARM_OTHER_MS < ALARM_LATE_MS, "an alarm held up behind one alarm's run is on time, metered as it was");
@@ -436,6 +437,11 @@ pub struct ComputerCell {
     /// #1079: a deadline's alarm applied during that destroy failed the
     /// start for good, its container left running).
     taking_over: futures_util::lock::Mutex<()>,
+    /// Held across each exec that marks or unmarks a hold, so the container
+    /// takes them in the order this object asked them: an awake save's
+    /// unhold, asked before a sleep's hold, lands before it, never after
+    /// and over it (Codex on #1378). In memory only.
+    marking: futures_util::lock::Mutex<()>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
     /// guest's view lists, and what a swap may use: a token is asked of
@@ -483,6 +489,7 @@ impl DurableObject for ComputerCell {
             env,
             adopted: std::cell::Cell::new(false),
             taking_over: futures_util::lock::Mutex::new(()),
+            marking: futures_util::lock::Mutex::new(()),
             states: RefCell::default(),
             accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
@@ -1205,7 +1212,7 @@ impl ComputerCell {
                 Action::Sleep { generation } => reported.push(self.hold(generation, true).await),
                 Action::Hold { generation } => reported.push(self.hold(generation, false).await),
                 Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
-                Action::Unhold { generation } => self.unhold(generation).await,
+                Action::Unhold { generation } => self.unhold(generation, MARK_EXEC_MS).await,
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved).await),
                 Action::Meter { from_ms, to_ms } => {
                     // kept until the owner's ledger has it: a flush that fails
@@ -1763,7 +1770,11 @@ impl ComputerCell {
             return Event::SaveFailed { generation, seq: 0, why: "its container is not running".into() };
         }
         let t0 = js::now_ms();
-        if let Err(e) = self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await {
+        let marked = {
+            let _marking = self.marking.lock().await;
+            self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await
+        };
+        if let Err(e) = marked {
             // a guest the DO cannot mark is saved as it is
             console_error!("{}", json!({ "computer": id, "hold": "failed", "generation": generation, "error": e.message }));
             return Event::Held { generation, held: false };
@@ -1815,7 +1826,7 @@ impl ComputerCell {
         // its backups together within `BACKUPS_MS` (the lever's
         // `hang-backups`: its own), each given what is left
         let budget = self.meta(MetaKey::HangBackups).ok().flatten().and_then(|ms| ms.parse::<i64>().ok()).filter(|ms| (1..=BACKUPS_MS).contains(ms)).unwrap_or(BACKUPS_MS);
-        let until = js::now_ms() + budget;
+        let mut until = js::now_ms() + budget;
         // each record's stored bytes and time, by what it holds
         let mut took = json!({});
         for dir in SAVED_DIRS {
@@ -1855,8 +1866,9 @@ impl ComputerCell {
                     // its home is in, the copies its guest made under the
                     // hold with it: an awake save lets go of its hold before
                     // it takes its work's (`Lifecycle`'s `HomeSaved`)
+                    // (its time, at most `UNMARK_EXEC_MS`, is not the backups')
                     if dir == "/data" {
-                        self.home_saved(generation, seq).await;
+                        until += self.home_saved(generation, seq).await;
                     }
                 }
                 Err(e) => {
@@ -1870,6 +1882,16 @@ impl ComputerCell {
             }
         }
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
+        // a newer save was asked as this one ran (its owner's sleep, once its
+        // guest went on): never the newest kept, ahead of a newer capture
+        if self.lifecycle().is_ok_and(|l| l.superseded(seq)) {
+            console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "superseded": true, "ms": js::now_ms() - t0 }));
+            match self.update_saves(|s| s.let_go(records)) {
+                Ok(lost) => self.forget(lost).await,
+                Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
+            }
+            return Event::SaveFailed { generation, seq, why: "a newer save was asked as it ran".into() };
+        }
         match self.keep_save(generation, records, held).await {
             Ok(save) => {
                 // one line per save (lesson 14): which, how big, how long,
@@ -1889,8 +1911,8 @@ impl ComputerCell {
     /// save, and the unhold it asks for (an awake save's, once) made at once,
     /// so its guest claims turns again while its work is copied. It asks for
     /// nothing else: no life ends, nothing of its saves is said, and its
-    /// alarm stays the save's deadline.
-    async fn home_saved(&self, generation: u64, seq: u64) {
+    /// alarm stays the save's deadline. Answers how long its unhold took.
+    async fn home_saved(&self, generation: u64, seq: u64) -> i64 {
         let event = Event::HomeSaved { generation, seq };
         let logged = json!(event);
         let applied = self.lifecycle().and_then(|mut life| {
@@ -1899,17 +1921,19 @@ impl ComputerCell {
             self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)?;
             Ok(step)
         });
+        let t = js::now_ms();
         match applied {
             Ok(step) => {
                 assert!(step.ended.is_none() && step.note == SaveNote::Same, "a save's home ends no life and says nothing of its saves");
                 for action in step.actions {
                     let Action::Unhold { generation } = action else { unreachable!("a save's home asks for its unhold alone: {action:?}") };
-                    self.unhold(generation).await;
+                    self.unhold(generation, UNMARK_EXEC_MS).await;
                 }
             }
             // held on to its end, as before: its end lets go
             Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": seq, "homeSaved": "untold", "error": e.message })),
         }
+        js::now_ms() - t
     }
 
     /// The work's last record in start `g`'s container
@@ -2031,14 +2055,19 @@ impl ComputerCell {
         }
     }
 
-    /// Lets go of the guest's hold: an awake save's end, or a sleep that
-    /// kept its container. A container that is gone has nothing to let go.
-    async fn unhold(&self, generation: u64) {
-        if !self.container_running().await {
+    /// Lets go of the guest's hold, within `ms`: an awake save past its home
+    /// or at its end, or a sleep that kept its container. A container that
+    /// is gone has nothing to let go, and one a newer hold, save or stop
+    /// holds now is that one's (`Lifecycle::lets_go`): asked as it unmarks,
+    /// one mark at a time (`marking`), so a sleep's hold asked meanwhile
+    /// lands after it.
+    async fn unhold(&self, generation: u64, ms: i64) {
+        let _marking = self.marking.lock().await;
+        if !self.lifecycle().is_ok_and(|l| l.lets_go(generation)) || !self.container_running().await {
             return;
         }
         let g = JsValue::from_f64(generation as f64);
-        if let Err(e) = self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await {
+        if let Err(e) = self.mark(&g, HOLD_UNMARK, ms).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unhold": "failed", "generation": generation, "error": e.message }));
         }
     }
