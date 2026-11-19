@@ -5,6 +5,26 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A deleted fragment's owner-named repo stays at code.storage
+
+- **Shortcut:** a delete takes a fragment's code.storage repo only when
+  the repo is named by that life's own key (`fragment_core::ended::
+  repo_goes`, the `RepoOfLife` meta). Fragments made before that naming
+  have repos named by their owner's identity, and a delete leaves those,
+  as it left every repo before. A wipe takes them all.
+- **Why:** a release from before that naming, rolled back to, names a
+  repo by its owner. Its create of a deleted name, by the same owner,
+  would find that repo while its delete was still to come (held, or
+  backing off), and the delete would then take the new life's files
+  (FIN-538, a review of #1369).
+- **Risk:** a deleted fragment made before that naming keeps its files
+  at code.storage, out of everyone's reach on the platform (404), until
+  the sweep.
+- **Delete when:** no rollback can reach a release that names repos by
+  their owner (the rollout's fence past it). Then a sweep deletes the
+  repos no live fragment names (FIN-540), and `repo_goes` takes every
+  deleted life's repo.
+
 ## No mail without Email Sending
 
 - **Shortcut:** the platform's mail (invites, a key added, an org's seat,

@@ -31,20 +31,29 @@
 //! agent unassigned already is (`fragment_core::ended::agent_left`).
 //!
 //! **Its code.storage repo goes with it** (Paul, 2026-11-18: a delete is
-//! when the files are really gone). Its end records the repo beside it
-//! (`ended_repos`), which the alarm deletes with the rest, retried as the
-//! rest are: the life is cleaned up only once its repo is gone too. Each
-//! life's repo is its own (`fragment_core::codestorage::repo_name`, named
-//! by the life's key), so a name made again before that delete gets a
-//! fresh repo, and the delete never reaches it. A chat's repo is made after
-//! its create answers (publish.rs `seeds_later`): one whose life ended
-//! while code.storage made it is recorded by that seed
-//! (`end_repo_of_no_life`). What a delete cannot reach: copies an agent's
-//! computer synced, and exports people downloaded.
+//! when the files are really gone), when the repo is named by the life's
+//! own key (`fragment_core::ended::repo_goes`; its `RepoOfLife` mark). Its
+//! end records the repo beside it (`ended_repos`), which the alarm deletes
+//! with the rest, retried as the rest are: the life is cleaned up only
+//! once its repo is gone too. A name made again before that delete gets a
+//! fresh repo of its own (`fragment_core::codestorage::repo_name`), so
+//! the delete never reaches it. A chat's repo is made after its create
+//! answers (publish.rs `seeds_later`): one whose life ended while
+//! code.storage made it is recorded by that seed (`end_repo_of_no_life`).
+//!
+//! A repo named by its owner (a life made before repos were named by its
+//! key) stays with a delete: an older release, rolled back to, names a
+//! repo so, and its create of the name would find one whose delete was
+//! still to come (FIN-538). Those wait for a sweep once no rollback can
+//! reach such a release (FIN-540; docs/technical-debt-ledger.md). Nor does
+//! a delete reach copies an agent's computer synced, or exports people
+//! downloaded.
 //!
 //! A wipe's end of a life (`end_life_wiped`: docs/api.md, Operators) is the
-//! same end, with no agent recorded: the wipe empties the computer before
-//! (its `computer` step) and the registry's rows after (`registry`).
+//! same end, its repo recorded however it is named (a wiped person never
+//! makes the name again), and no agent recorded: the wipe empties the
+//! computer before (its `computer` step) and the registry's rows after
+//! (`registry`).
 //!
 //! **A try that fails** is told apart (`fragment_core::ended`): a part
 //! already gone is done (a repo code.storage says is gone, or was never
@@ -64,7 +73,7 @@
 //! refuses every change (one from before its table had a column master
 //! writes) holds no wipe.
 
-use fragment_core::ended::{self as rules, Failure};
+use fragment_core::ended::{self as rules, End, Failure};
 use fragment_core::npub;
 use fragment_core::seed::Stage;
 use fragment_core::wipe::{LifeLeft, LIVES_SHOWN_MAX};
@@ -173,20 +182,21 @@ impl FragmentCell {
     /// fragment's agent, among it), stops the app, closes the sockets, and
     /// drops the life's tables, made again empty.
     pub(crate) fn end_life(&self) -> CellResult<Ended> {
-        self.end(true)
+        self.end(End::Delete)
     }
 
     /// A wipe's end of this life (docs/api.md, Operators): `end_life`, with
     /// no agent recorded, as the wipe empties its computer and the
     /// registry's names itself.
     pub(crate) fn end_life_wiped(&self) -> CellResult<Ended> {
-        self.end(false)
+        self.end(End::Wipe)
     }
 
     /// `end_life`, its agent recorded to leave its computer and the
-    /// registry's names (`agent`), or not (a wipe's, which empties both).
-    fn end(&self, agent: bool) -> CellResult<Ended> {
-        let [name, created_at, owner, npub, version, identity, computer, search, repo] = self.metas([
+    /// registry's names (a delete's), or not (a wipe's, which empties
+    /// both), and its repo recorded when it goes (`rules::repo_goes`).
+    fn end(&self, by: End) -> CellResult<Ended> {
+        let [name, created_at, owner, npub, version, identity, computer, search, repo, of_life] = self.metas([
             MetaKey::Name,
             MetaKey::CreatedAt,
             MetaKey::Owner,
@@ -196,6 +206,7 @@ impl FragmentCell {
             MetaKey::Computer,
             MetaKey::Search,
             MetaKey::Repo,
+            MetaKey::RepoOfLife,
         ])?;
         let name = name.ok_or_else(|| missing(MetaKey::Name))?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
@@ -224,11 +235,12 @@ impl FragmentCell {
              ON CONFLICT (incarnation, principal) DO NOTHING",
             vec![SqlStorageValue::Integer(incarnation), SqlStorageValue::Integer(version), now],
         )?;
-        // its repo, this life's alone (named by its key), deleted by the
-        // alarm; a life whose repo was not made yet (its template seeds
-        // after the create's answer, publish.rs `seeds_later`) records
-        // none here, and its seed records one it makes after
-        // (`end_repo_of_no_life`)
+        // its repo, deleted by the alarm: a wipe's always, a delete's when
+        // named by this life's key (an owner-named one stays: FIN-538); a
+        // life whose repo was not made yet (its template seeds after the
+        // create's answer, publish.rs `seeds_later`) records none here,
+        // and its seed records one it makes after (`end_repo_of_no_life`)
+        let repo = repo.filter(|_| rules::repo_goes(by, of_life.is_some()));
         if let Some(repo) = &repo {
             assert!(!repo.is_empty(), "a made repo has a name");
             self.exec(
@@ -240,7 +252,7 @@ impl FragmentCell {
         // ran on its owner's one computer (decision 13), named while it is
         // assigned. Unassigned since, that computer is asked all the same
         // (a no-op): nothing else reaches its row once this life is gone
-        if let (true, Some(identity)) = (agent, identity) {
+        if let (End::Delete, Some(identity)) = (by, identity) {
             let computer = computer.unwrap_or_else(|| fragment_core::computer::default_computer_of(&owner));
             self.exec(
                 "INSERT INTO ended_agents (incarnation, identity, computer, next_at) VALUES (?, ?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
@@ -256,7 +268,7 @@ impl FragmentCell {
         }
         crate::schema::remake(self.sql(), &fragment_core::migrate::FRAGMENT)?;
         assert!(self.meta(MetaKey::CreatedAt)?.is_none(), "an ended life leaves no fragment");
-        assert_eq!(self.ended_repo_rows(incarnation)?, u64::from(repo.is_some()), "the ended life's repo, if it had one, is recorded beside it");
+        assert_eq!(self.ended_repo_rows(incarnation)?, u64::from(repo.is_some()), "the ended life's repo, if it goes, is recorded beside it");
         Ok(Ended { owner })
     }
 

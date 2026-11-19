@@ -261,7 +261,8 @@ Its code.storage repo is the deployment's prefix, then `<name>--<12 hex>`,
 the hex a digest of its life's own key, its `npub`
 (`fragment_core::codestorage::repo_name`): each life of a name has a repo
 of its own, and a name made again, by anyone, never finds an earlier
-life's.
+life's. A fragment made before this naming has a repo named by its
+owner's identity instead, which it keeps.
 
 A chat's create answers before its repo is made (`publish::seeds_later`).
 Until its first commit lands, the chat runs its template from the release,
@@ -692,7 +693,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/search?q=` | any signer | → `SearchAnswer` (docs/wire, `search.find`; Search). `q` once, at most `SEARCH_QUERY_MAX_BYTES` and `SEARCH_QUERY_WORDS_MAX` words (400). Not for `for` |
 | `POST /api/search` | any signer, `for` too | `Across {q, in, limit?, mode?, fields?, after?, before?}` → `FoundAcross {results, fragments, semantic}`: one question asked of several fragments' indexes (Search across fragments) |
 | `GET /api/access` | a person | Sharing, "Who has access to what" |
-| `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once it is gone: 404 to everyone, out of its owner's list, its name free. Its members' lists, app database and blobs go after, by its alarm (`fragment_core::ended`: retried, a part refused or failing ten tries held and tried daily). An agent fragment's agent leaves its computer and is named by it no more. Its code.storage repo is deleted by the same alarm, retried and held as the rest. A life made again under the name, even before that, has a fresh repo of its own and is untouched by the old one's cleanup. Nothing reaches copies outside the platform: what an agent's computer synced, or exports people downloaded |
+| `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once it is gone: 404 to everyone, out of its owner's list, its name free. Its members' lists, app database and blobs go after, by its alarm (`fragment_core::ended`: retried, a part refused or failing ten tries held and tried daily). An agent fragment's agent leaves its computer and is named by it no more. Its code.storage repo is deleted by the same alarm, retried and held as the rest, when it is named by the life's own key (Names). A repo named by its owner (a fragment made before that naming) stays: a rolled-back release names repos so, and its create of the name would find one whose delete was still to come. Those wait for a sweep once no rollback can reach such a release (FIN-540). A life made again under the name, even before that delete, has a fresh repo of its own and is untouched by the old one's cleanup. Nothing reaches copies outside the platform: what an agent's computer synced, or exports people downloaded |
 | `GET /api/f/{name}/status` | viewer | → `FragmentStatus` (docs/wire, `fragments.status`), as the caller's role sees it: the share link's and the inbox's tokens only for those who hold them |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main; none 404 |
 | `GET /api/f/{name}/members` | viewer | → `MemberList` (docs/wire, `members.list`); to the owner, and their agent for them, each person's `email` too, as the share sheet shows it (decision 48) |

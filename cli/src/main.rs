@@ -172,8 +172,8 @@ enum Cmd {
     },
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
-    /// Delete a fragment you own, for everyone in it: its pages, data,
-    /// files and repo go, and its name is free. At a terminal it asks you
+    /// Delete a fragment you own, for everyone in it: its pages, data and
+    /// files go, and its name is free. At a terminal it asks you
     /// to type its name first, unless --yes
     Rm {
         name: String,
@@ -2139,7 +2139,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             c.call(c.delete(&format!("/api/f/{name}"))?)?;
             json_exit(j, &json!({ "deleted": true, "name": name }));
-            println!("deleted {name} for everyone in it: its pages, data, files and repo go, and the name is free.");
+            println!("deleted {name} for everyone in it: its pages, data and files go, and the name is free.");
         }
         Cmd::Archive { name } => {
             let done = set_archived(&c, &name, true)?;

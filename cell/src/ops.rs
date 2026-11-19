@@ -481,6 +481,8 @@ impl FragmentCell {
                     return Err(CellError::invalid(format!("repo is this fragment's name as repos were named before their owner: {own}")));
                 }
                 self.set_meta(MetaKey::Repo, &own)?;
+                // named so, by no life's key: a delete leaves it, a wipe takes it
+                self.del_meta(MetaKey::RepoOfLife)?;
                 json!({ "repo": own })
             }
             Some("alarm") => {

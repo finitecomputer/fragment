@@ -317,6 +317,11 @@ pub(crate) enum MetaKey {
     InboxToken,
     /// Its code.storage repo.
     Repo,
+    /// Set beside `Repo` when the repo is named by this life's own key
+    /// (`fragment_core::codestorage::repo_name`): only such a repo goes
+    /// with a delete (`fragment_core::ended::repo_goes`). A life made
+    /// before that naming has none: its repo, named by its owner, stays.
+    RepoOfLife,
     /// Its app facet's name, `app@<incarnation>`: each life of a name has
     /// its own app database (`app_facet`).
     AppFacet,
@@ -507,6 +512,7 @@ impl MetaKey {
             MetaKey::ViewToken => "view_token",
             MetaKey::InboxToken => "inbox_token",
             MetaKey::Repo => "repo",
+            MetaKey::RepoOfLife => "repo_of_life",
             MetaKey::IndexVersion => "index_version",
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
@@ -1420,6 +1426,8 @@ impl FragmentCell {
         let created_at = now.to_string();
         if let Some(repo) = &repo {
             self.set_meta(MetaKey::Repo, repo)?;
+            // named by this life's key above: a delete takes it
+            self.set_meta(MetaKey::RepoOfLife, "1")?;
         }
         for (k, v) in [
             (MetaKey::Owner, owner.as_str()),

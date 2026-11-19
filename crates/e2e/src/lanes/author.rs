@@ -855,14 +855,14 @@ fn archive_rm_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys)
     let (right_exit, right) = at_terminal(&format!("{asked}\n"))?;
     let after = api.status(keys, &asked)?;
     s.ok(
-        "fragment rm at a terminal asks for its name typed back: anything else deletes nothing (exit 2); its name deletes it, saying its repo goes too",
+        "fragment rm at a terminal asks for its name typed back: anything else deletes nothing (exit 2); its name deletes it, saying its files go",
         wrong_exit == Some(2)
             && wrong.contains(&format!("Type {asked} to delete it"))
             && wrong.contains("nothing deleted")
             && still.status == 200
             && right_exit == Some(0)
             && right.contains(&format!("deleted {asked} for everyone in it"))
-            && right.contains("files and repo go")
+            && right.contains("data and files go")
             && after.status == 404,
         json!({ "wrong": [wrong_exit, wrong, still.status], "right": [right_exit, right, after.status] }),
     );

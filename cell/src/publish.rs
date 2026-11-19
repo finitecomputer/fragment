@@ -226,6 +226,8 @@ impl FragmentCell {
                     return Err(ended);
                 }
                 self.set_meta(MetaKey::Repo, &repo)?;
+                // named by this life's key above: a delete takes it
+                self.set_meta(MetaKey::RepoOfLife, "1")?;
                 self.event("template.repo", &format!("{name}'s repo is made ({repo})"), json!({ "repo": repo }));
                 Ok(vec![Event::RepoMade])
             }
