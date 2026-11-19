@@ -12,9 +12,11 @@ use crate::notice::date;
 /// An invite waiting for their yes: `fragment`, shared to `edit` (else to
 /// view), titled `title` as it was sent, by `from` (the sharer's email, if
 /// anyone signs in as them now).
-pub fn invite(fragment: &str, edit: bool, title: &str, from: Option<&str>) -> Notice {
+pub fn invite(fragment: &str, edit: bool, title: &str, from: Option<&str>, expires_at: i64) -> Notice {
     let at = |verb: &str| format!("/api/invites/{fragment}/{verb}");
-    let empty = || Value::Object(Map::new());
+    // each answers the invite shown, by when it runs out: another in its
+    // place since is not its to answer
+    let shown = || Value::Object(Map::from_iter([("expiresAt".to_string(), Value::from(expires_at))]));
     Notice {
         id: format!("invite:{fragment}"),
         kind: "invite".into(),
@@ -23,7 +25,7 @@ pub fn invite(fragment: &str, edit: bool, title: &str, from: Option<&str>) -> No
         text: Some(format!("{} invited you to {} it.", from.unwrap_or("Someone"), if edit { "edit" } else { "view" })),
         detail: None,
         until: None,
-        actions: vec![NoticeAction::post("Accept", at("accept"), empty()), NoticeAction::post("Decline", at("decline"), empty())],
+        actions: vec![NoticeAction::post("Accept", at("accept"), shown()), NoticeAction::post("Decline", at("decline"), shown())],
         must_answer: false,
         image: None,
     }
@@ -94,12 +96,13 @@ mod tests {
     /// its two answers' routes, so a client draws it with no code of its own.
     #[test]
     fn an_invite_in_words_with_its_answers() {
-        let n = invite("garden--k3x9", true, "Garden plans", Some("ada@example.com"));
+        let n = invite("garden--k3x9", true, "Garden plans", Some("ada@example.com"), 1_700_000_000_000);
         assert_eq!((n.id.as_str(), n.kind.as_str(), n.level, n.title.as_str()), ("invite:garden--k3x9", "invite", NoticeLevel::Info, "Garden plans"));
         assert_eq!(n.text.as_deref(), Some("ada@example.com invited you to edit it."));
         let routes: Vec<(&str, &str, Value)> = n.actions.iter().map(|a| (a.label.as_str(), a.post.as_deref().unwrap_or(""), a.body.clone().unwrap_or_default())).collect();
-        assert_eq!(routes, vec![("Accept", "/api/invites/garden--k3x9/accept", json!({})), ("Decline", "/api/invites/garden--k3x9/decline", json!({}))]);
-        assert_eq!(invite("notes--a2b4", false, "notes--a2b4", None).text.as_deref(), Some("Someone invited you to view it."));
+        let shown = json!({ "expiresAt": 1_700_000_000_000i64 });
+        assert_eq!(routes, vec![("Accept", "/api/invites/garden--k3x9/accept", shown.clone()), ("Decline", "/api/invites/garden--k3x9/decline", shown)]);
+        assert_eq!(invite("notes--a2b4", false, "notes--a2b4", None, 0).text.as_deref(), Some("Someone invited you to view it."));
     }
 
     /// Goal: a lapsed seat is told in Settings' words, Pay again for its

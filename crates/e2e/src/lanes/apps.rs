@@ -403,6 +403,17 @@ fn races(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         !shown.is_empty() && replaced.status == 200 && stale.status == 404 && row(owner, &team, &apps[2]).is_none() && waiting && waits_on(&bob, &team),
         format!("shown {shown:?} replaced {replaced} stale {} waiting {waiting}", stale.status),
     );
+    // the same by the API (a notice's answer): only the invite it names
+    let at = |i: &Value| i["expiresAt"].as_i64().unwrap_or_default();
+    let now = invites_here(&team).iter().find(|i| i["app"] == apps[2].as_str()).map(at).unwrap_or_default();
+    let notices = api.signed(&bob, "GET", "/api/notices", None)?;
+    let notice = notices.body["notices"].as_array().into_iter().flatten().find(|n| n["id"] == format!("invite:{team}").as_str()).cloned().unwrap_or_default();
+    let stale_api = api.signed(&bob, "POST", &format!("/api/invites/{team}/accept"), Some(&json!({ "expiresAt": shown.parse::<i64>().unwrap_or_default() })))?;
+    s.ok(
+        "an invite's notice answers the invite it shows, and an answer naming one replaced since is gone (404), the one in its place still waiting",
+        now > 0 && notice["actions"][0]["body"]["expiresAt"] == now && notice["actions"][1]["body"]["expiresAt"] == now && stale_api.status == 404 && row(owner, &team, &apps[2]).is_none() && waits_on(&bob, &team),
+        format!("now {now} notice {notice} stale {stale_api}"),
+    );
     s.mail.fail_next("E_SEND_FAILED");
     let failed = invite_app(&apps[1])?;
     let kept = invites_here(&team).iter().any(|i| i["app"] == apps[2].as_str());

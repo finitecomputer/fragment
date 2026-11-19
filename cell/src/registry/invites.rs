@@ -319,7 +319,7 @@ impl RegistryCell {
         let invites = self.waiting_on(&b.person)?;
         let invites = invites.iter().map(|i| {
             let s = |k: &str| i[k].as_str().unwrap_or_default();
-            let mut n = said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str());
+            let mut n = said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str(), i["expiresAt"].as_i64().unwrap_or_default());
             n.must_answer = levers::must_answer_invite(fleet, s("fragment"));
             n
         });

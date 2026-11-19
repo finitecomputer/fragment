@@ -1027,19 +1027,26 @@ async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, se
 /// `/api/invites…`: a person's own answers to the invites waiting on the
 /// emails they sign in with (decision 63; registry/invites.rs). `GET`
 /// them; `POST <fragment>/accept`, their yes, which makes them a member
-/// there; `POST <fragment>/decline`, their no. Each takes no body (or
-/// `{}`). Their agent answers them for them, acting `for` them (the
-/// registry decides: invites.rs `invitee_by`).
+/// there; `POST <fragment>/decline`, their no. Each takes `{}`, or
+/// `{expiresAt}` naming the invite shown (a notice's answers do), which
+/// alone it answers. Their agent answers them for them, acting `for` them
+/// (the registry decides: invites.rs `invitee_by`).
 pub(crate) async fn invites(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let (by, acting_for) = (crate::orgs::signed_by(env, &req, url, &bytes)?, crate::acting_for(url)?);
-    let empty = bytes.is_empty() || serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes).is_ok_and(|m| m.is_empty());
+    // `{}`, or `{expiresAt}`: the invite shown
+    let body = match bytes.is_empty() {
+        true => Some(serde_json::Map::new()),
+        false => serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes).ok(),
+    };
+    let shown = body.as_ref().and_then(|b| b.get("expiresAt")).and_then(Value::as_i64);
+    let plain = body.is_some_and(|b| b.len() == usize::from(shown.is_some()));
     match (req.method(), rest) {
         (Method::Get, []) => crate::json_answer(&ask_registry(env, &InvitesFor { by, acting_for }).await?),
-        (Method::Post, [_, "accept" | "decline"]) if !empty => Err(CellError::invalid("this takes no body (or {})")),
+        (Method::Post, [_, "accept" | "decline"]) if !plain => Err(CellError::invalid("this takes {} or {expiresAt}, the invite shown")),
         (Method::Post, [fragment, verb @ ("accept" | "decline")]) => {
             let (fragment, yes) = (crate::named_fragment(fragment)?, *verb == "accept");
-            match (ask_registry(env, &AnswerInvite { by, acting_for, fragment: fragment.clone(), yes, expires_at: None }).await?, yes) {
+            match (ask_registry(env, &AnswerInvite { by, acting_for, fragment: fragment.clone(), yes, expires_at: shown }).await?, yes) {
                 // its page, which the person's client opens (FIN-458)
                 (Some(role), true) => crate::json_answer(&InviteAccepted { open: Some(crate::config::Config::from_env(env).canonical(url, &fragment)), fragment, role }),
                 (None, false) => crate::json_answer(&json!({ "ok": true, "declined": fragment })),
