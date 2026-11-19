@@ -975,21 +975,24 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
         "nostr-e2e/x",
     ];
     let before = vault(&owner, "GET", "/api/vault", None)?;
-    let mut refused = escapes.iter().map(|from| put(&owner, "PATH_E2E", json!({ "fromVault": from, "hosts": ["api.telegram.org"] }))).collect::<Result<Vec<_>>>()?;
+    let refused = escapes.iter().map(|from| put(&owner, "PATH_E2E", json!({ "fromVault": from, "hosts": ["api.telegram.org"] }))).collect::<Result<Vec<_>>>()?;
+    // from its page, any fromVault is refused before its name is read
+    // (`secrets-page`, below)
     let body = json!({ "fromVault": "../delete/nostr-e2e", "hosts": ["api.telegram.org"] }).to_string().into_bytes();
-    refused.push(api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/PATH_E2E"), body: Some(body), content_type: Some("application/json"), cookie: Some(editor_site.clone()), ..api::Call::default() })?);
+    let paged = api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/PATH_E2E"), body: Some(body), content_type: Some("application/json"), cookie: Some(editor_site.clone()), ..api::Call::default() })?;
     let held = vault(&owner, "GET", "/api/vault", None)?;
     let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok(
-        "a fromVault outside a Vault name's grammar (../, %2e%2e, %2F, a slash; from the API or its page) is refused (400) before any Vault route: the Vault keeps its token and its key that signs, each as it was (hosts, place, agents, when set), and the fragment is given nothing",
+        "a fromVault outside a Vault name's grammar (../, %2e%2e, %2F, a slash) is refused before any Vault route (400 from the API, 403 from its page): the Vault keeps its token and its key that signs, each as it was (hosts, place, agents, when set), and the fragment is given nothing",
         refused.iter().all(|r| r.status == 400 && r.text.contains("is not one"))
+            && paged.status == 403
             && held.text.contains("\"telegram-e2e\"")
             && held.text.contains("\"nostr-e2e\"")
             && held.status == 200
             && held.body == before.body
             && listed.status == 200
             && !listed.text.contains("PATH_E2E"),
-        json!({ "statuses": refused.iter().map(|r| r.status).collect::<Vec<_>>(), "first": refused.first().map(|r| r.text.clone()), "vault": held.text, "listed": listed.text }),
+        json!({ "statuses": refused.iter().map(|r| r.status).collect::<Vec<_>>(), "first": refused.first().map(|r| r.text.clone()), "paged": paged.text, "vault": held.text, "listed": listed.text }),
     );
     let moved = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
     let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
@@ -1116,9 +1119,19 @@ pub fn secrets_page(s: &mut Suite, api: &Api) -> Result<()> {
         held.status == 200 && held.body == before.body && kept.status == 200 && kept.body["secrets"] == json!([]),
         json!({ "asked": asked.status, "answer": asked.body, "vaultBefore": before.body, "vault": held.body, "fragment": kept.body }),
     );
+    // their own move (their key) keeps it within the hosts they set for it
+    // in their Vault: toward another, refused before anything is claimed
+    let wider = api.signed(&visitor, "PUT", &format!("/api/f/{name}/secrets/WIDER"), Some(&json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org", "127.0.0.1"] })))?;
+    let held = api.signed(&visitor, "GET", "/api/vault", None)?;
+    let kept = api.signed(&author, "GET", &format!("/api/f/{name}/secrets"), None)?;
+    s.ok(
+        "its person's own move toward a host their Vault does not point it at is refused (400), their Vault keeping it as it was and the fragment given nothing",
+        wider.status == 400 && wider.text.contains("goes only to the hosts set for it") && held.body == before.body && kept.body["secrets"] == json!([]),
+        json!({ "wider": wider.text, "vault": held.body, "fragment": kept.body }),
+    );
     // its author runs the job: its fetch names `{{STOLEN}}` toward their host
     let r = api.op(&author, &name, "send", "send-1", json!({ "url": format!("{}/take", host.url) }))?;
-    let run = super::jobs::settle(api, &author, &name, super::jobs::started(&r), &["succeeded", "held"], Duration::from_secs(40));
+    let run = super::jobs::settle(api, &author, &name, super::jobs::started(&r), &["succeeded", "held", "failed"], Duration::from_secs(40));
     let got = seen.lock().expect("the host's log").clone();
     s.ok(
         "and its author's job carries nothing of theirs to the host its page named",

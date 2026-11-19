@@ -1197,13 +1197,24 @@ impl FragmentCell {
         // refuse it here refuses it first
         let moved = match put.from_vault.take() {
             Some(_) if !put.value.is_empty() => return Err(CellError::invalid("a secret is its value or fromVault, not both")),
+            // Never from a page (`__secrets/KEY`, a site or frame session):
+            // a page runs its authors' code with its visitor's session, an
+            // agent of the visitor's own among them, so its call is no word
+            // of theirs. A move is asked from the platform's own pages (the
+            // shell's session: Settings moves the bot it offered a Telegram
+            // connector, connections.js) or their own key (the CLI's
+            // `--from-vault`). Refused before the Vault is asked, the same
+            // for every name, so a page learns nothing of what it holds.
+            Some(_) if caller.site => {
+                return Err(CellError::new(ErrorCode::Forbidden, "a secret of a vault moves only from Settings or its person's own key, never from a page"));
+            }
             Some(name) => {
                 let person = caller.signed.as_ref().filter(|s| s.identity.kind == fragment_proto::IdentityKind::Person).map(|s| s.identity.id.clone());
                 let person = person.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only a person moves a secret of their vault, from their own session or key"))?;
                 self.reach_while_private()?;
                 self.secret_room(key)?;
                 let to = format!("{}/{key}", self.name()?);
-                let crate::vault::Taken(value, revision) = crate::vault::take(&self.env, &person, &name, &to).await?;
+                let crate::vault::Taken(value, revision) = crate::vault::take(&self.env, &person, &name, &to, &hosts).await?;
                 put.value = value;
                 Some((person, name, to, revision))
             }
