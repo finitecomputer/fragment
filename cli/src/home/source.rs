@@ -1,9 +1,16 @@
-//! Where an agent's home is read from (`fragment home`): a folder, or a
-//! zip of one, read in place (an old agent's stage is one zip64 file,
-//! FIN-463). Every reader works on either: the survey, the files it
-//! brings, and the databases it reads. A database is a file SQLite opens,
-//! so a zip's is copied out first (`local`), into a scratch folder of the
-//! import's own that goes with it (`Scratch`).
+//! Where an agent's home is read from (`fragment home`): a folder, a zip
+//! of one, or a move's stage (an old agent's home as one zip64 the
+//! platform keeps, FIN-463), each read in place. Every reader works on
+//! each: the survey, the files it brings, and the databases it reads. A
+//! database is a file SQLite opens, so a zip's is copied out first
+//! (`local`), into a scratch folder of the import's own that goes with it
+//! (`Scratch`).
+//!
+//! **A stage is never downloaded** (`Stage`): its zip's directory, and
+//! each file an import reads, come by ranges from the platform, as its
+//! bound agent. An old agent's home can be tens of gigabytes, and its new
+//! computer's disk holds 20 (a 47 GB import that downloaded first failed,
+//! 2026-11-18): what lands on the disk is only what the import keeps.
 //!
 //! **Paths.** Every file is named by its path relative to the root,
 //! `/`-separated, as text. A zip entry that would leave the root (`..`, an
@@ -18,10 +25,14 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
 use anyhow::{anyhow, bail, Context, Result};
+use fragment_proto::migrations::StageOpened;
 use serde::Serialize;
 
-use crate::api::{Code, CodedError};
+use crate::api::{Client, Code, CodedError};
 
 /// Files one source holds, at most: an old agent's stage holds about
 /// 100,000 at the most (FIN-463), and each is a row in memory here.
@@ -46,8 +57,10 @@ pub struct Entry {
 
 /// A source: its files, and how their bytes are read.
 pub struct Source {
-    /// The folder or the zip it was opened from.
+    /// The folder or the zip it was opened from (a stage's `stage:<id>`).
     origin: PathBuf,
+    /// The stage it reads, when it is one.
+    stage: Option<String>,
     backing: Backing,
     /// Every file, by path.
     entries: Vec<Entry>,
@@ -66,12 +79,24 @@ enum Backing {
     Zip(zip::ZipArchive<At>),
 }
 
-/// A file read at an offset of its own, so that each clone of a zip reads
-/// it apart from the others (`zip::ZipArchive` is `Clone` when its reader
+/// Bytes read at an offset: a zip on this computer, or a stage on the
+/// platform (`Stage`).
+pub trait ReadAt: Send + Sync {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
+}
+
+impl ReadAt for File {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        FileExt::read_at(self, buf, offset)
+    }
+}
+
+/// A zip read at an offset of its own, so that each clone of it reads
+/// apart from the others (`zip::ZipArchive` is `Clone` when its reader
 /// is: one parse of the central directory serves every reader).
 #[derive(Clone)]
 pub struct At {
-    file: Arc<File>,
+    file: Arc<dyn ReadAt>,
     pos: u64,
     len: u64,
 }
@@ -81,6 +106,78 @@ impl Read for At {
         let n = self.file.read_at(buf, self.pos)?;
         self.pos += n as u64;
         Ok(n)
+    }
+}
+
+/// The first window a stage's read fetches, and the most one grows to
+/// while reads go on where the last ended (a database copied out, the
+/// zip's directory). A file's own window is its local header and, for a
+/// small file, its bytes: one request.
+const WINDOW_MIN: u64 = 64 * 1024;
+const WINDOW_MAX: u64 = 8 * 1024 * 1024;
+/// Windows kept, the latest last: the most a stage holds in memory is
+/// `WINDOWS_KEPT * WINDOW_MAX`.
+const WINDOWS_KEPT: usize = 8;
+
+/// A move's stage, read where the platform keeps it: its zip by ranges
+/// (`GET /api/migrations/stages/{stage}/zip`), as the agent the move is
+/// bound to, a window at a time, never whole.
+pub struct Stage {
+    client: Client,
+    path: String,
+    len: u64,
+    windows: Mutex<Windows>,
+}
+
+#[derive(Default)]
+struct Windows {
+    kept: VecDeque<(u64, Arc<Vec<u8>>)>,
+    /// Where the last fetch ended, and how long it was.
+    end: u64,
+    last: u64,
+}
+
+impl Stage {
+    /// Opens `stage` (`POST …/open`, harmless again): its manifest, and a
+    /// reader of its zip.
+    pub fn open(c: &Client, stage: &str) -> Result<(StageOpened, Stage)> {
+        if stage.is_empty() || !stage.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) {
+            bail!(usage(format!("{stage:?} is no stage: a move's routine names it (<old>.<phase>.<attempt>)")));
+        }
+        let base = format!("/api/migrations/stages/{stage}");
+        let opened: StageOpened = c.call_as(c.post_json(&format!("{base}/open"), &serde_json::json!({}))?).with_context(|| format!("opening stage {stage}"))?;
+        let client = Client::new(&c.host, c.signer.clone());
+        let len = opened.manifest.zip_bytes;
+        Ok((opened, Stage { client, path: format!("{base}/zip"), len, windows: Mutex::default() }))
+    }
+}
+
+impl ReadAt for Stage {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        if offset >= self.len || buf.is_empty() {
+            return Ok(0);
+        }
+        let mut w = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        let copy = |buf: &mut [u8], at: u64, bytes: &[u8]| {
+            let from = (offset - at) as usize;
+            let n = buf.len().min(bytes.len() - from);
+            buf[..n].copy_from_slice(&bytes[from..from + n]);
+            n
+        };
+        if let Some((at, bytes)) = w.kept.iter().find(|(at, b)| (*at..*at + b.len() as u64).contains(&offset)) {
+            return Ok(copy(buf, *at, bytes));
+        }
+        // a read going on where the last fetch ended takes a window twice
+        // as long; any other starts small again
+        let grown = if offset == w.end { (w.last * 2).min(WINDOW_MAX) } else { WINDOW_MIN };
+        let len = grown.max((buf.len() as u64).min(WINDOW_MAX)).min(self.len - offset);
+        let bytes = Arc::new(self.client.get_range(&self.path, offset, len).map_err(|e| io::Error::other(format!("{e:#}")))?);
+        (w.end, w.last) = (offset + len, len);
+        if w.kept.len() >= WINDOWS_KEPT {
+            w.kept.pop_front();
+        }
+        w.kept.push_back((offset, bytes.clone()));
+        Ok(copy(buf, offset, &bytes))
     }
 }
 
@@ -111,6 +208,14 @@ pub fn said(names: &[String]) -> String {
         out.push_str(&format!(" and {} more", names.len() - SAID_MAX));
     }
     out
+}
+
+/// How a source names a move's stage: `stage:<the stage>`.
+pub const STAGE_PREFIX: &str = "stage:";
+
+/// The stage a source's path names, if it names one.
+pub fn stage_of(path: &Path) -> Option<&str> {
+    path.to_str()?.strip_prefix(STAGE_PREFIX)
 }
 
 /// Whether the file at `path` is a zip (by its first bytes).
@@ -186,6 +291,21 @@ impl Source {
         Source::from_archive(path, archive, &path.display().to_string())
     }
 
+    /// A move's stage, read in place (`Stage`): its manifest, and its home.
+    pub fn stage(c: &Client, stage: &str) -> Result<(StageOpened, Source)> {
+        let (opened, reader) = Stage::open(c, stage)?;
+        let len = reader.len;
+        let said = format!("stage {stage}");
+        // a stage's zip starts at its first byte (the mover writes it so):
+        // the crate's default looks for where it starts by reading forward
+        // from there to its directory, the whole stage
+        let config = zip::read::Config { archive_offset: zip::read::ArchiveOffset::Known(0) };
+        let archive = zip::ZipArchive::with_config(config, At { file: Arc::new(reader), pos: 0, len }).with_context(|| format!("reading {said}'s zip"))?;
+        let mut src = Source::from_archive(&PathBuf::from(format!("{STAGE_PREFIX}{stage}")), archive, &said)?;
+        src.stage = Some(stage.to_string());
+        Ok((opened, src))
+    }
+
     /// A zip's files, from its central directory (no file's bytes are
     /// read). Each is named by a plain path (`plain`), or the whole zip is
     /// refused: a name a reader resolves another way than its text (`a/./b`
@@ -230,7 +350,7 @@ impl Source {
             true
         });
         let at = entries.iter().enumerate().map(|(n, (e, i))| (e.path.clone(), (n, *i))).collect();
-        Source { origin: origin.to_path_buf(), backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread, skipped: Vec::new() }
+        Source { origin: origin.to_path_buf(), stage: None, backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread, skipped: Vec::new() }
     }
 
     /// The folder or the zip it was opened from, as named.
@@ -278,10 +398,16 @@ impl Source {
 
     /// What kind of source this is, as the survey says it.
     pub fn kind(&self) -> &'static str {
-        match self.backing {
-            Backing::Dir(_) => "folder",
-            Backing::Zip(_) => "zip",
+        match (&self.backing, &self.stage) {
+            (Backing::Dir(_), _) => "folder",
+            (Backing::Zip(_), None) => "zip",
+            (Backing::Zip(_), Some(_)) => "stage",
         }
+    }
+
+    /// The stage it reads, when it is one.
+    pub fn stage_id(&self) -> Option<&str> {
+        self.stage.as_deref()
     }
 
     /// One file's bytes as they are read.
@@ -454,6 +580,63 @@ pub mod tests {
         assert!(z.has_folder("a/c") && !z.has_folder("a/b"));
         assert!(z.get("a").is_none(), "a folder is not a file");
         assert_eq!(z.get("e.md").unwrap().mtime, Some(1772539200), "a zip's time read as UTC (2026-03-03 12:00, its third file's)");
+    }
+
+    /// Goal (2026-11-18: an import that downloaded its 47 GB stage first
+    /// could not hold it): a move's stage reads as its zip does, in place:
+    /// the same files, sizes and bytes, a database copied out whole, and no
+    /// more of the zip fetched than what was read, so a large file never
+    /// read is never fetched, and one read comes in windows. Invalid: a
+    /// stage that is not there, a name that is no stage's. Method: the zip
+    /// as a stage writes it (stored, zip64), in the code.storage fake's
+    /// stage routes, which answer a range alone.
+    #[test]
+    fn a_stage_reads_as_its_zip_in_place() {
+        let t = Temp::new();
+        let video: Vec<u8> = (0..20 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+        let db: Vec<u8> = (0..300_000u32).map(|i| (i % 7) as u8).collect();
+        let files: Vec<(String, Vec<u8>)> = vec![
+            ("agent/hermes-home/SOUL.md".into(), b"me".to_vec()),
+            ("agent/hermes-home/state.db".into(), db.clone()),
+            ("workspace/notes/a.md".into(), b"# a\n".to_vec()),
+            ("workspace/videos/trip.mp4".into(), video.clone()),
+        ];
+        let zip = t.0.join("stage.zip");
+        fragment_fakes::old_home::zip(&zip, &files).unwrap();
+        let bytes = std::fs::read(&zip).unwrap();
+        let mock = crate::mockcs::start();
+        mock.seed_stage("old1.p1.1", bytes.clone());
+        let c = Client::new(&mock.url, crate::auth::fixed(7));
+        let (opened, s) = Source::stage(&c, "old1.p1.1").unwrap();
+        let (reads, served) = mock.stage_reads();
+        assert!(reads <= 3 && served <= 3 * WINDOW_MIN, "its directory read from the end alone: {reads} reads, {served} bytes");
+        assert_eq!((opened.manifest.zip_bytes, s.kind(), s.stage_id()), (bytes.len() as u64, "stage", Some("old1.p1.1")));
+        let local = Source::open(&zip).unwrap();
+        let listed = |s: &Source| s.entries().iter().map(|e| (e.path.clone(), e.size, e.mtime)).collect::<Vec<_>>();
+        assert_eq!(listed(&s), listed(&local), "the same files, sizes and times as the zip");
+        assert_eq!(s.read("agent/hermes-home/SOUL.md").unwrap(), b"me");
+        assert_eq!(s.read("workspace/notes/a.md").unwrap(), b"# a\n");
+        let scratch = Scratch::in_dir(&t.0).unwrap();
+        assert_eq!(std::fs::read(s.local("agent/hermes-home/state.db", &scratch).unwrap()).unwrap(), db, "a database copied out whole");
+        let (_, served) = mock.stage_reads();
+        assert!(served < video.len() as u64, "the video, never read, was never fetched: {served} bytes of {}", bytes.len());
+        // read, it comes in windows, each at most WINDOW_MAX, its bytes whole
+        let before = mock.stage_reads();
+        let read = s.with_reader("workspace/videos/trip.mp4", |r| {
+            let mut out = Vec::new();
+            r.read_to_end(&mut out)?;
+            Ok(out)
+        });
+        assert!(read.unwrap() == video, "the video read whole");
+        let (reads, served) = (mock.stage_reads().0 - before.0, mock.stage_reads().1 - before.1);
+        assert!(reads >= video.len() as u64 / WINDOW_MAX && served < video.len() as u64 + 2 * WINDOW_MAX, "{reads} reads, {served} bytes");
+        // invalid
+        let e = Source::stage(&c, "old2.p1.1").err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("no stage old2.p1.1"), "{e}");
+        let e = Source::stage(&c, "../x").err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("is no stage"), "{e}");
+        assert_eq!(stage_of(Path::new("stage:old1.p1.1")), Some("old1.p1.1"));
+        assert_eq!(stage_of(Path::new("./stage:x")), None, "a path that only holds the word is a path");
     }
 
     /// A zip that names a file outside itself is not read at all; a link in

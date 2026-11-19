@@ -397,8 +397,10 @@ enough by hand), and `withdraw` (out of the move).
 | 90 days after the cutoff (phase 2), whatever its import did | its prefix. A phase 2 stage is the only copy left (its old agent was retired as archived), so it is kept until then: after a good import as after a failed one (for staff's retry). Its `done` ends only its reads |
 | Backstop | the bucket's lifecycle rules: `p1/` after 16 days, `p2/` after 100, and incomplete multipart uploads after 1 |
 
-`/data` saves never hold a stage: the importer reads it by ranges into
-`/tmp`, outside the saved directories (docs/computers.md).
+A stage is never downloaded: the importer reads it in place, by ranges
+(`fragment home … stage:<stage>`), only what it imports, so neither its
+computer's disk nor its `/data` saves (docs/computers.md) ever hold it.
+An old agent's home can be larger than a new computer's whole disk.
 
 ## The operators' routes
 

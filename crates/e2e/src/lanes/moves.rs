@@ -1112,3 +1112,117 @@ fn check_by_keys(b: &mut crate::browser::Browser, page: &crate::browser::Page, s
     let drawn = b.eval(page, "getComputedStyle(document.querySelector('#move-page input.check')).appearance")?;
     Ok(json!({ "at": at, "drawn": drawn, "off": off, "on": on, "empty": empty, "fill": fill }))
 }
+
+/// The room a move-big computer has: less than its stage, more than what
+/// its import keeps on the disk.
+const BIG_ROOM: u64 = 24 * 1024 * 1024;
+
+/// A move bigger than its new computer can hold (2026-11-18: an old
+/// agent's 47 GB import failed on a computer with about 10 GB free). The
+/// bound agent's CLI runs as a computer whose disk has less room than the
+/// stage (`Suite::cli_in_room`: no file may grow past it), as the agent
+/// (a key of its own, as its computer's egress signs). The old way,
+/// downloading the stage first, finds no room; the import reads the stage
+/// where the platform keeps it, and keeps on the disk only what it keeps.
+/// The reader's windows and refusals, and the files' rules, are
+/// host-tested (cli/src/home/).
+pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("move-big", &[Need::Fakes, Need::Levers, Need::Move]) {
+        return Ok(());
+    }
+    const MIB: usize = 1024 * 1024;
+    let mover = Mover::new(&api.base, s.mover.clone());
+    let old = format!("{}-o1", s.name("mb"));
+    let owner = api.person()?;
+    let workos_id = s.workos.user(&Api::email_of(&owner)).id;
+    let (agent_keys, agent) = super::delegation::agent_of(api, &owner)?;
+    let home = s.dir("move-big-agent");
+    std::fs::create_dir_all(home.join(".config/fragment"))?;
+    std::fs::write(home.join(".config/fragment/config.json"), json!({ "secret_key": agent_keys.secret_hex() }).to_string())?;
+
+    // the old home: the fixture, and work larger than the computer's room
+    let pattern = |n: usize, seed: u32| -> Vec<u8> { (0..n as u32).map(|i| (i.wrapping_mul(2_654_435_761) ^ seed).rotate_right(11) as u8).collect() };
+    let zip_at = s.dir("move-big-stage").join("stage.zip");
+    let extra = [
+        ("workspace/videos/trip.mp4", pattern(40 * MIB, 1)),
+        ("workspace/photos/garden.jpg", pattern(3 * MIB, 2)),
+        ("workspace/datasets/readings.csv", pattern(6 * MIB, 3)),
+    ];
+    let files = fragment_fakes::old_home::stage(&zip_at, &extra)?;
+    let zip = std::fs::read(&zip_at)?;
+    let bytes: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+    anyhow::ensure!(zip.len() as u64 > 2 * BIG_ROOM, "the stage is larger than the computer's room");
+    mover.home(zip.clone(), 16 * MIB, files.len() as u64, bytes);
+    let layout = fragment_fakes::old_home::layout().to_str().context("a utf-8 path")?.to_string();
+
+    // Yes with this agent, and staged
+    let people = vec![person(&workos_id, &[&old])];
+    let r = mover.push(&Roster { snapshot: format!("{old}-s1"), observed_ms: 1_800_000_000_000, people })?;
+    anyhow::ensure!(r.status == 200, "the roster: {} {}", r.status, r.body);
+    let visit = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(&owner) })))?;
+    anyhow::ensure!(visit.status == 200, "its owner opens the move: {visit}");
+    let yes = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "answer", "old": old, "answer": "yes", "agent": agent })))?;
+    anyhow::ensure!(yes.status == 200, "Yes: {yes}");
+    mover.run_once()?;
+    let stage = format!("{old}.p1.1");
+    let base = format!("/api/migrations/stages/{stage}");
+    let opened = api.signed(&agent_keys, "POST", &format!("{base}/open"), Some(&json!({})))?;
+    anyhow::ensure!(opened.status == 200 && opened.body["manifest"]["zip_bytes"] == zip.len(), "the agent opens its stage: {opened}");
+
+    // the old way: the stage downloaded onto the computer first, which has no room for it
+    let url = format!("{}{base}/zip", api.base);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+    let mut curl = std::process::Command::new("curl");
+    curl.args(["-fsS", "-o"]).arg(home.join("home.zip")).args(["-H", &format!("authorization: {}", agent_keys.header("GET", &url, b"", now)), &url]);
+    crate::with_room(&mut curl, BIG_ROOM);
+    let downloaded = curl.output()?;
+    let held = std::fs::metadata(home.join("home.zip")).map(|m| m.len()).unwrap_or(0);
+    s.ok(
+        "the old way, downloading the stage first, finds no room on a computer smaller than it: the download fails partway",
+        !downloaded.status.success() && held <= BIG_ROOM,
+        format!("{:?} {held} bytes: {}", downloaded.status.code(), String::from_utf8_lossy(&downloaded.stderr)),
+    );
+    std::fs::remove_file(home.join("home.zip")).ok();
+
+    // the import reads it where it is
+    let source = format!("stage:{stage}");
+    let run = |s: &Suite, args: &[&str]| -> Result<Value> { crate::cli_data(args, &s.cli_in_room(api, &home, BIG_ROOM, args)) };
+    let survey = run(s, &["home", "survey", &source, "--layout", &layout, "--json"])?;
+    s.ok(
+        "the survey reads the stage in place: its files, the cap's pick of its work, its skills",
+        survey["source"]["kind"] == "stage"
+            && survey["source"]["files"].as_u64().unwrap_or(0) + survey["source"]["skipped"].as_array().map_or(0, Vec::len) as u64 == files.len() as u64
+            && survey["files"]["brought"]["files"].as_u64().is_some_and(|n| n >= 3),
+        json!({ "source": survey["source"], "files": survey["files"]["brought"] }),
+    );
+    let made = s.create(api, &owner, "old-files")?;
+    let name = made["name"].as_str().unwrap_or_default().to_string();
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "its files' fragment made members-only: {r}");
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent edits it: {r}");
+    let brought = run(s, &["home", "files", &source, "--layout", &layout, "--into", &name, "--json"])?;
+    let file = |p: &str| api.signed(&owner, "GET", &format!("/api/f/{name}/file?path={}", crate::api::url_enc(p)), None);
+    let video = file("files/videos/trip.mp4")?;
+    s.ok(
+        "its files come from the stage into a fragment of files, the video larger than the computer's room among them, whole",
+        brought["files"].as_u64().is_some_and(|n| n >= 3) && video.status == 200 && video.bytes == extra[0].1 && file("files/datasets/readings.csv")?.bytes == extra[2].1,
+        json!({ "brought": brought, "video": video.status }),
+    );
+    let kept = disk_used(&home);
+    s.ok("what the import keeps on the computer is within its room: the stage never came onto it", kept <= BIG_ROOM, format!("{kept} bytes"));
+
+    let done = api.signed(&agent_keys, "POST", &format!("{base}/done"), Some(&json!({ "ok": true })))?;
+    s.ok("it says it is done: the move waits for staff", done.status == 200 && done.body["state"] == "retiring", &done);
+    Ok(())
+}
+
+/// The bytes the files under `dir` hold.
+fn disk_used(dir: &std::path::Path) -> u64 {
+    let Ok(listed) = std::fs::read_dir(dir) else { return 0 };
+    listed.flatten().map(|e| match e.file_type() {
+        Ok(t) if t.is_dir() => disk_used(&e.path()),
+        Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+        _ => 0,
+    }).sum()
+}

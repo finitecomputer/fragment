@@ -227,6 +227,14 @@ struct State {
     /// and kind, else members and app.
     #[serde(skip)]
     described: BTreeMap<String, (String, String)>,
+    /// Moves' stages, by id (`seed_stage`, with `host_routes`): `open`
+    /// answers each one's manifest, and `zip` its bytes by a range alone,
+    /// as the platform's do for the agent a move is bound to.
+    #[serde(skip)]
+    stages: BTreeMap<String, Vec<u8>>,
+    /// The ranges a stage's zip answered, and their bytes in all.
+    #[serde(skip)]
+    stage_reads: (u64, u64),
 }
 
 struct Inner {
@@ -551,6 +559,9 @@ impl Inner {
         let m = req.method.as_str();
         if self.host_routes {
             if let Some(answer) = self.host_blob_route(st, req) {
+                return answer;
+            }
+            if let Some(answer) = stage_route(st, req) {
                 return answer;
             }
             if let Some(name) = path.strip_prefix("/api/f/").and_then(|p| p.strip_suffix("/storage-token")) {
@@ -930,6 +941,36 @@ impl Inner {
             _ => Response::json(404, &json!({ "error": "not_found", "message": "no such blob" })),
         })
     }
+}
+
+/// A move's stage, as the platform answers its bound agent
+/// (docs/migrations.md, "A new agent's stage"): `open` its manifest, and
+/// `zip` one range of its bytes (206), never the whole without one. None
+/// for any other request.
+fn stage_route(st: &mut State, req: &Request) -> Option<Response> {
+    let (stage, op) = req.path.strip_prefix("/api/migrations/stages/")?.split_once('/')?;
+    let Some(zip) = st.stages.get(stage) else { return Some(Response::json(404, &json!({ "error": "not_found", "message": format!("no stage {stage}") }))) };
+    Some(match (req.method.as_str(), op) {
+        ("POST", "open") => {
+            use sha2::Digest;
+            let manifest = json!({
+                "format": "finite-stage/1", "old": stage.split('.').next().unwrap_or(stage), "phase": "p1", "attempt": 1, "layout": "finite-computer",
+                "zip_bytes": zip.len(), "zip_sha256": hex::encode(sha2::Sha256::digest(zip)), "bytes": zip.len(), "files": 0,
+            });
+            Response::json(200, &json!({ "stage": stage, "manifest": manifest }))
+        }
+        ("GET", "zip") => {
+            let range = req.header("range").and_then(|r| r.strip_prefix("bytes=")).and_then(|r| r.split_once('-')).and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
+            let Some((first, last)) = range.filter(|(a, b)| a <= b && *b < zip.len() as u64) else {
+                return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "the fake's stage answers a range within its zip alone" })));
+            };
+            let bytes = zip[first as usize..=last as usize].to_vec();
+            st.stage_reads = (st.stage_reads.0 + 1, st.stage_reads.1 + bytes.len() as u64);
+            let total = zip.len();
+            Response::bytes(206, "application/zip", bytes).with_header("content-range", &format!("bytes {first}-{last}/{total}"))
+        }
+        _ => Response::json(404, &json!({ "error": "not_found", "message": format!("no route {} {}", req.method, req.path) })),
+    })
 }
 
 trait PemString {
@@ -1461,6 +1502,16 @@ impl CodeStorage {
                 st.blobs_corrupt.remove(sha);
             }
         });
+    }
+
+    /// A move's stage `stage`, its zip `zip` (with `host_routes`).
+    pub fn seed_stage(&self, stage: &str, zip: Vec<u8>) {
+        self.with(|st| st.stages.insert(stage.to_string(), zip));
+    }
+
+    /// The ranges the stages' zips answered so far, and their bytes in all.
+    pub fn stage_reads(&self) -> (u64, u64) {
+        self.with(|st| st.stage_reads)
     }
 
     /// What `name`'s status says it is: its visibility and its kind.

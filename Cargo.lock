@@ -697,6 +697,7 @@ dependencies = [
  "fragment-proto",
  "fragment-templates",
  "hex",
+ "libc",
  "reqwest",
  "rusqlite",
  "serde_json",
