@@ -83,7 +83,7 @@ pub use images::{does_simplex, image_running, valid_version, version_now, versio
 pub use lifecycle::{alive, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};
 pub use limits::{
     ALARM_LATE_MS, ALIVE_MS, AWAKE_ROW_MAX_MS, FAILED_WHY_MAX_BYTES, HOLD_DEADLINE_MS, HOLD_WAIT_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, PREWAKE_MS, RETRY_PAUSE_MS, SAVES_KEPT, SAVE_DEADLINE_MS, SAVE_EVERY_MS, SAVE_RETRY_MS,
-    SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, STARTS_OWED_MAX, START_DEADLINE_MS, UNSAVED_MAX_MS_DEFAULT, UNSAVED_NOTICE_FAILURES, WONT_WAKE_RETRY_MS,
+    SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, STARTS_OWED_MAX, START_DEADLINE_MS, STOP_LOOK_MS, UNSAVED_MAX_MS_DEFAULT, UNSAVED_NOTICE_FAILURES, WONT_WAKE_RETRY_MS,
 };
 pub use notices::{notices, support_url_ok, SUPPORT_URL_MAX_BYTES};
 pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};

@@ -4,7 +4,7 @@
 use fragment_proto::computer::LifeEnd;
 use serde::{Deserialize, Serialize};
 
-use crate::computer::limits::{ALARM_LATE_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, WONT_WAKE_RETRY_MS};
+use crate::computer::limits::{ALARM_LATE_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, STOP_LOOK_MS, WONT_WAKE_RETRY_MS};
 
 mod event;
 mod legacy;
@@ -780,11 +780,18 @@ impl Lifecycle {
                 let s = self.saving.unwrap_or(Saving::Stop { since_ms, saved: false });
                 if now_ms >= s.deadline_ms() {
                     self.overdue(generation, s, now_ms, rules, &mut step);
+                } else if matches!(self.saving, Some(Saving::Stop { .. })) {
+                    step.actions.push(Action::Look { generation });
                 }
             }
             (Phase::Failed { .. }, Event::Alarm) => {}
         }
-        step.alarm_ms = self.next_alarm();
+        step.alarm_ms = self.next_alarm().map(|at| match self.saving {
+            // a stop under way is looked at every `STOP_LOOK_MS` up to its
+            // deadline: a new isolate's look finds one its isolate lost
+            Some(Saving::Stop { since_ms, .. }) => at.min(since_ms + ((now_ms - since_ms) / STOP_LOOK_MS + 1) * STOP_LOOK_MS),
+            _ => at,
+        });
         self.assert_valid();
         step
     }
