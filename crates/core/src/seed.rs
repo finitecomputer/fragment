@@ -11,8 +11,9 @@
 //!
 //! The rows prove a step only when they are this life's own. Its template's
 //! commit is (its key names the life); live's pin and what was installed
-//! from it are not: a deleted life's repo is kept, with its `live`, and a
-//! refresh or a poll of the next life could pin and install that (#1072).
+//! from it are not: a life made before each life had a repo of its own
+//! (`codestorage::repo_name`) may have found a deleted life's, with its
+//! `live`, and a refresh or a poll could pin and install that (#1072).
 //! So deployed and installed are a seed's own, in flight, known only from
 //! its own deploy's answer; read from rows, a template committed is at
 //! most `Committed`, and its next seed deploys again (live already at
@@ -861,7 +862,8 @@ mod tests {
         }
     }
 
-    /// Invalid (#1072): a deleted life's repo is kept with its `live`. The
+    /// Invalid (#1072): a deleted life's repo was found again, with its
+    /// `live`, by a life made before each life had a repo of its own. The
     /// name made again, its repo found and its template's commit failed, or
     /// committed and its deploy failed, a refresh that pins and installs
     /// that old live does not make it this life's: its rows still say

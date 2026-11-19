@@ -244,14 +244,16 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
         let script = crate::OBSERVABILITY_SCRIPT;
         s.observability.log(now - 30_000, json!({ "$workers.scriptName": script, "computer": computer, "phase": { "phase": "awake" } }));
         s.observability.log(now - 20_000, json!({ "$workers.scriptName": script, "computer": computer, "phase": { "phase": "failed" } }));
+        s.observability.log(now - 10_000, json!({ "$workers.scriptName": script, "computer": computer, "event": { "event": "save_failed", "generation": 1, "seq": 1, "why": "backup '/data': No space left on device (os error 28)" } }));
     }
     let page = b.open(&format!("{}/admin", api.base))?;
     let tiles = b.until(&page, "document.querySelectorAll('#tiles .tile').length === 5 && /Updated/.test(document.getElementById('glance-at').textContent)", wait);
     let shown = b.eval(&page, "[...document.querySelectorAll('#tiles .tile')].map(t => t.querySelector('.label').textContent + ': ' + t.querySelector('.big').textContent)")?;
     let me = b.eval(&page, "document.getElementById('me').textContent")?;
     s.ok("an operator's session opens the admin's page on its glance: five tiles, and says who they are", tiles && me == "operator@e2e.test", &shown);
-    // the glance as an operator sees it, for review
-    let _ = b.screenshot(&page, &s.dir("admin-page").join("glance.png"));
+    // the glance as an operator sees it, for review (`dir` clears it: once)
+    let shots = s.dir("admin-page");
+    let _ = b.screenshot(&page, &shots.join("glance.png"));
     if !s.hosted() {
         let day = b.eval(&page, "(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); })()")?;
         let read = api.signed(&s.operator, "GET", &format!("/api/admin/glance?dayStart={day}"), None)?;
@@ -270,6 +272,18 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
             rows && before == json!(awake.to_string()),
             json!({ "page": shown, "glance": read.body["logs"] }),
         );
+        let said = b.until(
+            &page,
+            &format!("[...document.querySelectorAll('#trouble-rows tr')].some(r => r.textContent.includes({glancer_email:?}) && r.textContent.includes('a save failed') && /^disk full · \\d{{4}}-\\d\\d-\\d\\d \\d\\d:\\d\\d · backup '\\/data': No space left on device \\(os error 28\\)$/.test(r.querySelector('.why')?.textContent))"),
+            wait,
+        );
+        s.ok("its trouble says why a save failed: the kind's short label, when, and the reason its newest line gave", said, b.eval(&page, "document.getElementById('trouble-rows').innerText")?);
+        // the trouble rows as an operator sees them, wide and narrow, for review
+        for (width, height, mobile, name) in [(1280, 900, false, "glance-trouble-1280.png"), (390, 844, true, "glance-trouble-390.png")] {
+            b.viewport(&page, width, height, mobile)?;
+            let _ = b.screenshot(&page, &shots.join(name));
+        }
+        b.viewport(&page, 1280, 900, false)?;
         // no cache: a computer awake since, and the glance read again
         s.observability.log(now, json!({ "$workers.scriptName": crate::OBSERVABILITY_SCRIPT, "computer": "computer:000000000000000000000a11", "phase": { "phase": "awake" } }));
         b.click(&page, "#tabs button[data-tab=glance]")?;
@@ -345,6 +359,7 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     }
     let theirs = fragment_core::computer::default_computer_of(ivy_id);
     let stranger = "computer:00000000000000000000beef".to_string();
+    let saver = "computer:0000000000000000000005a7".to_string();
     // the node's Worker's lines, and another deployment's in the same
     // account (a branch's), which name the same person's computer (a hash
     // of them) and are never counted
@@ -362,9 +377,15 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
         s.observability.log(now - ago, of(ours, json!({ "computer": theirs, "phase": { "phase": "failed", "why": "its container kept stopping" } })));
     }
     s.observability.log(now - 30_000, of(ours, json!({ "computer": stranger, "disk": { "total": 20_000_000_000_u64, "free": 1_000_000_000_u64 }, "generation": 3 })));
+    // its saves failed twice: the newest says why, naming a person's file
+    // (its phase left out of the lines, so it counts as awake nowhere)
+    let failed = |seq: u64, why: &str| json!({ "computer": saver, "event": { "event": "save_failed", "generation": 2, "seq": seq, "why": why } });
+    s.observability.log(now - 40_000, of(ours, failed(1, "its container is not running")));
+    s.observability.log(now - 15_000, of(ours, failed(2, "backup '/data': open /data/home/Tax Return.pdf: Permission denied (os error 13)")));
     s.observability.log(now - 5_000, of(foreign, json!({ "computer": "computer:0000000000000000000f0e1d", "phase": { "phase": "awake" } })));
     s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "phase": { "phase": "failed" } })));
-    s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "event": { "event": "save_failed" } })));
+    s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "event": { "event": "save_failed", "why": "another deployment's" } })));
+    s.observability.log(now - 1_000, of(foreign, json!({ "computer": saver, "event": { "event": "save_failed", "why": "another deployment's" } })));
     s.observability.log(now - 5_000, of(foreign, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "frag-elsewhere" })));
     let r = ask(operator, day)?;
     let b = &r.body;
@@ -384,15 +405,17 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     let read = &b["logs"];
     let trouble = read["trouble"].as_array().cloned().unwrap_or_default();
     s.ok(
-        "its logs' numbers, of this deployment's Worker's lines alone: computers awake now (a line in ten minutes), today and this week, fragments that ran, and computers in trouble, each named with its person when it is one's (another deployment's lines about the same person's computer count for nothing)",
+        "its logs' numbers, of this deployment's Worker's lines alone: computers awake now (a line in ten minutes), today and this week, fragments that ran, and computers in trouble, each named with its person when it is one's, a failed save with why its newest did, a person's file left out (another deployment's lines about the same computers count for nothing)",
         read["state"] == "read"
             && read["computersAwakeNow"] == 1
             && read["computersAwakeToday"] == 1
             && read["computersAwakeWeek"] == 2
             && read["fragmentsAwakeNow"] == 2
             && trouble.first() == Some(&json!({ "computer": theirs, "kind": "wont_wake", "lines": 2, "npub": ivy_id, "email": ivy_email }))
-            && trouble.get(1) == Some(&json!({ "computer": stranger, "kind": "disk_filling", "lines": 1, "npub": null, "email": null }))
-            && trouble.len() == 2,
+            && trouble.get(1) == Some(&json!({ "computer": saver, "kind": "saves_failing", "lines": 2, "npub": null, "email": null, "why": { "at": now - 15_000, "text": "backup …: Permission denied (os error 13)" } }))
+            && trouble.get(2) == Some(&json!({ "computer": stranger, "kind": "disk_filling", "lines": 1, "npub": null, "email": null }))
+            && trouble.len() == 3
+            && read.get("whyUnread").is_none(),
         read,
     );
     let asked = s.observability.asked();
@@ -411,6 +434,22 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
         "anyone else's glance is refused (403), and a day that is not today is invalid (400), the integers' ends too",
         person.status == 403 && [&tomorrow, &stale, &least, &most].iter().all(|r| r.status == 400),
         json!([person.status, tomorrow.status, stale.status, least.status, most.status]),
+    );
+    // why saves failed is the lines themselves, which may run past the
+    // cell's bound on an answer: its read failing alone takes nothing else
+    s.observability.fail_next_events(400, "too many events to answer");
+    let partial = ask(operator, day)?;
+    let logs = &partial.body["logs"];
+    let rows = logs["trouble"].as_array().cloned().unwrap_or_default();
+    s.ok(
+        "when only why saves failed can't be read, the logs' numbers and trouble stand, no row says why, and the glance says why not",
+        partial.status == 200
+            && logs["state"] == "read"
+            && logs["computersAwakeWeek"] == read["computersAwakeWeek"]
+            && rows.iter().map(|t| (&t["computer"], &t["kind"])).eq(trouble.iter().map(|t| (&t["computer"], &t["kind"])))
+            && rows.iter().all(|t| t.get("why").is_none())
+            && logs["whyUnread"].as_str().is_some_and(|w| w.contains("SaveWhys") && w.contains("too many events to answer")),
+        logs,
     );
     s.observability.fail_next(403, "Authentication error");
     let failed = ask(operator, day)?;
