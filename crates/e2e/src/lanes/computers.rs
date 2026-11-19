@@ -43,6 +43,15 @@ use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
 pub(super) const AGENT_JSON: &[u8] = br#"{ "channels": { "tasks": { "read": "editor", "post": "editor" } } }"#;
+
+/// A plain fragment (shared by link, as one made with no template is) made
+/// members only before it runs as an agent, as one made from the agent
+/// template is: one shared past its owner is not made an agent (FIN-544).
+pub(super) fn members_only(api: &Api, keys: &crate::Keys, name: &str) -> Result<()> {
+    let r = api.signed(keys, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "{name} made members-only: {r}");
+    Ok(())
+}
 /// A start of the stub, its restore, and its bridge's first follow: well
 /// under this on any machine that built the image.
 const WAKE: Duration = Duration::from_secs(90);
@@ -1436,20 +1445,21 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     let ticket = |who: &crate::Keys, act: &str| api.signed(who, "POST", &path, Some(&json!({ "door": "simplex", "act": act })));
     let r = ticket(c.stranger, "link")?;
     s.ok("no one but its owner is given a ticket to the agent's door", r.status == 404, &r);
-    // an agent its link opens is given no door (FIN-352); members only
-    // again, it is, and an invite waiting (someone named) refuses none
+    // an agent fragment takes no link and no invite (FIN-544); one its
+    // link opens from before that (a lever leaves it so) is given no door
+    // (FIN-352); members only again, it is
     let visibility = |v: &str| api.signed(c.owner, "PUT", &format!("/api/f/{}/visibility", c.agent), Some(&json!({ "visibility": v })));
-    let linked = visibility("link")?;
-    let shared = ticket(c.owner, "link")?;
-    let narrowed = visibility("members")?;
+    let refused = visibility("link")?;
     let outsider = format!("door-outsider-{}@e2e.test", &crate::Keys::generate().pubkey_hex()[..8]);
     let invited = api.signed(c.owner, "POST", &format!("/api/f/{}/invites", c.agent), Some(&json!({ "email": outsider, "role": "viewer" })))?;
+    let linked = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": c.agent, "op": "legacy-visibility", "visibility": "link" })))?;
+    let shared = ticket(c.owner, "link")?;
+    let narrowed = visibility("members")?;
     let named = ticket(c.owner, "link")?;
-    let revoked = api.signed(c.owner, "DELETE", &format!("/api/f/{}/invites/{outsider}", c.agent), None)?;
     s.ok(
-        "an agent its link opens is given no link ticket to a door (403 unshare_first); members only again, with an invite waiting, it is",
-        linked.status == 200 && shared.status == 403 && shared.body["reason"] == "unshare_first" && narrowed.status == 200 && invited.status == 200 && named.status == 200 && revoked.status == 200,
-        json!({ "linked": linked.status, "ticket": shared.body, "narrowed": narrowed.status, "invited": invited.body, "named": named.status, "revoked": revoked.status }),
+        "an agent fragment takes no link and no invite (403); one its link opens from before is given no link ticket to a door (403 unshare_first); members only again, it is",
+        refused.status == 403 && invited.status == 403 && linked.status == 200 && shared.status == 403 && shared.body["reason"] == "unshare_first" && narrowed.status == 200 && named.status == 200,
+        json!({ "refused": refused.body, "invited": invited.body, "linked": linked.status, "ticket": shared.body, "narrowed": narrowed.status, "named": named.status }),
     );
     let t = ticket(c.owner, "link")?;
     let key = fragment_core::npub::parse(c.identity).unwrap_or_default();
@@ -1679,6 +1689,7 @@ fn deleted_agent_leaves(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str,
     let birch = s.create(api, owner, &birch_name)?;
     s.commit(&birch, &[("fragment.json", Some(AGENT_JSON))]);
     s.deploy(&birch);
+    members_only(api, owner, &birch_name)?;
     let r = api.signed(owner, "PUT", &format!("/api/computers/{id}/agents/{birch_name}"), Some(&json!({})))?;
     let birch_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == birch_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     let before = agents();
@@ -2083,10 +2094,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = s.create(api, &owner, &agent_name)?;
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON))]);
     s.deploy(&agent);
-    // members only, as one made from the agent template is: a door is
-    // linked only on an agent its link does not open (FIN-352)
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{agent_name}/visibility"), Some(&json!({ "visibility": "members" })))?;
-    anyhow::ensure!(r.status == 200, "the agent made members-only: {r}");
+    members_only(api, &owner, &agent_name)?;
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     s.ok("its owner assigns the agent fragment to it", r.status == 200 && fragment_core::npub::is_identity(&identity) && r.body["agents"][0]["fragment"] == agent_name.as_str(), &r);
@@ -2453,6 +2461,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let maple = s.create(api, &owner, &maple_name)?;
     s.commit(&maple, &[("fragment.json", Some(AGENT_JSON))]);
     s.deploy(&maple);
+    members_only(api, &owner, &maple_name)?;
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{maple_name}"), Some(&json!({})))?;
     let maple_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == maple_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     s.ok("a second agent runs on the same computer", r.status == 200 && fragment_core::npub::is_identity(&maple_id) && maple_id != identity, &r);
@@ -2796,6 +2805,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let later = s.create(api, &owner, &later_name)?;
     s.commit(&later, &[("fragment.json", Some(AGENT_JSON))]);
     s.deploy(&later);
+    members_only(api, &owner, &later_name)?;
     let assign = || api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{later_name}"), Some(&json!({})));
     let r = assign()?;
     let later_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == later_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
