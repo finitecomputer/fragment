@@ -3472,7 +3472,7 @@ fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str
     let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     let shown = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=disk_filling]')";
     // its words, over settings once they have loaded (what the shots show)
-    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (3.2 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && document.getElementById('settings-page').innerText.toUpperCase().includes('COMPUTER')");
+    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (3.2 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && [...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent === 'Computer')");
     let filling = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 3_240_662_016u64 }))?;
     b.viewport(page, 1280, 800, false)?;
     b.reload(page)?;
