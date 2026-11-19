@@ -127,6 +127,9 @@ pub struct World {
     /// Each post to a `chat` channel (a reply, among others) is answered
     /// this much later: a fragment's lane of posts held.
     pub chat_post_delay_ms: u64,
+    /// Every call is answered at least this much later: the platform's
+    /// hop from a computer, which the fake on this host otherwise hides.
+    pub hop_ms: u64,
     /// Records per `__live` page (the platform's is 1000).
     pub page: usize,
     /// Each agent's door, by its fragment: the nonce of the link ticket its
@@ -527,13 +530,14 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         if w.down {
             return refuse(StatusCode::SERVICE_UNAVAILABLE, "the fake is down");
         }
-        match method {
-            Method::POST if path.ends_with("/channels/work") => w.work_post_delay_ms,
-            Method::POST if path.ends_with("/channels/chat") => w.chat_post_delay_ms,
-            Method::GET if path.ends_with("/__people") => w.people_delay_ms,
-            Method::GET if path.contains("/channels/") && query(&q, "limit") == [fragment_bridge::limits::RECAP_PAGE_RECORDS.to_string()] => w.recap_page_delay_ms,
-            _ => 0,
-        }
+        w.hop_ms
+            + match method {
+                Method::POST if path.ends_with("/channels/work") => w.work_post_delay_ms,
+                Method::POST if path.ends_with("/channels/chat") => w.chat_post_delay_ms,
+                Method::GET if path.ends_with("/__people") => w.people_delay_ms,
+                Method::GET if path.contains("/channels/") && query(&q, "limit") == [fragment_bridge::limits::RECAP_PAGE_RECORDS.to_string()] => w.recap_page_delay_ms,
+                _ => 0,
+            }
     };
     if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
