@@ -14,7 +14,7 @@ import { avatar } from "./agent-identity.js";
 import { colorOf } from "./agent-color.js";
 import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
-import { createAppsPage, shot } from "./apps-page.js";
+import { createAppsPage, shoots } from "./apps-page.js";
 import { createHistoryPage } from "./history-page.js";
 import { createSchedulesPage } from "./schedules-page.js";
 import { createMovePage } from "./move-page.js";
@@ -1059,21 +1059,28 @@ async function loadCard(name) {
   cards.set(name, { etag: r.headers.get("etag"), url });
   return "new";
 }
-// every listed app's that has one shot (`shot`: never a members-only
-// one's of theirs), again after a deploy may have made one: an app with
+// every listed app's, again after a deploy may have made one: an app with
 // none yet is asked again, waiting longer each time (2 s to a minute), and
 // the rest when the page comes back after a minute away. `only` (a set of
 // names, after a change to the list): those, and the apps still without one.
+// One whose card no shot makes (`shoots`: a members-only one of theirs) and
+// that has none is not asked again until its row changes (`cardless`, its
+// row as it was then).
 const cardsLoad = { wait: 0, timer: null, at: 0 };
+const cardless = new Map();
 async function loadCards(only = null) {
   clearTimeout(cardsLoad.timer);
   cardsLoad.at = Date.now();
-  const listed = docked().filter(shot).map((f) => f.name);
-  for (const [name, card] of cards) if (!listed.includes(name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
-  const asked = listed.filter((name) => !only || only.has(name) || !cards.has(name));
-  const got = await Promise.all(asked.map((name) => loadCard(name).catch(() => "same")));
-  if (got.includes("new")) renderApps();
-  if (got.includes("none") && cardsLoad.wait < 60_000) {
+  const listed = docked();
+  for (const [name, card] of cards) if (!listed.some((f) => f.name === name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
+  const asked = listed.filter((f) => (!only || only.has(f.name) || !cards.has(f.name)) && cardless.get(f.name) !== JSON.stringify(f));
+  const got = await Promise.all(asked.map(async (f) => [f, await loadCard(f.name).catch(() => "same")]));
+  for (const [f, result] of got) {
+    if (result === "none" && !shoots(f)) cardless.set(f.name, JSON.stringify(f));
+    else cardless.delete(f.name);
+  }
+  if (got.some(([, result]) => result === "new")) renderApps();
+  if (got.some(([f, result]) => result === "none" && shoots(f)) && cardsLoad.wait < 60_000) {
     cardsLoad.wait = Math.min(60_000, cardsLoad.wait ? cardsLoad.wait * 2 : 2_000);
     cardsLoad.timer = setTimeout(() => loadCards().catch(() => {}), cardsLoad.wait);
   }
