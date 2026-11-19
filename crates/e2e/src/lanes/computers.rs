@@ -1057,12 +1057,14 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
         format!("{r} {bound} {:?}", role_of(c.identity)),
     );
     // the rows its members list says a door on (the list is the same to
-    // every member: its agent's bridge reads it so)
-    let doors = || -> Vec<(String, String)> {
-        let r = api.signed(c.owner, "GET", &format!("/api/f/{name}/members"), None).ok();
-        r.and_then(|r| r.body["members"].as_array().cloned()).unwrap_or_default().iter().filter_map(|m| Some((m["principal"].as_str()?.to_string(), m["door"].as_str()?.to_string()))).collect()
+    // every member: its agent's bridge reads it so); none when the list
+    // did not read, so a failed read never passes for "no door"
+    let doors = || -> Option<Vec<(String, String)>> {
+        let r = api.signed(c.owner, "GET", &format!("/api/f/{name}/members"), None).ok().filter(|r| r.status == 200)?;
+        let rows = r.body["members"].as_array().filter(|rows| !rows.is_empty())?.clone();
+        Some(rows.iter().filter_map(|m| Some((m["principal"].as_str()?.to_string(), m["door"].as_str()?.to_string()))).collect())
     };
-    let telegram_door = vec![(c.identity.to_string(), "telegram".to_string())];
+    let telegram_door = Some(vec![(c.identity.to_string(), "telegram".to_string())]);
     let bound_doors = doors();
     s.ok("bound, its members list says so on its agent's row alone (`door`: telegram)", bound_doors == telegram_door, json!(bound_doors));
 
@@ -1184,7 +1186,7 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "while it is off");
     s.ok("with Telegram off, its owner's message is published nowhere and nothing is sent", off["output"]["ignored"] == "not linked" && !published && tg.sent().len() == before, json!({ "run": off, "sent": tg.sent() }));
     let off_doors = doors();
-    s.ok("with Telegram off, no row of its members says a door", off_doors.is_empty(), json!(off_doors));
+    s.ok("with Telegram off, no row of its members says a door", off_doors == Some(vec![]), json!(off_doors));
     anyhow::ensure!(policy(Value::Null)?.status == 200, "the connectors lever");
 
     // unlinked from its page (its owner's session there): the door is shut
@@ -1205,7 +1207,7 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
         json!({ "unlink": unlinked.body, "bound": seen.body, "run": after, "sent": tg.sent() }),
     );
     let unlinked_doors = doors();
-    s.ok("unlinked, no row of its members says a door, its agent's (still a viewer) included", unlinked_doors.is_empty(), json!(unlinked_doors));
+    s.ok("unlinked, no row of its members says a door, its agent's (still a viewer) included", unlinked_doors == Some(vec![]), json!(unlinked_doors));
     let typed = api.signed(c.owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "typed-after-unlink", "body": { "text": "typed after the unlink" } })))?;
     let answered = s.eventually(wake, || agent_replies(&records(api, c.owner, &name, "chat"), c.identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("typed after the unlink"))));
     s.ok(
@@ -1248,7 +1250,7 @@ export class App extends DurableObject { noop() { return {}; } }
         json!({ "secrets": secrets(), "event": event }),
     );
     let unmade_doors = doors();
-    s.ok("unmade by a fork, no row of its members says a door", unmade_doors.is_empty(), json!(unmade_doors));
+    s.ok("unmade by a fork, no row of its members says a door", unmade_doors == Some(vec![]), json!(unmade_doors));
     s.commit(&made.body, &[("fragment.json", Some(br#"{"template":"telegram"}"#.as_slice())), ("app.mjs", None)]);
     let tip = s.deploy(&made.body);
     let back = installed(s, &tip);
@@ -1263,7 +1265,7 @@ export class App extends DurableObject { noop() { return {}; } }
         json!({ "bind": r.body, "delivery": later.status, "secrets": secrets() }),
     );
     let back_doors = doors();
-    s.ok("with its template again, still no row says a door", back_doors.is_empty(), json!(back_doors));
+    s.ok("with its template again, still no row says a door", back_doors == Some(vec![]), json!(back_doors));
     // its agent, with no Telegram chat now, set up from Settings (FIN-393):
     // this chat, no door for good since its fork, deleted first, so its
     // agent has no Telegram chat at all, and Settings' shots show only what
