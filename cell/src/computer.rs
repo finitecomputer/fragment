@@ -705,7 +705,8 @@ struct RelayClosed {
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
 /// `times` is `fail-saves`', `on` is `always-on`'s, `ms` is `hang-backups`'
-/// and `alive-check`'s, `freeze` is `alive-check`'s.
+/// and `alive-check`'s, `freeze` is `alive-check`'s, `total` and `free`
+/// are `disk`'s.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TestLever {
@@ -730,6 +731,11 @@ struct TestLever {
     /// `connections` as stored, `accounts` provider → id.
     #[serde(default)]
     row: Option<Value>,
+    /// `disk`'s read: its size and what is free, in bytes.
+    #[serde(default)]
+    total: Option<u64>,
+    #[serde(default)]
+    free: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -2736,6 +2742,16 @@ impl ComputerCell {
                 }
                 console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation }));
                 Ok(json!({ "computer": id, "killed": generation }))
+            }
+            "disk" => {
+                // a read of its disk as `DISK_READ`'s answer would give it,
+                // kept and told as one is (`read_disk`): a test fleet's
+                // computers share their host's disk, which never fills
+                let (total, free) = b.total.zip(b.free).filter(|(t, f)| *t > 0 && f <= t).ok_or_else(|| CellError::invalid("disk names its total and free bytes, free at most total"))?;
+                let d = fragment_core::computer::ComputerDisk { total, free, at: js::now_ms(), generation: self.lifecycle()?.generation() };
+                let kept = self.update_saves(|s| s.measured(d))?;
+                console_log!("{}", json!({ "computer": id, "lever": "disk", "total": total, "free": free, "kept": kept }));
+                Ok(json!({ "computer": id, "disk": d, "kept": kept }))
             }
             "saves" => {
                 let life = self.lifecycle()?;
