@@ -50,19 +50,6 @@ pub const KEEP_MS: i64 = 14 * DAY_MS;
 pub const ARCHIVE_KEEP_MS: i64 = 90 * DAY_MS;
 /// Phase 2 moves in flight at once: the rest wait their turn.
 pub const ARCHIVING_MAX: usize = 8;
-/// A person on the roster's comp (F5), given once as they open the move:
-/// a seat for this long...
-pub const COMP_MS: i64 = 30 * DAY_MS;
-/// ...and this much credit, granted on their ledger once, by its id
-/// (`comp_grant_id`).
-pub const COMP_GRANT_MICROS: i64 = 25 * crate::price::USD;
-
-/// The comp's grant's id on `person`'s ledger: one a person, ever (a
-/// ledger answers the same id again as it did, granting nothing).
-pub fn comp_grant_id(person: &str) -> String {
-    format!("move:{person}")
-}
-
 /// The routine that starts a stage's import, on its new agent's own
 /// `tasks` with no chat, so it runs in its owner's home (docs/migrations.md;
 /// docs/chat-records.md, "A routine"). Its person's answers join it with
@@ -1028,7 +1015,7 @@ pub fn offer(old: &str, name: &str, picture: bool, page: &str) -> Notice {
         kind: "move_offer".into(),
         level: NoticeLevel::Info,
         title: format!("{lead}'s upgrade is ready"),
-        text: Some("Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key. You'll get a month free.".into()),
+        text: Some("Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key.".into()),
         detail: None,
         until: None,
         actions: vec![NoticeAction::open(format!("Upgrade {name}"), page), post("Not now", "later"), post("Never", "never")],
@@ -1811,15 +1798,18 @@ mod tests {
     /// everything (must-answer), as their agent's upgrade, with its three
     /// answers: Upgrade opens the page, Not now and Never post to the
     /// person's own routes; its picture is read through the platform, and a
-    /// nameless agent is still asked.
+    /// nameless agent is still asked. It promises no free month: the move's
+    /// seat has no end (Paul, 2026-11-19).
     #[test]
     fn an_offer_asks_in_words_with_its_answers() {
         let n = offer("prj_1", " Ada ", true, "https://chat.test/move");
         assert_eq!((n.id.as_str(), n.kind.as_str(), n.level, n.must_answer), ("move:prj_1", "move_offer", NoticeLevel::Info, true));
         assert_eq!(
             (n.title.as_str(), n.text.as_deref()),
-            ("Ada's upgrade is ready", Some("Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key. You'll get a month free."))
+            ("Ada's upgrade is ready", Some("Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key."))
         );
+        let words = format!("{} {}", n.title, n.text.as_deref().unwrap_or_default()).to_lowercase();
+        assert!(!words.contains("month") && !words.contains("free"), "no free month: {words}");
         let acts: Vec<(&str, Option<&str>, Option<&str>)> = n.actions.iter().map(|a| (a.label.as_str(), a.open.as_deref(), a.post.as_deref())).collect();
         assert_eq!(
             acts,

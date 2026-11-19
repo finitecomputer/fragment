@@ -43,8 +43,8 @@ first, in `GET /api/notices` (docs/api.md, Notices): a notice that must
 be answered, `move:<old>`, its words the server's
 (`fragment_core::migrations::offer`): "<name>'s upgrade is ready", "Its
 memories, chats, and supported files and skills come with it, to a more
-secure home with a fresh key. You'll get a month free.", with the
-roster's picture through the platform. A person reads the move as their
+secure home with a fresh key.", with the roster's picture through the
+platform. A person reads the move as their
 agent's upgrade: the same agent, in a better home. The words promise
 only what comes (files past the cap, and a skill that needs what this
 platform lacks, stay behind), and its key is new: no words promise the
@@ -111,18 +111,33 @@ it, the offer's cover stands aside: it is answered there.
 ## The comp (F5)
 
 A person on the roster who opens the move (`/move`, `migrations::visit`)
-and has an old agent the roster offers or moves is given, once:
-
-- `COMP_GRANT_MICROS` ($25) of credit on their ledger, `GrantCredit` by
-  `migrations` with id `move:<person>` (`comp_grant_id`): a ledger answers
-  the same id again as it did, so it is granted once a person, ever;
-- a comped `seat` for `COMP_MS` (30 days, `CompSeat.untilMs`), which the
-  registry ends then. One who holds a seat already keeps theirs.
+and has an old agent the roster offers or moves is given, once, a comped
+`seat` with no end (Paul, 2026-11-19: most of finite.computer's people
+are paid for out of band, so everyone moves comped, and staff sort out
+their orgs after). It lasts until staff end it or the person takes an
+org's seat. One who holds a seat already keeps theirs, as it is. No
+credit is granted: a `seat` brings its own each month
+(`fragment_core::ledger::SEAT_INCLUDED`). The $25 granted before then
+(`GrantCredit` by `migrations`, id `move:<person>`) stays.
 
 Then Migrations marks them (`people.comped_ms`) and no visit gives it
-again. A visit cut off before the mark gives it again, each step
-answering as it did. A guest makes no agent (decision 25), so the comp
+again. A visit cut off before the mark gives it again, the registry
+answering the same comp. A guest makes no agent (decision 25), so the comp
 comes before `/move` makes the new ones.
+
+Comps the move gave before with a 30-day end lost it at the registry's
+step 12 (`0012_move_comps_open.sql`): each row whose last comp in the
+operators' log is Migrations', or, none logged, that Migrations added.
+`people.comp_until_ms` is that release's, read by nothing now.
+
+**After the move.** A move's comp is a comp like any other:
+
+- `fragment operator uncomp <seat>` ends it at once (its id, as
+  `fragment operator orgs` and `people` print it).
+- An org that pays by Stripe offers them a seat (`POST /api/org/seats`).
+  Their yes moves them: their org of one ends, the comp with it.
+- `fragment operator comp <email> --org <org>` places only someone in no
+  org. Someone the move comped is in an org of one already: 409.
 
 ## The mover's routes
 
