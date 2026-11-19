@@ -78,6 +78,16 @@ pub fn audience(owner: &str, members: &[Member]) -> Audience {
     people
 }
 
+/// An audience from its pairs, each person at the most they hold: built by
+/// insertion, as a sort would add its own code for each pair's type.
+pub fn audience_of(pairs: impl IntoIterator<Item = (String, Role)>) -> Audience {
+    let mut people = Audience::new();
+    for (person, role) in pairs {
+        count(&mut people, &person, role);
+    }
+    people
+}
+
 /// The first of an app's audience other than its owner. While an app is
 /// a member anywhere and its audience grows by asking no target, its
 /// owner is its only person; an agent fragment, which goes wherever its

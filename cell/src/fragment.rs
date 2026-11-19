@@ -407,6 +407,11 @@ pub(crate) enum MetaKey {
     /// Test fleets only: while set, the alarm sends no list row
     /// (`hold-rows`): what a list shows was sent by a request.
     TestHoldRows,
+    /// Test fleets only: a request reaching the step this names waits
+    /// while it does (`hold`, ops.rs `test_hold`), and the step it waits at
+    /// (`TestHoldAt`), so an e2e interleaves two requests where it chooses.
+    TestHold,
+    TestHoldAt,
     /// Test fleets only: the capability calls each start of the app facet
     /// may make (`facet-calls`), as Cloudflare spends a facet's subrequests.
     TestFacetCalls,
@@ -541,6 +546,8 @@ impl MetaKey {
             MetaKey::TestDropEffects => "test_drop_effects",
             MetaKey::TestHoldAdvances => "test_hold_advances",
             MetaKey::TestHoldRows => "test_hold_rows",
+            MetaKey::TestHold => "test_hold",
+            MetaKey::TestHoldAt => "test_hold_at",
             MetaKey::TestFacetCalls => "test_facet_calls",
             MetaKey::TestPostedKept => "test_posted_kept",
             MetaKey::TestPostedBytes => "test_posted_bytes",

@@ -41,13 +41,11 @@
 //! Its row in the target names no owner (members.rs `standing` reads one as
 //! an agent's): its owner reads nothing through it.
 
-use std::collections::BTreeMap;
-
 use fragment_core::app_member::{self, Audience};
 use fragment_proto::{ErrorCode, FragmentKind, Member, Role};
 use futures_util::future::join_all;
 use serde_json::json;
-use worker::{console_error, SqlStorageValue};
+use worker::SqlStorageValue;
 
 use crate::error::{CellError, CellResult};
 use crate::fragment::calls::{AppAnswer, AppAsked, AppAudience, AppAudienceOf, AppGrows, AppTold};
@@ -176,7 +174,7 @@ impl FragmentCell {
         let mut approved = self.app_audience(&g.app)?;
         let holds = self.member_role(&g.person)?;
         if let Err(refused) = app_member::grow(&mut approved, app_role, &g.person, g.role, holds) {
-            let person = self.emails(vec![g.person.clone()]).await.remove(&g.person).unwrap_or_else(|| fragment_core::npub::display(&g.person));
+            let person = self.emails(vec![g.person.clone()]).await.pop().map_or_else(|| fragment_core::npub::display(&g.person), |(_, email)| email);
             return Err(CellError::new(ErrorCode::Forbidden, refused.line(&g.title, &self.app_title()?, &person)));
         }
         let power = approved.get(&g.person).copied().unwrap_or(Role::Viewer);
@@ -208,6 +206,7 @@ impl FragmentCell {
         let asked = AppAsked { target: me, title: title.clone(), incarnation, version, owner: owner.clone(), role };
         let taken = match crate::fragment::call(&self.env, name, &asked).await {
             Ok(answer) => {
+                self.test_hold("app-answer").await;
                 // each person by their email, as the owner sees them, should a line name one
                 let names = self.emails(answer.audience.iter().map(|(p, _)| p.clone()).collect()).await;
                 self.app_answered(actor, name, role, (incarnation, version, &owner, &title), &answer, &names)
@@ -226,15 +225,10 @@ impl FragmentCell {
                 self.app_change(name, now)?;
             }
         }
-        self.flush_index().await;
-        // what changed at the app while it was asked (a look meanwhile found
-        // no row, or the answer brought back what a look took off) is
-        // taken now; best effort: the app's next change looks again
-        if let Ok(member) = &taken {
-            if let Err(e) = self.app_looked(&member.principal, name).await {
-                console_error!("{}", json!({ "event": "app.look-failed", "app": name, "code": e.code, "message": e.message }));
-            }
+        if taken.is_ok() {
+            self.test_hold("app-committed").await;
         }
+        self.flush_index().await;
         taken
     }
 
@@ -242,7 +236,7 @@ impl FragmentCell {
     /// why not: only while the ask is the newest, the life that asked and
     /// its owner's; held to the rule; then its row, the answer's life the
     /// one row of its name. Answers the row as written.
-    fn app_answered(&self, actor: &Actor, name: &str, role: Role, (incarnation, version, owner, title): (i64, i64, &str, &str), answer: &AppAnswer, names: &BTreeMap<String, String>) -> CellResult<Member> {
+    fn app_answered(&self, actor: &Actor, name: &str, role: Role, (incarnation, version, owner, title): (i64, i64, &str, &str), answer: &AppAnswer, names: &[(String, String)]) -> CellResult<Member> {
         let newest = self.rows("SELECT 1 AS x FROM app_asks WHERE name = ? AND version = ?", vec![name.into(), SqlStorageValue::Integer(version)])?;
         // an answer from a life whose end was heard meanwhile is no yes
         let ended = self.rows("SELECT 1 AS x FROM app_ended WHERE name = ? AND incarnation >= ?", vec![name.into(), SqlStorageValue::Integer(answer.incarnation)])?;
@@ -252,16 +246,13 @@ impl FragmentCell {
         // its list so far (none at a join) and its answer, held here; bounded:
         // an app's audience is its members and their owners
         let approved = self.app_audience(&answer.npub)?;
-        let mut held = BTreeMap::new();
-        for person in approved.keys().chain(answer.audience.iter().map(|(p, _)| p)) {
-            held.insert(person.clone(), self.member_role(person)?);
-        }
-        let audience: Audience = answer.audience.iter().cloned().collect();
-        let list = match app_member::join(role, &approved, audience, |p| held.get(p).copied().flatten()) {
+        // each one's role here, read in this turn (one that will not read holds none: the safe side)
+        let audience = app_member::audience_of(answer.audience.iter().cloned());
+        let list = match app_member::join(role, &approved, audience, |p| self.member_role(p).ok().flatten()) {
             Ok(list) => list,
             Err(refused) => {
                 let person = match &refused {
-                    app_member::Refusal::Audience(short) => names.get(&short.person).cloned().unwrap_or_else(|| fragment_core::npub::display(&short.person)),
+                    app_member::Refusal::Audience(short) => names.iter().find(|(id, _)| *id == short.person).map_or_else(|| fragment_core::npub::display(&short.person), |(_, email)| email.clone()),
                     _ => String::new(),
                 };
                 return Err(CellError::new(ErrorCode::Forbidden, refused.line(&answer.title, title, &person)));
@@ -377,9 +368,9 @@ impl FragmentCell {
     /// keeps (only a row it answered for). To the target: an app member's
     /// life ended, and with it any ask on its way; or its ask to look at its
     /// audience again.
-    pub(crate) async fn app_told(&self, AppTold { from_app, change: c }: AppTold) -> CellResult<()> {
+    pub(crate) async fn app_told(&self, c: AppTold) -> CellResult<()> {
         self.created()?;
-        if !from_app {
+        if !c.from_app {
             let role = c.role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
             let (inc, ver) = (SqlStorageValue::Integer(c.incarnation), SqlStorageValue::Integer(c.version));
             // a role changes only a row it answered for; an end (none) is kept
@@ -398,8 +389,15 @@ impl FragmentCell {
                     vec![c.fragment.as_str().into(), inc, ver],
                 )?,
             };
-            if !took.is_empty() && c.role.is_none() {
-                self.event("app.out", &format!("no longer in {}", c.fragment), json!({ "target": c.fragment }));
+            match (took.is_empty(), c.role) {
+                (true, _) => {}
+                (false, None) => self.event("app.out", &format!("no longer in {}", c.fragment), json!({ "target": c.fragment })),
+                // its role there taken (a join or a re-ask written): the
+                // target is asked to look at its audience again, by this
+                // app's outbox, so a change here while it was asked (its
+                // word found no row then) is taken there too, a restart
+                // between or not
+                (false, Some(_)) => self.app_look(&c.fragment)?,
             }
             return Ok(());
         }
@@ -446,7 +444,7 @@ impl FragmentCell {
         if answer.npub != principal {
             return Ok(());
         }
-        let shown: Audience = answer.audience.into_iter().collect();
+        let shown = app_member::audience_of(answer.audience);
         // bounded as its audience is
         for (person, power) in self.app_audience(principal)? {
             let left = shown.get(&person).copied().map(|now| now.min(power));
@@ -490,7 +488,8 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// `target` asked to look at this app's audience again.
+    /// `target` asked to look at this app's audience again, by the index
+    /// outbox (`FROM_APP`, as `viewer`).
     fn app_look(&self, target: &str) -> CellResult<()> {
         self.index_rows("SELECT ? AS principal, ? AS role", vec![format!("{FROM_APP}{target}").into(), Role::Viewer.as_str().into()])
     }
@@ -520,7 +519,7 @@ impl FragmentCell {
     /// (none before it joins).
     fn app_audience(&self, principal: &str) -> CellResult<Audience> {
         let rows = self.rows("SELECT person, power FROM app_audience WHERE app = ?", vec![principal.into()])?;
-        Ok(rows.iter().filter_map(|r| Some((r["person"].as_str()?.to_string(), Role::parse(r["power"].as_str()?)?))).collect())
+        Ok(app_member::audience_of(rows.iter().filter_map(|r| Some((r["person"].as_str()?.to_string(), Role::parse(r["power"].as_str()?)?)))))
     }
 
     /// Each app member held to the list it approved, at a change to who
@@ -552,7 +551,7 @@ impl FragmentCell {
 
     /// Each of `ids` by their email, as this fragment's owner sees them
     /// (none read: none named).
-    async fn emails(&self, ids: Vec<String>) -> BTreeMap<String, String> {
+    async fn emails(&self, ids: Vec<String>) -> Vec<(String, String)> {
         let named = crate::share::profiles(&self.env, ids).await;
         named.into_iter().filter_map(|(id, p)| Some((id, p.email?))).collect()
     }
