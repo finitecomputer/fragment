@@ -1801,11 +1801,14 @@ by its status. A fragment holds at most `LIVE_SOCKETS_MAX` sockets, a
 principal `LIVE_SOCKETS_PER_PRINCIPAL` (429). Opening a socket at the
 public role spends a public call.
 
-A socket's presence whose `typing` turns `true` (it was not, or the
-socket is new) says its person began typing: their own computer, when
-one of the fragment's wake subscriptions names it, is woken (decision
-39), at most once every `PREWAKE_EVERY_MS` (30 s) a fragment. Anyone
-else's typing, opening a socket, or any other presence, wakes none.
+On a fragment whose code is the platform's (a blessed template's
+release, decision 40: the chat), a socket's presence whose `typing`
+turns `true` (it was not, or the socket is new) says its person began
+typing: their own computer, when one of the fragment's wake
+subscriptions names it, is woken (decision 39), each computer at most
+once every `PREWAKE_EVERY_MS` (30 s). Anyone else's typing, an app's
+page's (its code may say it types with no one there), opening a socket,
+or any other presence, wakes none.
 
 A query over the socket runs as `__op` would, outside the public call
 budget: a principal may run `LIVE_QUERIES_MAX` queries over its sockets

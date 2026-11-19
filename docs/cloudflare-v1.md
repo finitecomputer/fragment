@@ -224,9 +224,9 @@ computers) returns once this product works.
     to the Computer DO is open, or a port tab's page speaks (container
     traffic does not count; Paul, 2026-11-18: a tab merely open holds
     nothing), then sleeps after `computer::IDLE_MS`. Its owner beginning
-    to type on a page of a fragment it follows pre-wakes it, held as any
-    wake is; anyone else's typing, or a page opening or reconnecting,
-    does not. An agent added to
+    to type in a chat it follows (a page of the platform's code) pre-wakes
+    it, held as any wake is; anyone else's typing, an app's page, or a
+    page opening or reconnecting, does not. An agent added to
     a fragment wakes it with `{kind: "joined"}` on its `tasks`.
 40. **Blessed templates run the platform's release.** A chat, agent, brain
     or skills fragment runs its template's code from the release, so one

@@ -47,7 +47,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fragment_core::live::{presence_admit, typing_began, QueryBudget, QueryRefused};
+use fragment_core::live::{presence_admit, typing_began, PrewakesDue, QueryBudget, QueryRefused};
 use fragment_core::facet::Answered;
 use fragment_core::npub;
 use fragment_proto::live::{Answer, Cursor, LiveIn, LiveOut, Present, Query, Subscribe};
@@ -159,6 +159,9 @@ pub(crate) struct LiveMemory {
     /// When the fragment's next draft is due at its steady pace
     /// (`presence_admit`'s, across its drafts).
     draft_at: i64,
+    /// When each computer its people's typing pre-wakes is next due
+    /// (runs_on.rs `prewake`).
+    prewakes: PrewakesDue,
 }
 
 fn state_of(ws: &WebSocket) -> Option<LiveState> {
@@ -355,6 +358,12 @@ impl FragmentCell {
         }
     }
 
+    /// Whether `computer`'s pre-wake is due now (`PrewakesDue`), noting the
+    /// next.
+    pub(crate) fn prewake_due(&self, computer: &str) -> bool {
+        self.live.borrow_mut().prewakes.take(computer, js::now_ms())
+    }
+
     /// Test fleets: forgets what this activation knows of its sockets, as
     /// waking from hibernation does (`/api/test/fragment` `forget-live`).
     pub(crate) fn live_forget(&self) {
@@ -452,7 +461,9 @@ impl FragmentCell {
                     return Err(CellError::new(ErrorCode::RateLimited, format!("presence changes past {} a second are dropped", limits::PRESENCE_PER_S)));
                 };
                 let had = st.presence.is_some();
-                let began = typing_began(st.presence.as_ref(), &data);
+                // a page of the platform's code (the blessed chat's): an
+                // app's own may say it types with no one there
+                let began = typing_began(|| self.meta(MetaKey::Blessed).ok().flatten().is_some(), st.presence.as_ref(), &data);
                 st.presence = (!data.is_null()).then_some(data);
                 st.presence_at = at;
                 ws.serialize_attachment(&st)?;

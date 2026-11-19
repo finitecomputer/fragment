@@ -3,7 +3,7 @@
 //! may change its presence, and which change is its person beginning to
 //! type.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fragment_proto::limits;
 use serde_json::Value;
@@ -92,14 +92,41 @@ pub fn presence_admit(due_ms: i64, now_ms: i64) -> Option<i64> {
 /// Whether a socket's presence change says its person began typing (a
 /// use of their own computer, when its agents follow the fragment:
 /// `computer::prewoken`, decision 39): `typing` is `true` now and was not
-/// on this socket before. The chat's composer turns it on at the first keystroke
-/// after a pause and off after a send or `TYPING_MS` of quiet; nothing
-/// else of a presence is read. A page sends its presence again as its
-/// socket reconnects, and as its tab is shown or hidden: none of those is
-/// typing begun.
-pub fn typing_began(before: Option<&Value>, now: &Value) -> bool {
+/// on this socket before, on a page whose code is the platform's own
+/// (`platform`, asked only then: a blessed template's release, decision
+/// 40). The chat's composer turns it on at the first keystroke after a
+/// pause and off after a send or `TYPING_MS` of quiet; nothing else of a
+/// presence is read. A page sends its presence again as its socket
+/// reconnects, and as its tab is shown or hidden: none of those is typing
+/// begun. An app's page, whose code is its author's, may say it types with
+/// no one there: its presence wakes nothing.
+pub fn typing_began(platform: impl FnOnce() -> bool, before: Option<&Value>, now: &Value) -> bool {
     let typing = |v: &Value| v.get("typing") == Some(&Value::Bool(true));
-    typing(now) && !before.is_some_and(typing)
+    typing(now) && !before.is_some_and(typing) && platform()
+}
+
+/// How often one computer is pre-woken at most (decision 39): typing in
+/// bursts is one sign.
+pub const PREWAKE_EVERY_MS: i64 = 30_000;
+
+/// When each computer's next pre-wake is due, one at most every
+/// `PREWAKE_EVERY_MS` each, so one person's typing never holds back
+/// another's computer. A fragment's memory only: one that slept forgets,
+/// and the next typing begun there wakes once more.
+#[derive(Debug, Default)]
+pub struct PrewakesDue(BTreeMap<String, i64>);
+
+impl PrewakesDue {
+    /// Whether `computer` is pre-woken at `now_ms`: when due, it is, and
+    /// is next due `PREWAKE_EVERY_MS` on.
+    pub fn take(&mut self, computer: &str, now_ms: i64) -> bool {
+        self.0.retain(|_, due| *due > now_ms);
+        if self.0.contains_key(computer) {
+            return false;
+        }
+        self.0.insert(computer.to_string(), now_ms + PREWAKE_EVERY_MS);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -210,15 +237,45 @@ mod tests {
         let page = serde_json::json!({ "typing": false, "looking": true });
         let hidden = serde_json::json!({ "typing": false, "looking": false });
         let typing = serde_json::json!({ "typing": true, "looking": true });
-        assert!(!typing_began(None, &page), "a page loaded, or its socket reconnected, says it is here");
-        assert!(!typing_began(Some(&page), &hidden) && !typing_began(Some(&hidden), &page), "the tab hidden, then shown again");
-        assert!(typing_began(Some(&page), &typing), "the first keystroke after a pause");
-        assert!(typing_began(None, &typing), "a socket reconnected as its person types");
-        assert!(!typing_began(Some(&typing), &serde_json::json!({ "typing": true, "looking": false })), "typing goes on");
-        assert!(!typing_began(Some(&typing), &typing), "the same presence again");
-        assert!(typing_began(Some(&page), &typing) && !typing_began(Some(&typing), &page), "a pause, then typing again begins again");
+        assert!(!typing_began(|| true, None, &page), "a page loaded, or its socket reconnected, says it is here");
+        assert!(!typing_began(|| true, Some(&page), &hidden) && !typing_began(|| true, Some(&hidden), &page), "the tab hidden, then shown again");
+        assert!(typing_began(|| true, Some(&page), &typing), "the first keystroke after a pause");
+        assert!(typing_began(|| true, None, &typing), "a socket reconnected as its person types");
+        assert!(!typing_began(|| true, Some(&typing), &serde_json::json!({ "typing": true, "looking": false })), "typing goes on");
+        assert!(!typing_began(|| true, Some(&typing), &typing), "the same presence again");
+        assert!(typing_began(|| true, Some(&page), &typing) && !typing_began(|| true, Some(&typing), &page), "a pause, then typing again begins again");
         for other in [serde_json::json!({ "typing": "yes" }), serde_json::json!({ "typing": 1 }), serde_json::json!(null), serde_json::json!([true]), serde_json::json!("typing"), serde_json::json!({ "x": 1, "y": 2 })] {
-            assert!(!typing_began(None, &other), "{other}");
+            assert!(!typing_began(|| true, None, &other), "{other}");
         }
+    }
+
+    /// Goal (review of #1351): an app's page, whose code is its author's,
+    /// may set `typing` with no one there; only a page of the platform's
+    /// code is a person typing. And the platform's code is asked only
+    /// when typing began, not at every presence.
+    #[test]
+    fn an_apps_own_page_typing_is_no_sign() {
+        let page = serde_json::json!({ "typing": false, "looking": true });
+        let typing = serde_json::json!({ "typing": true, "looking": true });
+        assert!(!typing_began(|| false, Some(&page), &typing), "an app's page says it types");
+        assert!(typing_began(|| true, Some(&page), &typing), "the platform's chat");
+        assert!(!typing_began(|| panic!("asked for a presence that began nothing"), Some(&page), &page));
+    }
+
+    /// Goal (review of #1351): each computer's pre-wakes are paced on their
+    /// own: one owner's typing never holds back another owner's computer in
+    /// a shared chat. Valid (two computers, each at once), replay (the same
+    /// computer within the pace, nothing; after it, again), the bound (what
+    /// is past due is forgotten).
+    #[test]
+    fn each_computer_is_pre_woken_at_its_own_pace() {
+        let mut due = PrewakesDue::default();
+        assert!(due.take("computer:aa", 1_000), "the first owner's typing");
+        assert!(due.take("computer:bb", 2_000), "another owner's computer, typing in the same chat");
+        assert!(!due.take("computer:aa", 1_000 + PREWAKE_EVERY_MS - 1), "the first again, within its pace");
+        assert!(due.take("computer:aa", 1_000 + PREWAKE_EVERY_MS), "and once its pace passed");
+        assert!(!due.take("computer:bb", 2_000 + PREWAKE_EVERY_MS - 1));
+        due.take("computer:cc", 10 * PREWAKE_EVERY_MS);
+        assert_eq!(due.0.len(), 1, "what was past due is forgotten");
     }
 }

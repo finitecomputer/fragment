@@ -36,8 +36,6 @@ use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 use crate::registry::calls::{self, By};
 
-/// At most one pre-wake a computer from one fragment this often.
-const PREWAKE_EVERY_MS: i64 = 30_000;
 /// The agent fragment's channel its computer follows for its routines and
 /// its new fragments (docs/chat-records.md, `tasks`).
 pub(crate) const TASKS: &str = "tasks";
@@ -562,22 +560,20 @@ impl FragmentCell {
         Ok(fragment_core::computer::prewoken(&subs, principal).map(|u| format!("computer:{}", u.trim_start_matches("computer:"))))
     }
 
-    /// `principal` began typing on a page of this fragment (its socket's
-    /// presence, `fragment_core::live::typing_began`): their own computer,
-    /// when this fragment's channels wake it, may hear from them soon, so it
-    /// starts now, held as any wake is (decision 39), at most every
-    /// `PREWAKE_EVERY_MS`. No one else's typing wakes it, and a socket's
-    /// opening is no use of it: a tab left open reconnects on its own. The
-    /// wake runs on its own, so the socket never waits for a start; a
-    /// failed pre-wake costs only the wait.
+    /// `principal` began typing on a page of this fragment whose code is
+    /// the platform's (its socket's presence,
+    /// `fragment_core::live::typing_began`): their own computer, when this
+    /// fragment's channels wake it, may hear from them soon, so it starts
+    /// now, held as any wake is (decision 39), each computer at most every
+    /// `PREWAKE_EVERY_MS` (`prewake_due`). No one else's typing wakes it,
+    /// and a socket's opening is no use of it: a tab left open reconnects
+    /// on its own. The wake runs on its own, so the socket never waits for
+    /// a start; a failed pre-wake costs only the wait.
     pub(crate) fn prewake(&self, principal: &str) {
-        let now = crate::js::now_ms();
-        let due = self.meta(MetaKey::PrewakeAt).ok().flatten().and_then(|v| v.parse::<i64>().ok()).is_none_or(|at| now >= at);
-        if !due {
+        let Ok(Some(c)) = self.woken_computer(principal) else { return };
+        if !self.prewake_due(&c) {
             return;
         }
-        let Ok(Some(c)) = self.woken_computer(principal) else { return };
-        let _ = self.set_meta(MetaKey::PrewakeAt, &(now + PREWAKE_EVERY_MS).to_string());
         let env = self.env.clone();
         worker::wasm_bindgen_futures::spawn_local(async move {
             if let Err(e) = crate::computer::ask(&env, &c, "computer/wake", &json!({ "why": "presence" })).await {

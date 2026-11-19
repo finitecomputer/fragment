@@ -452,8 +452,6 @@ pub(crate) enum MetaKey {
     DoorTemplate,
     /// Its owner's row was told its reach (`Sharing.reach`, reach.rs).
     ReachTold,
-    /// The next time a page may pre-wake the computers its channels wake.
-    PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
     /// call was paid and kept (`fail-after-paid`), so the step is retried.
     TestFailAfterPaid,
@@ -556,7 +554,6 @@ impl MetaKey {
             MetaKey::InboxSecret => "inbox_secret",
             MetaKey::DoorTemplate => "door_template",
             MetaKey::ReachTold => "reach_told",
-            MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestLoseVideoAnswers => "test_lose_video_answers",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
