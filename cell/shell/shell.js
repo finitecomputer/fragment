@@ -323,17 +323,22 @@ function show(spec) {
 }
 
 // A frame of `src` (the mint's, for fragment `name`; a port's ticket).
-function frameOf(src, title, name = null) {
+// Only a chat's page is lent the microphone (`microphone`: its voice
+// memo), by the kind its row says, wherever it is framed (the middle
+// column, or Apps' window of a chat that reaches the person's accounts);
+// any other (an app's, a Session Archive's, a files view's, a setup's,
+// a port's) is lent none.
+function frameOf(src, title, name = null, { microphone = false } = {}) {
   const frame = el("iframe");
   frame.setAttribute("aria-label", title);
-  frame.allow = "clipboard-write; microphone";
+  frame.allow = "clipboard-write";
   frame.dataset.src = src;
-  if (name) {
+  if (name) frame.dataset.fragment = name;
+  if (name && microphone) {
     // A bare `microphone` is the src's origin's, the mint's on this page's;
     // the page lands at the fragment's own, which the browser would refuse
     // without asking. So it names that origin before the frame navigates
     // (a policy is read as a navigation starts): known here, no request.
-    frame.dataset.fragment = name;
     frame.allow = `clipboard-write; microphone ${originAt(name)}`;
   }
   frame.src = src;
@@ -1027,7 +1032,10 @@ function dropFrame(name) {
 // A chat's frame, made once and kept.
 function chatFrame(name, path = setupFor(name) ? "/?setup=1" : "/") {
   if (state.frames.has(name)) return;
-  const frame = frameOf(framed(name, path), titleOf(name), name);
+  // a chat the launcher just made may come before its row (`newChat`):
+  // only a row that says it is no chat (an app at `/?chat=`, a Session
+  // Archive) withholds the microphone
+  const frame = frameOf(framed(name, path), titleOf(name), name, { microphone: !byName(name) || isChat(name) });
   $("frames").append(frame);
   state.frames.set(name, frame);
   standins.add(frame);
@@ -1162,7 +1170,7 @@ function openApp(name, path = "/") {
   const f = byName(name);
   const shown = document.querySelector(`#stack .pane[data-key="${CSS.escape(`app:${name}`)}"] iframe`);
   if (shown && path !== "/") go(shown, framed(name, path));
-  const frame = named(frameOf(framed(name, path), titleOf(name), name), name, (t) => t, "aria-label");
+  const frame = named(frameOf(framed(name, path), titleOf(name), name, { microphone: isChat(name) }), name, (t) => t, "aria-label");
   const status = el("span", "pane-sharing");
   if (f) status.append(...badges(f));
   show({

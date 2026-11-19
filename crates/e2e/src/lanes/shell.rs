@@ -6909,11 +6909,13 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
 /// still asked the status for that origin navigated under the bare
 /// policy, which names only the mint's origin, and the page stayed
 /// refused the microphone. The shell knows each fragment's origin from
-/// its own page now (its `fragment-origin` meta), with no request. Valid:
-/// in a shell of its own, the app's status held, never answered, its
-/// window opened and its Reload pressed, the frame is sent at once, under
-/// the policy that names the app's own origin, and its page may use the
-/// microphone (Chrome's fake, allowed).
+/// its own page now (its `fragment-origin` meta), with no request. Only a
+/// chat's frame is lent the microphone since (the frames section,
+/// `app_microphone`), so an app's window is sent under a policy that names
+/// none. Valid: in a shell of its own, the app's status held, never
+/// answered, its window opened and its Reload pressed, the frame is sent
+/// at once, under a policy that lends no microphone, and its page is told
+/// the microphone is denied (in this Chrome, whose fake would allow it).
 fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let pane = format!("document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{app}\"]")));
@@ -6933,15 +6935,15 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
     let opened = b.until(&shell, &format!("!!{pane}?.querySelector('iframe') && !!{pane}.querySelector('button[aria-label=Reload]')"), wait);
     // in the same task as the press: nothing it could have waited for came
     let sent = b.eval(&shell, &format!("(() => {{ {pane}.querySelector('button[aria-label=Reload]').click(); const f = {pane}.querySelector('iframe'); return {{ src: f.hasAttribute('src'), allow: f.allow }}; }})()"))?;
-    let named = sent["src"] == true && sent["allow"] == format!("clipboard-write; microphone {}", api.site_origin(app));
+    let named = sent["src"] == true && sent["allow"] == "clipboard-write";
     let told = s.eventually(wait, || {
         let Ok(frame) = b.frame(app) else { return false };
         let state = b.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)");
         let _ = b.detach(frame);
-        state.ok() == Some(json!("granted"))
+        state.ok() == Some(json!("denied"))
     });
     s.ok(
-        "an app's window opened and reloaded before its status answers loads at once, under the policy that names its own origin: its page may use the microphone",
+        "an app's window opened and reloaded before its status answers loads at once, under a policy that lends it no microphone: its page is told the microphone is denied",
         up && opened && named && told,
         json!({ "up": up, "opened": opened, "sent": sent, "told": told }),
     );
