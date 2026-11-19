@@ -314,8 +314,9 @@ impl Starts {
     /// Answers its line, when that ends it.
     pub fn after(&mut self, event: &Event, life: &Lifecycle, now_ms: i64) -> Option<String> {
         // a wake that leaves it awake was answered by the container it has
-        // (it cancelled an idle sleep): no start comes for its ask
-        if matches!(event, Event::Wake { .. }) && matches!(life.phase, Phase::Awake { .. }) {
+        // (it cancelled an idle sleep): no start comes for its ask. An
+        // owner's restart asked meanwhile still brings its own start
+        if matches!(event, Event::Wake { .. }) && matches!(life.phase, Phase::Awake { .. }) && !matches!(self.asked, Some((_, Woke::Restart))) {
             self.asked = None;
         }
         let l = self.line.as_mut()?;
@@ -726,5 +727,22 @@ mod tests {
         d.turn();
         let l = d.line(g2);
         assert_eq!((&l["woke"], ms(&l, "beganMs")), (&"itself".into(), 0), "{l}");
+        // an owner's restart asked as a wake leaves it awake (the wake's
+        // drive first, the restart's waiting on it: #1357's review): the
+        // restart's ask stands, and its start is the restart's
+        let asked = d.c.now;
+        d.starts.asked(Woke::Restart, &d.c.life.phase, asked);
+        d.apply(Event::Wake { why: Wake::Owner });
+        assert_eq!(d.starts.asked, Some((asked, Woke::Restart)), "the restart's ask stands");
+        d.apply(Event::Restart { generation: 0 });
+        let g = d.c.life.generation();
+        let (_, _, seq) = save_asked(&d.apply(Event::Held { generation: g, held: true }));
+        d.apply(Event::Saved { generation: g, seq });
+        let s = d.apply(Event::Asleep { generation: g });
+        let s = d.owed(&s);
+        let (g3, _) = d.start(&s, Outcome::Ready);
+        d.turn();
+        let l = d.line(g3);
+        assert!(l["woke"] == "restart" && ms(&l, "beganMs") > 0, "{l}");
     }
 }
