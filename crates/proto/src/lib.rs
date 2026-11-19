@@ -1587,6 +1587,14 @@ pub struct Member {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub email: Option<String>,
+    /// On a connector bound as an agent's door, that agent's row alone: the
+    /// door it is (`telegram`), while it is open (docs/api.md, "An agent's
+    /// doors"). Its records relaying that agent's owner come through it, so
+    /// the agent's bridge and its pages take them as its owner's words
+    /// (docs/chat-records.md). Add-only: absent from an older platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub door: Option<String>,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
