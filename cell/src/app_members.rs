@@ -122,9 +122,18 @@ impl FragmentCell {
         // bounded: the fragments an app is in hold it as a member
         let answers = join_all(targets.iter().map(|t| crate::fragment::call(&self.env, t, &asked))).await;
         let refused = answers.iter().find_map(|a| a.as_ref().err().filter(|e| e.code != ErrorCode::NotFound));
-        let Some(refused) = refused else { return Ok(Some(id)) };
+        // all yes, and its note still kept: the caller writes the growth in
+        // this same turn. A note the alarm took as run out meanwhile had
+        // every fragment look again, so their yes may be gone: ask again
+        let kept = !self.rows("SELECT 1 AS x FROM app_growth WHERE id = ?", vec![SqlStorageValue::Integer(id)])?.is_empty();
+        let refused = match (refused, kept) {
+            (None, true) => return Ok(Some(id)),
+            (Some(refused), _) => CellError::new(refused.code, refused.message.clone()),
+            (None, false) => CellError::new(ErrorCode::Conflict, "asking the fragments it is in took too long: try again"),
+        };
+        // each looks again, a yes given after the alarm's look too
         self.given_up(Some(id)).await?;
-        Err(CellError::new(refused.code, refused.message.clone()))
+        Err(refused)
     }
 
     /// When the oldest growth note runs out, if one is noted (for the alarm).
@@ -213,16 +222,13 @@ impl FragmentCell {
             "INSERT INTO app_asks (name, version) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET version = excluded.version",
             vec![name.into(), SqlStorageValue::Integer(version)],
         )?;
-        let asked = AppAsked { target: me, title: title.clone(), incarnation, version, owner: app_owner.to_string(), role };
+        let asked = AppAsked { target: me, title: title.clone(), incarnation, version, owner: app_owner.to_string(), role, key: key.map(str::to_string) };
         let taken = match crate::fragment::call(&self.env, name, &asked).await {
             Ok(answer) => {
                 self.test_hold("app-answer").await;
                 // each person by their email, as the owner sees them, should a line name one
                 let names = self.emails(answer.audience.iter().map(|(p, _)| p.clone()).collect()).await;
-                match key.is_some_and(|k| k != answer.npub) {
-                    true => Err(CellError::new(ErrorCode::Conflict, "that app is no longer the one asked for: open its sheet again")),
-                    false => self.app_answered(actor, name, role, (incarnation, version, &owner, app_owner, &title), &answer, &names, invited.as_ref()),
-                }
+                self.app_answered(actor, name, role, (incarnation, version, &owner, app_owner, &title), &answer, &names, invited.as_ref())
             }
             Err(e) => Err(e),
         };
@@ -456,6 +462,11 @@ impl FragmentCell {
     /// recorded in the same turn, or why not.
     pub(crate) fn app_asked(&self, a: AppAsked) -> CellResult<AppAnswer> {
         self.created()?;
+        // asked for another life of this name (a stale sheet's): it records nothing
+        let npub = self.must(MetaKey::Npub)?;
+        if a.key.as_ref().is_some_and(|k| *k != npub) {
+            return Err(CellError::new(ErrorCode::Conflict, "that app is no longer the one asked for: open its sheet again"));
+        }
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let refused = |why: String| CellError::new(ErrorCode::Forbidden, why);
         // within one person (decision 63): no one adds another's app
@@ -485,7 +496,7 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Conflict, "an older ask: it was asked again since"));
         }
         self.event("app.joining", &format!("asked into {} as {}, by its owner", a.target, a.role.as_str()), json!({ "target": a.target, "role": a.role }));
-        Ok(AppAnswer { npub: self.must(MetaKey::Npub)?, incarnation: self.incarnation()?, title, audience })
+        Ok(AppAnswer { npub, incarnation: self.incarnation()?, title, audience })
     }
 
     /// A change between an app and a target (`AppTold`). To the app: the
@@ -495,6 +506,10 @@ impl FragmentCell {
     /// audience again.
     pub(crate) async fn app_told(&self, c: AppTold) -> CellResult<()> {
         self.created()?;
+        // a role held by another life of this name is none of this one's
+        if !c.from_app && c.role.is_some() && c.key != Some(self.must(MetaKey::Npub)?) {
+            return Ok(());
+        }
         if !c.from_app {
             let role = c.role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
             let (inc, ver) = (SqlStorageValue::Integer(c.incarnation), SqlStorageValue::Integer(c.version));

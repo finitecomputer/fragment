@@ -137,6 +137,11 @@ pub(crate) struct AppAsked {
     pub version: i64,
     pub owner: String,
     pub role: Role,
+    /// The app's key the target asks for, when it asks for one life (a
+    /// role changed by an app's key): another life of the name records
+    /// nothing, and refuses it.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// The app's own key, its life, its title, and its audience
@@ -220,6 +225,11 @@ pub(crate) struct AppTold {
     pub role: Option<Role>,
     pub incarnation: i64,
     pub version: i64,
+    /// The target's word on a role: the key of the app it holds under the
+    /// name, whose word it is alone (a replacement under the name takes
+    /// none of it). An end names none: any life of the name takes it.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 impl Call for AppTold {
