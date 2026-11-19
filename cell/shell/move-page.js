@@ -6,7 +6,7 @@
 // server's words say so too, promising only what comes).
 //
 // Upgrade: the person opens the move (`POST /api/migrations/offers`,
-// which binds them and gives its comp once: a month's seat, so a guest
+// which binds them and gives its comp once: a comped seat, so a guest
 // may make agents), then, one at a time, a new agent is made as Settings'
 // Add makes one (onboarding.js `addAgent`, its chat not opened) and its
 // Yes posted (`…/offers/{old}/yes {agent}`), which stops the old agent and
