@@ -28,8 +28,8 @@ use crate::codestorage::{Author, Change, CsError, Held, Wants, MAIN};
 
 /// The files one commit carries, and the bytes of theirs it carries in
 /// git (a blob's are its pointer's).
-const BATCH_FILES: usize = 256;
-const BATCH_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const BATCH_FILES: usize = 256;
+pub(crate) const BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// Tries of one commit that lost its head to another writer, or whose
 /// answer was lost.
 const COMMIT_TRIES: u32 = 5;
@@ -114,7 +114,7 @@ pub fn planned(src: &Source, layout: &Layout) -> Result<Counted> {
 /// One commit of `changes` on `head`, as session import makes them: on
 /// another head when another writer moved main, once more when its answer
 /// was lost. Its new head.
-fn commit(c: &Client, held: &mut Held, author: &Author, mut head: Option<String>, message: &str, changes: &[Change]) -> Result<Option<String>> {
+pub(crate) fn commit(c: &Client, held: &mut Held, author: &Author, mut head: Option<String>, message: &str, changes: &[Change]) -> Result<Option<String>> {
     for attempt in 1..=COMMIT_TRIES {
         let storage = held.get(c)?;
         match storage.commit(head.as_deref(), message, author, changes) {
@@ -148,7 +148,7 @@ fn held_already(c: &Client, held: &mut Held, there: &HashMap<String, u64>, head:
 /// head: a commit naming none lands on whatever main is), and on one that
 /// moved meanwhile only if that one has none either, so another writer's
 /// own manifest is kept.
-fn manifest(c: &Client, held: &mut Held, author: &Author, mut head: String) -> Result<()> {
+pub(crate) fn manifest(c: &Client, held: &mut Held, author: &Author, mut head: String) -> Result<()> {
     let change = [Change::Upsert { path: RepoPath::parse(MANIFEST).expect("a repo path"), bytes: MANIFEST_BYTES.to_vec() }];
     for attempt in 1..=COMMIT_TRIES {
         let storage = held.get(c)?;

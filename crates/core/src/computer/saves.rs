@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::computer::disk::{disk_clear, disk_filling, ComputerDisk};
 use crate::computer::lifecycle::Ended;
 use crate::computer::limits::SAVES_KEPT;
+use crate::computer::start_line::Full;
 
 /// Records one save holds at most: one per directory it saves.
 pub const SAVE_RECORDS_MAX: usize = 4;
@@ -204,6 +205,37 @@ impl Saves {
             (Some(s), Some(image)) if s.save == save.id && s.image == image && !save.unusable && !self.fresh => Plan::Snapshot { id: s.id.clone() },
             _ => Plan::Backup,
         }
+    }
+
+    /// Why `plan(image)` restores the save whole, when it does (a start's
+    /// line: `start_line`): the first of these the DO's facts show, beside
+    /// `plan`'s own test so the two agree. `fell_back`: this wake's start
+    /// from the snapshot failed (`Lifecycle::fell_back`).
+    pub fn full_why(&self, image: Option<&str>, fell_back: bool) -> Option<Full> {
+        if self.plan(image) != Plan::Backup {
+            return None;
+        }
+        let newest = self.saves.first().map(|s| s.id.as_str());
+        Some(match (&self.snapshot, image) {
+            (_, None) => Full::Off,
+            _ if self.fresh => Full::Restart,
+            _ if self.current().map(|s| s.id.as_str()) != newest => Full::Unusable,
+            (Some(s), Some(image)) if s.image != image => Full::Image,
+            (Some(_), _) => Full::Other,
+            (None, _) if fell_back => Full::DeadSnapshot,
+            (None, _) => match self.ended {
+                Some(Ended { by: LifeEnd::Exit, .. }) => Full::Crash,
+                Some(Ended { saved: false, restart: true, .. }) => Full::Restart,
+                Some(Ended { saved: false, .. }) => Full::Unsaved,
+                Some(Ended { saved: true, .. }) => Full::NoSnapshot,
+                None => Full::Other,
+            },
+        })
+    }
+
+    /// The image's reference the last start that came up ran.
+    pub fn last_image(&self) -> Option<&str> {
+        self.running.as_ref().map(|r| r.image.as_str())
     }
 
     /// Its owner restarted it: the snapshot is forgotten (only a cache), and
