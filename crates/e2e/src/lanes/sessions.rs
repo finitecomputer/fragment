@@ -290,11 +290,12 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let refill = call("sessions", json!({ "kind": "chat" }))?;
     let refilled: Vec<Value> = refill.body["result"]["sessions"].as_array().into_iter().flatten().map(|e| e["title"].clone()).collect();
     let index_gone = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=index/chat.json"), None)?.status == 404;
-    b.eval(&page, "(location.reload(), true)")?;
-    b.until(&page, "!document.getElementById('layout').hidden && !!document.getElementById('history-link')?.offsetParent", wait);
-    b.click(&page, "#history-link")?;
-    b.click(&page, ".history-filter[data-filter=\"imported\"]")?;
-    let relisted = b.until(&page, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent).join('|') === 'A long letter|Beans'"), wait);
+    // a fresh shell, at History, reads the archive's list at once
+    let fresh = b.open(&format!("{}/history", api.base))?;
+    b.viewport(&fresh, 1280, 900, false)?;
+    b.until(&fresh, "!!document.querySelector('.history-filter[data-filter=\"imported\"]')?.offsetParent", wait);
+    b.click(&fresh, ".history-filter[data-filter=\"imported\"]")?;
+    let relisted = b.until(&fresh, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent).join('|') === 'A long letter|Beans'"), wait);
     s.ok(
         "the next import of anything lists it as rows from its files, takes its index file away, and History lists them so",
         again["added"] == 0 && again["unchanged"] == 3 && Value::Array(refilled.clone()) == json!(["Beans", "A long letter"]) && refill.body["result"]["whole"] == true && index_gone && relisted,
