@@ -234,6 +234,10 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
         // the repo a fragment made before 2026-10-07 kept: named as the
         // fragment's host was, without its owner
         let old = app_name.clone();
+        // the lever names the fragment's own old name alone: naming another
+        // fragment's repo, its end would delete that one
+        let other = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "repo", "repo": repos[0] })))?;
+        s.ok("the lever refuses another fragment's repo (400): it names only this fragment's own old name", other.status == 400, &other);
         s.fake.seed_repo(&old, &[("index.html", b"<p>the old app</p>\n")]);
         let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "repo", "repo": old })))?;
         s.ok("their app's repo is one named as before repos were their owner's (a lever)", r.status == 200 && r.body["repo"] == old.as_str(), &r);
@@ -397,10 +401,10 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{made} {files}"),
     );
     if scripted {
-        let named = fragment_core::codestorage::repo_name("", &agent_name, &fresh_id).unwrap_or_default();
-        s.ok("its repo is named for its new owner", s.fake.repo_url(&named).as_deref() == Some(fresh_repo.as_str()), &named);
+        let named = fragment_core::codestorage::repo_name("", &agent_name, made.body["npub"].as_str().unwrap_or_default()).unwrap_or_default();
+        s.ok("its repo is named for its new life", s.fake.repo_url(&named).as_deref() == Some(fresh_repo.as_str()), &named);
     } else {
-        s.skip("its repo is named for its new owner", "it reads code.storage's own record, the fake's");
+        s.skip("its repo is named for its new life", "it reads code.storage's own record, the fake's");
     }
     s.owned(&made.body, &fresh);
     s.commit(&made.body, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"a new soul\n"))]);

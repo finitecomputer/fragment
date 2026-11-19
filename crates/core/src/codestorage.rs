@@ -191,31 +191,33 @@ pub fn tree_page(v: &Value) -> Result<TreePage, String> {
     Ok(page)
 }
 
-/// Hex digits of the owner's digest a repo's name carries: 48 bits, so two
-/// identities that ever make one name share a repo name once in 2^48.
-pub const REPO_OWNER_HEX: usize = 12;
+/// Hex digits of the life's key's digest a repo's name carries: 48 bits,
+/// so two lives that ever have one name share a repo name once in 2^48.
+pub const REPO_LIFE_HEX: usize = 12;
 
 /// A new fragment's code.storage repo name: the one place it is derived.
-/// The cell's create names the repo with it once and keeps the repo it
+/// The cell names the repo with it once in a life and keeps the repo it
 /// made (`Created.repo`, the url-form id every later call uses); nothing
 /// rebuilds the name.
 ///
-/// `<prefix><name>--<owner>`: the deployment's prefix (a branch's
+/// `<prefix><name>--<hex>`: the deployment's prefix (a branch's
 /// `<branch>--`), the fragment's name, and the first 12 hex digits of a
-/// digest of its owner's identity. The owner is in it so a name another
-/// identity makes later (one a deleted fragment had) never finds the repo
-/// its earlier maker made: a repo a wipe deleted is never made again, nor
-/// another person's files read. The same owner making a deleted name again
-/// finds its repo, as before. `None`: not a fragment's name, or not an
-/// identity.
-pub fn repo_name(prefix: &str, fragment: &str, owner: &str) -> Option<String> {
+/// digest of its life's own key (its npub, drawn new for each life). A
+/// repo is one life's alone: a name made again, by anyone, never finds a
+/// repo an earlier life made, so a delete or a wipe deletes that one
+/// (cell ended.rs) with no later life in it, and no name code.storage
+/// deleted is asked for again (it may never be free). A seed's try again
+/// within its life finds the repo by this name. `None`: not a fragment's
+/// name, or not a key's npub.
+pub fn repo_name(prefix: &str, fragment: &str, life: &str) -> Option<String> {
     assert!(prefix.is_empty() || prefix.ends_with("--"), "a deployment's repo prefix is empty or ends in --: {prefix:?}");
-    if !fragment_proto::valid_fragment_name(fragment) || !crate::npub::is_identity(owner) {
+    if !fragment_proto::valid_fragment_name(fragment) || !crate::npub::is_identity(life) {
         return None;
     }
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(format!("fragment repo owner\0{owner}").as_bytes());
-    let name = format!("{prefix}{fragment}--{}", &hex::encode(digest)[..REPO_OWNER_HEX]);
-    assert!(name.starts_with(prefix) && name.ends_with(&hex::encode(digest)[..REPO_OWNER_HEX]), "the name is the prefix, the fragment's name, and the owner's digits");
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(format!("fragment repo life\0{life}").as_bytes());
+    let hex = hex::encode(digest);
+    let name = format!("{prefix}{fragment}--{}", &hex[..REPO_LIFE_HEX]);
+    assert!(name.starts_with(prefix) && name.ends_with(&hex[..REPO_LIFE_HEX]), "the name is the prefix, the fragment's name, and the life's digits");
     Some(name)
 }
 
@@ -503,30 +505,31 @@ mod tests {
         assert_eq!(next_repos_cursor(&json!({ "repos": [], "has_more": true })), None);
     }
 
-    /// Goal: a new fragment's repo name carries its owner, so another
-    /// identity making the same name never names the same repo, while the
-    /// same owner making the name again does (a delete keeps the repo).
-    /// Method: names derived for one owner, another, and the inputs the
-    /// derivation refuses.
+    /// Goal: a new fragment's repo name carries its life's own key, so a
+    /// name made again, by its owner or anyone, never names a repo an
+    /// earlier life made (a delete deletes that one), while a seed's try
+    /// again in the same life names the same repo. Method: names derived
+    /// for one life twice, a second life of the same name, another name,
+    /// and the inputs the derivation refuses.
     #[test]
-    fn a_repo_name_is_its_owners() {
-        let (paul, fresh) = (crate::npub::identity_of(&"a".repeat(64)), crate::npub::identity_of(&"b".repeat(64)));
-        let first = repo_name("e2e--", "todo--k3x9", &paul).unwrap();
+    fn a_repo_name_is_its_lifes() {
+        let (first_life, second_life) = (crate::npub::identity_of(&"a".repeat(64)), crate::npub::identity_of(&"b".repeat(64)));
+        let first = repo_name("e2e--", "todo--k3x9", &first_life).unwrap();
         assert!(first.starts_with("e2e--todo--k3x9--"), "{first}");
-        assert_eq!(first.len(), "e2e--todo--k3x9--".len() + REPO_OWNER_HEX, "{first}");
+        assert_eq!(first.len(), "e2e--todo--k3x9--".len() + REPO_LIFE_HEX, "{first}");
         assert!(first["e2e--todo--k3x9--".len()..].bytes().all(|b| b.is_ascii_hexdigit()), "{first}");
-        // the same owner, again (a delete, then a create): the same repo
-        assert_eq!(repo_name("e2e--", "todo--k3x9", &paul).as_deref(), Some(first.as_str()));
-        // another identity making the same name: another repo
-        let theirs = repo_name("e2e--", "todo--k3x9", &fresh).unwrap();
-        assert_ne!(theirs, first);
-        assert!(theirs.starts_with("e2e--todo--k3x9--"), "{theirs}");
+        // the same life, again (a seed's try after a lost answer): the same repo
+        assert_eq!(repo_name("e2e--", "todo--k3x9", &first_life).as_deref(), Some(first.as_str()));
+        // the name made again (deleted, then created, by anyone): another repo
+        let second = repo_name("e2e--", "todo--k3x9", &second_life).unwrap();
+        assert_ne!(second, first);
+        assert!(second.starts_with("e2e--todo--k3x9--"), "{second}");
         // production's has no prefix; another name is another repo
-        assert!(repo_name("", "todo--k3x9", &paul).unwrap().starts_with("todo--k3x9--"));
-        assert_ne!(repo_name("", "notes--k3x9", &paul), repo_name("", "todo--k3x9", &paul));
-        // not a fragment's name, or not an identity: no name
-        for (fragment, owner) in [("todo", paul.as_str()), ("Todo--k3x9", &paul), ("todo.paul", &paul), ("todo--k3x9", "id:short"), ("todo--k3x9", "npub1x"), ("todo--k3x9", &"a".repeat(64))] {
-            assert_eq!(repo_name("", fragment, owner), None, "{fragment} {owner}");
+        assert!(repo_name("", "todo--k3x9", &first_life).unwrap().starts_with("todo--k3x9--"));
+        assert_ne!(repo_name("", "notes--k3x9", &first_life), repo_name("", "todo--k3x9", &first_life));
+        // not a fragment's name, or not a key's npub: no name
+        for (fragment, life) in [("todo", first_life.as_str()), ("Todo--k3x9", &first_life), ("todo.paul", &first_life), ("todo--k3x9", "id:short"), ("todo--k3x9", "npub1x"), ("todo--k3x9", &"a".repeat(64))] {
+            assert_eq!(repo_name("", fragment, life), None, "{fragment} {life}");
         }
     }
 
