@@ -884,50 +884,85 @@ mod tests {
     /// 2026-11-19): a Registry holding comps the move gave with an end
     /// (step 10's `until_ms`, 30 days on) loses those ends at its next
     /// start, however the comp was made (a new org of one, or a seat in
-    /// the org its person was in) and though the operators' log forgot
-    /// it; an operator's comp keeps its own end, even on a row the move
-    /// comped before. Method: the Registry as it stood before, its rows
-    /// as that release wrote them, then the class as declared, twice.
+    /// the org its person was in); an operator's comp keeps its own end,
+    /// even on a row the move comped before (ended, then comped again or
+    /// given an offer's end by a merge). A log that forgot entries since
+    /// the move began (its oldest after 2026-11-10) leaves rows Migrations
+    /// added the move's. Method: the Registry as it stood before, its rows
+    /// as that release wrote them, then the class as declared, twice; once
+    /// with its log whole, once with its oldest entries gone.
     #[test]
     fn the_moves_comps_lose_their_end() {
+        const MOVE_BEGAN: i64 = 1_794_268_800_000;
         let before = REGISTRY.steps.iter().position(|s| s.name == "connection_signin_access").expect("step 11") + 1;
         let steps: &'static [Step] = REGISTRY.steps;
         let old = Class { name: REGISTRY.name, steps: &steps[..before], variants: REGISTRY.variants, kept: REGISTRY.kept };
-        let db = Lite::new();
-        assert_eq!(migrated(&db, &old, 1), Ok(Ran::Made { version: before as u32 }));
-        db.exec(
-            "INSERT INTO org_members (id, org, person, email, admin, seat, comped, sleeps, added_at, added_by, until_ms) VALUES
+        let members = "INSERT INTO org_members (id, org, person, email, admin, seat, comped, sleeps, added_at, added_by, until_ms) VALUES
                ('mem-new', 'org-a', 'npub1ada', 'ada@x.test', 1, 'seat', 1, 0, 1, 'migrations', 2000),
                ('mem-in', 'org-b', 'npub1bea', 'bea@x.test', 0, 'seat', 1, 0, 1, 'npub1admin', 2000),
-               ('mem-forgot', 'org-c', 'npub1cy', 'cy@x.test', 1, 'seat', 1, 0, 1, 'migrations', 2000),
+               ('mem-unlogged', 'org-c', 'npub1cy', 'cy@x.test', 1, 'seat', 1, 0, 1, 'migrations', 2000),
                ('mem-op', 'org-d', 'npub1dee', 'dee@x.test', 1, 'seat', 1, 0, 1, 'npub1op', 3000),
                ('mem-again', 'org-e', 'npub1eve', 'eve@x.test', 1, 'seat', 1, 0, 1, 'migrations', 4000),
+               ('mem-merged', 'org-h', 'npub1hal', 'hal@x.test', 1, 'seat', 1, 0, 1, 'migrations', 5000),
                ('mem-paid', 'org-f', 'npub1fay', 'fay@x.test', 1, 'seat_always_on', 0, 0, 1, 'npub1fay', NULL),
-               ('mem-open', 'org-g', 'npub1gus', 'gus@x.test', 1, 'seat', 1, 0, 1, 'npub1op', NULL);
-             INSERT INTO admin_log (at, operator, action, target, detail) VALUES
-               (1, 'migrations', 'comp', 'mem-new', 'seat for ada@x.test in ada@x.test'),
-               (1, 'migrations', 'comp', 'mem-in', 'seat for bea@x.test in Bea''s'),
-               (1, 'npub1op', 'comp', 'mem-op', 'seat for dee@x.test in dee@x.test'),
-               (1, 'migrations', 'comp', 'mem-again', 'seat for eve@x.test in eve@x.test'),
-               (2, 'npub1op', 'comp-end', 'mem-again', 'seat of eve@x.test'),
-               (3, 'npub1op', 'comp', 'mem-again', 'seat for eve@x.test in eve@x.test'),
-               (1, 'npub1op', 'comp', 'mem-open', 'seat for gus@x.test in gus@x.test');",
-        )
-        .expect("the rows the move's release wrote");
+               ('mem-open', 'org-g', 'npub1gus', 'gus@x.test', 1, 'seat', 1, 0, 1, 'npub1op', NULL);";
+        // each the move's comp, or an operator's after it: `at` is a day's
+        // offset from the move's start (negative: before it)
+        let log = |day: i64| {
+            let at = |d: i64| MOVE_BEGAN + (day + d) * 86_400_000;
+            format!(
+                "INSERT INTO admin_log (at, operator, action, target, detail) VALUES
+                   ({}, 'npub1op', 'trial-new', 'trial-1', 'a trial before the move'),
+                   ({}, 'migrations', 'comp', 'mem-new', 'seat for ada@x.test in ada@x.test'),
+                   ({}, 'migrations', 'comp', 'mem-in', 'seat for bea@x.test in Bea''s'),
+                   ({}, 'npub1op', 'comp', 'mem-op', 'seat for dee@x.test in dee@x.test'),
+                   ({}, 'migrations', 'comp', 'mem-again', 'seat for eve@x.test in eve@x.test'),
+                   ({}, 'npub1op', 'comp-end', 'mem-again', 'seat of eve@x.test'),
+                   ({}, 'npub1op', 'comp', 'mem-again', 'seat for eve@x.test in eve@x.test'),
+                   ({}, 'migrations', 'comp', 'mem-merged', 'seat for hal@x.test in hal@x.test'),
+                   ({}, 'npub1op', 'comp-end', 'mem-merged', 'seat of hal@x.test'),
+                   ({}, 'npub1op', 'comp', 'mem-offered', 'seat for hal@y.test in hal@x.test'),
+                   ({}, 'npub1op', 'comp', 'mem-open', 'seat for gus@x.test in gus@x.test');",
+                at(-1), at(0), at(0), at(0), at(0), at(1), at(2), at(0), at(1), at(2), at(0)
+            )
+        };
         let ends = |db: &Lite| -> Vec<(String, Option<i64>)> {
             let rows = db.rows("SELECT id, until_ms FROM org_members ORDER BY id").expect("the members");
             rows.iter().map(|r| (r["id"].as_str().unwrap_or_default().to_string(), r["until_ms"].as_i64())).collect()
         };
-        let want: Vec<(String, Option<i64>)> = [("mem-again", Some(4000)), ("mem-forgot", None), ("mem-in", None), ("mem-new", None), ("mem-op", Some(3000)), ("mem-open", None), ("mem-paid", None)]
+        let want = |unlogged: Option<i64>| -> Vec<(String, Option<i64>)> {
+            [
+                ("mem-again", Some(4000)),
+                ("mem-in", None),
+                ("mem-merged", Some(5000)),
+                ("mem-new", None),
+                ("mem-op", Some(3000)),
+                ("mem-open", None),
+                ("mem-paid", None),
+                ("mem-unlogged", unlogged),
+            ]
             .into_iter()
             .map(|(id, end)| (id.to_string(), end))
-            .collect();
-        let ran = migrated(&db, &REGISTRY, 2);
-        assert_eq!(ends(&db), want, "the move's comps have no end; an operator's keep theirs");
+            .collect()
+        };
+        // its log whole (its oldest entry before the move): only what it
+        // logged as the move's comp is the move's
+        let whole = Lite::new();
+        assert_eq!(migrated(&whole, &old, 1), Ok(Ran::Made { version: before as u32 }));
+        whole.exec(&format!("{members}\n{}", log(0))).expect("the rows the move's release wrote");
+        let ran = migrated(&whole, &REGISTRY, 2);
+        assert_eq!(ends(&whole), want(Some(2000)), "the move's comps have no end; an operator's keep theirs");
         assert_eq!(ran, Ok(Ran::Migrated { from: before as u32, version: REGISTRY.steps.len() as u32 }));
-        assert_eq!(db.count("SELECT COUNT(*) FROM admin_log"), 7, "the log as it was");
-        assert_eq!(migrated(&db, &REGISTRY, 3), Ok(Ran::Current { version: REGISTRY.steps.len() as u32 }));
-        assert_eq!(ends(&db), want, "a restart changes nothing");
+        assert_eq!(whole.count("SELECT COUNT(*) FROM admin_log"), 11, "the log as it was");
+        assert_eq!(migrated(&whole, &REGISTRY, 3), Ok(Ran::Current { version: REGISTRY.steps.len() as u32 }));
+        assert_eq!(ends(&whole), want(Some(2000)), "a restart changes nothing");
+        // its oldest entries forgotten (its oldest after the move began): a
+        // row Migrations added with nothing logged is the move's too
+        let forgot = Lite::new();
+        assert_eq!(migrated(&forgot, &old, 1), Ok(Ran::Made { version: before as u32 }));
+        forgot.exec(&format!("{members}\n{}\nDELETE FROM admin_log WHERE action = 'trial-new';", log(1))).expect("the rows, the log's oldest gone");
+        migrated(&forgot, &REGISTRY, 2).expect("migrated");
+        assert_eq!(ends(&forgot), want(None), "a row Migrations added, its log forgotten, is the move's");
     }
 
     /// Goal: every object a deployment holds is adopted: each class's
