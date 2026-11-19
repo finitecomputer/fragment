@@ -103,7 +103,9 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             ..notice(format!("update:{version}"), "update", NoticeLevel::Info, "An update is ready for your computer".into())
         },
         ComputerNotice::DiskFilling { free, .. } => Notice {
-            text: Some("Delete files you don't need, or ask an agent to tidy up.".into()),
+            // Paul, 2026-11-18: its agent makes room (`fragment offload`, the
+            // `disk-space-finite` skill)
+            text: Some("Ask your agent to move big files to storage.".into()),
             ..notice("disk_filling".into(), "disk_filling", NoticeLevel::Warn, format!("Your computer is almost full ({} left)", size(*free)))
         },
         ComputerNotice::KeyPaused { provider, spent_micros, cap_micros, allow_micros, resumes_at } => Notice {
@@ -211,6 +213,7 @@ mod tests {
 
         let disk = &said(&[ComputerNotice::DiskFilling { total: 20_000_002_048, free: 3_240_662_016 }], &f)[0];
         assert_eq!(disk.title, "Your computer is almost full (3.2 GB left)");
+        assert_eq!(disk.text.as_deref(), Some("Ask your agent to move big files to storage."));
         assert!(disk.actions.is_empty());
 
         let paused = |allow_micros| said(&[ComputerNotice::KeyPaused { provider: "elevenlabs".into(), spent_micros: 5_030_000, cap_micros: 5_000_000, allow_micros, resumes_at: 123 * MIN }], &f).remove(0);

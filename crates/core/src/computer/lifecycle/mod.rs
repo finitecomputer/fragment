@@ -227,6 +227,12 @@ impl Lifecycle {
         self.always_on
     }
 
+    /// Whether this wake fell back from a snapshot that would not start
+    /// (until a start comes up).
+    pub fn fell_back(&self) -> bool {
+        self.fell_back
+    }
+
     pub fn new() -> Lifecycle {
         Lifecycle {
             phase: Phase::ASLEEP,
