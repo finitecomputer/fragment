@@ -19,7 +19,13 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 /// The offer's words under its title, as the server says them
 /// (`fragment_core::migrations::offer`).
-const OFFER_TEXT: &str = "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key. You'll get a month free.";
+const OFFER_TEXT: &str = "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key.";
+/// Whether a person's words promise a free month, which the move no
+/// longer gives: its seat has no end (Paul, 2026-11-19).
+fn promises_a_month(words: &str) -> bool {
+    let w = words.to_lowercase();
+    w.contains("month") || w.contains("free")
+}
 
 fn agent(old: &str) -> RosterAgent {
     RosterAgent {
@@ -886,8 +892,8 @@ pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
                 let seen = b.eval(&page, crate::lanes::shell::MUST_ANSWER_SEEN)?;
                 let yes = b.eval(&page, "(() => { const a = document.querySelector('#must-answer a'); return { text: a?.textContent, href: a?.getAttribute('href'), target: a?.target ?? '', main: a?.classList.contains('primary') }; })()")?;
                 s.ok(
-                    "a person on the roster is asked as their page opens, over everything: the old agent's name, picture and words, its upgrade, Upgrade Juniper the main answer opening /move here, then Not now and Never",
-                    asked && seen["covers"] == true && seen["words"].as_str().is_some_and(|w| w.contains("Juniper's upgrade is ready") && w.contains(OFFER_TEXT) && w.contains("Not now") && w.contains("Never"))
+                    "a person on the roster is asked as their page opens, over everything: the old agent's name, picture and words, its upgrade (no free month), Upgrade Juniper the main answer opening /move here, then Not now and Never",
+                    asked && seen["covers"] == true && seen["words"].as_str().is_some_and(|w| w.contains("Juniper's upgrade is ready") && w.contains(OFFER_TEXT) && w.contains("Not now") && w.contains("Never") && !promises_a_month(w))
                         && yes["text"] == "Upgrade Juniper" && yes["href"].as_str().is_some_and(|h| h.ends_with("/move")) && yes["target"] == "" && yes["main"] == true,
                     json!([seen, yes]),
                 );
@@ -907,9 +913,12 @@ pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 /// F5, the move's comp: a person on the roster who opens the move is given
-/// a month's seat and $25 of credit, once, ever: opened again, after the
-/// node restarts, nothing more. One who holds a seat keeps theirs, and gets
-/// the credit. A comp with an end (`untilMs`) ends by itself then.
+/// a comped seat with no end, once, ever: opened again, after the node
+/// restarts, nothing more. No credit is granted: the seat brings its
+/// month's included credit. One who holds a seat already keeps theirs.
+/// Staff end a move's comp as any comp (`DELETE /api/admin/seats/{id}`,
+/// `fragment operator uncomp`); an operator's comp with an end (`untilMs`)
+/// ends by itself then.
 pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("move-comp", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Node, Need::Move]) {
         return Ok(());
@@ -917,8 +926,11 @@ pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
     let mover = Mover::new(&api.base, s.mover.clone());
     let run = s.name("mc");
     let visit = |api: &Api, who: &fragment_nip98::Keys| api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(who) })));
-    let purchased = |api: &Api, k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/ledger", None).ok().and_then(|r| r.body["purchasedMicros"].as_i64()).unwrap_or(-1);
+    let ledger = |api: &Api, k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/ledger", None).map(|r| r.body).unwrap_or(Value::Null);
+    let purchased = |api: &Api, k: &fragment_nip98::Keys| ledger(api, k)["purchasedMicros"].as_i64().unwrap_or(-1);
     let seat = |api: &Api, k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/seat", None).map(|r| r.body).unwrap_or(Value::Null);
+    // when each comped seat of theirs ends by itself (null: never), which no route shows
+    let ends = |api: &Api, k: &fragment_nip98::Keys| api.unsigned("POST", "/api/test/registry", Some(&json!({ "compEnds": Api::email_of(k) }))).map(|r| r.body["ends"].clone()).unwrap_or(Value::Null);
     let gina = api.person()?;
     // a guest, as someone from finite.computer arrives (this fleet's default plan is a seat)
     let made_guest = api.signed(&s.operator, "POST", &format!("/api/ledger/{}/plan", api.identity(&gina)?), Some(&json!({ "id": format!("{run}-guest"), "plan": "guest" })))?;
@@ -930,58 +942,61 @@ pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(mover.push(&Roster { snapshot: format!("{run}-s1"), observed_ms: 1_800_000_000_000, people: people.to_vec() })?.status == 200, "the roster");
     let before = (purchased(api, &gina), seat(api, &gina)["guest"].clone());
     let first = visit(api, &gina)?;
-    let given = s.eventually(crate::lanes::billing::PUSHED, || seat(api, &gina)["guest"] == false);
+    let given = s.eventually(crate::lanes::billing::PUSHED, || seat(api, &gina)["guest"] == false && ledger(api, &gina)["includedGrantedMicros"] == 50_000_000);
     let mine = seat(api, &gina);
     s.ok(
-        "a guest on the roster who opens the move is given its comp: $25 of credit and a seat (a comped `seat`)",
-        before == (0, json!(true)) && first.status == 200 && first.body["comp"] == true && purchased(api, &gina) == 25_000_000 && given && mine["seat"]["kind"] == "seat" && mine["seat"]["comped"] == true,
-        json!([before, first.body, mine]),
+        "a guest on the roster who opens the move is given its comp: a comped `seat` with no end, its own month's credit ($50 included) and no credit granted",
+        before == (0, json!(true)) && first.status == 200 && first.body["comp"] == true && first.body.get("untilMs").is_none() && given
+            && mine["seat"]["kind"] == "seat" && mine["seat"]["comped"] == true && ends(api, &gina) == json!([null]) && purchased(api, &gina) == 0,
+        json!([before, first.body, mine, ends(api, &gina), ledger(api, &gina)]),
     );
     let again = visit(api, &gina)?;
-    s.ok("opened again: nothing more (no comp due, $25 still)", again.status == 200 && again.body["comp"] == false && purchased(api, &gina) == 25_000_000, &again.body);
+    s.ok("opened again: nothing more (no comp due)", again.status == 200 && again.body["comp"] == false && purchased(api, &gina) == 0 && ends(api, &gina) == json!([null]), &again.body);
     let hanks = visit(api, &hank)?;
     let kept = seat(api, &hank);
     s.ok(
-        "one who holds a seat already keeps theirs, and gets the credit",
-        hanks.status == 200 && hanks.body["comp"] == true && purchased(api, &hank) == 25_000_000 && kept["seat"]["kind"] == "seat_always_on" && visit(api, &hank)?.body["comp"] == false,
-        json!([hanks.body, kept]),
+        "one who holds a seat already keeps theirs, as it was (its kind, no end), and is given nothing more",
+        hanks.status == 200 && hanks.body["comp"] == true && kept["seat"]["kind"] == "seat_always_on" && kept["seat"]["comped"] == true && ends(api, &hank) == json!([null])
+            && purchased(api, &hank) == 0 && visit(api, &hank)?.body["comp"] == false,
+        json!([hanks.body, kept, ends(api, &hank)]),
     );
     // restarted: what was given is remembered
     s.stop()?;
     let api = &s.start(false)?;
     let after = (visit(api, &gina)?, visit(api, &hank)?);
     s.ok(
-        "the node restarted: opened again, nothing more is given, to either",
-        after.0.status == 200 && after.0.body["comp"] == false && after.1.body["comp"] == false && purchased(api, &gina) == 25_000_000 && purchased(api, &hank) == 25_000_000,
-        json!([after.0.body, after.1.body]),
+        "the node restarted: opened again, nothing more is given, to either, and the move's seat still has no end",
+        after.0.status == 200 && after.0.body["comp"] == false && after.1.body["comp"] == false && purchased(api, &gina) == 0 && purchased(api, &hank) == 0
+            && seat(api, &gina)["seat"]["comped"] == true && ends(api, &gina) == json!([null]),
+        json!([after.0.body, after.1.body, ends(api, &gina)]),
     );
-    // a visit cut off after its credit, before its seat: the next asks for
-    // the same end, fixed at the first attempt, never a later one
+    // a visit cut off at its seat: the next gives it, with no end
     let joy = api.person()?;
     let joy_people = vec![RosterPerson { workos_id: s.workos.user(&Api::email_of(&joy)).id, email: format!("{run}-j1@old.test"), agents: vec![agent(&format!("{run}-j1"))] }];
     anyhow::ensure!(mover.push(&Roster { snapshot: format!("{run}-s2"), observed_ms: 1_800_000_000_000, people: [people.to_vec(), joy_people].concat() })?.status == 200, "the roster");
     let down = api.unsigned("POST", "/api/test/registry", Some(&json!({ "downFor": { "path": "/orgs/comp", "times": 1 } })))?;
     anyhow::ensure!(down.status == 200, "the registry's next comp refused: {down}");
-    let t0 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
     let cut = visit(api, &joy)?;
-    let t1 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
-    std::thread::sleep(Duration::from_secs(2));
     let retried = visit(api, &joy)?;
-    let until = retried.body["untilMs"].as_i64().unwrap_or(0);
-    const MONTH_MS: i64 = 30 * DAY_MS;
+    let joys = seat(api, &joy);
     s.ok(
-        "a visit cut off after its credit and before its seat is tried again by the next, asking for the same end, fixed at the first attempt (not 30 days from the retry); after it, nothing more",
-        cut.status != 200 && retried.status == 200 && retried.body["comp"] == true && (t0 + MONTH_MS..=t1 + MONTH_MS).contains(&until)
-            && purchased(api, &joy) == 25_000_000 && seat(api, &joy)["seat"]["comped"] == true && visit(api, &joy)?.body["comp"] == false,
-        json!([cut.status, retried.body, t0, t1]),
+        "a visit cut off at its seat is tried again by the next, which gives it with no end; after it, nothing more",
+        cut.status != 200 && retried.status == 200 && retried.body["comp"] == true && joys["seat"]["comped"] == true && ends(api, &joy) == json!([null])
+            && purchased(api, &joy) == 0 && visit(api, &joy)?.body["comp"] == false,
+        json!([cut.status, retried.body, joys, ends(api, &joy)]),
     );
-    // a comp with an end ends then, by itself (the registry's alarm)
+    // staff end a move's comp as any other (`fragment operator uncomp`)
+    let joy_seat = joys["seat"]["id"].as_str().unwrap_or_default().to_string();
+    let uncomped = api.signed(&s.operator, "DELETE", &format!("/api/admin/seats/{joy_seat}"), None)?;
+    let ended = s.eventually(crate::lanes::billing::PUSHED, || seat(api, &joy)["seat"].is_null());
+    s.ok("staff end a move's comp at once, as any comp", uncomped.status == 200 && ended && ends(api, &joy) == json!([]) && visit(api, &joy)?.body["comp"] == false, json!([uncomped.body, seat(api, &joy)]));
+    // an operator's comp with an end ends then, by itself (the registry's alarm)
     let ivy = api.person()?;
     let soon = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64 + 3_000;
     let r = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&ivy), "kind": "seat", "untilMs": soon })))?;
-    let held = seat(api, &ivy)["seat"]["kind"] == "seat";
+    let held = ends(api, &ivy) == json!([soon]) && seat(api, &ivy)["seat"]["kind"] == "seat";
     let ended = s.eventually(Duration::from_secs(30), || seat(api, &ivy)["seat"].is_null());
-    s.ok("a comp with an end holds until then, and then ends by itself", r.status == 200 && held && ended, seat(api, &ivy));
+    s.ok("an operator's comp with an end holds until then, and then ends by itself", r.status == 200 && held && ended, seat(api, &ivy));
     Ok(())
 }
 
@@ -1010,10 +1025,10 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     anyhow::ensure!(b.until(&page, "document.getElementById('must-answer').open && !!document.querySelector('#must-answer a')", wait), "the offer, over the page");
     b.eval(&page, "(document.querySelector('#must-answer a').click(), true)")?;
     let opened = b.until(&page, &format!("location.pathname === '/move' && !!{row} && !document.getElementById('must-answer').open"), wait);
-    let seen = b.eval(&page, &format!("(() => {{ const r = {row}; return {{ words: r?.innerText, picked: r?.querySelector('input[type=checkbox]')?.checked, bring: !!document.querySelector('#move-page button.primary'), cover: document.getElementById('must-answer').open, asked: !!document.querySelector('#move-page .move-into') }}; }})()"))?;
+    let seen = b.eval(&page, &format!("(() => {{ const r = {row}; return {{ words: r?.innerText, page: document.getElementById('move-page')?.innerText, picked: r?.querySelector('input[type=checkbox]')?.checked, bring: !!document.querySelector('#move-page button.primary'), cover: document.getElementById('must-answer').open, asked: !!document.querySelector('#move-page .move-into') }}; }})()"))?;
     s.ok(
-        "Upgrade Juniper opens /move here: the old agent, its words, and whether to upgrade it (chosen); the offer's cover stands aside on the page that answers it; with no agent here, nothing more is asked",
-        opened && seen["words"].as_str().is_some_and(|w| w.contains("Juniper's upgrade is ready.")) && seen["picked"] == true && seen["bring"] == true && seen["cover"] == false && seen["asked"] == false,
+        "Upgrade Juniper opens /move here: the old agent, its words, and whether to upgrade it (chosen), no free month; the offer's cover stands aside on the page that answers it; with no agent here, nothing more is asked",
+        opened && seen["words"].as_str().is_some_and(|w| w.contains("Juniper's upgrade is ready.")) && seen["page"].as_str().is_some_and(|w| !w.is_empty() && !promises_a_month(w)) && seen["picked"] == true && seen["bring"] == true && seen["cover"] == false && seen["asked"] == false,
         &seen,
     );
     let _ = b.screenshot(&page, &shots.join("move-1280-light.png"));
@@ -1057,9 +1072,9 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     );
     let _ = b.screenshot(&page, &shots.join("move-asked-1280-light.png"));
     s.ok(
-        "Upgrade: the guest is given the comp (a comped seat, $25), one new agent is made, with its one chat, not opened (the page stays), and its Yes starts the move: pausing it, in the server's words",
+        "Upgrade: the guest is given the comp (a comped seat, no credit granted), one new agent is made, with its one chat, not opened (the page stays), and its Yes starts the move: pausing it, in the server's words",
         making && asked && still == "/move" && one_each && b.eval(&page, &said)?.as_str().is_some_and(|w| w == "Pausing Juniper for its upgrade…") && m["state"] == "asked" && m["agent"].is_string()
-            && ledger.body["purchasedMicros"] == 25_000_000 && seat.body["seat"]["comped"] == true,
+            && ledger.body["purchasedMicros"] == 0 && seat.body["seat"]["comped"] == true,
         json!({ "move": m, "ledger": ledger.body["purchasedMicros"], "seat": seat.body["seat"], "path": still, "kinds": kinds }),
     );
     // the mover stops it and stages it: the page follows, read again, and
