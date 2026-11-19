@@ -447,15 +447,17 @@ async fn the_hermes_image() {
         serde_json::from_str::<serde_json::Value>(found.lines().rfind(|l| l.starts_with('{')).unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"))
     };
     // juniper holds no Google: once its profile is written after the
-    // managed set's install (the boot writes it before), Google's skill is
-    // hidden from it (FIN-509), and Hermes lists it no more
+    // managed set's install (the boot writes it before), its config hides
+    // Google's skill from it (FIN-509)
     let t = Instant::now();
     while !c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]).contains("\"google-workspace-finite\"") {
         assert!(t.elapsed() < Duration::from_secs(60), "Google's skill is never hidden from juniper: {}", c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]));
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    // (`find_all_skills` below still lists a disabled external skill: what
+    // the agent's prompt lists is held by
+    // an_open_chat_lists_a_connections_skill_once_connected)
     let found = hermes_finds();
-    assert!(found["google-workspace-finite"].is_null(), "a connection's skill is hidden from an agent that does not hold it: {found}");
     assert!(c.exec(&[
         "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper--k3x9", "HOME=/data/hermes/profiles/juniper--k3x9/home",
         "/opt/hermes/.venv/bin/python", "-c", include_str!("skill_fork.py"),
