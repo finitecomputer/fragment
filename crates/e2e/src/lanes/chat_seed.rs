@@ -403,9 +403,11 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     );
     let healer = api.signed(owner, "GET", &format!("/api/f/{kept}/storage-token"), None)?;
     let st = status(&kept);
-    let healed = healer.status == 200 && st["pins"]["live"].as_str().is_some_and(|live| live != old_live) && st["code"]["sha"] == st["pins"]["live"];
+    // its template's commit is the old life's bytes (`{"template":"chat"}`),
+    // so main and live stay at that commit: its landing is its own seed's
+    let healed = healer.status == 200 && st["pins"]["live"] == old_live.as_str() && st["pins"]["main"] == st["pins"]["live"] && st["code"]["sha"] == st["pins"]["live"];
     s.ok(
-        "commits back, its next writer lands its own template: committed and deployed in this life, live past the old one and installed from it",
+        "commits back, its next writer lands its own template: committed (the old life's bytes, so live stays at that commit) and deployed in this life, and installed from its own deploy",
         healed && manifest_at(s, &url) == json!({ "template": "chat" }) && events(&kept, "template").len() == 1,
         format!("{st} {}", manifest_at(s, &url)),
     );
