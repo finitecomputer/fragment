@@ -24,6 +24,15 @@
 //! file brought back beside its note's place, what was), and a group with
 //! no note yet is made again: the same paths, the same blobs.
 //!
+//! **Never over what is kept.** Each notes folder is its own place in
+//! storage, named as it is (`~/old-agent/home`'s files under `home/`): a
+//! file the notes name counts as kept only while its size and CRC-32 are
+//! the home's, and a home whose files differ from what its notes keep (an
+//! old agent that ran again before another move) is refused before
+//! anything is written, to be kept beside, with a new notes folder. Every
+//! path a run writes is checked first against every other, and against
+//! what the notes keep: a file named as another's part never takes it.
+//!
 //! **One storage fragment holds at most `STORE_FILES_MAX` files**, what a
 //! person's export takes of one. A home with more is kept in several: a run
 //! stops before the first note past it and says what is left, for another
@@ -45,8 +54,6 @@ use crate::codestorage::{Author, Change, Held, Wants, MAIN};
 use crate::home::files::{commit, manifest, BATCH_BYTES, BATCH_FILES};
 use crate::offload::{self, Folder, Moved, Record, Said, NOTE_SUFFIX};
 
-/// Where kept files go in the storage fragment: the old home, as it was.
-pub const PREFIX: &str = "home";
 /// The files one note keeps, at most: what `fragment offload` moves at once.
 pub const NOTE_FILES_MAX: usize = offload::FILES_MAX;
 /// The bytes one folder's note keeps, at most: a fifth of the room a
@@ -123,11 +130,12 @@ impl Group {
         self.key.rsplit_once('/').map_or("", |(d, _)| d)
     }
 
-    /// Its record, its files' sums as the zip names them.
-    fn record(&self, fragment: &str, notes: &Path, part_bytes: u64) -> Record {
+    /// Its record, its files' sums as the zip names them, under `root` in
+    /// the storage fragment (the notes folder's name).
+    fn record(&self, fragment: &str, root: &str, notes: &Path, part_bytes: u64) -> Record {
         let parent = self.parent();
         let rel = |p: &str| if parent.is_empty() { p.to_string() } else { p[parent.len() + 1..].to_string() };
-        let at = if parent.is_empty() { PREFIX.to_string() } else { format!("{PREFIX}/{parent}") };
+        let at = if parent.is_empty() { root.to_string() } else { format!("{root}/{parent}") };
         let files: Vec<Moved> = self.files.iter().map(|k| Moved { path: rel(&k.path), size: k.size, sha256: None, crc32: Some(k.crc32), mode: k.mode }).collect();
         // a folder's folders, its own first (a child sorts after its parent)
         let mut dirs = BTreeSet::new();
@@ -150,15 +158,24 @@ impl Group {
 /// bounds, else the file alone. Iterative, in path order.
 fn groups(keep: Vec<Keep>, part_bytes: u64) -> Vec<Group> {
     assert!(part_bytes > 0, "a part holds bytes");
-    let mut sums: HashMap<&str, (usize, u64, u64)> = HashMap::new();
+    // each folder's files, bytes, parts and folders (its own among them)
+    let mut sums: HashMap<&str, (usize, u64, u64, usize)> = HashMap::new();
+    let mut folders: BTreeSet<&str> = BTreeSet::new();
     for k in &keep {
         let parts = k.size.div_ceil(part_bytes).max(1);
         for (i, _) in k.path.match_indices('/') {
             let s = sums.entry(&k.path[..i]).or_default();
-            *s = (s.0 + 1, s.1 + k.size, s.2 + parts);
+            (s.0, s.1, s.2) = (s.0 + 1, s.1 + k.size, s.2 + parts);
+            folders.insert(&k.path[..i]);
         }
     }
-    let fits = |(files, bytes, parts): (usize, u64, u64)| files <= NOTE_FILES_MAX && bytes <= NOTE_BYTES_MAX && parts <= offload::PARTS_MAX;
+    for f in &folders {
+        for (i, _) in f.match_indices('/') {
+            sums.get_mut(&f[..i]).expect("a folder's folders are folders").3 += 1;
+        }
+        sums.get_mut(f).expect("a folder").3 += 1;
+    }
+    let fits = |(files, bytes, parts, dirs): (usize, u64, u64, usize)| files <= NOTE_FILES_MAX && bytes <= NOTE_BYTES_MAX && parts <= offload::PARTS_MAX && dirs <= offload::FILES_MAX;
     let key_of = |k: &Keep| -> (String, bool) {
         for (i, _) in k.path.match_indices('/') {
             if fits(sums[&k.path[..i]]) {
@@ -245,11 +262,23 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
     let list: fragment_proto::FragmentList = c.call_as(c.get("/api/fragments")?)?;
     let part_bytes = crate::session::upload_max(&list, c.agent().is_some());
 
-    // what is kept already: a note names it, or it was brought back from one
-    let mut covered: BTreeSet<String> = BTreeSet::new();
+    // this notes folder's own place in storage: its name
+    let root = notes.file_name().and_then(|n| n.to_str()).filter(|n| RepoPath::parse(&format!("{n}/x")).is_ok()).map(str::to_string);
+    let root = root.ok_or_else(|| coded(Code::InvalidUsage, format!("{}: --notes names a folder whose name a fragment's folder can be (such as home)", notes.display())))?;
+
+    // what the notes keep: each file as kept (its size and sums), and the
+    // paths its parts hold, by fragment
+    let mut covered: HashMap<String, Moved> = HashMap::new();
+    let mut taken: HashMap<(String, String), String> = HashMap::new();
     for (note, r) in notes_under(&notes)? {
         let dir = note.parent().expect("a note has a folder").strip_prefix(&notes).expect("found under the notes").to_string_lossy().to_string();
-        covered.extend(r.files.iter().map(|f| if dir.is_empty() { f.path.clone() } else { format!("{dir}/{}", f.path) }));
+        for f in &r.files {
+            let path = if dir.is_empty() { f.path.clone() } else { format!("{dir}/{}", f.path) };
+            for (part, _) in r.parts(f) {
+                taken.insert((r.fragment.clone(), part), path.clone());
+            }
+            covered.insert(path, f.clone());
+        }
     }
     // a path that is a file and a folder of the home both is no home a
     // filesystem held: its notes could not say which comes back
@@ -257,15 +286,29 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
     if let Some(both) = src.entries().iter().find(|e| folders.contains(e.path.as_str())) {
         bail!(coded(Code::InvalidRequest, format!("{} is a file and a folder of this home both: it is not kept", both.path)));
     }
-    let (mut todo, mut already, mut already_bytes) = (Vec::new(), 0, 0u64);
+    let (mut todo, mut already, mut already_bytes, mut differ) = (Vec::new(), 0, 0u64, Vec::new());
     for path in keep {
         let size = src.get(&path).ok_or_else(|| anyhow!("{path}: no such file"))?.size;
         let (crc32, mode) = src.sums(&path)?.ok_or_else(|| anyhow!("{path}: its zip names no CRC-32"))?;
-        if covered.contains(&path) || brought_back(&notes.join(&path), size, crc32) {
-            (already, already_bytes) = (already + 1, already_bytes + size);
-            continue;
+        match covered.get(&path) {
+            // kept already, as this home holds it
+            Some(f) if f.size == size && f.crc32 == Some(crc32) => (already, already_bytes) = (already + 1, already_bytes + size),
+            // kept, but other bytes: another copy of the home's
+            Some(_) => differ.push(path),
+            None if brought_back(&notes.join(&path), size, crc32) => (already, already_bytes) = (already + 1, already_bytes + size),
+            None => todo.push(Keep { path, size, crc32, mode: mode.filter(|m| *m != 0).unwrap_or(0o644) }),
         }
-        todo.push(Keep { path, size, crc32, mode: mode.filter(|m| *m != 0).unwrap_or(0o644) });
+    }
+    if let Some(first) = differ.first() {
+        bail!(coded(
+            Code::Conflict,
+            format!(
+                "{} files the notes in {} keep are other bytes than this home's ({first}, …): they keep another copy of it. Nothing was written. Keep this one beside it, with --notes naming a new folder (such as {}-2)",
+                differ.len(),
+                notes.display(),
+                notes.display()
+            )
+        ));
     }
 
     let mut held = Held::new(&into, Wants::Write);
@@ -282,9 +325,21 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
     let had_manifest = there.contains_key("fragment.json");
     let mut done = Stored { fragment: into.clone(), notes: notes.display().to_string(), files: 0, bytes: 0, notes_written: 0, already, already_bytes, more: None };
     let groups = groups(todo, part_bytes);
+    let records: Vec<Record> = groups.iter().map(|g| g.record(&into, &root, &notes, part_bytes)).collect();
+    // every path a run writes is its file's alone: never another's, nor
+    // one a note keeps (a file named as another's part), checked first
+    for (g, r) in groups.iter().zip(&records) {
+        for (k, f) in g.files.iter().zip(&r.files) {
+            for (part, _) in r.parts(f) {
+                RepoPath::parse(&part).map_err(|e| coded(Code::InvalidUsage, format!("{} cannot be kept as {e}", k.path)))?;
+                if let Some(other) = taken.insert((into.clone(), part.clone()), k.path.clone()).filter(|o| *o != k.path) {
+                    bail!(coded(Code::InvalidRequest, format!("{} and {other} would both be kept as {part}: nothing was written", k.path)));
+                }
+            }
+        }
+    }
     let total = groups.len();
-    for (n, g) in groups.iter().enumerate() {
-        let r = g.record(&into, &notes, part_bytes);
+    for (n, (g, r)) in groups.iter().zip(&records).enumerate() {
         let parts: Vec<(&Keep, &Moved, u64, String, u64)> = g
             .files
             .iter()
@@ -299,9 +354,6 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
             let rest = &groups[n..];
             done.more = Some(More { files: rest.iter().map(|g| g.files.len()).sum(), bytes: rest.iter().flat_map(|g| &g.files).map(|k| k.size).sum() });
             break;
-        }
-        for p in &parts {
-            RepoPath::parse(&p.3).map_err(|e| coded(Code::InvalidUsage, format!("{} cannot be kept as {e}", p.0.path)))?;
         }
         // its parts, a window at a time: the blobs copied (or uploaded),
         // the small ones read, then committed
@@ -347,8 +399,13 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
         let name = g.key.rsplit('/').next().expect("a key names something");
         let when = jiff::Timestamp::now().strftime("%Y-%m-%d").to_string();
         let said = Said { title: "Kept in storage", came: format!("came from the old agent's home in its move here on {when}, and was kept off this disk") };
-        offload::publish(&note, &offload::note_text(&r, &note, name, said))?;
-        assert!(offload::record_of(&std::fs::read_to_string(&note)?).is_ok_and(|back| back == r), "a note reads back as written");
+        let text = offload::note_text(r, &note, name, said);
+        // a note that would not read back as this record is never written
+        match offload::record_of(&text) {
+            Ok(back) if back == *r => {}
+            read => bail!("{}'s note would not read back as kept ({:?}); its files are in {into}, under {}, but no note was written", g.key, read.err(), r.at),
+        }
+        offload::publish(&note, &text)?;
         done.files += g.files.len();
         done.bytes += g.files.iter().map(|k| k.size).sum::<u64>();
         done.notes_written += 1;
@@ -634,6 +691,52 @@ mod tests {
         assert!(note.exists(), "the note stays");
     }
 
+    /// Goal (Codex on #1389): a home whose files differ from what its
+    /// notes keep (an old agent that ran again before another move) never
+    /// counts them kept, and never writes over them: refused before
+    /// anything is written; kept beside, under a new notes folder's own
+    /// place in storage; and each note still brings back its own bytes.
+    #[test]
+    fn a_changed_copy_of_the_home_is_kept_beside_never_over() {
+        let files = home();
+        let s = setup(&files);
+        bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap();
+        let mut changed = files.clone();
+        let db = changed.iter_mut().find(|(p, _)| p.ends_with("state.db")).unwrap();
+        db.1[0] ^= 1;
+        let zip = s._t.0.join("stage-2.zip");
+        fragment_fakes::old_home::zip(&zip, &changed).unwrap();
+        s.mock.seed_stage("old1.p1.2", std::fs::read(&zip).unwrap());
+        let src2 = crate::home::open_from(Some(&s.c), Path::new("stage:old1.p1.2"), &layout()).unwrap();
+        let head = s.mock.branch(STORE, "main");
+        let e = bring(&s.c, &src2, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("other bytes than this home's") && e.contains("state.db"), "{e}");
+        assert_eq!(s.mock.branch(STORE, "main"), head, "nothing written");
+        let beside = s.notes.with_file_name("home-2");
+        let b = bring(&s.c, &src2, &layout(), FILES, Some(Store { into: STORE, notes: &beside })).unwrap().stored.unwrap();
+        assert_eq!(b.already, 0);
+        assert_eq!(kept(&s.mock, STORE, "home-2/agent/hermes-home/state.db").as_ref(), Some(&changed.iter().find(|(p, _)| p.ends_with("state.db")).unwrap().1));
+        let first = &files.iter().find(|(p, _)| p.ends_with("state.db")).unwrap().1;
+        assert_eq!(kept(&s.mock, STORE, "home/agent/hermes-home/state.db").as_ref(), Some(first), "the first copy is as it was kept");
+        crate::offload::back(&s.c, &s.notes.join("agent.offloaded.md")).unwrap();
+        assert_eq!(std::fs::read(s.notes.join("agent/hermes-home/state.db")).unwrap(), *first, "and its note brings it back");
+    }
+
+    /// Goal (Codex on #1389): a file named as another's part never takes
+    /// its place: refused before anything is written.
+    #[test]
+    fn a_file_named_as_anothers_part_is_refused_before_anything_is_written() {
+        let mut files = home();
+        files.push(("agent/big.bin".into(), bytes(5 * MIB, 11)));
+        files.push(("agent/big.bin.part-0001-of-0003".into(), b"not a part".to_vec()));
+        let s = setup(&files);
+        let head = s.mock.branch(STORE, "main");
+        let e = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("would both be kept as home/agent/big.bin.part-0001-of-0003"), "{e}");
+        assert_eq!(s.mock.branch(STORE, "main"), head);
+        assert!(notes_under(&s.notes).unwrap().is_empty());
+    }
+
     /// Goal: each group is a note's worth: a folder within the bounds is
     /// one note; past them, its folders and files each their own (a file
     /// past the bytes alone), every file in exactly one group.
@@ -654,5 +757,9 @@ mod tests {
         let many: Vec<Keep> = (0..NOTE_FILES_MAX + 1).map(|i| k(&format!("deps/p{}/f{i}", i % 2), 1)).collect();
         let keys: Vec<String> = groups(many, MIB as u64).into_iter().map(|g| g.key).collect();
         assert_eq!(keys, ["deps/p0", "deps/p1"], "a folder past the count: its folders");
+        // past a note's folders (Codex on #1389): 5,001 files in 10,003 folders
+        let deep: Vec<Keep> = (0..5_001).map(|i| k(&format!("deps/a{i}/b/f"), 1)).collect();
+        let made = groups(deep, MIB as u64);
+        assert!(made.len() == 5_001 && made.iter().all(|g| g.folder && g.key.starts_with("deps/a")), "a folder past the folders: its own");
     }
 }

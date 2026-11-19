@@ -91,7 +91,7 @@ pub fn left_behind(plan: &Plan, counted: &Counted, kept_in: Option<&str>) -> Str
     let mut out = match kept_in {
         None => String::from("# Left behind\n\nThe old agent's files that were not brought here, and why. They are still where they were.\n\n"),
         Some(store) => format!(
-            "# Kept in storage\n\nThe old agent's files that were not brought here, and why. Each is kept whole in `{}`, under `home/`, as it was in the old agent's home, but those whose names say they may hold a password or key: those were never read, and stay with the old platform.\n\n",
+            "# Kept in storage\n\nThe old agent's files that were not brought here, and why. Each is kept whole in storage, as it was in the old agent's home: in `{}`, or in the next storage fragment once one fills, a note for each saying where. But those whose names say they may hold a password or key were never read, and stay with the old platform.\n\n",
             code_span(store).trim_matches('`')
         ),
     };

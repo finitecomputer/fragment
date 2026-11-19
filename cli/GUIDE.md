@@ -1057,9 +1057,10 @@ Running it again sends only what is missing.
 
 With `--store`, nothing stays behind: every other file of the home (its
 own self, its brains' files, what the files' pick leaves) is kept whole
-in a members-only storage fragment, under `home/` as it was in the home,
-a file past one upload in parts, but a file whose name says it may hold
-a password or key, never read. From a move's stage each large file is
+in a members-only storage fragment, as it was in the home, under the
+notes folder's name (`home/` for `--notes ~/old-agent/home`), a file past
+one upload in parts, but a file whose name says it may hold a password
+or key, never read. From a move's stage each large file is
 copied there on the platform, never through your disk. Each folder or
 file kept gets a note under `--notes`, laid out as the home, as
 `fragment offload` leaves one (`<name>.offloaded.md`, a folder's at most
@@ -1067,7 +1068,10 @@ file kept gets a note under `--notes`, laid out as the home, as
 checked against the old file's CRC-32. A storage fragment holds at most
 19,984 files: one that fills says what is left; run it again with
 `--store` naming another, and it goes on. Cut off, run it again: it
-keeps only what no note names yet.
+keeps only what no note names yet. A file its notes keep counts only as
+the same bytes; a home that differs from them (another copy of it) is
+refused before anything is written: keep it beside, with `--notes`
+naming a new folder.
 
 ## Moving files off a disk
 

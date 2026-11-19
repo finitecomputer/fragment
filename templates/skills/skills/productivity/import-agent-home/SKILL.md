@@ -353,6 +353,10 @@ it). Its answer counts the home's files: here, in storage, and unread.
 - **`stored.more`:** your storage is full (a fragment holds about 20,000
   files). Make another, `<your name>-storage-2`, write its name in
   `progress.md`, and run it again with `--store` naming that one.
+- **It says the notes keep other bytes than this home's:** an earlier
+  upgrade kept another copy of it. Keep this one beside it: run it again
+  with `--notes "$HOME/old-agent/home-<the stage>"`, and write that
+  folder in `progress.md` and the report.
 
 Then deploy each, once: `fragment deploy <its name>` and
 `fragment deploy <your storage>`. And save one memory: the rest of your
