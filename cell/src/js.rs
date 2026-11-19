@@ -506,6 +506,19 @@ pub async fn blob_head(env: &Env, key: &str) -> CellResult<Option<u64>> {
     Ok(blobs(env)?.head(key).await?.map(|o| o.size()))
 }
 
+/// An object's size in `bucket` (a binding's name), or `None` when absent.
+pub async fn object_size(env: &Env, bucket: &str, key: &str) -> CellResult<Option<u64>> {
+    Ok(env.bucket(bucket)?.head(key).await?.map(|o| o.size()))
+}
+
+/// The SHA-256 (hex) of a stream's bytes, read to its end: piped into
+/// `crypto.DigestStream` by the runtime, none of it through Wasm.
+pub async fn digest(body: ReadableStream) -> CellResult<String> {
+    let digest = DigestStream::new(DigestStreamAlgorithm::Sha256);
+    JsFuture::from(body.pipe_to(digest.raw().unchecked_ref::<WritableStream>())).await.map_err(|e| CellError::host(format!("hashing the bytes: {}", js_message(&e))))?;
+    Ok(hex::encode(digest.digest().await?.to_vec()))
+}
+
 /// A blob's bytes as a stream: (body, whole size, the served range as
 /// (offset, length) when `range` asked for one), or `None` when absent.
 pub struct BlobBody {

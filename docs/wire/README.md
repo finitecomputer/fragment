@@ -184,6 +184,17 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Answer: [`StageCompleted`](#stagecompleted)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
+#### `migrations.copy`
+
+`POST /api/migrations/stages/{stage}/copy`: One range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer, for the new agent bound to the move while it imports. The agent, or its owner (`for`), must edit the fragment.
+
+- Credentials: NIP-98
+- Query `into` (`string`, required): The fragment whose blobs it goes into.
+- Query `offset` (`integer`, required): Where in the zip the range starts.
+- Query `bytes` (`integer`, required): Its length: 1 to the caller's upload limit.
+- Answer: [`StageCopied`](#stagecopied)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
+
 #### `migrations.done`
 
 `POST /api/migrations/stages/{stage}/done`: The new agent says its import ended, well or not: its stage's reads end, and the old agent is retired once it went well. A phase 1 stage is deleted; a phase 2 stage is kept until it expires.
@@ -1202,6 +1213,15 @@ out. The manifest as written, by its SHA-256 (hex): what the mover's `staged` re
 | --- | --- | --- | --- |
 | `manifest_sha256` | `string` | required |  |
 | `zip_bytes` | `integer` | required |  |
+
+### `StageCopied`
+
+out. `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=`: one range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer: the blob it is, by its bytes' SHA-256 (hex), and their length.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `bytes` | `integer` | required |  |
+| `sha256` | `string` | required |  |
 
 ### `StageDone`
 

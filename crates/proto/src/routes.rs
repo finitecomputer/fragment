@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::live::{LiveIn, LiveOut};
-use crate::migrations::{HandedOff, Handoff, Mailbox, MoveAt, OfferYes, Offers, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageDone, StageOpened, StagePart, StageParts};
+use crate::migrations::{HandedOff, Handoff, Mailbox, MoveAt, OfferYes, Offers, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageCopied, StageDone, StageOpened, StagePart, StageParts};
 use crate::notice::NoticeList;
 use crate::vault::{PutSecret, Secret, SecretList, SecretRemoved};
 use crate::{
@@ -481,6 +481,22 @@ pub const ROUTES: &[Route] = &[
         request: None,
         answer: Answer::Bytes { media: "application/zip" },
         errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "migrations.copy",
+        method: Method::Post,
+        path: "/api/migrations/stages/{stage}/copy",
+        summary: "One range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer, for the new agent bound to the move while it imports. The agent, or its owner (`for`), must edit the fragment.",
+        auth: SIGNATURE,
+        params: &[
+            STAGE,
+            Param { name: "into", at: ParamAt::Query, required: true, schema: shape::<String>, doc: "The fragment whose blobs it goes into." },
+            Param { name: "offset", at: ParamAt::Query, required: true, schema: shape::<u64>, doc: "Where in the zip the range starts." },
+            Param { name: "bytes", at: ParamAt::Query, required: true, schema: shape::<u64>, doc: "Its length: 1 to the caller's upload limit." },
+        ],
+        request: None,
+        answer: Answer::Json(ty::<StageCopied>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict, TooLarge],
     },
     Route {
         operation: "migrations.done",

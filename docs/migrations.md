@@ -227,6 +227,7 @@ move in the routine that starts the import.
 |---|---|---|
 | `POST /api/migrations/stages/{stage}/open` | `StageOpened {stage, manifest}` | The manifest as the mover wrote it. |
 | `GET /api/migrations/stages/{stage}/zip` | the zip's bytes | `Range: bytes=…` is answered 206 with that range alone. |
+| `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=` | → `StageCopied {sha256, bytes}` | One range of the zip (a file's bytes, or a part of them: 1 to the caller's upload limit) copied on the platform into the blobs of the fragment `into`, never through the agent's computer: hashed as R2 reads it, then read again into `into`'s blob upload as the agent, or for its owner (`for`), which the fragment checks as its client's (editor, and the hash). The same range again is the same blob. A range past the zip is 400. |
 | `POST /api/migrations/stages/{stage}/done` | `StageDone {ok, report_sha256?, why?}` → `MoveAt` | Harmless either way. `ok` moves it to `retiring` with no command: its old agent stays stopped until staff's `retire`, and its person reads it as done. Not ok holds it for staff. The same `ok` again changes nothing. Either way the stage's routes refuse at once, and its objects are kept to their keep (Deletion). |
 
 Each is the bound agent's alone (403 for anyone else), for its current

@@ -304,7 +304,7 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
 
 /// Where `for` is honored (`signer_for`: docs/api.md, Principals and
 /// access), as a refusal elsewhere says it.
-pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), a search across fragments (POST /api/search), /api/fragments and the model routes (/api/models/…) only";
+pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), a search across fragments (POST /api/search), /api/fragments, the model routes (/api/models/…) and a move's copy (POST /api/migrations/stages/…/copy) only";
 
 /// The signer of a request that must be signed, resolved, with the body
 /// the router read. It acts as itself: a `for` is refused here
@@ -946,6 +946,19 @@ async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::Js
     }
     let inner = Request::new_with_init(&format!("https://fragment.internal{}", f.inner), &init)?;
     routed::send(env, "FRAGMENT", &f.routed.name, inner).await
+}
+
+/// `len` bytes the platform holds (a move's stage, read from R2) streamed
+/// to a fragment's route (`inner`), as `routed` says who asks: a copy's
+/// blob upload, which the fragment checks as its client's.
+pub(crate) async fn stream_to(env: &Env, routed: Routed, method: Method, inner: &str, body: worker::web_sys::ReadableStream, len: u64) -> CellResult<Response> {
+    let headers = Headers::new();
+    routed.to_headers(&headers)?;
+    headers.set("content-length", &len.to_string())?;
+    let mut init = RequestInit::new();
+    init.with_method(method).with_headers(headers).with_body(Some(body.into()));
+    let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
+    routed::send(env, "FRAGMENT", &routed.name, req).await
 }
 
 /// Whether a request is a browser's navigation to a page (its `Accept`

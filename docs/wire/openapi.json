@@ -3008,6 +3008,25 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "StageCopied": {
+        "description": "`POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=`: one\nrange of the stage's zip (a file's bytes, or a part of them) copied into\na fragment's blobs on the platform, never through the agent's computer:\nthe blob it is, by its bytes' SHA-256 (hex), and their length.",
+        "properties": {
+          "bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sha256",
+          "bytes"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
       "StageDone": {
         "description": "`POST /api/migrations/stages/{stage}/done`: the import ended, well or\nnot. The same `ok` again changes nothing.",
         "properties": {
@@ -6251,6 +6270,178 @@
           }
         ],
         "summary": "The person's Yes, bound to a new agent of their own: the old agent is stopped and its stage made, which the new agent imports.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/stages/{stage}/copy": {
+      "post": {
+        "operationId": "migrations.copy",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The fragment whose blobs it goes into.",
+            "in": "query",
+            "name": "into",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Where in the zip the range starts.",
+            "in": "query",
+            "name": "offset",
+            "required": true,
+            "schema": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Its length: 1 to the caller's upload limit.",
+            "in": "query",
+            "name": "bytes",
+            "required": true,
+            "schema": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageCopied"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`too_large`",
+            "x-fragment-codes": [
+              "too_large"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "One range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer, for the new agent bound to the move while it imports. The agent, or its owner (`for`), must edit the fragment.",
         "tags": [
           "migrations"
         ]

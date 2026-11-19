@@ -59,6 +59,8 @@ pub struct Entry {
 pub struct Source {
     /// The folder or the zip it was opened from (a stage's `stage:<id>`).
     origin: PathBuf,
+    /// The stage's reader, when it is one: its copies.
+    remote: Option<Arc<Stage>>,
     /// The stage it reads, when it is one.
     stage: Option<String>,
     backing: Backing,
@@ -149,6 +151,21 @@ impl Stage {
         let client = Client::new(&c.host, c.signer.clone());
         let len = opened.manifest.zip_bytes;
         Ok((opened, Stage { client, path: format!("{base}/zip"), len, windows: Mutex::default() }))
+    }
+}
+
+impl Stage {
+    /// `len` bytes of the zip from `offset` copied into `into`'s blobs on
+    /// the platform (`POST …/copy`), never through this computer: the blob
+    /// they are, by their SHA-256. The same range again is the same blob.
+    pub fn copy(&self, into: &str, offset: u64, len: u64) -> Result<String> {
+        let base = self.path.strip_suffix("/zip").expect("a stage's zip path");
+        let path = format!("{base}/copy?into={}&offset={offset}&bytes={len}", crate::api::encode_q(into));
+        let copied: fragment_proto::migrations::StageCopied = self.client.call_as(self.client.post_safe(&path, len)?).with_context(|| format!("copying {len} bytes of the stage into {into}"))?;
+        if copied.bytes != len || !fragment_core::blob::valid_sha(&copied.sha256) {
+            bail!("a copy of {len} bytes answered {} bytes, blob {:?}", copied.bytes, copied.sha256);
+        }
+        Ok(copied.sha256)
     }
 }
 
@@ -295,14 +312,15 @@ impl Source {
     pub fn stage(c: &Client, stage: &str) -> Result<(StageOpened, Source)> {
         let (opened, reader) = Stage::open(c, stage)?;
         let len = reader.len;
+        let reader = Arc::new(reader);
         let said = format!("stage {stage}");
         // a stage's zip starts at its first byte (the mover writes it so):
         // the crate's default looks for where it starts by reading forward
         // from there to its directory, the whole stage
         let config = zip::read::Config { archive_offset: zip::read::ArchiveOffset::Known(0) };
-        let archive = zip::ZipArchive::with_config(config, At { file: Arc::new(reader), pos: 0, len }).with_context(|| format!("reading {said}'s zip"))?;
+        let archive = zip::ZipArchive::with_config(config, At { file: reader.clone(), pos: 0, len }).with_context(|| format!("reading {said}'s zip"))?;
         let mut src = Source::from_archive(&PathBuf::from(format!("{STAGE_PREFIX}{stage}")), archive, &said)?;
-        src.stage = Some(stage.to_string());
+        (src.stage, src.remote) = (Some(stage.to_string()), Some(reader));
         Ok((opened, src))
     }
 
@@ -350,7 +368,7 @@ impl Source {
             true
         });
         let at = entries.iter().enumerate().map(|(n, (e, i))| (e.path.clone(), (n, *i))).collect();
-        Source { origin: origin.to_path_buf(), stage: None, backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread, skipped: Vec::new() }
+        Source { origin: origin.to_path_buf(), remote: None, stage: None, backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread, skipped: Vec::new() }
     }
 
     /// The folder or the zip it was opened from, as named.
@@ -408,6 +426,24 @@ impl Source {
     /// The stage it reads, when it is one.
     pub fn stage_id(&self) -> Option<&str> {
         self.stage.as_deref()
+    }
+
+    /// Where a stage's file's bytes are in its zip, as they are (stored):
+    /// (offset, length). None for a folder's or a zip's on this computer
+    /// (read here), or one compressed in the zip.
+    pub fn span(&self, path: &str) -> Result<Option<(u64, u64)>> {
+        let (Backing::Zip(archive), Some(_)) = (&self.backing, &self.remote) else { return Ok(None) };
+        let (_, index) = *self.at.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?;
+        let mut archive = archive.clone();
+        let e = archive.by_index_raw(index).with_context(|| format!("finding {path} in the zip"))?;
+        let start = e.data_start().ok_or_else(|| anyhow!("{path}: its bytes' place in the zip is not known"))?;
+        Ok((e.compression() == zip::CompressionMethod::Stored && e.compressed_size() == e.size()).then_some((start, e.size())))
+    }
+
+    /// `len` bytes of a stage's zip from `offset` copied into `into`'s blobs
+    /// on the platform (`Stage::copy`): the blob they are.
+    pub fn copy(&self, into: &str, offset: u64, len: u64) -> Result<String> {
+        self.remote.as_ref().ok_or_else(|| anyhow!("only a stage's bytes are copied on the platform"))?.copy(into, offset, len)
     }
 
     /// One file's bytes as they are read.

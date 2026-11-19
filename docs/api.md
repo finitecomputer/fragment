@@ -158,8 +158,10 @@ a member, or the visibility floor; never a share link) and the agent's cap
 someone sees `call.principal` as them and `call.agent` as the agent. `for`
 is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 `POST` for anyone but the agent's owner is 403), on `POST /api/search`
-(each fragment asked decides as on its own route) and on
-`/api/models/v1/…`; anywhere else 400. A person naming `for` is 403; two, or one that is no
+(each fragment asked decides as on its own route), on
+`/api/models/v1/…`, and on a move's `POST
+/api/migrations/stages/{stage}/copy` (the fragment it copies into decides
+as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
 identity, 400. A site request's query is its app's.
 
 **An agent shares for its owner** (`fragment_core::access::agent_shares`):
