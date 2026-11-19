@@ -3,10 +3,12 @@
 //! signal handler is in: its handler only writes to a pipe, which its
 //! iterator reads on a thread of ours. What it has no say in is here:
 //! that a signal the process was started ignoring stays ignored, and that
-//! the processes it starts ignore Ctrl-C (`outlive_interrupt`).
+//! the processes it starts ignore Ctrl-C (`outlive_interrupt`). The process
+//! may ask for the same work itself (`terminate`), with no signal.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{ensure, Result};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
@@ -17,14 +19,17 @@ const TERMINATION: [libc::c_int; 3] = [SIGINT, SIGTERM, SIGHUP];
 
 /// Whether `on_termination` has run: it runs once per process.
 static HANDLED: AtomicBool = AtomicBool::new(false);
-/// Whether a termination signal has come: its work has begun.
-static RECEIVED: AtomicBool = AtomicBool::new(false);
+/// Where the termination's work hears what ends the process: each signal,
+/// and each `terminate`. It takes the first.
+static ENDS: OnceLock<Sender<libc::c_int>> = OnceLock::new();
 
-/// Whether a termination signal has come and `on_termination`'s work has
-/// begun: a second signal now ends the process at once, mid-work, so
-/// nothing of the process's own sends one (the e2e's scratch cap).
-pub fn received() -> bool {
-    RECEIVED.load(Ordering::SeqCst)
+/// Ends the process through `on_termination`'s work, as `signal` would,
+/// sending no signal: a second signal while that work runs ends the
+/// process at once, mid-work, and a signal of its own could be the second
+/// (the e2e's scratch cap, with a Ctrl-C). A no-op once the work has begun.
+/// False when no `on_termination` handles termination.
+pub fn terminate(signal: libc::c_int) -> bool {
+    ENDS.get().is_some_and(|ends| ends.send(signal).is_ok())
 }
 
 /// A signal's disposition now: whether this process was started with it
@@ -45,7 +50,8 @@ fn ignored(signal: libc::c_int) -> bool {
 /// (128 + its number). A second signal during `then` ends the process at
 /// once, by that signal's own default; one during the kill could not, as
 /// the kill stops each process before it kills them all (tree.rs), and an
-/// exit between the two would leave them stopped for good. Once per process.
+/// exit between the two would leave them stopped for good. `terminate`
+/// starts the same work, with no signal. Once per process.
 pub fn on_termination(then: impl FnOnce(i32) + Send + 'static) -> Result<()> {
     ensure!(!HANDLED.swap(true, Ordering::SeqCst), "termination is handled once per process");
     let handled: Vec<libc::c_int> = TERMINATION.into_iter().filter(|&signal| !ignored(signal)).collect();
@@ -58,10 +64,19 @@ pub fn on_termination(then: impl FnOnce(i32) + Send + 'static) -> Result<()> {
     // its pipe is close-on-exec: the processes it starts (wrangler,
     // Chrome) inherit neither end
     let mut signals = Signals::new(&handled)?;
+    let (ends, end) = mpsc::channel();
+    ENDS.set(ends.clone()).expect("termination is handled once per process");
+    std::thread::Builder::new().name("termination-signals".into()).spawn(move || {
+        // nothing closes the iterator: each signal, passed on
+        for signal in signals.forever() {
+            if ends.send(signal).is_err() {
+                return;
+            }
+        }
+    })?;
     std::thread::Builder::new().name("termination".into()).spawn(move || {
-        // nothing closes the iterator: this returns on a signal
-        let Some(signal) = signals.forever().next() else { return };
-        RECEIVED.store(true, Ordering::SeqCst);
+        // a sender is kept for the process's life (ENDS): this returns on an end
+        let Ok(signal) = end.recv() else { return };
         crate::kill_started();
         ending.store(true, Ordering::SeqCst);
         then(signal);
@@ -208,6 +223,34 @@ mod tests {
             assert_eq!(rest.matches("work ran for").count(), 1, "{rest}");
             assert!(rest.contains(&format!("work ran for {sig}\n")), "{rest}");
         }
+    }
+
+    /// Goal: the process's own `terminate` runs the same work, once, and
+    /// exits as its signal would; asked again while the work runs, nothing
+    /// more. Method: a child that terminates itself once ready, and again
+    /// from its work.
+    #[test]
+    fn terminate_runs_the_work_with_no_signal() {
+        const TEST: &str = "signals::tests::terminate_runs_the_work_with_no_signal";
+        if std::env::var(CHILD).as_deref() == Ok("terminate") {
+            assert!(!terminate(libc::SIGTERM), "nothing handles termination yet");
+            on_termination(|signal| {
+                println!("work ran for {signal}");
+                assert!(terminate(libc::SIGINT), "a second ask is heard, and ignored");
+                std::thread::sleep(Duration::from_millis(500));
+            })
+            .expect("handled");
+            println!("ready; terminating");
+            assert!(terminate(libc::SIGTERM));
+            std::thread::sleep(WAIT);
+            println!("it did not end");
+            return;
+        }
+        let (c, out, _) = spawn(TEST, "terminate", false);
+        let (status, rest) = ended(c, out);
+        assert_eq!(status.code(), Some(128 + libc::SIGTERM), "{status:?} {rest}");
+        assert_eq!(rest.matches("work ran for").count(), 1, "{rest}");
+        assert!(rest.contains(&format!("work ran for {}\n", libc::SIGTERM)), "{rest}");
     }
 
     /// Goal: a signal the process was started ignoring stays ignored (nohup's

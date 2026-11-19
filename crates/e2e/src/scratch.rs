@@ -18,12 +18,13 @@
 //! with every run in RAM at `PEAK`, and while the file system has room for
 //! every run at `CAP`; otherwise its state goes in its scratch on disk, and
 //! it says why. A run past `CAP` stops itself, as SIGTERM stops it
-//! (`watch`). The directory is this user's alone (0700), each run's
-//! directory in it locked (flock) while its process lives, and runs take
-//! their places one at a time (`PLACING`), so the next run's start sweeps
-//! the directories of runs that died outright (SIGKILL, the OOM killer):
-//! what they left running killed, their containers removed, their state
-//! copied to their scratch first.
+//! (`watch`). The directory is this user's alone (0700, made so by the
+//! first run), each run's directory in it locked (flock) while its process
+//! lives, and runs take their places one at a time (`PLACING`), so the next
+//! run's start sweeps the directories of runs that died outright (SIGKILL,
+//! the OOM killer): the node and Chromes they left running killed, their
+//! containers removed, their state copied to their scratch, each step
+//! tried again by the next start until it is done.
 
 use std::fs::{self, File};
 use std::os::unix::ffi::OsStrExt;
@@ -53,6 +54,10 @@ pub const RESERVE: u64 = 12 * GIB;
 const WATCH_EVERY: Duration = Duration::from_secs(10);
 /// How long a sweep waits for a dead run's processes to go once killed.
 const LEFTOVERS_WAIT: Duration = Duration::from_secs(5);
+/// The programs a run starts that work in its directory: the node's
+/// (wrangler on the pinned Node, workerd, esbuild) and the Chromes. A
+/// sweep kills only these: a person's editor or shell there is spared.
+const LEFTOVERS: [&str; 5] = ["node", "workerd", "esbuild", "chromium", "chrome"];
 
 const _: () = assert!(PEAK < CAP, "a run's peak is under its cap");
 
@@ -194,21 +199,21 @@ impl Ram {
 
     /// Measures the directory every `WATCH_EVERY` while it is there; past
     /// `CAP`, stops the run as a SIGTERM does (its node and Chromes killed,
-    /// its state kept: `devstack::signals::on_termination`), unless a
-    /// termination signal is already being handled: a second would end the
-    /// process halfway through keeping its state.
+    /// its state kept: `devstack::signals::terminate`, which sends no
+    /// signal, so a Ctrl-C's work already running is never cut short).
     pub fn watch(&self) -> Result<()> {
         let dir = self.dir.clone();
         std::thread::Builder::new().name("scratch-cap".into()).spawn(move || loop {
             std::thread::sleep(WATCH_EVERY);
-            if !dir.exists() || devstack::signals::received() {
+            if !dir.exists() {
                 return;
             }
             let held = size(&dir);
-            if held > CAP && !devstack::signals::received() {
+            if held > CAP {
                 println!("\nscratch: {} holds {}, past a run's cap of {}: the run stops", dir.display(), gib(held), gib(CAP));
-                // SAFETY: kill(2) on this process's own id
-                unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+                if !devstack::signals::terminate(libc::SIGTERM) {
+                    println!("scratch: nothing handles the run's end: it goes on past its cap");
+                }
                 return;
             }
         })?;
@@ -233,17 +238,22 @@ fn end(held: &Mutex<Option<Held>>, keep: bool) {
 }
 
 /// `root`, made if need be, as this user's alone (0700): what is in it is
-/// this user's runs', which a sweep kills, copies and removes.
+/// this user's runs', which a sweep kills, copies and removes. One there
+/// already must be so (a run made it), never adopted.
 fn own_dir(root: &Path) -> Result<()> {
-    fs::create_dir_all(root).with_context(|| format!("make {VAR}={}", root.display()))?;
+    if fs::symlink_metadata(root).is_err() {
+        fs::create_dir_all(root.parent().context("a directory under /")?)?;
+        match fs::create_dir(root) {
+            Ok(()) => fs::set_permissions(root, fs::Permissions::from_mode(0o700))?,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e).with_context(|| format!("make {VAR}={}", root.display())),
+        }
+    }
     let meta = fs::symlink_metadata(root)?;
     // SAFETY: geteuid(2) has no failure
     let me = unsafe { libc::geteuid() };
-    if !meta.is_dir() || meta.uid() != me {
-        bail!("{VAR}={} is not a directory of this user's own: name one it makes (/dev/shm/fragment-e2e), not a shared one", root.display());
-    }
-    if meta.mode() & 0o777 != 0o700 {
-        fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o777 != 0o700 {
+        bail!("{VAR}={} is not a directory a run made (this user's, 0700): name a new one (/dev/shm/fragment-e2e), never a shared one", root.display());
     }
     Ok(())
 }
@@ -282,24 +292,35 @@ fn live(root: &Path) -> u64 {
     runs(root).iter().filter(|dir| File::open(dir.join(LOCK)).is_ok_and(|f| f.try_lock().is_err())).count() as u64
 }
 
-/// Removes the directories of runs whose process is gone (their lock free,
-/// or never made: a start that died taking its place), each one's leftover
-/// processes killed and containers removed first, and its state copied to
-/// its scratch on disk when that is there (a copy that fails leaves it).
-/// Called with `PLACING` held, so no run is taking its place meanwhile.
+/// Removes the directories of runs whose process is gone (their lock
+/// free), each one's leftover processes killed and containers removed
+/// first, and its state copied to its scratch on disk while that is there.
+/// A step that fails leaves the directory, for the next start to try
+/// again. Called with `PLACING` held, so no run is taking its place
+/// meanwhile. (One without a lock, from a start killed between making its
+/// directory and its lock, stays: an empty directory.)
 fn sweep(root: &Path) {
     for dir in runs(root) {
-        let lock = File::open(dir.join(LOCK));
-        if lock.as_ref().is_ok_and(|f| f.try_lock().is_err()) {
+        let Ok(lock) = File::open(dir.join(LOCK)) else { continue };
+        if lock.try_lock().is_err() {
             continue;
         }
-        let killed = kill_leftovers(&dir);
+        let killed = match kill_leftovers(&dir) {
+            Ok(killed) => killed,
+            Err(e) => {
+                println!("scratch: {}: {e:#}; it stays", dir.display());
+                continue;
+            }
+        };
         let project = dir.join("cell");
         let containers = match project.join("wrangler.jsonc").is_file() {
-            true => devstack::containers::remove(&project).map(|r| r.containers).unwrap_or_else(|e| {
-                println!("scratch: could not remove the containers of {}: {e:#}", project.display());
-                0
-            }),
+            true => match devstack::containers::remove(&project) {
+                Ok(r) => r.containers,
+                Err(e) => {
+                    println!("scratch: could not remove the containers of {}: {e:#}; it stays", project.display());
+                    continue;
+                }
+            },
             false => 0,
         };
         let kept = match scratch_of(&dir) {
@@ -310,7 +331,7 @@ fn sweep(root: &Path) {
                     continue;
                 }
             },
-            None => "no scratch on disk to keep its state in".into(),
+            None => "its scratch on disk is gone".into(),
         };
         match fs::remove_dir_all(&dir) {
             Ok(()) => println!("scratch: swept {}, a run's that is gone ({killed} processes it left killed, {containers} containers removed); {kept}", dir.display()),
@@ -320,40 +341,45 @@ fn sweep(root: &Path) {
 }
 
 /// A dead run's scratch on disk, as its directory names it: only a
-/// `target/e2e/<run>` of the same run, and only while it is there.
+/// `target/e2e/<run>` of the same run, and only while its `target/e2e` is
+/// there (its worktree, or its target, removed: nowhere to keep it).
 fn scratch_of(dir: &Path) -> Option<PathBuf> {
     let named = PathBuf::from(std::ffi::OsStr::from_bytes(&fs::read(dir.join(SCRATCH)).ok()?));
-    let ours = named.is_absolute() && named.file_name() == dir.file_name() && named.parent().is_some_and(|p| p.ends_with("target/e2e"));
-    (ours && named.is_dir()).then_some(named)
+    let ours = named.is_absolute() && named.file_name() == dir.file_name() && named.parent().is_some_and(|p| p.ends_with("target/e2e") && p.is_dir());
+    ours.then_some(named)
 }
 
-/// Kills what a dead run left running in `dir` (its node's wrangler and
-/// workerd, its Chromes: a process working in it or naming it), then waits
-/// for them to go, so its state is copied still and its pages freed. The
-/// number killed.
-fn kill_leftovers(dir: &Path) -> usize {
+/// Kills what a dead run left running in `dir`: its node and Chromes
+/// (`LEFTOVERS`), each working in it or naming it. Waits for them to go, so
+/// its state is copied still and its pages are freed; the number killed,
+/// or an error naming any still there after `LEFTOVERS_WAIT`.
+fn kill_leftovers(dir: &Path) -> Result<usize> {
     let mut inside = dir.as_os_str().as_bytes().to_vec();
     inside.push(b'/');
     let me = std::process::id();
     let mut killed = vec![];
     for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|p| p.parse::<u32>().ok()).filter(|&p| p != me) else { continue };
-        let cwd = fs::read_link(entry.path().join("cwd")).ok();
-        let cmdline = fs::read(entry.path().join("cmdline")).unwrap_or_default();
-        let works_in = cwd.is_some_and(|c| c.starts_with(dir));
-        let names = cmdline.windows(inside.len()).any(|w| w == inside.as_slice());
-        // SAFETY: kill(2) on a process of this user's, which works in or names the dead run's directory
+        let started = fs::read_link(entry.path().join("exe")).ok().is_some_and(|exe| exe.file_name().is_some_and(|n| LEFTOVERS.iter().any(|l| n == *l)));
+        if !started {
+            continue;
+        }
+        let works_in = fs::read_link(entry.path().join("cwd")).ok().is_some_and(|c| c.starts_with(dir));
+        let names = fs::read(entry.path().join("cmdline")).unwrap_or_default().windows(inside.len()).any(|w| w == inside.as_slice());
+        // SAFETY: kill(2) on a process of this user's, a node's or a Chrome's, that works in or names the dead run's directory
         if (works_in || names) && unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0 {
             killed.push(pid);
         }
     }
     // gone: no process, or a zombie its parent has yet to reap
-    let running = |p: &u32| fs::read_to_string(format!("/proc/{p}/stat")).is_ok_and(|st| st.rsplit_once(") ").is_some_and(|(_, rest)| !rest.starts_with('Z')));
+    let running = |p: &&u32| fs::read_to_string(format!("/proc/{p}/stat")).is_ok_and(|st| st.rsplit_once(") ").is_some_and(|(_, rest)| !rest.starts_with('Z')));
     let t0 = Instant::now();
-    while killed.iter().any(running) && t0.elapsed() < LEFTOVERS_WAIT {
+    while killed.iter().any(|p| running(&p)) && t0.elapsed() < LEFTOVERS_WAIT {
         std::thread::sleep(Duration::from_millis(50));
     }
-    killed.len()
+    let left: Vec<&u32> = killed.iter().filter(running).collect();
+    ensure!(left.is_empty(), "its processes {left:?} still run {LEFTOVERS_WAIT:?} after a SIGKILL");
+    Ok(killed.len())
 }
 
 /// Copies what a run's directory keeps (all but `NOT_KEPT`) into `to`,
@@ -524,19 +550,21 @@ mod tests {
         let ram = place_in(&root, RUN, &disk, roomy).unwrap().expect("room");
         fill(ram.dir());
         ram.end(true);
-        assert_eq!(fs::read_to_string(root.join(RUN).join("cell/.wrangler/state/v3/do/x.sqlite")).unwrap(), "rows");
+        let state = root.join(RUN).join("cell/.wrangler/state/v3/do/x.sqlite");
+        assert_eq!(fs::read_to_string(&state).unwrap(), "rows");
+        // the next start's sweep tries again, fails again, and leaves it
+        place_in(&root, "bbbbbbbbbb", &tmp.disk("bbbbbbbbbb"), roomy).unwrap().expect("room").end(false);
+        assert_eq!(fs::read_to_string(&state).unwrap(), "rows");
     }
 
     #[test]
-    fn the_next_start_sweeps_a_dead_runs_directory_its_leftovers_killed_and_its_state_kept() {
+    fn the_next_start_sweeps_a_dead_runs_directory_its_state_kept_and_spares_a_live_one_and_all_else() {
         let tmp = Tmp::new();
         let root = tmp.0.join("ram");
         own_dir(&root).unwrap();
         let dead_disk = tmp.disk("aaaaaaaaaa");
         let dead_dir = dead(&root, "aaaaaaaaaa", &dead_disk);
-        // what it left running there
-        let mut leftover = std::process::Command::new("sleep").arg("600").current_dir(&dead_dir).spawn().unwrap();
-        // a start that died taking its place: no lock made
+        // a start killed between making its directory and its lock
         fs::create_dir_all(root.join("dddddddddd")).unwrap();
         let alive = place_in(&root, "bbbbbbbbbb", &tmp.disk("bbbbbbbbbb"), roomy).unwrap().expect("room");
         // what is not a run's: never touched
@@ -548,15 +576,49 @@ mod tests {
         })
         .unwrap()
         .expect("room");
-        assert!(!dead_dir.exists() && !root.join("dddddddddd").exists(), "the dead runs' directories are swept");
+        assert!(!dead_dir.exists(), "the dead run's directory is swept");
         assert!(kept(&dead_disk));
-        // the sweep waited for it to go: reaped now, or it was never killed
-        let status = leftover.try_wait().unwrap();
-        let _ = leftover.kill();
-        assert_eq!(status.and_then(|s| std::os::unix::process::ExitStatusExt::signal(&s)), Some(libc::SIGKILL), "its leftover is killed");
-        assert!(alive.dir().is_dir() && root.join("not-a-run").is_dir());
+        assert!(alive.dir().is_dir() && root.join("not-a-run").is_dir() && root.join("dddddddddd").is_dir());
         alive.end(false);
         next.end(false);
+    }
+
+    /// The node and Chromes a run killed outright left working in its
+    /// directory are killed before its sweep; a person's process there is
+    /// not (`sleep` stands in for each, as `node` and as itself).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_sweep_kills_the_node_and_chromes_a_dead_run_left_and_spares_all_else() {
+        use std::os::unix::process::ExitStatusExt;
+        let tmp = Tmp::new();
+        let root = tmp.0.join("ram");
+        own_dir(&root).unwrap();
+        let dead_dir = dead(&root, "aaaaaaaaaa", &tmp.disk("aaaaaaaaaa"));
+        let bin = tmp.0.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap()).map(|d| d.join("sleep")).find(|p| p.is_file()).expect("a sleep");
+        fs::copy(&sleep, bin.join("node")).unwrap();
+        let mut node = std::process::Command::new(bin.join("node")).arg("600").current_dir(&dead_dir).spawn().unwrap();
+        let mut person = std::process::Command::new(&sleep).arg("600").current_dir(&dead_dir).spawn().unwrap();
+        sweep(&root);
+        assert!(!dead_dir.exists());
+        // the sweep waited for it to go: reaped now, or it was never killed
+        let (killed, spared) = (node.try_wait().unwrap(), person.try_wait().unwrap());
+        let _ = (node.kill(), person.kill(), node.wait(), person.wait());
+        assert_eq!(killed.and_then(|s| s.signal()), Some(libc::SIGKILL), "the node it left is killed");
+        assert!(spared.is_none(), "a person's process is spared: {spared:?}");
+    }
+
+    #[test]
+    fn a_directory_no_run_made_is_never_adopted() {
+        let tmp = Tmp::new();
+        let shared = tmp.0.join("shared");
+        fs::create_dir_all(shared.join("aaaaaaaaaa")).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+        let refused = place_in(&shared, RUN, &tmp.disk(RUN), roomy).err().expect("refused");
+        assert!(format!("{refused:#}").contains("not a directory a run made"), "{refused:#}");
+        assert_eq!(fs::metadata(&shared).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(shared.join("aaaaaaaaaa").is_dir());
     }
 
     #[test]
