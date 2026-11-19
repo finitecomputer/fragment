@@ -97,6 +97,9 @@ one made earlier, it skips them, and you make your own.
 - **Files:** always into a new app (step 3), never into one an earlier
   import made: sending there would replace a file changed since. Say in
   the report that the earlier one is there too.
+- **Storage is yours, not an import's:** keep the rest in your own
+  storage (step 3) even when an earlier import made it, in a notes
+  folder of this import's own: what is kept there is never written over.
 - **Brains:** never push into a brain an earlier import made, or make a
   second of one: keep a reference copy, and compare it with that brain
   (the profile's "Once you are in the real one").
@@ -406,11 +409,15 @@ without `notify`, and wait for it with your `process` tool:
 fragment home files <source> --layout <L> --into <its name> --store <your storage> --notes "$HOME/old-agent/home" --json
 ```
 
+If `~/old-agent/home/` is there already (an earlier import kept its
+files there), use `--notes "$HOME/old-agent/home-<the stage>"` in its
+place, here and below, and write that folder in `progress.md`.
+
 It brings the cap's pick as above, and keeps every other file of the old
 home (its self, its brains' files, what the cap leaves) whole in your
 storage, copied there by the platform, never through your disk. Each
-folder or file kept gets a note in `~/old-agent/home/`, laid out as the
-old home was, as `fragment offload` leaves one: `fragment offload --back
+folder or file kept gets a note in that folder, laid out as the old
+home was, as `fragment offload` leaves one: `fragment offload --back
 <its note>` brings it back when you need it (only once there is room for
 it). Its answer counts the home's files: here, in storage, and unread.
 - **It stops partway:** run it again the same way. It goes on.
@@ -424,9 +431,9 @@ it). Its answer counts the home's files: here, in storage, and unread.
 
 Then deploy each, once: `fragment deploy <its name>` and
 `fragment deploy <your storage>`. And save one memory: the rest of your
-old home is kept in your storage, a note for each folder or file in
-`~/old-agent/home/`, and `fragment offload --back <its note>` brings one
-back.
+old home is kept in your storage, a note for each folder or file in that
+notes folder, and `fragment offload --back <its note>` brings one back
+(one you saved before for an earlier import: add this folder to it).
 
 ## 4. Personality
 
