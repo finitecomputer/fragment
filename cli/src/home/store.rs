@@ -358,11 +358,15 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
         // its parts, a window at a time: the blobs copied (or uploaded),
         // the small ones read, then committed
         let mut kept: Vec<(String, u64, Kept)> = Vec::with_capacity(parts.len());
+        // each file's CRC-32 as its parts were kept, in order, to check
+        // against the zip's own of the old file before its note
+        let mut sums: HashMap<&str, crc32fast::Hasher> = HashMap::new();
         let (mut batch, mut batch_bytes) = (Vec::new(), 0usize);
         let message = format!("home store: {}", g.key);
         for window in parts.chunks(WINDOW) {
             let made = part_bytes_of(src, &blobs, &into, window)?;
-            for ((_, _, _, path, len), (bytes, k)) in window.iter().zip(made) {
+            for ((file, _, _, path, len), (bytes, k, crc)) in window.iter().zip(made) {
+                sums.entry(file.path.as_str()).or_default().combine(&crc32fast::Hasher::new_with_initial_len(crc, *len));
                 batch_bytes += bytes.len();
                 batch.push(Change::Upsert { path: RepoPath::parse(path).expect("checked above"), bytes });
                 kept.push((path.clone(), *len, k));
@@ -375,7 +379,15 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
         if !batch.is_empty() {
             head = commit(c, &mut held, &author, head, &message, &batch)?;
         }
-        // proven: each part at main, the size it was written, each blob in the store
+        // proven: each file the old one (its parts' CRC-32, combined, the
+        // zip's of it), each part at main, the size it was written, each
+        // blob in the store
+        for k in &g.files {
+            let crc = sums.remove(k.path.as_str()).map(|h| h.finalize());
+            if crc != Some(k.crc32) {
+                bail!("{} in the stage is not the old file it names (its CRC-32 is {crc:08x?}, the zip's {:08x}); no note was written for {}", k.path, k.crc32, g.key);
+            }
+        }
         let rev = head.clone().ok_or_else(|| anyhow!("{into}'s main has no head after its commit"))?;
         there = held.get(c)?.list_files(&rev)?.entries.into_iter().map(|e| (e.path.as_str().to_string(), e.size)).collect();
         for (path, len, k) in &kept {
@@ -420,11 +432,12 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
     Ok(done)
 }
 
-/// Each part of `window`, as git keeps it: a blob's copied on the platform
-/// from a stage (`COPIES_AT_ONCE` at once) or uploaded from a zip here, its
-/// pointer; a small one read, its bytes.
-fn part_bytes_of(src: &Source, blobs: &Blobs, into: &str, window: &[(&Keep, &Moved, u64, String, u64)]) -> Result<Vec<(Vec<u8>, Kept)>> {
-    let mut out: Vec<Option<(Vec<u8>, Kept)>> = (0..window.len()).map(|_| None).collect();
+/// Each part of `window`, as git keeps it, and its bytes' CRC-32: a blob's
+/// copied on the platform from a stage (`COPIES_AT_ONCE` at once, its
+/// CRC-32 the platform's) or uploaded from a zip here, its pointer; a small
+/// one read, its bytes.
+fn part_bytes_of(src: &Source, blobs: &Blobs, into: &str, window: &[(&Keep, &Moved, u64, String, u64)]) -> Result<Vec<(Vec<u8>, Kept, u32)>> {
+    let mut out: Vec<Option<(Vec<u8>, Kept, u32)>> = (0..window.len()).map(|_| None).collect();
     let mut copies = Vec::new();
     for (i, (k, _, offset, _, len)) in window.iter().enumerate() {
         match (blobs.keeps(*len)?, src.stage_id().is_some(), src.span(&k.path)?) {
@@ -433,21 +446,27 @@ fn part_bytes_of(src: &Source, blobs: &Blobs, into: &str, window: &[(&Keep, &Mov
                 copies.push((i, start + offset, *len));
             }
             (true, _, _) => {
-                let stored = blobs.store(src.read_range(&k.path, *offset, *len)?)?;
+                let read = src.read_range(&k.path, *offset, *len)?;
+                let crc = crc32fast::hash(&read);
+                let stored = blobs.store(read)?;
                 let sha = blob::parse(&stored).map(|p| p.sha256).ok_or_else(|| anyhow!("{}: kept as a blob, but no pointer came back", k.path))?;
-                out[i] = Some((stored, Kept::Blob(sha)));
+                out[i] = Some((stored, Kept::Blob(sha), crc));
             }
-            (false, _, _) => out[i] = Some((src.read_range(&k.path, *offset, *len)?, Kept::Bytes)),
+            (false, _, _) => {
+                let read = src.read_range(&k.path, *offset, *len)?;
+                let crc = crc32fast::hash(&read);
+                out[i] = Some((read, Kept::Bytes, crc));
+            }
         }
     }
     for chunk in copies.chunks(COPIES_AT_ONCE) {
-        let copied: Vec<Result<String>> = std::thread::scope(|s| {
+        let copied: Vec<Result<(String, u32)>> = std::thread::scope(|s| {
             let running: Vec<_> = chunk.iter().map(|(_, at, len)| s.spawn(move || src.copy(into, *at, *len))).collect();
             running.into_iter().map(|t| t.join().unwrap_or_else(|_| Err(anyhow!("a copy's thread panicked")))).collect()
         });
         for ((i, _, len), sha) in chunk.iter().zip(copied) {
-            let sha = sha.with_context(|| format!("copying {}", window[*i].0.path))?;
-            out[*i] = Some((blob::pointer(&sha, *len).into_bytes(), Kept::Blob(sha)));
+            let (sha, crc) = sha.with_context(|| format!("copying {}", window[*i].0.path))?;
+            out[*i] = Some((blob::pointer(&sha, *len).into_bytes(), Kept::Blob(sha), crc));
         }
     }
     Ok(out.into_iter().map(|o| o.expect("every part made")).collect())
@@ -720,6 +739,29 @@ mod tests {
         assert_eq!(kept(&s.mock, STORE, "home/agent/hermes-home/state.db").as_ref(), Some(first), "the first copy is as it was kept");
         crate::offload::back(&s.c, &s.notes.join("agent.offloaded.md")).unwrap();
         assert_eq!(std::fs::read(s.notes.join("agent/hermes-home/state.db")).unwrap(), *first, "and its note brings it back");
+    }
+
+    /// Goal (Codex on #1388): a file damaged in the stage, its directory
+    /// whole, is never kept as the old file: its parts' CRC-32s, combined,
+    /// are checked against the zip's before its note, and no note is
+    /// written for it.
+    #[test]
+    fn a_damaged_file_in_parts_gets_no_note() {
+        let files = home();
+        let t = Temp::new();
+        let zip = t.0.join("stage.zip");
+        fragment_fakes::old_home::zip(&zip, &files).unwrap();
+        let mut bytes = std::fs::read(&zip).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).unwrap();
+        let i = archive.index_for_name("work/videos/big.mp4").unwrap();
+        let start = archive.by_index_raw(i).unwrap().data_start().unwrap();
+        bytes[start as usize + 3 * MIB] ^= 1;
+        let s = setup(&files);
+        s.mock.seed_stage("old1.p1.9", bytes);
+        let src = crate::home::open_from(Some(&s.c), Path::new("stage:old1.p1.9"), &layout()).unwrap();
+        let e = bring(&s.c, &src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("work/videos/big.mp4 in the stage is not the old file"), "{e}");
+        assert!(notes_under(&s.notes).unwrap().iter().all(|(_, r)| r.files.iter().all(|f| !f.path.ends_with("big.mp4"))), "no note names it");
     }
 
     /// Goal (Codex on #1389): a file named as another's part never takes
