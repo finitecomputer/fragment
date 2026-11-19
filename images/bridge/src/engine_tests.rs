@@ -50,6 +50,102 @@ fn runtime_work_holds_until_it_ends_and_is_never_restored() {
     assert_eq!(keepalive(&e.step(heard(Event::Working(false)), T0 + 6)), None);
 }
 
+// ---- work left running ----
+
+/// A slice of the computer's counters from `from`, over a floor or not.
+fn slice(e: &mut Engine, from: u64, over: bool) -> Option<bool> {
+    keepalive(&e.step(Input::Slice { from, over: Some(over) }, from + limits::LOAD_SLICE_MS))
+}
+
+/// A slice of the computer's counters from `from` under the platform's
+/// hold: a save's, which says nothing.
+fn saving(e: &mut Engine, from: u64) -> Option<bool> {
+    keepalive(&e.step(Input::Slice { from, over: None }, from + limits::LOAD_SLICE_MS))
+}
+
+/// Goal (the plan to a sandbox per agent, P6): work an agent leaves running
+/// (a build, a download) holds the computer while the computer works, for
+/// at most `LEFT_RUNNING_HOLD_MS` after its agents' work last held it.
+/// Valid: a slice over a floor wholly after a turn's end holds it; it lets
+/// go once the window holds none, and holds again at the next. Bound: it
+/// lets go at the bound, working or not, and a later turn's end gives a
+/// new one; and a window no slice renews (the counters went quiet) lets
+/// go. A save's slices say nothing: they start no hold, and end none.
+/// Invalid: work with no turn ended in this life holds nothing, nor
+/// the slice the turn's own work ran in. Restart: a new life holds none of
+/// an earlier life's, so a wake's own start never holds a computer woken
+/// for a look; its own turns give it one.
+#[test]
+fn work_left_running_holds_within_its_bound() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let (s, bound, window) = (limits::LOAD_SLICE_MS, limits::LEFT_RUNNING_HOLD_MS, limits::LOAD_SLICES as u64 * limits::LOAD_SLICE_MS);
+    // invalid: no turn of this life has ended
+    assert_eq!(slice(&mut e, T0 - s, true), None);
+    assert!(!e.keepalive(), "work with no turn of this life holds nothing");
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "build it" }), T0)).expect("started").turn;
+    let end = T0 + 10;
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), end)), Some(false));
+    // invalid: the slice the turn's work ran in, though over a floor
+    assert_eq!(slice(&mut e, T0, true), None);
+    assert!(!e.keepalive(), "the turn's own work holds nothing on");
+    // valid: the first slice wholly after it
+    let mut t = T0 + s;
+    assert_eq!(slice(&mut e, t, true), Some(true), "work left running holds it");
+    // under the floor for a window: it lets go; over again, it holds
+    for i in 1..limits::LOAD_SLICES as u64 {
+        assert_eq!(slice(&mut e, t + i * s, false), None, "held by the window");
+    }
+    t += limits::LOAD_SLICES as u64 * s;
+    assert_eq!(slice(&mut e, t, false), Some(false), "the window holds no slice over");
+    // a save on a quiet computer starts no hold (its own work)
+    assert_eq!(saving(&mut e, t), None);
+    assert!(!e.keepalive(), "a save holds nothing");
+    assert_eq!(slice(&mut e, t + s, true), Some(true));
+    // a save longer than the window while it works: its slices say
+    // nothing, and the hold stays through it (Codex on #1349)
+    let mut u = t + 2 * s;
+    for _ in 0..2 * limits::LOAD_SLICES {
+        assert_eq!(saving(&mut e, u), None, "held through the save");
+        u += s;
+    }
+    assert!(e.keepalive());
+    assert_eq!(slice(&mut e, u, true), None, "work again, still held");
+    t = u - s;
+    // the counters went quiet: the window runs out on its own
+    assert_eq!(keepalive(&e.step(Input::Tick, t + s + window)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, t + 2 * s + window)), Some(false), "no slice renews it");
+    // the bound, from the turn's end, working all the while
+    assert_eq!(slice(&mut e, end + bound - 2 * s, true), Some(true));
+    assert_eq!(keepalive(&e.step(Input::Tick, end + bound - 1)), None);
+    assert_eq!(keepalive(&e.step(Input::Tick, end + bound)), Some(false), "at the bound it lets go");
+    assert_eq!(slice(&mut e, end + bound, true), None);
+    // a later turn's end gives a new bound
+    let next = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "again" }), end + bound + s)).expect("started").turn;
+    let end2 = end + bound + s + 1;
+    assert_eq!(keepalive(&e.step(heard(Event::End { turn: next, outcome: Outcome::Idle }), end2)), Some(false));
+    assert_eq!(slice(&mut e, end2, true), Some(true), "a new bound");
+
+    // restart mid-hold, a turn running (a command, say): the next life
+    // holds nothing of it, though it ends that turn as lost (a wake's
+    // start must not count as this life's work ending)
+    said(&mut e, &a, &v, 99, "npub1paul", json!({ "text": "one more" }), end2 + 2);
+    assert!(e.state().turns.values().any(|t| t.phase == Phase::Running), "a turn runs as the life ends");
+    let settings = Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 };
+    let mut next = Engine::new(e.state().clone(), settings, "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    next.step(Input::Agents(vec![a.clone()]), end2 + s);
+    next.recover(end2 + s);
+    next.step(heard(Event::Connected(true)), end2 + s);
+    assert_eq!(slice(&mut next, end2 + s, true), None);
+    assert!(!next.keepalive(), "a new life holds no earlier life's work");
+    let t3 = end2 + 3 * s;
+    // in another chat: the lost turn's continuation waits its turn in its own
+    let turn3 = started(&to_own_chat(&mut next, &a, 1, json!({ "text": "and again" }), t3)).expect("started").turn;
+    assert_eq!(keepalive(&next.step(heard(Event::End { turn: turn3, outcome: Outcome::Idle }), t3 + 1)), Some(false));
+    assert_eq!(slice(&mut next, t3 + 1, true), Some(true), "its own turn's work holds it");
+}
+
 // ---- several runtimes ----
 
 /// What `runtime`, one of the bridge's, said.

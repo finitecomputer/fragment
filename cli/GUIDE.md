@@ -147,9 +147,11 @@ keeps and fires through every restart and sleep of its computer. Never
 a background loop, `sleep`, crontab or `hermes cron` on the computer:
 they die with it. The computer sleeps a while after nothing holds it
 awake (a turn, a port tab open on it), and a sleep or a restart ends
-every process an agent started: a server, a background command, a download. Nothing starts
-those again. What must outlive a turn is a routine, or an app (its crons
-and triggers run on the platform). The agent is an editor of its own fragment, so it adds
+every process an agent started: a server, a background command, a
+download. Nothing starts those again. One still working (a build, a
+download) keeps the computer awake up to 2 hours after the agent's last
+turn; an idle server does not. What must outlive that is a routine, or
+an app (its crons and triggers run on the platform). The agent is an editor of its own fragment, so it adds
 one as any editor does; on a computer `fragment schedule` acts on the
 agent's own fragment unless another is named, and `--routine` builds the
 routine record:

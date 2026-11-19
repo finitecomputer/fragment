@@ -329,6 +329,18 @@ pub const LIVE_PING_MS: u64 = 30_000;
 /// platform then counts it closed, and its computer would sleep under the
 /// turn that holds it.
 pub const KEEPALIVE_PING_MS: u64 = 15_000;
+/// Work left running (load.rs) holds the computer at most this long after
+/// its agents' work last did: what a forgotten loop costs, at most.
+pub const LEFT_RUNNING_HOLD_MS: u64 = 2 * 60 * 60 * 1000;
+/// The counters are read every slice; the computer works while one of its
+/// last `LOAD_SLICES` was over a floor (a pause in the work holds on).
+pub const LOAD_SLICE_MS: u64 = 20_000;
+pub const LOAD_SLICES: usize = 6;
+/// The floors: CPU in thousandths of a core, network both ways. Measured
+/// in the Hermes image (#1349): idle at most 29 and 1,700 B/s; a busy loop
+/// about 1,000; a 200 KB/s download only 7–11 of CPU.
+pub const LOAD_CPU_FLOOR_PERMILLE: u64 = 50;
+pub const LOAD_NET_FLOOR_BYTES_PER_S: u64 = 50_000;
 
 /// A post the platform did not take is tried this many times, waiting a
 /// jittered backoff between (ids make every retry the same record).
