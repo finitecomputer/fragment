@@ -696,7 +696,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once it is gone: 404 to everyone, out of its owner's list, its name free. Its members' lists, app database and blobs go after, by its alarm (`fragment_core::ended`: retried, a part refused or failing ten tries held and tried daily). An agent fragment's agent leaves its computer and is named by it no more. Its code.storage repo is deleted by the same alarm, retried and held as the rest, when it is named by the life's own key (Names). A repo named by its owner (a fragment made before that naming) stays: a rolled-back release names repos so, and its create of the name would find one whose delete was still to come. Those wait for a sweep once no rollback can reach such a release (FIN-540). A life made again under the name, even before that delete, has a fresh repo of its own and is untouched by the old one's cleanup. Nothing reaches copies outside the platform: what an agent's computer synced, or exports people downloaded |
 | `GET /api/f/{name}/status` | viewer | → `FragmentStatus` (docs/wire, `fragments.status`), as the caller's role sees it: the share link's and the inbox's tokens only for those who hold them |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main; none 404 |
-| `GET /api/f/{name}/members` | viewer | → `MemberList` (docs/wire, `members.list`); to the owner, and their agent for them, each person's `email` too, as the share sheet shows it (decision 48) |
+| `GET /api/f/{name}/members` | viewer | → `MemberList` (docs/wire, `members.list`); to the owner, and their agent for them, each person's `email` too, as the share sheet shows it (decision 48); on a connector bound as an agent's door, that agent's row says its `door` while it is open (An agent's doors) |
 | `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer \| editor}` (another field 400) → the member, added or its role changed. A new member this way is one of the owner's own agents alone; anyone else 403 (invite them). An email no one signs in as, 404. A person's agents follow their role (an agent's own 400). A chat's lead agent (the first added) is never set below `editor` (400). An agent on a computer is told (`joined` on its `tasks`) and its computer woken. Its waits, in `Server-Timing`: `identity`, `list`, `joined` |
 | `DELETE /api/f/{name}/members/{id\|npub\|email\|me}` | owner, or their agent for them; the member | → `{ok, removed}`, closing their feeds. A person goes with their agents in it, and such an agent takes its person and their other agents (decision 64). A chat's lead agent is removed by no one else (400); it may leave |
 | `POST /api/f/{name}/invites` | owner, or their agent for them | `{email, role}` → `{invited: {email, role, expiresAt, createdBy}}` (Invites by email). In it already 400 |
@@ -2183,9 +2183,13 @@ nor speak through one (`fragment_core::door`):
   /api/f/{name}/door`, or `__door`), to an agent of theirs, which joins as
   a viewer. Bound and allowed, its app may publish records in its own
   channels whose `relayed` is exactly `{via: <door>, for: <owner>, agent}`,
-  unsigned, and its jobs read that in `job.door`. The binding is the
-  connector's, so several connectors may each be a door of one agent; an
-  unlink leaves the agent a viewer. Its rules are cell/src/doors.rs's.
+  unsigned, and its jobs read that in `job.door`. While it is open, its
+  members list says so on that agent's row (`door`: the door's id), and
+  on no other: that is how the agent's bridge and the chat's page know
+  which records relaying its owner came through its door
+  (docs/chat-records.md). The binding is the connector's, so several
+  connectors may each be a door of one agent; an unlink leaves the agent
+  a viewer. Its rules are cell/src/doors.rs's.
 
 A SimpleX door's key and ticket live in the agent fragment's `meta`, and
 go with it.
