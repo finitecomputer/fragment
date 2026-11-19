@@ -54,7 +54,7 @@ fn power(role: Role) -> Option<Role> {
 }
 
 /// `person` on `people` at the most of what they did and `role` lets them.
-fn count(people: &mut Audience, person: &str, role: Role) {
+pub fn count(people: &mut Audience, person: &str, role: Role) {
     if let Some(power) = power(role) {
         match people.iter_mut().find(|(p, _)| p == person) {
             Some((_, held)) => *held = (*held).max(power),
