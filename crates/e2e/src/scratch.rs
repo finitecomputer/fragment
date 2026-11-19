@@ -41,10 +41,10 @@ pub const VAR: &str = "FRAGMENT_E2E_SCRATCH";
 
 const GIB: u64 = 1 << 30;
 /// A run's disposable state at its largest, with room: a whole run's
-/// project held 0.95 GiB at its end (2026-11-19, without the trace store,
-/// `devstack::NodeOptions::trace_store`) and its Chromes' profiles up to
-/// 0.16 GiB.
-pub const PEAK: u64 = 3 * GIB / 2;
+/// peaked at 1.27 GiB (2026-11-19, without the trace store,
+/// `devstack::NodeOptions::trace_store`: Durable Objects 0.77, Chrome's
+/// profiles 0.16, Workflows 0.13, temporary files 0.15, R2 0.05).
+pub const PEAK: u64 = 2 * GIB;
 /// The most one run may hold in RAM: past it, the run stops (`watch`).
 pub const CAP: u64 = 4 * GIB;
 /// RAM the box keeps available (`MemAvailable`) with every run in RAM at
