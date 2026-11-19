@@ -3,8 +3,10 @@
 //! - the restore gate (`RESTORE_PENDING=1`: wait for
 //!   `/run/computer/restored` before reading `/data`);
 //! - the life: 128 random bits of this process's, never written to `/data`;
-//! - the state file (`<state>/state.json`), written whole and renamed into
-//!   place after every step that changed it, before the step's effects;
+//! - the state (store.rs): what each step changed, appended to
+//!   `<state>/state.log` and synced before the step's effects, and written
+//!   whole to `<state>/state.json` as the bridge starts, as the log fills,
+//!   and while the platform holds the computer;
 //! - followers: for each agent and each fragment it follows (its chats'
 //!   `chat`, its own `tasks`), a wake subscription, a catch-up from the
 //!   cursor over `GET …/channels/{c}?after=`, then `__live`, reconnecting
@@ -33,7 +35,7 @@ use tokio::sync::{mpsc, watch, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::{self, Api, ApiError, HomeChat};
-use crate::engine::{self, ChatView, ClaimAnswer, Effect, Engine, Input, Settings, State};
+use crate::engine::{self, ChatView, ClaimAnswer, Effect, Engine, Input, Settings};
 use crate::history::{Budget, Unavailable};
 use crate::limits;
 use crate::net::Backoff;
@@ -42,6 +44,7 @@ use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Cause, Record};
 use crate::runtime::{Agent, Command, Event, Kept, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
 use crate::scratch::Scratch;
+use crate::store::{Gate, Store};
 
 /// Each running turn's files (its message's, its answers'), by turn: their
 /// pins (`LocalFile::pin`) held until the engine ends the turn (`act`), so
@@ -113,39 +116,6 @@ impl std::fmt::Display for BridgeError {
     }
 }
 
-// ---- state on disk ----
-
-pub fn state_path(dir: &Path) -> PathBuf {
-    dir.join("state.json")
-}
-
-/// The state as last written, or a fresh one. A state of another format (an
-/// older bridge's) is set aside for a fresh one: the state is a cache of
-/// the journal (one life per turn), so starting from none reads the chats
-/// again and runs nothing twice. A state that contradicts itself is refused.
-pub fn load(dir: &Path) -> Result<State, BridgeError> {
-    let path = state_path(dir);
-    let corrupt = |why: String| BridgeError::Corrupt(format!("{}: {why}", path.display()));
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            if bytes.len() > limits::STATE_FILE_MAX_BYTES {
-                return Err(corrupt(format!("{} bytes, past the bound", bytes.len())));
-            }
-            let value: Value = serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
-            let Some(version) = value.get("version").and_then(Value::as_u64) else { return Err(corrupt("no version".into())) };
-            if !engine::STATE_VERSIONS.iter().any(|v| u64::from(*v) == version) {
-                crate::ev!("state.set_aside", { "path": path.display().to_string(), "version": version, "why": "another bridge's format: the journal says which turns ran" });
-                return Ok(State::default());
-            }
-            let state: State = serde_json::from_value(value).map_err(|e| corrupt(e.to_string()))?;
-            engine::check(&state).map_err(|c| BridgeError::Corrupt(c.0))?;
-            Ok(state)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
-        Err(e) => Err(BridgeError::Disk(format!("{}: {e}", path.display()))),
-    }
-}
-
 /// This process's life: 128 bits from the kernel's random source, as 32
 /// lowercase hex. Never written to `/data`, so no save carries it into
 /// another life (docs/chat-records.md, `turn.start`).
@@ -157,27 +127,6 @@ pub fn new_life() -> Result<String, BridgeError> {
     let life = records::hex(&bits);
     assert!(records::valid_life(&life), "a life is 32 lowercase hex");
     Ok(life)
-}
-
-/// Writes the state whole: a temporary file, synced, renamed over the old,
-/// and the directory synced, so a crash leaves the old state or the new.
-pub fn save(dir: &Path, state: &State) -> Result<(), BridgeError> {
-    let bytes = serde_json::to_vec(state).map_err(|e| BridgeError::Disk(e.to_string()))?;
-    assert!(bytes.len() <= limits::STATE_FILE_MAX_BYTES, "the engine bounds its state: {} bytes", bytes.len());
-    let path = state_path(dir);
-    let tmp = dir.join("state.json.tmp");
-    let write = || -> std::io::Result<()> {
-        use std::io::Write;
-        std::fs::create_dir_all(dir)?;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, &path)?;
-        std::fs::File::open(dir)?.sync_all()?;
-        Ok(())
-    };
-    write().map_err(|e| BridgeError::Disk(format!("{}: {e}", path.display())))?;
-    Ok(())
 }
 
 /// Whether `pattern` is one a hold's answer may name (docs/computers.md,
@@ -319,12 +268,16 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // the hold as the runtimes see it, and what of theirs it waits on
     let (held_tx, held_rx) = watch::channel(false);
     let runtimes_unquiet = Arc::new(AtomicUsize::new(0));
+    // and the state's log, written into its snapshot before the answer
+    // (store.rs, `Gate`): unknown until the store opens, so no answer
+    // before it has
+    let gate = Arc::new(Gate { logged: std::sync::atomic::AtomicBool::new(true), ..Gate::default() });
     let answer: String = cfg.left_out.iter().map(|p| format!("{p}\n")).collect();
     // a core a bridge before this one left running is gone before any hold is answered
     if let Some(sc) = &cfg.simplex {
         crate::simplex::run::kill_strays(sc).await;
     }
-    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), held_tx, runtimes_unquiet.clone(), stop.clone()));
+    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), held_tx, runtimes_unquiet.clone(), gate.clone(), stop.clone()));
     // SimpleX, when the image names its core: told of the computer at each
     // read; it says which agents' links are bound (`relaying`), whose
     // relayed records alone the engine honors, each with its SimpleX chat
@@ -335,7 +288,8 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     if let Some(h) = &simplex {
         let _ = simplex_page.handle.set(h.clone());
     }
-    let state = load(&cfg.state_dir)?;
+    let (store, state) = Store::open(&cfg.state_dir, gate)?;
+    let store = Mutex::new(store);
     let life = new_life()?;
     let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?;
 
@@ -398,6 +352,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
     let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, scratch.clone(), turn_files.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
+    tokio::spawn(crate::load::watch(inbox_tx.clone(), Msg::Input, Duration::from_millis(limits::LOAD_SLICE_MS), held_rx.clone(), stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
     // what each agent linked to SimpleX works on in its SimpleX chat, as its
@@ -420,7 +375,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
             }
         }
         if step.dirty {
-            save(&cfg.state_dir, engine.state())?;
+            store.lock().expect("store").write(engine.state())?;
             // a turn over lets its files go (bounded: the turns open)
             turn_files.lock().expect("turn files").retain(|t, _| engine.state().turns.get(t).is_some_and(|t| t.phase != engine::Phase::Ended));
             *shared.cursors.lock().expect("cursors") = engine.state().cursors.clone();
@@ -511,6 +466,9 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut computer_read = Instant::now();
     let mut stop_rx = stop.clone();
+    // the hold as the runtimes see it: as it comes, the state's log is
+    // written into its snapshot, which its answer waits for
+    let mut holding = held_rx.clone();
     // bounded by the bridge's life: one input per pass, ended by `stop`
     let result = loop {
         tokio::select! {
@@ -548,6 +506,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     break Err(e);
                 }
             }
+            Ok(()) = holding.changed() => {
+                if let Err(e) = store.lock().expect("store").settle() {
+                    break Err(e);
+                }
+            }
             r = relaying_rx.changed() => {
                 if r.is_err() {
                     break Ok(());
@@ -562,6 +525,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
             _ = tick.tick() => {
                 let s = engine.step(Input::Tick, crate::log::now_ms());
                 if let Err(e) = act(&engine, s) {
+                    break Err(e);
+                }
+                // held, its log written into its snapshot (a backstop: it
+                // is, as the hold comes)
+                if let Err(e) = store.lock().expect("store").settle() {
                     break Err(e);
                 }
                 // The computer's agents are read again this often: one assigned
@@ -840,7 +808,8 @@ async fn list_follows(api: &Api, agent: &Agent, only: Option<Vec<String>>) -> Re
     Ok(out)
 }
 
-/// A chat's members and names, read again after `VIEW_TTL_MS`.
+/// A chat's members and names, read again after `VIEW_TTL_MS`, or for its
+/// door when a record needs one (`feed`).
 struct ViewCache {
     view: ChatView,
     since: i64,
@@ -854,6 +823,7 @@ impl ViewCache {
         self.read_at.is_some_and(|t| t.elapsed() < Duration::from_millis(limits::VIEW_TTL_MS) && joined.is_none_or(|j| j < t))
     }
 
+
     /// Reads the chat's agents (in the order they were added), its writers'
     /// names, and when this agent joined: records from before are history.
     async fn read(&mut self, api: &Api, agent: &Agent, fragment: &str, writer: Option<&str>) -> Result<(), ApiError> {
@@ -862,6 +832,9 @@ impl ViewCache {
         self.view.agents = members.iter().filter(|m| m.kind == "agent").map(|m| m.principal.clone()).collect();
         self.view.people = members.iter().filter(|m| m.kind != "agent").map(|m| m.principal.clone()).collect();
         self.since = members.iter().find(|m| m.principal == agent.identity).map(|m| m.added_at).unwrap_or(0);
+        // the door this chat is of this agent's, as its own row says (the
+        // connector's binding, while open: docs/api.md, "An agent's doors")
+        self.view.door = members.iter().find(|m| m.principal == agent.identity).and_then(|m| m.door.clone()).filter(|d| records::door_ok(d));
         // Who to name, at most `PEOPLE_MAX` (one `__people`): the writer whose
         // record asked first, then its people, then its other agents (an
         // agent's message, a hand-off, is told by its name: its title, as
@@ -1092,9 +1065,23 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         // a writer the view has no name for (a person or another agent past
         // the last read's bound, or new): read again, with it first
         let unknown = records::is_identity(&record.principal) && record.principal != agent.identity && !view.view.names.contains_key(&record.principal);
-        if !view.fresh(shared.joined_at(fragment)) || unknown {
-            if let Err(e) = view.read(api, agent, fragment, Some(&record.principal)).await {
-                crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() });
+        // its owner's words carried by another key: whether this chat is a
+        // door of the agent's, as its row says now (the engine takes them
+        // as its owner's only through that door: `relayed_for`), read again
+        // whenever its view names none, so a door bound since it was read
+        // (an unlink and a link again, its agent a member throughout, which
+        // no join announces) is seen at its first record. One read a
+        // record, beside the turn the record starts either way. That read
+        // failing in a way asking again may pass ends the follow, which
+        // reads the record again from the cursor, so an owner's message is
+        // never taken for its carrier's for a blip.
+        let relays = record.at >= view.since && record.principal != agent.identity && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment);
+        let door = relays && view.view.door.is_none();
+        if !view.fresh(shared.joined_at(fragment)) || unknown || door {
+            match view.read(api, agent, fragment, Some(&record.principal)).await {
+                Ok(()) => {}
+                Err(e) if door && e.retryable() => return Some(Ended::Again(format!("its members did not read for its door (seq {}): {e}", record.seq))),
+                Err(e) => crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() }),
             }
         }
         (Some(view.view.clone()), view.since)
@@ -1688,11 +1675,12 @@ impl RuntimeLane {
                 // in its words with where each is (`with_files`)
                 let keep = |turn: &str, files: &[LocalFile]| turn_files.lock().expect("turn files").entry(turn.to_string()).or_default().extend(files.iter().map(|f| f.pin.clone()));
                 match &mut c {
-                    Command::Tell { turn, text, attached, .. } => {
+                    Command::Tell { turn, text, attached, files: told, .. } => {
                         if let Some(a) = attached.take() {
                             let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
                             keep(turn, &files);
                             *text = crate::runtime::with_files(text, &a.by_name, a.refs.len(), &files);
+                            *told = files;
                         }
                     }
                     Command::Answer { turn, words, attached, .. } => {
@@ -1728,7 +1716,7 @@ impl RuntimeLane {
                     let notes: Vec<String> = [ts.age.take(), ts.note.take(), note].into_iter().flatten().collect();
                     ts.note = (!notes.is_empty()).then(|| notes.join("\n\n"));
                     // (its own, a card's turn, in the cut note's place: `note_for`)
-                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 6), "a turn's notes are bounded");
+                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 4), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
                 if to_runtime.send(c).await.is_err() {
@@ -1773,7 +1761,7 @@ async fn quote_of(api: &Api, ts: &TurnStart, seq: u64) -> Option<Quote> {
 /// from its owner (docs/chat-records.md, "A relayed message"), which are
 /// its owner's.
 fn own_words(principal: &str, body: &Value, agent: &crate::runtime::Agent) -> bool {
-    principal == agent.identity && records::relayed(body).is_none_or(|r| r.for_ != agent.owner)
+    note::own_words(principal, body, &agent.identity, &agent.owner)
 }
 
 /// A message's attachments, from the chat's blobs to scratch files, each
@@ -1799,19 +1787,27 @@ async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef]
 /// answer, the channel's first record is read, or `NOTE_SCAN_RECORDS_MAX`
 /// are. With whether they reach back to its start.
 async fn read_back(api: &Api, agent: &str, fragment: &str, channel: &str, before: u64, enough: impl Fn(&[Record]) -> bool, budget: &mut Budget) -> Result<(Vec<Record>, bool), Unavailable> {
+    read_pages(api, agent, fragment, channel, before, (limits::NOTE_PAGE_RECORDS, limits::NOTE_SCAN_RECORDS_MAX), enough, budget).await
+}
+
+/// `read_back`, a page of `scan.0` records at a time, at most `scan.1`.
+#[allow(clippy::too_many_arguments)]
+async fn read_pages(api: &Api, agent: &str, fragment: &str, channel: &str, before: u64, scan: (u32, usize), enough: impl Fn(&[Record]) -> bool, budget: &mut Budget) -> Result<(Vec<Record>, bool), Unavailable> {
+    let (page_records, most) = scan;
+    assert!((1..=limits::NOTE_PAGE_RECORDS).contains(&page_records) && page_records as usize <= most, "a scan reads whole pages");
     let mut got: Vec<Record> = Vec::new();
     // the newest seq not read yet
     let mut upto = before.saturating_sub(1);
-    // bounded by NOTE_SCAN_RECORDS_MAX: each pass reads a page further back
+    // bounded by `most`: each pass reads a page further back
     loop {
         if upto == 0 {
             return Ok((got, true));
         }
-        if enough(&got) || got.len() >= limits::NOTE_SCAN_RECORDS_MAX {
+        if enough(&got) || got.len() >= most {
             return Ok((got, false));
         }
-        let after = upto.saturating_sub(u64::from(limits::NOTE_PAGE_RECORDS));
-        let (page, size) = api.history_records(agent, fragment, channel, after, limits::NOTE_PAGE_RECORDS, budget.request()?).await?;
+        let after = upto.saturating_sub(u64::from(page_records));
+        let (page, size) = api.history_records(agent, fragment, channel, after, page_records, budget.request()?).await?;
         budget.bytes(size)?;
         budget.page(&page.records, channel, after, upto)?;
         let mut older: Vec<Record> = page.records.into_iter().filter(|r| r.seq <= upto).collect();
@@ -1869,18 +1865,22 @@ async fn card_history(api: &Api, agent: &Agent, fragment: &str, record: &Record)
 /// The note a turn carries (note.rs): at the agent's first turn in a chat
 /// continued from its owner's Session Archive, what was said there
 /// (`history_note`, at most `HISTORY_NOTE_MAX_BYTES`); what a restart cut
-/// of the agent's turn before it in the chat (`cut_note`); and what its
-/// runtime does not remember of the chat (`forgotten_note`), each from the
-/// chat's journal, the last two together at most twice a note's bound. `None` when there is neither, or
-/// the journal did not answer: a turn is never held back for its note. A
-/// late card answer's turn carries its card's turn as its note already
-/// (`TurnStart::note`), in the cut note's place: that turn is the one a
-/// restart cut, most often, and is told once.
+/// of the agent's turn before it in the chat (`cut_note`); and, when its
+/// runtime forgot the chat, the chat (`forgotten_note`, at most
+/// `HISTORY_NOTE_MAX_BYTES`), each from the chat's journal. A runtime that
+/// forgot the chat ran turns there, so it is not told a history, which is
+/// a first turn's alone. `None` when there is none, or the journal did not
+/// answer: a turn is never held back for its note. A late card answer's
+/// turn carries its card's turn as its note already (`TurnStart::note`),
+/// in the cut note's place: that turn is the one a restart cut, most
+/// often, and is told once.
 async fn note_for(api: &Api, ts: &TurnStart) -> Option<String> {
     let cut = async { if ts.note.is_some() { None } else { cut_note(api, ts).await } };
-    let (history, cut, forgot) = tokio::join!(history_note(api, ts), cut, forgotten_note(api, ts));
+    let history = async { if ts.forgotten { None } else { history_note(api, ts).await } };
+    let (history, cut, forgot) = tokio::join!(history, cut, forgotten_note(api, ts));
+    assert!(history.is_none() || forgot.is_none(), "a history or a recap, never both");
     let note = [history, cut, forgot].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
-    assert!(note.len() <= limits::HISTORY_NOTE_MAX_BYTES + 2 * limits::NOTE_MAX_BYTES + 4, "a turn's notes are bounded");
+    assert!(note.len() <= limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 2, "a turn's notes are bounded");
     (!note.is_empty()).then_some(note)
 }
 
@@ -1904,41 +1904,88 @@ async fn history_note(api: &Api, ts: &TurnStart) -> Option<String> {
     Some(text)
 }
 
-/// What the agent no longer remembers of the chat (note.rs, "forgotten"):
-/// its turns there that another life ran since this life's `/data` was
-/// saved (`TurnStart::forgotten`), read from `work` back from the turn's
-/// claim to the oldest of their starts, and from `chat` back from its tail
-/// to the oldest of their causes. `None` when there are none, or the
-/// journal did not answer.
+/// The chat, told to a runtime that forgot it (`TurnStart::forgotten`;
+/// note.rs, `exchanges` and `recap`): its messages before the turn's own
+/// (for a turn no message of this chat started, those said by its claim),
+/// since the agent joined (its `members` row) and its owner's newest `/new`
+/// it ran, read back from `chat` until the note is full; `work` back from
+/// the claim to their turns' starts, for their tools and that `/new`; and
+/// the names of whoever else said them (`__people`, within the note's own
+/// time; unread, they are `Someone`). One `Budget`, each read complete or
+/// none. `None` when the runtime forgot
+/// nothing here, there is nothing to tell, or the chat did not answer.
 async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
-    if ts.forgotten.is_empty() {
+    if !ts.forgotten {
         return None;
     }
     let claim = ts.claim_seq?;
-    let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
-    let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "forgotten": ts.forgotten.len(), "error": e.why() });
-    let started = |rs: &[Record]| ts.forgotten.iter().all(|t| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == t.as_str()));
-    let (work, _) = read_back(api, agent, chat, records::WORK, claim, started, &mut Budget::default()).await.map_err(unread).ok()?;
-    // their causes in this chat: the chat read back to the oldest of them
-    let causes: Vec<u64> = work
-        .iter()
-        .filter(|r| r.principal == me && r.body["kind"] == "turn.start" && ts.forgotten.iter().any(|t| r.body["turn"] == t.as_str()))
-        .filter(|r| r.body["cause"]["fragment"] == chat && r.body["cause"]["channel"] == records::CHAT)
-        .filter_map(|r| r.body["cause"]["seq"].as_u64())
-        .collect();
-    let oldest = causes.iter().min().copied().unwrap_or(0);
-    let said = async {
-        let tail = api.channels(agent, chat).await?.into_iter().find(|c| c.name == records::CHAT).map_or(0, |c| c.seq);
-        read_back(api, agent, chat, records::CHAT, tail + 1, |rs| rs.first().is_some_and(|r| r.seq <= oldest), &mut Budget::default()).await
-    };
-    let said: Vec<Record> = said.await.map_err(unread).map(|(rs, _)| rs).unwrap_or_default();
-    let items = note::forgotten(&work, &said, me, &ts.forgotten);
-    if items.is_empty() {
-        crate::ev!("note.unread", { "turn": ts.turn, "why": "no forgotten turn's start among the records read", "forgotten": ts.forgotten.len() });
+    let (agent, chat, me, owner) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str(), ts.agent.owner.as_str());
+    let began = tokio::time::Instant::now();
+    let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "forgotten": true, "error": e.why() });
+    // the turn's claim names what started it; the agent's row, when it joined
+    let (claimed, members) = tokio::join!(api.records(agent, chat, records::WORK, claim.saturating_sub(1), 1), api.members(agent, chat));
+    let claimed = claimed.map_err(|e| unread(e.into())).ok()?.records.into_iter().find(|r| r.seq == claim && r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == ts.turn.as_str());
+    let since = members.map_err(|e| unread(e.into())).ok()?.into_iter().find(|m| m.principal == me).map(|m| m.added_at);
+    let (Some(claimed), Some(since)) = (claimed, since) else {
+        crate::ev!("note.unread", { "turn": ts.turn, "forgotten": true, "why": "its claim, or its agent's membership, is not where the turn says" });
         return None;
+    };
+    let cause = serde_json::from_value::<Cause>(claimed.body["cause"].clone()).ok();
+    let in_chat = cause.as_ref().filter(|c| c.fragment == chat && c.channel == records::CHAT).map(|c| c.seq);
+    let until = if in_chat.is_some() { i64::MAX } else { claimed.at };
+    let mut budget = Budget::default();
+    let before = match in_chat {
+        Some(seq) => seq,
+        None => {
+            budget.request().map_err(unread).ok()?;
+            api.channels(agent, chat).await.map_err(|e| unread(e.into())).ok()?.into_iter().find(|c| c.name == records::CHAT).map_or(0, |c| c.seq).saturating_add(1)
+        }
+    };
+    let full = |rs: &[Record]| {
+        let (said, begins) = note::exchanges(rs, me, owner, since, until);
+        begins || note::recap_bytes(&said) >= limits::HISTORY_NOTE_MAX_BYTES
+    };
+    // small pages: a page of the chat's longest records is one answer still
+    let (read, from_start) = read_pages(api, agent, chat, records::CHAT, before, (limits::RECAP_PAGE_RECORDS, limits::RECAP_SCAN_RECORDS), full, &mut budget).await.map_err(unread).ok()?;
+    let (mut said, mut begins) = note::exchanges(&read, me, owner, since, until);
+    let Some(oldest) = said.first().map(|r| r.at) else {
+        crate::ev!("note.none", { "turn": ts.turn, "forgotten": true, "why": "nothing said here before it to tell" });
+        return None;
+    };
+    // their turns' starts and steps: `work` back from the claim to before
+    // the oldest of them, and to the start of each turn a reply names
+    let replied: Vec<&str> = said.iter().filter(|r| note::own_words(&r.principal, &r.body, me, owner)).filter_map(|r| r.body["turn"].as_str()).collect();
+    let started = |rs: &[Record]| rs.first().is_some_and(|r| r.at < oldest) && replied.iter().all(|t| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == *t));
+    // and whoever else said them, by name, beside it: a name not read in
+    // time is `Someone`, and the note goes on
+    let mut others: Vec<String> = said.iter().map(|r| r.principal.clone()).filter(|p| p != me && p != owner).collect();
+    others.sort();
+    others.dedup();
+    let names = async {
+        if others.is_empty() {
+            return BTreeMap::new();
+        }
+        // within the note's own time, the recap's spare kept
+        let by = (began + Duration::from_millis(limits::NOTE_READ_MS_MAX - limits::RECAP_SPARE_MS)).min(tokio::time::Instant::now() + Duration::from_millis(limits::NAMES_READ_MS_MAX));
+        let read = tokio::time::timeout_at(by, api.people(agent, chat, &others)).await;
+        read.map_err(|_| "the names answered too slowly".to_string()).and_then(|r| r.map_err(|e| e.to_string())).unwrap_or_else(|why| {
+            crate::ev!("note.names_unread", { "turn": ts.turn, "why": why });
+            BTreeMap::new()
+        })
+    };
+    let (work, names) = tokio::join!(read_back(api, agent, chat, records::WORK, claim, started, &mut budget), names);
+    let work = work.map_err(unread).ok()?.0;
+    // a `/new` it ran began its runtime's conversation again (one naming no
+    // agent was the lead's then): nothing before it is told
+    if let Some(seq) = note::restarted(&read, &work, me, owner, chat) {
+        said.retain(|r| r.seq > seq);
+        begins = true;
     }
-    let text = note::forgotten_text(&items, ts.forgotten_more);
-    crate::ev!("note", { "turn": ts.turn, "forgotten": items.len(), "more": ts.forgotten_more, "bytes": text.len() });
+    let Some(text) = note::recap(&said, &work, me, owner, &names, chat, begins || from_start) else {
+        crate::ev!("note.none", { "turn": ts.turn, "forgotten": true, "why": "nothing said here since its /new to tell" });
+        return None;
+    };
+    crate::ev!("note", { "turn": ts.turn, "forgotten": true, "messages": said.len(), "bytes": text.len() });
     Some(text)
 }
 
@@ -2007,22 +2054,29 @@ async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
 /// hold, and starts none while it lasts; always true with no SimpleX), and
 /// nothing of a runtime's own runs outside its turns (`runtimes_unquiet`:
 /// each runtime is told the hold, `runtimes_held`, and quiets its own), and
-/// not otherwise. The platform clears `held` before each hold, so an
-/// answer is always to the hold it finds. The answer is `answer`: what the
+/// not otherwise; and it is first written once the state's log holds
+/// nothing its snapshot does not (`gate`: so a save holds the state whole,
+/// as an older bridge reads it). The platform clears `held` before each
+/// hold, so an answer is always to the hold it finds. The answer is `answer`: what the
 /// save may leave out, one per line (none, empty). Looked at every
 /// `HOLD_POLL_MS`, for the bridge's life.
 #[allow(clippy::too_many_arguments)]
-async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, runtimes_held: watch::Sender<bool>, runtimes_unquiet: Arc<AtomicUsize>, mut stop: watch::Receiver<bool>) {
+async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, runtimes_held: watch::Sender<bool>, runtimes_unquiet: Arc<AtomicUsize>, gate: Arc<Gate>, mut stop: watch::Receiver<bool>) {
     assert!(hold != held, "a hold and its answer are two files");
     assert!(answer.len() <= limits::HELD_ANSWER_MAX_BYTES, "an answer the platform reads whole");
     // bounded by the bridge's life: one look per `HOLD_POLL_MS`, ended by `stop`
     loop {
         let holding = hold.exists();
+        // stored before the log is looked at (store.rs, `Gate`)
+        gate.holding.store(holding, Ordering::SeqCst);
         runtimes_held.send_if_modified(|was| std::mem::replace(was, holding) != holding);
         let quiet = holding && in_flight.load(Ordering::SeqCst) == 0 && cores_quiet.load(Ordering::SeqCst) && runtimes_unquiet.load(Ordering::SeqCst) == 0;
         match (quiet, held.exists()) {
-            // written whole, then renamed: the platform never reads half
-            (true, false) => match write_whole(&held, answer.as_bytes()) {
+            // written whole, then renamed: the platform never reads half.
+            // The log stops an answer not made yet, never takes one back:
+            // once held, every write is whole and none says the log holds a
+            // change (store.rs).
+            (true, false) if !gate.logged.load(Ordering::SeqCst) => match write_whole(&held, answer.as_bytes()) {
                 Ok(()) => crate::ev!("held", { "held": held.display().to_string() }),
                 Err(e) => crate::ev!("held.failed", { "held": held.display().to_string(), "error": e.to_string() }),
             },
@@ -2033,6 +2087,8 @@ async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: A
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(limits::HOLD_POLL_MS)) => {}
+            // the log written into its snapshot: looked at again at once
+            _ = gate.settled.notified() => {}
             _ = crate::net::stopped(&mut stop) => return,
         }
     }

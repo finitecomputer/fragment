@@ -433,10 +433,10 @@ const CRASH_CHECKS: [&str; 10] = [
     "the lever answers its saves: the newest, the one its last start restored",
     "a think turn and a key's fetch turn run once each, before the crash",
     "awake, their end is saved: a save newer than the sleep's",
-    "the lever's kill (SIGKILL to the guest's PID 1) is a crash: it comes back at once, from the save after its last turn",
-    "a crash wakes it from its last save, and nothing that started runs again (P1)",
-    "its wake says what it restored: after the kill, a rollback is counted",
-    "a turn cut by a crash ends once, as an error, and its model was called once (P1)",
+    "the lever's kill (SIGKILL to the guest's PID 1) between its turns, all it did saved, is a sleep: it stays asleep, nothing told and no rollback counted",
+    "the next message wakes it from its last save, and nothing that started runs again (P1)",
+    "its wake says what it restored: the save after its last turn, after a sleep, no rollback",
+    "a turn cut by a crash (the kill as it runs) comes back at once and counts a rollback; the turn ends once, as an error, and its model was called once (P1)",
     "the cut turn is continued once, by the computer, told what the crash cut, from the journal; the messages after it are answered, told nothing (P5, phase 4)",
 ];
 
@@ -502,28 +502,40 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     s.eventually(SAVED_AFTER_WORK, || newest_save(api, c.id)["atMs"].as_i64().is_some_and(|at| at > last_at));
     let save = newest_save(api, c.id)["id"].as_str().unwrap_or("").to_string();
     s.ok(CRASH_CHECKS[4], !save.is_empty() && save != slept, format!("the sleep's save {slept}, its turns' {save}"));
-    // the crash
+    // the kill between its turns, all it did saved: a sleep (docs/computers.md,
+    // "A stop nothing asked for, while idle, is a sleep"). A crash would
+    // say starting at once, its turns' hold still running
     let generation = restored["generation"].as_u64().unwrap_or(0);
     let killed = lever(api, c.id, "kill")?;
-    let back = |after: u64| {
-        let v = view();
-        v["phase"] == "awake" && v["restored"]["generation"].as_u64().is_some_and(|g| g > after)
-    };
-    let came_back = killed.status == 200 && s.eventually(c.wake, || back(generation));
-    let restored = view()["restored"].clone();
+    let mut slept = Value::Null;
+    let asleep = killed.status == 200
+        && s.eventually(c.wake, || {
+            slept = view();
+            slept["phase"] != "awake"
+        })
+        && slept["phase"] == "asleep";
     s.ok(
         CRASH_CHECKS[5],
-        came_back && killed.body["killed"] == generation && restored["from"] == "backup" && restored["save"] == save.as_str() && restored["after"] == "exit",
-        format!("{killed} / {restored}"),
+        asleep && killed.body["killed"] == generation && slept["restored"]["generation"] == restored["generation"] && slept["rollbacks"].as_u64() == Some(rollbacks) && notice(&slept, "went_back").is_null(),
+        format!("{killed} / {slept}"),
     );
-    // one more message: turns of a chat run in order, so by its end every
-    // turn the restore made it read again was run again or fenced
+    // one more message wakes it: turns of a chat run in order, so by its end
+    // every turn its start made it read again was run again or fenced
     let after = say(52, "after the crash")?;
     let answered = s.eventually(c.wake, || replied(seq_of(&after)).is_some());
     let again = runs(s, api, c.owner, c.owner_id, c.id);
     s.ok(CRASH_CHECKS[6], answered && again == ran, format!("before the crash {ran:?}, after it {again:?}"));
     let v = view();
-    s.ok(CRASH_CHECKS[7], v["restored"]["rollback"] == true && v["rollbacks"].as_u64() == rollbacks.checked_add(1), &v);
+    let woke = &v["restored"];
+    s.ok(
+        CRASH_CHECKS[7],
+        woke["generation"].as_u64().is_some_and(|g| g > generation) && woke["from"] == "backup" && woke["save"] == save.as_str() && woke["after"] == "sleep" && woke["rollback"] == false && v["rollbacks"].as_u64() == Some(rollbacks),
+        &v,
+    );
+    let back = |after: u64| {
+        let v = view();
+        v["phase"] == "awake" && v["restored"]["generation"].as_u64().is_some_and(|g| g > after)
+    };
     // a turn cut by a crash: its model call is held, and the guest killed under it
     let generation = v["restored"]["generation"].as_u64().unwrap_or(0);
     let called = s.ai.chats().len();
@@ -533,6 +545,8 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let in_flight = s.eventually(c.wake, || s.ai.chats().len() > called);
     let killed = lever(api, c.id, "kill")?;
     let came_back = in_flight && killed.status == 200 && s.eventually(c.wake, || back(generation));
+    let crashed = view();
+    let rolled_back = crashed["restored"]["after"] == "exit" && crashed["restored"]["rollback"] == true && crashed["rollbacks"].as_u64() == rollbacks.checked_add(1);
     let ends = || work_of(&records(api, c.owner, c.chat, "work"), &cut_turn).into_iter().filter(|r| r["body"]["kind"] == "turn.end").collect::<Vec<_>>();
     let ended = came_back && s.eventually(c.wake, || !ends().is_empty());
     let next = say(54, "and after the cut")?;
@@ -540,8 +554,8 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let ends = ends();
     s.ok(
         CRASH_CHECKS[8],
-        ended && ends.len() == 1 && ends[0]["body"]["outcome"] == "error" && replied(seq_of(&cut)).is_none() && s.ai.chats().len() == called + 1,
-        format!("{} model calls since; {}", s.ai.chats().len() - called, json!(work_of(&records(api, c.owner, c.chat, "work"), &cut_turn))),
+        rolled_back && ended && ends.len() == 1 && ends[0]["body"]["outcome"] == "error" && replied(seq_of(&cut)).is_none() && s.ai.chats().len() == called + 1,
+        format!("{} model calls since; {}; {}", s.ai.chats().len() - called, json!(work_of(&records(api, c.owner, c.chat, "work"), &cut_turn)), crashed["restored"]),
     );
     // the cut turn is continued in its place, before the next message: said
     // by the computer and told once what the crash cut (P5; the stub echoes
@@ -614,7 +628,7 @@ const RECOVERY_CHECKS: [&str; 13] = [
     "seen, it is told no more; seen again, the same; a notice never told is refused",
     "when no save works for the bound, it is put to sleep unsaved at the time it said, and told it will go back",
     "its next wake goes back to that save, told once, the same notice; and its agent answers",
-    "and its agent is told, once, what it no longer remembers of the chat: the turn the stop lost, from the journal",
+    "and its agent is told the chat, once, from the records: the turn the stop lost among it, both sides",
     "asleep, its owner's restart starts it, fresh from its save",
     "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from the start of a sleep's try whose save failed to its bound, or to the restart that ended it; the time before and after is",
     "a restart whose save fails, with nothing done since the save it came up from: it goes back to that save and tells its owner nothing, since nothing was lost (Paul, 2026-10-23); a notice of it is refused",
@@ -787,7 +801,7 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     let then = replied(once_seq).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
     s.ok(
         RECOVERY_CHECKS[8],
-        zebra_ran && after_back.contains("(told: Your memory of this chat is behind") && after_back.contains("You were asked: “remember the zebra”") && answered_once && !then.contains("(told:"),
+        zebra_ran && after_back.contains("(told: Your memory of this chat is behind") && after_back.contains("\nYour owner: remember the zebra\nYou: echo: ") && answered_once && !then.contains("(told:"),
         json!([after_back, then]),
     );
     // asleep, a restart is a start
@@ -1042,6 +1056,17 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
         r.status == 200 && r.body["door"] == "telegram" && r.body["agent"] == c.agent && bound.body["bound"] == json!({ "door": "telegram", "agent": c.agent }) && role_of(c.identity) == Some(json!("viewer")),
         format!("{r} {bound} {:?}", role_of(c.identity)),
     );
+    // the rows its members list says a door on (the list is the same to
+    // every member: its agent's bridge reads it so); none when the list
+    // did not read, so a failed read never passes for "no door"
+    let doors = || -> Option<Vec<(String, String)>> {
+        let r = api.signed(c.owner, "GET", &format!("/api/f/{name}/members"), None).ok().filter(|r| r.status == 200)?;
+        let rows = r.body["members"].as_array().filter(|rows| !rows.is_empty())?.clone();
+        Some(rows.iter().filter_map(|m| Some((m["principal"].as_str()?.to_string(), m["door"].as_str()?.to_string()))).collect())
+    };
+    let telegram_door = Some(vec![(c.identity.to_string(), "telegram".to_string())]);
+    let bound_doors = doors();
+    s.ok("bound, its members list says so on its agent's row alone (`door`: telegram)", bound_doors == telegram_door, json!(bound_doors));
 
     // a direct message from the paired account: their words to their agent,
     // asked as them, and its reply back to Telegram
@@ -1160,6 +1185,8 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     let off = ran(&deliver(Telegram::message(20, PAUL, "Paul", "while it is off"), Some(HOOK2))?);
     let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "while it is off");
     s.ok("with Telegram off, its owner's message is published nowhere and nothing is sent", off["output"]["ignored"] == "not linked" && !published && tg.sent().len() == before, json!({ "run": off, "sent": tg.sent() }));
+    let off_doors = doors();
+    s.ok("with Telegram off, no row of its members says a door", off_doors == Some(vec![]), json!(off_doors));
     anyhow::ensure!(policy(Value::Null)?.status == 200, "the connectors lever");
 
     // unlinked from its page (its owner's session there): the door is shut
@@ -1179,6 +1206,8 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
         unlinked.status == 200 && seen.body["bound"].is_null() && after["output"]["ignored"] == "not linked" && !published && sent("This chat isn't linked to your agent.").is_some(),
         json!({ "unlink": unlinked.body, "bound": seen.body, "run": after, "sent": tg.sent() }),
     );
+    let unlinked_doors = doors();
+    s.ok("unlinked, no row of its members says a door, its agent's (still a viewer) included", unlinked_doors == Some(vec![]), json!(unlinked_doors));
     let typed = api.signed(c.owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "typed-after-unlink", "body": { "text": "typed after the unlink" } })))?;
     let answered = s.eventually(wake, || agent_replies(&records(api, c.owner, &name, "chat"), c.identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("typed after the unlink"))));
     s.ok(
@@ -1205,6 +1234,8 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     // code, then the template again, and it is no door, with none back
     let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
     anyhow::ensure!(r.status == 200, "bound again: {r}");
+    let rebound = doors();
+    s.ok("bound again, its agent's row says its door again", rebound == telegram_door, json!(rebound));
     let own = br#"import { DurableObject } from "cloudflare:workers";
 export class App extends DurableObject { noop() { return {}; } }
 "#;
@@ -1218,6 +1249,8 @@ export class App extends DurableObject { noop() { return {}; } }
         forked && unmade && secrets().is_empty() && event.as_ref().is_some_and(|e| e["data"]["secrets"] == json!(ours)),
         json!({ "secrets": secrets(), "event": event }),
     );
+    let unmade_doors = doors();
+    s.ok("unmade by a fork, no row of its members says a door", unmade_doors == Some(vec![]), json!(unmade_doors));
     s.commit(&made.body, &[("fragment.json", Some(br#"{"template":"telegram"}"#.as_slice())), ("app.mjs", None)]);
     let tip = s.deploy(&made.body);
     let back = installed(s, &tip);
@@ -1231,6 +1264,8 @@ export class App extends DurableObject { noop() { return {}; } }
         back && r.status == 403 && r.text.contains("is no connector") && later.status == 403 && later.text.contains("bad inbox secret") && !published && secrets().is_empty(),
         json!({ "bind": r.body, "delivery": later.status, "secrets": secrets() }),
     );
+    let back_doors = doors();
+    s.ok("with its template again, still no row says a door", back_doors == Some(vec![]), json!(back_doors));
     // its agent, with no Telegram chat now, set up from Settings (FIN-393):
     // this chat, no door for good since its fork, deleted first, so its
     // agent has no Telegram chat at all, and Settings' shots show only what
@@ -1962,6 +1997,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         heard && notices[0]["principal"] == agent_npub.as_str() && notices[0]["body"] == json!({ "kind": "joined", "fragment": chat_name }),
         json!(notices),
     );
+    // made an editor of its own fragment as it was assigned (before its
+    // computer held it): its home, no join, so nothing is posted for it
+    let home = told(api, &owner, &agent_name, &agent_name);
+    s.ok("its own fragment is no join: nothing is posted for it", home.is_empty(), json!(home));
     // awake, the guest follows the chat as the agent
     let woke = s.eventually(wake, || phase(api, &owner, &id) == "awake");
     s.ok("and wakes its computer, unasked", woke, phase(api, &owner, &id));
@@ -2656,6 +2695,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         // preview's computer is put to sleep, so it bills no awake time after
         s.skip("after a crash of the platform, the computer answers what comes next, once", "it crashes the node");
         s.skip("at zero credit no wake starts, nor does a record wake it", "it needs the deployment's operator (to make its owner a guest)");
+        for label in START_LINE_CHECKS {
+            s.skip(label, "it reads the node's logs, a local run's");
+        }
         std::thread::sleep(QUEUE_DRAIN);
         let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
         s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
@@ -2842,5 +2884,53 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({})))?;
     let v = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
     s.ok("nor does its owner's restart: the ledger refuses it too, and it stays asleep", r.status == 403 && r.text.contains("a guest pays for nothing") && v.body["phase"] == "asleep", &r);
+    start_line_checks(s, &id);
     Ok(())
+}
+
+const START_LINE_CHECKS: [&str; 4] = [
+    "each start of its computer writes one log line at most, plain and bounded, naming the computer by its id alone",
+    "its first start, woken by its agent's join, logs a fresh path, ready, its guest heard",
+    "a wake after a sleep that saved logs a whole restore (this fleet takes no snapshots) with the bytes it restored, each step's time from the wake in order, to its guest's first turn",
+    "a start that fails logs that it failed, and where",
+];
+
+/// Its starts' lines (docs/computers.md, "The start line"), as the run's
+/// node logs have them: one at most per start (a start whose isolate the
+/// lane crashed has none), the first start's fresh, a whole restore after
+/// a sleep that saved, and the `fail-starts` lever's starts failed. This
+/// fleet takes no snapshots: a snapshot wake's line is the core's test
+/// (`start_line::every_start_writes_one_line_with_its_path`).
+fn start_line_checks(s: &mut Suite, id: &str) {
+    let logs = super::vault::logs(s);
+    let lines: Vec<(usize, Value)> = logs
+        .lines()
+        .filter_map(|l| l.find(r#"{"start":{"generation":"#).map(|at| &l[at..]))
+        .filter_map(|l| {
+            let mut read = serde_json::Deserializer::from_str(l).into_iter::<Value>();
+            read.next().and_then(Result::ok).map(|v| (read.byte_offset(), v))
+        })
+        .filter(|(_, v)| v["computer"] == id)
+        .collect();
+    let starts: Vec<&Value> = lines.iter().map(|(_, v)| &v["start"]).collect();
+    let mut generations: Vec<u64> = starts.iter().filter_map(|l| l["generation"].as_u64()).collect();
+    generations.sort_unstable();
+    let once = generations.windows(2).all(|w| w[0] < w[1]) && generations.len() == lines.len();
+    let plain = lines.iter().all(|(len, v)| *len <= fragment_core::computer::start_line::LINE_MAX_BYTES && v.as_object().is_some_and(|o| o.len() == 2) && ["ready", "failed", "replaced"].iter().any(|e| v["start"]["end"] == *e));
+    s.ok(START_LINE_CHECKS[0], lines.len() >= 4 && once && plain, json!({ "generations": generations, "lines": lines.len() }));
+    let first = starts.iter().find(|l| l["generation"] == 1);
+    let ms = |l: &Value, k: &str| l[k].as_i64();
+    s.ok(
+        START_LINE_CHECKS[1],
+        first.is_some_and(|l| l["end"] == "ready" && l["path"] == "fresh" && l["woke"] == "joined" && ms(l, "readyMs").is_some() && ms(l, "heardMs").is_some() && l.get("why").is_none() && l.get("upMs").is_none()),
+        json!(first),
+    );
+    let in_order = |l: &Value| {
+        let steps: Vec<Option<i64>> = ["beganMs", "upMs", "dataMs", "readyMs", "turnMs"].iter().map(|k| ms(l, k)).collect();
+        steps.iter().all(Option::is_some) && steps.windows(2).all(|w| w[0] <= w[1]) && ms(l, "heardMs").is_some()
+    };
+    let restored = starts.iter().find(|l| l["end"] == "ready" && l["path"] == "restore" && l["why"] == "off" && l["woke"] == "owner" && l["bytes"].as_u64().is_some_and(|b| b > 0) && in_order(l));
+    s.ok(START_LINE_CHECKS[2], restored.is_some(), json!({ "restored": restored, "restores": starts.iter().filter(|l| l["path"] == "restore").collect::<Vec<_>>() }));
+    let failed: Vec<&&Value> = starts.iter().filter(|l| l["end"] == "failed" && l["failed"] == "start" && l["path"] == "restore" && l.get("readyMs").is_none()).collect();
+    s.ok(START_LINE_CHECKS[3], failed.len() >= 2, json!(failed));
 }

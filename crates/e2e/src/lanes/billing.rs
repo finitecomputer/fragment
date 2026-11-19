@@ -488,7 +488,14 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
     let org = buys(s, api, &vic)?;
     let root = format!("/api/orgs/{org}");
     let read = |api: &Api, who: &Keys| api.signed(who, "GET", &format!("{root}/ledger"), None).map(|r| r.body).unwrap_or(Value::Null);
+    // what its ledger has written (the `writes` lever): its first read
+    // makes it, and a read after writes nothing (F14)
+    let writes = || api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": format!("org:{org}"), "op": "writes" }))).map(|r| r.body).unwrap_or(Value::Null);
+    let unmade = writes();
     let fresh = read(api, &vic);
+    let made = writes();
+    let again = read(api, &vic);
+    let still = writes();
     s.ok(
         "an org's ledger starts with nothing: no credit, a budget of zero, read-only, and no plan, seat or included credit",
         fresh["org"] == org.as_str()
@@ -498,6 +505,11 @@ fn org_credit(s: &mut Suite, api: &Api) -> Result<()> {
             && fresh.get("plan").is_none()
             && fresh.get("includedMicros").is_none(),
         &fresh,
+    );
+    s.ok(
+        "its first read makes it, writing its head; a read after writes nothing and answers the same",
+        unmade["head"] == false && made["head"] == true && made["rows"].as_u64() > unmade["rows"].as_u64() && still["rows"] == made["rows"] && again == fresh,
+        json!({ "unmade": unmade, "made": made, "still": still, "again": again }),
     );
     // the operator's CLI, with their key's file
     let dir = s.dir("org-credit");

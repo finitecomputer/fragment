@@ -140,6 +140,84 @@ mod tests {
         assert_eq!(s.alarm_ms, Some((T + 3_000 + METER_EVERY_MS).min(T + 10_000 + IDLE_MS)), "{s:?}");
     }
 
+    /// The saves the lifecycle asks for, firing the alarm it asks for each
+    /// time (from `alarm`) up to `until`, each hold answered and its save
+    /// kept as the DO does: when each was asked.
+    fn saves_until(l: &mut Lifecycle, mut alarm: Option<i64>, until: i64) -> Vec<i64> {
+        let mut asked = vec![];
+        while let Some(at) = alarm.filter(|at| *at <= until) {
+            let s = l.apply(Event::Alarm, at);
+            assert!(!s.actions.iter().any(|a| matches!(a, Action::Sleep { .. })), "no sleep within the run: {s:?}");
+            alarm = s.alarm_ms;
+            if let Some(Action::Hold { generation }) = s.actions.last().cloned() {
+                asked.push(at);
+                let (_, _, seq) = save_asked(&l.apply(Event::Held { generation, held: true }, at + 100));
+                alarm = l.apply(Event::Saved { generation, seq }, at + 200).alarm_ms;
+            }
+        }
+        asked
+    }
+
+    /// Goal: what its owner does through its ports is saved as a turn's
+    /// work is: the last port tab's close asks a save once it settles
+    /// (`SAVE_SETTLE_MS`), so a host's stop after it loses nothing. Tabs
+    /// opened and closed fast save once, after the last close (each close
+    /// puts the settle off); one tab of two closing asks none; a keepalive
+    /// open keeps the save for its own close, one save. Replay: a close
+    /// with no tab counted asks nothing. Restart: a lifecycle stored and
+    /// read back between the close and its settle still saves. Method: the
+    /// alarms the lifecycle asks for, fired and answered as the DO does,
+    /// the saves asked counted.
+    #[test]
+    fn closing_the_last_port_tab_saves_once_it_settles() {
+        let until = T + 4 * 60_000;
+        // valid: one tab, its close saved once it settles
+        let mut l = Lifecycle::new();
+        started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
+        let s = l.apply(Event::Closed { socket: Socket::Tab }, T + 70_000);
+        assert_eq!(s.alarm_ms, Some(T + 70_000 + SAVE_SETTLE_MS), "the settle is what it waits for");
+        assert_eq!(saves_until(&mut l, s.alarm_ms, until), vec![T + 70_000 + SAVE_SETTLE_MS]);
+        // replay: a close with no tab counted asks nothing
+        let s = l.apply(Event::Closed { socket: Socket::Tab }, T + 130_000);
+        assert_eq!(saves_until(&mut l, s.alarm_ms, until), Vec::<i64>::new());
+        // ten tabs opened and closed a second apart: one save, after the last
+        let mut l = Lifecycle::new();
+        started(&mut l, T);
+        let mut s = Step::default();
+        for i in 0..10 {
+            l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000 + i * 1_000);
+            s = l.apply(Event::Closed { socket: Socket::Tab }, T + 10_500 + i * 1_000);
+        }
+        assert_eq!(saves_until(&mut l, s.alarm_ms, until), vec![T + 19_500 + SAVE_SETTLE_MS], "ten closes, one save");
+        // one tab of two closing asks none; the last one's close does
+        let mut l = Lifecycle::new();
+        started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
+        l.apply(Event::Opened { socket: Socket::Tab }, T + 11_000);
+        let s = l.apply(Event::Closed { socket: Socket::Tab }, T + 20_000);
+        assert_eq!(saves_until(&mut l, s.alarm_ms, T + 90_000), Vec::<i64>::new(), "a tab still open");
+        let s = l.apply(Event::Closed { socket: Socket::Tab }, T + 100_000);
+        assert_eq!(saves_until(&mut l, s.alarm_ms, until), vec![T + 100_000 + SAVE_SETTLE_MS]);
+        // a keepalive open across the tab's close: the save waits for the
+        // keepalive's close, and is one
+        let mut l = Lifecycle::new();
+        started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Keepalive }, T + 5_000);
+        l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
+        let s = l.apply(Event::Closed { socket: Socket::Tab }, T + 20_000);
+        assert_eq!(saves_until(&mut l, s.alarm_ms, T + 90_000), Vec::<i64>::new(), "busy: its turn's end saves");
+        let s = l.apply(Event::Closed { socket: Socket::Keepalive }, T + 100_000);
+        assert_eq!(saves_until(&mut l, s.alarm_ms, until), vec![T + 100_000 + SAVE_SETTLE_MS]);
+        // restart: stored and read back between the close and its settle
+        let mut l = Lifecycle::new();
+        started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Tab }, T + 10_000);
+        let s = l.apply(Event::Closed { socket: Socket::Tab }, T + 20_000);
+        let mut l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap().0;
+        assert_eq!(saves_until(&mut l, s.alarm_ms, until), vec![T + 20_000 + SAVE_SETTLE_MS]);
+    }
+
     /// Goal : an always-on computer, which never sleeps, is saved when
     /// its work ends and every `SAVE_EVERY_MS` while it stays busy, its
     /// awake time never metered. On master it was never saved. Method: a

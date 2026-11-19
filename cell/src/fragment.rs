@@ -7,8 +7,8 @@
 //! here into a `Caller`. On the control API the router resolved who is
 //! asking; on the site it did not, and the fragment resolves them only
 //! where its answer depends on it (`identified`, `reader`). Calls from
-//! inside the platform (the internal routes below) are answered before
-//! that decode: they carry no caller.
+//! inside the platform (calls.rs, and a computer's routes below) are
+//! answered before that decode: they carry no caller.
 //!
 //! Routes (inner paths; the router maps the public ones onto them):
 //!
@@ -39,13 +39,12 @@
 //!   GET /api/schedules   viewer; POST /api/schedules  PUT|DELETE /api/schedules/<id>   editor (schedules.rs)
 //!   POST   /api/inbox                     the inbox token (no signature)
 //!   *      /serve/<path>                  the site, `__files`, `__file`, `__op`, `__watch`
-//!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
-//!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
-//!   POST   /cap/search/upsert|delete|query|status  the app facet's `Search` capability (searchable.rs); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /api/card  PUT /api/card       editor: a shot again; an upload as the card (card.rs)
-//!   POST   <calls.rs's paths>             the platform's typed calls (`calls::HEADER`); never routed from outside
+//!   POST   <calls.rs's paths>             the platform's typed calls (`calls::HEADER`), a run's
+//!                                         Workflow's and the app facet's capabilities' among them;
+//!                                         never routed from outside
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -56,7 +55,7 @@ use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::npub;
 use fragment_core::seed;
 use fragment_proto::{
-    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, Pins, Role, Urls,
+    limits, search, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, Pins, Role, Urls,
     Visibility,
 };
 use fragment_templates::blessed;
@@ -74,7 +73,10 @@ use crate::routed::{Credential, Routed, Signed};
 
 pub(crate) mod calls;
 
-use calls::{AgentMade, Call, DoorActor, DoorCheck, FaceOf, FragmentLever, InviteAnswer, KeysLever, Picture, ReachOf, Report, Routine, VisibilityOf, WipeMembership, WipeOwned, Whose};
+use calls::{
+    AgentMade, Call, DoorActor, DoorCheck, FaceOf, FilesList, FilesRead, FilesStat, FragmentLever, InviteAnswer, JobAdvance, JobEffect, JobFinish, KeysLever,
+    Picture, ReachOf, Report, Routine, SearchStatus, VisibilityOf, WipeMembership, WipeOwned, Whose,
+};
 
 /// The alarm fires no sooner than this after it is armed …
 pub(crate) const ALARM_SOON_MS: i64 = 50;
@@ -315,6 +317,11 @@ pub(crate) enum MetaKey {
     InboxToken,
     /// Its code.storage repo.
     Repo,
+    /// Set beside `Repo` when the repo is named by this life's own key
+    /// (`fragment_core::codestorage::repo_name`): only such a repo goes
+    /// with a delete (`fragment_core::ended::repo_goes`). A life made
+    /// before that naming has none: its repo, named by its owner, stays.
+    RepoOfLife,
     /// Its app facet's name, `app@<incarnation>`: each life of a name has
     /// its own app database (`app_facet`).
     AppFacet,
@@ -505,6 +512,7 @@ impl MetaKey {
             MetaKey::ViewToken => "view_token",
             MetaKey::InboxToken => "inbox_token",
             MetaKey::Repo => "repo",
+            MetaKey::RepoOfLife => "repo_of_life",
             MetaKey::IndexVersion => "index_version",
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
@@ -1009,6 +1017,12 @@ impl FragmentCell {
             _ => {}
         }
         self.ready()?;
+        // the app facet's capabilities: each call one of its subrequests,
+        // to a fragment that is
+        if calls::CAPABILITIES.contains(&path) {
+            self.facet_calls_lever()?;
+            self.name()?;
+        }
         match path {
             KeysLever::PATH if self.cfg.test_hooks => {
                 // this cell's own sealing: the e2e checks that what one
@@ -1031,6 +1045,7 @@ impl FragmentCell {
             FaceOf::PATH => reply::<FaceOf>(self.face_of()),
             ReachOf::PATH => reply::<ReachOf>(self.reach_of()),
             AgentMade::PATH => reply::<AgentMade>(self.agent_with_person(decode(body)?).await),
+            calls::AgentJoined::PATH => reply::<calls::AgentJoined>(self.agent_joined(decode(body)?).await),
             InviteAnswer::PATH => {
                 let answer: InviteAnswer = decode(body)?;
                 reply::<InviteAnswer>(match answer.yes {
@@ -1042,6 +1057,16 @@ impl FragmentCell {
             calls::Acked::PATH => reply::<calls::Acked>(self.meter_acked(&decode(body)?).await),
             Whose::PATH => reply::<Whose>(self.whose(&decode::<Whose>(body)?.principal)),
             Routine::PATH => reply::<Routine>(self.move_routine(decode(body)?).await),
+            JobAdvance::PATH => reply::<JobAdvance>(self.job_advance(decode(body)?).await),
+            JobEffect::PATH => reply::<JobEffect>(self.job_effect(decode(body)?).await),
+            JobFinish::PATH => reply::<JobFinish>(self.job_finish(decode(body)?)),
+            FilesRead::PATH => self.files_read(&decode::<FilesRead>(body)?.path).await,
+            FilesList::PATH => reply::<FilesList>(self.list_main(&decode::<FilesList>(body)?.prefix)),
+            FilesStat::PATH => reply::<FilesStat>(self.stat_main(&decode::<FilesStat>(body)?.path).await),
+            search::Upsert::PATH => self.app_upsert(decode(body)?).await,
+            search::Delete::PATH => self.search_remove(decode(body)?).await,
+            search::Query::PATH => self.app_query(decode(body)?).await,
+            SearchStatus::PATH => self.search_state().await,
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no call {path}"))),
         }
     }
@@ -1057,15 +1082,6 @@ impl FragmentCell {
         if !(req.method() == Method::Delete && path == "/delete") {
             self.ready()?;
         }
-        if let Some(step) = path.strip_prefix("/job/") {
-            // Only this script's Workflow sets the header; the router never passes it.
-            if req.headers().get(crate::jobs::JOB_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            let step = step.to_string();
-            let bytes = req.bytes().await?;
-            return json_response(&self.job_callback(&step, &bytes).await?);
-        }
         if let Some(route) = path.strip_prefix("/computer/") {
             // Only a computer's routes and egress set the header; the router never passes it.
             if req.headers().get(crate::computer::INTERNAL_HEADER)?.is_none() {
@@ -1077,26 +1093,6 @@ impl FragmentCell {
             let route = route.to_string();
             let body = req.bytes().await?;
             return json_response(&self.runs_on(&route, &body).await?);
-        }
-        if let Some(op) = path.strip_prefix("/cap/files/") {
-            // Only the `Files` capability sets the header; the router never passes it.
-            if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("files") {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            self.facet_calls_lever()?;
-            let op = op.to_string();
-            let body: Value = body_json(&mut req).await?;
-            return self.cap_files(&op, &body).await;
-        }
-        if let Some(op) = path.strip_prefix("/cap/search/") {
-            // Only the `Search` capability sets the header (searchable.rs)
-            if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("search") {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            self.facet_calls_lever()?;
-            let op = op.to_string();
-            let body = req.bytes().await?;
-            return self.cap_search(&op, &body).await;
         }
         // Every route below is the router's: decoded once, from headers only it sets.
         let Routed { name: routed_name, url, signed, credential } = Routed::from_headers(req.headers())?;
@@ -1381,17 +1377,19 @@ impl FragmentCell {
                 }
                 None => None,
             };
+            // its own key, this life's alone, which names its repo
+            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
+            let fragment_npub = npub::encode(&pubkey);
+            laps.lap("key");
             // its repo, unless its template's seed makes it after the answer
             let repo = match making.repo_first() {
                 true => {
-                    let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&crate::publish::repo_name(self.cfg, &body.name, &owner)?).await?;
+                    let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&crate::publish::repo_name(self.cfg, &body.name, &fragment_npub)?).await?;
                     laps.lap("repo");
                     Some(repo)
                 }
                 false => None,
             };
-            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
-            laps.lap("key");
             // a blessed template's face is known now: the owner's list says
             // it is a chat or an agent from the start, not once it installs
             // (a read of the release that fails leaves it to the install,
@@ -1407,13 +1405,13 @@ impl FragmentCell {
                 }
                 None => None,
             };
-            Ok::<_, CellError>((agent, repo, pubkey, sealed, face))
+            Ok::<_, CellError>((agent, repo, fragment_npub, sealed, face))
         };
         // every await of its making is above: what follows is written in
         // one turn, its owner's row and its agent's together, so no list
         // row (this request's, `after_answer`'s, the alarm's) goes out
         // before either is in
-        let (agent, repo, fragment_pub, sealed, face) = match made.await {
+        let (agent, repo, fragment_npub, sealed, face) = match made.await {
             Ok(r) => r,
             Err(e) => {
                 self.del_meta(MetaKey::Name)?;
@@ -1422,13 +1420,14 @@ impl FragmentCell {
             }
         };
         let now = js::now_ms();
-        let fragment_npub = npub::encode(&fragment_pub);
         let visibility = body.visibility.unwrap_or_else(|| Visibility::made_from(body.template.as_deref()));
         let (view_token, inbox_token) = (js::random_hex::<12>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
         if let Some(repo) = &repo {
             self.set_meta(MetaKey::Repo, repo)?;
+            // named by this life's key above: a delete takes it
+            self.set_meta(MetaKey::RepoOfLife, "1")?;
         }
         for (k, v) in [
             (MetaKey::Owner, owner.as_str()),

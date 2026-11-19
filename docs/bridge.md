@@ -94,11 +94,24 @@ with its default. What an image sets:
 
 ## State, and what it never does twice
 
-Its state (`state.json`, written whole before a step's effects) is a
-cache. The authority on which turns started is the chat's `work`
-channel, so `/data` restored from any earlier save, or lost, costs reads
-and runs nothing twice. A state of another format is set aside for a
-fresh one; one that contradicts itself is refused.
+Its state is a cache. The authority on which turns started is the
+chat's `work` channel, so `/data` restored from any earlier save, or
+lost, costs reads and runs nothing twice. A state of another format is
+set aside for a fresh one; one that contradicts itself is refused.
+
+It lives in `/data/bridge` (`store.rs`) as two files. `state.json` is
+the whole state, in the format every earlier bridge read. `state.log`
+holds what each step changed since then, one line per step, appended and
+synced before the step's effects. The bridge writes `state.json` whole
+again, with a fresh log, as it starts, once the log fills, and after a
+hold. Under a hold it writes `state.json` whole, with an empty log,
+before it answers, then `state.json` alone at each step while held, as
+before the log, the empty log naming an earlier `state.json`. So a save
+holds the state whole in `state.json`, which is all an older bridge
+reads. A log whose
+first line names another `state.json` (an older bridge wrote one since,
+or a save copied the two at different moments) is read as none. A crash
+mid-append leaves a torn last line, and the log is read up to it.
 
 - **One life per turn.** Each bridge process is a life: 128 random bits,
   never written to `/data`. A turn runs only in the life whose claim (its
@@ -201,14 +214,38 @@ check before acting on it." A continuation is told the age of what its
 cut turn answered. A routine (its message says its hour), a command,
 and a state from before keep or tell none.
 
-### What a rollback forgot
+### What a runtime forgot
 
 A computer can go back to an older save (docs/computers.md, "What its
-owner is told"). The bridge then reads again the turns run since that
-save, and each of their claims is a 409. Those 409s are exactly what its
-runtime forgot. The agent's next turn in that chat is told what each
-forgotten turn was asked and replied, from the journal
-(`note::forgotten`), once a life.
+owner is told"), or lose `/data`, and an agent can start on a computer
+that never ran it. The bridge then reads again the turns run since that
+save, and each of their claims is a 409. A turn whose lost end is
+refused as well (that life ended it) ran in another life: its runtime
+does not remember it (Paul, 2026-11-18, M17: rebuild from the records).
+The agent's next turn in that chat is told the chat, once a life
+(`note::recap`):
+
+- its messages before the turn's own, both sides, oldest first, since
+  the agent joined and after the newest `/new` of its owner's it ran;
+  each by its sayer (`You`, `Your owner`, anyone else by name);
+- before each of its turns' first reply, that turn's steps on one line
+  (a cut turn's are the cut note's);
+- at most the 24 KiB a continued chat gets (`HISTORY_NOTE_MAX_BYTES`),
+  the oldest dropped first, with where the rest is
+  (`fragment channel <chat> chat`).
+
+It is one bounded read, complete or nothing (`read_back`, `Budget`),
+and runtime-neutral: Hermes gets it as relay's `context`, Claude Code
+in its message. It opens "Your memory of this chat is behind". A turn
+whose lost end lands as this life's was cut in that life, and the cut
+note tells it. What a rebuild loses is tool outputs
+and the runtime's own summaries.
+
+In a chat with other members, the note hands the agent their words
+again. That widens nothing. The bridge reads the chat as the agent,
+which may read all of it with `fragment channel`, and only what was said
+since it joined is told. The note is read-only context, never a message
+or anyone's words to act on.
 
 ## An answer for the computer
 
@@ -231,7 +268,10 @@ masked field, and:
   gets its words once the card's closure is on `work`; the closure says it
   was answered by the agent's owner, nothing of what. A record answering
   it is ignored, live or late. A card whose turn is gone (a restart) takes
-  it no more, saying so: its person sends a message to start again.
+  it no more, saying so: its person sends a message to start again. So
+  such a card holds the computer while it is open, at most
+  `COMPUTER_CARD_HOLD_MS` (10 minutes) or to its expiry if sooner
+  (`Prompt::holds_until`): a sleep comes only after that.
 
 The value is never logged or kept, here or on the platform, which only
 carries the port's bytes. Something on the computer itself (the agent's
@@ -242,7 +282,8 @@ only fail.
 ## A card outlives its turn
 
 Waiting on a person (a card, or a question in words) never holds the
-computer, so a sleep or a restart may cut a turn under its card. The
+computer, but for a card only this life can take ("An answer for the
+computer"), so a sleep or a restart may cut a turn under its card. The
 turn ends as lost; its cards stay answerable until `expiresAt`. An owner's
 answer that no running turn of this life holds is late, and the engine
 resolves it from the chat's journal, read back to the card (`cards.rs`):
@@ -274,7 +315,8 @@ it.
 ## Runtime work outside a turn
 
 The keepalive is held while a turn is queued or runs (not while it waits
-on a person), and while a runtime says it has work of its own (`Working`):
+on a person, but for a card only this life can take), and while a
+runtime says it has work of its own (`Working`):
 in our image, delegated children still running after their parent
 replied.
 
@@ -337,6 +379,40 @@ it, and the hook returns only then:
   turn's own calls are steps (`pre_llm_call` maps Hermes' run to our
   turn): its memory review's and a delegated child's are not. A call
   whose end is not observed is no step; nothing is guessed.
+
+## Work left running
+
+Work an agent leaves running outside its turns (a background command of
+any runtime's, `nohup … &`, a download) holds the computer while the
+computer is working, for at most `LEFT_RUNNING_HOLD_MS` (2 hours) after
+its agents' work last held it: a turn queued or running, or a runtime's
+own work. An idle server, an idle runtime and its desktop never do
+(load.rs; `Input::Slice`).
+
+- **Working** is read from the computer's own counters every
+  `LOAD_SLICE_MS` (20 s): its CPU time (its cgroup's `cpu.stat`) and its
+  network bytes both ways on every interface but loopback
+  (`/proc/net/dev`). A slice over either floor
+  (`LOAD_CPU_FLOOR_PERMILLE`, `LOAD_NET_FLOOR_BYTES_PER_S`) is work, and
+  the computer is working while one of its last `LOAD_SLICES` (2
+  minutes) was, counting only slices that began after its agents' work
+  stopped holding it: a turn's own work (its last tool, the runtime's
+  reply) never holds the computer on. A slice the platform's hold
+  overlapped says nothing: the save's own work would hold the computer it
+  saves, and its end save it again; a hold stays as it was through a
+  save, so a long one never ends it while work runs. Disk writes are no measure: idle
+  write-back alone passes any useful floor. The measurements behind the
+  floors are beside them.
+- **The bound is this life's**, never saved: a new life (a restart, a
+  wake) holds nothing until its own agents' work ends (an earlier life's
+  turns it ends as lost are none of its), so a wake's own start never
+  holds a computer woken for a look. The bound runs on the guest's clock,
+  as every bound of the engine does: a clock set back holds that much
+  longer. A bridge restarted alone
+  loses the hold; the computer then sleeps after its idle wait unless a
+  turn runs.
+- A computer with no counters to read (`load.counters` says so) holds
+  nothing for it. Its awake time is billed as any other.
 
 ## Agents asking each other
 
@@ -417,8 +493,8 @@ never reaches another agent's core.
   relayed message"). What the agent says there goes to their app once
   posted: its replies but the interim ones, with their files, and a
   card's question with its choices. An unlink stops the mirror and keeps
-  the chat; a link again is that chat. `state.json` holds nothing of
-  SimpleX.
+  the chat; a link again is that chat. The bridge's state holds nothing
+  of SimpleX.
 - **Working shows as 🚀 on their message** (Paul, 2026-11-11): SimpleX
   carries no typing, so while the agent's turn runs on a message from
   their app (the engine's `working`: its own turn phases, whatever the
@@ -541,9 +617,10 @@ reaches it (`withheld`).
   expiring, ends the turn, its login with it, and no session begins; the
   URL is taken only once said whole (a pipe's reads are not its lines).
   The login's verifier lives only in
-  its process (PKCE), so a sign-in never outlives its turn: after a sleep
-  or a restart its card's code is refused, saying so, and the next
-  message asks anew.
+  its process (PKCE), so a sign-in never outlives its turn: its card holds
+  the computer for at most `COMPUTER_CARD_HOLD_MS`, and after a sleep or
+  a restart its card's code is refused, saying so, and the next message
+  asks anew.
 - **Its model and effort** are its agent's own: its `agent.json`'s
   `"claude": {"model", "effort"}` (`ClaudeSettings`), read with its
   runtime, in Claude Code's own names (`opus`, `sonnet`, `haiku`, `fable`

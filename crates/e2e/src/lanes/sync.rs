@@ -2,7 +2,7 @@
 //! an exit code as a script reads it, continuous sync with the change
 //! feed, a viewer's read-only sync, and the event log's tail. What one pass does (conflicts, a
 //! commit whose answer is lost, modes, verify, the mirror source, what
-//! syncs, the mass-deletion guard) is host-tested in cli/src/sync.rs
+//! syncs, the mass-deletion guard) is host-tested in cli/src/sync/
 //! against the same code.storage fake, and large files are the `blobs`
 //! section's.
 
@@ -36,7 +36,7 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     let dir_of = |p: &Path| p.to_str().expect("utf-8 path").to_string();
 
     // a both-sides change exits 3 through the process, as a script reads
-    // it (cli/src/sync.rs has the rest of a conflict, and each exit code)
+    // it (cli/src/sync/ has the rest of a conflict, and each exit code)
     let (name, c) = create(s, "sync-conflict")?;
     let dir = s.dir("sync-conflict");
     std::fs::write(dir.join("doc.md"), "base")?;

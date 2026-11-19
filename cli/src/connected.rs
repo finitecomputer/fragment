@@ -118,9 +118,12 @@ pub fn token(provider: &str, env: Option<&str>, vars: &[(String, String)]) -> Re
         let value = vars.iter().find(|(n, _)| n == name).map(|(_, v)| v.trim().to_string()).filter(|v| !v.is_empty());
         return value.map(|v| (v.clone(), placeholder(&v))).ok_or_else(|| Refused::new(0, "not_connected", format!("{name} is not set")));
     }
-    // sorted, so two variables of one provider answer the same each time
+    // sorted, so two variables of one provider answer the same each time,
+    // and a connection's placeholder first: a person's Vault secret may
+    // share its name (`vault::name_ok`), and is never sent in its place
     let mut held: Vec<&(String, String)> = vars.iter().filter(|(_, v)| placeholder(v.trim())).collect();
     held.sort();
+    held.sort_by_key(|(_, v)| !v.trim().starts_with(fragment_core::swap::CONNECTION_PREFIX));
     held.first().map(|(_, v)| (v.trim().to_string(), true)).ok_or_else(|| Refused::new(0, "not_connected", format!("no variable here holds {provider}'s placeholder: it is not connected for you")))
 }
 
@@ -420,17 +423,11 @@ fn save(path: &Path, head: &[u8], rest: &mut dyn Read, stated: Option<u64>) -> R
     written
 }
 
-/// What a good answer says on stdout: its body, or, saved, one line naming
-/// the file.
+/// What a good answer says on stdout: its body byte for byte (so `> file`
+/// keeps a download whole), or, saved, one line naming the file.
 pub fn deliver(answer: &Answer) -> Vec<u8> {
     match &answer.body {
-        Body::Printed(body) => {
-            let mut body = body.clone();
-            if !body.is_empty() && !body.ends_with(b"\n") {
-                body.push(b'\n');
-            }
-            body
-        }
+        Body::Printed(body) => body.clone(),
         Body::Saved { path, bytes, spilled } => {
             let mut line = json!({ "status": answer.status, "saved": path.display().to_string(), "bytes": bytes, "contentType": answer.content_type });
             if *spilled {
@@ -537,6 +534,29 @@ mod tests {
         names
     }
 
+    /// A person's Vault secret may share a connection's name
+    /// (`vault::name_ok`): its placeholder (`fck_linear_…`) is never sent
+    /// where the connection's (`fcx_linear_…`) is held, whatever their
+    /// variables are called; alone, it is still the provider's.
+    #[test]
+    fn a_connections_placeholder_comes_before_a_secrets_of_its_name() {
+        let both = vars(&[("LINEAR_API_KEY", &format!("fck_linear_{TAG}")), ("LINEAR_OAUTH_ACCESS_TOKEN", &format!("fcx_linear_{TAG}"))]);
+        assert_eq!(token("linear", None, &both), Ok((format!("fcx_linear_{TAG}"), true)));
+        let secret = vars(&[("LINEAR_API_KEY", &format!("fck_linear_{TAG}"))]);
+        assert_eq!(token("linear", None, &secret), Ok((format!("fck_linear_{TAG}"), true)));
+    }
+
+    /// An answer short enough to print is printed byte for byte, as it
+    /// came: `> file` keeps a download whole (a binary one included).
+    #[test]
+    fn a_printed_answer_is_its_bytes_as_they_came() {
+        let bytes = vec![0x89, b'P', b'N', b'G', 0, 0xff, b'\r'];
+        let sent = bytes.clone();
+        let (server, _) = provider(move |_| Response::bytes(200, "application/octet-stream", sent.clone()));
+        let answer = asked(&call(&format!("{}/file", server.url))).unwrap();
+        assert_eq!(deliver(&answer), bytes);
+    }
+
     /// The token is the provider's own placeholder, found by its shape: a
     /// variable of another provider's, or one that only begins like it, is
     /// never sent; none is `not_connected`; `--env` names any variable.
@@ -574,7 +594,7 @@ mod tests {
         assert_eq!((r.header("content-type"), r.header("x-version"), r.header("accept")), (Some("application/json"), Some("2"), Some("application/json")));
         assert_eq!((r.query.get("team").map(String::as_str), r.query.get("q").map(String::as_str), r.query.get("n").map(String::as_str)), (Some("ENG"), Some("SELECT Id FROM Account"), Some("5")));
         assert_eq!(r.body, br#"{"title": "A"}"#);
-        assert_eq!(deliver(&answer), b"{\"ok\":true}\n");
+        assert_eq!(deliver(&answer), b"{\"ok\":true}");
     }
 
     /// A GraphQL document is a POST of `{query, variables}`, and an answer

@@ -64,15 +64,56 @@ impl Lifecycle {
     /// the sleep stopped it (it died as it was held or saved) stopped on its
     /// own: an exit.
     pub(super) fn end_life(&mut self, by: LifeEnd, now_ms: i64, step: &mut Step) {
+        let stopped = matches!(self.saving, Some(Saving::Stop { .. }));
+        let by = if by == LifeEnd::Sleep && !stopped { LifeEnd::Exit } else { by };
+        let saved = by == LifeEnd::Sleep && matches!(self.saving, Some(Saving::Stop { saved: true, .. }));
+        self.life_ended(by, saved, now_ms, step);
+    }
+
+    /// The running start, if it came up, was a life that ended `by` this
+    /// (`saved`: a sleep whose newest save holds all it did).
+    fn life_ended(&mut self, by: LifeEnd, saved: bool, now_ms: i64, step: &mut Step) {
         if std::mem::take(&mut self.ready) {
             assert!(step.ended.is_none(), "one event ends one life");
-            let stopped = matches!(self.saving, Some(Saving::Stop { .. }));
-            let by = if by == LifeEnd::Sleep && !stopped { LifeEnd::Exit } else { by };
-            let saved = by == LifeEnd::Sleep && matches!(self.saving, Some(Saving::Stop { saved: true, .. }));
-            let quiet = self.kept_ms > 0 && self.worked_ms < self.kept_ms;
             let restarting = matches!(self.phase, Phase::Sleeping { restarting: true, .. });
-            step.ended = Some(Ended { generation: self.generation, by, saved, at_ms: now_ms, restart: restarting && by == LifeEnd::Sleep, quiet });
+            step.ended = Some(Ended { generation: self.generation, by, saved, at_ms: now_ms, restart: restarting && by == LifeEnd::Sleep, quiet: self.quiet() });
         }
+    }
+
+    /// Nothing was done on this life since its newest save that worked, or
+    /// since it came up when it has none: what it ran is in that save.
+    fn quiet(&self) -> bool {
+        self.kept_ms > 0 && self.worked_ms < self.kept_ms
+    }
+
+    /// Whether its container, stopped now though nothing asked, ends a sleep
+    /// and not a crash: a life that came up, awake, nothing open, no save
+    /// under way, a save it made since it was last awake (`Awake`'s
+    /// `since_ms`) holds all it did (`quiet`), and no record or join woke
+    /// it that its guest has not taken up (`owed_ms`). A host stops
+    /// containers for its own reasons (its maintenance, a node short of
+    /// memory); stopped so, such a computer loses nothing and leaves nothing
+    /// it was asked to do undone. A wake not taken up is work no save holds
+    /// (a message that came between a turn's end and its save), and a life
+    /// with no save of its own may have been woken for work it has not
+    /// begun, so either stop stays a crash, started again while that wake
+    /// holds it.
+    pub(super) fn idle_and_kept(&self) -> bool {
+        let Phase::Awake { since_ms, .. } = self.phase else { return false };
+        self.ready && !self.open() && self.saving.is_none() && self.quiet() && self.kept_ms > since_ms && self.owed_ms.is_none()
+    }
+
+    /// Its container stopped unasked while it was idle and kept
+    /// (`idle_and_kept`): a sleep its newest save made, no strike, and
+    /// nothing holds it awake (the hold after its last work, or a wake's, is
+    /// let go as its own idle sleep would have let it go), so its next want
+    /// wakes it from that save. Always on, it is wanted still: it starts
+    /// again, as after its owner's sleep of it.
+    pub(super) fn slept_unasked(&mut self, now_ms: i64, step: &mut Step) {
+        assert!(self.idle_and_kept(), "only an idle computer whose work is kept sleeps unasked");
+        self.held_until_ms = now_ms;
+        self.life_ended(LifeEnd::Sleep, true, now_ms, step);
+        self.gone(now_ms, step);
     }
 
     /// A start that did not come up: tried again after a pause, or given
@@ -168,7 +209,7 @@ pub fn alive(heard_ms: Option<i64>, started_ms: i64, waiting_ms: i64, now_ms: i6
 
 #[cfg(test)]
 mod tests {
-    use fragment_proto::computer::{LifeEnd, LossCause, RestoreSource};
+    use fragment_proto::computer::{ComputerNotice, LifeEnd, LossCause, RestoreSource};
 
     use super::*;
     use crate::computer::testing::{bare, owed, save_asked, started, Computer, IMAGE, T};
@@ -400,6 +441,213 @@ mod tests {
         let s = l.apply(Event::Exited { generation: g }, T + IDLE_MS + 1);
         assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })));
         assert_eq!(l.phase, Phase::ASLEEP);
+    }
+
+    /// What its owner is told now.
+    fn told(c: &Computer) -> Vec<ComputerNotice> {
+        notices(&c.life, &c.saves, &c.images, &Rules::default())
+    }
+
+    /// Goal: a container that stops unasked while its computer is idle,
+    /// with all it did in a save of this life's own (its host's own stop:
+    /// a host's maintenance, a node short of memory), is a sleep: no
+    /// strike, no rollback, nothing told, and nothing starts it again,
+    /// though the hold after its last turn still runs. Its next wake
+    /// restores that save, as after any sleep. Valid (that exit), replay
+    /// (its report again, and its old alarm, change nothing), restart (the
+    /// isolate that hears it reads its stored lifecycle), and the wake after
+    /// it. Method: the computer as the DO drives it, five minutes into the
+    /// twenty its turn's end holds it.
+    #[test]
+    fn an_exit_while_idle_and_saved_is_a_sleep() {
+        let mut c = Computer::new();
+        c.wake();
+        c.turn_saved("b1");
+        let g = c.life.generation();
+        c.now += 5 * 60_000;
+        assert!(c.life.wanted(c.now), "its turn's end still holds it");
+        // restart: the isolate that hears the exit reads it back
+        c.life = Lifecycle::read(&serde_json::to_string(&c.life).unwrap()).unwrap().0;
+        let s = c.apply(Event::Exited { generation: g });
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: c.now, restart: false, quiet: true }), "{s:?}");
+        assert_eq!((c.life.phase.clone(), c.life.failures(), s.alarm_ms), (Phase::ASLEEP, 0, None), "asleep with no strike and no start due: {s:?}");
+        assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "{s:?}");
+        assert_eq!(told(&c), vec![], "nothing to tell");
+        // replay: its report again, then the alarm it had set
+        for e in [Event::Exited { generation: g }, Event::Alarm] {
+            let s = c.apply(e);
+            assert!(s.actions.is_empty() && s.ended.is_none() && s.alarm_ms.is_none(), "{s:?}");
+            assert_eq!((c.life.phase.clone(), c.life.failures()), (Phase::ASLEEP, 0));
+        }
+        // its next want wakes it from that save: no rollback, nothing told
+        let s = c.apply(Event::Wake { why: Wake::Record });
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        let r = c.come_up(generation);
+        assert_eq!((r.from, r.save.as_deref(), r.after, r.rollback, c.saves.rollbacks()), (RestoreSource::Backup, Some("b1"), Some(LifeEnd::Sleep), false, 0), "{r:?}");
+        assert_eq!(told(&c), vec![]);
+    }
+
+    /// Goal: a message its guest took up owes nothing, however its wake
+    /// arrives: before the turn (a keepalive opened after it), during it
+    /// (a guest at work queues what comes), or after the turn ended, as a
+    /// queued wake does once its record was already answered (it was
+    /// posted before that turn's keepalive closed). The exit after the
+    /// turn's save is a sleep each time. Replay: the same late wake again
+    /// owes nothing. Invalid: one posted after the last turn ended owes it
+    /// (`an_exit_with_work_not_kept_is_still_a_crash`). Restart: the
+    /// lifecycle is stored and read back before the exit. Method: the
+    /// three orders, each to its exit.
+    #[test]
+    fn a_message_its_guest_took_up_owes_nothing() {
+        for order in ["before", "during", "after"] {
+            let mut c = Computer::new();
+            c.wake();
+            let g = c.life.generation();
+            let posted = c.now + 1;
+            if order == "before" {
+                c.apply(Event::Posted { at_ms: posted });
+                c.apply(Event::Wake { why: Wake::Record });
+            }
+            c.apply(Event::Opened { socket: Socket::Keepalive });
+            if order == "during" {
+                c.apply(Event::Posted { at_ms: posted });
+                c.apply(Event::Wake { why: Wake::Record });
+            }
+            c.apply(Event::Closed { socket: Socket::Keepalive });
+            if order == "after" {
+                for _ in 0..2 {
+                    c.apply(Event::Posted { at_ms: posted });
+                    c.apply(Event::Wake { why: Wake::Record });
+                }
+            }
+            c.now += SAVE_SETTLE_MS;
+            assert_eq!(c.apply(Event::Alarm).actions.last(), Some(&Action::Hold { generation: g }), "{order}");
+            c.saved_as("b1");
+            c.life = Lifecycle::read(&serde_json::to_string(&c.life).unwrap()).unwrap().0;
+            let s = c.apply(Event::Exited { generation: g });
+            assert_eq!(s.ended.map(|e| (e.by, e.saved)), Some((LifeEnd::Sleep, true)), "{order}: {s:?}");
+            assert_eq!((c.life.phase.clone(), s.alarm_ms), (Phase::ASLEEP, None), "{order}");
+        }
+    }
+
+    /// Goal: an always-on computer's idle exit is the same sleep, no strike
+    /// and no rollback, but it is wanted still: it starts again at once, as
+    /// after its owner's sleep of it awake. Method: as above, always on.
+    #[test]
+    fn an_always_on_computers_idle_exit_starts_it_again() {
+        let mut c = Computer::new();
+        c.wake();
+        c.apply(Event::AlwaysOn { on: true });
+        c.turn_saved("b1");
+        let g = c.life.generation();
+        c.now += 5 * 60_000;
+        let s = c.apply(Event::Exited { generation: g });
+        assert_eq!(s.ended.map(|e| (e.by, e.saved)), Some((LifeEnd::Sleep, true)), "{s:?}");
+        assert_eq!(c.life.failures(), 0);
+        let s = c.owed(&s);
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        let r = c.come_up(generation);
+        assert_eq!((r.save.as_deref(), r.rollback), (Some("b1"), false), "{r:?}");
+        assert_eq!(told(&c), vec![]);
+    }
+
+    /// Goal: every other exit while awake stays a crash, as before: one
+    /// strike, started again at once while wanted, and its owner told what
+    /// it went back to when it lost work. Invalid, each: a turn ended but
+    /// not yet saved (its save waits 30 s); a port tab used after the save;
+    /// a keepalive open; a save under way; a life woken by a record and up
+    /// before its turn began (no save of its own: that record is still
+    /// owed, so it starts again, though nothing was lost); and a lifecycle
+    /// stored before saves kept what they held (`kept_ms` 0). Method: each
+    /// from a saved, idle computer, then the exit.
+    #[test]
+    fn an_exit_with_work_not_kept_is_still_a_crash() {
+        // what is done between its save and the exit, and whether that loses work
+        type Case = (&'static str, fn(&mut Computer), bool);
+        let cases: [Case; 9] = [
+            ("a turn ended 10 s ago", |c| {
+                c.apply(Event::Opened { socket: Socket::Keepalive });
+                c.apply(Event::Closed { socket: Socket::Keepalive });
+                c.now += 10_000;
+            }, true),
+            ("a port tab used since its save", |c| {
+                c.apply(Event::Opened { socket: Socket::Tab });
+                c.now += 60_000;
+                c.apply(Event::Closed { socket: Socket::Tab });
+            }, true),
+            ("a keepalive open", |c| {
+                c.apply(Event::Opened { socket: Socket::Keepalive });
+            }, true),
+            ("a save under way", |c| {
+                let g = c.life.generation();
+                c.apply(Event::Opened { socket: Socket::Keepalive });
+                c.apply(Event::Closed { socket: Socket::Keepalive });
+                c.now += SAVE_SETTLE_MS;
+                assert_eq!(c.apply(Event::Alarm).actions.last(), Some(&Action::Hold { generation: g }));
+            }, true),
+            ("a record's wake, up before its turn", |c| {
+                c.sleep(Some("b2"));
+                let s = c.apply(Event::Wake { why: Wake::Record });
+                let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+                c.come_up(generation);
+            }, false),
+            ("stored before kept_ms", |c| c.life.kept_ms = 0, true),
+            // Codex on this PR: a message's wake after a turn ends and
+            // before its save, then the save, then the exit before its guest
+            // took the message up (no keepalive opened since): that message
+            // is owed, so the exit is a crash, started again while its wake
+            // holds it, though all that was done is saved
+            ("a message's wake not taken up, then a save", |c| {
+                c.apply(Event::Opened { socket: Socket::Keepalive });
+                c.apply(Event::Closed { socket: Socket::Keepalive });
+                c.apply(Event::Posted { at_ms: c.now + 500 });
+                c.apply(Event::Wake { why: Wake::Record });
+                c.now += SAVE_SETTLE_MS;
+                let g = c.life.generation();
+                assert_eq!(c.apply(Event::Alarm).actions.last(), Some(&Action::Hold { generation: g }));
+                c.saved_as("b2");
+            }, false),
+            // Codex's second round: a deploy cut its keepalive, the guest's
+            // turn ended, a message came, and the object closed the lost
+            // socket only as that message's wake reached it: a close it
+            // infers says nothing of when the work ended
+            ("a message after a keepalive a deploy cut, closed as its wake came", |c| {
+                c.apply(Event::Opened { socket: Socket::Keepalive });
+                c.now += 60_000;
+                let posted = c.now;
+                c.apply(Event::Closed { socket: Socket::Keepalive });
+                c.apply(Event::Posted { at_ms: posted });
+                c.apply(Event::Wake { why: Wake::Record });
+                c.now += SAVE_SETTLE_MS;
+                let g = c.life.generation();
+                assert_eq!(c.apply(Event::Alarm).actions.last(), Some(&Action::Hold { generation: g }));
+                c.saved_as("b2");
+            }, false),
+            ("a join's wake not taken up, then a save", |c| {
+                c.apply(Event::Opened { socket: Socket::Keepalive });
+                c.apply(Event::Closed { socket: Socket::Keepalive });
+                c.apply(Event::Posted { at_ms: c.now + 500 });
+                c.apply(Event::Wake { why: Wake::Joined });
+                c.now += SAVE_SETTLE_MS;
+                let g = c.life.generation();
+                assert_eq!(c.apply(Event::Alarm).actions.last(), Some(&Action::Hold { generation: g }));
+                c.saved_as("b2");
+            }, false),
+        ];
+        for (case, before, loses) in cases {
+            let mut c = Computer::new();
+            c.wake();
+            c.turn_saved("b1");
+            before(&mut c);
+            let g = c.life.generation();
+            let s = c.apply(Event::Exited { generation: g });
+            assert_eq!(s.ended.map(|e| e.by), Some(LifeEnd::Exit), "{case}: {s:?}");
+            assert_eq!(c.life.failures(), 1, "{case}: one strike");
+            let s = c.owed(&s);
+            assert!(matches!(s.actions.first(), Some(Action::Start { .. })), "{case}: wanted, it starts again: {s:?}");
+            let went_back = told(&c).into_iter().any(|n| matches!(n, ComputerNotice::WentBack { cause: LossCause::Crash, pending: true, .. }));
+            assert_eq!(went_back, loses, "{case}: told it goes back only when it lost work");
+        }
     }
 
     /// Goal: a container that dies while it starts, before it was ever

@@ -1,6 +1,7 @@
 import { KIND } from "./frame-messages.js";
 import { icon } from "./icons.js";
 import { providerMark } from "./provider-marks.js";
+import { closeOnOutsidePress } from "./dialog.js";
 
 // A provider's name for people: the platform's (`ProviderView.name`), or
 // its id where an older release answered without one (a deploy going out,
@@ -545,9 +546,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     inner.append(block);
     sheet.append(top, inner);
     // closed by its X, Escape or a press outside it (its backdrop)
-    sheet.onclick = (e) => {
-      if (e.target === sheet) sheet.close();
-    };
+    closeOnOutsidePress(sheet);
     sheet.addEventListener("close", () => {
       // (not one a reload took away: its replacement is shown)
       if (openSheet?.provider === p.provider && sheet.isConnected) openSheet = null;

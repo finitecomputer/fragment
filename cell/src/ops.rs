@@ -447,6 +447,13 @@ impl FragmentCell {
             // an ended life's cleanup, which outlives it (ended.rs)
             return self.ended_view();
         }
+        if body["op"] == "ended-due" {
+            // every part of its ended lives due now, held ones too, as a
+            // wipe's call makes them (ended.rs), and the alarm armed
+            self.ended_due_now()?;
+            self.schedule().await?;
+            return self.ended_view();
+        }
         if body["op"] == "search-index" {
             // a life's search index, an ended life's too (searchable.rs)
             return self.search_index_lever(body).await;
@@ -466,14 +473,17 @@ impl FragmentCell {
         Ok(match body["op"].as_str() {
             Some("repo") => {
                 // the repo it names, as one made before repos were named for
-                // their owner kept (`<prefix><name>`), or one code.storage
-                // never had: a wipe deletes what it names
-                let repo = body["repo"]
-                    .as_str()
-                    .filter(|r| (1..=200).contains(&r.len()) && r.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
-                    .ok_or_else(|| CellError::invalid("repo is a repo's name: [a-z0-9-], 1 to 200"))?;
-                self.set_meta(MetaKey::Repo, repo)?;
-                json!({ "repo": repo })
+                // their owner kept: `<prefix><name>`, this fragment's own
+                // and no other's, since its end deletes what it names (a
+                // delete's or a wipe's: ended.rs)
+                let own = format!("{}{}", self.cfg.codestorage().repo_prefix, self.name()?);
+                if body["repo"].as_str() != Some(own.as_str()) {
+                    return Err(CellError::invalid(format!("repo is this fragment's name as repos were named before their owner: {own}")));
+                }
+                self.set_meta(MetaKey::Repo, &own)?;
+                // named so, by no life's key: a delete leaves it, a wipe takes it
+                self.del_meta(MetaKey::RepoOfLife)?;
+                json!({ "repo": own })
             }
             Some("alarm") => {
                 let alarm_at = self.state.storage().get_alarm().await?;
