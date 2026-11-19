@@ -169,6 +169,26 @@ pub(crate) fn manifest(c: &Client, held: &mut Held, author: &Author, mut head: S
     unreachable!("the last try returns")
 }
 
+/// What git holds for a picked file: from a stage, a blob's bytes copied
+/// there on the platform (never through this computer, which may hold far
+/// less than its stage), its pointer; else its bytes as read, a blob's
+/// uploaded first.
+fn stored(src: &Source, blobs: &Blobs, into: &str, p: &plan::Picked) -> Result<Vec<u8>> {
+    if blobs.keeps(p.bytes)? {
+        if let Some((offset, len)) = src.span(&p.from)? {
+            let (sha, crc) = src.copy(into, offset, len).with_context(|| format!("copying {}", p.from))?;
+            // the zip's own check of the file, which reading it made
+            let (want, _) = src.sums(&p.from)?.ok_or_else(|| anyhow!("{}: its zip names no CRC-32", p.from))?;
+            if crc != want {
+                bail!("{} in the stage is not the old file it names (its CRC-32 is {crc:08x}, the zip's {want:08x}): nothing was committed for it", p.from);
+            }
+            return Ok(blob::pointer(&sha, len).into_bytes());
+        }
+    }
+    let read = src.read_max(&p.from, BLOB_MAX_BYTES).with_context(|| format!("reading {}", p.from))?;
+    blobs.store(read)
+}
+
 /// The files the plan brings, into the fragment `into`, and
 /// `left-behind.md`.
 pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str) -> Result<Brought> {
@@ -199,8 +219,7 @@ pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str) -> Result<Br
             already += 1;
             continue;
         }
-        let read = src.read_max(&p.from, BLOB_MAX_BYTES).with_context(|| format!("reading {}", p.from))?;
-        let stored = blobs.store(read)?;
+        let stored = stored(src, &blobs, into, p)?;
         batch_bytes += stored.len();
         batch.push(Change::Upsert { path: RepoPath::parse(&p.to).map_err(|e| anyhow!("{e}"))?, bytes: stored });
         (files, bytes) = (files + 1, bytes + p.bytes);
@@ -283,6 +302,63 @@ mod tests {
         let cut = bring(&c, &src, &layout(), other).unwrap();
         assert_eq!((cut.files, cut.already), (1, 1), "what is there already is not sent again");
         assert_eq!(mock.file_at(other, "main", MANIFEST).as_deref(), Some(&br#"{"meta":{"title":"Mine"}}"#[..]), "a manifest of its own is kept");
+    }
+
+    /// Goal (2026-11-18: a move's import must never bring its stage through
+    /// its computer): from a move's stage, a file kept as a blob is copied
+    /// on the platform, stage to blobs, never read here; a small one is
+    /// read, as git keeps it; each lands whole. Again, nothing is copied or
+    /// read twice. Method: a stage in the code.storage fake, whose copy
+    /// route stores a range in a fragment's blobs, counting what its zip
+    /// answered and what it copied.
+    #[test]
+    fn a_stages_large_files_are_copied_on_the_platform_never_read_here() {
+        let t = Temp::new();
+        let video: Vec<u8> = (0..5 * 1024 * 1024u32).map(|i| (i % 249) as u8).collect();
+        let zip = t.0.join("stage.zip");
+        fragment_fakes::old_home::zip(&zip, &[("work/notes/a.md".into(), b"# a".to_vec()), ("work/videos/trip.mp4".into(), video.clone())]).unwrap();
+        let mock = crate::mockcs::start();
+        mock.keep_blobs();
+        mock.seed_repo(NAME, &[]);
+        mock.seed_stage("old1.p1.1", std::fs::read(&zip).unwrap());
+        let c = Client::new(&mock.url, crate::auth::fixed(7));
+        let src = super::super::open_from(Some(&c), std::path::Path::new("stage:old1.p1.1"), &layout()).unwrap();
+        let b = bring(&c, &src, &layout(), NAME).unwrap();
+        assert_eq!((b.files, b.already), (2, 0));
+        let pointer = blob::parse(&mock.file_at(NAME, "main", "files/videos/trip.mp4").unwrap()).expect("the video is a blob's pointer");
+        assert_eq!((pointer.sha256.as_str(), pointer.size), (blob::sha256_hex(&video).as_str(), video.len() as u64));
+        assert_eq!(mock.blob(NAME, &pointer.sha256), Some(video.clone()), "its bytes in the fragment's blobs");
+        assert_eq!(mock.file_at(NAME, "main", "files/notes/a.md").as_deref(), Some(&b"# a"[..]));
+        let (copies, copied) = mock.stage_copies();
+        let (_, read) = mock.stage_reads();
+        assert_eq!((copies, copied), (1, video.len() as u64), "the video copied on the platform, once");
+        assert!(read < video.len() as u64, "and never read here: {read} bytes read");
+        let again = bring(&c, &src, &layout(), NAME).unwrap();
+        assert_eq!((again.files, again.already, mock.stage_copies().0), (0, 2, 1), "again: nothing copied twice");
+    }
+
+    /// Goal (Codex on #1388): a stage's file whose bytes are not those its
+    /// zip's CRC-32 names (damaged, its directory whole) is never taken for
+    /// the old file: a copy on the platform answers its CRC-32, checked as
+    /// reading the file checks it, and nothing is committed for it.
+    #[test]
+    fn a_damaged_file_in_a_stage_is_never_taken_for_the_old_one() {
+        let t = Temp::new();
+        let video: Vec<u8> = (0..5 * 1024 * 1024u32).map(|i| (i % 247) as u8).collect();
+        let zip = t.0.join("stage.zip");
+        fragment_fakes::old_home::zip(&zip, &[("work/videos/trip.mp4".into(), video)]).unwrap();
+        let mut bytes = std::fs::read(&zip).unwrap();
+        let start = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).unwrap().by_index_raw(0).unwrap().data_start().unwrap();
+        bytes[start as usize + 100] ^= 1;
+        let mock = crate::mockcs::start();
+        mock.keep_blobs();
+        mock.seed_repo(NAME, &[]);
+        mock.seed_stage("old1.p1.1", bytes);
+        let c = Client::new(&mock.url, crate::auth::fixed(7));
+        let src = super::super::open_from(Some(&c), std::path::Path::new("stage:old1.p1.1"), &layout()).unwrap();
+        let e = bring(&c, &src, &layout(), NAME).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("is not the old file it names"), "{e}");
+        assert!(mock.file_at(NAME, "main", "files/videos/trip.mp4").is_none(), "nothing committed for it");
     }
 
     /// Goal: a file of 1 MiB or more counts as there already only when a

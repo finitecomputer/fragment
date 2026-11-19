@@ -239,6 +239,10 @@ struct State {
     /// The ranges a stage's zip answered, and their bytes in all.
     #[serde(skip)]
     stage_reads: (u64, u64),
+    /// The ranges copied from a stage into a fragment's blobs, and their
+    /// bytes in all (`POST …/copy`).
+    #[serde(skip)]
+    stage_copies: (u64, u64),
 }
 
 struct Inner {
@@ -980,6 +984,25 @@ fn stage_route(st: &mut State, req: &Request) -> Option<Response> {
             });
             Response::json(200, &json!({ "stage": stage, "manifest": manifest }))
         }
+        // a range into a fragment's blobs, as the platform copies it (with
+        // `keep_blobs`): never through the caller
+        ("POST", "copy") => {
+            let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
+            let (into, offset, len) = (q("into"), q("offset").parse::<u64>().ok(), q("bytes").parse::<u64>().ok());
+            let (Some(offset), Some(len)) = (offset, len) else { return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "offset and bytes are numbers" }))) };
+            if len == 0 || offset.checked_add(len).is_none_or(|end| end > zip.len() as u64) {
+                return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "past the zip's end" })));
+            }
+            if st.upload_max.is_some_and(|max| len > max) {
+                return Some(Response::json(413, &json!({ "error": "too_large", "message": "past the upload limit" })));
+            }
+            let bytes = zip[offset as usize..(offset + len) as usize].to_vec();
+            let (sha, crc32) = (fragment_core::blob::sha256_hex(&bytes), crc32fast::hash(&bytes));
+            let Some(blobs) = st.host_blobs.as_mut() else { return Some(Response::json(404, &json!({ "error": "not_found", "message": "this host keeps no blobs" }))) };
+            blobs.insert((into, sha.clone()), bytes);
+            st.stage_copies = (st.stage_copies.0 + 1, st.stage_copies.1 + len);
+            Response::json(200, &json!({ "sha256": sha, "bytes": len, "crc32": crc32 }))
+        }
         ("GET", "zip") => {
             let range = req.header("range").and_then(|r| r.strip_prefix("bytes=")).and_then(|r| r.split_once('-')).and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
             let Some((first, last)) = range.filter(|(a, b)| a <= b && *b < zip.len() as u64) else {
@@ -1535,6 +1558,12 @@ impl CodeStorage {
     /// The ranges the stages' zips answered so far, and their bytes in all.
     pub fn stage_reads(&self) -> (u64, u64) {
         self.with(|st| st.stage_reads)
+    }
+
+    /// The ranges copied from stages into fragments' blobs so far, and
+    /// their bytes in all.
+    pub fn stage_copies(&self) -> (u64, u64) {
+        self.with(|st| st.stage_copies)
     }
 
     /// What `name`'s status says it is: its visibility and its kind.

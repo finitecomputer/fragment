@@ -1421,8 +1421,43 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
     let kept = disk_used(&home);
     s.ok("what the import keeps on the computer is within its room: the stage never came onto it", kept <= BIG_ROOM, format!("{kept} bytes"));
 
+    // the copy, stage to blobs on the platform: the bound agent's alone,
+    // into a fragment it (or its owner, `for`) edits, within the zip and
+    // its upload limit
+    let (at, len) = (zip.windows(4).position(|w| w == b"PK\x03\x04").unwrap_or(0) as u64, 2 * MIB as u64);
+    let copy = |k: &crate::Keys, into: &str, q: &str| api.signed(k, "POST", &format!("{base}/copy?into={into}&{q}"), None);
+    let range = format!("offset={at}&bytes={len}");
+    let want = fragment_core::blob::sha256_hex(&zip[at as usize..(at + len) as usize]);
+    let mine = copy(&agent_keys, &name, &range)?;
+    let held = api.signed(&owner, "GET", &format!("/api/f/{name}/blobs/{want}"), None)?;
+    s.ok(
+        "the bound agent copies a range of its stage into a fragment it edits, on the platform: the blob of those bytes",
+        mine.status == 200 && mine.body["sha256"] == want.as_str() && mine.body["bytes"] == len && held.status == 200 && held.bytes == zip[at as usize..(at + len) as usize],
+        format!("{mine} | {}", held.status),
+    );
+    let owners = s.create(api, &owner, "owners")?["name"].as_str().unwrap_or_default().to_string();
+    let me = api.signed(&owner, "GET", "/api/identities/me", None)?.body["id"].as_str().unwrap_or_default().to_string();
+    let for_owner = copy(&agent_keys, &owners, &format!("{range}&for={me}"))?;
+    let as_itself = copy(&agent_keys, &owners, &range)?;
+    s.ok(
+        "acting for its owner, it copies into its owner's fragment it is no member of, as its computer's egress signs; as itself, the fragment refuses it (403)",
+        for_owner.status == 200 && for_owner.body["sha256"] == want.as_str() && api.signed(&owner, "GET", &format!("/api/f/{owners}/blobs/{want}"), None)?.status == 200 && as_itself.status == 403,
+        format!("{for_owner} | {as_itself}"),
+    );
+    let stranger = api.person()?;
+    let theirs = copy(&stranger, &name, &range)?;
+    let past = copy(&agent_keys, &name, &format!("offset={}&bytes={len}", zip.len() as u64 - len + 1))?;
+    let over = copy(&agent_keys, &name, &format!("offset=0&bytes={}", fragment_proto::limits::BLOB_MAX_BYTES + 1))?;
+    let none = copy(&agent_keys, &name, "offset=0&bytes=0")?;
+    s.ok(
+        "a copy is refused to anyone but the bound agent (403), past the zip's end (400), past its upload limit (413), and of nothing (400)",
+        theirs.status == 403 && past.status == 400 && over.status == 413 && none.status == 400,
+        format!("{} {} {} {}", theirs.status, past.status, over.status, none.status),
+    );
+
     let done = api.signed(&agent_keys, "POST", &format!("{base}/done"), Some(&json!({ "ok": true })))?;
-    s.ok("it says it is done: the move waits for staff", done.status == 200 && done.body["state"] == "retiring", &done);
+    let after = copy(&agent_keys, &name, &range)?;
+    s.ok("it says it is done: the move waits for staff, and its stage copies no more (409)", done.status == 200 && done.body["state"] == "retiring" && after.status == 409, format!("{done} | {}", after.status));
     Ok(())
 }
 

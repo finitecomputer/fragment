@@ -252,7 +252,8 @@ pub const AGENT_HEADER: &str = "x-fragment-agent";
 /// refuses it on every other route (cell/src/lib.rs `signer`).
 pub fn honors_for(method: &str, path: &str) -> bool {
     let p = path.split('?').next().unwrap_or(path);
-    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/") || (method == "POST" && p == "/api/search")
+    let stage_copy = method == "POST" && p.starts_with("/api/migrations/stages/") && p.ends_with("/copy");
+    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/") || (method == "POST" && p == "/api/search") || stage_copy
 }
 
 impl From<Identity> for Signer {
@@ -486,6 +487,11 @@ impl Client {
     /// the time that takes.
     pub fn get_sized(&self, path: &str, bytes: u64) -> Result<Resp> {
         self.send("GET", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
+    }
+    /// A POST that does the same however often it is sent (a copy into a
+    /// content address): retried as a read is.
+    pub fn post_safe(&self, path: &str, bytes: u64) -> Result<Resp> {
+        self.send("POST", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
     }
     /// `len` bytes of what `path` answers, from `offset` (a `Range` the
     /// answer must honor whole, 206), or its refusal.
@@ -913,6 +919,12 @@ mod tests {
         // a search across fragments takes it; the launcher's search never
         assert!(honors_for("POST", "/api/search"));
         assert!(!honors_for("GET", "/api/search?q=a") && !honors_for("POST", "/api/searchx"));
+        // a move's copy into a fragment, often its owner's; no other stage route
+        assert!(honors_for("POST", "/api/migrations/stages/o1.p1.1/copy?into=x--k3x9&offset=0&bytes=1"));
+        for no in ["/api/migrations/stages/o1.p1.1/open", "/api/migrations/stages/o1.p1.1/done", "/api/migrations/stages/o1.p1.1/zip"] {
+            assert!(!honors_for("POST", no) && !honors_for("GET", no), "{no}");
+        }
+        assert!(!honors_for("GET", "/api/migrations/stages/o1.p1.1/copy"));
     }
 
     /// Every code has its own name, and GUIDE.md lists each one.
