@@ -226,13 +226,18 @@ impl FragmentCell {
             // as its owner may: whether the channel takes the fragment's
             // records at all; and its record relays no one (one kept by a
             // release before `check` refused it)
-            match schedule::admit_channel(&r.channel, decl.as_ref(), builtin, Role::Owner).and_then(|()| schedule::fires(&record)) {
+            // a skipped fire moves on without claiming it fired (`lastAt` keeps the last real one)
+            let fired = match schedule::admit_channel(&r.channel, decl.as_ref(), builtin, Role::Owner).and_then(|()| schedule::fires(&record)) {
                 Ok(()) => {
                     self.append_own(&r.channel, &record, &schedule::fire_key(r.id, at)).await?;
+                    true
                 }
-                Err(why) => self.event("schedule.unfired", &format!("schedule #{}: {why}", r.id), json!({ "schedule": r.id })),
-            }
-            self.record_moves_on(r, now, true)?;
+                Err(why) => {
+                    self.event("schedule.unfired", &format!("schedule #{}: {why}", r.id), json!({ "schedule": r.id }));
+                    false
+                }
+            };
+            self.record_moves_on(r, now, fired)?;
         }
         Ok(())
     }
