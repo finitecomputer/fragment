@@ -12,6 +12,17 @@ pub const LEFT_OUT_MAX: usize = 512;
 pub const LEFT_OUT_PATTERN_MAX_BYTES: usize = 256;
 const _: () = assert!(LEFT_OUT_MAX * 2 <= HELD_ANSWER_MAX_BYTES, "the answer's bound fits its patterns' count");
 
+/// What a save saves (docs/computers.md, "Data and the restore gate"):
+/// `/data/work`, what the guest's tools write, and the rest of `/data`,
+/// the guest's own state, each a record of its own and restored together,
+/// the first first (a restore replaces its directory whole, so `/data`'s
+/// record goes in before the work's). `/data`'s record leaves the work out
+/// (the cell's `WORK_LEFT_OUT`), and what a held guest names; the work's
+/// record leaves out only what it named under `/work/` (`work_left_out`:
+/// its agents' caches). The platform's own paths, which a save's failure
+/// names (`glance::why` keeps them).
+pub const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
+
 /// What a guest's answer to the hold (`/run/computer/held`, docs/computers.md)
 /// names as left out of its save: one gitignore pattern a line, relative to
 /// `/data`, of letters, digits and `._-/*?[]` (empty lines skipped). These
