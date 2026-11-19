@@ -13,7 +13,7 @@
 //! and one shared before the rule keeps what it had
 //! (docs/technical-debt-ledger.md).
 
-use fragment_proto::{ErrorCode, FragmentKind};
+use fragment_proto::{ErrorCode, FragmentKind, Sharing};
 
 use crate::error::{CellError, CellResult};
 use crate::fragment::{FragmentCell, MetaKey};
@@ -44,8 +44,7 @@ impl FragmentCell {
     /// invited, or its link or public opens it: what an agent fragment
     /// shared before the rule still is (an operator's count asks this).
     pub(crate) fn shared_past_owner(&self) -> CellResult<bool> {
-        let sharing = self.sharing_counts()?;
-        Ok(sharing.with_others() || sharing.beyond())
+        Ok(past_owner(&self.sharing_counts()?))
     }
 
     /// Made an agent, refused while it is shared past its owner.
@@ -55,4 +54,10 @@ impl FragmentCell {
             false => Ok(()),
         }
     }
+}
+
+/// Whether `sharing` reaches past its owner and their own agents
+/// (`shared_past_owner`), for a caller that read it already.
+pub(crate) fn past_owner(sharing: &Sharing) -> bool {
+    sharing.with_others() || sharing.beyond()
 }
