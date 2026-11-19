@@ -53,7 +53,7 @@ pub(super) fn page(session: &str, who: &Signed, email: Option<&str>, name: &str,
     };
     let body = format!(
         "<p>{from} invited you to {may} <b>{t}</b>.</p>\
-         <form method=\"post\" action=\"/auth/fragment/invite?name={qn}&amp;return={qb}{address}\"><input type=\"hidden\" name=\"form\" value=\"{f}\">\
+         <form method=\"post\" action=\"/auth/fragment/invite?name={qn}&amp;return={qb}{address}\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><input type=\"hidden\" name=\"invite\" value=\"{at}\">\
          <footer class=\"answer\"><button class=\"quiet\" name=\"answer\" value=\"decline\" data-arm disabled>Decline</button><button name=\"answer\" value=\"accept\" data-arm disabled>Accept and open</button></footer></form>\
          <p class=\"hint\">{hint}</p>",
         t = esc(title),
@@ -61,6 +61,8 @@ pub(super) fn page(session: &str, who: &Signed, email: Option<&str>, name: &str,
         qb = esc(&enc(back)),
         address = esc(address),
         f = esc(&form::issue(session, &purpose(name), crate::js::now_ms())),
+        // the invite shown, which alone its answer answers
+        at = waiting["expiresAt"].as_i64().unwrap_or_default(),
     );
     share::sheet_page(200, "You're invited", &body, false)
 }
@@ -85,7 +87,9 @@ pub(super) async fn answered(req: &mut Request, env: &Env, cfg: &Config, url: &U
         _ => return Err(CellError::invalid("an invite's answer is accept or decline")),
     };
     let again = format!("/auth/fragment?name={}&return={}{}", enc(&name), enc(&back), super::address_query(cfg, url));
-    let answer = AnswerInvite { by: By::Session(session.clone()), acting_for: None, fragment: name.clone(), yes };
+    // the invite the page showed: another in its place since is gone to it
+    let shown = fields.get("invite").and_then(|at| at.parse().ok());
+    let answer = AnswerInvite { by: By::Session(session.clone()), acting_for: None, fragment: name.clone(), yes, expires_at: shown };
     match (ask_registry(env, &answer).await, yes) {
         (Ok(Some(_)), true) => {}
         (Ok(None), false) => return Ok(redirect("/", &[])?.with_status(303)),

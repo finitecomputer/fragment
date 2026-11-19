@@ -57,7 +57,7 @@ fn now_ms() -> i64 {
 }
 
 /// A page's value for an input named or with the id `key`.
-fn value_of(r: &Reply, attr: &str) -> String {
+pub(super) fn value_of(r: &Reply, attr: &str) -> String {
     let at = r.text.find(attr).map(|i| i + attr.len());
     at.and_then(|i| r.text[i..].split_once("value=\"")).and_then(|(_, rest)| rest.split('"').next()).unwrap_or("").replace("&amp;", "&")
 }
@@ -99,7 +99,7 @@ fn headers(r: &Reply) -> String {
 }
 
 /// A form a sharing page posts, from `origin`, with `session`'s cookie.
-fn post(api: &Api, path: &str, session: &str, origin: &str, fields: &[(&str, &str)]) -> Result<Reply> {
+pub(super) fn post(api: &Api, path: &str, session: &str, origin: &str, fields: &[(&str, &str)]) -> Result<Reply> {
     let body = fields.iter().map(|(k, v)| format!("{k}={}", url_enc(v))).collect::<Vec<_>>().join("&");
     api.call(Call {
         method: "POST",

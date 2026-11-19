@@ -89,6 +89,11 @@ pub(crate) struct AnswerInvite {
     pub acting_for: Option<String>,
     pub fragment: String,
     pub yes: bool,
+    /// The invite the asker was shown, by when it runs out: another in its
+    /// place since is not this answer's (404). None: the one `invite_to`
+    /// picks.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }
 
 impl Call for AnswerInvite {
@@ -141,12 +146,12 @@ struct DueRow {
 }
 
 impl RegistryCell {
-    /// `/invite`: the invite kept against the email, for its person's yes,
-    /// and mailed. The row is written before the mail goes, so a list read
-    /// meanwhile shows it, and taken back when the mail is not sent: the
-    /// one it replaced comes back, unless another took its place since (the
-    /// fragment restores its own the same way). Whoever holds the email now
-    /// has their open pages told.
+    /// `/invite`: the invite mailed, then kept against the email for its
+    /// person's yes. Written only once its mail went, so a mail not sent
+    /// changes nothing here (the fragment restores its own invite before it,
+    /// as this keeps it), and only over an older invite to the fragment (by
+    /// when each runs out), so of two in flight the newer stands. Whoever
+    /// holds the email now has their open pages told.
     pub(super) async fn invite(&self, i: InviteEmail) -> CellResult<()> {
         if !mail::valid_address(&i.email) || i.email != i.email.to_ascii_lowercase() {
             return Err(CellError::invalid(format!("{:?} is not a lower-case email", i.email)));
@@ -169,42 +174,27 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::RateLimited, format!("{} invites wait on {} already", limits::INVITES_PER_EMAIL_MAX, i.email)));
         }
         self.count_mail(&i.sharer, now)?;
-        let text = |t: Option<&str>| t.map_or(SqlStorageValue::Null, Into::into);
-        // the one it replaces, which a mail not sent puts back (read as the
-        // rows `waiting_on` reads: no decoder of its own)
-        let before = self.row::<serde_json::Value>(
-            "SELECT expires_at, role, title, sharer, app FROM invites_waiting WHERE email = ? AND fragment = ?",
-            vec![i.email.as_str().into(), i.fragment.as_str().into()],
-        )?;
-        let write = |at: i64, role: Option<&str>, title: Option<&str>, sharer: Option<&str>, app: Option<&str>, replace: &str| {
-            self.exec(
-                &format!(
-                    "INSERT INTO invites_waiting (email, fragment, expires_at, role, title, sharer, app) VALUES (?, ?, ?, ?, ?, ?, ?)
-                     ON CONFLICT (email, fragment) DO {replace}"
-                ),
-                vec![i.email.as_str().into(), i.fragment.as_str().into(), SqlStorageValue::Integer(at), text(role), text(title), text(sharer), text(app)],
-            )
-        };
-        let replace = "UPDATE SET expires_at = excluded.expires_at, role = excluded.role, title = excluded.title, sharer = excluded.sharer, app = excluded.app";
-        write(i.expires_at, Some(i.role.as_str()), Some(&i.title), Some(&i.sharer), i.app.as_deref(), replace)?;
         // the platform's own page, where its person accepts it, then opens
         // the fragment (auth.rs `/auth/fragment`, FIN-502): never the
         // fragment's address, which is no one's to open until they do
         let link = format!("{}/auth/fragment?name={}", self.cfg.platform(), i.fragment);
         let days = limits::INVITE_TTL_S / (24 * 3600);
         let invite = mail::invite(&i.email, &from, &i.title, i.role == Role::Editor, &link, days);
-        let sent = crate::mail::send(&self.env, self.cfg, &invite).await;
-        if let Err(e) = sent {
-            let ours = self.rows::<EmailRow>(
-                "DELETE FROM invites_waiting WHERE email = ? AND fragment = ? AND expires_at = ? RETURNING email",
-                vec![i.email.as_str().into(), i.fragment.as_str().into(), SqlStorageValue::Integer(i.expires_at)],
-            )?;
-            if let (Some(w), false) = (before, ours.is_empty()) {
-                let s = |k: &str| w[k].as_str();
-                write(w["expires_at"].as_i64().unwrap_or_default(), s("role"), s("title"), s("sharer"), s("app"), "NOTHING")?;
-            }
-            return Err(e);
-        }
+        crate::mail::send(&self.env, self.cfg, &invite).await?;
+        self.exec(
+            "INSERT INTO invites_waiting (email, fragment, expires_at, role, title, sharer, app) VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (email, fragment) DO UPDATE SET expires_at = excluded.expires_at, role = excluded.role, title = excluded.title,
+               sharer = excluded.sharer, app = excluded.app WHERE excluded.expires_at > invites_waiting.expires_at",
+            vec![
+                i.email.as_str().into(),
+                i.fragment.as_str().into(),
+                SqlStorageValue::Integer(i.expires_at),
+                i.role.as_str().into(),
+                i.title.as_str().into(),
+                i.sharer.as_str().into(),
+                i.app.as_deref().map_or(SqlStorageValue::Null, Into::into),
+            ],
+        )?;
         self.tell_invitee(&i.email).await;
         Ok(())
     }
@@ -298,12 +288,13 @@ impl RegistryCell {
     }
 
     /// The invite to `fragment` waiting on `person`'s emails, if one does,
-    /// as `waiting_on` reads each (the one that runs out soonest, when two
-    /// of their emails hold one): what a sign-in there asks them to accept
-    /// first (signin.rs `mint`, FIN-502).
+    /// as `waiting_on` reads each (an app's first, which asks a yes of a
+    /// member too; then the one that runs out soonest, when two of their
+    /// emails hold one): what a sign-in there asks them to accept first
+    /// (signin.rs `mint`, FIN-502).
     pub(super) fn waiting_to(&self, person: &str, fragment: &str) -> CellResult<Option<serde_json::Value>> {
         self.row::<serde_json::Value>(
-            &format!("{WAITING_SELECT} AND w.fragment = ? ORDER BY w.expires_at LIMIT 1"),
+            &format!("{WAITING_SELECT} AND w.fragment = ? ORDER BY w.app IS NULL, w.expires_at LIMIT 1"),
             vec![SqlStorageValue::Integer(js::now_ms()), person.into(), fragment.into()],
         )
     }
@@ -337,12 +328,15 @@ impl RegistryCell {
 
     /// The email of `person`'s that `fragment`'s invite waits on for their
     /// yes, and that invite's generation (its `expires_at`, which only its
-    /// own answer forgets), or 404.
-    fn invite_to(&self, person: &str, fragment: &str) -> CellResult<(String, i64)> {
+    /// own answer forgets), or 404: the one made at `at` when it names one,
+    /// else an app's first (as `waiting_to` shows it), then the soonest to
+    /// run out.
+    fn invite_to(&self, person: &str, fragment: &str, at: Option<i64>) -> CellResult<(String, i64)> {
+        let at = at.map_or(SqlStorageValue::Null, SqlStorageValue::Integer);
         let row = self.row::<serde_json::Value>(
-            "SELECT email, expires_at FROM invites_waiting WHERE fragment = ? AND role IS NOT NULL AND expires_at > ?
-               AND email IN (SELECT email FROM subjects WHERE identity = ?) ORDER BY expires_at LIMIT 1",
-            vec![fragment.into(), SqlStorageValue::Integer(js::now_ms()), person.into()],
+            "SELECT email, expires_at FROM invites_waiting WHERE fragment = ? AND role IS NOT NULL AND expires_at > ? AND (? IS NULL OR expires_at = ?)
+               AND email IN (SELECT email FROM subjects WHERE identity = ?) ORDER BY app IS NULL, expires_at LIMIT 1",
+            vec![fragment.into(), SqlStorageValue::Integer(js::now_ms()), at.clone(), at, person.into()],
         )?;
         let gone = || CellError::new(ErrorCode::NotFound, format!("no invite to {fragment} waits on you: it was taken back, answered, or ran out")).because(Reason::Gone);
         let row = row.ok_or_else(gone)?;
@@ -374,7 +368,7 @@ impl RegistryCell {
     /// answered.
     async fn answer_invite(&self, b: AnswerInvite) -> CellResult<Option<Role>> {
         let who = self.invitee_by(&b.by, b.acting_for.as_deref())?;
-        let (email, expires_at) = self.invite_to(&who.id, &b.fragment)?;
+        let (email, expires_at) = self.invite_to(&who.id, &b.fragment, b.expires_at)?;
         let answer = InviteAnswer { email: email.clone(), identity: who.id.clone(), agents: self.agents_of(&who.id)?, yes: b.yes, expires_at: Some(expires_at) };
         let met = match crate::fragment::call(&self.env, &b.fragment, &answer).await {
             Ok(met) => Some(met),

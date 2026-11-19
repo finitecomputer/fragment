@@ -391,9 +391,21 @@ fn races(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         link.status == 200 && link.text.contains("Accept") && link.text.contains("adds your app"),
         format!("{} {}", link.status, link.text.chars().take(300).collect::<String>()),
     );
+    // the page answers the invite it showed: a newer one is its own to answer
+    let (form, shown) = (super::share::form_of(&link), super::share::value_of(&link, "name=\"invite\""));
+    let replaced = invite_app(&apps[2])?;
+    std::thread::sleep(std::time::Duration::from_millis(fragment_core::form::DELAY_MS as u64 + 100));
+    let answer = format!("/auth/fragment/invite?name={team}&return=%2F");
+    let stale = super::share::post(api, &answer, &bob_session, &api.base, &[("form", &form), ("invite", &shown), ("answer", "accept")])?;
+    let waiting = invites_here(&team).iter().any(|i| i["app"] == apps[2].as_str());
+    s.ok(
+        "a yes from a page that showed an app's invite answers only that one: one for another app in its place since is gone to it, and still waits",
+        !shown.is_empty() && replaced.status == 200 && stale.status == 404 && row(owner, &team, &apps[2]).is_none() && waiting && waits_on(&bob, &team),
+        format!("shown {shown:?} replaced {replaced} stale {} waiting {waiting}", stale.status),
+    );
     s.mail.fail_next("E_SEND_FAILED");
-    let failed = invite_app(&apps[2])?;
-    let kept = invites_here(&team).iter().any(|i| i["app"] == apps[1].as_str());
+    let failed = invite_app(&apps[1])?;
+    let kept = invites_here(&team).iter().any(|i| i["app"] == apps[2].as_str());
     s.ok(
         "an app's invite whose mail fails keeps the invite before it, here and in its person's notices",
         failed.status != 200 && kept && waits_on(&bob, &team),
@@ -403,7 +415,7 @@ fn races(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     api.signed(owner, "DELETE", &format!("/api/f/{team}/members/{bob_id}"), None)?;
     s.mail.fail_next("E_SEND_FAILED");
     let failed = api.signed(owner, "POST", &format!("/api/f/{team}/invites"), Some(&json!({ "email": super::templates::email_of(&bob), "role": "viewer" })))?;
-    let kept = invites_here(&team).iter().any(|i| i["app"] == apps[1].as_str());
+    let kept = invites_here(&team).iter().any(|i| i["app"] == apps[2].as_str());
     s.ok(
         "a person's invite whose mail fails, in place of their app's, keeps the app's here and in their notices",
         failed.status != 200 && kept && waits_on(&bob, &team),
