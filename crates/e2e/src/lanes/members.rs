@@ -267,6 +267,9 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
         demoted.status == 400 && removed.status == 400 && demoted.message().contains("this chat's own agent") && removed.message().contains("this chat's own agent") && leads == Some(json!("editor")),
         format!("{demoted} {removed}"),
     );
+    // no door: a chat no connector is says one on no row, its agents' included
+    let rows = r.body["members"].as_array().cloned().unwrap_or_default();
+    s.ok("a chat that is no connector's says a door on no member's row", rows.iter().filter(|m| m["kind"] == "agent").count() >= 2 && rows.iter().all(|m| m.get("door").is_none()), json!(rows));
     let lowered = api.signed(&owner, "PUT", &talk_path(&format!("members/{second_id}")), Some(&json!({ "role": "viewer" })))?;
     let gone = api.signed(&owner, "DELETE", &talk_path(&format!("members/{second_id}")), None)?;
     s.ok("another agent in it is lowered and removed as any member is", lowered.status == 200 && gone.status == 200, format!("{lowered} {gone}"));

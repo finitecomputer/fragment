@@ -754,6 +754,7 @@ out.
 | --- | --- | --- | --- |
 | `addedAt` | `integer` | required |  |
 | `addedBy` | `string` | required | Who granted it: the owner, or their agent for them (an invite's maker). |
+| `door` | `string` or `null` | optional | On a connector bound as an agent's door, that agent's row alone: the door it is (`telegram`), while it is open (docs/api.md, "An agent's doors"). Its records relaying that agent's owner come through it, so the agent's bridge and its pages take them as its owner's words (docs/chat-records.md). Add-only: absent from an older platform. |
 | `email` | `string` or `null` | optional | A person member's email, as the share sheet shows it (decision 48): in `GET members` to the owner and their agent for them, and in no other list (add-only: absent from an older platform). |
 | `kind` | [`IdentityKind`](#identitykind) or `null` | optional | `person` or `agent`. |
 | `owner` | `string` or `null` | optional | An agent member's owner, who reads what it reads. |

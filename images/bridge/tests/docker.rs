@@ -1313,6 +1313,98 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     assert_eq!(replies, 1, "no duplicate arrives after the completion settles");
 }
 
+/// A host server that sends one body of `bytes` at about `per_s` bytes a
+/// second, to every request: a slow download for the computer.
+async fn slow_download(bytes: usize, per_s: usize) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.expect("it listens");
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        // bounded by the test: it ends with the runtime
+        while let Ok((mut s, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = [0u8; 4096];
+                let _ = s.read(&mut head).await;
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\ncontent-length: {bytes}\r\nconnection: close\r\n\r\n").as_bytes()).await;
+                let chunk = vec![7u8; per_s / 10];
+                // bounded: the body, a tenth of a second's worth at a time
+                for _ in 0..bytes / chunk.len() {
+                    if s.write_all(&chunk).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+        }
+    });
+    port
+}
+
+/// Goal (the plan to a sandbox per agent, P6; docs/bridge.md, "Work left
+/// running"): work an agent leaves running holds its computer while it
+/// works, and lets go once it idles, as the computer's own counters show.
+/// Invalid: an idle server the agent started, beside idle Hermes and its
+/// bridge, never holds it: the keepalive closes after the turn and stays
+/// closed for a whole window. Valid: a background command that computes
+/// for 50 s, then downloads for 30 s at 200 KB/s (its CPU under the floor,
+/// its network over it), holds the computer through both, from the first
+/// slice after its turn; once it idles, still running, it lets go within
+/// the window and a slice.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn work_left_running_holds_the_computer_while_it_works() {
+    use fragment_bridge::limits::{LOAD_SLICES, LOAD_SLICE_MS};
+    let (fake, _model, chat, c) = hermes_running().await;
+    let window = LOAD_SLICES as u64 * LOAD_SLICE_MS;
+    let open = |w: &support::fake::World| w.keepalive_open > 0;
+    // invalid: an idle server left running
+    tool_said(&fake, &chat, &c, "start: python3 -m http.server 8123").await;
+    within(&fake, &chat, &c, window + 3 * LOAD_SLICE_MS, "the keepalive to close under an idle server", |w| !open(w)).await;
+    assert!(c.exec(&["pgrep", "-f", "http.server 8123"]), "the server still runs");
+    let t = Instant::now();
+    // bounded: a window
+    while t.elapsed() < Duration::from_millis(window) {
+        assert!(!fake.with(|w| open(w)), "an idle server held the computer after {:?}", t.elapsed());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // valid: work, then a download, then idle, the process still running
+    let port = slow_download(6_000_000, 200_000).await;
+    let dir = "/data/work/juniper--k3x9";
+    let command = format!("start: sh -c 'timeout 50 python3 -c \"while True: pass\"; touch {dir}/computed; curl -s http://api.fragment.internal:{port}/big -o {dir}/big; touch {dir}/downloaded; sleep 900'");
+    let left = |c: &Container| c.logs().lines().filter(|l| l.contains("\"keepalive.left\"")).map(|l| l.contains("\"hold\":true")).collect::<Vec<bool>>();
+    let before = left(&c).len();
+    tool_said(&fake, &chat, &c, &command).await;
+    let started = Instant::now();
+    // bounded: the turn's end and the first slice after it
+    while left(&c).len() == before {
+        assert!(started.elapsed() < Duration::from_millis(3 * LOAD_SLICE_MS), "the work never held the computer");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let first = started.elapsed();
+    let mut gaps = vec![];
+    // bounded: the work's 80 s and a margin
+    while !c.exec(&["test", "-f", &format!("{dir}/downloaded")]) {
+        assert!(started.elapsed() < Duration::from_secs(180), "the work did not finish");
+        if !fake.with(|w| open(w)) {
+            gaps.push((started.elapsed(), c.exec(&["test", "-f", &format!("{dir}/computed")])));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let worked = started.elapsed();
+    let downloaded = c.exec_out(&["stat", "-c", "%s", &format!("{dir}/big")]);
+    let said = left(&c);
+    eprintln!("work left running: held from {first:?}, gaps {gaps:?}, done at {worked:?}, downloaded {downloaded}, said {said:?}");
+    assert_eq!(downloaded.trim(), "6000000", "the download finished whole");
+    assert_eq!(said[before..], [true], "one hold, from the first slice after its turn: {said:?}");
+    assert!(gaps.is_empty(), "held throughout the work, the download's too: {gaps:?}");
+    // idle, still running: it lets go within the window and a slice
+    within(&fake, &chat, &c, window + 2 * LOAD_SLICE_MS, "the keepalive to close once the work idles", |w| !open(w)).await;
+    assert!(c.exec(&["pgrep", "-f", "sleep 900"]), "the idle command still runs");
+    assert_eq!(left(&c)[before..], [true, false], "let go once");
+    let log = c.logs();
+    assert!(log.contains("\"load.counters\"") && log.contains("\"read\":true"), "the container's own cgroup is read");
+}
+
 /// Goal (Alex on #1086): a `group` Hermes runs as one completion unit.
 /// Two background tasks of one group, independent completions on: both
 /// helpers start under the parent's turn; the fast one, finished, stays in
