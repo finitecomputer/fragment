@@ -1670,7 +1670,9 @@ async fn boot_main() {
                         // at its next start
                         if c.credential_env != credential_env {
                             credential_env = c.credential_env.clone();
-                            for a in agents::hermes(&agents).iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
+                            // none whose files a restore is syncing (`restore`)
+                            let running = restoring.lock().expect("the restores are never poisoned").running.keys().cloned().collect::<BTreeSet<String>>();
+                            for a in agents::hermes(&agents).iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment) && !running.contains(&a.fragment)) {
                                 write_profile(&api, a, &home, ids, &route, &credential_env, &team).await;
                             }
                         }
@@ -1741,9 +1743,11 @@ async fn boot_main() {
             if last_sync.elapsed() > Duration::from_millis(sync_every) {
                 last_sync = Instant::now();
                 // another runtime's agent only once the bridge was told it
-                // is ready (the ready file written): its restore is the one
-                // sync of its files until then
-                for a in agents.iter().filter(|a| agents::of_hermes(a) || published.contains(&agents::restored_key(a))) {
+                // is ready (the ready file written), and no agent whose
+                // files a restore is syncing: the restore is the one sync
+                // of its files while it runs
+                let running = restoring.lock().expect("the restores are never poisoned").running.keys().cloned().collect::<BTreeSet<String>>();
+                for a in agents.iter().filter(|a| (agents::of_hermes(a) || published.contains(&agents::restored_key(a))) && !running.contains(&a.fragment)) {
                     // a Hermes agent's job may have changed: its role with it
                     if sync_own(&api, a, &home, &own).await.is_some_and(|d| d.pulled > 0) && agents::of_hermes(a) {
                         write_identity(a, &hermes::profile_dir(&home, &a.fragment), ids, &read_face(&api, a).await);
