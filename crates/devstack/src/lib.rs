@@ -723,13 +723,6 @@ pub struct NodeOptions {
     /// as it reaches xtask: in a group of its own, it outlived a Ctrl-C,
     /// holding its port.
     pub own_group: bool,
-    /// miniflare's local trace store (`X_LOCAL_OBSERVABILITY`): every
-    /// invocation's trace, in a SQLite of the node's state, for its local
-    /// explorer. `xtask dev` keeps it; the e2e reads none, and it was most
-    /// of what a run wrote to disk (2026-11-19: a `computers` run's workerd
-    /// wrote 9.8 GB with it, 1.2 GB without; 3.0 of a whole run's 3.9 GB of
-    /// state).
-    pub trace_store: bool,
 }
 
 impl NodeOptions {
@@ -895,6 +888,9 @@ const RUNTIME_NAMED_WAIT: Duration = Duration::from_secs(30);
 /// (`node::VARS_CLEARED`). So wrangler never gets it.
 const WRANGLER_VARS_CLEARED: [&str; 1] = ["VSCODE_INSPECTOR_OPTIONS"];
 
+/// wrangler's switch for miniflare's local trace store (`Node::start`).
+const LOCAL_TRACES: &str = "X_LOCAL_OBSERVABILITY";
+
 /// A process this one started and stops itself (OpenBao): a termination
 /// signal's `kill_started` reaches it as it reaches every process below
 /// this one (tree.rs), so it needs no list of its own.
@@ -974,8 +970,14 @@ impl Node {
         cmd.current_dir(&opts.project)
             .env("WRANGLER_LOG_PATH", &opts.log_dir)
             .env("WRANGLER_REGISTRY_PATH", opts.project.join(".wrangler/registry"));
-        if !opts.trace_store {
-            cmd.env("X_LOCAL_OBSERVABILITY", "false");
+        // miniflare's local trace store: every invocation's trace in a
+        // SQLite of the node's state, for wrangler's local explorer, which
+        // nothing here reads. On this box's SSD it was most of what a node
+        // wrote (2026-11-19: a `computers` e2e run's workerd, 9.8 GB with
+        // it, 1.2 GB without). Off unless the caller's environment says
+        // otherwise (`X_LOCAL_OBSERVABILITY=true cargo xtask dev`).
+        if std::env::var_os(LOCAL_TRACES).is_none() {
+            cmd.env(LOCAL_TRACES, "false");
         }
         for var in WRANGLER_VARS_CLEARED {
             cmd.env_remove(var);

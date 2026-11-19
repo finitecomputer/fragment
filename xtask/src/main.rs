@@ -418,8 +418,6 @@ fn dev(args: &[String]) -> Result<()> {
         log_dir: devstack::repo_root().join("target/devstack"),
         // in the terminal's group: Ctrl-C stops it with xtask
         own_group: false,
-        // the local explorer's traces, for a person looking
-        trace_store: true,
     };
     let (node, took) = match &celld {
         None => devstack::Node::start(&tools, &opts)?,
