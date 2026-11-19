@@ -377,10 +377,10 @@ Node's, and its Chromium's policy).
   `DirectoryBackup` saves and restores `/data` through it.
 - `sh` (with its `test`), `true`, `mkdir`, `touch`, `rm` and `cat`, with
   which the DO polls, marks and reads its markers.
-- Optional: GNU `find` (findutils, its `-newercm`), `sleep` that takes a
-  fraction, `grep` and `mv`, with which a save keeps an unchanged work's
-  record (below, "Saves and what a wake restores"). Without them every
-  save copies the work whole.
+- Optional: GNU `find` (findutils, its `-newercm` and `-newermt`), a
+  `sleep` that takes a fraction, `sync -f` and `mv`, with which a save
+  keeps an unchanged work's record (below, "Saves and what a wake
+  restores"). Without them every save copies the work whole.
 
 ### The hold
 
@@ -444,10 +444,13 @@ the DO removes them from one started from a snapshot.
 - **A save keeps an unchanged work's record** (P9). The DO stamps each
   work record in the container (a file named by it in
   `/data/.work-stamps/`, as its backup starts or once its restore ends,
-  then a tick of the clock past it), and a save asks whether anything
-  under `/data/work` has a change time (ctime) newer than the stamp of
-  the work's last record in that container, within 30 s. Only a clean no
-  keeps that record, now several saves'; an answer, an error, no stamp, a
+  then a tick of the clock past it, and a backup's writes the
+  filesystem's dirty pages back, so a store through a mapping after it
+  changes its file's ctime), and a save asks whether anything under
+  `/data/work` has a change time (ctime) newer than the stamp of the
+  work's last record in that container, within 6 s. Only a clean no keeps
+  that record, now several saves', and only for a save that leaves out
+  what it left out (its name says so); an answer, an error, no stamp, a
   mount under the work, or no answer in time copies the work. A record a
   kept save holds is never deleted (`fragment_core::computer::work`). A
   guest that writes nothing under its work when nothing changed (a start

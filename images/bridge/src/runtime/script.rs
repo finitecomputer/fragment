@@ -202,13 +202,16 @@ async fn read_data(root: &std::path::Path, rel: &str) -> String {
     }
 }
 
-/// Entries `hash` reads at most.
+/// Entries `hash` reads at most, and bytes of them.
 const HASH_ENTRIES_MAX: usize = 10_000;
+const HASH_BYTES_MAX: u64 = 256 << 20;
 
 /// `hash <path>`: one digest of the tree at a path under the data root,
 /// of each entry under it in path order (its path, its kind and mode, a
-/// file's bytes, a link's target), so a restore's tree can be told the
-/// same as the one saved; `none` when there is none.
+/// regular file's bytes, a link's target), so a restore's tree can be told
+/// the same as the one saved; `none` when there is none. Bounded: what is
+/// neither a directory, a link nor a regular file (a FIFO) is named, never
+/// opened, and files are read as they hash, at most `HASH_BYTES_MAX` in all.
 async fn hash_data(root: &std::path::Path, rel: &str) -> String {
     use sha2::Digest;
     use std::os::unix::fs::PermissionsExt;
@@ -218,7 +221,7 @@ async fn hash_data(root: &std::path::Path, rel: &str) -> String {
     }
     let mut h = sha2::Sha256::new();
     let mut stack = vec![top.clone()];
-    let mut seen = 0usize;
+    let (mut seen, mut read) = (0usize, 0u64);
     // bounded by HASH_ENTRIES_MAX
     while let Some(path) = stack.pop() {
         seen += 1;
@@ -236,9 +239,12 @@ async fn hash_data(root: &std::path::Path, rel: &str) -> String {
             stack.extend(names);
         } else if meta.file_type().is_symlink() {
             h.update(std::fs::read_link(&path).map(|t| t.display().to_string()).unwrap_or_default().as_bytes());
-        } else {
-            match std::fs::read(&path) {
-                Ok(bytes) => h.update(&bytes),
+        } else if meta.is_file() {
+            let left = HASH_BYTES_MAX - read;
+            let copied = std::fs::File::open(&path).and_then(|f| std::io::copy(&mut std::io::Read::take(f, left + 1), &mut h));
+            match copied {
+                Ok(n) if n > left => return format!("hash refused: more than {HASH_BYTES_MAX} bytes"),
+                Ok(n) => read += n,
                 Err(e) => return format!("hash failed: {e}"),
             }
         }
@@ -1193,6 +1199,10 @@ mod tests {
         assert_eq!(hash(hash_data(&root, "other").await), work);
         std::fs::rename(root.join("other/b.txt"), root.join("other/c.txt")).unwrap();
         assert_ne!(hash(hash_data(&root, "other").await), work, "a rename");
+        // a FIFO is named, never opened (it would never answer)
+        assert!(std::process::Command::new("mkfifo").arg(root.join("work/pipe")).status().unwrap().success());
+        let piped = hash(hash_data(&root, "work").await);
+        assert!(piped.len() == 64 && piped != work, "{piped}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

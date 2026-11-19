@@ -89,4 +89,4 @@ pub use limits::{
 pub use notices::{notices, support_url_ok, SUPPORT_URL_MAX_BYTES};
 pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};
 pub use which::{default_computer_of, prewoken};
-pub use work::{stamp_name_ok, work_unchanged, STAMP_NEXT, STAMP_RESTORED, STAMP_TAKEN, WORK_CHANGED, WORK_CHECK_MS, WORK_STAMPS};
+pub use work::{kept_for, stamp_name_ok, work_name, work_unchanged, STAMP_NEXT, STAMP_RESTORED, STAMP_TAKEN, WORK_CHANGED, WORK_CHECK_MS, WORK_STAMPS, WORK_STAMP_MS};

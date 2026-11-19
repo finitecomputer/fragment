@@ -53,9 +53,9 @@ use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
     alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
-    SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX, STAMP_NEXT, STAMP_RESTORED, STAMP_TAKEN, WORK_CHANGED, WORK_CHECK_MS, WORK_STAMPS,
+    SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX, STAMP_NEXT, STAMP_RESTORED, STAMP_TAKEN, WORK_CHANGED, WORK_CHECK_MS, WORK_STAMPS, WORK_STAMP_MS,
 };
-use fragment_core::computer::{stamp_name_ok, work_unchanged};
+use fragment_core::computer::{kept_for, stamp_name_ok, work_name, work_unchanged};
 use fragment_core::ledger::{MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
@@ -277,7 +277,7 @@ const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + REST
 const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
 const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + UNMARK_EXEC_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the disk's read after it fit the one alarm they run in");
 const _: () = assert!(SAVE_STEPS_MS + UNMARK_EXEC_MS < SAVE_DEADLINE_MS, "an awake save, its unhold past its home among its steps, reports before its deadline");
-const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
+const _: () = assert!(BACKUPS_MS - WORK_CHECK_MS - WORK_STAMP_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least, after its work's check and stamp");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
 const _: () = assert!(ALARM_WALL_MS + ALARM_OTHER_MS < ALARM_LATE_MS, "an alarm held up behind one alarm's run is on time, metered as it was");
 /// The largest request body the egress signs and hands on (it is hashed
@@ -1590,7 +1590,7 @@ impl ComputerCell {
                 // anything else touches it: a save keeps that record while
                 // nothing under the work changes
                 if let Some(rid) = save.records.iter().find(|r| r["dir"] == WORK_DIR).and_then(|r| r["id"].as_str()).filter(|id| stamp_name_ok(id)) {
-                    self.stamp(&g, STAMP_RESTORED, &[rid], until).await;
+                    self.stamp(&g, STAMP_RESTORED, &[rid], MARK_EXEC_MS, until).await;
                 }
                 // the image's check, behind the gate: nothing reads /data yet
                 let argv = js::to_js(&json!(["sh", "-c", CHECK]));
@@ -1838,29 +1838,33 @@ impl ComputerCell {
                 // what it named in its work (its agents' caches), relative to it
                 _ => ("work", fragment_core::computer::work_left_out(&left_out)),
             };
-            let exclude = js::to_js(&json!(exclude));
+            // a work's record names what it leaves out, which a save that
+            // keeps it must leave out too (`kept_for`)
+            let label = (dir == WORK_DIR).then(|| work_name(generation, &exclude));
             let t = js::now_ms();
             // its work's last record, kept when nothing in it changed since
             // that was taken or restored; else a stamp, then its backup
             let mut stamped = false;
             if dir == WORK_DIR {
-                let (kept, checked) = self.work_kept(&g, generation, until).await;
+                let (kept, checked) = self.work_kept(&g, generation, &exclude, until).await;
                 took["checked"] = json!(checked);
                 if let Some(record) = kept {
                     took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t, "kept": true });
                     records.push(record);
                     continue;
                 }
-                stamped = self.stamp(&g, STAMP_NEXT, &[&seq.to_string()], until).await;
+                stamped = self.stamp(&g, STAMP_NEXT, &[&seq.to_string()], WORK_STAMP_MS, until).await;
             }
+            let exclude = js::to_js(&json!(exclude));
             let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
-            match self.call("backup", &[g.clone(), dir.into(), exclude, left]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
+            let label = label.map_or(JsValue::UNDEFINED, |l| JsValue::from_str(&l));
+            match self.call("backup", &[g.clone(), dir.into(), exclude, left, label]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
                 Ok(record) => {
                     took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
                     // its stamp is this record's (`STAMP_TAKEN`): the next
                     // save keeps it while nothing under the work changes
                     if let (true, Some(id)) = (stamped, record["id"].as_str().filter(|id| stamp_name_ok(id))) {
-                        took[name]["stamped"] = json!(self.stamp(&g, STAMP_TAKEN, &[&seq.to_string(), id], until).await);
+                        took[name]["stamped"] = json!(self.stamp(&g, STAMP_TAKEN, &[&seq.to_string(), id], MARK_EXEC_MS, until).await);
                     }
                     records.push(record);
                     // its home is in, the copies its guest made under the
@@ -1937,13 +1941,17 @@ impl ComputerCell {
     }
 
     /// The work's last record in start `g`'s container
-    /// (`Saves::work_of`), when nothing under the work changed since its
+    /// (`Saves::work_of`), when this save leaves out what it left out
+    /// (`exclude`: `kept_for`) and nothing under the work changed since its
     /// stamp (`WORK_CHANGED`, within `WORK_CHECK_MS` and what is left until
     /// `until`): this save keeps it, unchanged. Else none, and why: none
     /// to keep, `changed`, or what made the check unsure (an exit, an
     /// error, no answer), each of which copies the work.
-    async fn work_kept(&self, g: &JsValue, generation: u64, until: i64) -> (Option<Value>, String) {
+    async fn work_kept(&self, g: &JsValue, generation: u64, exclude: &[String], until: i64) -> (Option<Value>, String) {
         let Some(record) = self.saves().ok().and_then(|s| s.work_of(generation).cloned()) else { return (None, "none to keep".into()) };
+        if !kept_for(&record, exclude) {
+            return (None, "it left out other than this save does".into());
+        }
         let Some(rid) = record["id"].as_str().filter(|id| stamp_name_ok(id)) else { return (None, "no stamp names it".into()) };
         let ms = WORK_CHECK_MS.min(until - js::now_ms());
         if ms <= 0 {
@@ -1964,10 +1972,10 @@ impl ComputerCell {
 
     /// Runs the stamp `script` (`STAMP_NEXT`, `STAMP_TAKEN`,
     /// `STAMP_RESTORED`) with `args` in start `g`'s container, within
-    /// `MARK_EXEC_MS` and what is left until `until`: whether it worked.
-    /// One that did not leaves no stamp a save keeps a record by.
-    async fn stamp(&self, g: &JsValue, script: &str, args: &[&str], until: i64) -> bool {
-        let ms = MARK_EXEC_MS.min(until - js::now_ms());
+    /// `bound_ms` and what is left until `until`: whether it worked. One
+    /// that did not leaves no stamp a save keeps a record by.
+    async fn stamp(&self, g: &JsValue, script: &str, args: &[&str], bound_ms: i64, until: i64) -> bool {
+        let ms = bound_ms.min(until - js::now_ms());
         if ms <= 0 {
             return false;
         }
@@ -1975,7 +1983,8 @@ impl ComputerCell {
         let out = self.call("exec", &[g.clone(), argv, JsValue::from_f64(ms as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
         match out {
             Ok(o) if o["exitCode"] == 0 => true,
-            // exit 2: its image's `find` cannot compare change times
+            // exit 2: its image's `find` cannot compare change times; exit
+            // 3: a mount under its work, or its mounts unread
             Ok(o) => {
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "stamp": "unmade", "exit": o["exitCode"] }));
                 false

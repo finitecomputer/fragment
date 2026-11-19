@@ -22,16 +22,34 @@
 //!   the backup reads anything, or before the guest is let go: every write
 //!   in the stamp's own tick came before the record was taken, so it is in
 //!   the record (a restore's), or the backup read it (a backup's), and every
-//!   write after has a change time newer than the stamp's.
+//!   write after has a change time newer than the stamp's. A restore's
+//!   stamp gets its name only once that tick passed.
+//! - A backup's stamp then writes the filesystem's dirty pages back
+//!   (`sync -f`), which write-protects every shared writable mapping of a
+//!   file: a store through one after the stamp faults and changes its
+//!   file's ctime, as a write does (Codex on #1379: a page dirtied before
+//!   the stamp took later stores silently). A restore's needs none: no
+//!   process of the new start has mapped anything yet.
 //! - A write during the backup is after its stamp: the next save copies.
 //! - A delete or a rename changes its directory; an edit, a chmod, a
 //!   `touch -d` or a copy that keeps old times changes its file's ctime.
+//! - A record is kept only by a save that leaves out what that record left
+//!   out (`work_name`: the patterns' digest in the record's name), so a
+//!   cache the guest names no more, or a save its guest did not answer, is
+//!   copied (Codex on #1379).
 //! - What the work's record leaves out (the caches its guest names) is
 //!   walked too: a change there copies, erring toward saving.
+//! - No stamp is made, and none is trusted, while anything is mounted under
+//!   the work (an unmount could show what lay under it unchanged), or when
+//!   the mounts cannot be read.
 //!
 //! What it trusts: the container's clock going forward (a root guest that
-//! sets it back can hide its own changes from its own next save), and a
-//! filesystem mounted under the work having none (one found copies).
+//! sets it back can hide its own changes from its own next save; a stamp
+//! still in the future is not trusted). A write to a file the walk passed
+//! already, as it walks, is the next save's, as one to a file a copy read
+//! already is.
+
+use serde_json::Value;
 
 /// Where the stamps are kept, relative to `/data`: root's alone (a tool run
 /// as the guest's user cannot touch one), and left out of the home's
@@ -39,51 +57,73 @@
 pub const WORK_STAMPS: &str = "/.work-stamps/";
 
 /// The longest a check of the work (`WORK_CHANGED`) is given: a walk of
-/// 195,000 files took 1.1–9.5 s (preview, 2026-11-18). Past it, it copies.
-pub const WORK_CHECK_MS: i64 = 30_000;
+/// 195,514 files took 0.6 s warm on preview, and an `lstat` walk of as many
+/// 4.6–9.5 s cold (11-18). Past it, it copies.
+pub const WORK_CHECK_MS: i64 = 6_000;
+/// The longest a backup's stamp (`STAMP_NEXT`: its tick and its writeback)
+/// is given. Past it, no stamp: the next save copies.
+pub const WORK_STAMP_MS: i64 = 4_000;
 
 /// Each script runs as `sh -c <script> sh <data> <args>…` (`$1` is `/data`,
-/// a test's own directory in tests). The tick wait after a stamp `$s`:
-/// until a probe touched now is newer than it, at most about 3 s (a
-/// filesystem that keeps whole seconds waits up to one), else it failed.
+/// a test's own directory in tests). First, nothing may be mounted under
+/// the work, and the mounts must read (`MOUNTINFO`, the process's own
+/// unless a test names another).
+macro_rules! no_mount {
+    () => {
+        "m=$(cat \"${MOUNTINFO:-/proc/self/mountinfo}\") || exit 3\ncase \"$m\" in *\" $1/work \"*|*\" $1/work/\"*) exit 3;; esac\n"
+    };
+}
+
+/// The tick wait after a stamp: until a probe touched now is newer than
+/// it, at most about 3 s (a filesystem that keeps whole seconds waits up
+/// to one), else it failed.
 macro_rules! tick_after {
     ($stamp:literal) => {
         concat!(
-            "i=0\nuntil touch .probe && [ -n \"$(find .probe -newer \"",
+            "i=0\nuntil touch ./.probe && [ -n \"$(find ./.probe -newer \"./",
             $stamp,
-            "\")\" ]; do i=$((i+1)); [ \"$i\" -le 300 ] || exit 1; sleep 0.01; done\nrm -f .probe\n"
+            "\")\" ]; do i=$((i+1)); [ \"$i\" -le 300 ] || exit 1; sleep 0.01; done\nrm -f ./.probe\n"
         )
     };
 }
 
-/// Before the work's backup (`$2`: the save's number): its stamp, then
-/// the tick past it. Exit 2: this image's `find` cannot compare change
-/// times (`-newercm`, GNU findutils'), so no save of it keeps its work.
+/// Before the work's backup (`$2`: the save's number): its stamp, the
+/// tick past it, then the writeback. Exit 2: this image's `find` cannot
+/// compare change times (`-newercm`, GNU findutils'), so no save of it
+/// keeps its work; exit 3: a mount under the work, or none readable.
 pub const STAMP_NEXT: &str = concat!(
+    no_mount!(),
     "cd \"$1\" && mkdir -p -m 700 .work-stamps && cd .work-stamps && find . -maxdepth 0 -newercm . >/dev/null 2>&1 || exit 2\n",
-    "rm -f \"next-$2\" && touch \"next-$2\" || exit 1\n",
+    "rm -f \"./next-$2\" && touch \"./next-$2\" || exit 1\n",
     tick_after!("next-$2"),
+    "sync -f . || exit 1\n",
 );
 
 /// Once the save `$2` is kept with the new work record `$3`: its stamp is
 /// that record's, the only one (another save's under way, ended first,
 /// loses its own, and copies next time).
-pub const STAMP_TAKEN: &str = "cd \"$1/.work-stamps\" && test -f \"next-$2\" || exit 1\nfor f in *; do [ \"$f\" = \"next-$2\" ] || rm -f \"$f\"; done\nmv \"next-$2\" \"$3\"\n";
+pub const STAMP_TAKEN: &str = "cd \"$1/.work-stamps\" && test -f \"./next-$2\" || exit 1\nfor f in *; do [ \"$f\" = \"next-$2\" ] || rm -f \"./$f\"; done\nmv \"./next-$2\" \"./$3\"\n";
 
 /// Once a start restored its save, the work's record `$2` among it, and
-/// before its check and its gate: that record's stamp, the only one, then
-/// the tick past it.
+/// before its check and its gate: that record's stamp, the only one, named
+/// so only once the tick past it passed.
 pub const STAMP_RESTORED: &str = concat!(
+    no_mount!(),
     "cd \"$1\" && rm -rf .work-stamps && mkdir -m 700 .work-stamps && cd .work-stamps && find . -maxdepth 0 -newercm . >/dev/null 2>&1 || exit 2\n",
-    "touch \"$2\" || exit 1\n",
-    tick_after!("$2"),
+    "touch ./.pending || exit 1\n",
+    tick_after!(".pending"),
+    "mv ./.pending \"./$2\"\n",
 );
 
 /// Whether anything under the work changed since the stamp of record
 /// `$2`: the first path that did, or nothing. Exit 1 with no such stamp,
-/// or a mount under the work.
-pub const WORK_CHANGED: &str =
-    "test -f \"$1/.work-stamps/$2\" || exit 1\n! grep -qs \" $1/work[ /]\" /proc/self/mountinfo || exit 1\nfind \"$1/work\" -newercm \"$1/.work-stamps/$2\" -print -quit\n";
+/// one still in the future, or a mount under the work (or none readable).
+pub const WORK_CHANGED: &str = concat!(
+    "s=\"$1/.work-stamps/$2\"\ntest -f \"$s\" || exit 1\n",
+    no_mount!(),
+    "[ -z \"$(find \"$s\" -newermt now)\" ] || exit 1\n",
+    "find \"$1/work\" -newercm \"$s\" -print -quit\n",
+);
 
 /// Whether `WORK_CHANGED`'s run says the work is unchanged: it exited 0
 /// and printed nothing. Anything else (a path, an error, no answer within
@@ -93,9 +133,24 @@ pub fn work_unchanged(exit: Option<i64>, output: &str) -> bool {
 }
 
 /// Whether `id` names a stamp: a record's id as `DirectoryBackup` makes
-/// them (a UUID), never a path.
+/// them (a UUID), never a path nor an option.
 pub fn stamp_name_ok(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    id.len() <= 64 && id.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// The name a work's record of start `generation` is taken with, saying
+/// what it leaves out (`exclude`, its patterns' digest): a save keeps a
+/// record only when it leaves out the same (`kept_for`).
+pub fn work_name(generation: u64, exclude: &[String]) -> String {
+    format!("generation {generation} work {}", crate::blob::sha256_hex(exclude.join("\n").as_bytes()))
+}
+
+/// Whether a save that leaves out `exclude` may keep `record` (a work's,
+/// named by `work_name` as it was taken). A record named otherwise (taken
+/// before records said so) is never kept.
+pub fn kept_for(record: &Value, exclude: &[String]) -> bool {
+    let digest = crate::blob::sha256_hex(exclude.join("\n").as_bytes());
+    record["name"].as_str().and_then(|n| n.rsplit_once(" work ")).is_some_and(|(_, d)| d == digest)
 }
 
 #[cfg(test)]
@@ -124,10 +179,14 @@ mod tests {
     }
 
     fn run_with_path(script: &str, data: &Path, args: &[&str], path: Option<&str>) -> (Option<i64>, String) {
+        run_env(script, data, args, &path.map(|p| vec![("PATH", p)]).unwrap_or_default())
+    }
+
+    fn run_env(script: &str, data: &Path, args: &[&str], env: &[(&str, &str)]) -> (Option<i64>, String) {
         let mut c = Command::new("sh");
         c.arg("-c").arg(script).arg("sh").arg(data).args(args);
-        if let Some(p) = path {
-            c.env("PATH", p);
+        for (k, v) in env {
+            c.env(k, v);
         }
         let out = c.output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
@@ -272,6 +331,34 @@ mod tests {
         assert!(!work_unchanged(exit, &out), "{exit:?} {out}");
         assert_eq!(run_with_path(STAMP_NEXT, &d, &["10"], Some(&path)).0, Some(2), "no stamp from such an image");
         assert_eq!(run_with_path(STAMP_RESTORED, &d, &[ID], Some(&path)).0, Some(2));
+        // (that restore's stamp went before its find was asked: none left)
+        assert!(!unchanged(&d, ID));
+        assert_eq!(run(STAMP_RESTORED, &d, &[ID]).0, Some(0));
+        // a mount under the work, or mounts that do not read: no stamp made,
+        // none trusted
+        let mounts = d.join("mountinfo");
+        std::fs::write(&mounts, format!("36 35 98:0 / {}/work/b rw - fuse.r2 r2 rw\n", d.display())).unwrap();
+        let fake = [("MOUNTINFO", mounts.to_str().unwrap())];
+        assert_eq!(run_env(WORK_CHANGED, &d, &[ID], &fake).0, Some(3));
+        assert_eq!(run_env(STAMP_NEXT, &d, &["11"], &fake).0, Some(3));
+        assert_eq!(run_env(STAMP_RESTORED, &d, &[ID], &fake).0, Some(3));
+        assert!(d.join(format!(".work-stamps/{ID}")).exists(), "a refused restore's stamp touched nothing");
+        let none = [("MOUNTINFO", "/nonexistent/mountinfo")];
+        assert_eq!(run_env(WORK_CHANGED, &d, &[ID], &none).0, Some(3));
+        assert!(unchanged(&d, ID), "with the process's own mounts, as it was");
+        // a stamp still in the future (a clock set back) is not trusted
+        assert!(Command::new("touch").args(["-d", "tomorrow"]).arg(d.join(format!(".work-stamps/{ID}"))).status().unwrap().success());
+        assert!(!unchanged(&d, ID));
+        // a restore's stamp whose tick never came (a `find` that sees none
+        // newer, a `sleep` at once) is never named: no record's stamp
+        std::fs::write(bin.join("find"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(bin.join("sleep"), "#!/bin/sh\nexit 0\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("sleep"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(run_with_path(STAMP_RESTORED, &d, &[ID], Some(&path)).0, Some(1));
+        assert!(!d.join(format!(".work-stamps/{ID}")).exists() && !unchanged(&d, ID), "no tick, no stamp");
         assert!(!work_unchanged(None, ""), "no answer within its bound");
         assert!(!work_unchanged(Some(1), ""));
         assert!(!work_unchanged(Some(0), "/data/work/b"));
@@ -282,8 +369,67 @@ mod tests {
     #[test]
     fn a_stamp_is_named_by_an_id() {
         assert!(stamp_name_ok(ID));
-        for bad in ["", "../x", "a/b", "next 1", &"a".repeat(65)] {
+        for bad in ["", "../x", "a/b", "next 1", "-rf", &"a".repeat(65)] {
             assert!(!stamp_name_ok(bad), "{bad:?}");
         }
+    }
+
+    /// A record is kept only by a save that leaves out what it left out:
+    /// the same patterns keep it; others, none (a hold unanswered), or a
+    /// record named before records said so, copy.
+    #[test]
+    fn a_record_is_kept_only_by_a_save_that_leaves_out_the_same() {
+        let caches = vec!["/*/home/.cache/pip/".to_string(), "/*/browser-profile/*/Cache/".to_string()];
+        let record = |name: &str| serde_json::json!({ "id": ID, "dir": "/data/work", "name": name });
+        let taken = record(&work_name(4, &caches));
+        assert!(kept_for(&taken, &caches));
+        assert!(kept_for(&record(&work_name(9, &caches)), &caches), "another start's, the same patterns");
+        assert!(!kept_for(&taken, &[]), "a save its guest did not answer leaves out nothing");
+        assert!(!kept_for(&taken, &caches[..1]), "a cache named no more");
+        assert!(!kept_for(&record(&work_name(4, &[])), &caches));
+        assert!(!kept_for(&record("generation 4"), &caches), "named before records said what they leave out");
+        assert!(!kept_for(&serde_json::json!({ "id": ID }), &[]));
+    }
+
+    /// A store through a shared writable mapping, to a page it dirtied
+    /// before a backup's stamp, after that stamp, is seen: the stamp's
+    /// writeback makes it fault and change its file's ctime (Codex on
+    /// #1379). On a filesystem with writeback (tmpfs has none, so not
+    /// `/tmp` here): beside the build's own target.
+    #[test]
+    fn a_store_through_a_mapping_after_the_stamp_is_seen() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/work-tests");
+        std::fs::create_dir_all(&root).unwrap();
+        let d = root.join(format!("mapped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("work")).unwrap();
+        let f = d.join("work/mapped.bin");
+        std::fs::write(&f, vec![0u8; 4096]).unwrap();
+        // maps it, stores (the page dirty), says so, waits for a word, stores again
+        let mut py = Command::new("python3")
+            .args(["-c", "import mmap,sys\nf=open(sys.argv[1],'r+b')\nm=mmap.mmap(f.fileno(),4096)\nm[0:1]=b'a'\nprint('dirty',flush=True)\nsys.stdin.readline()\nm[1:2]=b'b'\nprint('stored',flush=True)\nsys.stdin.readline()\n"])
+            .arg(&f)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("python3 runs");
+        use std::io::{BufRead, Write};
+        let mut out = std::io::BufReader::new(py.stdout.take().unwrap());
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "dirty");
+        assert_eq!(run(STAMP_NEXT, &d, &["1"]).0, Some(0));
+        assert_eq!(run(STAMP_TAKEN, &d, &["1", ID]).0, Some(0));
+        assert!(unchanged(&d, ID), "nothing since the stamp");
+        let mut input = py.stdin.take().unwrap();
+        writeln!(input).unwrap();
+        line.clear();
+        out.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "stored");
+        let (exit, said) = run(WORK_CHANGED, &d, &[ID]);
+        assert!(exit == Some(0) && said.trim().ends_with("mapped.bin"), "the store is seen: {exit:?} {said:?}");
+        writeln!(input).unwrap();
+        py.wait().unwrap();
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
