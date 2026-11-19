@@ -3,6 +3,8 @@
 //! arrives (`<act>/<fragment>/<channel>`) and its body, read into the
 //! request the target is asked, which checks who is asking itself.
 
+use std::borrow::Cow;
+
 use fragment_proto::{valid_channel_name, valid_fragment_name};
 use serde::Deserialize;
 
@@ -13,8 +15,8 @@ pub struct Act<'a> {
     pub method: Method,
     /// Its route there, after `/api`, with its query.
     pub route: String,
-    /// JSON, passed as the app sent it.
-    pub body: Option<&'a str>,
+    /// JSON: as the app sent it, or a follow's own.
+    pub body: Option<Cow<'a, str>>,
     /// The depth its record's runs run at (`x-fragment-hops`): a post's.
     pub hops: Option<u32>,
 }
@@ -35,10 +37,12 @@ struct Page {
     limit: Option<u32>,
 }
 
-/// One act: `post` (a `PostRecord`), `draft` (a `PutDraft`) or `records`
-/// (`{after?, before?, limit?}`), from a job's step at its run's `depth`,
-/// or from the app's capability (`None`). A post is a step's alone, so it
-/// carries its run's depth and is made once however often its body runs.
+/// One act: `post` (a `PostRecord`), `draft` (a `PutDraft`), `records`
+/// (`{after?, before?, limit?}`) or `follow` (its body unread: the
+/// channel's subscription with `follow`), from a job's step at its run's
+/// `depth`, or from the app's capability (`None`). A post and a follow are
+/// a step's alone, so a post carries its run's depth and each is made once
+/// however often its body runs.
 /// `Err` says why it is no act: the caller's (400), or an act there is
 /// not (`Unknown`, 404).
 pub fn read<'a>(at: &'a str, body: &'a [u8], depth: Option<u32>) -> Result<Act<'a>, Refused> {
@@ -51,8 +55,12 @@ pub fn read<'a>(at: &'a str, body: &'a [u8], depth: Option<u32>) -> Result<Act<'
     let at = format!("/channels/{channel}");
     let step = |act: &str| depth.ok_or_else(|| Refused::Invalid(format!("a {act} in another fragment is a job's step (job.otherFragments.{act}): it carries its run's depth and is made once")));
     let (method, route, body, hops) = match act {
-        "post" => (Method::Post, at, Some(text), Some(step(act)?.saturating_add(1))),
-        "draft" => (Method::Put, format!("{at}/draft"), Some(text), None),
+        "post" => (Method::Post, at, Some(Cow::Borrowed(text)), Some(step(act)?.saturating_add(1))),
+        "draft" => (Method::Put, format!("{at}/draft"), Some(Cow::Borrowed(text)), None),
+        "follow" => {
+            step(act)?;
+            (Method::Post, "/subscriptions".into(), Some(Cow::Owned(format!(r#"{{"channel":"{channel}","follow":true}}"#))), None)
+        }
         "records" => {
             let page: Page = serde_json::from_slice(body).map_err(|e| Refused::Invalid(format!("a page is {{after?, before?, limit?}}: {e}")))?;
             let query: Vec<String> = [("after", page.after), ("before", page.before), ("limit", page.limit.map(u64::from))]
@@ -62,7 +70,7 @@ pub fn read<'a>(at: &'a str, body: &'a [u8], depth: Option<u32>) -> Result<Act<'
             let route = if query.is_empty() { at } else { format!("{at}?{}", query.join("&")) };
             (Method::Get, route, None, None)
         }
-        _ => return Err(Refused::Unknown(format!("no act {act:?}: post, draft, records"))),
+        _ => return Err(Refused::Unknown(format!("no act {act:?}: post, draft, records, follow"))),
     };
     Ok(Act { fragment, method, route, body, hops })
 }
@@ -84,7 +92,7 @@ mod tests {
         let body = br#"{"id":"a","body":{"text":"hi"}}"#;
         let at = format!("post/{ROOM}/chat");
         let act = read(&at, body, Some(3)).unwrap();
-        assert_eq!(act, Act { fragment: ROOM, method: Method::Post, route: "/channels/chat".into(), body: Some(r#"{"id":"a","body":{"text":"hi"}}"#), hops: Some(4) });
+        assert_eq!(act, Act { fragment: ROOM, method: Method::Post, route: "/channels/chat".into(), body: Some(r#"{"id":"a","body":{"text":"hi"}}"#.into()), hops: Some(4) });
         // a call's job is at depth 0: as a post from outside
         assert_eq!(read(&at, body, Some(0)).unwrap().hops, Some(1));
         assert_eq!(read(&at, body, Some(u32::MAX)).unwrap().hops, Some(u32::MAX));
@@ -104,6 +112,15 @@ mod tests {
     }
 
     #[test]
+    fn a_follow_is_a_step_asking_for_the_channel_and_naming_nothing_else() {
+        let at = format!("follow/{ROOM}/chat");
+        let act = read(&at, br#"{"url":"https://elsewhere.example/hook"}"#, Some(2)).unwrap();
+        assert_eq!((act.method, act.route.as_str(), act.hops), (Method::Post, "/subscriptions", None));
+        assert_eq!(act.body.as_deref(), Some(r#"{"channel":"chat","follow":true}"#), "its body is its own: the app's is not read");
+        assert!(matches!(read(&at, b"{}", None), Err(Refused::Invalid(why)) if why.contains("job.otherFragments.follow")));
+    }
+
+    #[test]
     fn what_is_no_act_is_refused_before_anything_is_asked() {
         let invalid = |at: &str, body: &[u8]| matches!(read(at, body, Some(0)), Err(Refused::Invalid(_)));
         assert!(invalid("post/no such name/chat", b"{}"));
@@ -115,5 +132,6 @@ mod tests {
         assert!(invalid(&format!("records/{ROOM}/chat"), br#"{"for":"npub1x"}"#));
         assert!(invalid(&format!("records/{ROOM}/chat"), br#"{"after":-1}"#));
         assert!(matches!(read(&format!("delete/{ROOM}/chat"), b"{}", None), Err(Refused::Unknown(_))));
+        assert!(invalid(&format!("follow/{ROOM}/no-such Channel"), b"{}"));
     }
 }

@@ -106,6 +106,12 @@ macro_rules! step {
     };
 }
 
+/// The columns the Fragment's later steps add to step 1's tables (step
+/// 5's `ended.search`, step 10's `delivery_outbox.depth`): what a test
+/// lever takes away to make an object as it stood before versions (the
+/// cell's schema.rs), held to the steps by a test.
+pub const FRAGMENT_LATER_COLUMNS: &[(&str, &str)] = &[("ended", "search"), ("delivery_outbox", "depth")];
+
 pub const FRAGMENT: Class = Class {
     name: "Fragment",
     steps: &[
@@ -118,6 +124,7 @@ pub const FRAGMENT: Class = Class {
         step!("making", "fragment/0007_making.sql"),
         step!("newest", "fragment/0008_newest.sql"),
         step!("inbox_forward_only", "fragment/0009_inbox_forward_only.sql"),
+        step!("outbox_depth", "fragment/0010_outbox_depth.sql"),
     ],
     variants: &[Variant {
         name: "members",
@@ -856,6 +863,29 @@ mod tests {
         assert_eq!(held.iter().map(|h| h.how.as_str()).collect::<Vec<_>>(), ["adopted", "ran", "ran"]);
         assert_eq!(db.count("SELECT COUNT(*) FROM members WHERE fenced = 0"), 1);
         assert_eq!(db.count("SELECT COUNT(*) FROM sqlite_master WHERE name = 'meter_batches'"), 1);
+    }
+
+    /// Goal: the test lever's object from before versions (the cell's
+    /// schema.rs) is step 1's, so it is adopted: every step's tables and
+    /// indexes but step 1's gone, and the columns later steps add to step
+    /// 1's tables (`FRAGMENT_LATER_COLUMNS`). Method: every step, then that
+    /// undone, then migrated again. A step that adds a column the list
+    /// misses fails here.
+    #[test]
+    fn the_levers_object_from_before_versions_is_adopted() {
+        let db = Lite::new();
+        assert!(migrated(&db, &FRAGMENT, 5).is_ok());
+        let first = declared(FRAGMENT.steps[0].sql);
+        for o in objects(&db, &FRAGMENT).expect("its objects") {
+            if !first.iter().any(|f| f.kind == o.kind && f.name == o.name) {
+                db.exec(&format!("DROP {} IF EXISTS {}", o.kind.to_ascii_uppercase(), o.name)).expect("a later step's object goes");
+            }
+        }
+        for (table, column) in FRAGMENT_LATER_COLUMNS {
+            db.exec(&format!("ALTER TABLE {table} DROP COLUMN {column}")).expect("a later step's column goes");
+        }
+        db.exec("DROP TABLE _schema").expect("before versions");
+        assert_eq!(migrated(&db, &FRAGMENT, 7), Ok(Ran::Adopted { fixed: vec![], version: FRAGMENT.steps.len() as u32 }));
     }
 
     /// Goal: a Registry made before #367 (every deployment's, until it

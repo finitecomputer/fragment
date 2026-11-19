@@ -296,6 +296,26 @@ impl Call for Routine {
     type Answer = ();
 }
 
+/// A record of `fragment`'s channel that this fragment's agent follows
+/// there (subscriptions.rs, a follow), from that fragment's outbox
+/// (deliveries.rs): its `followed` triggers' runs, at `depth` (jobs.rs
+/// `heard_followed`). `subscriber` is the follow's, which must be its
+/// agent; `incarnation` the life of `fragment` it was posted in (a name
+/// made again counts its records again).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Followed {
+    pub subscriber: String,
+    pub fragment: String,
+    pub incarnation: String,
+    pub record: fragment_proto::ChannelRecord,
+    pub depth: u32,
+}
+
+impl Call for Followed {
+    const PATH: &'static str = "/call/followed";
+    type Answer = ();
+}
+
 /// Fleets with levers only (`/api/test/fragment`): a lever on the fragment
 /// (ops.rs `test_fragment`), its body the test's.
 #[derive(Serialize, Deserialize)]

@@ -120,6 +120,11 @@ pub(crate) struct Started {
     pub replayed: bool,
 }
 
+/// How long a followed record's runs outlive newer runs (`trim_runs`): its
+/// source hands it on only within half of this (subscriptions.rs).
+pub(crate) const FOLLOWED_KEPT_MS: i64 = 24 * 3600 * 1000;
+const _: () = assert!(FOLLOWED_KEPT_MS < limits::RUN_RETENTION_MS);
+
 /// Why a step did not produce a value: for good (the job sees an error it
 /// may catch), or for now (the Workflow retries the step).
 pub(crate) enum StepFail {
@@ -1009,10 +1014,13 @@ impl FragmentCell {
         let status = resp.status_code();
         let text = resp.text().await.map_err(|e| StepFail::Retry(e.to_string()))?;
         let answer: Value = crate::json_text(&text).unwrap_or(Value::Null);
+        let said = format!("{status}: {}", answer["message"].as_str().unwrap_or(&text));
         match status {
             200..=299 => Ok(answer),
-            429 | 500..=599 => Err(StepFail::Retry(format!("{name} answered {status}"))),
-            _ => Err(permanent(format!("{status}: {}", answer["message"].as_str().unwrap_or(&text)))),
+            // a follow's 429 is a full list there: no passing thing
+            429 if act != "follow" => Err(StepFail::Retry(said)),
+            500..=599 => Err(StepFail::Retry(said)),
+            _ => Err(permanent(said)),
         }
     }
 
@@ -1078,6 +1086,47 @@ impl FragmentCell {
             started.push(s.id);
         }
         Ok(started)
+    }
+
+    /// A record of a channel its agent follows in another fragment
+    /// (`calls::Followed`, from that fragment's outbox): its `followed`
+    /// triggers' runs, as the fragment, at the record's depth there, each
+    /// once by the record, so a record handed again starts none twice. A
+    /// follow is its agent's own: another identity's (this fragment made
+    /// again since) is refused, and its follower ends it.
+    pub(crate) async fn heard_followed(&self, f: crate::fragment::calls::Followed) -> CellResult<()> {
+        self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
+        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(f.subscriber.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "that follow is another agent's, not this fragment's"));
+        }
+        let ops = || -> CellResult<Vec<String>> { Ok(self.triggers()?.into_iter().filter(|t| matches!(t.on, TriggerOn::Followed(_))).map(|t| t.run).collect()) };
+        if ops()?.is_empty() {
+            return Ok(());
+        }
+        let read_only = self.read_only().await?;
+        // read after the wait, so the runs start from the code installed now
+        let own = self.own_key()?;
+        let (fragment, channel, seq) = (f.fragment.as_str(), f.record.channel.as_str(), f.record.seq);
+        // as a channel trigger's input (`fire_channel`), with where it was heard
+        let input = json!({ "fragment": fragment, "channel": channel, "record": f.record });
+        let life = f.incarnation.as_str();
+        for op in &ops()? {
+            let call_id = format!("followed:{fragment}@{life}:{channel}:{seq}:{op}");
+            let sha = crate::ops::input_sha(op, &fragment_proto::canonical_json(&input));
+            self.start_run(NewRun {
+                op,
+                via: Via::Followed,
+                trigger: Some(format!("{fragment}/{channel}")),
+                principal: &own,
+                role: Role::Editor,
+                depth: f.depth,
+                call: Some((&call_id, &sha)),
+                input: input.clone(),
+                owner_read_only: read_only,
+            })?;
+        }
+        self.later();
+        Ok(())
     }
 
     /// Starts the runs a move of `main` triggers, blocked when `read_only`
@@ -1423,11 +1472,19 @@ impl FragmentCell {
         }
     }
 
-    /// From the alarm: finished runs past their retention go.
+    /// From the alarm: finished runs past their retention go. A followed
+    /// record's runs are what keep it from running twice, so they stay,
+    /// however many runs came after, while its source may hand it again.
     pub(crate) fn trim_runs(&self) -> CellResult<()> {
+        let now = js::now_ms();
         self.exec(
-            "DELETE FROM runs WHERE status NOT IN ('queued', 'running') AND (finished_at < ? OR id <= (SELECT MAX(id) FROM runs) - ?)",
-            vec![SqlStorageValue::Integer(js::now_ms() - limits::RUN_RETENTION_MS), SqlStorageValue::Integer(limits::RUNS_KEPT)],
+            "DELETE FROM runs WHERE status NOT IN ('queued', 'running') AND (finished_at < ? OR (id <= (SELECT MAX(id) FROM runs) - ? AND NOT (via = ? AND finished_at >= ?)))",
+            vec![
+                SqlStorageValue::Integer(now - limits::RUN_RETENTION_MS),
+                SqlStorageValue::Integer(limits::RUNS_KEPT),
+                Via::Followed.as_str().into(),
+                SqlStorageValue::Integer(now - FOLLOWED_KEPT_MS),
+            ],
         )?;
         // a run's charges, what its steps bought and asked for go with it (the ledger keeps the month's usage)
         self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
@@ -1491,8 +1548,11 @@ impl FragmentCell {
     /// or trigger handed it, a viewer's to see. Its output is the app's
     /// own answer, a viewer's to see whatever it copied (docs/api.md).
     fn input_shown(&self, role: Role, run: &RunRow) -> CellResult<bool> {
-        if run.via != Via::Channel {
-            return Ok(true);
+        match run.via {
+            // a record another fragment let its agent read: its editors' (its agent's, its owner's)
+            Via::Followed => return Ok(role >= Role::Editor),
+            Via::Channel => {}
+            _ => return Ok(true),
         }
         let channel = run.trigger.as_deref().ok_or_else(|| CellError::host(format!("channel run #{} names no channel", run.id)))?;
         match self.channel_read_role(channel) {

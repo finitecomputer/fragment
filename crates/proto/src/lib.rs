@@ -2208,12 +2208,15 @@ pub enum TriggerOn {
     /// activation that a person or an agent made, never an alarm or the
     /// platform's own. At most once per activation. Always `true`.
     Woke(bool),
+    /// Each record of another fragment's channel its agent follows there
+    /// (a subscription with `follow`). Always `true`.
+    Followed(bool),
 }
 
 impl TriggerOn {
     /// What starts it, and on what: `("cron", schedule)`, `("channel",
-    /// channel)`, `("files", pattern)`, `("installed", "")` or `("woke",
-    /// "")`; the names are its wire keys.
+    /// channel)`, `("files", pattern)`, `("installed", "")`, `("woke", "")`
+    /// or `("followed", "")`; the names are its wire keys.
     pub fn parts(&self) -> (&'static str, &str) {
         match self {
             TriggerOn::Cron(c) => ("cron", c),
@@ -2221,6 +2224,7 @@ impl TriggerOn {
             TriggerOn::Files(f) => ("files", f),
             TriggerOn::Installed(_) => ("installed", ""),
             TriggerOn::Woke(_) => ("woke", ""),
+            TriggerOn::Followed(_) => ("followed", ""),
         }
     }
 
@@ -2231,6 +2235,7 @@ impl TriggerOn {
             "files" => Some(TriggerOn::Files(target)),
             "installed" => Some(TriggerOn::Installed(true)),
             "woke" => Some(TriggerOn::Woke(true)),
+            "followed" => Some(TriggerOn::Followed(true)),
             _ => None,
         }
     }
@@ -2295,11 +2300,14 @@ pub enum Via {
     Files,
     Installed,
     Woke,
+    /// A record of a channel it follows in another fragment (`trigger`
+    /// names `<fragment>/<channel>`).
+    Followed,
     Unknown(String),
 }
 
 impl Via {
-    const KNOWN: [Via; 7] = [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed, Via::Woke];
+    const KNOWN: [Via; 8] = [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files, Via::Installed, Via::Woke, Via::Followed];
 
     pub fn as_str(&self) -> &str {
         match self {
@@ -2310,6 +2318,7 @@ impl Via {
             Via::Files => "files",
             Via::Installed => "installed",
             Via::Woke => "woke",
+            Via::Followed => "followed",
             Via::Unknown(s) => s,
         }
     }

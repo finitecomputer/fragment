@@ -230,8 +230,11 @@ pub(crate) fn fragment_lever(raw: &JsValue, sql: SqlStorage, id: &str, op: &str,
                     other => return Err(CellError::invalid(format!("a later step's {other} {}: this lever drops tables and indexes", o.name))),
                 };
             }
-            // and the columns later steps added: step 5's `ended.search`
-            sql.exec(&format!("ALTER TABLE ended DROP COLUMN search; DROP TABLE _schema; {plant}"), None)?;
+            // and the columns later steps added to step 1's tables
+            for (table, column) in migrate::FRAGMENT_LATER_COLUMNS {
+                sql.exec(&format!("ALTER TABLE {table} DROP COLUMN {column}"), None)?;
+            }
+            sql.exec(&format!("DROP TABLE _schema; {plant}"), None)?;
             Ok(json!({ "members": columns(&sql, "members")?, "runs": columns(&sql, "runs")? }))
         }
         ("schema-try", Some(step @ ("adds" | "fails"))) => {

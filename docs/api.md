@@ -733,8 +733,8 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`; none 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent) | its app's database, for an export (`__dump`, cell/platform.mjs). No `table`: `{schema: [{type, name, table, sql}], tables}`, the platform's own tables left out. A `table`: `{table, offset, rows, next}`, at most 1000 rows and about 4 MiB from `offset`, each a JSON object (a blob `{"$base64"}`); not in the schema 404. No app code: 404 `no_code` |
 | `POST /api/f/{name}/inbox` | the inbox token, or the secret its code's `inbox` names (Apps) | the token in `x-fragment-inbox-token` or `?t=`, or, when its code names an inbox, its secret in its header or its HMAC signature (and no token: 403 otherwise, saying why a signature is refused); JSON `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`, or its `answer` query's. Bad token 403; `INBOX_PENDING_MAX` pending 429 |
-| `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record POSTed to `url` as `{type: "record", fragment, channel, record}` (unsigned: the URL is the capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go). `{channel, wake: true}` in place of `url`, from a computer's egress alone (400 from anywhere else), wakes its computer instead (docs/computers.md) |
-| `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
+| `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record POSTed to `url` as `{type: "record", fragment, channel, record}` (unsigned: the URL is the capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go). `{channel, wake: true}` in place of `url`, from a computer's egress alone (400 from anywhere else), wakes its computer instead (docs/computers.md). `{channel, follow: true}`, from an agent made from a fragment (else 403), → `{id, channel, follow}`: its fragment follows the channel (not `events` or `ops`, which are read: 400), each new record but the agent's own handed to it from the outbox, never through the queue, at least once, running its `followed` triggers (Jobs and triggers) at the record's depth here; it ends once its agent may read the channel no more, or its follower takes it no more (gone, or made again), and a record gone past its retention before it went is a `delivery.failed` |
+| `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, wake, follow, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
 | `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, from, listed, seq}]}`: `events`, `ops`, `inbox`, and the app's (Apps) |
 | `GET /api/f/{name}/channels/{channel}?after=\|before=&limit=` | the channel's reader | → `ChannelPage` (docs/wire, `channels.read`): at most `CHANNEL_PAGE` records and, past its first record, `CHANNEL_HTTP_PAGE_MAX_BYTES` of bodies, always ascending. Both cursors, or a bad cursor or limit, 400 |
@@ -1005,7 +1005,11 @@ agent, or carrying code, keeps the last good code and says to fork it.
   alarm, the platform's own calls, or an anonymous visitor; and only when
   there is something to catch up: `main` moved since the operation's last
   triggered run started, or that run did not succeed, with none queued or
-  running; its input `{}`, its run's `via` `woke`).
+  running; its input `{}`, its run's `via` `woke`); `{"followed": true,
+  "run": op}` (each record of a channel its agent follows in another
+  fragment, once by that fragment, channel and seq; its input `{fragment,
+  channel, record}`, its run's `via` `followed`, its input shown to
+  editors alone).
 - `files` (optional, FIN-372): `{"page": true, "home": <path>, "status":
   <query>, "graph": true}`, each optional. `page`: the fragment's page (`/`)
   is the files view (`__files`), with its Open Graph tags. `home`: the
@@ -1145,7 +1149,10 @@ whose message begins with its status):
   …/channels/{channel}` (`PostRecord`): its record's runs there are a hop
   deeper than the job's, as a job's publish's are, so fragments triggering
   one another stop at `HOP_DEPTH_MAX`;
-- `records(…)`, as above, its answer kept.
+- `records(…)`, as above, its answer kept;
+- `follow(name, channel)` → `{id, channel, follow}`, as `POST
+  …/subscriptions` `{channel, follow: true}`: its `followed` triggers hear
+  the channel's records.
 
 Each is checked there exactly as the agent's own signed request (its
 membership and role, its owner's hold, a `relayed` record's door), so it
@@ -1681,9 +1688,9 @@ steps:
   <fragment>-<life>-r<run>-s<step>` (the same on every try) unless the job
   set one.
 - `job.publish(channel, body, kind)`: a record.
-- `job.otherFragments.post(name, channel, {id, body})` and `records`: an
-  agent's fragment's acts in another fragment (Acting in another
-  fragment).
+- `job.otherFragments.post(name, channel, {id, body})`, `records` and
+  `follow`: an agent's fragment's acts in another fragment (Acting in
+  another fragment).
 - `job.sleep(ms | "N seconds|minutes|hours|days")`, up to 30 days.
 - `job.members()`, `job.people(ids)` (at most 64), `job.presence()`: as the
   page reads `__members`, `__people` and its presence.

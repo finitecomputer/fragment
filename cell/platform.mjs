@@ -21,7 +21,7 @@
 // paying; camel case, so no operation (`a-z`, `0-9`, `_`) can shadow it.
 // `this.otherFragments.draft / records` act in another fragment as this
 // one's agent (docs/api.md, "Acting in another fragment"), and a job's
-// `job.otherFragments.post / records` as steps.
+// `job.otherFragments.post / records / follow` as steps.
 //
 // A job's method gets (input, job) and runs as a Workflow: each `await
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
@@ -347,6 +347,7 @@ class Job {
     return {
       post: (name, channel, record) => act("post", name, channel, record),
       records: (name, channel, page = {}) => act("records", name, channel, page),
+      follow: (name, channel) => act("follow", name, channel, {}),
     };
   }
 
