@@ -216,6 +216,12 @@ const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK
 /// The lever's `slow-tell` waits at most this: a restart's request is held
 /// no longer than a request's wait in the lane.
 const SLOW_TELL_MAX_MS: u64 = 30_000;
+/// A tell to its owner's open pages waits at most this. A call to their
+/// list takes a few ms; past this the computer goes on without it, so a
+/// slow or stuck owner never holds a start, a wake's answer or a sleep
+/// (#1381), and a page that did not hear reads it again at its next change
+/// or as it reconnects.
+const TELL_MAX_MS: u64 = 3_000;
 /// The lever's `stall-failing-start` waits at most this.
 const STALL_FAILING_START_MAX_MS: u64 = 10 * 60_000;
 /// A takeover that failed (`take_over`) is tried again by an alarm within
@@ -1056,13 +1062,30 @@ impl ComputerCell {
         }
     }
 
-    /// Tells its owner's open pages to read it again. One that did not hear
-    /// reads it as it reconnects, or at its next change: logged, never failed.
+    /// Tells its owner's open pages to read it again, within `TELL_MAX_MS`.
+    /// One that did not hear reads it as it reconnects, or at its next
+    /// change: logged, never failed.
     async fn tell_owner(&self) {
+        self.tell_owner_after(None).await;
+    }
+
+    /// `tell_owner`, a lever's wait (`lever`'s ms: `slow-start-tell`) first,
+    /// the two within `TELL_MAX_MS` together: a slow owner, as the lane makes one.
+    async fn tell_owner_after(&self, lever: Option<MetaKey>) {
         let Ok(Some(owner)) = self.meta(MetaKey::Owner) else { return };
-        if let Err(e) = crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await {
-            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": e.message }));
-        }
+        let told = async {
+            if let Some(key) = lever {
+                self.lever_wait(key, SLOW_TELL_MAX_MS).await;
+            }
+            crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await
+        };
+        let bound = Delay::from(std::time::Duration::from_millis(TELL_MAX_MS));
+        let error = match futures_util::future::select(Box::pin(told), Box::pin(bound)).await {
+            futures_util::future::Either::Left((Ok(()), _)) => return,
+            futures_util::future::Either::Left((Err(e), _)) => e.message,
+            futures_util::future::Either::Right(_) => format!("no answer in {TELL_MAX_MS} ms: gone on without it"),
+        };
+        console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": error }));
     }
 
     /// `answer`, when asked for and still empty, takes the view as its
@@ -1129,8 +1152,7 @@ impl ComputerCell {
             // slowed container destroys (#1343)
             let start = step.actions.iter().find_map(|a| if let Action::Start { generation } = a { Some(*generation) } else { None });
             if let Some(g) = start.filter(|_| phase_told(&life) != was) {
-                self.lever_wait(MetaKey::SlowStartTell, SLOW_TELL_MAX_MS).await;
-                self.tell_owner().await;
+                self.tell_owner_after(Some(MetaKey::SlowStartTell)).await;
                 // what came in as it was told (its owner's sleep, a newer
                 // wake) may have ended this start: then none is made
                 if !matches!(self.lifecycle()?.phase, Phase::Starting { generation, .. } if generation == g) {
@@ -2688,7 +2710,7 @@ impl ComputerCell {
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
             }
             "slow-tell" | "slow-start-tell" => {
-                // its next restart's (or start's) owner is told `ms` late (0:
+                // its next restart's (or start's, within TELL_MAX_MS) owner is told `ms` late (0:
                 // on time), as a slow principal answers: the window in which
                 // its alarm makes the start the restart owed (`drive_events`'
                 // answer), or its owner's sleep ends a start before it is made
