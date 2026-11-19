@@ -503,7 +503,7 @@ function portal() {
  * which is for a seat of one, no seat is added: it says so instead.
  */
 function orgSection(org, offer, pays, trial) {
-  const { el, section, actionLine } = h;
+  const { el, section, line, actionLine } = h;
   const box = section(org.name ? `Org: ${org.name}` : "Org");
   if (org.error) {
     box.append(el("p", "muted", org.error));
@@ -624,9 +624,8 @@ function orgSection(org, offer, pays, trial) {
     }
   };
   // while a trial runs, no seat is added: said instead of a form that would be refused
-  const trialSays = el("p", "muted", "A trial is for one seat. Add seats once it's paid: add a card in Payment and invoices before the trial ends.");
   box.append(
-    trial ? actionLine("Add a seat", trialSays) : actionLine("Add a seat", add),
+    trial ? line("Add a seat", "A trial is for one seat. Add seats once it's paid: add a card in Payment and invoices before the trial ends.") : actionLine("Add a seat", add),
     actionLine("Add an admin", admin),
     el("p", "muted", `A seat or an admin's place is offered by mail, and is theirs once they accept it (someone in the org is given a seat at once). A seat, ${price(offer.seatMicros)} a month and always on, bills from its offer, prorated; one removed is credited on the next invoice. ${pays ? "Cancel in Payment and invoices." : "Its billing is who pays's."}`),
   );
