@@ -19,7 +19,13 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 /// The offer's words under its title, as the server says them
 /// (`fragment_core::migrations::offer`).
-const OFFER_TEXT: &str = "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key. You'll get a month free.";
+const OFFER_TEXT: &str = "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key.";
+/// Whether a person's words promise a free month, which the move no
+/// longer gives: its seat has no end (Paul, 2026-11-19).
+fn promises_a_month(words: &str) -> bool {
+    let w = words.to_lowercase();
+    w.contains("month") || w.contains("free")
+}
 
 fn agent(old: &str) -> RosterAgent {
     RosterAgent {
@@ -154,7 +160,7 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("\"Never\" holds until \"Ask again\"; a move whose person is not known here takes no answer (409)", n.body["state"] == "never" && back.body["state"] == "open" && listed.status == 409, format!("{} {} {}", n.body, back.body, listed));
 
     // ---- Yes: the mover is told to stop and stage it
-    let (alice_agent_keys, alice_agent) = api.own_agent(&alice)?;
+    let (_, alice_agent) = api.own_agent(&alice)?;
     let (strangers_agent_keys, strangers_agent) = api.own_agent(&stranger)?;
     let theirs = answer(&a1, "yes", Some(&strangers_agent))?;
     let yes = answer(&a1, "yes", Some(&alice_agent))?;
@@ -167,6 +173,14 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
             && yes_again.status == 200
             && serde_json::to_value(&cmd)? == json!({ "id": format!("{a1}:1:stop_and_stage"), "old": a1, "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{a1}.p1.1"), "secrets": ["telegram_bot_token", "openrouter_key", "nostr_nsec"] }),
         format!("{theirs} {cmd:?}"),
+    );
+    // an agent takes in one move, ever (Paul 11-19): a2's Yes into the
+    // agent a1 is bound to is refused, a2 left as it was
+    let taken = answer(&a2, "yes", Some(&alice_agent))?;
+    s.ok(
+        "a Yes into an agent another of the person's moves is bound to is refused (409, in the server's words), changing nothing",
+        taken.status == 409 && taken.to_string().contains("that agent took in another upgrade already") && state(&a2) == "open" && state(&a1) == "asked",
+        &taken,
     );
 
     // ---- the hand-off of its secrets (F11): the mover's alone, for its
@@ -317,10 +331,18 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     // imports; no one else, ever
     let e1 = old("e1");
     mover.push(&roster("s2b", vec![person(&alice_id, &[&a1, &a2, &e1]), person(&dave_id, &[&d1, &d2]), person(&format!("{run}-nobody"), &[&b1])]))?;
-    answer(&e1, "yes", Some(&alice_agent))?;
+    // an agent takes in one move, ever: alice's first took in a1 (moved)
+    let into_again = answer(&e1, "yes", Some(&alice_agent))?;
+    let (e1_keys, e1_agent) = api.own_agent(&alice)?;
+    let yes_e1 = answer(&e1, "yes", Some(&e1_agent))?;
+    s.ok(
+        "an agent that took in a move takes in no other, even once that move is done (409, e1 left as it was); another agent of theirs is taken",
+        into_again.status == 409 && into_again.to_string().contains("that agent took in another upgrade already") && yes_e1.status == 200 && yes_e1.body["state"] == "asked",
+        format!("{into_again} {yes_e1}"),
+    );
     let stage = format!("{e1}.p1.1");
     let at = |what: &str| format!("/api/migrations/stages/{stage}/{what}");
-    let before = (api.signed(&alice_agent_keys, "POST", &at("open"), None)?, api.signed(&alice_agent_keys, "GET", &at("zip"), None)?);
+    let before = (api.signed(&e1_keys, "POST", &at("open"), None)?, api.signed(&e1_keys, "GET", &at("zip"), None)?);
     s.ok("its bound agent reads nothing before the move imports (409)", before.0.status == 409 && before.1.status == 409, format!("{} {}", before.0, before.1));
     mover.run_once()?;
     let (alice_other_keys, _) = api.own_agent(&alice)?;
@@ -341,26 +363,26 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let row = moved(&e1)?;
     let fields = ["old", "workos_id", "person", "agent", "state", "reason", "phase", "attempt", "command", "since_ms", "deadline_ms", "staged_ms", "why"];
     s.ok("staff's list says its state and when, never a stage's bytes or manifest", row["state"] == "importing" && row.as_object().is_some_and(|o| o.keys().all(|k| fields.contains(&k.as_str()))), &row);
-    let other = api.signed(&alice_agent_keys, "POST", &format!("/api/migrations/stages/{e1}.p1.9/open"), None)?;
-    let opened = api.signed(&alice_agent_keys, "POST", &at("open"), None)?;
+    let other = api.signed(&e1_keys, "POST", &format!("/api/migrations/stages/{e1}.p1.9/open"), None)?;
+    let opened = api.signed(&e1_keys, "POST", &at("open"), None)?;
     let m = &opened.body["manifest"];
     s.ok(
         "its bound agent opens it: the manifest as completed; another attempt's stage is none (404)",
         other.status == 404 && opened.status == 200 && opened.body["stage"] == stage.as_str() && m["format"] == STAGE_FORMAT && m["old"] == e1.as_str() && m["attempt"] == 1 && m["zip_bytes"] == 65_536 && m["left"][0]["why"] == "secret",
         &opened.body,
     );
-    let whole = api.signed(&alice_agent_keys, "GET", &at("zip"), None)?;
-    let range = api.call(crate::api::Call { method: "GET", url: format!("{}{}", api.base, at("zip")), keys: Some(&alice_agent_keys), extra: vec![("range", "bytes=100-199".to_string())], ..Default::default() })?;
+    let whole = api.signed(&e1_keys, "GET", &at("zip"), None)?;
+    let range = api.call(crate::api::Call { method: "GET", url: format!("{}{}", api.base, at("zip")), keys: Some(&e1_keys), extra: vec![("range", "bytes=100-199".to_string())], ..Default::default() })?;
     let zip = mover.zip_bytes();
     s.ok(
         "it reads the zip whole (200), and by a range (206, that range alone, content-range of the whole)",
         whole.status == 200 && whole.bytes == zip && range.status == 206 && range.bytes == zip[100..200] && range.header("content-range") == "bytes 100-199/65536" && range.header("accept-ranges") == "bytes",
         format!("{} {} {}", whole.status, range.status, range.header("content-range")),
     );
-    let bad = api.signed(&alice_agent_keys, "POST", &at("done"), Some(&json!({ "ok": "yes" })))?;
-    let done = api.signed(&alice_agent_keys, "POST", &at("done"), Some(&json!({ "ok": true, "report_sha256": "cd".repeat(32) })))?;
-    let again = api.signed(&alice_agent_keys, "POST", &at("done"), Some(&json!({ "ok": true })))?;
-    let after = (api.signed(&alice_agent_keys, "GET", &at("zip"), None)?, api.signed(&alice_agent_keys, "POST", &at("open"), None)?);
+    let bad = api.signed(&e1_keys, "POST", &at("done"), Some(&json!({ "ok": "yes" })))?;
+    let done = api.signed(&e1_keys, "POST", &at("done"), Some(&json!({ "ok": true, "report_sha256": "cd".repeat(32) })))?;
+    let again = api.signed(&e1_keys, "POST", &at("done"), Some(&json!({ "ok": true })))?;
+    let after = (api.signed(&e1_keys, "GET", &at("zip"), None)?, api.signed(&e1_keys, "POST", &at("open"), None)?);
     s.ok(
         "done well: retiring; the same done again changes nothing; its stage is refused to its own agent at once (409); a done that is not one is 400",
         bad.status == 400 && done.status == 200 && done.body["state"] == "retiring" && again.status == 200 && again.body["state"] == "retiring" && after.0.status == 409 && after.1.status == 409,
@@ -497,7 +519,8 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     // archived, the stage is no one's to read until its person says Yes
     let unread = api.signed(&carol_agent_keys, "GET", &format!("/api/migrations/stages/{c1}.p2.{}/zip", moved(&c1)?["attempt"]), None)?;
     s.ok("an archived stage is read by no one, its person's own agent included, until their Yes binds it (403)", unread.status == 403, &unread);
-    for (o, who, agent) in [(&c1, "a late sign-up", &carol_agent), (&a2, "someone who never answered", &alice_agent)] {
+    let (_, a2_agent) = api.own_agent(&alice)?;
+    for (o, who, agent) in [(&c1, "a late sign-up", &carol_agent), (&a2, "someone who never answered", &a2_agent)] {
         let late = answer(o, "yes", Some(agent))?;
         let late_move = moved(o)?;
         s.ok(
@@ -869,8 +892,8 @@ pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
                 let seen = b.eval(&page, crate::lanes::shell::MUST_ANSWER_SEEN)?;
                 let yes = b.eval(&page, "(() => { const a = document.querySelector('#must-answer a'); return { text: a?.textContent, href: a?.getAttribute('href'), target: a?.target ?? '', main: a?.classList.contains('primary') }; })()")?;
                 s.ok(
-                    "a person on the roster is asked as their page opens, over everything: the old agent's name, picture and words, its upgrade, Upgrade Juniper the main answer opening /move here, then Not now and Never",
-                    asked && seen["covers"] == true && seen["words"].as_str().is_some_and(|w| w.contains("Juniper's upgrade is ready") && w.contains(OFFER_TEXT) && w.contains("Not now") && w.contains("Never"))
+                    "a person on the roster is asked as their page opens, over everything: the old agent's name, picture and words, its upgrade (no free month), Upgrade Juniper the main answer opening /move here, then Not now and Never",
+                    asked && seen["covers"] == true && seen["words"].as_str().is_some_and(|w| w.contains("Juniper's upgrade is ready") && w.contains(OFFER_TEXT) && w.contains("Not now") && w.contains("Never") && !promises_a_month(w))
                         && yes["text"] == "Upgrade Juniper" && yes["href"].as_str().is_some_and(|h| h.ends_with("/move")) && yes["target"] == "" && yes["main"] == true,
                     json!([seen, yes]),
                 );
@@ -884,14 +907,18 @@ pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
         }
     }
     move_page_ui(s, api, &mut b, &mover, &session, &old, &shots)?;
+    move_into_theirs(s, api, &mut b, &mover, &roster.people, &shots)?;
     println!("      (screenshots: {})", shots.display());
     Ok(())
 }
 
 /// F5, the move's comp: a person on the roster who opens the move is given
-/// a month's seat and $25 of credit, once, ever: opened again, after the
-/// node restarts, nothing more. One who holds a seat keeps theirs, and gets
-/// the credit. A comp with an end (`untilMs`) ends by itself then.
+/// a comped seat with no end, once, ever: opened again, after the node
+/// restarts, nothing more. No credit is granted: the seat brings its
+/// month's included credit. One who holds a seat already keeps theirs.
+/// Staff end a move's comp as any comp (`DELETE /api/admin/seats/{id}`,
+/// `fragment operator uncomp`); an operator's comp with an end (`untilMs`)
+/// ends by itself then.
 pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("move-comp", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Node, Need::Move]) {
         return Ok(());
@@ -899,8 +926,11 @@ pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
     let mover = Mover::new(&api.base, s.mover.clone());
     let run = s.name("mc");
     let visit = |api: &Api, who: &fragment_nip98::Keys| api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(who) })));
-    let purchased = |api: &Api, k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/ledger", None).ok().and_then(|r| r.body["purchasedMicros"].as_i64()).unwrap_or(-1);
+    let ledger = |api: &Api, k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/ledger", None).map(|r| r.body).unwrap_or(Value::Null);
+    let purchased = |api: &Api, k: &fragment_nip98::Keys| ledger(api, k)["purchasedMicros"].as_i64().unwrap_or(-1);
     let seat = |api: &Api, k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/seat", None).map(|r| r.body).unwrap_or(Value::Null);
+    // when each comped seat of theirs ends by itself (null: never), which no route shows
+    let ends = |api: &Api, k: &fragment_nip98::Keys| api.unsigned("POST", "/api/test/registry", Some(&json!({ "compEnds": Api::email_of(k) }))).map(|r| r.body["ends"].clone()).unwrap_or(Value::Null);
     let gina = api.person()?;
     // a guest, as someone from finite.computer arrives (this fleet's default plan is a seat)
     let made_guest = api.signed(&s.operator, "POST", &format!("/api/ledger/{}/plan", api.identity(&gina)?), Some(&json!({ "id": format!("{run}-guest"), "plan": "guest" })))?;
@@ -912,58 +942,61 @@ pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(mover.push(&Roster { snapshot: format!("{run}-s1"), observed_ms: 1_800_000_000_000, people: people.to_vec() })?.status == 200, "the roster");
     let before = (purchased(api, &gina), seat(api, &gina)["guest"].clone());
     let first = visit(api, &gina)?;
-    let given = s.eventually(crate::lanes::billing::PUSHED, || seat(api, &gina)["guest"] == false);
+    let given = s.eventually(crate::lanes::billing::PUSHED, || seat(api, &gina)["guest"] == false && ledger(api, &gina)["includedGrantedMicros"] == 50_000_000);
     let mine = seat(api, &gina);
     s.ok(
-        "a guest on the roster who opens the move is given its comp: $25 of credit and a seat (a comped `seat`)",
-        before == (0, json!(true)) && first.status == 200 && first.body["comp"] == true && purchased(api, &gina) == 25_000_000 && given && mine["seat"]["kind"] == "seat" && mine["seat"]["comped"] == true,
-        json!([before, first.body, mine]),
+        "a guest on the roster who opens the move is given its comp: a comped `seat` with no end, its own month's credit ($50 included) and no credit granted",
+        before == (0, json!(true)) && first.status == 200 && first.body["comp"] == true && first.body.get("untilMs").is_none() && given
+            && mine["seat"]["kind"] == "seat" && mine["seat"]["comped"] == true && ends(api, &gina) == json!([null]) && purchased(api, &gina) == 0,
+        json!([before, first.body, mine, ends(api, &gina), ledger(api, &gina)]),
     );
     let again = visit(api, &gina)?;
-    s.ok("opened again: nothing more (no comp due, $25 still)", again.status == 200 && again.body["comp"] == false && purchased(api, &gina) == 25_000_000, &again.body);
+    s.ok("opened again: nothing more (no comp due)", again.status == 200 && again.body["comp"] == false && purchased(api, &gina) == 0 && ends(api, &gina) == json!([null]), &again.body);
     let hanks = visit(api, &hank)?;
     let kept = seat(api, &hank);
     s.ok(
-        "one who holds a seat already keeps theirs, and gets the credit",
-        hanks.status == 200 && hanks.body["comp"] == true && purchased(api, &hank) == 25_000_000 && kept["seat"]["kind"] == "seat_always_on" && visit(api, &hank)?.body["comp"] == false,
-        json!([hanks.body, kept]),
+        "one who holds a seat already keeps theirs, as it was (its kind, no end), and is given nothing more",
+        hanks.status == 200 && hanks.body["comp"] == true && kept["seat"]["kind"] == "seat_always_on" && kept["seat"]["comped"] == true && ends(api, &hank) == json!([null])
+            && purchased(api, &hank) == 0 && visit(api, &hank)?.body["comp"] == false,
+        json!([hanks.body, kept, ends(api, &hank)]),
     );
     // restarted: what was given is remembered
     s.stop()?;
     let api = &s.start(false)?;
     let after = (visit(api, &gina)?, visit(api, &hank)?);
     s.ok(
-        "the node restarted: opened again, nothing more is given, to either",
-        after.0.status == 200 && after.0.body["comp"] == false && after.1.body["comp"] == false && purchased(api, &gina) == 25_000_000 && purchased(api, &hank) == 25_000_000,
-        json!([after.0.body, after.1.body]),
+        "the node restarted: opened again, nothing more is given, to either, and the move's seat still has no end",
+        after.0.status == 200 && after.0.body["comp"] == false && after.1.body["comp"] == false && purchased(api, &gina) == 0 && purchased(api, &hank) == 0
+            && seat(api, &gina)["seat"]["comped"] == true && ends(api, &gina) == json!([null]),
+        json!([after.0.body, after.1.body, ends(api, &gina)]),
     );
-    // a visit cut off after its credit, before its seat: the next asks for
-    // the same end, fixed at the first attempt, never a later one
+    // a visit cut off at its seat: the next gives it, with no end
     let joy = api.person()?;
     let joy_people = vec![RosterPerson { workos_id: s.workos.user(&Api::email_of(&joy)).id, email: format!("{run}-j1@old.test"), agents: vec![agent(&format!("{run}-j1"))] }];
     anyhow::ensure!(mover.push(&Roster { snapshot: format!("{run}-s2"), observed_ms: 1_800_000_000_000, people: [people.to_vec(), joy_people].concat() })?.status == 200, "the roster");
     let down = api.unsigned("POST", "/api/test/registry", Some(&json!({ "downFor": { "path": "/orgs/comp", "times": 1 } })))?;
     anyhow::ensure!(down.status == 200, "the registry's next comp refused: {down}");
-    let t0 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
     let cut = visit(api, &joy)?;
-    let t1 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
-    std::thread::sleep(Duration::from_secs(2));
     let retried = visit(api, &joy)?;
-    let until = retried.body["untilMs"].as_i64().unwrap_or(0);
-    const MONTH_MS: i64 = 30 * DAY_MS;
+    let joys = seat(api, &joy);
     s.ok(
-        "a visit cut off after its credit and before its seat is tried again by the next, asking for the same end, fixed at the first attempt (not 30 days from the retry); after it, nothing more",
-        cut.status != 200 && retried.status == 200 && retried.body["comp"] == true && (t0 + MONTH_MS..=t1 + MONTH_MS).contains(&until)
-            && purchased(api, &joy) == 25_000_000 && seat(api, &joy)["seat"]["comped"] == true && visit(api, &joy)?.body["comp"] == false,
-        json!([cut.status, retried.body, t0, t1]),
+        "a visit cut off at its seat is tried again by the next, which gives it with no end; after it, nothing more",
+        cut.status != 200 && retried.status == 200 && retried.body["comp"] == true && joys["seat"]["comped"] == true && ends(api, &joy) == json!([null])
+            && purchased(api, &joy) == 0 && visit(api, &joy)?.body["comp"] == false,
+        json!([cut.status, retried.body, joys, ends(api, &joy)]),
     );
-    // a comp with an end ends then, by itself (the registry's alarm)
+    // staff end a move's comp as any other (`fragment operator uncomp`)
+    let joy_seat = joys["seat"]["id"].as_str().unwrap_or_default().to_string();
+    let uncomped = api.signed(&s.operator, "DELETE", &format!("/api/admin/seats/{joy_seat}"), None)?;
+    let ended = s.eventually(crate::lanes::billing::PUSHED, || seat(api, &joy)["seat"].is_null());
+    s.ok("staff end a move's comp at once, as any comp", uncomped.status == 200 && ended && ends(api, &joy) == json!([]) && visit(api, &joy)?.body["comp"] == false, json!([uncomped.body, seat(api, &joy)]));
+    // an operator's comp with an end ends then, by itself (the registry's alarm)
     let ivy = api.person()?;
     let soon = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64 + 3_000;
     let r = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&ivy), "kind": "seat", "untilMs": soon })))?;
-    let held = seat(api, &ivy)["seat"]["kind"] == "seat";
+    let held = ends(api, &ivy) == json!([soon]) && seat(api, &ivy)["seat"]["kind"] == "seat";
     let ended = s.eventually(Duration::from_secs(30), || seat(api, &ivy)["seat"].is_null());
-    s.ok("a comp with an end holds until then, and then ends by itself", r.status == 200 && held && ended, seat(api, &ivy));
+    s.ok("an operator's comp with an end holds until then, and then ends by itself", r.status == 200 && held && ended, seat(api, &ivy));
     Ok(())
 }
 
@@ -992,10 +1025,10 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     anyhow::ensure!(b.until(&page, "document.getElementById('must-answer').open && !!document.querySelector('#must-answer a')", wait), "the offer, over the page");
     b.eval(&page, "(document.querySelector('#must-answer a').click(), true)")?;
     let opened = b.until(&page, &format!("location.pathname === '/move' && !!{row} && !document.getElementById('must-answer').open"), wait);
-    let seen = b.eval(&page, &format!("(() => {{ const r = {row}; return {{ words: r?.innerText, picked: r?.querySelector('input[type=checkbox]')?.checked, bring: !!document.querySelector('#move-page button.primary'), cover: document.getElementById('must-answer').open }}; }})()"))?;
+    let seen = b.eval(&page, &format!("(() => {{ const r = {row}; return {{ words: r?.innerText, page: document.getElementById('move-page')?.innerText, picked: r?.querySelector('input[type=checkbox]')?.checked, bring: !!document.querySelector('#move-page button.primary'), cover: document.getElementById('must-answer').open, asked: !!document.querySelector('#move-page .move-into') }}; }})()"))?;
     s.ok(
-        "Upgrade Juniper opens /move here: the old agent, its words, and whether to upgrade it (chosen); the offer's cover stands aside on the page that answers it",
-        opened && seen["words"].as_str().is_some_and(|w| w.contains("Juniper's upgrade is ready.")) && seen["picked"] == true && seen["bring"] == true && seen["cover"] == false,
+        "Upgrade Juniper opens /move here: the old agent, its words, and whether to upgrade it (chosen), no free month; the offer's cover stands aside on the page that answers it; with no agent here, nothing more is asked",
+        opened && seen["words"].as_str().is_some_and(|w| w.contains("Juniper's upgrade is ready.")) && seen["page"].as_str().is_some_and(|w| !w.is_empty() && !promises_a_month(w)) && seen["picked"] == true && seen["bring"] == true && seen["cover"] == false && seen["asked"] == false,
         &seen,
     );
     let _ = b.screenshot(&page, &shots.join("move-1280-light.png"));
@@ -1039,9 +1072,9 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     );
     let _ = b.screenshot(&page, &shots.join("move-asked-1280-light.png"));
     s.ok(
-        "Upgrade: the guest is given the comp (a comped seat, $25), one new agent is made, with its one chat, not opened (the page stays), and its Yes starts the move: pausing it, in the server's words",
+        "Upgrade: the guest is given the comp (a comped seat, no credit granted), one new agent is made, with its one chat, not opened (the page stays), and its Yes starts the move: pausing it, in the server's words",
         making && asked && still == "/move" && one_each && b.eval(&page, &said)?.as_str().is_some_and(|w| w == "Pausing Juniper for its upgrade…") && m["state"] == "asked" && m["agent"].is_string()
-            && ledger.body["purchasedMicros"] == 25_000_000 && seat.body["seat"]["comped"] == true,
+            && ledger.body["purchasedMicros"] == 0 && seat.body["seat"]["comped"] == true,
         json!({ "move": m, "ledger": ledger.body["purchasedMicros"], "seat": seat.body["seat"], "path": still, "kinds": kinds }),
     );
     // the mover stops it and stages it: the page follows, read again, and
@@ -1083,6 +1116,182 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
         }
         b.close(p)?;
     }
+    Ok(())
+}
+
+/// Paul 11-19: someone who moved by hand has an agent here already, and
+/// Upgrade made them a second. On `/move` they are asked, for each old
+/// agent, a new one or theirs, nothing chosen for them (pictures at 1280
+/// and 390 px, light and dark). A Yes that never landed: a reload asks
+/// again, and no agent is made. Theirs chosen, its Yes alone binds it:
+/// nothing made, nothing of its self changed; while it may still import,
+/// it is no one else's choice, and the server refuses it; once the move
+/// imports, the routine is on its own tasks and the person in its own chat.
+fn move_into_theirs(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover: &Mover, before: &[RosterPerson], shots: &std::path::Path) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let run = s.name("mt");
+    let email = format!("{run}-rook@e2e.test");
+    let session = api.sign_in(&email)?;
+    let workos_id = s.workos.user(&email).id;
+    let call = |method: &'static str, path: &str, body: Option<Value>| super::shell::shell(api, &session, method, path, body.as_ref(), &[]);
+    // their agent, Pip, as the shell's Add makes one: its fragment and its
+    // self, on a computer, with its own chat
+    let made = call("POST", "/api/fragments", Some(json!({ "label": "pip", "template": "agent", "title": "Pip" })))?;
+    let pip = made.body["name"].as_str().context("Pip's fragment")?.to_string();
+    let pip_npub = made.body["npub"].as_str().unwrap_or_default().to_string();
+    let own: [(&str, &str); 4] = [
+        ("SOUL.md", "You are Rook's assistant. Keep answers short.\n"),
+        ("memories/MEMORY.md", "Rook takes tea at four.\n"),
+        ("skills/home/brew/SKILL.md", "---\nname: brew\ndescription: How Rook likes tea.\n---\n\nSteep it four minutes.\n"),
+        ("agent.json", "{\n  \"tier\": \"cheap\"\n}\n"),
+    ];
+    let w = call("POST", &format!("/api/f/{pip}/files"), Some(json!({ "key": "pip-self", "message": "its self", "files": own.iter().map(|(p, t)| json!({ "path": p, "text": t })).collect::<Vec<_>>() })))?;
+    anyhow::ensure!(w.status == 200, "Pip's self: {w}");
+    let computer = call("POST", "/api/computers", Some(json!({})))?.body["computer"].as_str().context("their computer")?.to_string();
+    let placed = call("PUT", &format!("/api/computers/{computer}/agents/{pip}"), Some(json!({})))?;
+    let identity = placed.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == pip.as_str())).and_then(|a| a["identity"].as_str()).context("Pip on its computer")?.to_string();
+    anyhow::ensure!(call("POST", &format!("/api/f/{pip}/deploy"), Some(json!({})))?.status == 200, "Pip deployed");
+    let chat = call("POST", "/api/fragments", Some(json!({ "label": "pip-chat", "template": "chat", "title": "Chat" })))?.body["name"].as_str().context("Pip's chat")?.to_string();
+    anyhow::ensure!(call("PUT", &format!("/api/f/{chat}/members/{identity}"), Some(json!({ "role": "editor" })))?.status == 200, "Pip in its chat");
+    // what Pip is, as its person reads it: each file of its self, its name, and their agents and chats
+    let pip_is = || -> Result<Value> {
+        let mut is = serde_json::Map::new();
+        for (path, _) in own {
+            is.insert(path.into(), json!(call("GET", &format!("/api/f/{pip}/file?path={}", crate::api::url_enc(path)), None)?.text));
+        }
+        let list = call("GET", "/api/fragments", None)?.body["fragments"].as_array().cloned().unwrap_or_default();
+        is.insert("title".into(), list.iter().find(|f| f["name"] == pip.as_str()).map(|f| f["title"].clone()).unwrap_or_default());
+        let mut kinds: Vec<&str> = list.iter().filter_map(|f| f["kind"].as_str()).collect();
+        kinds.sort_unstable();
+        is.insert("kinds".into(), json!(kinds));
+        Ok(Value::Object(is))
+    };
+    let was = pip_is()?;
+    let whole = own.iter().all(|(p, t)| was[*p] == *t) && was["title"] == "Pip" && was["kinds"] == json!(["agent", "chat"]);
+    anyhow::ensure!(whole, "Pip as made: {was}");
+
+    // their old agent, Wren, on the roster beside the first person's
+    let wren = format!("{run}-b");
+    let mut a = agent(&wren);
+    a.name = "Wren".into();
+    a.picture_url = Some(format!("{}/__shell/agent.png", api.base));
+    let people = [before.to_vec(), vec![RosterPerson { workos_id: workos_id.clone(), email: format!("{run}@old.test"), agents: vec![a.clone()] }]].concat();
+    anyhow::ensure!(mover.push(&Roster { snapshot: format!("{run}-into"), observed_ms: 1_800_000_000_000, people: people.clone() })?.status == 200, "the roster");
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let row = format!("document.querySelector('#move-page .move-row[data-old={}]')", serde_json::to_string(&wren)?);
+    let radio = |value: &str| format!("#move-page .move-row[data-old=\"{wren}\"] input[type=radio][value=\"{value}\"]");
+    let asked = format!(
+        "(() => {{ const q = {row}?.querySelector('.move-into'); return q ? {{ said: q.querySelector('p').textContent, answers: [...q.querySelectorAll('label')].map((l) => [l.textContent, l.querySelector('input').checked]), shown: !q.hidden, role: q.getAttribute('role'), go: !document.querySelector('#move-page button.primary').disabled }} : null; }})()"
+    );
+    const SAID: &str = "You already have an agent here. Make a new one for this upgrade, or use Pip?";
+    let unanswered = json!({ "said": SAID, "answers": [["Make a new one", false], ["Use Pip", false]], "shown": true, "role": "radiogroup", "go": false });
+    for (width, height, phone, scheme) in [(1280, 800, false, "light"), (1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
+        let p = b.open(&format!("{}/move", api.base))?;
+        b.viewport(&p, width, height, phone)?;
+        b.color_scheme(&p, scheme)?;
+        let drawn = b.until(&p, &format!("!!{row}?.querySelector('.move-into') && !!{row}?.querySelector('img')?.naturalWidth"), wait);
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = b.screenshot(&p, &shots.join(format!("into-{width}-{scheme}.png")));
+        let q = b.eval(&p, &asked)?;
+        b.click(&p, &radio(&pip))?;
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = b.screenshot(&p, &shots.join(format!("into-pip-{width}-{scheme}.png")));
+        let chose = b.eval(&p, &asked)?;
+        if (width, scheme) == (1280, "light") {
+            s.ok(
+                "someone with an agent here is asked on /move, an old agent at a time: a new one, or Pip by its name; nothing chosen for them, Upgrade waiting for the answer; Pip chosen, Upgrade offered",
+                drawn && q == unanswered && chose["answers"] == json!([["Make a new one", false], ["Use Pip", true]]) && chose["go"] == true,
+                json!([q, chose]),
+            );
+        }
+        b.close(p)?;
+    }
+
+    // a Yes that never lands (the page's own call for it refused, so the
+    // server never hears it): nothing made; a reload asks again
+    let page = b.open(&format!("{}/move", api.base))?;
+    b.viewport(&page, 1280, 800, false)?;
+    b.color_scheme(&page, "light")?;
+    anyhow::ensure!(b.until(&page, &format!("!!{row}?.querySelector('.move-into')"), wait), "the question");
+    b.eval(&page, "(() => { let n = 1; const f = window.fetch; window.fetch = (u, o) => (String(u).endsWith('/yes') && n-- > 0 ? Promise.reject(new TypeError('Failed to fetch')) : f(u, o)); return true; })()")?;
+    b.click(&page, &radio(&pip))?;
+    b.click(&page, "#move-page button.primary")?;
+    let failed = b.until(&page, &format!("!!document.querySelector('#move-page .form-error') && !document.querySelector('#move-page button.primary').disabled && {row}?.dataset.state === 'open'"), Duration::from_secs(60));
+    let kept = b.eval(&page, &asked)?;
+    let after_fail = pip_is()?;
+    // a move as staff read it, page by page
+    let operator = s.operator.clone();
+    let state = |o: &str| -> Value {
+        let mut after = String::new();
+        while let Ok(r) = api.signed(&operator, "GET", &format!("/api/admin/migrations?after={after}"), None) {
+            if let Some(m) = r.body["moves"].as_array().and_then(|ms| ms.iter().find(|m| m["old"] == o)) {
+                return m.clone();
+            }
+            match r.body["next"].as_str() {
+                Some(next) => after = next.to_string(),
+                None => break,
+            }
+        }
+        Value::Null
+    };
+    b.reload(&page)?;
+    let again = b.until(&page, &format!("!!{row}?.querySelector('.move-into')"), wait) && b.eval(&page, &asked)? == unanswered;
+    s.ok(
+        "a Yes into Pip that never landed: the page says so, Pip still chosen, to try again; nothing made, the move still open; a reload asks again, nothing chosen",
+        failed && kept["answers"] == json!([["Make a new one", false], ["Use Pip", true]]) && after_fail == was && state(&wren)["state"] == "open" && again,
+        json!({ "kept": kept, "pip": after_fail, "move": state(&wren) }),
+    );
+
+    // Pip chosen: its Yes alone, nothing made, nothing of it changed
+    b.click(&page, &radio(&pip))?;
+    b.click(&page, "#move-page button.primary")?;
+    let bound = b.until(&page, &format!("{row}?.dataset.state === 'asked'"), Duration::from_secs(60));
+    let _ = b.screenshot(&page, &shots.join("into-asked-1280-light.png"));
+    let m = state(&wren);
+    let now = pip_is()?;
+    let gone = b.eval(&page, &format!("!{row}?.querySelector('.move-into') && !document.querySelector('#move-page button.primary')"))?;
+    s.ok(
+        "Pip chosen, Upgrade: Wren's move is bound to Pip (asked), no agent or chat made, Pip's SOUL, memories, skill, agent.json and name as they were; nothing left to ask",
+        bound && m["agent"] == identity.as_str() && m["state"] == "asked" && now == was && gone == true,
+        json!({ "move": m, "pip": now }),
+    );
+
+    // Pip took in Wren: it is no one else's, ever; another old agent of
+    // theirs is not asked about it, and its Yes into Pip is refused
+    let finch = format!("{run}-c");
+    let people = [before.to_vec(), vec![RosterPerson { workos_id, email: format!("{run}@old.test"), agents: vec![a, agent(&finch)] }]].concat();
+    anyhow::ensure!(mover.push(&Roster { snapshot: format!("{run}-into2"), observed_ms: 1_800_000_000_000, people })?.status == 200, "the roster again");
+    let finch_row = format!("document.querySelector('#move-page .move-row[data-old={}]')", serde_json::to_string(&finch)?);
+    let shown = b.until(&page, &format!("!!{finch_row}"), wait);
+    let refused = call("POST", &format!("/api/migrations/offers/{finch}/yes"), Some(json!({ "agent": identity })))?;
+    let finch_asked = b.eval(&page, &format!("!!{finch_row}?.querySelector('.move-into')"))?;
+    s.ok(
+        "Pip took in Wren, so it is no one else's: their other old agent is asked nothing about it, and a Yes into Pip for it is refused (409), changing nothing",
+        shown && finch_asked == false && refused.status == 409 && refused.to_string().contains("that agent took in another upgrade already") && state(&finch)["state"] == "open",
+        json!({ "refused": refused.to_string(), "finch": state(&finch) }),
+    );
+
+    // the mover stages Wren: its import's routine on Pip's own tasks, and
+    // the person, on the page, taken to Pip's own chat
+    mover.run_once()?;
+    let shown_chat = format!(
+        "(location.pathname === '/' && document.getElementById('move-page').hidden && new URLSearchParams((document.querySelector('#frames iframe:not([hidden])')?.dataset.src ?? '?').split('?')[1]).get('name') === {})",
+        serde_json::to_string(&chat)?
+    );
+    let arrived = b.until(&page, &shown_chat, Duration::from_secs(60));
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = b.screenshot(&page, &shots.join("into-arrived-1280-light.png"));
+    let stage = format!("{wren}.p1.1");
+    let routine = || call("GET", &format!("/api/f/{pip}/channels/tasks"), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default().into_iter().find(|r| r["body"]["kind"] == "routine" && r["body"]["text"].as_str().is_some_and(|t| t.contains(&stage)));
+    let landed = s.eventually(Duration::from_secs(30), || routine().is_some());
+    let r = routine().unwrap_or_default();
+    let end = pip_is()?;
+    s.ok(
+        "staged: Wren's import begins in Pip, its routine on Pip's own tasks as Pip, naming its stage and the skill; the person is taken to Pip's own chat; Pip's self still as it was, and still no other agent",
+        arrived && landed && r["principal"] == pip_npub.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.contains("import-agent-home")) && end == was && state(&wren)["state"] == "importing",
+        json!({ "routine": r, "pip": end, "move": state(&wren) }),
+    );
+    b.close(page)?;
     Ok(())
 }
 
