@@ -204,6 +204,11 @@ pub(crate) struct AppTold {
     pub role: Option<Role>,
     pub incarnation: i64,
     pub version: i64,
+    /// The target's word on a role: the key of the app it holds under the
+    /// name, whose word it is alone (a replacement under the name takes
+    /// none of it). An end names none: any life of the name takes it.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 impl Call for AppTold {
