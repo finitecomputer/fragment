@@ -242,6 +242,10 @@ impl FragmentCell {
     /// life ended, and with it any ask on its way.
     pub(crate) fn app_told(&self, c: AppTold) -> CellResult<()> {
         self.created()?;
+        // a role held by another life of this name is none of this one's
+        if !c.from_app && c.role.is_some() && c.key != Some(self.must(MetaKey::Npub)?) {
+            return Ok(());
+        }
         if !c.from_app {
             let role = c.role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
             let (inc, ver) = (SqlStorageValue::Integer(c.incarnation), SqlStorageValue::Integer(c.version));
