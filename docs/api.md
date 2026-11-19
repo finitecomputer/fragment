@@ -258,9 +258,11 @@ label is 404, saying so; the CLI resolves a bare label among its caller's
 fragments.
 
 Its code.storage repo is the deployment's prefix, then `<name>--<12 hex>`,
-the hex a digest of its owner's identity
-(`fragment_core::codestorage::repo_name`): the same owner making a deleted
-name again finds its repo, and no one else ever does.
+the hex a digest of its life's own key, its `npub`
+(`fragment_core::codestorage::repo_name`): each life of a name has a repo
+of its own, and a name made again, by anyone, never finds an earlier
+life's. A fragment made before this naming has a repo named by its
+owner's identity instead, which it keeps.
 
 A chat's create answers before its repo is made (`publish::seeds_later`).
 Until its first commit lands, the chat runs its template from the release,
@@ -269,7 +271,8 @@ made yet". The repo and its first commit are made by its alarm, armed for
 right after the answer, else at a later pass (`template.failed` says why
 one did not land), and first by any writer of its repo that comes before:
 a commit, a deploy, a storage token. A chat whose life ends before its repo
-lands records none; one made after that is deleted (`ended.repo-of-no-life`).
+is made records none; one made after that is deleted with the rest of that
+life (`ended.repo-of-no-life`).
 
 **A public address.** An app or a brain may have one: `<label>.<suffix>`
 (`<label>--<branch>.<suffix>` on a branch), a second origin of the same
@@ -680,7 +683,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?, agent?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. `agent`, one of the maker's own agents (its identity), is an editor from the first moment, in every list row of it, its computer told it joined, as `PUT members/{agent}` adds one after, once its template is installed (a template that fails to land tells it when a retry lands it); anyone else's is 403, and nothing is made; with a connector's template (`telegram`, whose only editor is its owner) it is 400, and nothing is made. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions`, `telegram` are blessed (decision 40): main's first commit is `{"template", "meta": {title}}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `board`, `notes`, `slides` are the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400). A chat's `repo` is `""`: made after the answer (Names), when its agent's computer is told it joined. Its waits, in `Server-Timing` (`<part>;dur=<ms>`): `ledger`, `object` and, an agent's, `agent`; then its object's `identity` (with `agent`), `repo`, `key`, `manifest`, `list`, `seed` (with `template`), `joined` (with `agent` and no `template`: its computer told; a template's seed tells it once it lands) and `alarm` (a chat's: `identity` with `agent`, `key`, `manifest`, `install`, `list` and `alarm`) |
+| `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?, agent?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. `agent`, one of the maker's own agents (its identity), is an editor from the first moment, in every list row of it, its computer told it joined, as `PUT members/{agent}` adds one after, once its template is installed (a template that fails to land tells it when a retry lands it); anyone else's is 403, and nothing is made; with a connector's template (`telegram`, whose only editor is its owner) it is 400, and nothing is made. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions`, `telegram` are blessed (decision 40): main's first commit is `{"template", "meta": {title}}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `board`, `notes`, `slides` are the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400). A chat's `repo` is `""`: made after the answer (Names), when its agent's computer is told it joined. Its waits, in `Server-Timing` (`<part>;dur=<ms>`): `ledger`, `object` and, an agent's, `agent`; then its object's `identity` (with `agent`), `key`, `repo`, `manifest`, `list`, `seed` (with `template`), `joined` (with `agent` and no `template`: its computer told; a template's seed tells it once it lands) and `alarm` (a chat's: `identity` with `agent`, `key`, `manifest`, `install`, `list` and `alarm`) |
 | `GET /api/fragments` | any signer | → `FragmentList` (docs/wire, `fragments.list`): a `ListedFragment` row for each fragment they hold a role on. `limits` (`UploadLimits`), what a message of theirs may carry. An agent's `?for=<id>` lists that identity's, as the agent acts with them, with the agent's own `limits` |
 | `GET /api/fragments/watch` | any signer; the shell's session with the platform's exact `Origin` | a WebSocket of `ListWatchFrame`s (docs/wire, `fragments.watch`). A fragment's page is refused like no one (401). At most `LIST_WATCHERS_MAX` a list (429). Not for `for` |
 | `PUT /api/fragments/{name}/archived` | any signer with a role on it | `SetArchived` → `Archived` (docs/wire): their own view, in their list's row only. It goes when they leave, or the fragment is made again. No role, none, or a bare label 404; a bad body 400. Not for `for` |
@@ -690,10 +693,10 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/search?q=` | any signer | → `SearchAnswer` (docs/wire, `search.find`; Search). `q` once, at most `SEARCH_QUERY_MAX_BYTES` and `SEARCH_QUERY_WORDS_MAX` words (400). Not for `for` |
 | `POST /api/search` | any signer, `for` too | `Across {q, in, limit?, mode?, fields?, after?, before?}` → `FoundAcross {results, fragments, semantic}`: one question asked of several fragments' indexes (Search across fragments) |
 | `GET /api/access` | a person | Sharing, "Who has access to what" |
-| `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once it is gone: 404 to everyone, out of its owner's list, its name free. Its members' lists, app database and blobs go after, by its alarm (`fragment_core::ended`: retried, a part refused or failing ten tries held and tried daily). An agent fragment's agent leaves its computer and is named by it no more. A life made again under the name is untouched by the old one's cleanup. The repo stays |
+| `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once it is gone: 404 to everyone, out of its owner's list, its name free. Its members' lists, app database and blobs go after, by its alarm (`fragment_core::ended`: retried, a part refused or failing ten tries held and tried daily). An agent fragment's agent leaves its computer and is named by it no more. Its code.storage repo is deleted by the same alarm, retried and held as the rest, when it is named by the life's own key (Names). A repo named by its owner (a fragment made before that naming) stays: a rolled-back release names repos so, and its create of the name would find one whose delete was still to come. Those wait for a sweep once no rollback can reach such a release (FIN-540). A life made again under the name, even before that delete, has a fresh repo of its own and is untouched by the old one's cleanup. Nothing reaches copies outside the platform: what an agent's computer synced, or exports people downloaded |
 | `GET /api/f/{name}/status` | viewer | → `FragmentStatus` (docs/wire, `fragments.status`), as the caller's role sees it: the share link's and the inbox's tokens only for those who hold them |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main; none 404 |
-| `GET /api/f/{name}/members` | viewer | → `MemberList` (docs/wire, `members.list`); to the owner, and their agent for them, each person's `email` too, as the share sheet shows it (decision 48) |
+| `GET /api/f/{name}/members` | viewer | → `MemberList` (docs/wire, `members.list`); to the owner, and their agent for them, each person's `email` too, as the share sheet shows it (decision 48); on a connector bound as an agent's door, that agent's row says its `door` while it is open (An agent's doors) |
 | `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer \| editor}` (another field 400) → the member, added or its role changed. A new member this way is one of the owner's own agents alone; anyone else 403 (invite them). An email no one signs in as, 404. A person's agents follow their role (an agent's own 400). A chat's lead agent (the first added) is never set below `editor` (400). An agent on a computer is told (`joined` on its `tasks`) and its computer woken. Its waits, in `Server-Timing`: `identity`, `list`, `joined` |
 | `DELETE /api/f/{name}/members/{id\|npub\|email\|me}` | owner, or their agent for them; the member | → `{ok, removed}`, closing their feeds. A person goes with their agents in it, and such an agent takes its person and their other agents (decision 64). A chat's lead agent is removed by no one else (400); it may leave |
 | `POST /api/f/{name}/invites` | owner, or their agent for them | `{email, role}` → `{invited: {email, role, expiresAt, createdBy}}` (Invites by email). In it already 400 |
@@ -2180,9 +2183,13 @@ nor speak through one (`fragment_core::door`):
   /api/f/{name}/door`, or `__door`), to an agent of theirs, which joins as
   a viewer. Bound and allowed, its app may publish records in its own
   channels whose `relayed` is exactly `{via: <door>, for: <owner>, agent}`,
-  unsigned, and its jobs read that in `job.door`. The binding is the
-  connector's, so several connectors may each be a door of one agent; an
-  unlink leaves the agent a viewer. Its rules are cell/src/doors.rs's.
+  unsigned, and its jobs read that in `job.door`. While it is open, its
+  members list says so on that agent's row (`door`: the door's id), and
+  on no other: that is how the agent's bridge and the chat's page know
+  which records relaying its owner came through its door
+  (docs/chat-records.md). The binding is the connector's, so several
+  connectors may each be a door of one agent; an unlink leaves the agent
+  a viewer. Its rules are cell/src/doors.rs's.
 
 A SimpleX door's key and ticket live in the agent fragment's `meta`, and
 go with it.

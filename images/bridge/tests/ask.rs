@@ -279,7 +279,7 @@ async fn an_answers_owner_stops_it_and_answers_its_question() {
 async fn refusals_on_either_side() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
     let pair = fake.chat("pair", &["juniper"]);
-    fake.with(|w| w.fragments.get_mut(&pair).unwrap().members.push(support::fake::Member { principal: person("rowan"), role: "viewer".into(), kind: "agent".into(), added_at: 20 }));
+    fake.with(|w| w.fragments.get_mut(&pair).unwrap().members.push(support::fake::Member { principal: person("rowan"), role: "viewer".into(), kind: "agent".into(), added_at: 20, door: None }));
     let home = fake.chat("home", &["juniper"]);
     let theirs = fake.chat("theirs", &[]);
     let runs = Runs::default();
