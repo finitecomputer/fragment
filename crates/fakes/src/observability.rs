@@ -6,8 +6,10 @@
 //! one does for the queries the glance makes: the lines in the timeframe
 //! that pass every filter (`eq` on a string, `lt`/`gt` on a number, a key
 //! dotted into the line's objects), and one calculation over them, `uniq`
-//! of a key or `count`, grouped by a key or not. Only its account and its
-//! key are let in. Lever: the next query is refused (`fail_next`).
+//! of a key or `count`, grouped by a key or not; or, asked for the
+//! `events` view, the lines themselves, newest first, at most its limit.
+//! Only its account and its key are let in. Levers: the next query is
+//! refused (`fail_next`), or the next of the events view (`fail_next_events`).
 
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +23,8 @@ struct State {
     lines: Vec<(i64, Value)>,
     /// The next query's refusal: its status and message.
     fail_next: Option<(u16, String)>,
+    /// The next events view query's refusal (`fail_next_events`).
+    fail_events: Option<(u16, String)>,
     /// The queries asked, as their bodies.
     asked: Vec<Value>,
 }
@@ -56,9 +60,19 @@ fn answer(lines: &[(i64, Value)], q: &Value) -> Result<Value, String> {
     let (from, to) = (q["timeframe"]["from"].as_i64().ok_or("no timeframe")?, q["timeframe"]["to"].as_i64().ok_or("no timeframe")?);
     let p = &q["parameters"];
     let filters = p["filters"].as_array().cloned().unwrap_or_default();
-    let calc = p["calculations"].as_array().and_then(|c| c.first()).ok_or("no calculation")?;
     let group = p["groupBys"].as_array().and_then(|g| g.first()).and_then(|g| g["value"].as_str());
-    let matched: Vec<&Value> = lines.iter().filter(|(t, l)| (from..=to).contains(t) && filters.iter().all(|f| passes(l, f))).map(|(_, l)| l).collect();
+    let mut passed: Vec<&(i64, Value)> = lines.iter().filter(|(t, l)| (from..=to).contains(t) && filters.iter().all(|f| passes(l, f))).collect();
+    if q["view"] == "events" {
+        // the lines themselves, newest first (the glance counts on no
+        // order), each as Cloudflare's API types an event
+        // (cloudflare-typescript, `workers/observability/telemetry.ts`)
+        passed.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+        let limit = q["limit"].as_u64().unwrap_or(50) as usize;
+        let events: Vec<Value> = passed.iter().take(limit).enumerate().map(|(i, (t, l))| json!({ "$metadata": { "id": format!("event-{i}") }, "dataset": "cloudflare-workers", "timestamp": t, "source": l })).collect();
+        return Ok(json!({ "success": true, "errors": [], "result": { "run": {}, "statistics": {}, "events": { "count": passed.len(), "events": events } } }));
+    }
+    let calc = p["calculations"].as_array().and_then(|c| c.first()).ok_or("no calculation")?;
+    let matched: Vec<&Value> = passed.into_iter().map(|(_, l)| l).collect();
     let value = |ls: &[&Value]| -> Result<u64, String> {
         match calc["operator"].as_str() {
             Some("count") => Ok(ls.len() as u64),
@@ -111,6 +125,11 @@ impl Observability {
             }
             let q: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
             s.asked.push(q.clone());
+            if q["view"] == "events" {
+                if let Some((status, message)) = s.fail_events.take() {
+                    return refused(status, &message);
+                }
+            }
             match answer(&s.lines, &q) {
                 Ok(a) => Response::json(200, &a),
                 Err(why) => refused(400, &why),
@@ -129,6 +148,12 @@ impl Observability {
     /// The next query is refused with `status` and `message`.
     pub fn fail_next(&self, status: u16, message: &str) {
         self.state.lock().expect("observability state").fail_next = Some((status, message.to_string()));
+    }
+
+    /// The next query of the events view is refused with `status` and
+    /// `message`, whichever of the glance's queries comes first.
+    pub fn fail_next_events(&self, status: u16, message: &str) {
+        self.state.lock().expect("observability state").fail_events = Some((status, message.to_string()));
     }
 
     /// The queries asked, oldest first.
@@ -164,7 +189,9 @@ mod tests {
             (T - 3_000, ours(json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f2" }))),
             (T - 1_000, theirs(json!({ "computer": "computer:e", "phase": { "phase": "awake" } }))),
             (T - 1_000, theirs(json!({ "computer": "computer:a", "phase": { "phase": "failed" } }))),
-            (T - 1_000, theirs(json!({ "computer": "computer:a", "event": { "event": "save_failed" } }))),
+            (T - 1_000, theirs(json!({ "computer": "computer:a", "event": { "event": "save_failed", "why": "theirs" } }))),
+            (T - 9_000, ours(json!({ "computer": "computer:c", "event": { "event": "save_failed", "why": "its container is not running" } }))),
+            (T - 4_000, ours(json!({ "computer": "computer:c", "event": { "event": "save_failed", "why": "backup '/data': No space left on device (os error 28)" } }))),
             (T - 1_000, theirs(json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f9" }))),
         ]
     }
@@ -175,7 +202,7 @@ mod tests {
     /// hashes of the same people's).
     #[test]
     fn the_glances_queries_answer_over_their_lines() {
-        use fragment_core::glance::{by_computer_of, uniq_of, Question};
+        use fragment_core::glance::{by_computer_of, uniq_of, whys_of, Question};
         let day = T - 5 * 3_600_000;
         let ask = |q: Question| answer(&lines(), &q.body("fragment", T, day)).unwrap();
         assert_eq!(uniq_of(&ask(Question::AwakeNow)), Ok(1), "a, twice; b an hour ago");
@@ -184,6 +211,9 @@ mod tests {
         assert_eq!(uniq_of(&ask(Question::FragmentsNow)), Ok(2));
         assert_eq!(by_computer_of(&ask(Question::WontWake)), Ok(vec![("computer:c".into(), 1)]));
         assert_eq!(by_computer_of(&ask(Question::DiskFilling)), Ok(vec![("computer:d".into(), 1)]));
-        assert_eq!(by_computer_of(&ask(Question::SavesFailing)), Ok(vec![]), "the other deployment's failed save is none of ours");
+        assert_eq!(by_computer_of(&ask(Question::SavesFailing)), Ok(vec![("computer:c".into(), 2)]), "the other deployment's failed save is none of ours");
+        let whys = ask(Question::SaveWhys);
+        assert_eq!(whys_of(&whys), Ok(vec![("computer:c".into(), T - 4_000, "backup '/data': No space left on device (os error 28)".into())]), "its newest, of ours alone");
+        assert_eq!((whys["result"]["events"]["count"].as_u64(), whys["result"]["events"]["events"][0]["timestamp"].as_i64()), (Some(2), Some(T - 4_000)), "the lines themselves, newest first");
     }
 }
