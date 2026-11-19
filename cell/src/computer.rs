@@ -53,7 +53,7 @@ use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
     alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
-    SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
+    SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
 use fragment_core::ledger::{MeterRow, Month, Spend};
@@ -160,15 +160,8 @@ const DISK_READ_MS: i64 = 5_000;
 const CHECK: &str = "test ! -x /usr/local/bin/computer-check || exec /usr/local/bin/computer-check";
 const CHECK_EXEC_MS: i64 = 120_000;
 const CHECK_UNUSABLE: i64 = 3;
-/// What a save saves (docs/computers.md, "Data and the restore gate"):
-/// `/data/work`, what the guest's tools
-/// write, and the rest of `/data`, the guest's own state, each a record of
-/// its own and restored together, the first first (a restore replaces its
-/// directory whole, so `/data`'s record goes in before the work's).
-/// `/data`'s record leaves the work out (`WORK_LEFT_OUT`), and what a held
-/// guest names; the work's record leaves out only what it named under
-/// `/work/` (`work_left_out`: its agents' caches).
-const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
+/// What `/data`'s record leaves out (`fragment_core::computer::SAVED_DIRS`):
+/// its work, a record of its own.
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
