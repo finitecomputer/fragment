@@ -27,9 +27,9 @@ test("a failed save's reason of a known kind: its label, when, then the reason a
 });
 
 test("a reason of no known kind stands alone, after when", () => {
-  assert.deepEqual(troubleWhat(failed("backup '/data': …: Permission denied (os error 13)"), when), {
+  assert.deepEqual(troubleWhat(failed("backup …: Permission denied (os error 13)"), when), {
     what: "a save failed",
-    why: "2026-11-18 14:02 · backup '/data': …: Permission denied (os error 13)",
+    why: "2026-11-18 14:02 · backup …: Permission denied (os error 13)",
   });
 });
 
