@@ -1418,7 +1418,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // then removes the containers it left (on celld's krun engine, its VMs)
     let leftovers = project.clone();
     let engine = celld.as_ref().map(|c| c.engine.clone());
-    let in_ram = ram.clone();
+    let in_ram = ram.as_ref().map(scratch::Ram::ending);
     devstack::signals::on_termination(move |signal| {
         println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers");
         let krun = engine.as_ref().map_or(Ok(0), |e| e.remove(&leftovers));

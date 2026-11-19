@@ -11,24 +11,28 @@
 //! on disk (`target/e2e/<run>`) keeps the rest: each node boot's log, the
 //! lanes' directories and screenshots. A run that does not pass (a FAIL, an
 //! error, a panic, a signal, its cap) has its state copied there before its
-//! directory in RAM goes.
+//! directory in RAM goes; a copy that fails leaves it in RAM, and says so.
 //!
 //! Limits. A run takes RAM only while the box keeps `RESERVE` available
 //! with every run in RAM at `PEAK`, and while the file system has room for
 //! every run at `CAP`; otherwise its state goes in its scratch on disk, and
-//! it says why. A run past `CAP` stops itself, as Ctrl-C stops it (`watch`).
-//! Each run's directory is locked (flock) while its process lives, so the
-//! next run's start sweeps the directories of runs that died outright
-//! (SIGKILL, the OOM killer), their state copied to their scratch first.
+//! it says why. A run past `CAP` stops itself, as SIGTERM stops it
+//! (`watch`). The directory is this user's alone (0700), each run's
+//! directory in it locked (flock) while its process lives, and runs take
+//! their places one at a time (`PLACING`), so the next run's start sweeps
+//! the directories of runs that died outright (SIGKILL, the OOM killer):
+//! what they left running killed, their containers removed, their state
+//! copied to their scratch first.
 
 use std::fs::{self, File};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
+use fragment_devstack as devstack;
 
 /// The variable naming the directory runs keep their disposable state in.
 pub const VAR: &str = "FRAGMENT_E2E_SCRATCH";
@@ -46,9 +50,14 @@ pub const CAP: u64 = 4 * GIB;
 pub const RESERVE: u64 = 12 * GIB;
 /// How often a run measures its directory in RAM against `CAP`.
 const WATCH_EVERY: Duration = Duration::from_secs(10);
+/// How long a sweep waits for a dead run's processes to go once killed.
+const LEFTOVERS_WAIT: Duration = Duration::from_secs(5);
 
 const _: () = assert!(PEAK < CAP, "a run's peak is under its cap");
 
+/// In the directory: the lock a run holds while it takes its place, so
+/// that sweeping, counting the runs, and making its own are one step.
+const PLACING: &str = ".placing";
 /// In a run's directory: the lock its process holds while it lives.
 const LOCK: &str = ".lock";
 /// In a run's directory: its scratch on disk, where its state is kept.
@@ -95,15 +104,41 @@ fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / GIB as f64)
 }
 
-/// A run's directory in RAM, locked while the run lives. Ended once: by the
-/// run's end, its drop, a termination signal, whichever comes first.
-#[derive(Clone)]
-pub struct Ram(Arc<Mutex<Option<Held>>>, PathBuf);
+/// A run's directory in RAM, locked while the run lives. Ended once: by
+/// `end`, by the termination signal's work (`ending`), or as it drops (its
+/// state kept: an error or a panic before the run's own end).
+pub struct Ram {
+    held: Arc<Mutex<Option<Held>>>,
+    dir: PathBuf,
+}
+
+/// A run's directory as the termination signal's work holds it: never
+/// keeping it from ending as the run's own `Ram` drops.
+pub struct Ending(Weak<Mutex<Option<Held>>>);
 
 struct Held {
     dir: PathBuf,
     scratch: PathBuf,
+    /// Whether its state is copied to its scratch before it goes.
+    keep: bool,
     _lock: File,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if self.keep {
+            match copy_kept(&self.dir, &self.scratch) {
+                Ok(bytes) => println!("      (the node's state, {} MiB, copied from RAM to {})", bytes >> 20, self.scratch.display()),
+                Err(e) => {
+                    println!("      could not copy the node's state to {}: {e:#}; it stays in RAM, at {}", self.scratch.display(), self.dir.display());
+                    return;
+                }
+            }
+        }
+        if let Err(e) = fs::remove_dir_all(&self.dir) {
+            println!("      could not remove {}: {e}", self.dir.display());
+        }
+    }
 }
 
 /// Where the run `run` (its scratch on disk: `scratch`) keeps its
@@ -118,62 +153,58 @@ pub fn place(run: &str, scratch: &Path) -> Result<Option<Ram>> {
 fn place_in(root: &Path, run: &str, scratch: &Path, room: impl FnOnce(u64) -> Result<Room>) -> Result<Option<Ram>> {
     ensure!(root.is_absolute(), "{VAR} names a directory absolutely, not {}", root.display());
     ensure!(crate::hosted::sweep::is_run(run), "{run:?} is a run's id");
-    fs::create_dir_all(root).with_context(|| format!("make {VAR}={}", root.display()))?;
+    own_dir(root)?;
+    let placing = File::create(root.join(PLACING))?;
+    placing.lock().with_context(|| format!("lock {}", root.join(PLACING).display()))?;
     sweep(root);
     let room = room(live(root) + 1)?;
     if let Err(why) = room.admits() {
         println!("scratch: on disk, {}: {why}", scratch.display());
         return Ok(None);
     }
-    // made under a name no sweep takes, locked, then moved into place: a
-    // sweep never finds it unlocked
-    let making = root.join(format!(".{run}"));
-    fs::create_dir(&making).with_context(|| format!("make {}", making.display()))?;
-    fs::set_permissions(&making, fs::Permissions::from_mode(0o700))?;
-    let lock = File::create(making.join(LOCK))?;
-    lock.try_lock().with_context(|| format!("lock {}", making.display()))?;
-    fs::write(making.join(SCRATCH), scratch.as_os_str().as_bytes())?;
     let dir = root.join(run);
-    ensure!(!dir.exists(), "{}: another run's directory", dir.display());
-    fs::rename(&making, &dir)?;
+    fs::create_dir(&dir).with_context(|| format!("make {}", dir.display()))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    let lock = File::create(dir.join(LOCK))?;
+    lock.try_lock().with_context(|| format!("lock {}", dir.display()))?;
+    let held = Held { dir: dir.clone(), scratch: scratch.to_path_buf(), keep: true, _lock: lock };
+    fs::write(dir.join(SCRATCH), scratch.as_os_str().as_bytes())?;
+    drop(placing);
     println!("scratch: the node's state and Chrome's profiles in RAM, {} ({} runs there; {} of RAM available)", dir.display(), room.runs, gib(room.available));
-    Ok(Some(Ram(Arc::new(Mutex::new(Some(Held { dir: dir.clone(), scratch: scratch.to_path_buf(), _lock: lock }))), dir)))
+    Ok(Some(Ram { held: Arc::new(Mutex::new(Some(held))), dir }))
 }
 
 impl Ram {
     pub fn dir(&self) -> &Path {
-        &self.1
+        &self.dir
     }
 
     /// Ends the run's directory in RAM, its state first copied to its
-    /// scratch on disk when `keep`; after the first, a no-op. The node and
-    /// the Chromes writing there are stopped first.
+    /// scratch on disk when `keep`; after the first end, a no-op. Its
+    /// writers (the node, the Chromes) are stopped first.
     pub fn end(&self, keep: bool) {
-        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(h) = held.take() else { return };
-        if keep {
-            match copy_kept(&h.dir, &h.scratch) {
-                Ok(bytes) => println!("      (the node's state, {} MiB, copied from RAM to {})", bytes >> 20, h.scratch.display()),
-                Err(e) => println!("      could not copy the node's state from {} to {}: {e:#}", h.dir.display(), h.scratch.display()),
-            }
-        }
-        if let Err(e) = fs::remove_dir_all(&h.dir) {
-            println!("      could not remove {}: {e}", h.dir.display());
-        }
+        end(&self.held, keep);
+    }
+
+    /// The directory, for the termination signal's work to end.
+    pub fn ending(&self) -> Ending {
+        Ending(Arc::downgrade(&self.held))
     }
 
     /// Measures the directory every `WATCH_EVERY` while it is there; past
     /// `CAP`, stops the run as a SIGTERM does (its node and Chromes killed,
-    /// its state kept: `devstack::signals::on_termination`).
+    /// its state kept: `devstack::signals::on_termination`), unless a
+    /// termination signal is already being handled: a second would end the
+    /// process halfway through keeping its state.
     pub fn watch(&self) -> Result<()> {
-        let dir = self.1.clone();
+        let dir = self.dir.clone();
         std::thread::Builder::new().name("scratch-cap".into()).spawn(move || loop {
             std::thread::sleep(WATCH_EVERY);
-            if !dir.exists() {
+            if !dir.exists() || devstack::signals::received() {
                 return;
             }
             let held = size(&dir);
-            if held > CAP {
+            if held > CAP && !devstack::signals::received() {
                 println!("\nscratch: {} holds {}, past a run's cap of {}: the run stops", dir.display(), gib(held), gib(CAP));
                 // SAFETY: kill(2) on this process's own id
                 unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
@@ -182,6 +213,38 @@ impl Ram {
         })?;
         Ok(())
     }
+}
+
+impl Ending {
+    /// As `Ram::end`, if the run's `Ram` has not ended it already.
+    pub fn end(&self, keep: bool) {
+        if let Some(held) = self.0.upgrade() {
+            end(&held, keep);
+        }
+    }
+}
+
+fn end(held: &Mutex<Option<Held>>, keep: bool) {
+    let mut held = held.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(mut h) = held.take() {
+        h.keep = keep;
+    }
+}
+
+/// `root`, made if need be, as this user's alone (0700): what is in it is
+/// this user's runs', which a sweep kills, copies and removes.
+fn own_dir(root: &Path) -> Result<()> {
+    fs::create_dir_all(root).with_context(|| format!("make {VAR}={}", root.display()))?;
+    let meta = fs::symlink_metadata(root)?;
+    // SAFETY: geteuid(2) has no failure
+    let me = unsafe { libc::geteuid() };
+    if !meta.is_dir() || meta.uid() != me {
+        bail!("{VAR}={} is not a directory of this user's own: name one it makes (/dev/shm/fragment-e2e), not a shared one", root.display());
+    }
+    if meta.mode() & 0o777 != 0o700 {
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// `MemAvailable`, from /proc/meminfo.
@@ -199,52 +262,97 @@ fn fs_free(dir: &Path) -> Result<u64> {
     if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
         bail!("statvfs {}: {}", dir.display(), std::io::Error::last_os_error());
     }
+    #[allow(clippy::unnecessary_cast)]
     Ok(st.f_bavail as u64 * st.f_frsize as u64)
 }
 
-/// The runs' directories under `root`: (path, its lock file), each named as
-/// a run (or `.`run, one being made). Nothing else there is touched: the
-/// root may be shared (/dev/shm itself).
-fn runs(root: &Path) -> Vec<(PathBuf, PathBuf)> {
+/// The runs' directories under `root`: those named as a run.
+fn runs(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(root) else { return vec![] };
     entries
         .flatten()
-        .filter(|e| {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            crate::hosted::sweep::is_run(name.strip_prefix('.').unwrap_or(&name)) && e.file_type().is_ok_and(|t| t.is_dir())
-        })
-        .map(|e| (e.path(), e.path().join(LOCK)))
-        .filter(|(_, lock)| lock.is_file())
+        .filter(|e| crate::hosted::sweep::is_run(&e.file_name().to_string_lossy()) && e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path())
         .collect()
 }
 
 /// The runs in RAM now: their locks held.
 fn live(root: &Path) -> u64 {
-    runs(root).iter().filter(|(_, lock)| File::open(lock).is_ok_and(|f| f.try_lock().is_err())).count() as u64
+    runs(root).iter().filter(|dir| File::open(dir.join(LOCK)).is_ok_and(|f| f.try_lock().is_err())).count() as u64
 }
 
-/// Removes the directories of runs whose process is gone (their lock free),
-/// each one's state copied to its scratch on disk first, when that is there.
+/// Removes the directories of runs whose process is gone (their lock free,
+/// or never made: a start that died taking its place), each one's leftover
+/// processes killed and containers removed first, and its state copied to
+/// its scratch on disk when that is there (a copy that fails leaves it).
+/// Called with `PLACING` held, so no run is taking its place meanwhile.
 fn sweep(root: &Path) {
-    for (dir, lock) in runs(root) {
-        let Ok(file) = File::open(&lock) else { continue };
-        if file.try_lock().is_err() {
+    for dir in runs(root) {
+        let lock = File::open(dir.join(LOCK));
+        if lock.as_ref().is_ok_and(|f| f.try_lock().is_err()) {
             continue;
         }
-        let scratch = fs::read(dir.join(SCRATCH)).ok().map(|b| PathBuf::from(std::ffi::OsStr::from_bytes(&b)));
-        let kept = match scratch.filter(|s| s.is_dir()) {
+        let killed = kill_leftovers(&dir);
+        let project = dir.join("cell");
+        let containers = match project.join("wrangler.jsonc").is_file() {
+            true => devstack::containers::remove(&project).map(|r| r.containers).unwrap_or_else(|e| {
+                println!("scratch: could not remove the containers of {}: {e:#}", project.display());
+                0
+            }),
+            false => 0,
+        };
+        let kept = match scratch_of(&dir) {
             Some(s) => match copy_kept(&dir, &s) {
                 Ok(bytes) => format!("its state ({} MiB) copied to {}", bytes >> 20, s.display()),
-                Err(e) => format!("its state could not be copied to {}: {e:#}", s.display()),
+                Err(e) => {
+                    println!("scratch: could not copy {}'s state to {}: {e:#}; it stays", dir.display(), s.display());
+                    continue;
+                }
             },
-            None => "its scratch on disk is gone".into(),
+            None => "no scratch on disk to keep its state in".into(),
         };
         match fs::remove_dir_all(&dir) {
-            Ok(()) => println!("scratch: swept {}, a run's that is gone; {kept}", dir.display()),
+            Ok(()) => println!("scratch: swept {}, a run's that is gone ({killed} processes it left killed, {containers} containers removed); {kept}", dir.display()),
             Err(e) => println!("scratch: could not sweep {}: {e}", dir.display()),
         }
     }
+}
+
+/// A dead run's scratch on disk, as its directory names it: only a
+/// `target/e2e/<run>` of the same run, and only while it is there.
+fn scratch_of(dir: &Path) -> Option<PathBuf> {
+    let named = PathBuf::from(std::ffi::OsStr::from_bytes(&fs::read(dir.join(SCRATCH)).ok()?));
+    let ours = named.is_absolute() && named.file_name() == dir.file_name() && named.parent().is_some_and(|p| p.ends_with("target/e2e"));
+    (ours && named.is_dir()).then_some(named)
+}
+
+/// Kills what a dead run left running in `dir` (its node's wrangler and
+/// workerd, its Chromes: a process working in it or naming it), then waits
+/// for them to go, so its state is copied still and its pages freed. The
+/// number killed.
+fn kill_leftovers(dir: &Path) -> usize {
+    let mut inside = dir.as_os_str().as_bytes().to_vec();
+    inside.push(b'/');
+    let me = std::process::id();
+    let mut killed = vec![];
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|p| p.parse::<u32>().ok()).filter(|&p| p != me) else { continue };
+        let cwd = fs::read_link(entry.path().join("cwd")).ok();
+        let cmdline = fs::read(entry.path().join("cmdline")).unwrap_or_default();
+        let works_in = cwd.is_some_and(|c| c.starts_with(dir));
+        let names = cmdline.windows(inside.len()).any(|w| w == inside.as_slice());
+        // SAFETY: kill(2) on a process of this user's, which works in or names the dead run's directory
+        if (works_in || names) && unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0 {
+            killed.push(pid);
+        }
+    }
+    // gone: no process, or a zombie its parent has yet to reap
+    let running = |p: &u32| fs::read_to_string(format!("/proc/{p}/stat")).is_ok_and(|st| st.rsplit_once(") ").is_some_and(|(_, rest)| !rest.starts_with('Z')));
+    let t0 = Instant::now();
+    while killed.iter().any(running) && t0.elapsed() < LEFTOVERS_WAIT {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    killed.len()
 }
 
 /// Copies what a run's directory keeps (all but `NOT_KEPT`) into `to`,
@@ -252,7 +360,7 @@ fn sweep(root: &Path) {
 /// (Chrome's Singleton*), and sockets and the like left out.
 fn copy_kept(from: &Path, to: &Path) -> Result<u64> {
     fn walk(root: &Path, from: &Path, to: &Path, bytes: &mut u64) -> Result<()> {
-        fs::create_dir_all(to)?;
+        fs::create_dir_all(to).with_context(|| format!("make {}", to.display()))?;
         for entry in fs::read_dir(from)? {
             let entry = entry?;
             let path = entry.path();
@@ -278,7 +386,6 @@ fn copy_kept(from: &Path, to: &Path) -> Result<u64> {
 
 /// The bytes the files under `dir` take.
 fn size(dir: &Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
     let Ok(entries) = fs::read_dir(dir) else { return 0 };
     entries
         .flatten()
@@ -299,9 +406,15 @@ mod tests {
     struct Tmp(PathBuf);
     impl Tmp {
         fn new() -> Tmp {
-            let d = std::env::temp_dir().join(format!("e2e-scratch-test-{}", fragment_devstack::random_hex(6)));
+            let d = std::env::temp_dir().join(format!("e2e-scratch-test-{}", devstack::random_hex(6)));
             fs::create_dir_all(&d).unwrap();
             Tmp(d)
+        }
+        /// A run's scratch on disk, `target/e2e/<run>`.
+        fn disk(&self, run: &str) -> PathBuf {
+            let d = self.0.join("target/e2e").join(run);
+            fs::create_dir_all(&d).unwrap();
+            d
         }
     }
     impl Drop for Tmp {
@@ -323,6 +436,21 @@ mod tests {
         std::os::unix::fs::symlink("host-123", dir.join("chrome-ab12/SingletonLock")).unwrap();
     }
 
+    /// The directory a run killed outright leaves: its lock file free, its
+    /// scratch named.
+    fn dead(root: &Path, run: &str, scratch: &Path) -> PathBuf {
+        let dir = root.join(run);
+        fs::create_dir_all(&dir).unwrap();
+        File::create(dir.join(LOCK)).unwrap();
+        fs::write(dir.join(SCRATCH), scratch.as_os_str().as_bytes()).unwrap();
+        fill(&dir);
+        dir
+    }
+
+    fn kept(disk: &Path) -> bool {
+        fs::read_to_string(disk.join("cell/.wrangler/state/v3/do/x.sqlite")).is_ok_and(|t| t == "rows")
+    }
+
     #[test]
     fn a_run_fits_while_the_box_keeps_its_reserve_and_its_file_system_has_room() {
         let need = RESERVE + 4 * PEAK;
@@ -337,19 +465,20 @@ mod tests {
     fn a_run_without_room_keeps_its_state_on_disk_and_makes_nothing_in_ram() {
         let tmp = Tmp::new();
         let root = tmp.0.join("ram");
-        let placed = place_in(&root, RUN, &tmp.0.join("disk"), |runs| Ok(Room { available: RESERVE, free: 64 * GIB, runs })).unwrap();
+        let placed = place_in(&root, RUN, &tmp.disk(RUN), |runs| Ok(Room { available: RESERVE, free: 64 * GIB, runs })).unwrap();
         assert!(placed.is_none());
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert!(runs(&root).is_empty());
     }
 
     #[test]
     fn a_passing_run_leaves_nothing_and_a_failing_one_keeps_its_state_on_disk() {
         let tmp = Tmp::new();
-        let (root, disk) = (tmp.0.join("ram"), tmp.0.join("disk"));
-        fs::create_dir_all(&disk).unwrap();
+        let (root, disk) = (tmp.0.join("ram"), tmp.disk(RUN));
         let ram = place_in(&root, RUN, &disk, roomy).unwrap().expect("room");
         assert_eq!(ram.dir(), root.join(RUN));
-        assert_eq!(fs::metadata(ram.dir()).unwrap().permissions().mode() & 0o777, 0o700);
+        for d in [&root, &root.join(RUN)] {
+            assert_eq!(fs::metadata(d).unwrap().permissions().mode() & 0o777, 0o700, "{} is this user's alone", d.display());
+        }
         assert_eq!(live(&root), 1);
         fill(ram.dir());
         ram.end(false);
@@ -357,11 +486,13 @@ mod tests {
 
         let ram = place_in(&root, RUN, &disk, roomy).unwrap().expect("room");
         fill(ram.dir());
+        let ending = ram.ending();
         ram.end(true);
         // replayed (a signal after the run's own end): nothing more
-        ram.end(true);
+        ending.end(false);
+        ram.end(false);
         assert!(!root.join(RUN).exists());
-        assert_eq!(fs::read_to_string(disk.join("cell/.wrangler/state/v3/do/x.sqlite")).unwrap(), "rows");
+        assert!(kept(&disk));
         assert_eq!(fs::read_to_string(disk.join("chrome-ab12/chrome.log")).unwrap(), "said");
         assert_eq!(fs::read_link(disk.join("chrome-ab12/SingletonLock")).unwrap(), Path::new("host-123"));
         for gone in ["cell/build", "cell/.wrangler/tmp", LOCK, SCRATCH] {
@@ -370,34 +501,77 @@ mod tests {
     }
 
     #[test]
-    fn the_next_start_sweeps_a_dead_runs_directory_its_state_kept_and_spares_a_live_one_and_all_else() {
+    fn a_run_that_ends_early_keeps_its_state_as_it_drops_and_a_signal_after_finds_nothing() {
+        let tmp = Tmp::new();
+        let (root, disk) = (tmp.0.join("ram"), tmp.disk(RUN));
+        let ram = place_in(&root, RUN, &disk, roomy).unwrap().expect("room");
+        fill(ram.dir());
+        let ending = ram.ending();
+        drop(ram);
+        assert!(!root.join(RUN).exists() && kept(&disk));
+        ending.end(true);
+    }
+
+    #[test]
+    fn a_copy_that_fails_leaves_the_state_in_ram() {
         let tmp = Tmp::new();
         let root = tmp.0.join("ram");
-        let (dead_disk, live_disk) = (tmp.0.join("dead"), tmp.0.join("live"));
-        fs::create_dir_all(&dead_disk).unwrap();
-        // a run killed outright: its lock released with its process, its
-        // directory left (a clone kept past the drop stands in for nothing)
-        let dead = place_in(&root, "aaaaaaaaaa", &dead_disk, roomy).unwrap().expect("room");
-        fill(dead.dir());
-        let held = dead.0.lock().unwrap().take().expect("held");
-        drop(held);
-        let alive = place_in(&root, "bbbbbbbbbb", &live_disk, roomy).unwrap().expect("room");
+        // its scratch is a file: nothing can be made under it
+        let disk = tmp.0.join("target/e2e").join(RUN);
+        fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        fs::write(&disk, "in the way").unwrap();
+        let ram = place_in(&root, RUN, &disk, roomy).unwrap().expect("room");
+        fill(ram.dir());
+        ram.end(true);
+        assert_eq!(fs::read_to_string(root.join(RUN).join("cell/.wrangler/state/v3/do/x.sqlite")).unwrap(), "rows");
+    }
+
+    #[test]
+    fn the_next_start_sweeps_a_dead_runs_directory_its_leftovers_killed_and_its_state_kept() {
+        let tmp = Tmp::new();
+        let root = tmp.0.join("ram");
+        own_dir(&root).unwrap();
+        let dead_disk = tmp.disk("aaaaaaaaaa");
+        let dead_dir = dead(&root, "aaaaaaaaaa", &dead_disk);
+        // what it left running there
+        let mut leftover = std::process::Command::new("sleep").arg("600").current_dir(&dead_dir).spawn().unwrap();
+        // a start that died taking its place: no lock made
+        fs::create_dir_all(root.join("dddddddddd")).unwrap();
+        let alive = place_in(&root, "bbbbbbbbbb", &tmp.disk("bbbbbbbbbb"), roomy).unwrap().expect("room");
         // what is not a run's: never touched
         fs::create_dir_all(root.join("not-a-run")).unwrap();
-        fs::create_dir_all(root.join("cccccccccc")).unwrap();
-        assert_eq!(live(&root), 1);
 
-        let next = place_in(&root, RUN, &tmp.0.join("next"), |runs| {
+        let next = place_in(&root, RUN, &tmp.disk(RUN), |runs| {
             assert_eq!(runs, 2, "the live run and this one");
             roomy(runs)
         })
         .unwrap()
         .expect("room");
-        assert!(!root.join("aaaaaaaaaa").exists(), "the dead run's directory is swept");
-        assert_eq!(fs::read_to_string(dead_disk.join("cell/.wrangler/state/v3/do/x.sqlite")).unwrap(), "rows");
-        assert!(alive.dir().is_dir() && root.join("not-a-run").is_dir() && root.join("cccccccccc").is_dir());
+        assert!(!dead_dir.exists() && !root.join("dddddddddd").exists(), "the dead runs' directories are swept");
+        assert!(kept(&dead_disk));
+        let status = leftover.wait().unwrap();
+        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGKILL), "its leftover is killed");
+        assert!(alive.dir().is_dir() && root.join("not-a-run").is_dir());
         alive.end(false);
         next.end(false);
+    }
+
+    #[test]
+    fn a_dead_runs_state_goes_only_to_its_own_scratch() {
+        let tmp = Tmp::new();
+        let root = tmp.0.join("ram");
+        own_dir(&root).unwrap();
+        // names another run's scratch, and a directory that is no scratch
+        let elsewhere = tmp.disk("ffffffffff");
+        let dir = dead(&root, "aaaaaaaaaa", &elsewhere);
+        assert_eq!(scratch_of(&dir), None);
+        let notes = tmp.0.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(dir.join(SCRATCH), notes.as_os_str().as_bytes()).unwrap();
+        assert_eq!(scratch_of(&dir), None);
+        sweep(&root);
+        assert!(!dir.exists());
+        assert!(fs::read_dir(&elsewhere).unwrap().count() == 0 && fs::read_dir(&notes).unwrap().count() == 0);
     }
 
     #[test]
@@ -407,6 +581,7 @@ mod tests {
         assert!(place_in(&tmp.0, "../escape", &tmp.0, roomy).is_err());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_box_reads_its_available_ram_and_free_space() {
         assert!(mem_available().unwrap() > 0);

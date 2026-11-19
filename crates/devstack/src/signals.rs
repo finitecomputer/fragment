@@ -17,6 +17,15 @@ const TERMINATION: [libc::c_int; 3] = [SIGINT, SIGTERM, SIGHUP];
 
 /// Whether `on_termination` has run: it runs once per process.
 static HANDLED: AtomicBool = AtomicBool::new(false);
+/// Whether a termination signal has come: its work has begun.
+static RECEIVED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a termination signal has come and `on_termination`'s work has
+/// begun: a second signal now ends the process at once, mid-work, so
+/// nothing of the process's own sends one (the e2e's scratch cap).
+pub fn received() -> bool {
+    RECEIVED.load(Ordering::SeqCst)
+}
 
 /// A signal's disposition now: whether this process was started with it
 /// ignored (a background job's SIGINT, nohup's SIGHUP), which it keeps.
@@ -52,6 +61,7 @@ pub fn on_termination(then: impl FnOnce(i32) + Send + 'static) -> Result<()> {
     std::thread::Builder::new().name("termination".into()).spawn(move || {
         // nothing closes the iterator: this returns on a signal
         let Some(signal) = signals.forever().next() else { return };
+        RECEIVED.store(true, Ordering::SeqCst);
         crate::kill_started();
         ending.store(true, Ordering::SeqCst);
         then(signal);
