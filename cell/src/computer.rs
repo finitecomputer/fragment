@@ -183,6 +183,12 @@ const SHIM_UNHANG: &str = "cd /usr/local/bin && { test ! -e sandbox-shim.real ||
 /// once its container is up, so it never reads its view, as a dead one's
 /// guest never does (#362).
 const SIGSTOP: f64 = 19.0;
+/// SIGKILL: what ends that stopped guest once its start is dead. Stopped,
+/// it takes no SIGTERM, so a destroy waits out the runtime's own kill;
+/// on a loaded host that ran past `DESTROY_MS` and refused the same wake's
+/// next start (the e2e `computers` lane's #362 check). A dead guest that
+/// is not stopped takes its destroy at once, as this one then does.
+const SIGKILL: f64 = 9.0;
 /// A marker's exec answers within this, or it failed: a sleep goes on
 /// without its hold, a start fails.
 const MARK_EXEC_MS: i64 = 30_000;
@@ -1596,6 +1602,10 @@ impl ComputerCell {
             // (#1004). Stored, so an isolate after this one knows it too.
             self.start_failing(generation);
             self.stall_failing_start().await;
+            if planned.freeze {
+                // its exit is this failure's now (`start_failing`), no crash
+                let _ = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(SIGKILL)]).await;
+            }
         }
         match started {
             Ok(()) => {
@@ -2875,7 +2885,7 @@ impl ComputerCell {
                 let Some(generation) = self.lifecycle()?.running() else {
                     return Err(CellError::invalid("it is not running: wake it first"));
                 };
-                let sent = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(9.0)]).await?;
+                let sent = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(SIGKILL)]).await?;
                 if sent.as_bool() != Some(true) {
                     return Err(CellError::host(format!("start {generation}'s container is not running here")));
                 }
