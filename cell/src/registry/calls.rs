@@ -484,6 +484,10 @@ pub(crate) enum TestHook {
     /// waited for a yes (decision 63: no role, title or sharer kept), which
     /// a sign-in as it still meets (`{before}`: how many).
     InvitesBefore(String),
+    /// When each comped seat held by, or offered to, this email ends by
+    /// itself (`{ends}`, each null when it never does), which no route
+    /// shows.
+    CompEnds(String),
 }
 
 /// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the
