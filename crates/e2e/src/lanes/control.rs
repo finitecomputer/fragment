@@ -343,10 +343,52 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     );
     s.owned(&second, &owner);
     s.commit(&second, &[("notes.md", Some(b"the second life\n"))]);
-    // whatever it checks, code.storage takes repo deletes again after
+    // whatever each checks, code.storage takes repo deletes again after
     let held = made_again_while_its_repo_delete_waits(s, api, &owner, &name, &second_repo);
     s.fake.refuse_repo_deletes(false);
-    held
+    held?;
+    let kept = a_delete_leaves_an_owner_named_repo(s, api, &owner);
+    s.fake.refuse_repo_deletes(false);
+    kept
+}
+
+/// A fragment made before repos were named by the life's key has a repo
+/// named by its owner (here the older `<name>` the `repo` lever sets). Its
+/// delete never queues that repo (FIN-538: a release rolled back to would
+/// find it again by name while its delete was still to come); a per-life
+/// repo's delete is queued. Both deleted while code.storage refuses repo
+/// deletes, so what each queued is read before anything is deleted.
+fn a_delete_leaves_an_owner_named_repo(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let queued = |name: &str| -> Result<(u64, bool)> {
+        let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "ended" })))?;
+        let lives = r.body["ended"].as_array().cloned().unwrap_or_default();
+        Ok((lives.iter().filter_map(|l| l["repos"].as_u64()).sum(), lives.iter().any(|l| l["held"] == true)))
+    };
+    let (older, newer) = (s.named(api, owner, "owner-named")?, s.named(api, owner, "life-named")?);
+    s.create(api, owner, &older)?;
+    let made = s.create(api, owner, &newer)?;
+    let newer_repo = made["repo"].as_str().unwrap_or("").to_string();
+    s.fake.seed_repo(&older, &[("notes.md", b"an older life's\n")]);
+    let set = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": older, "op": "repo", "repo": older })))?;
+    s.fake.refuse_repo_deletes(true);
+    let gone = [api.signed(owner, "DELETE", &format!("/api/f/{older}"), None)?, api.signed(owner, "DELETE", &format!("/api/f/{newer}"), None)?];
+    let held = s.eventually(Duration::from_secs(30), || queued(&newer).is_ok_and(|q| q == (1, true)));
+    let (older_queued, _) = queued(&older)?;
+    s.ok(
+        "deleted, a fragment whose repo is named by its owner (made before repos were named by its life's key) queues no repo delete; one whose repo is named by its life's key queues its repo",
+        set.status == 200 && gone.iter().all(|r| r.status == 200) && older_queued == 0 && held,
+        json!({ "lever": set.body, "olderQueued": older_queued, "newerHeld": held }),
+    );
+    s.fake.refuse_repo_deletes(false);
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": newer, "op": "ended-due" })))?;
+    let (older_clean, older_last) = s.ended_cleaned(api, &older);
+    let (newer_clean, newer_last) = s.ended_cleaned(api, &newer);
+    s.ok(
+        "their cleanups done, the per-life repo is deleted and the owner-named one stays, files and all",
+        older_clean && newer_clean && s.fake.repo_deleted(&newer_repo) && !s.fake.repo_deleted(&older) && s.fake.file_at(&older, "main", "notes.md").as_deref() == Some(&b"an older life's\n"[..]),
+        format!("{older_last} / {newer_last}"),
+    );
+    Ok(())
 }
 
 /// The name made again while its ended life's repo delete is still to come
