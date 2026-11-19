@@ -132,6 +132,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let script = shell_site(s, api, &session, &agent, "agent.js")?;
     s.ok("and its script, from the release", script.status == 200 && script.text.contains("SOUL.md"), script.status);
     release_assets(s, api, &session, &agent)?;
+    blessed_serves_no_page_of_its_own(s, api)?;
     let channels = shell(api, &session, "GET", &format!("/api/f/{agent}/channels"), None, &[])?;
     s.ok(
         "the template's channels run on it",
@@ -1015,6 +1016,82 @@ fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Resul
         format!("{} {} bytes / by its name {}", r.status, r.bytes.len(), by_name.status),
     );
     Ok(())
+}
+
+/// A fragment on a blessed template serves its template's pages from the
+/// release and none of its own (decision 40; docs/api.md, Apps: "Its repo
+/// holds only its face and data"): its code's name, `blessed:chat@…`, is
+/// what says its pages are the platform's. So a file one of its editors
+/// deploys under `site/` is never a page of its origin: the write and
+/// the deploy are taken (the file is its data, read at `__file`), and the
+/// path is none (404). The same of a template that runs no code (an
+/// agent's), and of a path the release does not ship (`sub/`).
+fn blessed_serves_no_page_of_its_own(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let editor = api.person()?;
+    let chat = s.named(api, &owner, "planted")?;
+    let r = api.create_with(&owner, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "making the chat on the template: {r}");
+    s.owned(&r.body, &owner);
+    let code = || api.status(&owner, &chat).map(|r| r.body["code"]["id"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+    anyhow::ensure!(s.eventually(std::time::Duration::from_secs(30), || code().starts_with("blessed:chat@")), "the chat installs the release's code: {}", code());
+    let (r, deployed) = planted(s, api, &owner, &editor, &chat, "notes.html")?;
+    s.ok(
+        "a file an editor deploys into a chat on the blessed template is no page of its origin (none there), and the chat still runs the release's code",
+        none(&r) && code().starts_with("blessed:chat@"),
+        format!("{deployed} / code {} / notes.html {}", code(), shown(&r)),
+    );
+    let (r, deployed) = planted(s, api, &owner, &editor, &chat, "sub/")?;
+    s.ok("nor at a path the release does not ship, a directory's page", none(&r), format!("{deployed} / sub/ {}", shown(&r)));
+    // an agent's fragment: the release's site, and no code at all
+    let agent = s.named(api, &owner, "planted-agent")?;
+    let r = api.create_with(&owner, json!({ "name": agent, "template": "agent" }))?;
+    anyhow::ensure!(r.status == 200, "making the agent on the template: {r}");
+    s.owned(&r.body, &owner);
+    let (r, deployed) = planted(s, api, &owner, &editor, &agent, "notes.html")?;
+    let page = site_page(api, &owner, &agent, "")?;
+    s.ok(
+        "nor on an agent's fragment, whose template runs no code: its page is still the release's",
+        none(&r) && page.status == 200 && page.text.contains("agent.js"),
+        format!("{deployed} / notes.html {} / its page {}", shown(&r), page.status),
+    );
+    Ok(())
+}
+
+/// What a blessed fragment's editor plants as a page at `at` (its own
+/// `site/` path), written and deployed as any file of the fragment's is,
+/// and the answer there to its owner's browser: the owner signed in,
+/// navigating to it, once the deploy is live.
+fn planted(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, editor: &fragment_nip98::Keys, name: &str, at: &str) -> Result<(Reply, String)> {
+    let joined = api.share(name, &api.identity(editor)?, "editor")?;
+    anyhow::ensure!(joined.status == 200, "an editor joins {name}: {joined}");
+    let path = if at.ends_with('/') { format!("site/{at}index.html") } else { format!("site/{at}") };
+    let files = json!({ "files": [{ "path": path, "text": format!("<!doctype html><script>/* an editor's own, {at} */</script>") }] });
+    let wrote = api.signed(editor, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
+    let deployed = api.signed(editor, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;
+    anyhow::ensure!(wrote.status == 200 && deployed.status == 200, "an editor writes and deploys {path} of {name}: {wrote} / {deployed}");
+    let live = deployed.body["live"].as_str().unwrap_or("").to_string();
+    let landed = s.eventually(std::time::Duration::from_secs(30), || api.status(owner, name).is_ok_and(|r| r.body["pins"]["live"] == live.as_str()));
+    anyhow::ensure!(landed, "the editor's deploy lands: {}", api.status(owner, name)?);
+    Ok((site_page(api, owner, name, at)?, format!("files {} / deploy {}", wrote.status, deployed.status)))
+}
+
+/// `path` of `name`'s origin as its owner's browser opens it: signed in,
+/// a top-level navigation.
+fn site_page(api: &Api, owner: &fragment_nip98::Keys, name: &str, path: &str) -> Result<Reply> {
+    let session = api.sign_in(&Api::email_of(owner))?;
+    let cookie = format!("fragment_site={}", super::signin::site_cookie(api, &session, name)?);
+    let navigation = vec![("sec-fetch-site", "none".to_string()), ("sec-fetch-mode", "navigate".to_string()), ("sec-fetch-dest", "document".to_string()), ("accept", "text/html".to_string())];
+    api.call(Call { method: "GET", url: api.site_url(name, path), cookie: Some(cookie), extra: navigation, ..Call::default() })
+}
+
+/// Whether `r` answers none of the editor's bytes: a 404.
+fn none(r: &Reply) -> bool {
+    r.status == 404 && !r.text.contains("an editor's own")
+}
+
+fn shown(r: &Reply) -> String {
+    format!("{} {} csp {:?}, the editor's: {}", r.status, r.header("content-type"), r.header("content-security-policy"), r.text.contains("an editor's own"))
 }
 
 fn shell_site(_s: &Suite, api: &Api, session: &str, name: &str, path: &str) -> Result<Reply> {

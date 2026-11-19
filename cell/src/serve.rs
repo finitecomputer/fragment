@@ -637,7 +637,8 @@ impl FragmentCell {
             return Ok(if head { Response::empty()?.with_headers(h) } else { Response::from_html(page)?.with_headers(h) });
         }
         // a blessed template's fragment: its site is the platform release's (decision 40)
-        if let Some(installed) = self.meta(MetaKey::Blessed)? {
+        let blessed_site = self.meta(MetaKey::Blessed)?;
+        if let Some(installed) = &blessed_site {
             let (t, release) = installed.split_once('@').unwrap_or((installed.as_str(), ""));
             for candidate in site::site_candidates(path) {
                 if let Some(file) = blessed::site_file(t, &candidate) {
@@ -645,11 +646,21 @@ impl FragmentCell {
                 }
             }
         }
+        // and only the release's: none of its own files is a page of its
+        // site (a path the release does not ship goes on as none was found,
+        // to its code's routes, else a 404). Its code's name says its pages
+        // are the platform's (shell.js, alerts-sw.js), and its repo holds
+        // only its face and data, read at `__file` (inert): a page of its
+        // own here would run as whoever opened it, written by any of its
+        // editors or anyone with a write token. None, not inert, so a path
+        // of the origin answers no bytes that the release did not ship.
         let mut found = None;
-        for candidate in site::site_candidates(path) {
-            if let Some(row) = self.tree_row("live", &candidate)? {
-                found = Some(row);
-                break;
+        if blessed_site.is_none() {
+            for candidate in site::site_candidates(path) {
+                if let Some(row) = self.tree_row("live", &candidate)? {
+                    found = Some(row);
+                    break;
+                }
             }
         }
         let Some(row) = found else {
