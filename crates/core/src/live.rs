@@ -3,9 +3,9 @@
 //! may change its presence, and which change is its person beginning to
 //! type.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use fragment_proto::limits;
+use fragment_proto::{limits, Role};
 use serde_json::Value;
 
 /// Why a socket's query was not run.
@@ -105,26 +105,38 @@ pub fn typing_began(platform: impl FnOnce() -> bool, before: Option<&Value>, now
     typing(now) && !before.is_some_and(typing) && platform()
 }
 
-/// How often one computer is pre-woken at most (decision 39): typing in
-/// bursts is one sign.
+/// Whether a page's typing is its person's own, as far as the platform
+/// can tell (decision 39). A page sets its presence itself, and any page on
+/// a fragment's origin can: an app's code, or a page someone added to a
+/// blessed fragment's site (served beside the release's, serve.rs), may
+/// say it types with no one there. So it counts only on a fragment of the
+/// platform's code (`blessed`, a blessed template's release, decision 40,
+/// asked only for its owner) and only from its owner (`role`): every page
+/// on their fragment's origin is theirs or one they let its editors add,
+/// and the computer it wakes is their own (`computer::prewoken`).
+pub fn typing_trusted(role: Role, blessed: impl FnOnce() -> bool) -> bool {
+    role == Role::Owner && blessed()
+}
+
+/// How often a fragment's owner's computer is pre-woken at most (decision
+/// 39): typing in bursts is one sign.
 pub const PREWAKE_EVERY_MS: i64 = 30_000;
 
-/// When each computer's next pre-wake is due, one at most every
-/// `PREWAKE_EVERY_MS` each, so one person's typing never holds back
-/// another's computer. A fragment's memory only: one that slept forgets,
-/// and the next typing begun there wakes once more.
+/// When a fragment's owner's computer is next pre-woken: at most every
+/// `PREWAKE_EVERY_MS`. Only its owner's typing pre-wakes (`typing_trusted`),
+/// so one pace a fragment holds back no one else's. A fragment's memory
+/// only: one that slept forgets, and its next typing begun wakes once more.
 #[derive(Debug, Default)]
-pub struct PrewakesDue(BTreeMap<String, i64>);
+pub struct PrewakeDue(i64);
 
-impl PrewakesDue {
-    /// Whether `computer` is pre-woken at `now_ms`: when due, it is, and
-    /// is next due `PREWAKE_EVERY_MS` on.
-    pub fn take(&mut self, computer: &str, now_ms: i64) -> bool {
-        self.0.retain(|_, due| *due > now_ms);
-        if self.0.contains_key(computer) {
+impl PrewakeDue {
+    /// Whether the pre-wake is due at `now_ms`: when it is, it is next due
+    /// `PREWAKE_EVERY_MS` on.
+    pub fn take(&mut self, now_ms: i64) -> bool {
+        if now_ms < self.0 {
             return false;
         }
-        self.0.insert(computer.to_string(), now_ms + PREWAKE_EVERY_MS);
+        self.0 = now_ms + PREWAKE_EVERY_MS;
         true
     }
 }
@@ -262,20 +274,30 @@ mod tests {
         assert!(!typing_began(|| panic!("asked for a presence that began nothing"), Some(&page), &page));
     }
 
-    /// Goal (review of #1351): each computer's pre-wakes are paced on their
-    /// own: one owner's typing never holds back another owner's computer in
-    /// a shared chat. Valid (two computers, each at once), replay (the same
-    /// computer within the pace, nothing; after it, again), the bound (what
-    /// is past due is forgotten).
+    /// Goal: a fragment's owner's typing in bursts pre-wakes their computer
+    /// once a pace. Valid (the first), replay (within the pace, nothing),
+    /// the bound (once it passed, again).
     #[test]
-    fn each_computer_is_pre_woken_at_its_own_pace() {
-        let mut due = PrewakesDue::default();
-        assert!(due.take("computer:aa", 1_000), "the first owner's typing");
-        assert!(due.take("computer:bb", 2_000), "another owner's computer, typing in the same chat");
-        assert!(!due.take("computer:aa", 1_000 + PREWAKE_EVERY_MS - 1), "the first again, within its pace");
-        assert!(due.take("computer:aa", 1_000 + PREWAKE_EVERY_MS), "and once its pace passed");
-        assert!(!due.take("computer:bb", 2_000 + PREWAKE_EVERY_MS - 1));
-        due.take("computer:cc", 10 * PREWAKE_EVERY_MS);
-        assert_eq!(due.0.len(), 1, "what was past due is forgotten");
+    fn its_owners_computer_is_pre_woken_once_a_pace() {
+        let mut due = PrewakeDue::default();
+        assert!(due.take(1_000));
+        assert!(!due.take(1_000 + PREWAKE_EVERY_MS - 1), "within its pace");
+        assert!(due.take(1_000 + PREWAKE_EVERY_MS), "once its pace passed");
+    }
+
+    /// Goal (review of #1351): a page may set `typing` on its own, so only
+    /// the fragment's owner's typing on a fragment of the platform's code
+    /// counts. Invalid: anyone else on a blessed chat (a visitor opening a
+    /// page someone added to its site, a member, a reader), and its owner
+    /// on a fragment of its own code; and the platform's code is asked
+    /// only for its owner.
+    #[test]
+    fn only_the_owners_typing_on_the_platforms_code_is_trusted() {
+        assert!(typing_trusted(Role::Owner, || true), "its owner, in their chat");
+        for role in [Role::Public, Role::Viewer, Role::Editor] {
+            assert!(!typing_trusted(role, || true), "{role:?}, on someone else's blessed chat");
+            assert!(!typing_trusted(role, || panic!("asked for one who is not its owner")));
+        }
+        assert!(!typing_trusted(Role::Owner, || false), "its owner, on a fragment of its own code");
     }
 }

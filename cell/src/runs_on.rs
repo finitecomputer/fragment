@@ -560,18 +560,18 @@ impl FragmentCell {
         Ok(fragment_core::computer::prewoken(&subs, principal).map(|u| format!("computer:{}", u.trim_start_matches("computer:"))))
     }
 
-    /// `principal` began typing on a page of this fragment whose code is
-    /// the platform's (its socket's presence,
-    /// `fragment_core::live::typing_began`): their own computer, when this
-    /// fragment's channels wake it, may hear from them soon, so it starts
-    /// now, held as any wake is (decision 39), each computer at most every
-    /// `PREWAKE_EVERY_MS` (`prewake_due`). No one else's typing wakes it,
-    /// and a socket's opening is no use of it: a tab left open reconnects
-    /// on its own. The wake runs on its own, so the socket never waits for
-    /// a start; a failed pre-wake costs only the wait.
+    /// `principal`, this fragment's owner, began typing on a page of it
+    /// whose code is the platform's (its socket's presence,
+    /// `fragment_core::live::{typing_began, typing_trusted}`): their own
+    /// computer, when this fragment's channels wake it, may hear from them
+    /// soon, so it starts now, held as any wake is (decision 39), at most
+    /// every `PREWAKE_EVERY_MS` (`prewake_due`). No one else's typing wakes
+    /// it, and a socket's opening is no use of it: a tab left open
+    /// reconnects on its own. The wake runs on its own, so the socket never
+    /// waits for a start; a failed pre-wake costs only the wait.
     pub(crate) fn prewake(&self, principal: &str) {
         let Ok(Some(c)) = self.woken_computer(principal) else { return };
-        if !self.prewake_due(&c) {
+        if !self.prewake_due() {
             return;
         }
         let env = self.env.clone();

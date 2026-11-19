@@ -28,8 +28,8 @@ impl Default for Rules {
 pub enum Wake {
     /// A record on a channel one of its agents subscribed to.
     Record,
-    /// Its owner began typing in a chat it subscribes to (decision 39's
-    /// pre-wake).
+    /// Its owner began typing in a chat of theirs it subscribes to
+    /// (decision 39's pre-wake).
     Presence,
     /// A port tab is opening.
     Tab,
