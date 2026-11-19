@@ -85,6 +85,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "a call to another account's host under its suffix (another org's) is refused, naming its own account's host, and reaches no one",
     "an account whose Pipes metadata names no host under the suffix, or another host, has its calls there refused, reaching no one",
     "connected through its callback as one org, then again as another: the account is made again with the new org's host, never updated beside the old one's, so the token goes to the new org's host and the old org's is refused, reaching no one",
+    "an operator key its provider echoes back reaches the guest named as its provider ({{name}}), never as the key",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -347,6 +348,9 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
 
     // Hermes' tool vendors share the existing upstream fake: each real
     // host and SDK header, with no vendor-specific response simulation.
+    // The fake answers with what arrived, its auth headers too, as a
+    // provider that echoes its key would.
+    let mut echoes = vec![];
     for (i, (n, name, host, env, header, scheme)) in [
         (130, "firecrawl", "api.firecrawl.dev", "FIRECRAWL_API_KEY", "authorization", "Bearer "),
         (131, "fal", "queue.fal.run", "FAL_KEY", "authorization", "Key "),
@@ -359,7 +363,10 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         s.ok(SWAP_CHECKS[22 + i],
             said.starts_with("fetched 200") && seen["host"] == host && seen["auth"][header] == format!("{scheme}{}", key_value(name)),
             json!({ "said": said, "seen": seen }));
+        echoes.push((name, said));
     }
+    let hidden = echoes.iter().all(|(name, said)| said.contains(&format!("{{{{{name}}}}}")) && !SWAP_KEYS.iter().any(|(_, value, _)| said.contains(value)));
+    s.ok(SWAP_CHECKS[SWAP_CHECKS.len() - 1], hidden, json!({ "echoes": echoes }));
     // fal's image (FIN-445): queued as Hermes does, charged nothing (made
     // later, or not); run synchronously, charged below by its pixels; and
     // the call above (a poll's) nothing

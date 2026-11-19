@@ -103,8 +103,12 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   https URL, method and body's SHA-256) in `Authorization: Nostr …`, and
   such a request carries no other placeholder.
 - **Echoes are hidden**: an answer to a request a Vault filled is read
-  whole (not an event stream, at most 8 MiB) and each value it echoes
-  named `{{name}}`, as a job's fetch names its own.
+  whole (text, at most 8 MiB) and each value it echoes named `{{name}}`,
+  as a job's fetch names its own; one that streams as it is made (an event
+  stream, newline-delimited JSON, audio, video, an image, octet-stream) is
+  named as it streams, each value's own bytes. The operator's keys on the
+  request are named first, in a pass of their own, so a value its person
+  chose never cuts into one (`secrets::redact_passes`).
 - **A wipe empties it** with their ledger, and keeps the row that says so.
 - **An old finite.computer agent's keys come in once** (FIN-463 F11;
   docs/migrations.md, "The secrets hand-off"): on its person's Yes, the

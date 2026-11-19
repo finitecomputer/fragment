@@ -441,6 +441,53 @@ impl Streamed {
     }
 }
 
+/// Values to name in passes, each pass's named whole before the next's
+/// are looked for (hardening, 2026-11-19): the swap's answer names the
+/// operator's keys first and a Vault's fills after, so a value a person
+/// chose can never cut into the start of an operator key's echo and leave
+/// the rest of it unnamed. Within a pass, each value is named in turn, as
+/// before. `redact`'s every spelling for a text read whole, `Streamed`'s
+/// bytes for one read a piece at a time.
+pub fn redact_passes(text: String, passes: &[Vec<(String, String)>]) -> String {
+    passes.iter().flatten().fold(text, |t, (name, value)| redact(t, &std::collections::BTreeMap::from([(name.clone(), value.clone())])))
+}
+
+/// `Streamed`, a pass at a time (`redact_passes`): each piece goes
+/// through the first pass's, what comes out through the next's.
+pub struct StreamedPasses(Vec<Streamed>);
+
+impl StreamedPasses {
+    pub fn new(passes: &[Vec<(String, String)>]) -> StreamedPasses {
+        StreamedPasses(passes.iter().map(|values| Streamed::new(values.as_slice())).collect())
+    }
+
+    /// The next piece, as much of it as may go out now.
+    pub fn push(&mut self, piece: &[u8]) -> Vec<u8> {
+        self.0.iter_mut().fold(piece.to_vec(), |carry, pass| pass.push(&carry))
+    }
+
+    /// The body has ended: what each pass still holds, named.
+    pub fn finish(self) -> Vec<u8> {
+        self.0.into_iter().fold(vec![], |carry, mut pass| {
+            let mut out = pass.push(&carry);
+            out.extend(pass.finish());
+            out
+        })
+    }
+}
+
+/// Whether an answer of `content_type` is read whole to be named, every
+/// spelling of its values (`redact`), rather than streamed a piece at a
+/// time (`Streamed`): an event stream, newline-delimited JSON, and bytes
+/// that are no text (audio, video, an image, octet-stream) stream as they
+/// come, so a streamed speech's audio plays as it is made; its bytes were
+/// never text to spell a value in.
+pub fn read_whole(content_type: &str) -> bool {
+    let kind = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    let streams = ["text/event-stream", "application/x-ndjson", "application/octet-stream"].contains(&kind.as_str()) || ["audio/", "video/", "image/"].iter().any(|p| kind.starts_with(p));
+    !streams
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,5 +906,46 @@ mod tests {
         assert_eq!(s.push(b"x"), b"{{short}}x");
         assert_eq!(s.push(b"abcd"), b"");
         assert_eq!(s.finish(), b"{{short}}d");
+    }
+
+    /// Invalid: a value of a later pass (a Vault's, a person's to choose)
+    /// that overlaps the start of an earlier pass's (an operator key's
+    /// echo) never leaves any of the earlier one unnamed, read whole or
+    /// streamed, however the stream is cut.
+    #[test]
+    fn a_later_pass_never_cuts_into_an_earlier_ones() {
+        let key = "pplx-0123456789abcdef0123456789abcdef".to_string();
+        let operator = vec![("perplexity".to_string(), key.clone())];
+        for chosen in ["pplx-", "Bearer pp", "er pplx-0123", "x-0123456789abcdef0123456789abcdef!"] {
+            let passes = [operator.clone(), vec![("mine".to_string(), chosen.to_string())]];
+            let echo = format!(r#"{{"auth":{{"authorization":"Bearer {key}"}},"n":1}}!"#);
+            let whole = redact_passes(echo.clone(), &passes);
+            assert!(whole.contains("{{perplexity}}") && !whole.contains("0123456789abcdef"), "{chosen}: {whole}");
+            for cut in 1..echo.len() {
+                let mut streamed = StreamedPasses::new(&passes);
+                let mut out = streamed.push(&echo.as_bytes()[..cut]);
+                out.extend(streamed.push(&echo.as_bytes()[cut..]));
+                out.extend(streamed.finish());
+                let out = String::from_utf8(out).unwrap();
+                assert!(out.contains("{{perplexity}}") && !out.contains("0123456789abcdef"), "{chosen} cut at {cut}: {out}");
+            }
+        }
+        // valid: what no pass names goes as it came, and each pass names its own
+        let passes = [operator.clone(), vec![("mine".to_string(), "my-secret".to_string())]];
+        assert_eq!(redact_passes(format!("a {key} b my-secret c"), &passes), "a {{perplexity}} b {{mine}} c");
+        let mut streamed = StreamedPasses::new(&passes);
+        let out = [streamed.push(format!("a {key} b my-se").as_bytes()), streamed.push(b"cret c"), streamed.finish()].concat();
+        assert_eq!(String::from_utf8(out).unwrap(), "a {{perplexity}} b {{mine}} c");
+    }
+
+    /// An answer is read whole unless it streams as it is made, or is no text.
+    #[test]
+    fn what_is_read_whole() {
+        for whole in ["application/json", "application/json; charset=utf-8", "text/html", "text/plain", "", "application/xml"] {
+            assert!(read_whole(whole), "{whole}");
+        }
+        for streams in ["text/event-stream", "Text/Event-Stream; charset=utf-8", "application/x-ndjson", "audio/mpeg", "audio/ogg", "video/mp4", "image/png", "application/octet-stream"] {
+            assert!(!read_whole(streams), "{streams}");
+        }
     }
 }

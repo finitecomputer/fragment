@@ -4285,7 +4285,8 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // each placeholder's secret, by its provider and tag
     let mut answered: Vec<(Placeholder, String)> = vec![];
     let mut vault_rows = vec![];
-    // what a Vault filled (never a signature), by name: named so in the answer
+    // what a Vault filled (never a signature), by name: named so in the
+    // answer, after the operator's keys (`hidden`)
     let mut filled: Vec<(String, String)> = vec![];
     // a Vault's secret that goes as a half of basic auth, if one does
     let mut basic: Option<String> = None;
@@ -4352,6 +4353,9 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let header = out_parts.headers.iter().find(|(h, _)| h == "authorization").and_then(|(_, v)| v.strip_prefix("Basic "));
         filled.extend(header.map(|b| (name.clone(), b.to_string())));
     }
+    // each operator key, the platform's own at its vendor, named so too:
+    // a vendor that echoes what it was sent never shows the guest the key
+    let operator = plan.operator_keys(&cfg.providers, &secrets, &out_parts);
     let headers = Headers::new();
     for (name, value) in &out_parts.headers {
         headers.set(name, value)?;
@@ -4449,20 +4453,24 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status, "grantsMs": grants_ms }));
     }
     match sent {
-        Ok(resp) if !filled.is_empty() => hidden(resp, &filled).await,
+        Ok(resp) if !(operator.is_empty() && filled.is_empty()) => hidden(resp, &[operator, filled]).await,
         sent => sent,
     }
 }
 
-/// An answer that may echo a Vault's value, with each value named as its
+/// An answer that may echo an operator key or a Vault's value (each the
+/// swap put on its request), with each value named as its
 /// secret (`{{name}}`), as a job's fetch names its own (Paul, 2026-11-09:
-/// echoed values hidden): in its headers, and in its body. A body read
-/// whole (up to `ANSWER_HIDDEN_MAX_BYTES`, not an event stream) has every
+/// echoed values hidden): in its headers, and in its body, in `passes`,
+/// the operator's keys first, so no value a person chose cuts into one
+/// (`secrets::redact_passes`). A body read whole (up to
+/// `ANSWER_HIDDEN_MAX_BYTES`, text: `secrets::read_whole`) has every
 /// spelling of a value named (`secrets::redact`), or its bytes, not text;
-/// past that, or an event stream, each value's own bytes are named as it
-/// streams (`secrets::Streamed`), a value split across pieces too.
-async fn hidden(mut resp: Response, filled: &[(String, String)]) -> CellResult<Response> {
-    let redact = |text: String| filled.iter().fold(text, |t, (name, value)| fragment_core::secrets::redact(t, &BTreeMap::from([(name.clone(), value.clone())])));
+/// past that, or one that streams as it is made (an event stream, a
+/// streamed speech's audio), each value's own bytes are named as it
+/// streams (`secrets::StreamedPasses`), a value split across pieces too.
+async fn hidden(mut resp: Response, passes: &[Vec<(String, String)>]) -> CellResult<Response> {
+    let redact = |text: String| fragment_core::secrets::redact_passes(text, passes);
     let headers = Headers::new();
     for (name, value) in resp.headers().entries() {
         headers.set(&name, &redact(value))?;
@@ -4474,9 +4482,9 @@ async fn hidden(mut resp: Response, filled: &[(String, String)]) -> CellResult<R
     }
     let kind = resp.headers().get("content-type")?.unwrap_or_default();
     let mut stream = resp.stream()?;
-    let mut streamed = fragment_core::secrets::Streamed::new(filled);
+    let mut streamed = fragment_core::secrets::StreamedPasses::new(passes);
     let mut read = vec![];
-    if !kind.starts_with("text/event-stream") {
+    if fragment_core::secrets::read_whole(&kind) {
         // bounded: each piece read adds to `read`, which stops at its cap
         while read.len() <= ANSWER_HIDDEN_MAX_BYTES {
             match stream.next().await {
