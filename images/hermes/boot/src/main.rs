@@ -739,48 +739,45 @@ async fn sync_own(api: &Api, a: &Agent, home: &Path, own: &(dyn Fn(&Path) + Sync
     }
 }
 
-/// The restores of agents' own files (`restore`): those done, and those
-/// under way, each by (fragment, runtime), the latter with its own number
-/// (only the restore still under way for its key may finish it) and what
-/// stops it.
+/// The restores of agents' own files (`restore`): those done, by (fragment,
+/// runtime), and the one under way for each agent, by its fragment.
 #[derive(Default)]
 struct Restores {
     done: agents::Restored,
-    running: BTreeMap<(String, String), (u64, tokio::task::AbortHandle)>,
-    started: u64,
+    running: BTreeMap<String, Running>,
+}
+
+/// A restore under way: for which runtime, and whether its assignment
+/// changed since it began (it then makes the agent ready for none).
+struct Running {
+    runtime: String,
+    stale: bool,
 }
 
 type Restoring = std::sync::Arc<std::sync::Mutex<Restores>>;
 
 /// A restore started for each agent of another runtime than Hermes' whose
-/// own files are not restored, nor being restored, for the runtime it
-/// names now (FIN-542): done once its sync succeeds. One that failed is
-/// not, so it is ready for no runtime (agents.rs, `ready_file`), and is
-/// tried again at the next read of the computer's agents. An agent that
-/// left, or names another runtime, is forgotten: back, it is restored
-/// again, and its restore under way is stopped: only a restore started for
-/// its new assignment makes it ready. Each runs on its own, a round under
-/// way for a hold (`Busy`; none starts while held), so a slow one keeps no
-/// other agent waiting; a start waits for them.
+/// own files are not restored for the runtime it names now (FIN-542): done
+/// once its sync succeeds. One that failed is not, so it is ready for no
+/// runtime (agents.rs, `ready_file`), and is tried again at the next read
+/// of the computer's agents. An agent that left, or names another runtime,
+/// is forgotten, and its restore under way makes it ready for none: back,
+/// it is restored again once that one ended (one sync of an agent's files
+/// at a time; none is cut short, so each ends with what it agreed saved).
+/// Each runs on its own, a round under way for a hold (`Busy`; none starts
+/// while held), so a slow one keeps no other agent waiting; a start waits
+/// for them.
 fn restore(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, quiet: &std::sync::Arc<Quiet>, restoring: &Restoring) -> Vec<tokio::task::JoinHandle<()>> {
     let mut r = restoring.lock().expect("the restores are never poisoned");
     let here = |(f, rt): &(String, String)| agents.iter().any(|a| &a.fragment == f && agents::runtime_of(a) == rt);
     r.done.retain(here);
-    // stopped now, a new one for the same agent waits for the next read, by
-    // when the stopped one has let go of its files
-    let mut stopped = agents::Restored::new();
-    r.running.retain(|key, (_, stop)| {
-        let keep = here(key);
-        if !keep {
-            stop.abort();
-            stopped.insert(key.clone());
-        }
-        keep
-    });
+    for (f, run) in r.running.iter_mut() {
+        run.stale |= !here(&(f.clone(), run.runtime.clone()));
+    }
     let mut started = Vec::new();
     for a in agents.iter().filter(|a| !agents::of_hermes(a)) {
         let key = agents::restored_key(a);
-        if r.done.contains(&key) || r.running.contains_key(&key) || stopped.iter().any(|(f, _)| *f == key.0) {
+        if r.done.contains(&key) || r.running.contains_key(&a.fragment) {
             continue;
         }
         // counted before the hold is looked at: a hold begun since waits for it
@@ -788,22 +785,16 @@ fn restore(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, qu
         if quiet.paused() {
             break;
         }
-        r.started += 1;
-        let number = r.started;
-        let (api, a, home, restoring, held) = (api.clone(), a.clone(), home.to_path_buf(), restoring.clone(), key.clone());
-        let task = tokio::spawn(async move {
+        r.running.insert(a.fragment.clone(), Running { runtime: key.1.clone(), stale: false });
+        let (api, a, home, restoring) = (api.clone(), a.clone(), home.to_path_buf(), restoring.clone());
+        started.push(tokio::spawn(async move {
             let _busy = busy;
             let restored = sync_own(&api, &a, &home, &move |p: &Path| chown(p, ids)).await.is_some();
             let mut r = restoring.lock().expect("the restores are never poisoned");
-            if r.running.get(&held).is_some_and(|(n, _)| *n == number) {
-                r.running.remove(&held);
-                if restored {
-                    r.done.insert(held);
-                }
+            if r.running.remove(&a.fragment).is_some_and(|run| !run.stale) && restored {
+                r.done.insert(key);
             }
-        });
-        r.running.insert(key, (number, task.abort_handle()));
-        started.push(task);
+        }));
     }
     started
 }
@@ -1580,7 +1571,8 @@ async fn boot_main() {
     let quiet = std::sync::Arc::new(Quiet::default());
     let restoring = Restoring::default();
     futures_util::future::join_all(restore(&api, &agents, &home, ids, &quiet, &restoring)).await;
-    let mut ready_now = write_ready(&agents, &restoring.lock().expect("the restores are never poisoned").done, &home);
+    let mut published = restoring.lock().expect("the restores are never poisoned").done.clone();
+    let mut ready_now = write_ready(&agents, &published, &home);
     let mut bridge = spawn_bridge(card_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
     tokio::spawn(answer_holds(quiet.clone(), ids));
@@ -1711,6 +1703,7 @@ async fn boot_main() {
                         if !change.is_empty() || agents::ready_file(&read, &restored) != ready_now {
                             ready_now = follow_agents(&api, &change, &read, &restored, &home, ids, &route, &credential_env, &team).await;
                         }
+                        published = restored;
                         agents = read;
                     }
                     // once per outage: the next read that answers ends it
@@ -1736,10 +1729,10 @@ async fn boot_main() {
             }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {
                 last_sync = Instant::now();
-                // another runtime's agent only once restored: its restore,
-                // under way, is the one sync of its files meanwhile
-                let restored = restoring.lock().expect("the restores are never poisoned").done.clone();
-                for a in agents.iter().filter(|a| agents::of_hermes(a) || restored.contains(&agents::restored_key(a))) {
+                // another runtime's agent only once the bridge was told it
+                // is ready (the ready file written): its restore is the one
+                // sync of its files until then
+                for a in agents.iter().filter(|a| agents::of_hermes(a) || published.contains(&agents::restored_key(a))) {
                     // a Hermes agent's job may have changed: its role with it
                     if sync_own(&api, a, &home, &own).await.is_some_and(|d| d.pulled > 0) && agents::of_hermes(a) {
                         write_identity(a, &hermes::profile_dir(&home, &a.fragment), ids, &read_face(&api, a).await);
