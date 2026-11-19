@@ -215,7 +215,12 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   `DISK_TOLD_FREE_MAX` (5 GB) free: the room left, told until a read finds
   clearly more (at most `DISK_CLEAR_USED_PCT`, 70%, used, or at least
   `DISK_CLEAR_FREE_MIN`, 6 GB, free), so a disk at the edge never shows
-  and clears it in turn. Each read logs a `disk` line of its own.
+  and clears it in turn. Each read logs a `disk` line of its own. It
+  tells its owner to ask their agent to move big files to storage: the
+  agent reads the same disk (`df`, the relay hint's `DISK`), and its
+  `disk-space-finite` skill makes room with `fragment offload`, which
+  removes a file only once its copy in a members-only fragment of the
+  owner's reads back as it was (cli/GUIDE.md, "Moving files off a disk").
 - `unsaved`: this life's saves are failing (a sleep's at once, awake ones
   from the second in a row): since when its work is in no save, and when
   the bound stops it.
@@ -451,6 +456,56 @@ from a snapshot.
   start that went back in time is a rollback, counted in `rollbacks`: the
   life before it crashed, slept unsaved, or its start fell back past its
   newest save. Nothing's correctness depends on the guest reading either.
+
+### The start line
+
+The Computer DO logs one line per start (`fragment_core::computer::start_line`),
+for Workers Logs and `wrangler tail` to count which path wakes take and how
+long each step is. It begins `{"start":{"generation":`, names the computer
+by its id alone, and is at most 512 bytes:
+
+```json
+{"start":{"generation":7,"end":"ready","woke":"record","path":"restore","why":"crash","bytes":1480000000,"newImage":false,"beganMs":40,"upMs":900,"dataMs":37000,"readyMs":37050,"heardMs":37800,"turnMs":39100},"computer":"computer:17c33cdf88c6d1d8f58b7a0f"}
+```
+
+It is written once, as the start ends: `failed`; `replaced` (a later start
+began before its end was heard); or `ready`, once its guest opens its first
+keepalive (a turn), `TURN_WAIT_MS` (a minute) passes after it came up (it
+is written at the next event or view read: the guest reads its view each
+minute), or its life ends, whichever is first.
+
+- `failed`: `start` (its own steps), `snapshot` (the snapshot would not
+  start), `dead` (its guest never read its view within its wait: a
+  snapshot that came up dead, or the `alive-check` lever),
+  `unusable` (its save would not restore), `exit` (its container stopped
+  first), `deadline`, `other`.
+- `woke`: what asked for the wake it answers: `record`, `presence`, `tab`,
+  `owner`, `joined`, `restart`; `itself` when nothing did (a start after a
+  crash, an always-on start, or an ask an earlier isolate heard). A wake's
+  fallback and retries carry its first ask.
+- `path`: `snapshot`, `restore` (the image, then the save whole), `fresh`
+  (no save yet).
+- `why`, for a restore, the first that holds: `off` (no snapshots here),
+  `restart`, `unusable` (a newer save would not restore), `image` (the
+  snapshot is of another image), `dead_snapshot` (this wake's snapshot
+  start failed), `crash`, `unsaved` (its last sleep could not save),
+  `no_snapshot` (its last life ended saved and no snapshot was kept: a host
+  stopped it idle, or that sleep's snapshot failed), `other`.
+- `bytes`: the stored, compressed size of the save it restores, or that
+  its snapshot caches.
+- `newImage`: it runs another image than its last life did (absent before
+  its first life). Whether the host pulled it is not known to the DO.
+- Times, in ms from the wake asked (or the start's own beginning when
+  nothing asked): `beganMs` the start made (a sleep under way delays it),
+  `upMs` its container took an exec (snapshot and restore only), `dataMs`
+  the restore's gate opened, `readyMs` it came up, `heardMs` its guest
+  first read its view (our image's boot reads it first, then its bridge),
+  `turnMs` its first keepalive (its bridge has a turn queued or running).
+  When its bridge follows its chats is not visible to the DO, so it is
+  left out.
+
+The line is in memory until it is written: a deploy or a crash of the
+platform during a start, or before its first turn, loses that start's line.
 
 ### Bounds
 

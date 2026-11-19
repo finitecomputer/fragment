@@ -183,14 +183,14 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
         }
         (Method::Post, ["computer"]) => {
             /// `{computer, op, times?, on?, ms?, freeze?, offsetMs?,
-            /// generation?, agent?, row?, month?}`: a lever on that computer (computer.rs, `lever`):
+            /// generation?, agent?, row?, month?, total?, free?}`: a lever on that computer (computer.rs, `lever`):
             /// `times` is `fail-saves`', `fail-starts`' and
             /// `fail-takeover-destroys`', `on` is `always-on`'s, `ms` is
             /// `hang-backups`', `alive-check`'s, `slow-tell`'s,
             /// `stall-failing-start`'s and `alarm-in`'s, `freeze` is `alive-check`'s,
             /// `offsetMs` is `clock`'s, `generation` is `exit`'s, `agent`
             /// and `row` are `legacy-grants`', `row` and `month`
-            /// `legacy-uses`'.
+            /// `legacy-uses`', `total` and `free` are `disk`'s.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {
@@ -214,6 +214,10 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 row: Option<serde_json::Value>,
                 #[serde(default)]
                 month: Option<String>,
+                #[serde(default)]
+                total: Option<u64>,
+                #[serde(default)]
+                free: Option<u64>,
             }
             let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if !valid_computer_id(&t.computer) {
@@ -232,7 +236,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 let generation = t.generation.ok_or_else(|| CellError::invalid("exit names its generation"))?;
                 return json_answer(&crate::computer::ask(env, &t.computer, "computer/exited", &serde_json::json!({ "generation": generation })).await?);
             }
-            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "offsetMs": t.offset_ms, "agent": t.agent, "row": t.row, "month": t.month });
+            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "offsetMs": t.offset_ms, "agent": t.agent, "row": t.row, "month": t.month, "total": t.total, "free": t.free });
             json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &asked).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
