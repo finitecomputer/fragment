@@ -127,14 +127,8 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Conflict, "it changed while its app was asked: ask again"));
         }
         // its owner's alone: no yes here waits on the app (that list comes
-        // with the audience's growing); bounded, its members and their
-        // owners, and built by insertion: a collect sorts, with code of its
-        // own for the pair's type
-        let mut audience = Audience::new();
-        for (person, power) in &answer.audience {
-            audience.insert(person.clone(), *power);
-        }
-        if let Err(refused) = app_member::join(role, &Audience::new(), audience, |p| self.member_role(p).ok().flatten()) {
+        // with the audience's growing); bounded, its members and their owners
+        if let Err(refused) = app_member::join(role, &Audience::new(), answer.audience.clone(), |p| self.member_role(p).ok().flatten()) {
             let person = match &refused {
                 app_member::Refusal::Audience(short) => fragment_core::npub::display(&short.person),
                 _ => String::new(),
@@ -239,7 +233,7 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Conflict, "an older ask: it was asked again since"));
         }
         self.event("app.joining", &format!("asked into {} as {}, by its owner", a.target, a.role.as_str()), json!({ "target": a.target, "role": a.role }));
-        Ok(AppAnswer { npub: self.must(MetaKey::Npub)?, incarnation: self.incarnation()?, title, audience: audience.into_iter().collect() })
+        Ok(AppAnswer { npub: self.must(MetaKey::Npub)?, incarnation: self.incarnation()?, title, audience })
     }
 
     /// A change between an app and a target (`AppTold`). To the app: the
