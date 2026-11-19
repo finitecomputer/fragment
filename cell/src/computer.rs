@@ -36,7 +36,7 @@
 //!   provider answered is counted by agent and month in its owner's
 //!   ledger (`fragment_core::ledger::uses`), sent after the answer. The
 //!   months it counted itself before (its step 7) it owes that ledger,
-//!   handed over after a request it answers (`hand_over_uses`).
+//!   handed over as its owner reads its view (`uses_later`).
 //! - **Its agents' new fragments**: the fragment an agent of its was added
 //!   to tells the agent's own fragment, which posts `joined` on its `tasks`
 //!   and names this computer, and then wakes it (`Wake::Joined`; runs_on.rs).
@@ -50,6 +50,7 @@
 //!   a start) fails at its next write.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
@@ -469,10 +470,11 @@ pub struct ComputerCell {
     armed: RefCell<Option<(u64, Vec<String>)>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
-    /// When a request next hands over the uses it owes (`hand_over_uses`):
-    /// at once in a new activation; never again once one ran (a lever's
-    /// plant asks again); a minute on after one failed. In memory only.
-    uses_due_ms: std::cell::Cell<i64>,
+    /// When its owner's next look hands over the uses it owes
+    /// (`uses_later`): at once in a new activation; never again once one ran
+    /// (a lever's plant asks again); a minute on after one failed. In memory
+    /// only, shared with the task that hands them over.
+    uses_due_ms: Rc<std::cell::Cell<i64>>,
 }
 
 impl DurableObject for ComputerCell {
@@ -498,7 +500,7 @@ impl DurableObject for ComputerCell {
             armed: RefCell::new(None),
             relays: RefCell::default(),
             schema,
-            uses_due_ms: std::cell::Cell::new(0),
+            uses_due_ms: Rc::new(std::cell::Cell::new(0)),
         }
     }
 
@@ -550,6 +552,34 @@ impl DurableObject for ComputerCell {
         self.keepalive_closed(&ws).await;
         Ok(())
     }
+}
+
+/// Each month of uses computer `id` owes `owner`'s ledger, handed over
+/// (`uses::TakeUses`, under `<computer>:<month>`, its rows sent as step 7
+/// kept them, unread here: the ledger reads them), and forgotten once the
+/// ledger took it: taken once by its id, so one sent again (its answer
+/// lost, the computer gone between) adds nothing twice. A month the ledger
+/// refuses (its person wiped, or rows it will never take) is said aloud
+/// whole and forgotten; one it did not answer stays owed.
+async fn hand_over_uses(sql: &SqlStorage, env: &Env, id: &str, owner: &str) -> CellResult<()> {
+    let owed: Vec<Value> = sql.exec("SELECT key, value FROM meta WHERE key LIKE 'uses_owed:%' ORDER BY key", None)?.to_array()?;
+    let mut left = owed.len();
+    // bounded by the months step 7 found (13 kept)
+    for r in owed {
+        let (Some(key), Some(value)) = (r["key"].as_str(), r["value"].as_str()) else { continue };
+        let month = key.strip_prefix(USES_OWED).and_then(|m| m.parse().ok()).map(Month).ok_or_else(|| CellError::host(format!("an owed month {key:?}")))?;
+        let take_id = serde_json::to_string(&format!("{id}:{}", month.0)).expect("a string serializes");
+        let take = format!(r#"{{"id":{take_id},"month":{},"rows":{value}}}"#, month.0);
+        match crate::ledger::asked(env, owner, <uses::TakeUses as crate::ledger::Route>::PATH, take).await {
+            Ok(_) => {}
+            Err(e) if e.refused.is_some() => console_error!("{}", json!({ "computer": id, "uses_refused": month.label(), "why": e.message, "rows": value })),
+            Err(e) => return Err(e.into()),
+        }
+        sql.exec("DELETE FROM meta WHERE key = ?", vec![key.into()])?;
+        left -= 1;
+        console_log!("{}", json!({ "computer": id, "uses_owed": left, "handed": month.label() }));
+    }
+    Ok(())
 }
 
 /// A wiped computer's answer: as no computer.
@@ -1290,57 +1320,28 @@ impl ComputerCell {
     }
 
     /// The months of uses it owes its owner's ledger (its step 7), handed
-    /// over after this request, never in its way: once an activation, and
-    /// again a minute after one that failed (`uses_due_ms`).
+    /// over as its owner reads its view (the shell or Settings opening),
+    /// never in that read's way: once an activation, and again a minute
+    /// after one that failed (`uses_due_ms`). Never from a request of its
+    /// life (a start, an exit, a takeover, a guest's), and never through
+    /// the request's `waitUntil`: the e2e found a takeover's container
+    /// destroy, polled within `DESTROY_MS`, running past it when the
+    /// request that took the computer over had begun one (#1343). A task
+    /// of its own, holding its own handles, which a computer gone mid-way
+    /// leaves to the next look: taken once by its id, nothing counts twice.
     fn uses_later(&self) {
-        if js::now_ms() < self.uses_due_ms.get() {
+        if self.wiped.get() || js::now_ms() < self.uses_due_ms.get() {
             return;
         }
         self.uses_due_ms.set(i64::MAX);
-        // SAFETY: as FragmentCell::later's: the object is never destroyed
-        // while a promise it gave the runtime runs, and `waitUntil` holds
-        // this one until it settles.
-        let cell: &'static ComputerCell = unsafe { &*(self as *const ComputerCell) };
-        self.state.wait_until(cell.hand_over_uses());
-    }
-
-    /// Each month of uses it owes, handed to its owner's ledger
-    /// (`uses::TakeUses`, under `<computer>:<month>`, its rows sent as step 7
-    /// kept them, unread here: the ledger reads them), and forgotten once the
-    /// ledger took it: taken once by its id, so one sent again (its answer
-    /// lost, this object gone between) adds nothing twice. A month the
-    /// ledger refuses (its person wiped, or rows it will never take) is said
-    /// aloud whole and forgotten; one it did not answer stays owed.
-    async fn hand_over_uses(&self) {
-        if let Err(e) = self.try_hand_over_uses().await {
-            console_error!("{}", json!({ "computer": "uses-owed", "error": e.message }));
-            self.uses_due_ms.set(js::now_ms() + USES_RETRY_MS);
-        }
-    }
-
-    async fn try_hand_over_uses(&self) -> CellResult<()> {
-        let owed = self.rows("SELECT key, value FROM meta WHERE key LIKE 'uses_owed:%' ORDER BY key", vec![])?;
-        if owed.is_empty() || self.wiped.get() {
-            return Ok(());
-        }
-        let (id, owner) = (self.must(MetaKey::Id)?, self.must(MetaKey::Owner)?);
-        let mut left = owed.len();
-        // bounded by the months step 7 found (13 kept)
-        for r in owed {
-            let (Some(key), Some(value)) = (r["key"].as_str(), r["value"].as_str()) else { continue };
-            let month = key.strip_prefix(USES_OWED).and_then(|m| m.parse().ok()).map(Month).ok_or_else(|| CellError::host(format!("an owed month {key:?}")))?;
-            let take_id = serde_json::to_string(&format!("{id}:{}", month.0)).expect("a string serializes");
-            let take = format!(r#"{{"id":{take_id},"month":{},"rows":{value}}}"#, month.0);
-            match crate::ledger::asked(&self.env, &owner, <uses::TakeUses as crate::ledger::Route>::PATH, take).await {
-                Ok(_) => {}
-                Err(e) if e.refused.is_some() => console_error!("{}", json!({ "computer": id, "uses_refused": month.label(), "why": e.message, "rows": value })),
-                Err(e) => return Err(e.into()),
+        let (Ok(Some(id)), Ok(Some(owner))) = (self.meta(MetaKey::Id), self.meta(MetaKey::Owner)) else { return };
+        let (sql, env, due) = (self.sql(), self.env.clone(), self.uses_due_ms.clone());
+        worker::wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = hand_over_uses(&sql, &env, &id, &owner).await {
+                console_error!("{}", json!({ "computer": id, "uses_owed": "failed", "error": e.message }));
+                due.set(js::now_ms() + USES_RETRY_MS);
             }
-            self.exec("DELETE FROM meta WHERE key = ?", vec![key.into()])?;
-            left -= 1;
-            console_log!("{}", json!({ "computer": id, "uses_owed": left, "handed": month.label() }));
-        }
-        Ok(())
+        });
     }
 
     /// Sends the awake intervals the ledger has not taken to the owner's
@@ -2584,7 +2585,7 @@ impl ComputerCell {
     /// taken (`fragment_core::grants::Owed`), then reads what is owed;
     /// `legacy-uses {month?, row?}` makes a month of uses owed as step 7
     /// keeps one (`row`: its `[{agent, provider, calls, micros}]`), handed
-    /// over from the next request on, then reads every month owed.
+    /// over at its owner's next look, then reads every month owed.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         if b.op == "schema" {
@@ -2755,8 +2756,8 @@ impl ComputerCell {
             "legacy-uses" => {
                 // a month of uses from before the move, owed as step 7 keeps
                 // one (`[{agent, provider, calls, micros}]`), when named:
-                // handed over from the next request on, as by a computer
-                // that slept since the deploy; then every month owed
+                // handed over at its owner's next look, as by a computer that
+                // slept since the deploy; then every month owed
                 if let Some(rows) = b.row.as_ref().filter(|r| r.is_array()) {
                     let month = b.month.as_deref().and_then(Month::parse).ok_or_else(|| CellError::invalid("legacy-uses names its month, YYYY-MM"))?;
                     let key = format!("{USES_OWED}{}", month.0);
@@ -2789,7 +2790,6 @@ impl ComputerCell {
         }
         if !wipe && path != "/computer/test" {
             self.schema.ready()?;
-            self.uses_later();
         }
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
@@ -2804,6 +2804,7 @@ impl ComputerCell {
             "computer/view" => {
                 // its owner reading it (the shell, as it opens): a deploy since its last look is news
                 self.look_and_tell().await;
+                self.uses_later();
                 json_response(&self.view().await?)
             }
             // an operator's view of it (orgs.rs, the person page): the whole
@@ -3056,7 +3057,10 @@ impl ComputerCell {
         self.owned_by(&who)?;
         self.look_and_tell().await;
         match (req.method(), rest) {
-            (Method::Get, []) => json_response(&self.view().await?),
+            (Method::Get, []) => {
+                self.uses_later();
+                json_response(&self.view().await?)
+            }
             (Method::Post, ["wake"]) => {
                 self.wake(Wake::Owner).await?;
                 json_response(&self.view().await?)

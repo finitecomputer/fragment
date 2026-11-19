@@ -407,19 +407,20 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         json!({ "typed": typed.status, "added": pressed.status, "me": theirs.body }),
     );
     const OWN_KEY: &str = "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected";
-    const OWED_USES: &str = "after a restart a computer's month of uses from before the move, owed, is handed to its owner's ledger after a request it answers, once, whole";
+    const OWED_USES: &str = "after a restart a computer's month of uses from before the move, owed, is handed to its owner's ledger as its owner reads its view, once, whole";
     match own_key {
         Some((connector, connector_session, bound, back, computer)) => {
             let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
             let state = api.signed(&connector, "GET", "/api/connections", None)?;
             let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
             s.ok(OWN_KEY, page.status == 200 && page.text.contains("is connected") && connected, json!({ "page": page.to_string(), "connections": state.body }));
-            // the sign-in's finish was a request its computer answered
+            // its owner reads its view (the shell, Settings)
+            let looked = api.signed(&connector, "GET", &format!("/api/computers/{computer}"), None)?;
             let owed = || api.unsigned("POST", "/api/test/computer", Some(&json!({ "computer": computer, "op": "legacy-uses" }))).map(|r| r.body["owed"].clone()).unwrap_or(Value::Null);
             let taken = s.eventually(Duration::from_secs(30), || owed() == json!({}));
             let got = api.signed(&connector, "GET", &format!("/api/ledger/uses/{last_month}"), None)?;
             let once = json!([{ "provider": "github", "agent": "restart-agent--a1b2", "calls": 3, "micros": 0 }, { "provider": "perplexity", "agent": "restart-agent--a1b2", "calls": 2, "micros": 15_000 }]);
-            s.ok(OWED_USES, taken && got.body["uses"] == once, json!({ "taken": taken, "ledger": got.body }));
+            s.ok(OWED_USES, looked.status == 200 && taken && got.body["uses"] == once, json!({ "taken": taken, "ledger": got.body }));
         }
         None => {
             s.skip(OWN_KEY, NO_COMPUTERS);

@@ -1283,7 +1283,7 @@ pub(super) fn grant_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
 /// The checks `uses_checks` makes: a computer's uses from before the move
 /// (M16) handed to its owner's ledger.
 pub(super) const USES_CHECKS: &[&str] = &[
-    "a computer's months of uses from before the move, owed (an agent gone among them), are handed to its owner's ledger after its next request, whole, and owed no more",
+    "a computer's months of uses from before the move, owed (an agent gone among them), are handed to its owner's ledger as its owner reads its view, whole, and owed no more",
     "handed over again (as when its answer was lost before the computer forgot them), the ledger adds nothing twice",
     "another body under a month the ledger took is refused, changing nothing there, and the computer owes it no more",
 ];
@@ -1305,8 +1305,7 @@ fn ledger_uses(api: &Api, owner: &crate::Keys, month: &str) -> Vec<(String, Stri
 /// A computer's uses from before the move (Computer step 7, M16): months
 /// it owes its owner's ledger, made by its `legacy-uses` lever as the step
 /// keeps them, the months before the lane's (`month`), whose uses the lane
-/// does not count. Taken once each, whole, after a request the computer
-/// answers.
+/// does not count. Taken once each, whole, as its owner reads its view.
 pub(super) fn uses_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, agent: &str, month: &str) -> Result<()> {
     use fragment_core::ledger::Month;
     let this = Month::parse(month).ok_or_else(|| anyhow::anyhow!("the lane's month {month:?}"))?;

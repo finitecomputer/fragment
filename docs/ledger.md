@@ -125,7 +125,7 @@ ledger's `uses` table its store, `GET /api/ledger/uses[/{YYYY-MM}]`
   (`ledger.uses-full`), and one held counts on.
 - **Moved, never dropped.** A computer counted its agents' uses itself
   before. Its step 7 keeps each month it held as owed, and it hands each
-  to its owner's ledger after a request it answers (`/take-uses`, under
+  to its owner's ledger as its owner reads its view (`/take-uses`, under
   `<computer>:<month>`). The ledger takes a month once by that id,
   adding it to what it counted since: the same body again adds nothing,
   another under it is refused. The debt ledger says when this goes.

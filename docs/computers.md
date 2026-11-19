@@ -687,8 +687,9 @@ provider's own hosts.
   ledger (docs/ledger.md, "Usage"), after the answer; an operator key's
   is charged to its agent's owner too. A computer from before kept its
   own `uses`; its step 7 keeps the months it held as owed (`meta`
-  `uses_owed:<month>`), each handed to the owner's ledger after a
-  request the computer answers, taken once, then forgotten.
+  `uses_owed:<month>`), each handed to the owner's ledger as the owner
+  reads the computer's view (never from a start, an exit or a takeover),
+  taken once, then forgotten.
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
   each secret bound to an agent, with a host, is one of its credentials,
   kind `own`, named by the secret, with no variable. Its hosts join the

@@ -94,9 +94,9 @@ unfinished design, not debt.
   each computer's `uses` to the person's ledger
   (`fragment_core::ledger::uses`; M16). The Computer's step 7 dropped
   `uses`, keeping each month it held in the computer's `meta`
-  `uses_owed:<month>`, as the ledger reads a hand-over's rows. After a
-  request it answers, once an activation (`ComputerCell::uses_later`),
-  the computer hands each month to its owner's ledger (`uses::TakeUses`,
+  `uses_owed:<month>`, as the ledger reads a hand-over's rows. As its
+  owner reads its view, once an activation and in a task of its own
+  (`ComputerCell::uses_later`), the computer hands each month to its owner's ledger (`uses::TakeUses`,
   under `<computer>:<month>`), which takes it once by that id and keeps
   the id in its `meta` (`uses_taken:<id>`); the computer forgets each
   month the ledger took or refused, logging how many it still owes
