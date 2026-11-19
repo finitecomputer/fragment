@@ -1042,15 +1042,9 @@ impl ComputerCell {
     /// reads it as it reconnects, or at its next change: logged, never failed.
     async fn tell_owner(&self) {
         let Ok(Some(owner)) = self.meta(MetaKey::Owner) else { return };
-        tell(self.env.clone(), owner, self.meta(MetaKey::Id).ok().flatten()).await;
-    }
-
-    /// `tell_owner` beside what follows, never in its way: a start's steps
-    /// wait on no page, and nothing comes between its stored phase and them
-    /// (a drive's end tells again, awaited, should this be lost).
-    fn tell_owner_aside(&self) {
-        let Ok(Some(owner)) = self.meta(MetaKey::Owner) else { return };
-        worker::wasm_bindgen_futures::spawn_local(tell(self.env.clone(), owner, self.meta(MetaKey::Id).ok().flatten()));
+        if let Err(e) = crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": e.message }));
+        }
     }
 
     /// `answer`, when asked for and still empty, takes the view as its
@@ -1108,10 +1102,13 @@ impl ComputerCell {
                 }
             }
             self.alarm_at(step.alarm_ms).await?;
-            // its phase changed: its owner's open pages read it again as a
-            // start's actions begin (a chat says its agent is getting ready)
-            if phase_told(&life) != was {
-                self.tell_owner_aside();
+            // a start begins: its owner's open pages read it again before
+            // its steps (a chat says its agent is getting ready while it
+            // starts); every other change is told as the drive ends. Awaited,
+            // never a task of its own: background work on a lifecycle route
+            // slowed container destroys (#1343)
+            if phase_told(&life) != was && step.actions.iter().any(|a| matches!(a, Action::Start { .. })) {
+                self.tell_owner().await;
             }
             refused = refused.or(step.refused.clone());
             for next in self.perform(step).await? {
@@ -4299,12 +4296,4 @@ fn target_fragment(path: &str) -> Option<String> {
 /// one, as a start due (shown starting before its alarm) is made.
 fn phase_told(life: &Lifecycle) -> (std::mem::Discriminant<Phase>, ComputerPhase) {
     (std::mem::discriminant(&life.phase), life.shown(js::now_ms()))
-}
-
-/// Tells `owner`'s open pages to read again (`Changed`). One that did not
-/// hear reads it as it reconnects, or at its next change: logged, never failed.
-async fn tell(env: Env, owner: String, computer: Option<String>) {
-    if let Err(e) = crate::principal::ask(&env, &owner, &crate::principal::calls::Changed {}).await {
-        console_error!("{}", json!({ "computer": computer, "told": "owner", "error": e.message }));
-    }
 }
