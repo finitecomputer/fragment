@@ -512,6 +512,12 @@ fn preflight(tools: &devstack::Tools, d: &Deployment, config: &Path, bound: &dev
 
 use devstack::valid_branch;
 
+/// The connection a skill names in its frontmatter: the image's own reader,
+/// so the row test below and the image never read a skill two ways.
+#[cfg(test)]
+#[path = "../../images/hermes/boot/src/skill_connection.rs"]
+mod skill_connection;
+
 pub(crate) fn expand(path: &Path) -> PathBuf {
     match path.strip_prefix("~") {
         Ok(rest) => PathBuf::from(std::env::var_os("HOME").expect("HOME is set")).join(rest),
@@ -2071,8 +2077,8 @@ mod tests {
                     dirs.push(entry);
                 } else if entry.file_name().is_some_and(|n| n == "SKILL.md") {
                     let text = fs::read_to_string(&entry).unwrap();
-                    if let Some(connection) = fragment_templates::blessed::skill_connection(&text) {
-                        skills.entry(connection.to_string()).or_default().push(dir.clone());
+                    if let Some(connection) = skill_connection::of(&text) {
+                        skills.entry(connection).or_default().push(dir.clone());
                     }
                 }
             }

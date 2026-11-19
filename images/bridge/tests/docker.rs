@@ -446,6 +446,17 @@ async fn the_hermes_image() {
         assert_eq!(code, 0, "Hermes' own skill listing ran: {found}");
         serde_json::from_str::<serde_json::Value>(found.lines().rfind(|l| l.starts_with('{')).unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"))
     };
+    // juniper holds no Google: once its profile is written after the
+    // managed set's install (the boot writes it before), its config hides
+    // Google's skill from it (FIN-509)
+    let t = Instant::now();
+    while !c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]).contains("\"google-workspace-finite\"") {
+        assert!(t.elapsed() < Duration::from_secs(60), "Google's skill is never hidden from juniper: {}", c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // (`find_all_skills` below still lists a disabled external skill: what
+    // the agent's prompt lists is held by
+    // an_open_chat_lists_a_connections_skill_once_connected)
     let found = hermes_finds();
     assert!(c.exec(&[
         "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper--k3x9", "HOME=/data/hermes/profiles/juniper--k3x9/home",
@@ -467,7 +478,7 @@ async fn the_hermes_image() {
     assert!(found["garden-notes"].as_str().is_some_and(|d| d.contains("Juniper's own")), "its own skill: {found}");
     assert!(found["grill-me"].as_str().is_some_and(|d| d.contains("which wins")), "its own wins on a name: {found}");
     assert!(found["fragment"].as_str().is_some_and(|d| d.starts_with("You are an agent on a Fragment computer")), "the platform skill: {found}");
-    for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
+    for name in ["apps-finite", "git-finite", "brain-finite", "image-generation-finite", "model-council-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
         assert!(found[name].is_string(), "the release's managed {name} is visible: {found}");
     }
     // v0.23 bundles Word, PowerPoint and Excel as one skill, microsoft-office
@@ -4720,6 +4731,75 @@ async fn an_open_chat_lists_a_managed_skill_added_while_it_runs() {
     // and an install that changes nothing asks nothing more
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert_eq!(refreshed(&c), base + 1, "one refresh for the one change: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
+}
+
+/// Goal (FIN-509, with #1329): a connection's skill is hidden from an agent
+/// that does not hold the connection, and a connect made while a chat is
+/// open puts it in that chat's prompt at its next turn, its conversation
+/// kept; a disconnect takes it out again. Invalid: the skill hidden through
+/// the profile's config alone, which asked no open chat to rebuild its
+/// prompt (the hidden list was no prompt input). Method: an owner's skills
+/// fragment with one plain skill and one of Linear's; turns before, after
+/// a connect (juniper's credentials gain Linear) and after a disconnect,
+/// each after the refresh it asks for (`prompts.refreshed`, why
+/// `connections`).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_open_chat_lists_a_connections_skill_once_connected() {
+    const GARDEN: &str = "---\nname: garden-log\ndescription: Keep the garden's daily log of what was sown and watered.\n---\n# Garden log\n";
+    const ISSUES: &str = "---\nname: issue-desk\ndescription: Triage the team's open issues in their tracker every morning.\nmetadata:\n  hermes:\n    tags: [Issues]\n  fragment:\n    connection: linear\n---\n# Issue desk\n\nCall it with `fragment connection call linear`.\n";
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.skills("skills", &[("skills/notes/garden-log/SKILL.md", GARDEN), ("skills/work/issue-desk/SKILL.md", ISSUES)]);
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SKILLS_MS", "2000"), ("HERMES_BOOT_MODEL_MS", "1000")]);
+    fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let config = || c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]);
+    let t = Instant::now();
+    while !config().contains("disabled: [\"issue-desk\"]") {
+        assert!(t.elapsed() < Duration::from_secs(60), "Linear's skill is never hidden from juniper: {}\n{}", config(), c.logs());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let refreshed = |c: &Container| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "prompts.refreshed" && e["why"] == "connections").count();
+    let turn_of = |said: serde_json::Value| fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let system_of = |said: &str| {
+        let call = handed(&model, "juniper--k3x9", said).into_iter().next().unwrap_or_else(|| panic!("the turn's model call for {said}"));
+        let messages = call.body["messages"].as_array().cloned().unwrap_or_default();
+        (messages.first().filter(|m| m["role"] == "system").map(content_text).unwrap_or_default(), messages)
+    };
+    let turn = |text: &'static str| {
+        let fake = &fake;
+        let id = turn_of(fake.say(&chat, &person("paul"), json!({ "text": text })));
+        async move { fake.until(180_000, text, |w| ended(w, &id)).await }
+    };
+    turn("remember the green gate").await;
+    let (first, _) = system_of("remember the green gate");
+    assert!(first.contains("garden-log") && !first.contains("issue-desk"), "not connected, the chat's prompt lists no Linear skill: {}", first.chars().take(4000).collect::<String>());
+    // its owner connects Linear while the chat is open
+    let base = refreshed(&c);
+    fake.with(|w| w.computer["agents"][0]["credentials"] = json!([{ "provider": "linear", "kind": "connection", "env": ["LINEAR_OAUTH_ACCESS_TOKEN"], "placeholder": "fcx_linear_0123456789abcdef0123456789abcdef", "hosts": ["api.linear.app"] }]));
+    let t = Instant::now();
+    while !(!config().contains("issue-desk") && refreshed(&c) > base) {
+        assert!(t.elapsed() < Duration::from_secs(60), "the connect never asked a refresh: {}\n{}", config(), c.logs().lines().filter(|l| l.contains("prompts.") || l.contains("profile.")).collect::<Vec<_>>().join("\n"));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    turn("what gate was it").await;
+    let (system, messages) = system_of("what gate was it");
+    assert!(system.contains("issue-desk"), "connected, the open chat's prompt lists Linear's skill: {}", system.chars().take(4000).collect::<String>());
+    assert!(messages.iter().any(|m| m["role"] == "user" && content_text(m).contains("remember the green gate")), "its conversation kept: {messages:#?}");
+    // and a disconnect takes it out of the same chat again
+    let base = refreshed(&c);
+    fake.with(|w| w.computer["agents"][0]["credentials"] = json!([]));
+    let t = Instant::now();
+    while !(config().contains("disabled: [\"issue-desk\"]") && refreshed(&c) > base) {
+        assert!(t.elapsed() < Duration::from_secs(60), "the disconnect never asked a refresh: {}", config());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    turn("and the fence").await;
+    let (system, _) = system_of("and the fence");
+    assert!(!system.contains("issue-desk") && system.contains("garden-log"), "disconnected, the open chat's prompt lists it no more: {}", system.chars().take(4000).collect::<String>());
 }
 
 // ---- teammates asking each other (route A: images/hermes/plugins/fragment-ask) ----
