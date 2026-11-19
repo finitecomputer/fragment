@@ -89,6 +89,18 @@ an image may rely on this:
   container still running, tells nothing and tries again at the next
   event, an alarm it keeps a minute on at the latest (on its last strike
   nothing else may come).
+- **A start held up by the container before it** is no failure. A
+  sleep's snapshot the runtime still takes holds its container past the
+  sleep's destroy (it takes no signal), so the next start can find that
+  container still running. That start started nothing: it is made again
+  at once, told as `starting`, no strike, until the container has had a
+  stop's deadline (`SLEEP_DEADLINE_MS`, 6 minutes) since the first such
+  try; after that each try is a strike, so one that never goes gives up
+  as failing starts do. Nothing it would have started from is forgotten.
+  A new isolate that finds such a start (it planned nothing yet) never
+  takes the running container over as its own: it reports the start held
+  up. A port's request meanwhile answers that the computer is still
+  starting (409, try again) rather than reach the earlier container.
 - **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
   share `RESTORE_MS`), never one that follows a restore's progress: a
   restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,
@@ -481,7 +493,9 @@ minute), or its life ends, whichever is first.
   start), `dead` (its guest never read its view within its wait: a
   snapshot that came up dead, or the `alive-check` lever),
   `unusable` (its save would not restore), `exit` (its container stopped
-  first), `deadline`, `other`.
+  first), `deadline`, `blocked` (the container before it still ran: it
+  started nothing, and the start made again counts from the same wake),
+  `other`.
 - `woke`: what asked for the wake it answers: `record`, `presence`, `tab`,
   `owner`, `joined`, `restart`; `itself` when nothing did (a start after a
   crash, an always-on start, or an ask an earlier isolate heard). A wake's
@@ -522,7 +536,18 @@ backups get what the rest leaves (`BACKUPS_MS`, 11 minutes 10 seconds).
 That is the most any save can have, so it is fixed, not one that follows
 a save's progress. Saves over 1 GB moved 9 to 156 MB/s on production
 (2026-10-27 to 11-03), so a full disk's save (about 10.8 GB) fits all but
-the slowest 6% of tries, each tried again. A start takes an alarm of its
+the slowest 6% of tries, each tried again. The snapshot after it is given
+what the hold and the save left of the sleep's 14 minutes, at least 30
+seconds and at most five (`snapshot_ms`): a snapshot is incremental, but
+the first after a disk grew took about 85 s for 9 GB (preview,
+2026-11-18), and 30 s for every one lost each over about 1.5 GB. A
+snapshot cut short frees nothing sooner: the runtime's takes no signal and
+holds the container until it ends. A wake that comes during the stop
+starts once the stop ends (`owes_start`), made by its alarm, never by its
+owner's sleep, which answers within its steps. The stop's deadline is six
+minutes, but every minute (`STOP_LOOK_MS`) its alarm looks whether its
+container is gone, so one whose end its isolate lost is found as soon as
+before. A start takes an alarm of its
 own: the one start an alarm makes (a retry's, or one owed after a sleep),
 its disk's read among its steps, with the alarm's other events, fits
 15 minutes (`RESTORE_MS` leaves them their 65 seconds). So an owner's
@@ -745,8 +770,13 @@ provider's own hosts.
   (`grants::Owed`): an agent's next ask carries its row, taken whole by a
   fragment holding none of its own and ignored by one that does
   (`grants::answered`), then forgotten.
-- Each call a provider answered is counted in the computer's `uses`; an
-  operator key's is charged to its agent's owner (docs/ledger.md).
+- Each call a provider answered is counted as its agent's in the owner's
+  ledger (docs/ledger.md, "Usage"), after the answer; an operator key's
+  is charged to its agent's owner too. A computer from before kept its
+  own `uses`; its step 7 keeps the months it held as owed (`meta`
+  `uses_owed:<month>`), each handed to the owner's ledger as the owner
+  reads the computer's view (never from a start, an exit or a takeover),
+  taken once, then forgotten.
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
   each secret bound to an agent, with a host, is one of its credentials,
   kind `own`, named by the secret, with no variable. Its hosts join the
@@ -754,7 +784,7 @@ provider's own hosts.
   its guest reads its view). The intercept asks the Vault for it per
   request, plans it beside the catalog's rows, and names each value it
   filled in the answer (`{{name}}`); a Nostr key's is a signature the
-  Vault makes. A Vault's calls are not counted in `uses`.
+  Vault makes. A Vault's calls are not counted in usage.
 
 ### An agent's own model
 

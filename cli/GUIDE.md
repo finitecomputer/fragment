@@ -1027,7 +1027,9 @@ A file a message held is under `~/archive/media/`, named in its
 ## Bringing an agent's home
 
 `fragment home` reads an agent's home from wherever it ran: its folder,
-or a zip of it, read in place and never changed. A layout says where
+a zip of it, or a move's stage (`stage:<the stage>`, as its routine names
+it: read where the platform keeps it, never downloaded), each read in
+place and never changed. A layout says where
 that home keeps things: `hermes` (a bare Hermes home, the default), or a
 layout file a platform's import skill carries.
 
@@ -1037,6 +1039,7 @@ fragment home survey stage.zip --layout ./layouts/x.json       # a zip, read thr
 fragment home extract stage.zip agent/SOUL.md skills/ --to ~/import   # files and folders, copied out as they are
 fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9   # its own files, into a fragment of files
 fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9 --plan   # only what it would bring
+fragment home files stage:o1.p1.1 --layout ./layouts/x.json --into old-files--k3x9 --store juniper-storage--b2c3 --notes ~/old-agent/home   # and the rest, kept in storage
 ```
 
 The survey lists the chats' database (`fragment session import` brings
@@ -1057,6 +1060,24 @@ more as a blob, and writes `left-behind.md` beside them: every file or
 folder left out, its size, and why. A fragment with no `fragment.json`
 gets one whose page is the files view (`fragment deploy` shows it).
 Running it again sends only what is missing.
+
+With `--store`, nothing stays behind: every other file of the home (its
+own self, its brains' files, what the files' pick leaves) is kept whole
+in a members-only storage fragment, as it was in the home, under the
+notes folder's name (`home/` for `--notes ~/old-agent/home`), a file past
+one upload in parts, but a file whose name says it may hold a password
+or key, never read. From a move's stage each large file is
+copied there on the platform, never through your disk. Each folder or
+file kept gets a note under `--notes`, laid out as the home, as
+`fragment offload` leaves one (`<name>.offloaded.md`, a folder's at most
+10,000 files and 1 GB): `fragment offload --back <note>` brings it back,
+checked against the old file's CRC-32. A storage fragment holds at most
+19,984 files: one that fills says what is left; run it again with
+`--store` naming another, and it goes on. Cut off, run it again: it
+keeps only what no note names yet. A file its notes keep counts only as
+the same bytes; a home that differs from them (another copy of it) is
+refused before anything is written: keep it beside, with `--notes`
+naming a new folder.
 
 ## Moving files off a disk
 
@@ -1250,7 +1271,7 @@ fragment export [--out FILE]             fragment channel <name> [<channel>] [--
 fragment session import <path> [--kind K] [--layout L]   # an agent's past conversations, into your Session Archive
 fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
 fragment home extract <source> <path>... --to <dir> [--layout L]
-fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files
+fragment home files <source> --into <name> [--plan] [--layout L] [--store <name> --notes <dir>]   # its files, into a fragment of files (and the rest, in storage)
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>

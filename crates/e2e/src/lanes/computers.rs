@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 use super::jobs::{events, records};
 use super::ledger::{charged, entries, quiet, usage};
 use crate::api::{Api, Call, Socket};
-use super::credentials::{grant_checks, model_checks, placeholder, swap_checks, vault_checks, Swapping, GRANT_CHECKS, MODEL_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
+use super::credentials::{grant_checks, model_checks, placeholder, swap_checks, uses_checks, vault_checks, Swapping, GRANT_CHECKS, MODEL_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
@@ -135,7 +135,7 @@ struct Runs {
 }
 
 fn runs(s: &Suite, api: &Api, owner: &crate::Keys, owner_id: &str, id: &str) -> Runs {
-    let uses = api.signed(owner, "GET", &format!("/api/computers/{id}/uses"), None).ok().and_then(|r| r.body["uses"].as_array().map(|l| l.iter().filter_map(|u| u["calls"].as_u64()).sum())).unwrap_or(0);
+    let uses = api.signed(owner, "GET", "/api/ledger/uses", None).ok().and_then(|r| r.body["uses"].as_array().map(|l| l.iter().filter_map(|u| u["calls"].as_u64()).sum())).unwrap_or(0);
     Runs { model_calls: s.ai.chats().len(), model_rows: entries(api, owner_id, "aig:").len(), key_rows: entries(api, owner_id, &format!("key:{id}:")).len(), uses }
 }
 
@@ -150,12 +150,17 @@ pub(super) fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::
     api.unsigned("POST", "/api/test/computer", Some(&body))
 }
 
-/// Pins computer `id`'s uses to this month for the lane (its `clock` lever,
-/// run on from the 15th), so the uses the lane makes and its reads of the
-/// month's are in one month however late in a month it runs: its month.
-pub(super) fn pin_month(api: &Api, id: &str) -> Result<String> {
-    let r = lever_with(api, id, json!({ "op": "clock", "offsetMs": super::ledger::mid_month_offset_ms() }))?;
+/// Pins computer `id` and its owner's ledger to this month for the lane
+/// (their `clock` levers, run on from the 15th), so the uses the lane
+/// makes, which its owner's ledger counts, its reads of the month's, and
+/// its key hours, which the computer counts, are in one month however late
+/// in a month it runs: its month.
+pub(super) fn pin_month(api: &Api, id: &str, owner_id: &str) -> Result<String> {
+    let offset = super::ledger::mid_month_offset_ms();
+    let r = lever_with(api, id, json!({ "op": "clock", "offsetMs": offset }))?;
     anyhow::ensure!(r.status == 200, "the computer's clock moves: {r}");
+    let l = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "clock", "offsetMs": offset })))?;
+    anyhow::ensure!(l.status == 200, "its owner's ledger's clock moves: {l}");
     Ok(r.body["month"].as_str().unwrap_or_default().to_string())
 }
 
@@ -329,11 +334,15 @@ fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
 /// The bound checks (r4, r6: a sick container after a wake, and a sleep
 /// that never ended; #362: a start from a snapshot that came up dead), each
 /// skipped off the stub and the fakes.
-const BOUND_CHECKS: [&str; 4] = [
+const BOUND_CHECKS: [&str; 8] = [
     "a start that waits for its guest, as one from a snapshot does, is up once its guest reads its view",
     "one whose guest never reads it came up dead: the same wake starts it again from its save (#362)",
     "a sleep whose backups never answer (a sick container's) fails at their bound, and keeps its container, saying why",
     "its backups answering again, its owner's sleep saves it, and it sleeps",
+    "a sleep whose snapshot takes 45 s (a big disk's first, which 30 s cut) waits for it and keeps it, its container gone",
+    "the wake after it starts once, nothing failed",
+    "a wake during a slow stop starts it once the stop ends, by its alarm: its owner's sleep never waits for that start",
+    "a snapshot that outruns its bound holds its container past the sleep: the wake after it waits for it, no start failed, and comes up",
 ];
 
 /// A start that waits for its guest, as a start from a snapshot does (local
@@ -341,8 +350,11 @@ const BOUND_CHECKS: [&str; 4] = [
 /// the save wait so, and with `freeze` stops its guest so it never reads its
 /// view), and a sleep whose backups never answer (the lever's
 /// `hang-backups`: the container's `sandbox-shim` never answers, and its
-/// saves' backups are bounded by the lever's few seconds). Starts and ends
-/// asleep.
+/// saves' backups are bounded by the lever's few seconds), and a sleep
+/// whose snapshot is slow (the lever's `slow-snapshot`: one made up that
+/// takes its ms, as a big disk's first does, holding the container
+/// meanwhile as the runtime's does; with `snapshot-bound`, past its bound).
+/// Starts and ends asleep.
 fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
     let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
     let asleep = api.signed(c.owner, "GET", &path(""), None)?.body;
@@ -420,6 +432,115 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
         unhang.status == 200 && r.body["phase"] == "asleep" && r.body.get("why").is_none() && newest["generation"] == generation && newest["id"] != before["id"],
         format!("{r} / {newest}"),
     );
+    // a slow snapshot: its sleep waits it out, keeps it as its save's cache,
+    // and its container is gone by the answer, so the next start is clean
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let g = woke.body["generation"].as_u64().unwrap_or(0);
+    std::thread::sleep(QUEUE_DRAIN);
+    let slow = Duration::from_secs(45);
+    let lever_set = lever_with(api, c.id, json!({ "op": "slow-snapshot", "ms": slow.as_millis() as u64 }))?;
+    let t0 = std::time::Instant::now();
+    // its answer comes once the snapshot ends: longer than a request's own wait
+    let slept = api.patient(slow * 3).signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let took = t0.elapsed();
+    let kept = lever(api, c.id, "saves")?;
+    let snapshot = &kept.body["snapshot"];
+    s.ok(
+        BOUND_CHECKS[4],
+        woke.body["phase"] == "awake"
+            && lever_set.status == 200
+            && slept.body["phase"] == "asleep"
+            && took >= slow
+            && snapshot["id"].as_str().is_some_and(|id| id.starts_with("lever-") && id.ends_with(&format!("-{g}")))
+            && snapshot["save"] == kept.body["saves"][0]["id"]
+            && kept.body["saves"][0]["generation"].as_u64() == Some(g)
+            && kept.body["running"] == false,
+        format!("slept in {took:.1?}; {slept} / {kept}"),
+    );
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let after = lever(api, c.id, "saves")?;
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    s.ok(
+        BOUND_CHECKS[5],
+        woke.body["phase"] == "awake" && woke.body["generation"].as_u64() == Some(g + 1) && after.body["failures"] == 0 && slept.body["phase"] == "asleep",
+        format!("{woke} / {after} / {slept}"),
+    );
+    // a wake as its snapshot runs: its start waits for the stop, made by the
+    // alarm, never by its owner's sleep, which answers within its steps
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let g = woke.body["generation"].as_u64().unwrap_or(0);
+    std::thread::sleep(QUEUE_DRAIN);
+    let slow = Duration::from_secs(20);
+    let set = lever_with(api, c.id, json!({ "op": "slow-snapshot", "ms": slow.as_millis() as u64 }))?;
+    let (slept, during) = std::thread::scope(|scope| {
+        let sleeping = scope.spawn(|| api.patient(slow * 3).signed(c.owner, "POST", &path("/sleep"), Some(&json!({}))));
+        // its hold and save take a few seconds: this lands as it snapshots
+        std::thread::sleep(slow / 2);
+        let during = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})));
+        (sleeping.join().expect("the sleep's request"), during)
+    });
+    let (slept, during) = (slept?, during?);
+    let up = s.eventually(WAKE, || phase(api, c.owner, c.id) == "awake");
+    let after = api.signed(c.owner, "GET", &path(""), None)?;
+    s.ok(
+        BOUND_CHECKS[6],
+        woke.body["phase"] == "awake"
+            && set.status == 200
+            && during.status == 200
+            && slept.status == 200
+            && slept.body["phase"] != "awake"
+            && up
+            && after.body["generation"].as_u64() == Some(g + 1),
+        format!("{slept} / {during} / {after}"),
+    );
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    anyhow::ensure!(slept.body["phase"] == "asleep", "it sleeps again: {slept}");
+    // a snapshot that outruns its bound (a slow save left it little): the
+    // runtime's goes on, holding the container past the sleep's destroy, and
+    // the wake after it waits for that container, each start it holds up no
+    // failure, where three strikes said "won't wake" before
+    let g = slept.body["generation"].as_u64().unwrap_or(0);
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    std::thread::sleep(QUEUE_DRAIN);
+    let (bound, hold) = (Duration::from_secs(10), Duration::from_secs(120));
+    let set = [
+        lever_with(api, c.id, json!({ "op": "snapshot-bound", "ms": bound.as_millis() as u64 }))?,
+        lever_with(api, c.id, json!({ "op": "slow-snapshot", "ms": hold.as_millis() as u64 }))?,
+    ];
+    let log = |event: &str| {
+        let text = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
+        text.lines().filter(|l| l.contains(c.id) && l.contains(&format!("\"event\":\"{event}\""))).count()
+    };
+    let (failed_before, held_before, ready_before) = (log("start_failed"), log("start_blocked"), log("ready"));
+    let t0 = std::time::Instant::now();
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let outlived = lever(api, c.id, "saves")?;
+    let answered = api.patient(hold * 2).signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let up = s.eventually(WAKE, || phase(api, c.owner, c.id) == "awake");
+    let took = t0.elapsed();
+    let after = api.signed(c.owner, "GET", &path(""), None)?;
+    let (failed, held, ready) = (log("start_failed") - failed_before, log("start_blocked") - held_before, log("ready") - ready_before);
+    s.ok(
+        BOUND_CHECKS[7],
+        woke.body["phase"] == "awake"
+            && set.iter().all(|r| r.status == 200)
+            && slept.body["phase"] == "asleep"
+            && outlived.body["running"] == true
+            && answered.status == 200
+            && notice(&answered.body, "wont_wake").is_null()
+            && up
+            && took >= hold
+            && failed == 0
+            && held >= 1
+            && ready == 1
+            && after.body["generation"].as_u64().is_some_and(|n| n > g + 2),
+        format!("up in {took:.1?}, {held} starts held up, {failed} failed, {ready} came up; {slept} / {outlived} / {answered} / {after}"),
+    );
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    anyhow::ensure!(slept.body["phase"] == "asleep", "it sleeps again: {slept}");
     Ok(())
 }
 
@@ -1939,7 +2060,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
-    let month = pin_month(api, &id)?;
+    let month = pin_month(api, &id, &api.identity(&owner)?)?;
     // The stub's scripted runtime (images/stub) answers its commands ("tool
     // please", "slow…", "fetch …", "think …") and echoes the rest; the
     // deployment's own image (our Hermes) answers as its real model does.
@@ -2200,6 +2321,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
         replies_so_far += grant_checks(s, api, &swapping, &fetched)?;
     }
+    // its uses from before the move, owed to its owner's ledger (M16)
+    uses_checks(s, api, &owner, &id, &agent_name, &month)?;
 
     // the model intercept: the agent's call is the platform's model route, its owner paying
     if scripted {
@@ -2380,7 +2503,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let theirs = placeholder(s, &id, &maple_name, "perplexity");
         let said = fetched(s, 24, &format!("fetch http://api.perplexity.ai/search with {theirs}"))?;
         replies_so_far += 1;
-        let uses = || api.signed(&owner, "GET", &format!("/api/computers/{id}/uses"), None).map(|r| r.body).unwrap_or(Value::Null);
+        let uses = || api.signed(&owner, "GET", "/api/ledger/uses", None).map(|r| r.body).unwrap_or(Value::Null);
         let maples = |u: &Value| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == "perplexity" && x["agent"] == maple_name.as_str() && x["calls"] == 1));
         let counted = s.eventually(Duration::from_secs(20), || maples(&uses()));
         s.ok("another agent's placeholder on the same computer is that agent's: its call is counted as the second agent's", said.starts_with("fetched 200") && counted, json!({ "said": said, "uses": uses() }));
