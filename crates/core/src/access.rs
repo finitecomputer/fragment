@@ -374,6 +374,7 @@ mod tests {
             kind: Some(if owner.is_some() { IdentityKind::Agent } else { IdentityKind::Person }),
             owner: owner.map(str::to_string),
             email: None,
+            door: None,
         };
         let alone = vec![m("npub1paul", Owner, None), m("npub1bea", Editor, None)];
         assert!(!talks_to_owners_agent(Chat, &alone), "no agent in it: nothing to warn of");

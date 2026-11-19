@@ -8,6 +8,8 @@
 // and sees only that. Every value reaches the page as text, never as
 // markup.
 
+import { troubleWhat } from "./admin-glance.js";
+
 const $ = (id) => document.getElementById(id);
 const status = $("status");
 
@@ -208,13 +210,21 @@ async function trials() {
 // deployment's logs (`GET /api/admin/glance`). Read afresh each minute
 // while it is shown, never cached (Paul, 2026-11-04).
 const GLANCE_EVERY_MS = 60_000;
-const TROUBLE = { wont_wake: "won't wake", saves_failing: "a save failed", disk_filling: "disk nearly full" };
 let glanceTimer = null;
 
 function tile(label, big, small) {
   const t = el("div", undefined, "tile");
   t.append(el("div", label, "label"), el("div", String(big), "big"), el("div", small, "small"));
   return t;
+}
+
+// a trouble's kind, and under it, small, why a save failed, when read
+function troubleCell(t) {
+  const { what, why } = troubleWhat(t, when);
+  if (!why) return what;
+  const cell = el("div", what);
+  cell.append(el("div", why, "quiet why"));
+  return cell;
 }
 
 // a person in the glance opens their page, as the People tab does
@@ -239,10 +249,10 @@ async function glance() {
     tile("Signed in, last 24 hours", v.signedIn.day, `${v.signedIn.week} in the last 7 days`),
   );
   $("glance-logs").textContent =
-    logs.state === "notConfigured" ? "Computers and fragments come from the deployment's logs, which aren't configured here (observability_read)." : logs.state === "failed" ? `The logs couldn't be read: ${logs.why}` : "";
+    logs.state === "notConfigured" ? "Computers and fragments come from the deployment's logs, which aren't configured here (observability_read)." : logs.state === "failed" ? `The logs couldn't be read: ${logs.why}` : logs.whyUnread ? `Why saves failed couldn't be read: ${logs.whyUnread}` : "";
   const trouble = read ? logs.trouble : [];
   $("trouble-head").hidden = $("trouble").hidden = trouble.length === 0;
-  $("trouble-rows").replaceChildren(...trouble.map((t) => row([t.email || t.npub || "no one's", el("code", t.computer), TROUBLE[t.kind] || t.kind, String(t.lines)], t.npub ? openFromGlance(t.npub) : undefined)));
+  $("trouble-rows").replaceChildren(...trouble.map((t) => row([t.email || t.npub || "no one's", el("code", t.computer), troubleCell(t), String(t.lines)], t.npub ? openFromGlance(t.npub) : undefined)));
   const up = (p) => (p.computerUp == null ? "–" : p.computerUp ? "yes" : "not yet");
   $("new-rows").replaceChildren(...v.newPeople.map((p) => row([p.email || p.npub, when(p.joinedAt), seatText(p.seat) || "none", p.agentAt ? when(p.agentAt) : "none", up(p)], openFromGlance(p.npub))));
   $("glance-at").textContent = `Updated ${new Date(v.at).toLocaleTimeString()}; again each minute.`;
