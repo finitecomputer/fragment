@@ -1147,3 +1147,19 @@ unfinished design, not debt.
   the snapshot is in the format it wrote.
 - **Delete when:** no computer can be pinned to an image whose bridge
   predates the log.
+
+## A bridge finds an agent's hosted doors in its fragment's event log
+
+- **Shortcut:** a relayed record carried by a connector's own key is its
+  owner's only in a chat the agent fragment's `door.hosted` events name
+  as that door (images/bridge/src/driver.rs `hosted_door`). The binding
+  itself is the connector's `door_actor`, which only its owner reads, so
+  the bridge reads the copy written to the agent's `events` as its owner
+  binds it.
+- **Risk:** `events` keeps its newest `AUDIT_KEPT`; past that a door
+  bound long ago is not found, and its owner's words through it are read
+  as the connector's (a turn asked by its key, not refused). Binding the
+  door again writes it anew.
+- **Delete when:** an agent reads which connectors are its doors from
+  the binding itself (a view of `door_actor` its agent may read); then
+  `hosted_door` reads that.

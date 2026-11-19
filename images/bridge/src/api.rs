@@ -410,11 +410,15 @@ pub struct Posted {
     pub seq: Option<u64>,
 }
 
-/// A page of records: `{channel, records, next}`.
+/// A page of records: `{channel, records, next, more}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub records: Vec<Record>,
     pub next: u64,
+    /// Records remain past it: a page its bytes cut short says so (none
+    /// from a platform before `more`).
+    #[serde(default)]
+    pub more: bool,
 }
 
 /// One file of a fragment at main (`GET /api/f/{name}/files`).

@@ -222,6 +222,15 @@ impl World {
         record
     }
 
+    /// An event on `fragment`'s `events`, as the platform writes one: by
+    /// `platform`, its `kind` the event's, its body `{summary, data}`.
+    pub fn event(&mut self, fragment: &str, kind: &str, data: Value) {
+        let at = self.now();
+        let c = self.fragments.get_mut(fragment).expect("a fragment of the fake").channels.entry("events".into()).or_default();
+        let seq = c.records.len() as u64 + 1;
+        c.records.push(json!({ "channel": "events", "seq": seq, "at": at, "principal": "platform", "kind": kind, "body": { "summary": kind, "data": data } }));
+    }
+
     pub fn records(&self, fragment: &str, channel: &str) -> Vec<Value> {
         self.fragments.get(fragment).and_then(|f| f.channels.get(channel)).map(|c| c.records.clone()).unwrap_or_default()
     }
@@ -361,6 +370,27 @@ impl Fake {
             f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
             f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
             w.fragments.insert(name.clone(), f);
+        });
+        name
+    }
+
+    /// A connector `<label>--k3x9` of paul's, bound as agent `agent`'s
+    /// `door` door, as the platform binds one (docs/api.md, "An agent's
+    /// doors"): the agent a viewer of its chat, which takes its posts on
+    /// `chat` and `work`, and its fragment's `events` saying so
+    /// (`door.hosted`). Its own key, which its records relaying paul are
+    /// by, is none of its members: say, `npub1<label>`.
+    pub fn connector(&self, label: &str, agent: &str, door: &str) -> String {
+        let name = format!("{label}--k3x9");
+        self.with(|w| {
+            let at = w.now();
+            let mut f = Frag { kind: "chat".into(), ..Frag::default() };
+            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+            f.members.push(Member { principal: format!("npub1{agent}"), role: "viewer".into(), kind: "agent".into(), added_at: at });
+            f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
+            f.channels.insert("work".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
+            w.fragments.insert(name.clone(), f);
+            w.event(&format!("{agent}--k3x9"), "door.hosted", json!({ "door": door, "actor": name }));
         });
         name
     }

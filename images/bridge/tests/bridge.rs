@@ -700,6 +700,43 @@ async fn catch_up_after_a_restart_without_a_duplicate() {
     bridge.stop().await;
 }
 
+/// Goal (security; valid, invalid and restart): a record relaying the
+/// agent's owner, carried by a key that is none of the chat's members, is
+/// its owner's only in a chat its agent's fragment names as that door
+/// (`door.hosted`, as its owner's binding writes it): a hosted connector's,
+/// read live or caught up by a new life, is asked as its owner. The same
+/// record in a chat that is no door of its (a record an editor scheduled,
+/// fired as the chat's own key before the bridge read it) is asked by its
+/// carrier, never as its owner.
+#[tokio::test]
+async fn a_relayed_record_is_its_owners_only_through_its_door() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let door = fake.connector("tgdoor", "juniper", "telegram");
+    let relayed = |text: &str| json!({ "text": text, "to": ["npub1juniper"], "relayed": { "via": "telegram", "for": "npub1paul", "agent": "juniper--k3x9" } });
+    let asker = |w: &World, chat: &str, said: &Value| w.bodies(chat, "work", "turn.start").into_iter().find(|t| t["turn"] == turn_of("juniper", chat, seq(said))).map(|t| t["asker"].clone());
+    // appended before the bridge reads the chat: a forgery its cursor is behind
+    let forged = fake.say(&chat, "npub1talkk3x9", relayed("forged"));
+    let dir = support::dir("relayed-door");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start(cfg.clone(), support::script());
+    following(&fake, 3).await;
+    let live = fake.say(&door, "npub1tgdoor", relayed("from telegram"));
+    fake.until(WAIT, "both turns", |w| asker(w, &chat, &forged).is_some() && asker(w, &door, &live).is_some()).await;
+    fake.with(|w| {
+        assert_eq!(asker(w, &chat, &forged), Some(json!("npub1talkk3x9")), "the chat's own key: its own message, never its owner's");
+        assert_eq!(asker(w, &door, &live), Some(json!("npub1paul")), "its door's: its owner's");
+    });
+    // a new life, one more said through the door meanwhile
+    bridge.stop().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let later = fake.say(&door, "npub1tgdoor", relayed("while it slept"));
+    let bridge = support::start(cfg, support::script());
+    fake.until(WAIT, "its turn", |w| asker(w, &door, &later).is_some()).await;
+    fake.with(|w| assert_eq!(asker(w, &door, &later), Some(json!("npub1paul")), "a new life reads its door again"));
+    bridge.stop().await;
+}
+
 /// Goal (lesson 5): when the API drops every socket (a deploy) or goes
 /// down a while, the bridge comes back on its own and answers what was
 /// said meanwhile, once.
