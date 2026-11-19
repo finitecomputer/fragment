@@ -6,12 +6,17 @@
 //! `GET /api/computer`'s, in the platform's order. Without the setting it
 //! runs every agent the platform lists (the stub).
 //!
-//! The file is `{"agents": ["juniper--k3x9", …]}`, the host's, written whole
-//! and renamed into place, so a read never sees half of one. A missing
-//! file is no agent ready. One that does not read keeps the set before it
-//! (a host's bug must not stop the agents it had made ready), and says so.
+//! The file is `{"agents": ["juniper--k3x9", …], "runtimes": {"rowan--k3x9":
+//! "claude"}}`, the host's, written whole and renamed into place, so a read
+//! never sees half of one. Each agent is ready for the runtime it was made
+//! ready for: the one `runtimes` names, else the default (Hermes'). An
+//! agent whose `agent.json` names another runtime now is not run until the
+//! file says it is ready for that one (FIN-542: a Claude agent's files are
+//! restored before its first turn). A missing file is no agent ready. One
+//! that does not read keeps the set before it (a host's bug must not stop
+//! the agents it had made ready), and says so.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
@@ -25,17 +30,36 @@ use crate::runtime::Agent;
 pub const READY_FILE_MAX_BYTES: usize = 16 * 1024;
 /// A name in it is at most this long (a fragment's `<label>--<suffix>`).
 pub const READY_NAME_MAX_BYTES: usize = 128;
+/// A runtime's name in it is at most this long.
+pub const READY_RUNTIME_MAX_BYTES: usize = 32;
 
-const _: () = assert!(limits::AGENTS_MAX * (READY_NAME_MAX_BYTES + 4) < READY_FILE_MAX_BYTES);
+const _: () = assert!(limits::AGENTS_MAX * (2 * READY_NAME_MAX_BYTES + READY_RUNTIME_MAX_BYTES + 12) < READY_FILE_MAX_BYTES);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
     agents: Vec<String>,
+    #[serde(default)]
+    runtimes: BTreeMap<String, String>,
+}
+
+/// The agents a ready file names, and the runtime each is ready for.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Prepared {
+    pub agents: BTreeSet<String>,
+    runtimes: BTreeMap<String, String>,
+}
+
+impl Prepared {
+    /// Whether `a` is ready for the runtime its `agent.json` names now.
+    pub fn runs(&self, a: &Agent) -> bool {
+        let for_runtime = self.runtimes.get(&a.fragment).map_or(crate::runtime::DEFAULT, String::as_str);
+        self.agents.contains(&a.fragment) && for_runtime == a.runtime.as_deref().unwrap_or(crate::runtime::DEFAULT)
+    }
 }
 
 /// The agents a ready file names.
-pub fn parse(bytes: &[u8]) -> Result<BTreeSet<String>, String> {
+pub fn parse(bytes: &[u8]) -> Result<Prepared, String> {
     if bytes.len() > READY_FILE_MAX_BYTES {
         return Err(format!("{} bytes, past {READY_FILE_MAX_BYTES}", bytes.len()));
     }
@@ -46,12 +70,17 @@ pub fn parse(bytes: &[u8]) -> Result<BTreeSet<String>, String> {
     if let Some(bad) = f.agents.iter().find(|a| a.is_empty() || a.len() > READY_NAME_MAX_BYTES || a.chars().any(char::is_whitespace)) {
         return Err(format!("{bad:?} is no agent fragment's name"));
     }
-    Ok(f.agents.into_iter().collect())
+    let agents: BTreeSet<String> = f.agents.into_iter().collect();
+    if let Some((a, r)) = f.runtimes.iter().find(|(a, r)| !agents.contains(*a) || r.is_empty() || r.len() > READY_RUNTIME_MAX_BYTES || r.chars().any(char::is_whitespace)) {
+        return Err(format!("{a:?} is ready for {r:?}: no agent it names, or no runtime's name"));
+    }
+    Ok(Prepared { agents, runtimes: f.runtimes })
 }
 
-/// The platform's agents that are ready, in the platform's order.
-pub fn gate(agents: Vec<Agent>, ready: &BTreeSet<String>) -> Vec<Agent> {
-    agents.into_iter().filter(|a| ready.contains(&a.fragment)).collect()
+/// The platform's agents that are ready for their runtimes, in the
+/// platform's order.
+pub fn gate(agents: Vec<Agent>, ready: &Prepared) -> Vec<Agent> {
+    agents.into_iter().filter(|a| ready.runs(a)).collect()
 }
 
 /// What tells one version of the file from the next: a rename makes a new
@@ -63,15 +92,15 @@ pub struct Ready {
     path: PathBuf,
     seen: Signature,
     read_once: bool,
-    agents: BTreeSet<String>,
+    agents: Prepared,
 }
 
 impl Ready {
     pub fn new(path: PathBuf) -> Ready {
-        Ready { path, seen: None, read_once: false, agents: BTreeSet::new() }
+        Ready { path, seen: None, read_once: false, agents: Prepared::default() }
     }
 
-    pub fn agents(&self) -> &BTreeSet<String> {
+    pub fn agents(&self) -> &Prepared {
         &self.agents
     }
 
@@ -90,11 +119,11 @@ impl Ready {
         self.read_once = true;
         self.seen = sig;
         let next = match sig {
-            None => BTreeSet::new(),
+            None => Prepared::default(),
             Some(_) => match std::fs::read(&self.path).map_err(|e| e.to_string()).and_then(|b| parse(&b)) {
                 Ok(set) => set,
                 Err(e) => {
-                    crate::ev!("agents_file.unread", { "path": self.path.display().to_string(), "error": e, "kept": self.agents.len() });
+                    crate::ev!("agents_file.unread", { "path": self.path.display().to_string(), "error": e, "kept": self.agents.agents.len() });
                     return false;
                 }
             },
@@ -102,7 +131,7 @@ impl Ready {
         if next == self.agents {
             return false;
         }
-        crate::ev!("agents_file.read", { "ready": next.iter().collect::<Vec<_>>() });
+        crate::ev!("agents_file.read", { "ready": next.agents.iter().collect::<Vec<_>>(), "runtimes": next.runtimes });
         self.agents = next;
         true
     }
@@ -124,7 +153,27 @@ mod tests {
         let ready = parse(br#"{"agents": ["maple--k3x9", "juniper--k3x9", "gone--k3x9"]}"#).unwrap();
         let got = gate(vec![agent("juniper"), agent("oak"), agent("maple")], &ready);
         assert_eq!(got.iter().map(|a| a.fragment.as_str()).collect::<Vec<_>>(), ["juniper--k3x9", "maple--k3x9"]);
-        assert!(gate(vec![agent("juniper")], &BTreeSet::new()).is_empty(), "nothing ready, nothing run");
+        assert!(gate(vec![agent("juniper")], &Prepared::default()).is_empty(), "nothing ready, nothing run");
+    }
+
+    /// Goal (FIN-542): an agent is run only on the runtime it was made ready
+    /// for. Invalid: switched to Claude, an entry made ready for Hermes does
+    /// not run it on Claude (its files may not be restored yet), nor one made
+    /// ready for Claude on Hermes. Valid: once the file says Claude, it does.
+    #[test]
+    fn an_agent_runs_only_on_the_runtime_it_was_made_ready_for() {
+        let on = |label: &str, runtime: Option<&str>| Agent { runtime: runtime.map(str::to_string), ..agent(label) };
+        let names = |got: Vec<Agent>| got.into_iter().map(|a| a.fragment).collect::<Vec<_>>();
+        let for_hermes = parse(br#"{"agents": ["juniper--k3x9"]}"#).unwrap();
+        assert_eq!(names(gate(vec![on("juniper", None)], &for_hermes)), ["juniper--k3x9"]);
+        assert_eq!(names(gate(vec![on("juniper", Some("hermes"))], &for_hermes)), ["juniper--k3x9"]);
+        assert!(gate(vec![on("juniper", Some("claude"))], &for_hermes).is_empty(), "switched to Claude: not ready for it yet");
+        let for_claude = parse(br#"{"agents": ["juniper--k3x9"], "runtimes": {"juniper--k3x9": "claude"}}"#).unwrap();
+        assert_eq!(names(gate(vec![on("juniper", Some("claude"))], &for_claude)), ["juniper--k3x9"]);
+        assert!(gate(vec![on("juniper", None)], &for_claude).is_empty(), "back on Hermes: its profile first");
+        for bad in [&br#"{"agents": [], "runtimes": {"juniper--k3x9": "claude"}}"#[..], br#"{"agents": ["juniper--k3x9"], "runtimes": {"juniper--k3x9": ""}}"#, br#"{"agents": ["juniper--k3x9"], "runtimes": {"juniper--k3x9": "a b"}}"#] {
+            assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
     }
 
     /// Invalid: past its bounds, not the shape, or names that are no
@@ -156,22 +205,25 @@ mod tests {
             std::fs::rename(&tmp, &path).unwrap();
         };
         let mut r = Ready::new(path.clone());
-        assert!(!r.refresh() && r.agents().is_empty(), "no file: no agent ready");
+        assert!(!r.refresh() && r.agents().agents.is_empty(), "no file: no agent ready");
         write(r#"{"agents": ["juniper--k3x9"]}"#);
         assert!(r.refresh());
-        assert_eq!(r.agents().iter().collect::<Vec<_>>(), ["juniper--k3x9"]);
+        assert_eq!(r.agents().agents.iter().collect::<Vec<_>>(), ["juniper--k3x9"]);
         assert!(!r.refresh(), "unchanged: not read again");
         write(r#"{"agents": ["juniper--k3x9"]}"#);
         assert!(!r.refresh(), "the same agents again: no change");
         write(r#"{"agents": ["juniper--k3x9", "maple--k3x9"]}"#);
-        assert!(r.refresh() && r.agents().len() == 2);
+        assert!(r.refresh() && r.agents().agents.len() == 2);
         write("{half");
-        assert!(!r.refresh() && r.agents().len() == 2, "a file that does not read keeps the set before it");
+        assert!(!r.refresh() && r.agents().agents.len() == 2, "a file that does not read keeps the set before it");
         let mut restarted = Ready::new(path.clone());
         write(r#"{"agents": ["maple--k3x9"]}"#);
-        assert!(restarted.refresh() && restarted.agents().iter().collect::<Vec<_>>() == ["maple--k3x9"]);
+        assert!(restarted.refresh() && restarted.agents().agents.iter().collect::<Vec<_>>() == ["maple--k3x9"]);
+        // the same agents, made ready for another runtime: a change
+        write(r#"{"agents": ["maple--k3x9"], "runtimes": {"maple--k3x9": "claude"}}"#);
+        assert!(restarted.refresh(), "made ready for Claude now");
         std::fs::remove_file(&path).unwrap();
-        assert!(restarted.refresh() && restarted.agents().is_empty(), "removed: no agent ready");
+        assert!(restarted.refresh() && restarted.agents().agents.is_empty(), "removed: no agent ready");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

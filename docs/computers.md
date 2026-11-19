@@ -759,8 +759,9 @@ What our Hermes image guarantees beyond the contract:
   shared with the agent's owner it syncs with the `fragment` CLI, as its
   owner would, at the lower of their roles (cli/GUIDE.md, Sync in depth). An agent whose `agent.json` names another runtime (Claude) has no
   profile, desktop or route: the boot reads `runtime` as the bridge
-  does (`with_runtimes`), and the ready file names it at once, for the
-  bridge to run on its runtime. A start reads every agent's before it
+  does (`with_runtimes`), and the ready file names it, for the bridge to
+  run on its runtime, once its own files are restored for that runtime
+  (below, "Claude Code"). A start reads every agent's before it
   writes or retires a profile, asking again until each answers, so a
   failed read never retires a Hermes agent's profile. One switched to another runtime while
   the computer runs loses its desktop within 10 s, its profile retired at
@@ -1014,7 +1015,11 @@ gates it.
   beside its files, so one lost alone deletes nothing, and a file deleted
   from its work directory comes back rather than leaving the fragment. A
   computer whose `/data` is lost or new, or an agent newly assigned to
-  it, has all of it back before the bridge runs the agent.
+  it or switched to Claude, has all of it back before the bridge runs the
+  agent: the ready file names an agent with the runtime it was made ready
+  for, and a Claude agent only once a sync restored its files (a failed
+  one is tried again at each read of the computer's agents, every 3 s);
+  the bridge runs an agent only on the runtime its entry names.
 
 ## Billing
 

@@ -508,7 +508,7 @@ fn screen_start(agent: Option<&str>) -> ! {
     let Some(agent) = agent else { fail("screen-start <agent fragment>") };
     let ready = std::fs::read(format!("{RUN}/{READY_FILE}")).map_err(|e| e.to_string()).and_then(|b| fragment_bridge::ready::parse(&b));
     match ready {
-        Ok(set) if set.contains(agent) => {}
+        Ok(ready) if ready.agents.contains(agent) => {}
         Ok(_) => fail(&format!("no desktop to start: {agent} is no agent of this computer's")),
         Err(e) => fail(&format!("no desktop to start: the ready file does not read: {e}")),
     }
@@ -719,21 +719,39 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
 
 /// One sync of an agent's own files with its agent fragment, where its
 /// runtime keeps them (agents.rs, `places`): said when it did something.
-async fn sync_own(api: &Api, a: &Agent, home: &Path, own: &(dyn Fn(&Path) + Sync)) -> sync::Done {
+/// None: it failed, and said so.
+async fn sync_own(api: &Api, a: &Agent, home: &Path, own: &(dyn Fn(&Path) + Sync)) -> Option<sync::Done> {
     let places = agents::places(a, home);
     if places.is_empty() {
-        return sync::Done::default();
+        return Some(sync::Done::default());
     }
     match sync::round(api, a, &places, own).await {
         Ok(d) => {
             if d != sync::Done::default() {
                 ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted });
             }
-            d
+            Some(d)
         }
         Err(e) => {
             ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() });
-            sync::Done::default()
+            None
+        }
+    }
+}
+
+/// Each agent of another runtime than Hermes' whose own files are not yet
+/// restored for the runtime it names now: synced, and restored once a sync
+/// succeeds (FIN-542). One that failed stays unrestored, out of the ready
+/// file (agents.rs, `ready_file`), and is tried again at the next read of
+/// the computer's agents. An agent that left, or names another runtime,
+/// is forgotten: back, it is restored again.
+async fn restore(api: &Api, agents: &[Agent], home: &Path, own: &(dyn Fn(&Path) + Sync), restored: &mut agents::Restored) {
+    restored.retain(|(f, r)| agents.iter().any(|a| &a.fragment == f && agents::runtime_of(a) == r));
+    let todo: Vec<&Agent> = agents.iter().filter(|a| !agents::of_hermes(a) && !restored.contains(&agents::restored_key(a))).collect();
+    let synced = futures_util::future::join_all(todo.iter().map(|a| sync_own(api, a, home, own))).await;
+    for (a, d) in todo.into_iter().zip(synced) {
+        if d.is_some() {
+            restored.insert(agents::restored_key(a));
         }
     }
 }
@@ -913,9 +931,11 @@ fn spawn_bridge(card_timeout_s: u64) -> Option<Child> {
 /// The bridge's screens file (each of Hermes' agents' own desktop), then its
 /// ready file (every agent it may run: agents.rs, `ready_file`): a screen is
 /// named before its agent runs, and goes with it.
-fn write_ready(agents: &[Agent], home: &Path) {
+fn write_ready(agents: &[Agent], restored: &agents::Restored, home: &Path) -> String {
     write_whole(Path::new(&format!("{RUN}/{SCREENS_FILE}")), &desktop::screens_file(&agents::hermes(agents), home), None);
-    write_whole(Path::new(&format!("{RUN}/{READY_FILE}")), &agents::ready_file(agents), None);
+    let ready = agents::ready_file(agents, restored);
+    write_whole(Path::new(&format!("{RUN}/{READY_FILE}")), &ready, None);
+    ready
 }
 
 /// The chat each agent's route names (bots.rs, `profile_routes`): a chat
@@ -1029,7 +1049,7 @@ async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, Strin
 /// names `now`, every agent the bridge may run: one that left leaves it, so
 /// the bridge stops at once.
 #[allow(clippy::too_many_arguments)]
-async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
+async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], restored: &agents::Restored, home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) -> String {
     let t = Instant::now();
     let names = |l: &[Agent]| l.iter().map(|a| a.fragment.clone()).collect::<Vec<_>>();
     ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "credentials": names(&change.credentials), "agents": now.len() });
@@ -1055,8 +1075,9 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
             Err(e) => ev!("agents.serve_unasked", { "error": e, "ms": asked.elapsed().as_millis() as u64 }),
         }
     }
-    write_ready(now, home);
+    let ready = write_ready(now, restored, home);
     ev!("agents.ready", { "agents": now.len(), "ms": t.elapsed().as_millis() as u64 });
+    ready
 }
 
 /// The managed skills' directory (skills.rs), made if it is missing: the
@@ -1500,10 +1521,11 @@ async fn boot_main() {
         Err(_) => ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
     }
     // the other runtimes' agents' own files, as each Hermes agent's came
-    // with its profile: back before the bridge runs their first turn
+    // with its profile: back before the ready file names them
     let own = move |p: &Path| chown(p, ids);
-    futures_util::future::join_all(agents.iter().filter(|a| !agents::of_hermes(a)).map(|a| sync_own(&api, a, &home, &own))).await;
-    write_ready(&agents, &home);
+    let mut restored = agents::Restored::new();
+    restore(&api, &agents, &home, &own, &mut restored).await;
+    let mut ready_now = write_ready(&agents, &restored, &home);
     let mut bridge = spawn_bridge(card_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
     // its answer to the platform's holds, for its whole life
@@ -1627,13 +1649,12 @@ async fn boot_main() {
                         }
                         let (read, _) = with_runtimes(&api, c.agents, &runtime_names, again).await;
                         let change = agents::diff(&agents::hermes(&agents), &agents::hermes(&read));
-                        // another runtime's agent new here, or switched to it:
-                        // its own files back before the ready file names it
-                        for a in read.iter().filter(|a| !agents::of_hermes(a) && !agents.iter().any(|b| b.fragment == a.fragment && b.runtime == a.runtime)) {
-                            sync_own(&api, a, &home, &own).await;
-                        }
-                        if !change.is_empty() || agents::ready_file(&agents) != agents::ready_file(&read) {
-                            follow_agents(&api, &change, &read, &home, ids, &route, &credential_env, &team).await;
+                        // another runtime's agent new here, switched to it, or
+                        // whose last try failed: its own files back before
+                        // the ready file names it for that runtime
+                        restore(&api, &read, &home, &own, &mut restored).await;
+                        if !change.is_empty() || agents::ready_file(&read, &restored) != ready_now {
+                            ready_now = follow_agents(&api, &change, &read, &restored, &home, ids, &route, &credential_env, &team).await;
                         }
                         agents = read;
                     }
@@ -1662,7 +1683,7 @@ async fn boot_main() {
                 last_sync = Instant::now();
                 for a in &agents {
                     // a Hermes agent's job may have changed: its role with it
-                    if sync_own(&api, a, &home, &own).await.pulled > 0 && agents::of_hermes(a) {
+                    if sync_own(&api, a, &home, &own).await.is_some_and(|d| d.pulled > 0) && agents::of_hermes(a) {
                         write_identity(a, &hermes::profile_dir(&home, &a.fragment), ids, &read_face(&api, a).await);
                     }
                 }

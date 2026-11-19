@@ -8,7 +8,7 @@
 //! the ready file names it (the bridge's `ready.rs`). So no turn of
 //! another agent is ever cut by a change, and none waits for one.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use fragment_bridge::runtime::relay::wire;
@@ -83,11 +83,27 @@ pub fn places(a: &Agent, home: &Path) -> Vec<Place> {
     Place::claude(&work, &claude::memory_dir(&claude::config_dir(home), &work), home).into()
 }
 
+/// The runtime an agent's `agent.json` names, as the bridge reads it.
+pub fn runtime_of(a: &Agent) -> &str {
+    a.runtime.as_deref().unwrap_or(fragment_bridge::runtime::DEFAULT)
+}
+
+/// The agents of runtimes other than Hermes' whose own files were restored
+/// (`places`), each by its fragment and the runtime they were restored for.
+pub type Restored = BTreeSet<(String, String)>;
+
+pub fn restored_key(a: &Agent) -> (String, String) {
+    (a.fragment.clone(), runtime_of(a).to_string())
+}
+
 /// The bridge's ready file (its `ready.rs`): every agent it may run, in the
-/// platform's order: one of Hermes' once its profile is written, any other
-/// as soon as its runtime is read.
-pub fn ready_file(agents: &[Agent]) -> String {
-    json!({ "agents": agents.iter().map(|a| a.fragment.as_str()).collect::<Vec<_>>() }).to_string()
+/// platform's order, each with the runtime it is ready for: one of Hermes'
+/// once its profile is written (the default), any other once its own files
+/// are restored for the runtime it names (`restored`, FIN-542), never before.
+pub fn ready_file(agents: &[Agent], restored: &Restored) -> String {
+    let ready: Vec<&Agent> = agents.iter().filter(|a| of_hermes(a) || restored.contains(&restored_key(a))).collect();
+    let runtimes: BTreeMap<&str, &str> = ready.iter().filter(|a| !of_hermes(a)).map(|a| (a.fragment.as_str(), runtime_of(a))).collect();
+    json!({ "agents": ready.iter().map(|a| a.fragment.as_str()).collect::<Vec<_>>(), "runtimes": runtimes }).to_string()
 }
 
 /// The profiles of `agents` the gateway's answer to `rescan-profiles` does
@@ -132,22 +148,26 @@ mod tests {
     }
 
     /// Goal (FIN-258): Hermes runs an agent naming no runtime or its own,
-    /// and only those have a profile; every agent is in the ready file, so
-    /// the bridge runs a Claude agent at once. Valid: one switched to Claude
-    /// leaves Hermes as a removed agent does, still in the ready file, and
-    /// one switched back is added. Invalid: a runtime no one runs is not
+    /// and only those have a profile; every agent is in the ready file once
+    /// its own files are restored, each for its runtime (FIN-542). Valid:
+    /// one switched to Claude leaves Hermes as a removed agent does, and
+    /// leaves the ready file until its files are restored for Claude; one
+    /// switched back is added. Invalid: a runtime no one runs is not
     /// Hermes'. Replay: the same runtimes again are no change.
     #[test]
     fn hermes_runs_only_the_agents_that_name_it() {
         let named = |label: &str, runtime: Option<&str>| Agent { runtime: runtime.map(str::to_string), ..agent(label) };
         let set = [named("juniper", None), named("maple", Some("hermes")), named("rowan", Some("claude")), named("oak", Some("nobody-runs-this"))];
         assert_eq!(names(&hermes(&set)), vec!["juniper--k3x9", "maple--k3x9"]);
-        assert_eq!(ready_file(&set), r#"{"agents":["juniper--k3x9","maple--k3x9","rowan--k3x9","oak--k3x9"]}"#, "every agent the bridge may run");
+        let restored: Restored = set.iter().filter(|a| !of_hermes(a)).map(restored_key).collect();
+        assert_eq!(ready_file(&set, &restored), r#"{"agents":["juniper--k3x9","maple--k3x9","rowan--k3x9","oak--k3x9"],"runtimes":{"oak--k3x9":"nobody-runs-this","rowan--k3x9":"claude"}}"#, "every agent the bridge may run, on its runtime");
 
         let switched = [named("juniper", Some("claude")), named("maple", Some("hermes"))];
         let c = diff(&hermes(&set[..2]), &hermes(&switched));
         assert_eq!((names(&c.added), names(&c.removed)), (vec![], vec!["juniper--k3x9"]), "to Claude: its profile goes");
-        assert_eq!(ready_file(&set[..2]), ready_file(&switched), "still run, by the bridge");
+        assert_eq!(ready_file(&switched, &restored), r#"{"agents":["maple--k3x9"],"runtimes":{}}"#, "to Claude: not ready until its files are restored for it");
+        let ready = Restored::from([("juniper--k3x9".to_string(), "claude".to_string())]);
+        assert_eq!(ready_file(&switched, &ready), r#"{"agents":["juniper--k3x9","maple--k3x9"],"runtimes":{"juniper--k3x9":"claude"}}"#, "then ready for Claude");
         let c = diff(&hermes(&switched), &hermes(&set[..2]));
         assert_eq!((names(&c.added), names(&c.removed)), (vec!["juniper--k3x9"], vec![]), "back to Hermes: its profile again");
         assert!(diff(&hermes(&set), &hermes(&set)).is_empty(), "replay");
@@ -212,8 +232,13 @@ mod tests {
 
     #[test]
     fn the_ready_file_names_every_agent_in_order() {
-        assert_eq!(ready_file(&[agent("maple"), agent("juniper")]), r#"{"agents":["maple--k3x9","juniper--k3x9"]}"#);
-        assert_eq!(ready_file(&[]), r#"{"agents":[]}"#);
+        assert_eq!(ready_file(&[agent("maple"), agent("juniper")], &Restored::new()), r#"{"agents":["maple--k3x9","juniper--k3x9"],"runtimes":{}}"#);
+        assert_eq!(ready_file(&[], &Restored::new()), r#"{"agents":[],"runtimes":{}}"#);
+        // what the bridge reads of it: each agent ready for its runtime
+        let rowan = Agent { runtime: Some("claude".into()), ..agent("rowan") };
+        let file = ready_file(&[agent("maple"), rowan.clone()], &Restored::from([restored_key(&rowan)]));
+        let read = fragment_bridge::ready::parse(file.as_bytes()).unwrap();
+        assert!(read.runs(&agent("maple")) && read.runs(&rowan) && !read.runs(&agent("rowan")));
     }
 
     /// The gateway's answer says whether it serves the new profiles; an

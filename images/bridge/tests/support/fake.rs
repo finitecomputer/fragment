@@ -106,6 +106,9 @@ pub struct World {
     pub fail_lists: u32,
     /// The next this many reads of any agent's `agent.json` answer 503.
     pub fail_agent_json: u32,
+    /// The next this many listings of a fragment's files (`GET files`),
+    /// by fragment, answer 503.
+    pub fail_files: BTreeMap<String, u32>,
     /// The next this many reads of a page of 100 records (a note's, or a
     /// late card answer's) answer 503, as a deploying platform does.
     pub fail_history_reads: u32,
@@ -910,6 +913,10 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             (Some((ty, bytes)), _) => net::respond(StatusCode::OK, ty, bytes.clone()),
             (None, _) => refuse(StatusCode::NOT_FOUND, "no such blob"),
         },
+        (Method::GET, ["files"]) if w.fail_files.get(&fragment).is_some_and(|n| *n > 0) => {
+            *w.fail_files.get_mut(&fragment).expect("counted") -= 1;
+            refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying")
+        }
         (Method::GET, ["files"]) => {
             // a file's version moves with its bytes, as a commit's does
             let version = |b: &Bytes| format!("c{}", &fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(b))[..12]);
