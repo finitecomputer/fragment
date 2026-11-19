@@ -29,14 +29,19 @@
 //! Every failure lands on the safe side: a list holding someone the app
 //! never took may pause it too early, and shows no one anything.
 
-use std::collections::BTreeMap;
-
 use fragment_proto::{IdentityKind, Member, Role, Visibility};
 
 /// Who can see or edit an app, by name (an npub, as `Member` shows it),
-/// with what they do to it: `Viewer` sees it, `Editor` edits it (its owner
-/// does).
-pub type Audience = BTreeMap<String, Role>;
+/// each once, in the order counted, with what they do to it: `Viewer` sees
+/// it, `Editor` edits it (its owner does). A list, not a map: it is
+/// bounded by an app's members, and a map's code costs the cell's Wasm
+/// more than a scan of so few.
+pub type Audience = Vec<(String, Role)>;
+
+/// What `person` does to the app, by `audience`, if they are on it.
+pub fn power_of(audience: &Audience, person: &str) -> Option<Role> {
+    audience.iter().find(|(p, _)| p == person).map(|(_, power)| *power)
+}
 
 /// What holding `role` in an app lets a person do to it: see it, edit it
 /// (owning it, too), or nothing (the public floor, no one's by name).
@@ -51,8 +56,10 @@ fn power(role: Role) -> Option<Role> {
 /// `person` on `people` at the most of what they did and `role` lets them.
 fn count(people: &mut Audience, person: &str, role: Role) {
     if let Some(power) = power(role) {
-        let held = people.entry(person.to_string()).or_insert(power);
-        *held = (*held).max(power);
+        match people.iter_mut().find(|(p, _)| p == person) {
+            Some((_, held)) => *held = (*held).max(power),
+            None => people.push((person.to_string(), power)),
+        }
     }
 }
 
@@ -78,22 +85,12 @@ pub fn audience(owner: &str, members: &[Member]) -> Audience {
     people
 }
 
-/// An audience from its pairs, each person at the most they hold: built by
-/// insertion, as a sort would add its own code for each pair's type.
-pub fn audience_of(pairs: impl IntoIterator<Item = (String, Role)>) -> Audience {
-    let mut people = Audience::new();
-    for (person, role) in pairs {
-        count(&mut people, &person, role);
-    }
-    people
-}
-
 /// The first of an app's audience other than its owner. While an app is
 /// a member anywhere and its audience grows by asking no target, its
 /// owner is its only person; an agent fragment, which goes wherever its
 /// person goes (decision 64), would be held so always.
 pub fn others<'a>(owner: &str, audience: &'a Audience) -> Option<&'a str> {
-    audience.keys().map(String::as_str).find(|p| *p != owner)
+    audience.iter().map(|(p, _)| p.as_str()).find(|p| *p != owner)
 }
 
 /// The least role a person must hold in the target, by what they do to
@@ -128,8 +125,8 @@ impl Short {
 /// role in the target (its owner's is `Owner`; no agent of theirs lends
 /// them one). `None`: the rule holds.
 pub fn short(approved: &Audience, app_role: Role, holds: impl Fn(&str) -> Option<Role>) -> Option<Short> {
-    approved.iter().find_map(|(person, &power)| {
-        let held = holds(person);
+    approved.iter().find_map(|(person, power)| {
+        let (power, held) = (*power, holds(person));
         (held < Some(needs(power, app_role))).then(|| Short { person: person.clone(), power, holds: held })
     })
 }
@@ -211,10 +208,10 @@ pub fn grow(approved: &mut Audience, app_role: Role, person: &str, role: Role, h
 /// holds at most `left` in the app (`None`: nothing). The list never grows
 /// this way.
 pub fn shrink(approved: &mut Audience, person: &str, left: Option<Role>) {
-    match (left.and_then(power), approved.get_mut(person)) {
-        (Some(left), Some(held)) => *held = (*held).min(left),
-        (None, Some(_)) => {
-            approved.remove(person);
+    match (left.and_then(power), approved.iter().position(|(p, _)| p == person)) {
+        (Some(left), Some(at)) => approved[at].1 = approved[at].1.min(left),
+        (None, Some(at)) => {
+            approved.remove(at);
         }
         (_, None) => {}
     }
@@ -245,8 +242,15 @@ mod tests {
         Member { app: Some(fragment_proto::MemberApp { name: "board--x".into(), paused: None }), ..member(principal, role, None, Some(OWNER)) }
     }
 
+    /// An audience, in order of name, as `sorted` puts one.
     fn people(of: &[(&str, Role)]) -> Audience {
-        of.iter().map(|(p, r)| (p.to_string(), *r)).collect()
+        sorted(of.iter().map(|(p, r)| (p.to_string(), *r)).collect())
+    }
+
+    /// An audience in order of name, to compare by who is on it.
+    fn sorted(mut a: Audience) -> Audience {
+        a.sort();
+        a
     }
 
     /// A target's members: each person's own role there.
@@ -264,14 +268,14 @@ mod tests {
         assert_eq!(others(OWNER, &alone), None, "its owner's alone");
 
         let members = [person(OWNER, Owner), agent("npub1ownersagent", Editor, OWNER), person(ROBIN, Viewer), agent("npub1robinsagent", Editor, ROBIN), person(SAM, Viewer)];
-        assert_eq!(audience(OWNER, &members), people(&[(OWNER, Editor), (ROBIN, Editor), (SAM, Viewer)]), "an agent counts as its person, at the most of theirs: never as itself");
+        assert_eq!(sorted(audience(OWNER, &members)), people(&[(OWNER, Editor), (ROBIN, Editor), (SAM, Viewer)]), "an agent counts as its person, at the most of theirs: never as itself");
 
         let with_app = [person(OWNER, Owner), app("npub1board", Editor)];
         assert_eq!(audience(OWNER, &with_app), people(&[(OWNER, Editor)]), "an app member adds no one: its own audience is held to these members");
 
         let unknown = [member("npub1what", Viewer, None, None), member("npub1owned", Editor, None, Some(ROBIN))];
-        assert_eq!(audience(OWNER, &unknown), people(&[(OWNER, Editor), ("npub1what", Viewer), ("npub1owned", Editor), (ROBIN, Editor)]), "an unknown kind counts as itself and its owner: the safe side");
-        assert_eq!(others(OWNER, &audience(OWNER, &unknown)), Some("npub1owned"), "anyone else is another");
+        assert_eq!(sorted(audience(OWNER, &unknown)), people(&[(OWNER, Editor), ("npub1what", Viewer), ("npub1owned", Editor), (ROBIN, Editor)]), "an unknown kind counts as itself and its owner: the safe side");
+        assert_eq!(others(OWNER, &audience(OWNER, &unknown)), Some("npub1what"), "anyone else is another: the first counted");
 
         assert_eq!(audience(OWNER, &[person(ROBIN, Public)]), people(&[(OWNER, Editor)]), "the public floor is no one by name");
     }
@@ -341,11 +345,11 @@ mod tests {
         assert_eq!(approved, before, "a refusal records nothing");
 
         assert_eq!(grow(&mut approved, Viewer, ROBIN, Editor, Some(Viewer)), Ok(()), "an app that views: its editors need only be members");
-        assert_eq!(approved[ROBIN], Editor);
+        assert_eq!(power_of(&approved, ROBIN).expect("on the list"), Editor);
         assert_eq!(grow(&mut approved, Editor, SAM, Owner, Some(Editor)), Ok(()), "a new owner edits it");
-        assert_eq!(approved[SAM], Editor);
+        assert_eq!(power_of(&approved, SAM).expect("on the list"), Editor);
         assert_eq!(grow(&mut approved, Editor, "npub1anon", Public, None), Ok(()), "the public floor is no one by name");
-        assert!(!approved.contains_key("npub1anon"));
+        assert_eq!(power_of(&approved, "npub1anon"), None);
     }
 
     /// Goal: a shrinking audience only ever narrows the list. Method:
@@ -354,11 +358,11 @@ mod tests {
     fn a_shrink_never_grows_the_list() {
         let mut approved = people(&[(OWNER, Editor), (ROBIN, Editor), (SAM, Viewer)]);
         shrink(&mut approved, ROBIN, Some(Viewer));
-        assert_eq!(approved[ROBIN], Viewer, "lowered to what is left");
+        assert_eq!(power_of(&approved, ROBIN).expect("on the list"), Viewer, "lowered to what is left");
         shrink(&mut approved, SAM, Some(Owner));
-        assert_eq!(approved[SAM], Viewer, "never raised");
+        assert_eq!(power_of(&approved, SAM).expect("on the list"), Viewer, "never raised");
         shrink(&mut approved, SAM, None);
-        assert!(!approved.contains_key(SAM), "gone from it");
+        assert_eq!(power_of(&approved, SAM), None, "gone from it");
         let before = approved.clone();
         shrink(&mut approved, SAM, None);
         shrink(&mut approved, "npub1never", Some(Editor));

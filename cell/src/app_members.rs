@@ -147,8 +147,7 @@ impl FragmentCell {
         // an app's audience is its members and their owners
         let approved = self.app_audience(&answer.npub)?;
         // each one's role here, read in this turn (one that will not read holds none: the safe side)
-        let audience = app_member::audience_of(answer.audience.iter().cloned());
-        let list = match app_member::join(role, &approved, audience, |p| self.member_role(p).ok().flatten()) {
+        let list = match app_member::join(role, &approved, answer.audience.clone(), |p| self.member_role(p).ok().flatten()) {
             Ok(list) => list,
             Err(refused) => {
                 let person = match &refused {
@@ -264,7 +263,7 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Conflict, "an older ask: it was asked again since"));
         }
         self.event("app.joining", &format!("asked into {} as {}, by its owner", a.target, a.role.as_str()), json!({ "target": a.target, "role": a.role }));
-        Ok(AppAnswer { npub: self.must(MetaKey::Npub)?, incarnation: self.incarnation()?, title, audience: audience.into_iter().collect() })
+        Ok(AppAnswer { npub: self.must(MetaKey::Npub)?, incarnation: self.incarnation()?, title, audience })
     }
 
     /// A change between an app and a target (`AppTold`). To the app: the
@@ -348,10 +347,9 @@ impl FragmentCell {
         if answer.npub != principal {
             return Ok(());
         }
-        let shown = app_member::audience_of(answer.audience);
         // bounded as its audience is
         for (person, power) in self.app_audience(principal)? {
-            let left = shown.get(&person).copied().map(|now| now.min(power));
+            let left = app_member::power_of(&answer.audience, &person).map(|now| now.min(power));
             if left == Some(power) {
                 continue;
             }
@@ -368,7 +366,7 @@ impl FragmentCell {
     /// its own key.
     pub(crate) fn app_audience_of(&self) -> CellResult<AppAudience> {
         self.created()?;
-        let audience = app_member::audience(&self.must(MetaKey::Owner)?, &self.member_list()?.members).into_iter().collect();
+        let audience = app_member::audience(&self.must(MetaKey::Owner)?, &self.member_list()?.members);
         Ok(AppAudience { npub: self.must(MetaKey::Npub)?, audience })
     }
 
@@ -402,7 +400,7 @@ impl FragmentCell {
             _ => target.id.as_str(),
         };
         let power = if role >= Role::Editor { Role::Editor } else { Role::Viewer };
-        Ok(audience.get(person).is_none_or(|now| *now < power))
+        Ok(app_member::power_of(&audience, person).is_none_or(|now| now < power))
     }
 
     /// The app `name` told its role here (none: out), at a new version, by
@@ -416,7 +414,8 @@ impl FragmentCell {
     /// (none before it joins).
     fn app_audience(&self, principal: &str) -> CellResult<Audience> {
         let rows = self.rows("SELECT person, power FROM app_audience WHERE app = ?", vec![principal.into()])?;
-        Ok(app_member::audience_of(rows.iter().filter_map(|r| Some((r["person"].as_str()?.to_string(), Role::parse(r["power"].as_str()?)?)))))
+        // one row a person: the list as kept
+        Ok(rows.iter().filter_map(|r| Some((r["person"].as_str()?.to_string(), Role::parse(r["power"].as_str()?)?))).collect())
     }
 
     /// Each app member held to the list it approved, at a change to who
