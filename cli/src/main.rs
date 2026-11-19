@@ -173,8 +173,8 @@ enum Cmd {
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
     /// Delete a fragment you own, for everyone in it: its pages, data and
-    /// blobs go, and its name is free; its repo's history stays. At a
-    /// terminal it asks you to type its name first, unless --yes
+    /// files go, and its name is free. At a terminal it asks you
+    /// to type its name first, unless --yes
     Rm {
         name: String,
         /// Delete without asking (only a terminal asks)
@@ -2137,7 +2137,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Rm { name, yes } => {
             let name = c.fragment(&name)?;
             if !yes && std::io::stdin().is_terminal() {
-                eprintln!("Delete {name} for everyone in it? Its pages, data and blobs go. This can't be undone.");
+                eprintln!("Delete {name} for everyone in it? Its pages, data and files go. This can't be undone.");
                 eprint!("Type {name} to delete it: ");
                 let mut typed = String::new();
                 std::io::stdin().read_line(&mut typed)?;
@@ -2147,7 +2147,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             c.call(c.delete(&format!("/api/f/{name}"))?)?;
             json_exit(j, &json!({ "deleted": true, "name": name }));
-            println!("deleted {name} for everyone in it: its pages, data and blobs are gone, and the name is free. Its repo's history stays, and comes back if you make {name} again.");
+            println!("deleted {name} for everyone in it: its pages, data and files go, and the name is free.");
         }
         Cmd::Archive { name } => {
             let done = set_archived(&c, &name, true)?;

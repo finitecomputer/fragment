@@ -53,7 +53,7 @@ use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
     alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
-    SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
+    SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
 use fragment_core::ledger::{MeterRow, Month, Spend};
@@ -160,15 +160,8 @@ const DISK_READ_MS: i64 = 5_000;
 const CHECK: &str = "test ! -x /usr/local/bin/computer-check || exec /usr/local/bin/computer-check";
 const CHECK_EXEC_MS: i64 = 120_000;
 const CHECK_UNUSABLE: i64 = 3;
-/// What a save saves (docs/computers.md, "Data and the restore gate"):
-/// `/data/work`, what the guest's tools
-/// write, and the rest of `/data`, the guest's own state, each a record of
-/// its own and restored together, the first first (a restore replaces its
-/// directory whole, so `/data`'s record goes in before the work's).
-/// `/data`'s record leaves the work out (`WORK_LEFT_OUT`), and what a held
-/// guest names; the work's record leaves out only what it named under
-/// `/work/` (`work_left_out`: its agents' caches).
-const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
+/// What `/data`'s record leaves out (`fragment_core::computer::SAVED_DIRS`):
+/// its work, a record of its own.
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
@@ -1860,19 +1853,25 @@ impl ComputerCell {
         // `hang-backups`: its own), each given what is left
         let budget = self.meta(MetaKey::HangBackups).ok().flatten().and_then(|ms| ms.parse::<i64>().ok()).filter(|ms| (1..=BACKUPS_MS).contains(ms)).unwrap_or(BACKUPS_MS);
         let until = js::now_ms() + budget;
+        // each record's stored bytes and time, by what it holds
+        let mut took = json!({});
         for dir in SAVED_DIRS {
-            // the guest's own state leaves its work out (a record of its
-            // own) and what it copied or named; its work leaves out only the
-            // caches it named in it
-            let exclude = match dir {
-                "/data" => std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>(),
+            // the guest's own state (its home) leaves its work out (a record
+            // of its own) and what it copied or named; its work leaves out
+            // only the caches it named in it
+            let (name, exclude) = match dir {
+                "/data" => ("home", std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>()),
                 // what it named in its work (its agents' caches), relative to it
-                _ => fragment_core::computer::work_left_out(&left_out),
+                _ => ("work", fragment_core::computer::work_left_out(&left_out)),
             };
             let exclude = js::to_js(&json!(exclude));
-            let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
+            let t = js::now_ms();
+            let left = JsValue::from_f64((until - t).max(1) as f64);
             match self.call("backup", &[g.clone(), dir.into(), exclude, left]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
-                Ok(record) => records.push(record),
+                Ok(record) => {
+                    took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
+                    records.push(record);
+                }
                 Err(e) => {
                     console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": e.message, "ms": js::now_ms() - t0 }));
                     match self.update_saves(|s| s.let_go(std::mem::take(&mut records))) {
@@ -1886,8 +1885,9 @@ impl ComputerCell {
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
         match self.keep_save(generation, records, held).await {
             Ok(save) => {
-                // one line per save (lesson 14): which, how big, how long
-                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0 }));
+                // one line per save (lesson 14): which, how big, how long,
+                // and its home's and its work's apart
+                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0, "home": took["home"], "work": took["work"] }));
                 Event::Saved { generation, seq }
             }
             Err(e) => {
