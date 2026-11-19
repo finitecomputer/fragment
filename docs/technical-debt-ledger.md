@@ -5,6 +5,26 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A deleted fragment's owner-named repo stays at code.storage
+
+- **Shortcut:** a delete takes a fragment's code.storage repo only when
+  the repo is named by that life's own key (`fragment_core::ended::
+  repo_goes`, the `RepoOfLife` meta). Fragments made before that naming
+  have repos named by their owner's identity, and a delete leaves those,
+  as it left every repo before. A wipe takes them all.
+- **Why:** a release from before that naming, rolled back to, names a
+  repo by its owner. Its create of a deleted name, by the same owner,
+  would find that repo while its delete was still to come (held, or
+  backing off), and the delete would then take the new life's files
+  (FIN-538, a review of #1369).
+- **Risk:** a deleted fragment made before that naming keeps its files
+  at code.storage, out of everyone's reach on the platform (404), until
+  the sweep.
+- **Delete when:** no rollback can reach a release that names repos by
+  their owner (the rollout's fence past it). Then a sweep deletes the
+  repos no live fragment names (FIN-540), and `repo_goes` takes every
+  deleted life's repo.
+
 ## No mail without Email Sending
 
 - **Shortcut:** the platform's mail (invites, a key added, an org's seat,
@@ -96,11 +116,12 @@ unfinished design, not debt.
   `uses`, keeping each month it held in the computer's `meta`
   `uses_owed:<month>`, as the ledger reads a hand-over's rows. As its
   owner reads its view, once an activation and in a task of its own
-  (`ComputerCell::uses_later`), the computer hands each month to its owner's ledger (`uses::TakeUses`,
-  under `<computer>:<month>`), which takes it once by that id and keeps
-  the id in its `meta` (`uses_taken:<id>`); the computer forgets each
-  month the ledger took or refused, logging how many it still owes
-  (`uses_owed`). The test lever `legacy-uses` makes a month owed.
+  (`ComputerCell::uses_later`), the computer hands each month to its
+  owner's ledger (`uses::TakeUses`, under `<computer>:<month>`), which
+  takes it once by that id and keeps the id in its `meta`
+  (`uses_taken:<id>`); the computer forgets each month the ledger took
+  or refused, logging how many it still owes (`uses_owed`). The test
+  lever `legacy-uses` makes a month owed.
 - **Risk:** a computer nothing touches keeps owing, and its person's
   Settings shows those months short until it hands them over. Dropped
   instead, up to 13 months of a person's usage would be lost.
@@ -110,21 +131,6 @@ unfinished design, not debt.
   `uses_later`, `hand_over_uses`, `TakeUses`, `/take-uses` and the lever
   go; a Ledger step may drop its `uses_taken:` rows. The log sees only
   computers something touched, so its silence alone is not enough.
-
-## A chat wiped while its seed runs can keep its template's repo
-
-- **Shortcut:** a chat's create answers before its repo is made
-  (`publish::seeds_later`); its seed makes the repo right after. A life
-  that ends while that seed waits on code.storage records no repo for its
-  wipe (none was made when it ended), and the seed, seeing the life gone,
-  stops and keeps what it made, as a delete keeps a repo
-  (`publish.rs` `seed`). A wipe in that second leaves the repo holding
-  the chat's first `fragment.json` (its template and title), or nothing.
-- **Risk:** one chat's title outlives its owner's wipe at code.storage,
-  when the wipe lands within about a second of that chat's making.
-- **Delete when:** a wipe deletes its person's repos by their name
-  (`codestorage::repo_name`, the owner's digest), not only those its
-  fragments' lives recorded.
 
 ## The bridge copies the platform's file bounds; the app, an older platform's
 
