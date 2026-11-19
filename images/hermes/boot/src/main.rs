@@ -1254,8 +1254,9 @@ fn refresh_stored_prompts(home: &Path, why: &str, overlapped: &dyn Fn() -> bool)
     if overlapped() {
         return ev!("prompts.stamp_deferred", { "why": why, "because": "held" });
     }
-    if let Err(e) = write_stamp(&stamp, &inputs) {
-        ev!("prompts.stamp_failed", { "why": why, "error": e.to_string() });
+    match write_stamp(&stamp, &inputs) {
+        Ok(()) => ev!("prompts.stamped", { "why": why }),
+        Err(e) => ev!("prompts.stamp_failed", { "why": why, "error": e.to_string() }),
     }
 }
 
@@ -1469,14 +1470,23 @@ async fn boot_main() {
     }
     // the skills settled (`managed_dir`, above) and the cut turns too: a
     // chat's stored prompt rebuilt from today's inputs at its next turn
+    // One that outlives its wait runs on beside the gateway and the hold's
+    // answer, which may copy a database before its request lands there: it
+    // leaves the stamp then, and the next start asks again.
+    let late = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let refreshing = {
-        let home = home.clone();
-        tokio::task::spawn_blocking(move || refresh_stored_prompts(&home, "boot", &|| false))
+        let (home, late) = (home.clone(), late.clone());
+        tokio::task::spawn_blocking(move || refresh_stored_prompts(&home, "boot", &|| late.load(std::sync::atomic::Ordering::SeqCst)))
     };
-    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await {
+    // HERMES_BOOT_REFRESH_MS: a test's shorter wait for it
+    let refresh_wait = env("HERMES_BOOT_REFRESH_MS").and_then(|v| v.parse::<u64>().ok()).map_or(END_PREVIOUS_LIFE_MS_MAX, |v| v.min(END_PREVIOUS_LIFE_MS_MAX));
+    match tokio::time::timeout(Duration::from_millis(refresh_wait), refreshing).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => ev!("prompts.refresh_failed", { "why": "boot", "error": e.to_string() }),
-        Err(_) => ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
+        Err(_) => {
+            late.store(true, std::sync::atomic::Ordering::SeqCst);
+            ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": refresh_wait });
+        }
     }
     write_ready(&agents, &home);
     let mut bridge = spawn_bridge(card_timeout_s);

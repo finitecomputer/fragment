@@ -4422,6 +4422,40 @@ print(len(was))
     assert_eq!(refreshed, 1, "one refresh, at the first start on the changed hint: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
 }
 
+/// Goal: a boot's prompt refresh that outlives its wait runs on beside the
+/// gateway and the hold's answer, which may copy a database before the
+/// refresh's request lands in it: it leaves the stamp unwritten, so the
+/// next start asks again, rather than stamp inputs a save may not hold.
+/// Method: a wait of 1 ms (`HERMES_BOOT_REFRESH_MS`), a turn (so there are
+/// databases to ask), the stamp removed, a restart; the boot's word on
+/// its stamp.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_boot_refresh_that_outlives_its_wait_leaves_its_stamp() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_REFRESH_MS", "1")]);
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(180_000, "the first turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    let stamp = "/data/hermes/.fragment_prompt_inputs";
+    assert!(c.exec(&["rm", "-f", stamp]), "the stamp removed: the next start's inputs read as changed");
+    let from = fragment_bridge::log::now_ms();
+    c.restart();
+    // the boot's own word on its stamp (a skills round may stamp too: its own)
+    let said = |what: &str| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).any(|e| e["at"].as_u64().is_some_and(|at| at >= from) && e["event"] == what && e["why"] == "boot");
+    let t = Instant::now();
+    // bounded: the boot's refresh ends within a minute of the restart
+    while !(said("prompts.stamp_deferred") || said("prompts.stamped")) {
+        assert!(t.elapsed() < Duration::from_secs(60), "the boot's refresh never ended: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let words = c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n");
+    assert!(said("prompts.stamp_deferred") && !said("prompts.stamped"), "a refresh past its wait leaves the stamp: {words}");
+}
+
 /// Goal (Austin, 2026-11-17: a skill's change, as a hint's, would reach
 /// only new chats): a managed skill added to its owner's set while a chat
 /// is open is in that chat's prompt at its next turn, no restart, its
