@@ -198,7 +198,8 @@ impl FragmentCell {
     /// move on to their next minute after now. Past the owner's overdraft
     /// (`read_only`, read once for the pass) none appends: each moves on,
     /// and one event says why. One whose channel no longer takes the
-    /// fragment's records (redeclared since) moves on, saying so.
+    /// fragment's records (redeclared since), or whose record relays
+    /// someone (`schedule::fires`), moves on, saying so.
     pub(crate) async fn fire_records(&self, read_only: Option<Why>, now: i64) -> CellResult<()> {
         // bounded: a fragment's scheduled records
         let due: Vec<Row> = self.typed(
@@ -221,10 +222,13 @@ impl FragmentCell {
             let at = r.next_at.expect("a due schedule names its minute");
             let builtin = BUILTIN_CHANNELS.contains(&r.channel.as_str());
             let decl = if builtin { None } else { self.declared_channel(&r.channel)? };
-            // as its owner may: whether the channel takes the fragment's records at all
-            match schedule::admit_channel(&r.channel, decl.as_ref(), builtin, Role::Owner) {
+            let record = r.record();
+            // as its owner may: whether the channel takes the fragment's
+            // records at all; and its record relays no one (one kept by a
+            // release before `check` refused it)
+            match schedule::admit_channel(&r.channel, decl.as_ref(), builtin, Role::Owner).and_then(|()| schedule::fires(&record)) {
                 Ok(()) => {
-                    self.append_own(&r.channel, &r.record(), &schedule::fire_key(r.id, at)).await?;
+                    self.append_own(&r.channel, &record, &schedule::fire_key(r.id, at)).await?;
                 }
                 Err(why) => self.event("schedule.unfired", &format!("schedule #{}: {why}", r.id), json!({ "schedule": r.id })),
             }
