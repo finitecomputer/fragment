@@ -657,8 +657,11 @@ provider's own hosts.
   its ask of the agent's fragment (so it waits on no hop more), and for
   which keys the person holds at each read of a view. A computer from
   before the move held them (`own_keys`, `own_signins`): it hands its keys
-  to the Vault at its next touch, and the Vault takes one only where its
-  person said nothing since; a sign-in begun there finishes from there.
+  to the Vault at its owner's next read of it or of their connections, or
+  its agent's next call through one (never a start, an exit, a takeover or
+  its guest's request), and the Vault takes one only where its person said
+  nothing since. Until then its views list the keys it still owes. A
+  sign-in begun there finishes from there.
 - **The intercept** catches the catalog's hosts on HTTPS and HTTP, sends
   on over HTTPS, and swaps each placeholder where its row says it goes
   (`swap::Plan`). It refuses the request, reaching no provider, for a

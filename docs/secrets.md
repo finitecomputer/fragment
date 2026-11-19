@@ -114,8 +114,9 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   request goes, beside its ask of the agent's fragment, and the view lists
   which they hold. Neither asks a computer.
 - **A computer from before the move hands its own keys over** once, at
-  its next touch (its guest's view, a call through one, its person's read
-  of their connections): it opens each, sends it to their Vault in one
+  its owner's next read of it or of their connections, or its agent's
+  next call through one (never a start, an exit, a takeover or its
+  guest's request): it opens each, sends it to their Vault in one
   hop between the two, logs only providers and counts, and deletes it
   whether the Vault took it or not. The Vault takes one only where its
   person set or removed none since, so a key sent late, or again, never

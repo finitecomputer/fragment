@@ -93,9 +93,10 @@ unfinished design, not debt.
 - **Shortcut:** a person's own keys and their sign-ins moved from their
   computer (`own_keys`, `own_signins`) to their Vault (M16; docs/secrets.md,
   "A person's Vault"). The tables stay, written by nothing but the test
-  levers: a computer hands its keys over at its next touch
-  (`ComputerCell::hand_over_own`: its guest's or owner's view, a call
-  through an own key, its owner's read of their connections) and deletes
+  levers: a computer hands its keys over at its owner's next read of it
+  or of their connections, or its agent's next call through one
+  (`ComputerCell::hand_over_logged`; never a start, an exit, a takeover or
+  its guest's request: #1343) and deletes
   each, taken or not; the Vault takes one only where its person set or
   removed none since (a removal is kept, `sealed` NULL). A sign-in its
   person's Vault holds none of is asked of their computer, found by

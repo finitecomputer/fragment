@@ -1439,6 +1439,11 @@ impl ComputerCell {
     }
 
     /// `hand_over_own`, its failure logged: those not handed stay owed.
+    /// Started only by its owner's view reads (`GET /api/computers[/{id}]`)
+    /// and connections read (`computer/own-keys`), and its agent's own call
+    /// (`credentials`): never by a start, an exit, a takeover or its guest's
+    /// request, whose work in the background slowed a frozen container's
+    /// destroy past its bound (#1343).
     async fn hand_over_logged(&self) {
         if let Err(e) = self.hand_over_own().await {
             console_error!("{{\"computer\":{:?},\"ownKeys\":\"owed\",\"error\":{:?}}}", self.meta(MetaKey::Id).ok().flatten().unwrap_or_default(), e.message);
@@ -2072,12 +2077,14 @@ impl ComputerCell {
     /// The view, each agent's grants asked of its fragment (`grants_of`):
     /// one that does not answer is logged, and shown as it is used
     /// meanwhile, with no provider. Whose models each may run is read from
-    /// its owner's own keys, their Vault's (`own_names`), asked beside the
-    /// grants; any this computer kept before the move are handed over first.
+    /// its owner's own keys: their Vault's (`own_names`), asked beside the
+    /// grants, and any this computer still owes it from before the move. It
+    /// hands none over: a view answers lifecycle and guest requests too
+    /// (`hand_over_logged`'s callers).
     async fn asked(&self, Unasked(mut view): Unasked) -> CellResult<ComputerView> {
-        self.hand_over_logged().await;
         let grants = futures_util::future::join_all(view.agents.iter().map(|a| self.grants_of(&a.fragment, &a.identity, None)));
-        let (asked, own) = futures_util::future::join(grants, self.own_names(&view.owner, !view.agents.is_empty())).await;
+        let (asked, mut own) = futures_util::future::join(grants, self.own_names(&view.owner, !view.agents.is_empty())).await;
+        own.extend(self.owed_own()?);
         let id = view.computer.clone();
         for (agent, grants) in view.agents.iter_mut().zip(asked) {
             let grants = grants.unwrap_or_else(|e| {
@@ -2219,7 +2226,9 @@ impl ComputerCell {
         // each agent's person's Vault's secrets bound to it, as own keys with
         // no variable (FIN-466): their hosts caught before the guest can know one
         let fragments: Vec<String> = view.agents.iter().map(|a| a.fragment.clone()).collect();
-        let crate::vault::Names(usable, own) = self.vault_usable(&fragments).await;
+        let crate::vault::Names(usable, mut own) = self.vault_usable(&fragments).await;
+        // with any it still owes its owner's Vault: never handed over from its guest's request
+        own.extend(self.owed_own()?);
         self.arm_more(usable.iter().flat_map(|u| u.2.iter().cloned()).collect()).await;
         for crate::vault::Usable(of, name, hosts) in usable {
             if let Some(agent) = view.agents.iter_mut().find(|a| a.fragment == of) {
@@ -3020,6 +3029,8 @@ impl ComputerCell {
                 let list = match self.owned_by(&who) {
                     Ok(()) => {
                         self.look_and_tell().await;
+                        // its owner reading it: what it kept before the move goes over first
+                        self.hand_over_logged().await;
                         vec![self.view().await?]
                     }
                     Err(e) if e.code == ErrorCode::NotFound => vec![],
@@ -3035,7 +3046,11 @@ impl ComputerCell {
         self.owned_by(&who)?;
         self.look_and_tell().await;
         match (req.method(), rest) {
-            (Method::Get, []) => json_response(&self.view().await?),
+            (Method::Get, []) => {
+                // its owner reading it: what it kept before the move goes over first
+                self.hand_over_logged().await;
+                json_response(&self.view().await?)
+            }
             (Method::Post, ["wake"]) => {
                 self.wake(Wake::Owner).await?;
                 json_response(&self.view().await?)

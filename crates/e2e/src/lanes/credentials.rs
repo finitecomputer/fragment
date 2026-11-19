@@ -1178,7 +1178,7 @@ const OWN_MOVE_CALLS: i32 = 2;
 /// fakes skips them. They run before `swap_checks` sets an own key, so the
 /// person has said nothing of one since the move.
 pub(super) const OWN_MOVE_CHECKS: &[&str] = &[
-    "an own key its computer kept from before the move goes to its person's Vault, never lost: its agent's next call goes with that key, the computer holds it no more, and its person's list says it is set",
+    "an own key its computer kept from before the move stays owed through its guest's own read of its view, which gives it to the guest (no hand-over from a guest's request), then goes to its person's Vault at its agent's next call, never lost: that call goes with the key, the computer holds it no more, and its person's list says it is set",
     "one its owner's view reads first goes over then: its agent may run that provider's models",
     "what its person said since stands: a key set after the move is never replaced by the one its computer hands over late (a hand-over again), nor one removed put back, the agent's call then refused, reaching no provider",
 ];
@@ -1211,15 +1211,18 @@ pub(super) fn own_move_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &
     // kept as before the move: the next touch hands it over, and the
     // agent's call goes with it
     let wrote = kept(SWAP_OWN, Some(OWN_BEFORE));
+    let given = say(s, 214, "credentials")?;
+    let owed = kept(SWAP_OWN, None);
     let seen = s.upstream.seen().len();
     let said = say(s, 210, &mail(s))?;
     let went = sent_with(s, seen, OWN_BEFORE);
     let held = kept(SWAP_OWN, None);
     let listed = state(SWAP_OWN);
+    let listed_to_guest = given.contains(&format!("{SWAP_OWN} {SWAP_OWN_ENV} fck_{SWAP_OWN}_"));
     s.ok(
         OWN_MOVE_CHECKS[0],
-        wrote == json!([SWAP_OWN]) && said.starts_with("fetched 200") && went && held == json!([]) && listed == "set",
-        json!({ "wrote": wrote, "said": said, "went": went, "held": held, "listed": listed }),
+        wrote == json!([SWAP_OWN]) && listed_to_guest && owed == json!([SWAP_OWN]) && said.starts_with("fetched 200") && went && held == json!([]) && listed == "set",
+        json!({ "wrote": wrote, "listedToGuest": listed_to_guest, "owedAfterGuestRead": owed, "said": said, "went": went, "held": held, "listed": listed }),
     );
 
     // read first by its owner's view: which models its agent may run
