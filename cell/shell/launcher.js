@@ -168,7 +168,8 @@ export function createLauncher(shell) {
   function openFound(name) {
     const to = opensTo(name);
     closeSearch();
-    if (to?.chat) openChat(to.chat);
+    // a chat picked, as from the sidebar: their computer's start is raced
+    if (to?.chat) { openChat(to.chat); prewake(); }
     else if (to) openApp(to.app);
     leaveSidebar();
   }
@@ -178,7 +179,7 @@ export function createLauncher(shell) {
   function openKnown(hit) {
     closeSearch();
     const at = knownAt(hit, byName(hit.fragment)?.kind);
-    if (at.chat) openChat(hit.fragment, true, at.chat);
+    if (at.chat) { openChat(hit.fragment, true, at.chat); prewake(); }
     else openApp(hit.fragment, at.app);
     leaveSidebar();
   }

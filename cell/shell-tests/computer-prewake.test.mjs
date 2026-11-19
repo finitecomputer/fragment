@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { createComputer } from "../shell/computer.js";
 import { createLauncher } from "../shell/launcher.js";
 import { KIND } from "../shell/frame-messages.js";
+import { readFileSync } from "node:fs";
 
 const COMPUTER = "computer:aa";
 const WAKE = `/api/computers/${COMPUTER}/wake`;
@@ -179,10 +180,13 @@ function element(own = {}) {
 function launcherPage(t) {
   const listeners = [];
   const els = new Map();
+  // the input keeps what listens to it; every element made is kept (`made`)
+  const listening = () => ({ heard: {}, addEventListener(type, fn) { this.heard[type] = fn; } });
   const $ = (id) => {
-    if (!els.has(id)) els.set(id, element(id === "search-dialog" ? { showModal() { this.open = true; } } : {}));
+    if (!els.has(id)) els.set(id, element(id === "search-dialog" ? { showModal() { this.open = true; } } : id === "workspace-search" ? listening() : {}));
     return els.get(id);
   };
+  const made = [];
   const frameWindow = {};
   const frame = element({ dataset: { fragment: "talk--k3x9" }, contentWindow: frameWindow });
   globalThis.document = { activeElement: frame, querySelectorAll: () => [frame], elementFromPoint: () => null, addEventListener() {}, removeEventListener() {} };
@@ -191,7 +195,9 @@ function launcherPage(t) {
   t.after(() => { delete globalThis.addEventListener; delete globalThis.matchMedia; });
   const woken = [];
   createLauncher({
-    $, el: () => element(), api: async () => ({}), seg: (s) => s, state: { fragments: [], agents: new Map(), current: null },
+    $, el: (tag, cls) => { const e = element({ tag, cls }); made.push(e); return e; },
+    api: async (method, path) => (path.startsWith("/api/search") ? { fragments: [{ name: "talk--k3x9", kind: "chat" }], messages: [] } : {}),
+    seg: (s) => s, state: { fragments: [], agents: new Map(), current: null },
     byName: (name) => ({ name, kind: "chat" }), isChat: () => true, titleOf: (n) => n, chatTitle: (n) => n, mark: () => element(), iconOf: () => element(),
     primaryAgent: () => null, newChatAgent: () => null, agentsOwnChat: () => null, UNTITLED: "New chat",
     openChat() {}, openApp() {}, chatFrame() {}, composeIn() {}, newChat: async () => null, leaveSidebar() {}, closeMenu() {}, notice() {},
@@ -199,7 +205,7 @@ function launcherPage(t) {
     views: () => 0, busy: () => false, setupChat: () => null,
   });
   const fire = async (type, event) => { for (const l of listeners.filter((l) => l.type === type)) await l.fn(event); };
-  return { $, woken, frame, frameWindow, fire };
+  return { $, woken, frame, frameWindow, fire, made };
 }
 
 test("a framed page's ask opens the launcher and wakes nothing, however late it comes: only the person's own opening races their computer", async (t) => {
@@ -213,4 +219,30 @@ test("a framed page's ask opens the launcher and wakes nothing, however late it 
   p.$("search-dialog").open = false;
   await p.fire("keydown", { metaKey: true, code: "KeyK", preventDefault() {} });
   assert.deepEqual(p.woken, ["wake", "wake"], "⌘K in the shell");
+});
+
+test("a chat picked from the launcher's results is a pick: it races the computer, however the launcher was opened or long ago", async (t) => {
+  const p = launcherPage(t);
+  // opened by a framed page's ask: no wake for that
+  await p.fire("message", { data: { fragment: KIND.openLauncher }, source: p.frameWindow, origin: "https://talk--k3x9.example" });
+  assert.deepEqual(p.woken, []);
+  const input = p.$("workspace-search");
+  input.value = "talk";
+  input.heard.input();
+  await new Promise((r) => setTimeout(r, 300));
+  const row = p.made.find((e) => e.cls === "row search-result" && e.dataset.fragment === "talk--k3x9");
+  assert.ok(row, "the chat found is a row");
+  row.onclick();
+  assert.deepEqual(p.woken, ["wake"], "the person's pick of a result");
+});
+
+// shell.js itself does not load here (it is the page), so its two wirings
+// of a pick are read from its source: Continue's Open (continue.js
+// `navigation.openChat`), and the chat an alert's click opens with no
+// shell open (`?chat=`, alerts-sw.js) are picks, through `pickChat`.
+test("shell.js: Continue's chats and an alert's chat opened with no shell are picks (`pickChat`), not page loads", () => {
+  const shell = readFileSync(new URL("../shell/shell.js", import.meta.url), "utf8");
+  const continuing = shell.slice(shell.indexOf("const continuing = createContinue("), shell.indexOf("const sessionArchive = createSessionArchive("));
+  assert.match(continuing, /navigation: \{ openChat: pickChat, leaveSidebar \}/, "Continue opens its chats as picks");
+  assert.match(shell, /else if \(pick\) \(pick === alerted \? pickChat : openChat\)\(pick\);/, "the alerted chat, as start opens it, is a pick");
 });
