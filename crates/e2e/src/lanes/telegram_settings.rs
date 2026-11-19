@@ -401,6 +401,12 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>, dir: &s
         lost && failed && framed(&mut b, SAID)["buttons"] == json!(["Use it", "Use another bot"]) && moved_out == ["telegram-other"] && kept.text.contains("TELEGRAM_BOT_TOKEN") && state(api, c, &name)["bot"].is_null() && state(api, c, &name)["held"] == true,
         json!({ "said": framed(&mut b, SAID), "vault": moved_out, "secrets": kept.body, "state": state(api, c, &name) }),
     );
+    // Settings moved it toward the Vault's own host (api.telegram.org),
+    // which no fetch of the page's goes through, so `to_fake` cannot point
+    // it at the fake Telegram as it does the page's own secrets: its owner
+    // sets it again here, the same token toward the fake's host
+    let pointed = api.signed(c.owner, "PUT", &format!("/api/f/{name}/secrets/TELEGRAM_BOT_TOKEN"), Some(&json!({ "value": c.token, "hosts": ["127.0.0.1"] })))?;
+    anyhow::ensure!(pointed.status == 200, "the kept token pointed at the fake Telegram: {pointed}");
     // closed and opened again: Settings names no Vault secret now, and the
     // chat's own word offers that bot; Use it goes on from the token kept
     b.eval(&page, "([...document.querySelectorAll('dialog.connector-setup .rename-actions button')].find((x) => x.textContent === 'Done')?.click(), true)")?;
