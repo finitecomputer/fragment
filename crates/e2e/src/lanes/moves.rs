@@ -1284,7 +1284,7 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
         let deployed = s.cli_in_room(api, &home, BIG_ROOM, &["deploy", f]);
         anyhow::ensure!(deployed.status.success(), "the agent deploys {f}: {}", String::from_utf8_lossy(&deployed.stderr));
     }
-    owner_sees(s, api, &owner, &[(&name, "files"), (&storage, "storage")])?;
+    owner_sees(s, api, &owner, &[(&name, "files", "files"), (&storage, "storage", "home")])?;
 
     // the copy, stage to blobs on the platform: the bound agent's alone,
     // into a fragment it (or its owner, `for`) edits, within the zip and
@@ -1326,10 +1326,11 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
-/// Each of `pages` (a fragment, and what to call its picture) as `owner`
-/// opens it from their apps, in Chrome, at 1280 and 390 px, light and
-/// dark: the move-big section's pictures (no Chrome, none).
-fn owner_sees(s: &mut Suite, api: &Api, owner: &crate::Keys, pages: &[(&str, &str)]) -> Result<()> {
+/// Each of `pages` (a fragment, what to call its picture, and a folder its
+/// page of files lists) as `owner` opens it from their apps, in Chrome, at
+/// 1280 and 390 px, light and dark: its picture taken once the page in its
+/// frame lists that folder (no Chrome, none).
+fn owner_sees(s: &mut Suite, api: &Api, owner: &crate::Keys, pages: &[(&str, &str, &str)]) -> Result<()> {
     let Some(mut b) = s.browser()? else {
         println!("      (no Chrome: no pictures of the owner's pages)");
         return Ok(());
@@ -1338,22 +1339,27 @@ fn owner_sees(s: &mut Suite, api: &Api, owner: &crate::Keys, pages: &[(&str, &st
     let session = api.sign_in(&Api::email_of(owner))?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let wait = Duration::from_secs(30);
-    for (name, called) in pages {
+    for (name, called, folder) in pages {
         let row = format!("document.querySelector({})", serde_json::to_string(&format!("#apps [data-key=\"app:{name}\"]"))?);
-        let mut shown = true;
+        let lists = format!("(document.body?.innerText ?? '').split(/\\s+/).includes({})", serde_json::to_string(folder)?);
+        let mut seen = Vec::new();
         for (width, height, phone) in [(1280, 800, false), (390, 844, true)] {
             for scheme in ["light", "dark"] {
                 let page = b.open(&format!("{}/", api.base))?;
                 b.viewport(&page, width, height, phone)?;
                 b.color_scheme(&page, scheme)?;
-                let opened = b.until(&page, &format!("!!{row}"), wait) && { b.eval(&page, &format!("({row}.click(), true)"))?; b.until(&page, "!!document.querySelector('.viewer iframe')", wait) };
-                std::thread::sleep(Duration::from_millis(1500));
+                let opened = b.until(&page, &format!("!!{row}"), wait) && {
+                    b.eval(&page, &format!("({row}.click(), true)"))?;
+                    b.until(&page, "!!document.querySelector('.viewer iframe')", wait)
+                };
+                let shown = opened && s.eventually(wait, || b.eval_in_frame(&page, name, &lists).ok() == Some(json!(true)));
+                std::thread::sleep(Duration::from_millis(500));
                 let _ = b.screenshot(&page, &shots.join(format!("{called}-{width}-{scheme}.png")));
-                shown &= opened;
+                seen.push((format!("{width}-{scheme}"), shown));
                 b.close(page)?;
             }
         }
-        s.ok(&format!("its owner opens its {called} from their apps, a page of its files"), shown, name);
+        s.ok(&format!("its owner opens its {called} from their apps: a page of its files, listing {folder}/, at 1280 and 390 px, light and dark"), seen.iter().all(|(_, shown)| *shown), json!(seen));
     }
     println!("      (screenshots: {})", shots.display());
     Ok(())
