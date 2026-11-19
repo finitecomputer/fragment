@@ -142,11 +142,14 @@ mirrors:
   own app, as its own key, in its own `chat`, its `relayed` exactly
   `{via, for, agent}`.
 - Only that agent's own bridge honors it, and only when it is carried by
-  the agent itself or by a key that is none of the chat's members: it is
-  the owner's message, asked as them, whether or not a link is bound now.
+  the agent itself, or by a key that is none of the chat's members in a
+  chat that runs the release's code of the door it names (its status's
+  `code.id` is `blessed:<via>@…`: a hosted door's own chat): it is the
+  owner's message, asked as them, whether or not a link is bound now.
   Any other `relayed` is read as the record without it: another `for`,
-  another agent's door, a `via` that is no door's id, or carried by
-  another member.
+  another agent's door, a `via` that is no door's id, carried by another
+  member, or by a key none of the members anywhere else (a record a
+  fragment's own key fires on a schedule).
 - A page shows it as the owner's, "via" its door, once the members say
   its poster is their agent or none of the chat's members.
 

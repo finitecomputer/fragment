@@ -66,6 +66,15 @@
 //! - An agent's `tasks` hears only its own fragment (its cron, the
 //!   platform's `joined`) and its owner: another agent acting for the owner
 //!   starts no routine there.
+//! - A chat is heard only while it runs no code of its author's own (its
+//!   status's `code.id`: the release's, or none; `records::Runs`): there a
+//!   record's principal is whoever called its code, not who spoke. Its
+//!   cursor passes what it says all the same, and nothing there is acted
+//!   on; once read running such code it is heard no more in this state
+//!   (`State::unheard`), and no turn's notes or quote are read there, so
+//!   nothing passed over comes back through a journal read. A relayed record carried by a key that is none of a chat's
+//!   members is its owner's only in a chat that runs the release's code of
+//!   the door it names.
 //! - Only a turn's asker stops it; only an agent's owner answers its
 //!   prompts, the first answer wins, and an unanswered prompt expires
 //!   (decision 42).
@@ -224,6 +233,15 @@ pub struct State {
     /// `until` (`limits::HELPERS_LEASE_MS`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<Helper>,
+    /// The chats an agent of this computer read a record of while they ran
+    /// code of their author's own, each with the first such record's seq:
+    /// none of them is heard again in this state, whatever they run later
+    /// (`Engine::heard`), so a record passed over there is never acted on
+    /// through a journal read (a card's late answer, a turn's notes)
+    /// either. At most `UNHEARD_MAX`. A state without it (an earlier
+    /// bridge's) remembers none; an earlier bridge reading one drops it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unheard: BTreeMap<String, u64>,
 }
 
 /// A helper running (`State::children`): the chat its set goes to (its
@@ -243,7 +261,7 @@ pub struct Helper {
 
 impl Default for State {
     fn default() -> State {
-        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new(), children: Vec::new() }
+        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new(), children: Vec::new(), unheard: BTreeMap::new() }
     }
 }
 
@@ -512,6 +530,9 @@ pub struct ChatView {
     pub people: Vec<String>,
     /// What to call its writers, by identity.
     pub names: BTreeMap<String, String>,
+    /// What code it runs (its status's `code.id`): only where none of its
+    /// author's runs is anything said there acted on (`Engine::record`).
+    pub runs: records::Runs,
 }
 
 impl ChatView {
@@ -1054,11 +1075,30 @@ impl Engine {
         if let Some(v) = view {
             self.views.insert(fragment.to_string(), v);
         }
+        // before anything passes it over: a chat read running its
+        // author's code is remembered whatever the record (`heard`)
+        if record.channel == records::CHAT {
+            self.observe(fragment, record.seq);
+        }
         if record.at < since {
             // Said before the agent joined: not for it.
             return;
         }
         if record.principal.starts_with("anon:") {
+            return;
+        }
+        // A chat running code of its author's own is followed (its cursor
+        // passes what it reads, so nothing said while it ran such code is
+        // acted on if it runs other code later) and nothing said there is
+        // acted on: its code publishes an operation's effect or a job's
+        // step under whoever called it, with a body of its choosing, so a
+        // record's principal there says who called, never who spoke (its
+        // owner's word, a command, a card's answer, a hand-off's hop or an
+        // ask's return alike). Every chat that runs the release's code, or
+        // none, is answered as ever: the shared chats agents are in.
+        if record.channel == records::CHAT && !self.heard(fragment) {
+            let runs = self.views.get(fragment).map(|v| format!("{:?}", v.runs)).unwrap_or_else(|| "unread".into());
+            crate::ev!("record.unvouched", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "runs": runs, "before": self.state.unheard.get(fragment) });
             return;
         }
         match record.channel.as_str() {
@@ -1109,7 +1149,11 @@ impl Engine {
         // a turn of this life holds it after all (it was read as the turn
         // asked): the card's answer, as any is
         let held = self.state.turns.values().any(|t| t.active() && t.agent == agent && t.fragment == fragment && card.as_ref().is_none_or(|c| c.agent == a.identity && c.turn == t.id) && t.prompts.iter().any(|p| p.id == prompt));
-        if held || record.at < since {
+        // in a chat running its author's code, or that ran it, no one's
+        // answer at all (`record` passes its cursor, and acts on nothing
+        // there): a journal read there may hold what was passed over
+        let vouched = view.as_ref().or_else(|| self.views.get(fragment)).is_some_and(|v| v.runs.vouched()) && self.journal_heard(fragment);
+        if held || record.at < since || !vouched {
             self.record(agent, fragment, record, view, since);
             return;
         }
@@ -1155,6 +1199,48 @@ impl Engine {
         }
     }
 
+    /// Remembers chat `fragment` (`State::unheard`) when its view, as read
+    /// with record `seq`, says it runs code of its author's own: every
+    /// record read there, whether or not it is for the agent, so nothing
+    /// passed over there is trusted through a journal read later. Past
+    /// `UNHEARD_MAX` it is not remembered, and no chat's journal is
+    /// trusted from then on (`journal_heard`): never open for want of room.
+    fn observe(&mut self, fragment: &str, seq: u64) {
+        let own = self.views.get(fragment).is_some_and(|v| v.runs == records::Runs::Own);
+        if !own || self.state.unheard.contains_key(fragment) {
+            return;
+        }
+        if self.state.unheard.len() < limits::UNHEARD_MAX {
+            self.state.unheard.insert(fragment.to_string(), seq);
+            self.dirty = true;
+        } else {
+            crate::ev!("unheard.bounded", { "fragment": fragment, "max": limits::UNHEARD_MAX, "why": "no chat's journal is trusted from now on" });
+        }
+    }
+
+    /// Whether what is said in chat `fragment` now is heard (`record`): it
+    /// runs the release's code or none, as its view last read says, and
+    /// was never read running code of its author's own (`observe`).
+    fn heard(&self, fragment: &str) -> bool {
+        self.views.get(fragment).is_some_and(|v| v.runs.vouched()) && !self.state.unheard.contains_key(fragment)
+    }
+
+    /// Whether what chat `fragment` said before may be trusted when read
+    /// back from its journal (a late card answer, a turn's notes): it was
+    /// never read running code of its author's own, and the bridge has
+    /// remembered every chat that was (`UNHEARD_MAX` not reached).
+    fn journal_heard(&self, fragment: &str) -> bool {
+        self.state.unheard.len() < limits::UNHEARD_MAX && !self.state.unheard.contains_key(fragment)
+    }
+
+    /// The chats whose journals are not trusted (`journal_heard`), for a
+    /// turn's notes and quote (driver.rs, the runtime's lane): those read
+    /// running code of their author's own; `None` when the bridge may not
+    /// have remembered them all (`UNHEARD_MAX` reached): none is trusted.
+    pub fn unheard(&self) -> Option<BTreeSet<String>> {
+        (self.state.unheard.len() < limits::UNHEARD_MAX).then(|| self.state.unheard.keys().cloned().collect())
+    }
+
     /// The prompts this life's running turns hold open, by agent and chat:
     /// their answers are theirs, read with no journal (driver.rs `feed`).
     pub fn held(&self) -> BTreeSet<(String, String, String)> {
@@ -1162,13 +1248,17 @@ impl Engine {
     }
 
     /// Whether `record` relays `agent`'s owner through `agent`'s own door,
-    /// carried by the agent itself or by a key that is none of the chat's
-    /// members (a hosted connector publishes as its own fragment's key), as
-    /// the chat's page reads it.
+    /// carried by the agent itself (SimpleX's) or by a key that is none of
+    /// the chat's members in a chat that runs the release's code of that
+    /// very door (a hosted connector publishes as its own fragment's key in
+    /// its own chat: `blessed:<via>@…`). Any other key that is no member's
+    /// (a scheduled record fires as its fragment's own key; the platform
+    /// refuses one that relays, docs/api.md, "Scheduled records", and this
+    /// is the floor under it) carries no one's words but its own.
     fn relayed_for(&self, agent: &Agent, fragment: &str, record: &Record) -> bool {
+        let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) else { return false };
         let member = |v: &ChatView| v.agents.contains(&record.principal) || v.people.contains(&record.principal);
-        let carrier = record.principal == agent.identity || self.views.get(fragment).is_some_and(|v| !member(v));
-        carrier && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment)
+        record.principal == agent.identity || self.views.get(fragment).is_some_and(|v| !member(v) && v.runs.release() == Some(r.via.as_str()))
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
@@ -2776,6 +2866,9 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
     }
     if state.children.len() > limits::CHILDREN_OPEN_MAX {
         return Err(Corrupt(format!("{} helpers is past the bound", state.children.len())));
+    }
+    if state.unheard.len() > limits::UNHEARD_MAX || !state.unheard.keys().all(|f| records::fragment_name_ok(f)) {
+        return Err(Corrupt(format!("{} chats remembered as running their author's code, past the bound or not each a fragment's name", state.unheard.len())));
     }
     for (i, c) in state.children.iter().enumerate() {
         let whole = records::fragment_name_ok(&c.agent)

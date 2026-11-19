@@ -194,9 +194,18 @@ struct Shared {
     /// The image's SimpleX, when it names a core: a move's routine waits
     /// for it (`feed`).
     simplex: Option<crate::simplex::run::Handle>,
+    /// The chats heard running code of their author's own (`Engine::unheard`):
+    /// no turn's notes or quote are read there (`RuntimeLane`); `None`,
+    /// past its bound: none are read anywhere.
+    unheard: Mutex<Option<BTreeSet<String>>>,
 }
 
 impl Shared {
+    /// Whether chat `fragment`'s journal is trusted (`Engine::unheard`).
+    fn journal_heard(&self, fragment: &str) -> bool {
+        self.unheard.lock().expect("unheard").as_ref().is_some_and(|u| !u.contains(fragment))
+    }
+
     fn cursor(&self, agent: &str, fragment: &str, channel: &str) -> u64 {
         self.cursors.lock().expect("cursors").get(&engine::cursor_key(agent, fragment, channel)).copied().unwrap_or(0)
     }
@@ -295,7 +304,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
 
     let (inbox_tx, mut inbox) = mpsc::channel::<Msg>(limits::INBOX_MAX);
     let (keep_tx, keep_rx) = watch::channel(false);
-    let shared = Arc::new(Shared { simplex: simplex.clone(), ..Shared::default() });
+    let shared = Arc::new(Shared { simplex: simplex.clone(), unheard: Mutex::new(engine.unheard()), ..Shared::default() });
 
     // Each runtime starts at once (Hermes dials it while the bridge reads
     // the platform), and its events go to the inbox, named by it. The
@@ -350,7 +359,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtimes": runs, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
-    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, scratch.clone(), turn_files.clone()))).collect();
+    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, scratch.clone(), turn_files.clone(), shared.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
@@ -379,6 +388,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
             turn_files.lock().expect("turn files").retain(|t, _| engine.state().turns.get(t).is_some_and(|t| t.phase != engine::Phase::Ended));
             *shared.cursors.lock().expect("cursors") = engine.state().cursors.clone();
             *shared.held.lock().expect("held") = engine.held();
+            *shared.unheard.lock().expect("unheard") = engine.unheard();
         }
         for e in step.effects {
             match e {
@@ -824,6 +834,7 @@ impl ViewCache {
     /// Reads the chat's agents (in the order they were added), its writers'
     /// names, and when this agent joined: records from before are history.
     async fn read(&mut self, api: &Api, agent: &Agent, fragment: &str, writer: Option<&str>) -> Result<(), ApiError> {
+        self.read_runs(api, agent, fragment).await?;
         let mut members = api.members(&agent.fragment, fragment).await?;
         members.sort_by(|a, b| (a.added_at, &a.principal).cmp(&(b.added_at, &b.principal)));
         self.view.agents = members.iter().filter(|m| m.kind == "agent").map(|m| m.principal.clone()).collect();
@@ -857,6 +868,14 @@ impl ViewCache {
             self.view.names.entry(id).or_insert_with(|| "someone".into());
         }
         self.read_at = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Reads what code the chat runs now (`records::Runs`), which vouches
+    /// for what is said there (engine.rs, `record`). What it ran before
+    /// is kept until a read answers.
+    async fn read_runs(&mut self, api: &Api, agent: &Agent, fragment: &str) -> Result<(), ApiError> {
+        self.view.runs = api.runs(&agent.fragment, fragment).await?;
         Ok(())
     }
 }
@@ -1059,10 +1078,23 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         // a writer the view has no name for (a person or another agent past
         // the last read's bound, or new): read again, with it first
         let unknown = records::is_identity(&record.principal) && record.principal != agent.identity && !view.view.names.contains_key(&record.principal);
-        if !view.fresh(shared.joined_at(fragment)) || unknown {
-            if let Err(e) = view.read(api, agent, fragment, Some(&record.principal)).await {
-                crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() });
-            }
+        // What the chat runs vouches for what is said there (engine.rs,
+        // `record`): read with the view, and again for each record that
+        // would carry its owner's word (theirs, or one that relays), so
+        // code installed since the last read is judged now. A read that
+        // fails follows again from the cursor after a wait: no record is
+        // judged on a guess, nor passed over for a blip.
+        let owners = record.principal == agent.owner || records::relayed(&record.body).is_some();
+        let read = if !view.fresh(shared.joined_at(fragment)) || unknown {
+            view.read(api, agent, fragment, Some(&record.principal)).await
+        } else if owners {
+            view.read_runs(api, agent, fragment).await
+        } else {
+            Ok(())
+        };
+        if let Err(e) = read {
+            crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() });
+            return Some(ended_by(e));
         }
         (Some(view.view.clone()), view.since)
     };
@@ -1093,7 +1125,7 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
     // follow, which reads it again from the cursor after a wait, so a card
     // is never closed for a blip. (A turn that ends between this look and
     // the engine's is a race of a few ms; its answer is passed over.)
-    let late = !tasks && record.at >= since && record.seq > shared.cursor(&agent.fragment, fragment, &record.channel) && record.principal == agent.owner && matches!(records::said(&record.body), records::Said::PromptResponse { prompt, card, .. } if card.as_ref().is_none_or(|c| c.agent == agent.identity) && !shared.holds(&agent.fragment, fragment, &prompt));
+    let late = !tasks && view.view.runs.vouched() && shared.journal_heard(fragment) && record.at >= since && record.seq > shared.cursor(&agent.fragment, fragment, &record.channel) && record.principal == agent.owner && matches!(records::said(&record.body), records::Said::PromptResponse { prompt, card, .. } if card.as_ref().is_none_or(|c| c.agent == agent.identity) && !shared.holds(&agent.fragment, fragment, &prompt));
     let input = if late {
         let read = tokio::time::timeout(Duration::from_millis(limits::CARD_READ_MS_MAX), card_history(api, agent, fragment, &record)).await;
         let history = read.unwrap_or(Err(Unavailable::Read));
@@ -1646,7 +1678,7 @@ impl RuntimeLane {
     /// One runtime's lane: a turn's commands all go to one runtime, so they
     /// keep the engine's order, and a runtime slow to read its commands
     /// holds no other's.
-    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, scratch: Arc<Scratch>, turn_files: TurnFiles) -> RuntimeLane {
+    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, scratch: Arc<Scratch>, turn_files: TurnFiles, shared: Arc<Shared>) -> RuntimeLane {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
@@ -1673,7 +1705,28 @@ impl RuntimeLane {
                     _ => {}
                 }
                 if let Command::Start(ts) = &mut c {
+                    // A turn's notes and quote are read from its chat's
+                    // records, which say who spoke only where no code of
+                    // its author's runs or ran (engine.rs, `heard`): a
+                    // routine or an ask's answer may run in any chat, and
+                    // what was passed over there must not come back as a
+                    // note. Read only where the chat was never heard run
+                    // such code and its status says it runs none now; a
+                    // status that does not read reads none.
+                    // (the status read beside the notes', never before
+                    // them: a turn waits no longer for its notes)
+                    let trusted = shared.journal_heard(&ts.fragment);
+                    let runs = async {
+                        if !trusted {
+                            return false;
+                        }
+                        let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), api.runs(&ts.agent.fragment, &ts.fragment)).await;
+                        matches!(read, Ok(Ok(runs)) if runs.vouched())
+                    };
                     let note = async {
+                        if !trusted {
+                            return None;
+                        }
                         let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), note_for(&api, ts)).await;
                         read.unwrap_or_else(|_| {
                             crate::ev!("note.unread", { "turn": ts.turn, "why": "the journal answered too slowly" });
@@ -1681,14 +1734,18 @@ impl RuntimeLane {
                         })
                     };
                     let quote = async {
-                        let seq = ts.reply_to?;
+                        let seq = ts.reply_to.filter(|_| trusted)?;
                         let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), quote_of(&api, ts, seq)).await;
                         read.unwrap_or_else(|_| {
                             crate::ev!("quote.unread", { "turn": ts.turn, "seq": seq, "why": "the chat answered too slowly" });
                             None
                         })
                     };
-                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
+                    let (files, heard, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), runs, note, quote);
+                    let (note, quote) = if heard { (note, quote) } else { (None, None) };
+                    if !heard {
+                        crate::ev!("note.unheard", { "turn": ts.turn, "fragment": ts.fragment });
+                    }
                     keep(&ts.turn, &files);
                     ts.files = files;
                     // its age first (a late message's), then a late card

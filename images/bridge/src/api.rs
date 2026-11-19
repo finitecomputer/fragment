@@ -632,6 +632,13 @@ impl Api {
         self.json(Method::GET, &format!("/api/f/{}/status", name(fragment)?), Some(agent), None).await
     }
 
+    /// `GET /api/f/{name}/status`'s `code`: what the fragment runs now
+    /// (`records::Runs`).
+    pub async fn runs(&self, agent: &str, fragment: &str) -> Result<crate::records::Runs, ApiError> {
+        let status: Value = self.json(Method::GET, &format!("/api/f/{}/status", name(fragment)?), Some(agent), None).await?;
+        Ok(crate::records::Runs::of_status(&status))
+    }
+
     /// `GET /api/f/{name}/channels`.
     pub async fn channels(&self, agent: &str, fragment: &str) -> Result<Vec<ChannelInfo>, ApiError> {
         #[derive(Deserialize)]

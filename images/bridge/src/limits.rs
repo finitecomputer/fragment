@@ -26,6 +26,12 @@ pub const RUNTIMES_MAX: usize = 4;
 /// principal 8 sockets on one fragment and 32 subscriptions per fragment.
 pub const FOLLOWS_PER_AGENT_MAX: usize = 200;
 
+/// Chats a bridge's state remembers as having run code of their author's
+/// own (`State::unheard`), at most: one entry per such chat its agents
+/// read a record from, a name and a seq. Past it a new one is not
+/// remembered (logged), and is judged by what it runs at each read alone.
+pub const UNHEARD_MAX: usize = 4096;
+
 /// Fragments one discovery asks about (`GET /api/fragments` lists every
 /// membership of the agent, apps included), at most.
 pub const DISCOVER_FRAGMENTS_MAX: usize = 500;

@@ -55,12 +55,18 @@ pub struct Frag {
     /// capitalized, as the shell titles one by the agent's name).
     pub title: String,
     pub members: Vec<Member>,
+    /// What its status says it runs (`code.id`): `None`, no app code; a
+    /// chat's is the release's chat (`RELEASE_CHAT`).
+    pub code: Option<String>,
     pub channels: BTreeMap<String, Chan>,
     pub subscriptions: Vec<Value>,
     pub blobs: HashMap<String, (String, Bytes)>,
     pub files: BTreeMap<String, Bytes>,
     pub commits: Vec<Value>,
 }
+
+/// What a chat on the blessed `chat` template runs (its status's `code.id`).
+pub const RELEASE_CHAT: &str = "blessed:chat@0f1e2d3c";
 
 struct LiveSock {
     id: u64,
@@ -353,7 +359,7 @@ impl Fake {
     pub fn chat_named(&self, name: &str, agents: &[&str]) -> String {
         let name = name.to_string();
         self.with(|w| {
-            let mut f = Frag { kind: "chat".into(), ..Frag::default() };
+            let mut f = Frag { kind: "chat".into(), code: Some(RELEASE_CHAT.into()), ..Frag::default() };
             f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
             for (i, a) in agents.iter().enumerate() {
                 f.members.push(Member { principal: format!("npub1{a}"), role: "editor".into(), kind: "agent".into(), added_at: 10 + i as i64 });
@@ -726,7 +732,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             return refuse(StatusCode::CONFLICT, "that name is taken");
         }
         let at = w.now();
-        let mut f = Frag { kind: "chat".into(), title: v["title"].as_str().unwrap_or("").to_string(), ..Frag::default() };
+        let mut f = Frag { kind: "chat".into(), title: v["title"].as_str().unwrap_or("").to_string(), code: Some(RELEASE_CHAT.into()), ..Frag::default() };
         f.members.push(Member { principal: owner.clone(), role: "owner".into(), kind: "person".into(), added_at: at });
         f.members.push(Member { principal: me.clone(), role: "editor".into(), kind: "agent".into(), added_at: at });
         f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
@@ -773,8 +779,8 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
     let Some(role) = World::role_in(f, &me, acting_for.as_deref()) else { return refuse(StatusCode::FORBIDDEN, "not a member") };
     match (method, &p[3..]) {
         // what a status says of it that the image reads: its title (an
-        // agent's name: hermes-boot's Bot Mode identity)
-        (Method::GET, ["status"]) => answer(StatusCode::OK, json!({ "name": fragment, "kind": f.kind, "title": f.title })),
+        // agent's name: hermes-boot's Bot Mode identity), and what code it runs
+        (Method::GET, ["status"]) => answer(StatusCode::OK, json!({ "name": fragment, "kind": f.kind, "title": f.title, "code": { "id": f.code, "sha": null, "operations": {}, "error": null } })),
         (Method::GET, ["channels"]) if w.broken.contains(&fragment) => refuse(StatusCode::INTERNAL_SERVER_ERROR, "a broken fragment, as asked"),
         (Method::GET, ["channels"]) => {
             let list: Vec<Value> = f.channels.iter().map(|(n, c)| json!({ "name": n, "read": "viewer", "post": c.post, "seq": c.records.len() })).collect();

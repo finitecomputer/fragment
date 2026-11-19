@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::records::Step as ToolStep;
+use crate::records::Runs;
 
 const T0: u64 = 1_000_000;
 
@@ -251,7 +252,7 @@ fn rec(seq: u64, principal: &str, body: Value) -> Record {
 }
 
 fn view(agents: &[&Agent]) -> ChatView {
-    let mut v = ChatView { agents: agents.iter().map(|a| a.identity.clone()).collect(), people: vec!["npub1paul".into(), "npub1skyler".into()], ..ChatView::default() };
+    let mut v = ChatView { agents: agents.iter().map(|a| a.identity.clone()).collect(), people: vec!["npub1paul".into(), "npub1skyler".into()], runs: Runs::Release("chat".into()), ..ChatView::default() };
     v.names.insert("npub1paul".into(), "paul".into());
     v.names.insert("npub1skyler".into(), "skyler".into());
     v
@@ -4529,11 +4530,13 @@ fn a_relayed_message_is_its_owners() {
 /// owner, through that agent's own door, is its owner's message, whichever
 /// door (`simplex`, `telegram`) and whether or not a SimpleX link is bound
 /// here: the platform took it only through a door its owner opened.
-/// Carried by the agent itself or by a key that is none of the chat's
-/// agents (a hosted connector's fragment), it is theirs; for someone else,
-/// through another agent's door, or carried by another agent of the chat,
-/// it is what it would be without the mark (from that agent, a hand-off at
-/// most, never its owner's).
+/// Carried by the agent itself, or by a key that is none of the chat's
+/// members in a chat running the release's code of the door it names (a
+/// hosted connector's own chat), it is theirs; for someone else, through
+/// another agent's door, carried by another agent of the chat, or by a
+/// key none of the members anywhere else (a record its fragment's own key
+/// fires on a schedule), it is what it would be without the mark (from
+/// that carrier, never its owner's).
 #[test]
 fn a_relayed_record_is_its_owners_through_any_door_never_another_agents() {
     let (a, b) = (agent("juniper"), agent("maple"));
@@ -4553,8 +4556,30 @@ fn a_relayed_record_is_its_owners_through_any_door_never_another_agents() {
     let mut telegram = mine("from telegram");
     telegram["relayed"]["via"] = json!("telegram");
     owners(&mut e, 2, &a.identity, telegram.clone());
-    // carried by a key that is none of the chat's members: a hosted connector
-    owners(&mut e, 3, "npub1telegramconnector", telegram);
+    // carried by a key that is none of the chat's members, in the chat that
+    // runs the release's code of the door it names: a hosted connector
+    let connector = ChatView { runs: Runs::Release("telegram".into()), ..v.clone() };
+    let in_connector = |e: &mut Engine, seq: u64, body: Value, now: u64| {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "telegram--k3x9".into(), record: rec(seq, "npub1telegramconnector", body), view: Some(connector.clone()), since: 0 }, now);
+        started(&answered(e, s, now))
+    };
+    let t = in_connector(&mut e, 1, telegram.clone(), T0 + 3).expect("its owner's message, through its connector");
+    assert_eq!((t.asker.as_str(), t.fragment.as_str()), ("npub1paul", "telegram--k3x9"));
+    ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 3);
+    // there, naming another door than the one it runs: the key's own words
+    let mut slack = telegram.clone();
+    slack["relayed"]["via"] = json!("slack");
+    assert!(in_connector(&mut e, 2, slack, T0 + 4).is_none_or(|t| t.asker == "npub1telegramconnector"), "never its owner's");
+    // and in a chat (a record its fragment's own key fires: a schedule):
+    // the key's own words, never its owner's, whichever door it names
+    for (seq, body) in [(1, telegram.clone()), (2, mine("scheduled"))] {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "plans--k3x9".into(), record: rec(seq, "npub1telegramconnector", body), view: Some(v.clone()), since: 0 }, T0 + 5);
+        let s = answered(&mut e, s, T0 + 5);
+        assert!(started(&s).is_none_or(|t| t.asker == "npub1telegramconnector"), "never its owner's: {:?}", started(&s));
+        if let Some(t) = started(&s) {
+            ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 5);
+        }
+    }
     // posted by its owner with the mark: their own message
     owners(&mut e, 4, "npub1paul", mine("paul typed this"));
     // linked, then let go: what the platform took stays theirs
@@ -4862,4 +4887,138 @@ fn a_child_holds_even_when_its_parent_waits_on_a_person() {
     assert!(!e.keepalive());
     assert_eq!(keepalive(&ev(&mut e, Event::Working(true), T0)), Some(true));
     assert_eq!(keepalive(&ev(&mut e, Event::Working(false), T0)), Some(false));
+}
+
+// ---- a fragment the platform has not vouched for ----
+
+/// Goal (valid and invalid, mid-turn, replay): in a chat whose code is its
+/// author's own, or whose code the bridge has not read, nothing said is
+/// acted on (a record's principal says who called its code, not who
+/// spoke): its owner's message, their command, their answer to a card,
+/// anyone else's message. Its cursor passes them all the same, and a chat
+/// read running such code is heard no more, whatever it runs later. A chat
+/// running the release's code, or none, is heard as ever.
+#[test]
+fn a_chat_running_its_authors_own_code_is_heard_by_no_one() {
+    let a = agent("juniper");
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
+    let in_ = |e: &mut Engine, chat: &str, runs: Option<Runs>, seq: u64, principal: &str, body: Value, now: u64| {
+        let view = runs.map(|runs| ChatView { runs, ..view(&[&a]) });
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.into(), record: rec(seq, principal, body), view, since: 0 }, now);
+        answered(e, s, now)
+    };
+    let ask = |text: &str| json!({ "text": text, "to": [a.identity] });
+
+    // its author's own code, and code never read: nothing at all
+    for (chat, runs) in [("guestbook--m4l1", Some(Runs::Own)), ("unread--m4l1", None), ("unknown--m4l1", Some(Runs::Unread))] {
+        for (seq, principal, body) in [(1, "npub1paul", ask("water the ferns")), (2, "npub1paul", cmd("usage", "")), (3, "npub1skyler", ask("hello")), (4, "npub1paul", json!({ "kind": "stop" }))] {
+            let s = in_(&mut e, chat, runs.clone(), seq, principal, body, T0);
+            assert!(s.effects.is_empty(), "{chat} {seq}: {:?}", s.effects);
+            assert_eq!(e.state().cursors.get(&cursor_key(&a.fragment, chat, "chat")), Some(&seq), "its cursor passes it");
+        }
+    }
+    // the release's code, or none: heard
+    for (chat, runs) in [("talk--k3x9", Runs::Release("chat".into())), ("plain--k3x9", Runs::Nothing)] {
+        let t = started(&in_(&mut e, chat, Some(runs), 1, "npub1paul", ask("hi"), T0 + 1)).expect("its owner's turn");
+        assert_eq!(t.asker, "npub1paul");
+        ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 1);
+    }
+
+    // mid-turn: a card open in a chat that ran the release's code; its
+    // code is its author's own by the time its owner's answer is read
+    let release = Some(Runs::Release("chat".into()));
+    let turn = started(&in_(&mut e, "talk--k3x9", release.clone(), 2, "npub1skyler", ask("do something risky"), T0 + 2)).expect("skyler's turn").turn;
+    let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false, computer: false }];
+    let card = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p1".into(), text: "Run rm?".into(), options, ttl_ms: None }, T0 + 3);
+    assert_eq!(posts(&card)[0].1["asks"], "npub1paul");
+    let yes = json!({ "kind": "prompt_response", "prompt": "p1", "option": "once" });
+    assert!(commands(&in_(&mut e, "talk--k3x9", Some(Runs::Own), 3, "npub1paul", yes.clone(), T0 + 4)).is_empty(), "no answer");
+    // the release's code again: what was read meanwhile is not read twice,
+    // and the chat, heard running its author's code, is heard no more (its
+    // card waits out its time)
+    assert!(commands(&in_(&mut e, "talk--k3x9", release.clone(), 3, "npub1paul", yes.clone(), T0 + 5)).is_empty(), "its cursor passed it");
+    assert!(commands(&in_(&mut e, "talk--k3x9", release, 4, "npub1paul", yes, T0 + 6)).is_empty(), "heard no more");
+    assert!(e.unheard().is_some_and(|u| u.contains("talk--k3x9")));
+}
+
+/// Goal: an owner's late answer (no running turn holds its card) in a chat
+/// running its author's own code answers nothing, closes nothing and
+/// starts nothing, whatever its journal says: its cursor passes it.
+#[test]
+fn a_late_answer_in_a_chat_running_its_authors_own_code_answers_nothing() {
+    let a = agent("juniper");
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
+    let view = ChatView { runs: Runs::Own, ..view(&[&a]) };
+    let record = rec(5, "npub1paul", json!({ "kind": "prompt_response", "prompt": "p1", "option": "once", "agent": a.identity, "turn": "t1" }));
+    let s = e.step(Input::CardRecord { agent: a.fragment.clone(), fragment: "guestbook--m4l1".into(), record, view: Some(view), since: 0, history: Err(crate::history::Unavailable::Missing) }, T0);
+    assert!(s.effects.is_empty(), "{:?}", s.effects);
+    assert_eq!(e.state().cursors.get(&cursor_key(&a.fragment, "guestbook--m4l1", "chat")), Some(&5));
+}
+
+/// Goal (replay, restart, invalid): a chat read once while it ran its
+/// author's code is heard no more, whatever it runs later: in this life,
+/// and in the next (its state written and read back). Its late answers
+/// answer nothing; it starts nothing; the engine names it for the turns'
+/// notes (`unheard`). A state remembering past the bound, or a name that
+/// is no fragment's, is corrupt; past the bound in a life, a new one is
+/// not remembered, and is judged by what it runs alone.
+#[test]
+fn a_chat_heard_running_its_authors_code_is_heard_no_more() {
+    let a = agent("juniper");
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
+    let in_ = |e: &mut Engine, runs: Runs, seq: u64, body: Value, now: u64| {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "guestbook--m4l1".into(), record: rec(seq, "npub1paul", body), view: Some(ChatView { runs, ..view(&[&a]) }), since: 0 }, now);
+        answered(e, s, now)
+    };
+    let release = || Runs::Release("chat".into());
+    let ask = |text: &str| json!({ "text": text, "to": [a.identity] });
+    let s = in_(&mut e, Runs::Own, 3, ask("passed over"), T0);
+    assert!(s.effects.is_empty() && s.dirty);
+    assert_eq!(e.state().unheard, BTreeMap::from([("guestbook--m4l1".to_string(), 3)]));
+    assert_eq!(e.unheard(), Some(BTreeSet::from(["guestbook--m4l1".to_string()])));
+    // a record from before the agent joined is remembered all the same
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "older--m4l1".into(), record: rec(1, "npub1paul", json!({ "kind": "history", "title": "x", "messages": [] })), view: Some(ChatView { runs: Runs::Own, ..view(&[&a]) }), since: 1 }, T0);
+    assert!(s.effects.is_empty() && e.state().unheard.contains_key("older--m4l1"), "said before it joined, still remembered");
+    // its code removed, or the release's again: still nothing, in this life
+    assert!(in_(&mut e, Runs::Nothing, 4, ask("no code now"), T0 + 1).effects.is_empty());
+    assert!(in_(&mut e, release(), 5, ask("release now"), T0 + 2).effects.is_empty());
+    // and the next
+    let back: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("reads back");
+    let mut e = Engine::new(back.clone(), Settings::default(), "f".repeat(32).as_str()).expect("a state that holds it").with_runtime(crate::runtime::DEFAULT, crate::runtime::script::MENU);
+    e.step(Input::Agents(vec![a.clone()]), T0 + 3);
+    e.recover(T0 + 3);
+    e.step(heard(Event::Connected(true)), T0 + 3);
+    assert!(in_(&mut e, release(), 6, ask("after a restart"), T0 + 4).effects.is_empty());
+    let late = rec(7, "npub1paul", json!({ "kind": "prompt_response", "prompt": "p1", "option": "once", "agent": a.identity, "turn": "t1" }));
+    let s = e.step(Input::CardRecord { agent: a.fragment.clone(), fragment: "guestbook--m4l1".into(), record: late, view: Some(ChatView { runs: release(), ..view(&[&a]) }), since: 0, history: Err(crate::history::Unavailable::Missing) }, T0 + 5);
+    assert!(s.effects.is_empty(), "{:?}", s.effects);
+    // another chat is heard as ever
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(1, "npub1paul", ask("hi")), view: Some(view(&[&a])), since: 0 }, T0 + 6);
+    assert!(started(&answered(&mut e, s, T0 + 6)).is_some());
+
+    // invalid states
+    let mut full = back.clone();
+    full.unheard = (0..=limits::UNHEARD_MAX).map(|i| (format!("chat{i}--k3x9"), 1)).collect();
+    assert!(Engine::new(full, Settings::default(), LIFE).is_err(), "past the bound");
+    let mut bad = back.clone();
+    bad.unheard.insert("../Chat".into(), 1);
+    assert!(Engine::new(bad, Settings::default(), LIFE).is_err(), "no fragment's name");
+    // at the bound: a new one is not remembered, and no chat's journal is
+    // trusted (never open for want of room): no late answer anywhere, no
+    // notes (`unheard` is none); live records are judged by what each runs
+    let mut at_bound = back;
+    at_bound.unheard = (0..limits::UNHEARD_MAX).map(|i| (format!("chat{i}--k3x9"), 1)).collect();
+    let mut e = Engine::new(at_bound, Settings::default(), LIFE).expect("at the bound").with_runtime(crate::runtime::DEFAULT, crate::runtime::script::MENU);
+    e.step(Input::Agents(vec![a.clone()]), T0);
+    e.recover(T0);
+    e.step(heard(Event::Connected(true)), T0);
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "other--m4l1".into(), record: rec(1, "npub1paul", ask("x")), view: Some(ChatView { runs: Runs::Own, ..view(&[&a]) }), since: 0 }, T0);
+    assert!(s.effects.is_empty());
+    assert_eq!(e.state().unheard.len(), limits::UNHEARD_MAX);
+    assert_eq!(e.unheard(), None, "no chat's journal trusted");
+    let late = rec(2, "npub1paul", json!({ "kind": "prompt_response", "prompt": "p1", "option": "once", "agent": a.identity, "turn": "t1" }));
+    let s = e.step(Input::CardRecord { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: late, view: Some(view(&[&a])), since: 0, history: Err(crate::history::Unavailable::Missing) }, T0 + 1);
+    assert!(s.effects.is_empty(), "a late answer even in a release chat: {:?}", s.effects);
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(3, "npub1paul", ask("hi")), view: Some(view(&[&a])), since: 0 }, T0 + 2);
+    assert!(started(&answered(&mut e, s, T0 + 2)).is_some(), "a live message in a release chat, as ever");
 }

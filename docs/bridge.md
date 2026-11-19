@@ -44,9 +44,9 @@ computer's own:
   names a SimpleX core), `POST /api/computer/door`, and the WebSockets
   `GET /api/computer/keepalive` and `GET /api/computer/relay`;
 - what an agent follows: `GET /api/fragments`, and on each fragment
-  `GET …/channels`, `…/channels/{c}`, `…/members` and `…/subscriptions`
-  (`POST` one when it has none), `GET /f/{f}/__people`, and the
-  `/f/{f}/__live` socket;
+  `GET …/channels`, `…/channels/{c}`, `…/members`, `…/status` (what code
+  it runs: below) and `…/subscriptions` (`POST` one when it has none),
+  `GET /f/{f}/__people`, and the `/f/{f}/__live` socket;
 - what it writes: `POST …/channels/chat`, `…/channels/work` and its own
   `…/channels/tasks` (an ask's answer), `PUT …/channels/chat/draft`,
   `PUT` and `GET …/blobs/{sha256}` (an upload refused, as a viewer's in
@@ -91,6 +91,31 @@ with its default. What an image sets:
   (docs/computers.md, "Claude Code"). Unset, an agent whose `agent.json`
   names `claude` has its turns refused, saying so; set but not installed
   yet, each turn ends saying how to install it (`NOT_INSTALLED`).
+
+## Whose words a chat's records are
+
+An agent is in every fragment its person joins, and follows each one's
+`chat`. It acts on what is said there only while the fragment runs no
+code of its author's own: its status's `code.id` is the release's
+(`blessed:<template>@<release>`) or none. Where its author's code runs,
+an operation's effect or a job's step is published under whoever called
+it, with a body that code chose, so a record's principal says who was
+present, not who spoke: nothing said there starts a turn, runs a
+command, answers a card or stops a turn, the owner's included. Its
+cursor passes those records all the same, and a chat once read running
+such code is heard no more, whatever it runs later (the state keeps it,
+whatever record it read there, at most `UNHEARD_MAX`; past that, no
+chat's journal is trusted at all): a late card answer there answers nothing, and no
+turn's notes or quote (its history, recap, cut note) are read there, so
+nothing passed over comes back through the journal. A turn that runs
+there anyway (a routine, an ask's answer) is told no notes; nor is one
+whose chat's status does not say, at its start, that it runs the
+release's code or none.
+
+What a fragment runs is read with the chat's view (`VIEW_TTL_MS`), and
+again for each record that would carry the owner's word (theirs, or one
+that relays), so code installed since is judged before that record is.
+A read that fails follows again from the cursor after a wait.
 
 ## State, and what it never does twice
 

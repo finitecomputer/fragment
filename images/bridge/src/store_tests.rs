@@ -97,6 +97,7 @@ fn conversation() -> Vec<State> {
     let mut s3 = s2.clone();
     s3.children.push(engine::Helper { agent: "agent0--k3x9".into(), fragment: "chat0--k3x9".into(), turn: id.clone(), child: "0123456789abcdef01234567".into(), goal: "look it up".into(), since: 1 });
     s3.agent_turns.insert("chat0--k3x9".into(), vec![10, 20]);
+    s3.unheard.insert("chat3--k3x9".into(), 7);
     s3.said += 1;
     let mut s4 = s3.clone();
     s4.turns.get_mut(&id).expect("its turn").replies = 1;
@@ -107,6 +108,7 @@ fn conversation() -> Vec<State> {
     s5.version = 2;
     s5.boot += 1;
     s5.agent_turns.clear();
+    s5.unheard.insert("chat4--k3x9".into(), 2);
     s5.cursors.remove(&cursor_key("agent2--k3x9", "chat19--k3x9", records::WORK));
     vec![s0, s1, s2, s3, s4, s5]
 }

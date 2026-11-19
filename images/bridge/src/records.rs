@@ -305,6 +305,57 @@ pub fn door_ok(door: &str) -> bool {
         && !door.contains("--")
 }
 
+/// What a fragment runs, as its status says (`GET /api/f/{name}/status`'s
+/// `code.id`: docs/wire `CodeStatus`), which is what vouches for its
+/// records (engine.rs, `record`): an operation's effect or a job's step
+/// is published under whoever called it, with a body its code chose, so
+/// in a fragment whose code is its author's own a record's principal says
+/// who was there, never who spoke.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Runs {
+    /// Not read, or read from a status that says nothing of its code:
+    /// vouched for by nothing.
+    #[default]
+    Unread,
+    /// No app code: nothing there writes a record but its poster.
+    Nothing,
+    /// The platform release's code of the blessed template named
+    /// (`blessed:<template>@<release>`; `fragment_core::door::blessed_template`).
+    Release(String),
+    /// Code of its author's own (`app:<hash>`), or an id of no shape the
+    /// bridge knows.
+    Own,
+}
+
+impl Runs {
+    /// From a status's `code` (absent: `Unread`).
+    pub fn of_status(status: &Value) -> Runs {
+        let Some(code) = status.get("code").filter(|c| c.is_object()) else { return Runs::Unread };
+        match code.get("id") {
+            None | Some(Value::Null) => Runs::Nothing,
+            Some(Value::String(id)) => match id.strip_prefix("blessed:").and_then(|t| t.split_once('@')) {
+                Some((template, release)) if door_ok(template) && !release.is_empty() => Runs::Release(template.to_string()),
+                _ => Runs::Own,
+            },
+            Some(_) => Runs::Own,
+        }
+    }
+
+    /// Whether what is said there is its posters' own: no code of its
+    /// author's runs there.
+    pub fn vouched(&self) -> bool {
+        matches!(self, Runs::Nothing | Runs::Release(_))
+    }
+
+    /// The blessed template whose release's code it runs, if it runs one.
+    pub fn release(&self) -> Option<&str> {
+        match self {
+            Runs::Release(t) => Some(t),
+            _ => None,
+        }
+    }
+}
+
 /// What a relayed message says it relays: the person it speaks for, how
 /// they said it, and whose door it came through.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -970,6 +1021,26 @@ pub fn reply(text: &str, turn: &str, to: &[String], hop: u32, interim: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (valid and invalid): a status vouches for a fragment's records
+    /// only when it says its code is none or the release's of a template;
+    /// its author's own, an id of another shape, or a status that says
+    /// nothing of its code vouches for nothing.
+    #[test]
+    fn what_a_fragment_runs_reads_strictly() {
+        let of = |code: Value| Runs::of_status(&json!({ "name": "talk--k3x9", "code": code }));
+        assert_eq!(of(json!({ "id": null, "sha": null })), Runs::Nothing);
+        assert_eq!(of(json!({ "sha": null })), Runs::Nothing, "no id: no app code");
+        assert_eq!(of(json!({ "id": "blessed:chat@4f2a" })), Runs::Release("chat".into()));
+        assert_eq!(of(json!({ "id": "blessed:telegram@4f2a" })).release(), Some("telegram"));
+        for own in [json!("app:0f1e2d"), json!("blessed:chat"), json!("blessed:chat@"), json!("blessed:Chat@1"), json!("blessed:../chat@1"), json!("chat@1"), json!(""), json!(7)] {
+            assert_eq!(of(json!({ "id": own })), Runs::Own, "{own}");
+        }
+        assert_eq!(Runs::of_status(&json!({ "name": "talk--k3x9" })), Runs::Unread, "a status that says nothing of its code");
+        assert_eq!(of(json!("blessed:chat@1")), Runs::Unread, "a `code` that is no object");
+        assert!(Runs::Nothing.vouched() && Runs::Release("chat".into()).vouched());
+        assert!(!Runs::Own.vouched() && !Runs::Unread.vouched());
+    }
 
     /// Goal: a relayed message is a message that names a door (any door's
     /// id) and a person, nothing else; its body round-trips through `said` as a
