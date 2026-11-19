@@ -629,11 +629,15 @@ yes (decision 63). The owner, or their agent for them, invites an email at
   sign-in until they run out: debt ledger, "Invites from before their
   yes".)
 - An invite runs out at its expiry. Inviting the same email again renews
-  it and mails it again; `DELETE invites/<email>` takes it back.
+  it and mails it again; `DELETE invites/<email>` takes it back. An
+  answer, or a take-back, meets only the invite it names (by its
+  expiry): a newer one in its place keeps waiting, here and in its
+  person's list (409 to an answer of the older one).
 - A fragment holds at most `INVITES_MAX` waiting, and an email
   `INVITES_PER_EMAIL_MAX` across the fleet (429). A person mails at most
   `INVITE_MAILS_DAILY_MAX` a day, their agents' counted in (429). A mail
-  the service does not send takes the invite back.
+  the service does not send takes the invite back, and the one it
+  replaced, if any, waits again.
 - No event names the email: `invite.created` and `invite.revoked` say a
   role and who made them, `invite.declined` no one, `member.joined` the
   npub that accepted.
@@ -648,7 +652,7 @@ member). Any other agent is 403; a person naming `for` 400:
 
 | method & path | body → answer |
 | --- | --- |
-| `GET /api/invites` | → `InvitesWaiting {invites: [{fragment, role, title, from, email, expiresAt}]}`: those waiting on their emails, soonest to run out first; `title` the fragment's as sent, `from` the sharer's email (an agent's: its owner's; null when no one signs in as them now) |
+| `GET /api/invites` | → `InvitesWaiting {invites: [{fragment, role, title, from, email, expiresAt, app}]}`: those waiting on their emails, soonest to run out first; `title` the fragment's as sent, `from` the sharer's email (an agent's: its owner's; null when no one signs in as them now), `app` the app of theirs it asks in (null for a person's invite); its mailed link asks a member to accept it too |
 | `POST /api/invites/{fragment}/accept` | `{}` or none (else 400) → `InviteAccepted {fragment, role, open}`, the fragment in their list before it answers, `open` its page (Notices). None waiting: 404 (`reason: gone`); the fragment's refusal keeps it |
 | `POST /api/invites/{fragment}/decline` | the same → `{ok, declined}`; none waiting: 404 (`reason: gone`) |
 

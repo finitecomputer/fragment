@@ -351,5 +351,83 @@ fn races(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         first.status == 200 && revoked == 200 && resent != 200 && waiting.body["invites"].as_array().is_some_and(|i| i.is_empty()),
         format!("{first} revoked {revoked} resent {resent} {waiting}"),
     );
+
+    // ---- a member's apps: a newer invite outlives an older one's yes, a
+    // failed replacement keeps the one before, and the mailed link asks
+    let team = made(s, owner, "apps-team2")?;
+    let (bob, bob_session) = super::templates::person(api)?;
+    let bob_id = api.identity(&bob)?;
+    api.share(&team, &bob_id, "viewer")?;
+    let mut apps = vec![];
+    for base in ["apps-bob-a", "apps-bob-b", "apps-bob-c"] {
+        let name = made(s, &bob, base)?;
+        members_only(&bob, &name)?;
+        apps.push(name);
+    }
+    let invite_app = |app: &str| api.signed(owner, "POST", &format!("/api/f/{team}/invites"), Some(&json!({ "app": app, "role": "viewer" })));
+    let waits_on = |keys: &Keys, fragment: &str| -> bool {
+        let invites = api.signed(keys, "GET", "/api/invites", None).ok().and_then(|r| r.body["invites"].as_array().cloned()).unwrap_or_default();
+        invites.iter().any(|i| i["fragment"] == fragment)
+    };
+    let invites_here = |name: &str| -> Vec<Value> { api.signed(owner, "GET", &format!("/api/f/{name}/invites"), None).ok().and_then(|r| r.body["invites"].as_array().cloned()).unwrap_or_default() };
+    let first = invite_app(&apps[0])?;
+    hold(&team, Some("claimed"))?;
+    let (accepted, replaced) = std::thread::scope(|scope| -> Result<(u16, u16)> {
+        let accept = scope.spawn(|| api.signed(&bob, "POST", &format!("/api/invites/{team}/accept"), Some(&json!({}))));
+        s.eventually(wait, || held_at(&team) == "claimed");
+        let replaced = invite_app(&apps[1])?.status;
+        hold(&team, None)?;
+        Ok((accept.join().expect("the acceptance's thread")?.status, replaced))
+    })?;
+    let notice = waits_on(&bob, &team);
+    s.ok(
+        "an invite made while an older one's yes was being taken keeps its notice: its person can still answer it",
+        first.status == 200 && accepted == 200 && replaced == 200 && row(owner, &team, &apps[0]).is_some() && notice,
+        format!("first {first} accepted {accepted} replaced {replaced} notice {notice}"),
+    );
+    let link = super::signin::with_session(api, "GET", &format!("/auth/fragment?name={team}"), &bob_session)?;
+    s.ok(
+        "the mailed link asks its person, a member already, to accept their app's invite before it opens the fragment",
+        link.status == 200 && link.text.contains("Accept") && link.text.contains("adds your app"),
+        format!("{} {}", link.status, link.text.chars().take(300).collect::<String>()),
+    );
+    s.mail.fail_next("E_SEND_FAILED");
+    let failed = invite_app(&apps[2])?;
+    let kept = invites_here(&team).iter().any(|i| i["app"] == apps[1].as_str());
+    s.ok(
+        "an app's invite whose mail fails keeps the invite before it, here and in its person's notices",
+        failed.status != 200 && kept && waits_on(&bob, &team),
+        format!("{failed} kept {kept} {:?}", invites_here(&team)),
+    );
+    // their own invite, after they left, whose mail fails: the app's stays
+    api.signed(owner, "DELETE", &format!("/api/f/{team}/members/{bob_id}"), None)?;
+    s.mail.fail_next("E_SEND_FAILED");
+    let failed = api.signed(owner, "POST", &format!("/api/f/{team}/invites"), Some(&json!({ "email": super::templates::email_of(&bob), "role": "viewer" })))?;
+    let kept = invites_here(&team).iter().any(|i| i["app"] == apps[1].as_str());
+    s.ok(
+        "a person's invite whose mail fails, in place of their app's, keeps the app's here and in their notices",
+        failed.status != 200 && kept && waits_on(&bob, &team),
+        format!("{failed} kept {kept} {:?}", invites_here(&team)),
+    );
+
+    // ---- a revoke's word to the registry forgets only the invite it took
+    // back: one made again meanwhile stays in its person's notices
+    let dan = api.person()?;
+    let invite_dan = || api.signed(owner, "POST", &format!("/api/f/{team}/invites"), Some(&json!({ "email": Api::email_of(&dan), "role": "viewer" })));
+    let first = invite_dan()?;
+    hold(&team, Some("revoked"))?;
+    let (revoked, again) = std::thread::scope(|scope| -> Result<(u16, u16)> {
+        let revoke = scope.spawn(|| api.signed(owner, "DELETE", &format!("/api/f/{team}/invites/{}", Api::email_of(&dan)), None));
+        s.eventually(wait, || held_at(&team) == "revoked");
+        let again = invite_dan()?.status;
+        hold(&team, None)?;
+        Ok((revoke.join().expect("the revoke's thread")?.status, again))
+    })?;
+    let notice = waits_on(&dan, &team);
+    s.ok(
+        "an invite made again while the one before was being revoked keeps its notice",
+        first.status == 200 && revoked == 200 && again == 200 && notice,
+        format!("first {first} revoked {revoked} again {again} notice {notice}"),
+    );
     Ok(())
 }

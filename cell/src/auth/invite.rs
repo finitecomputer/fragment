@@ -46,11 +46,16 @@ pub(super) fn page(session: &str, who: &Signed, email: Option<&str>, name: &str,
         Some(e) => esc(e),
         None => format!("<code>{}</code>", esc(&who.id)),
     };
+    // an app's: its person is a member there already (decision 72)
+    let hint = match s("app") {
+        Some(_) => "Accepting adds your app there.".to_string(),
+        None => format!("Accepting makes you a member: it knows you as {you}, and it is in your fragments."),
+    };
     let body = format!(
         "<p>{from} invited you to {may} <b>{t}</b>.</p>\
          <form method=\"post\" action=\"/auth/fragment/invite?name={qn}&amp;return={qb}{address}\"><input type=\"hidden\" name=\"form\" value=\"{f}\">\
          <footer class=\"answer\"><button class=\"quiet\" name=\"answer\" value=\"decline\" data-arm disabled>Decline</button><button name=\"answer\" value=\"accept\" data-arm disabled>Accept and open</button></footer></form>\
-         <p class=\"hint\">Accepting makes you a member: it knows you as {you}, and it is in your fragments.</p>",
+         <p class=\"hint\">{hint}</p>",
         t = esc(title),
         qn = esc(&enc(name)),
         qb = esc(&enc(back)),

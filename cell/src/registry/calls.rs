@@ -119,6 +119,10 @@ pub(crate) struct InviteEmail {
     /// fragment: its title, or its label.
     pub title: String,
     pub expires_at: i64,
+    /// The app it asks in, for its person (decision 72), who is a member
+    /// there already: its mailed link asks them first all the same.
+    #[serde(default)]
+    pub app: Option<String>,
 }
 
 /// Answered, the invite waits on the email, and its mail went.

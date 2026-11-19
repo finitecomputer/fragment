@@ -1841,6 +1841,10 @@ pub struct WaitingInvite {
     pub from: Option<String>,
     pub email: String,
     pub expires_at: i64,
+    /// The app it asks in, an app of its person's, who is a member there
+    /// already (decision 72). Add-only: a person's invite names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 /// The answer to `POST /api/invites/<fragment>/accept`: the role they

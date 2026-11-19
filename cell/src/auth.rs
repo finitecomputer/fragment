@@ -728,7 +728,8 @@ enum Asking {
 /// fragment the person said yes to unless the fragment knows them already.
 /// Asked an invite first, an invite waiting there is answered for their
 /// yes unless the fragment knows them already (a member with a stray
-/// invite on another of their emails is signed in, as any member).
+/// invite on another of their emails is signed in, as any member), or it
+/// asks in an app of theirs (decision 72): a member's yes all the same.
 async fn mint_for(env: &Env, url: &Url, by: Minter<'_>, name: &str, back: &str, embedder: Option<&str>, asking: Asking) -> CellResult<Minting> {
     let (token, key) = match by {
         Minter::Session(token) => (Some(token.to_string()), None),
@@ -755,7 +756,9 @@ async fn mint_for(env: &Env, url: &Url, by: Minter<'_>, name: &str, back: &str, 
     // them already (docs/api.md, Asking first): the fragment is asked that
     // alone
     let who = Signed::new(minted.identity, key.clone());
+    let app_invite = minted.invite.as_ref().is_some_and(|i| i["app"].is_string());
     match share::ask::<serde::de::IgnoredAny>(env, url, name, &who, Method::Get, "/signin/known", None).await {
+        Ok(_) if app_invite => Ok(Minting::Ask(who, minted.email, minted.invite)),
         Ok(_) => {
             let minted = ask_registry(env, &mint(Consent::Member, false)).await?;
             Ok(Minting::Redeem(minted.redeem.ok_or_else(|| CellError::host("a member's mint answered no redemption"))?))

@@ -349,9 +349,10 @@ impl FragmentCell {
         }
         let now = js::now_ms();
         let expires_at = now + fragment_proto::limits::INVITE_TTL_S * 1000;
-        // one app's invite to a member at a time: a newer one takes its
-        // place; should its mail fail, none is left (the registry may hold
-        // neither), and the owner invites again
+        // one invite to a member at a time: a newer one takes its place, and
+        // should its mail fail, the one before comes back, here as at the
+        // registry
+        let before = self.invite_on(&email)?;
         self.exec(
             "INSERT INTO invites (email, role, expires_at, created_by, created_at, app, app_key) VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (email) DO UPDATE SET role = excluded.role, expires_at = excluded.expires_at, created_by = excluded.created_by,
@@ -365,10 +366,10 @@ impl FragmentCell {
             role,
             title: format!("{title}, for your app {shown}"),
             expires_at,
+            app: Some(name.to_string()),
         };
         if let Err(e) = crate::ask_registry(&self.env, &asked).await {
-            self.exec("DELETE FROM invites WHERE email = ? AND created_at = ? AND app = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now), name.into()])?;
-            self.sharing_changed()?;
+            self.invite_failed(&email, now, &before)?;
             return Err(e);
         }
         self.sharing_changed()?;
@@ -385,7 +386,10 @@ impl FragmentCell {
         let key = invited.key.clone();
         match self.add_app(&Actor::invited_by(by), app, role, &claim.identity, Some(invited), Some(&key)).await {
             // its invite went in the join's own turn
-            Ok(member) => Ok(member.role),
+            Ok(member) => {
+                self.test_hold("claimed").await;
+                Ok(member.role)
+            }
             // the app is gone: its invite goes with it, as the registry forgets it
             Err(e) if e.code == ErrorCode::NotFound => {
                 self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(made)])?;

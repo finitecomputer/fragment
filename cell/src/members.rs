@@ -939,7 +939,7 @@ impl FragmentCell {
         self.test_hold("invite-asked").await;
         // the write's own turn, after every wait: the invite it replaces
         // (what a failed mail brings back) and the cap, read now
-        let before = self.rows("SELECT email, role, expires_at, created_by, created_at, app, app_key FROM invites WHERE email = ?", vec![email.as_str().into()])?;
+        let before = self.invite_on(&email)?;
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
         }
@@ -962,6 +962,7 @@ impl FragmentCell {
             role: body.role,
             title: self.title()?.unwrap_or_else(|| crate::share::label(&name).to_string()),
             expires_at,
+            app: None,
         };
         let answer = crate::ask_registry(&self.env, &asked).await;
         match answer {
@@ -978,19 +979,7 @@ impl FragmentCell {
                 json_response(&Shared::Invited(invite))
             }
             Err(e) => {
-                // what this call wrote, unless a yes met it meanwhile; the
-                // one before comes back only into the place this one still
-                // held (a revoke or a newer invite since stands)
-                let ours = self.rows("DELETE FROM invites WHERE email = ? AND created_at = ? RETURNING email", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
-                if let (Some(was), false) = (before.first(), ours.is_empty()) {
-                    // whole, an app's marks too: it grants what it granted
-                    let text = |k: &str| was[k].as_str().map_or(SqlStorageValue::Null, Into::into);
-                    let int = |k: &str| SqlStorageValue::Integer(was[k].as_i64().unwrap_or_default());
-                    self.exec(
-                        "INSERT INTO invites (email, role, expires_at, created_by, created_at, app, app_key) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (email) DO NOTHING",
-                        vec![text("email"), text("role"), int("expires_at"), text("created_by"), int("created_at"), text("app"), text("app_key")],
-                    )?;
-                }
+                self.invite_failed(&email, now, &before)?;
                 Err(e)
             }
         }
@@ -1007,18 +996,20 @@ impl FragmentCell {
         let actor = self.require_owner(caller)?;
         let email = email.trim().to_ascii_lowercase();
         self.drop_spent_invites().await?;
-        if self.rows("SELECT email FROM invites WHERE email = ?", vec![email.as_str().into()])?.is_empty() {
+        let gone = self.rows("DELETE FROM invites WHERE email = ? RETURNING expires_at", vec![email.as_str().into()])?;
+        let Some(expires_at) = gone.first().map(|r| r["expires_at"].as_i64()) else {
             return Err(CellError::new(ErrorCode::NotFound, format!("no invite waits on {email}")));
-        }
-        self.exec("DELETE FROM invites WHERE email = ?", vec![email.as_str().into()])?;
+        };
         // the owner's list counts the invites waiting
         self.sharing_changed()?;
         self.event("invite.revoked", &format!("an invite was revoked{}", actor.said()), actor.noted(json!({})));
         self.flush_index().await;
         // and its person sees it no more: a registry that does not hear it
         // keeps showing it to them until it runs out, or they answer it
-        // (their yes then finds none waiting here, and says it is gone)
-        let forget = ForgetInvite { email: Some(email.clone()), fragment: self.name()? };
+        // (their yes then finds none waiting here, and says it is gone); a
+        // newer invite made meanwhile stands there
+        self.test_hold("revoked").await;
+        let forget = ForgetInvite { email: Some(email.clone()), fragment: self.name()?, expires_at };
         if let Err(e) = crate::ask_registry(&self.env, &forget).await {
             console_error!("{}: its revoked invite was not forgotten by the registry ({:?}): {}", forget.fragment, e.code, e.message);
         }
@@ -1030,7 +1021,7 @@ impl FragmentCell {
     /// registry that does not hear it shows them until they run out or are
     /// answered (a yes then finds no fragment, says it is gone, and forgets it).
     pub(crate) async fn forget_invites(&self, name: &str) {
-        let forget = ForgetInvite { email: None, fragment: name.to_string() };
+        let forget = ForgetInvite { email: None, fragment: name.to_string(), expires_at: None };
         if let Err(e) = crate::ask_registry(&self.env, &forget).await {
             console_error!("{name}: its ended life's invites were not forgotten by the registry ({:?}): {}", e.code, e.message);
         }
@@ -1044,9 +1035,10 @@ impl FragmentCell {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
         self.drop_spent_invites().await?;
-        let gone = self.rows("DELETE FROM invites WHERE email = ? RETURNING role", vec![claim.email.as_str().into()])?;
+        let at = claim.expires_at.map_or(SqlStorageValue::Null, SqlStorageValue::Integer);
+        let gone = self.rows("DELETE FROM invites WHERE email = ? AND (? IS NULL OR expires_at = ?) RETURNING role", vec![claim.email.as_str().into(), at.clone(), at])?;
         if gone.is_empty() {
-            return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
+            return Err(self.not_waiting(&claim.email)?);
         }
         self.sharing_changed()?;
         self.event("invite.declined", "an invite was declined", json!({}));
@@ -1067,9 +1059,13 @@ impl FragmentCell {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
         self.drop_spent_invites().await?;
-        let rows = self.rows("SELECT role, created_by, created_at, app, app_key FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
+        let at = claim.expires_at.map_or(SqlStorageValue::Null, SqlStorageValue::Integer);
+        let rows = self.rows(
+            "SELECT role, created_by, created_at, app, app_key FROM invites WHERE email = ? AND (? IS NULL OR expires_at = ?)",
+            vec![claim.email.as_str().into(), at.clone(), at],
+        )?;
         let Some(row) = rows.first() else {
-            return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
+            return Err(self.not_waiting(&claim.email)?);
         };
         let role = row["role"].as_str().and_then(Role::parse).ok_or_else(|| CellError::host("invites.role"))?;
         let by = row["created_by"].as_str().unwrap_or_default().to_string();
@@ -1101,13 +1097,7 @@ impl FragmentCell {
             )?;
             if same.is_empty() {
                 self.given_up(noted).await?;
-                // a newer invite in its place is not this one's to spend, nor
-                // the registry's to forget: a conflict, not a 404
-                let newer = !self.rows("SELECT 1 AS x FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?.is_empty();
-                return Err(match newer {
-                    true => CellError::new(ErrorCode::Conflict, "a newer invite waits on that email: answer that one"),
-                    false => CellError::new(ErrorCode::NotFound, "no invite waits on that email"),
-                });
+                return Err(self.not_waiting(&claim.email)?);
             }
             if let Err(e) = self.room_for(u64::from(self.member_role(who)?.is_none()) + self.not_members(agents)?) {
                 self.given_up(noted).await?;
@@ -1139,6 +1129,41 @@ impl FragmentCell {
         self.flush_index().await;
         self.flush_joined().await;
         Ok(now)
+    }
+
+    /// The invite waiting on `email`, whole, as a replacement's write reads
+    /// it in its own turn (`invite_failed`).
+    pub(crate) fn invite_on(&self, email: &str) -> CellResult<Vec<Value>> {
+        self.rows("SELECT email, role, expires_at, created_by, created_at, app, app_key FROM invites WHERE email = ?", vec![email.into()])
+    }
+
+    /// A replacement invite the registry refused (a day's mails spent, a
+    /// mail not sent): what it wrote at `made` goes, unless a yes met it
+    /// meanwhile, and `before` (`invite_on`) comes back whole, an app's
+    /// marks too, so it grants what it granted, only into the place it
+    /// still held: a revoke or a newer invite since stands.
+    pub(crate) fn invite_failed(&self, email: &str, made: i64, before: &[Value]) -> CellResult<()> {
+        let ours = self.rows("DELETE FROM invites WHERE email = ? AND created_at = ? RETURNING email", vec![email.into(), SqlStorageValue::Integer(made)])?;
+        if let (Some(was), false) = (before.first(), ours.is_empty()) {
+            let text = |k: &str| was[k].as_str().map_or(SqlStorageValue::Null, Into::into);
+            let int = |k: &str| SqlStorageValue::Integer(was[k].as_i64().unwrap_or_default());
+            self.exec(
+                "INSERT INTO invites (email, role, expires_at, created_by, created_at, app, app_key) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (email) DO NOTHING",
+                vec![text("email"), text("role"), int("expires_at"), text("created_by"), int("created_at"), text("app"), text("app_key")],
+            )?;
+        }
+        self.sharing_changed()
+    }
+
+    /// Why an answer to the invite on `email` meets none: a newer invite in
+    /// its place is not this answer's to spend, nor the registry's to
+    /// forget (409); none at all is 404.
+    fn not_waiting(&self, email: &str) -> CellResult<CellError> {
+        let newer = !self.rows("SELECT 1 AS x FROM invites WHERE email = ?", vec![email.into()])?.is_empty();
+        Ok(match newer {
+            true => CellError::new(ErrorCode::Conflict, "a newer invite waits on that email: answer that one"),
+            false => CellError::new(ErrorCode::NotFound, "no invite waits on that email"),
+        })
     }
 
     /// How many of `ids` are no members here.

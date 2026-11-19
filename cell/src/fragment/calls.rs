@@ -277,6 +277,11 @@ pub(crate) struct InviteAnswer {
     pub identity: String,
     pub agents: Vec<String>,
     pub yes: bool,
+    /// The invite answered, by when it runs out (its generation): a newer
+    /// one in its place is 409, not this answer's. None: an invite from
+    /// before invites waited for a yes, met at a sign-in.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }
 
 impl Call for InviteAnswer {
