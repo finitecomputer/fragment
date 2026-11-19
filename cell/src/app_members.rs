@@ -185,7 +185,7 @@ impl FragmentCell {
             let person = self.emails(vec![g.person.clone()]).await.pop().map_or_else(|| fragment_core::npub::display(&g.person), |(_, email)| email);
             return Err(CellError::new(ErrorCode::Forbidden, refused.line(&g.title, &self.app_title()?, &person)));
         }
-        let power = approved.get(&g.person).copied().unwrap_or(Role::Viewer);
+        let power = app_member::power_of(&approved, &g.person).unwrap_or(Role::Viewer);
         self.exec(
             "INSERT INTO app_audience (app, person, power, at) VALUES (?, ?, ?, ?) ON CONFLICT (app, person) DO UPDATE SET power = excluded.power, at = excluded.at",
             vec![g.app.as_str().into(), g.person.as_str().into(), power.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
@@ -271,8 +271,7 @@ impl FragmentCell {
         // an app's audience is its members and their owners
         let approved = self.app_audience(&answer.npub)?;
         // each one's role here, read in this turn (one that will not read holds none: the safe side)
-        let audience = app_member::audience_of(answer.audience.iter().cloned());
-        let list = match app_member::join(role, &approved, audience, |p| self.member_role(p).ok().flatten()) {
+        let list = match app_member::join(role, &approved, answer.audience.clone(), |p| self.member_role(p).ok().flatten()) {
             Ok(list) => list,
             Err(refused) => {
                 let person = match &refused {
@@ -570,10 +569,9 @@ impl FragmentCell {
         if answer.npub != principal {
             return Ok(());
         }
-        let shown = app_member::audience_of(answer.audience);
         // bounded as its audience is
         for (person, power) in self.app_audience(principal)? {
-            let left = shown.get(&person).copied().map(|now| now.min(power));
+            let left = app_member::power_of(&answer.audience, &person).map(|now| now.min(power));
             if left == Some(power) {
                 continue;
             }
@@ -596,10 +594,9 @@ impl FragmentCell {
         let fresh = js::now_ms() - GROWTH_NOTED_MS;
         for g in self.rows("SELECT person, power FROM app_growth WHERE at >= ?", vec![SqlStorageValue::Integer(fresh)])? {
             let (Some(person), Some(power)) = (g["person"].as_str(), g["power"].as_str().and_then(Role::parse)) else { continue };
-            let held = audience.entry(person.to_string()).or_insert(power);
-            *held = (*held).max(power);
+            app_member::count(&mut audience, person, power);
         }
-        Ok(AppAudience { npub: self.must(MetaKey::Npub)?, audience: audience.into_iter().collect() })
+        Ok(AppAudience { npub: self.must(MetaKey::Npub)?, audience })
     }
 
     /// Each fragment this app is in asked to look at its audience again, at
@@ -631,7 +628,7 @@ impl FragmentCell {
             _ => target.id.as_str(),
         };
         let power = if role >= Role::Editor { Role::Editor } else { Role::Viewer };
-        Ok(audience.get(person).is_none_or(|now| *now < power).then(|| person.to_string()))
+        Ok(app_member::power_of(&audience, person).is_none_or(|now| now < power).then(|| person.to_string()))
     }
 
     /// The app `name` told its role here (none: out), at a new version, by
@@ -645,7 +642,8 @@ impl FragmentCell {
     /// (none before it joins).
     fn app_audience(&self, principal: &str) -> CellResult<Audience> {
         let rows = self.rows("SELECT person, power FROM app_audience WHERE app = ?", vec![principal.into()])?;
-        Ok(app_member::audience_of(rows.iter().filter_map(|r| Some((r["person"].as_str()?.to_string(), Role::parse(r["power"].as_str()?)?)))))
+        // one row a person: the list as kept
+        Ok(rows.iter().filter_map(|r| Some((r["person"].as_str()?.to_string(), Role::parse(r["power"].as_str()?)?))).collect())
     }
 
     /// Each app member held to the list it approved, at a change to who
