@@ -338,13 +338,16 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
         format!("{refreshed} / {pending_st} / {landed_while_down:?}"),
     );
     poll_now(&kept)?;
+    // its template's commit is the old life's bytes (`{"template":"chat"}`,
+    // a face being its cell's), so main and live stay at that commit: its
+    // landing is its own seed's, its deploy's install
     let healed = s.eventually(wait, || {
         let st = status(&kept);
-        st["pins"]["live"].as_str().is_some_and(|live| live != old_live) && st["code"]["sha"] == st["pins"]["live"]
+        events(&kept, "template").len() == 1 && st["pins"]["live"] == old_live.as_str() && st["pins"]["main"] == st["pins"]["live"] && st["code"]["sha"] == st["pins"]["live"]
     });
     let st = status(&kept);
     s.ok(
-        "commits back, its own template lands: committed and deployed in this life, live past the old one and installed from it",
+        "commits back, its own template lands: committed (the old life's bytes, so live stays at that commit) and deployed in this life, and installed from its own deploy",
         healed && manifest_at(s, &url) == json!({ "template": "chat" }) && events(&kept, "template").len() == 1,
         format!("{st} {}", manifest_at(s, &url)),
     );
