@@ -1111,13 +1111,27 @@ pub fn secrets_page(s: &mut Suite, api: &Api) -> Result<()> {
     let cookie = format!("fragment_site={}", super::signin::site_cookie(api, &api.sign_in(&Api::email_of(&visitor))?, &name)?);
     let body = json!({ "fromVault": "telegram-e2e", "hosts": ["127.0.0.1"] });
     let extra = vec![("origin", api.site_origin(&name)), ("sec-fetch-site", "same-origin".to_string()), ("sec-fetch-mode", "cors".to_string()), ("sec-fetch-dest", "empty".to_string())];
-    let asked = api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/STOLEN"), body: Some(body.to_string().into_bytes()), content_type: Some("application/json"), cookie: Some(cookie), extra, ..api::Call::default() })?;
+    let asked = api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/STOLEN"), body: Some(body.to_string().into_bytes()), content_type: Some("application/json"), cookie: Some(cookie.clone()), extra: extra.clone(), ..api::Call::default() })?;
     let held = api.signed(&visitor, "GET", "/api/vault", None)?;
     let kept = api.signed(&author, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok(
         "a fromVault move asked from the page of an ordinary fragment (its author's own code), with a visiting editor's session, takes nothing from their Vault and stores nothing: their Vault lists the secret as it was, its hosts theirs, and the fragment holds no such secret",
         held.status == 200 && held.body == before.body && kept.status == 200 && kept.body["secrets"] == json!([]),
         json!({ "asked": asked.status, "answer": asked.body, "vaultBefore": before.body, "vault": held.body, "fragment": kept.body }),
+    );
+    // and the page learns nothing of what their Vault holds: a name it
+    // holds and names it does not, asked the same way, answer alike
+    let guesses = (0..24)
+        .map(|i| {
+            let body = json!({ "fromVault": format!("telegram-guess-{i}"), "hosts": ["127.0.0.1"] });
+            api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/STOLEN"), body: Some(body.to_string().into_bytes()), content_type: Some("application/json"), cookie: Some(cookie.clone()), extra: extra.clone(), ..api::Call::default() })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let held = api.signed(&visitor, "GET", "/api/vault", None)?;
+    s.ok(
+        "from the page, a name their Vault holds and two dozen it does not answer alike (status and body), so a page learns nothing of their Vault; it is as it was",
+        guesses.iter().all(|g| g.status == asked.status && g.body == asked.body) && held.body == before.body,
+        json!({ "held": { "status": asked.status, "body": asked.body }, "guessed": guesses.iter().map(|g| format!("{} {}", g.status, g.text)).collect::<std::collections::BTreeSet<_>>() }),
     );
     // their own move (their key) keeps it within the hosts they set for it
     // in their Vault: toward another, refused before anything is claimed
