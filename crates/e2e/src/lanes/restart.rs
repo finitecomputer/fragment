@@ -368,9 +368,18 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
             let bound = super::credentials::own_key_cookie(&asked);
             let back = super::credentials::sent_back(&api, asked.body["url"].as_str().unwrap_or_default())?;
             anyhow::ensure!(made.status == 200 && asked.status == 200 && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {asked} {back}");
-            Some((connector, connector_session, bound, back))
+            Some((connector, connector_session, bound, back, made.body["computer"].as_str().unwrap_or("").to_string()))
         }
     };
+    // a month of uses its computer owes its ledger from before the move
+    // (M16, Computer step 7), made last month's as the step keeps one, and
+    // handed over by no request before the restart
+    let last_month = fragment_core::ledger::Month(fragment_core::ledger::Month::of(crate::api::now_ms()).0 - 1).label();
+    let owed_uses = json!([{ "agent": "restart-agent--a1b2", "provider": "github", "calls": 3, "micros": 0 }, { "agent": "restart-agent--a1b2", "provider": "perplexity", "calls": 2, "micros": 15_000 }]);
+    if let Some((_, _, _, _, computer)) = &own_key {
+        let r = api.unsigned("POST", "/api/test/computer", Some(&json!({ "computer": computer, "op": "legacy-uses", "month": last_month, "row": owed_uses })))?;
+        anyhow::ensure!(r.status == 200 && r.body["owed"][&last_month] == owed_uses, "owed uses setup: {r}");
+    }
 
     s.stop()?;
     let api = s.start_with_a_key_more()?;
@@ -398,14 +407,25 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         json!({ "typed": typed.status, "added": pressed.status, "me": theirs.body }),
     );
     const OWN_KEY: &str = "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected";
+    const OWED_USES: &str = "after a restart a computer's month of uses from before the move, owed, is handed to its owner's ledger as its owner reads its view, once, whole";
     match own_key {
-        Some((connector, connector_session, bound, back)) => {
+        Some((connector, connector_session, bound, back, computer)) => {
             let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
             let state = api.signed(&connector, "GET", "/api/connections", None)?;
             let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
             s.ok(OWN_KEY, page.status == 200 && page.text.contains("is connected") && connected, json!({ "page": page.to_string(), "connections": state.body }));
+            // its owner reads its view (the shell, Settings)
+            let looked = api.signed(&connector, "GET", &format!("/api/computers/{computer}"), None)?;
+            let owed = || api.unsigned("POST", "/api/test/computer", Some(&json!({ "computer": computer, "op": "legacy-uses" }))).map(|r| r.body["owed"].clone()).unwrap_or(Value::Null);
+            let taken = s.eventually(Duration::from_secs(30), || owed() == json!({}));
+            let got = api.signed(&connector, "GET", &format!("/api/ledger/uses/{last_month}"), None)?;
+            let once = json!([{ "provider": "github", "agent": "restart-agent--a1b2", "calls": 3, "micros": 0 }, { "provider": "perplexity", "agent": "restart-agent--a1b2", "calls": 2, "micros": 15_000 }]);
+            s.ok(OWED_USES, looked.status == 200 && taken && got.body["uses"] == once, json!({ "taken": taken, "ledger": got.body }));
         }
-        None => s.skip(OWN_KEY, NO_COMPUTERS),
+        None => {
+            s.skip(OWN_KEY, NO_COMPUTERS);
+            s.skip(OWED_USES, NO_COMPUTERS);
+        }
     }
     const FACE: &str = "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them";
     match face {

@@ -27,7 +27,8 @@ pub(super) struct Swapping<'a> {
     pub id: &'a str,
     pub agent: &'a str,
     pub identity: &'a str,
-    /// The month the computer's uses are counted in (`computers::pin_month`).
+    /// The month its owner's ledger counts the agent's uses in
+    /// (`computers::pin_month`).
     pub month: &'a str,
 }
 
@@ -52,8 +53,8 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "basic auth: the own key in its password's place, its user as it came",
     "a key that is no printable token is refused; taken away, the guest is given it no more",
     "each operator key's call is charged to the agent's owner's ledger after it, as the agent, at its list price and the margin",
-    "this month's uses: each call by agent, a connection's and an own key's counted, never charged, an operator key's at its charge",
-    "no one else reads them, and a month is YYYY-MM",
+    "this month's uses, in the owner's ledger: each call by agent, a connection's and an own key's counted, never charged, an operator key's at its charge",
+    "no one else reads them (a stranger's are their own, none), and a month is YYYY-MM",
     "a request with no placeholder goes on as it came",
     "an operator key's call its owner's ledger's gate refuses is refused, and reaches no provider",
     "firecrawl: its SDK header is swapped only at its catalog host",
@@ -471,16 +472,20 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     s.ok(SWAP_CHECKS[37], session_sent && reused_sent && held_row("browser-use", 1, charge_of("browser-use")) == 1 && held_row("browser-use", 0, 0) == 2, json!({ "rows": rows }));
     s.ok(SWAP_CHECKS[38], lookup_sent && search_sent && held_row("x", 0, 0) == 2, json!({ "rows": rows }));
     let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 3, charge_of("google-places:photo")), ("firecrawl", 2, charge_of("firecrawl:credit")), ("fal", 3, image), ("browser-use", 3, charge_of("browser-use")), ("xai", 3, charge_of("xai")), ("x", 3, charge_of("x")), (SWAP_OWN, 1, 0)];
-    let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
+    let uses = || api.signed(w.owner, "GET", "/api/ledger/uses", None).map(|r| r.body).unwrap_or(Value::Null);
     let counted = |u: &Value| expect.iter().all(|(p, calls, micros)| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == *p && x["agent"] == w.agent && x["calls"] == *calls && x["micros"] == *micros)));
     let all = s.eventually(Duration::from_secs(20), || counted(&uses()));
     let u = uses();
     let month = w.month;
-    s.ok(SWAP_CHECKS[18], all && u["month"] == month && u["computer"] == w.id, &u);
-    let theirs = api.signed(w.stranger, "GET", &format!("/api/computers/{}/uses", w.id), None)?;
-    let bad_month = api.signed(w.owner, "GET", &format!("/api/computers/{}/uses/2026-13", w.id), None)?;
-    let this = api.signed(w.owner, "GET", &format!("/api/computers/{}/uses/{month}", w.id), None)?;
-    s.ok(SWAP_CHECKS[19], theirs.status == 404 && bad_month.status == 400 && this.status == 200 && this.body == u, json!({ "stranger": theirs.status, "badMonth": bad_month.status, "month": this.body }));
+    s.ok(SWAP_CHECKS[18], all && u["month"] == month, &u);
+    let theirs = api.signed(w.stranger, "GET", &format!("/api/ledger/uses/{month}"), None)?;
+    let bad_month = api.signed(w.owner, "GET", "/api/ledger/uses/2026-13", None)?;
+    let this = api.signed(w.owner, "GET", &format!("/api/ledger/uses/{month}"), None)?;
+    s.ok(
+        SWAP_CHECKS[19],
+        theirs.status == 200 && theirs.body["uses"] == json!([]) && bad_month.status == 400 && this.status == 200 && this.body == u,
+        json!({ "stranger": theirs.body, "badMonth": bad_month.status, "month": this.body }),
+    );
 
     let said = say(s, 117, "fetch http://api.perplexity.ai/plain with nothing-swapped")?;
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
@@ -511,7 +516,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let calls = (cap - spent + each - 1) / each;
     anyhow::ensure!((1..=6).contains(&calls), "a few long calls reach the cap: {calls}");
     let eleven_calls = || {
-        let u = api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
+        let u = api.signed(w.owner, "GET", "/api/ledger/uses", None).map(|r| r.body).unwrap_or(Value::Null);
         u["uses"].as_array().map_or(0, |l| l.iter().filter(|x| x["provider"] == "elevenlabs").map(|x| x["calls"].as_u64().unwrap_or(0)).sum::<u64>())
     };
     let counted_before = eleven_calls();
@@ -613,7 +618,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
             && paused_now(),
         json!({ "stale": stale.status, "kept": kept, "low": low, "heldLow": held_low, "back": back, "late": late.status, "repaused": repaused }),
     );
-    // two hours on, by the computer's clock (its uses' month stays)
+    // two hours on, by the computer's clock, which its key hours are on
     let moved = super::computers::lever_with(api, w.id, json!({ "op": "clock", "offsetMs": super::ledger::mid_month_offset_ms() + 2 * fragment_core::key_hour::HOUR_MS }))?;
     let again = say(s, 159, &speak(SPOKEN))?;
     // a view with no notices leaves them out
@@ -903,7 +908,7 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let calls_before = s.openrouter.calls().len();
     let said = say(s, 203, &format!("fetch http://{SWAP_ROUTER_HOST}/api/v1/key with ${SWAP_ROUTER_ENV}"))?;
     let calls = s.openrouter.calls();
-    let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
+    let uses = || api.signed(w.owner, "GET", "/api/ledger/uses", None).map(|r| r.body).unwrap_or(Value::Null);
     let counted = s.eventually(Duration::from_secs(20), || uses()["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == SWAP_ROUTER && x["agent"] == w.agent && x["calls"] == 1 && x["micros"] == 0)));
     s.ok(
         MODEL_CHECKS[5],
@@ -1277,4 +1282,73 @@ pub(super) fn grant_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let unpicked = api.signed(w.owner, "PUT", &format!("/api/computers/{}/agents/{}/accounts/{SEVERAL}", w.id, w.agent), Some(&json!({ "account": null })))?;
     anyhow::ensure!(back.status == 200 && unpicked.status == 200, "the agent given every provider again, its pick cleared: {back}; {unpicked}");
     Ok(turns)
+}
+
+/// The checks `uses_checks` makes: a computer's uses from before the move
+/// (M16) handed to its owner's ledger.
+pub(super) const USES_CHECKS: &[&str] = &[
+    "a computer's months of uses from before the move, owed (an agent gone among them), are handed to its owner's ledger as its owner reads its view, whole, and owed no more",
+    "handed over again (as when its answer was lost before the computer forgot them), the ledger adds nothing twice",
+    "another body under a month the ledger took is refused, changing nothing there, and the computer owes it no more",
+];
+
+/// A month's uses in `owner`'s ledger, as `(provider, agent, calls,
+/// micros)`, sorted.
+fn ledger_uses(api: &Api, owner: &crate::Keys, month: &str) -> Vec<(String, String, i64, i64)> {
+    let r = api.signed(owner, "GET", &format!("/api/ledger/uses/{month}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let mut rows: Vec<(String, String, i64, i64)> = r["uses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|u| (u["provider"].as_str().unwrap_or("").to_string(), u["agent"].as_str().unwrap_or("").to_string(), u["calls"].as_i64().unwrap_or(-1), u["micros"].as_i64().unwrap_or(-1)))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A computer's uses from before the move (Computer step 7, M16): months
+/// it owes its owner's ledger, made by its `legacy-uses` lever as the step
+/// keeps them, the months before the lane's (`month`), whose uses the lane
+/// does not count. Taken once each, whole, as its owner reads its view.
+pub(super) fn uses_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, agent: &str, month: &str) -> Result<()> {
+    use fragment_core::ledger::Month;
+    let this = Month::parse(month).ok_or_else(|| anyhow::anyhow!("the lane's month {month:?}"))?;
+    let (last, before) = (Month(this.0 - 1).label(), Month(this.0 - 2).label());
+    let lever = |body: Value| super::computers::lever_with(api, id, body);
+    let owed = || lever(json!({ "op": "legacy-uses" })).map(|r| r.body["owed"].clone()).unwrap_or(Value::Null);
+    let touch = || api.signed(owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.status).unwrap_or(0);
+    let gone = "gone--z9x1";
+    let kept = |a: &str, p: &str, calls: i64, micros: i64| json!({ "agent": a, "provider": p, "calls": calls, "micros": micros });
+    let rows_last = json!([kept(agent, "github", 3, 0), kept(agent, "perplexity", 2, 15_000), kept(gone, "perplexity", 1, 7_500)]);
+    let rows_before = json!([kept(agent, "elevenlabs", 4, 90_000)]);
+    let row = |p: &str, a: &str, c: i64, m: i64| (p.to_string(), a.to_string(), c, m);
+    let mut want_last = vec![row("github", agent, 3, 0), row("perplexity", agent, 2, 15_000), row("perplexity", gone, 1, 7_500)];
+    want_last.sort();
+    let want_before = vec![row("elevenlabs", agent, 4, 90_000)];
+    let held = (ledger_uses(api, owner, &last), ledger_uses(api, owner, &before));
+
+    let planted = [lever(json!({ "op": "legacy-uses", "month": last, "row": rows_last }))?, lever(json!({ "op": "legacy-uses", "month": before, "row": rows_before }))?];
+    let both = planted[1].body["owed"].as_object().is_some_and(|o| o.len() == 2);
+    let touched = touch();
+    let taken = s.eventually(Duration::from_secs(20), || owed() == json!({}));
+    let got = (ledger_uses(api, owner, &last), ledger_uses(api, owner, &before));
+    s.ok(
+        USES_CHECKS[0],
+        held == (vec![], vec![]) && both && touched == 200 && taken && got == (want_last.clone(), want_before.clone()),
+        json!({ "held": held, "planted": planted[1].body, "taken": taken, "got": got }),
+    );
+
+    // its answer lost: the computer still owes what the ledger took
+    let again = lever(json!({ "op": "legacy-uses", "month": last, "row": rows_last }))?;
+    let touched = touch();
+    let taken = s.eventually(Duration::from_secs(20), || owed() == json!({}));
+    let after = ledger_uses(api, owner, &last);
+    s.ok(USES_CHECKS[1], again.status == 200 && touched == 200 && taken && after == want_last, json!({ "taken": taken, "after": after }));
+
+    let other = lever(json!({ "op": "legacy-uses", "month": last, "row": [kept(agent, "github", 99, 0)] }))?;
+    let touched = touch();
+    let taken = s.eventually(Duration::from_secs(20), || owed() == json!({}));
+    let after = ledger_uses(api, owner, &last);
+    s.ok(USES_CHECKS[2], other.status == 200 && touched == 200 && taken && after == want_last, json!({ "taken": taken, "after": after }));
+    Ok(())
 }

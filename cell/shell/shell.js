@@ -1974,7 +1974,7 @@ function leaveMove() {
 }
 
 const settings = createSettings({
-  api, $, seg, asks,
+  api, $, asks,
   account: { person: () => state.me, setPerson: (p) => { state.me = p; }, isGuest: () => state.guest, setGuest,
     setSeat: (seat) => { state.seat = seat; }, support: () => state.support, seatIs,
     switchForm: (...args) => switchForm(...args), noSeatSaid: () => noSeatSaid() },

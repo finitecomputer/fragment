@@ -155,9 +155,9 @@ pub const PRINCIPAL: Class = Class {
     kept: &["wiped"],
 };
 
-pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
+pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql"), step!("uses", "ledger/0002_uses.sql")], variants: &[], kept: &["wiped"] };
 
-pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql"), step!("grants_forward_only", "computer/0005_grants_forward_only.sql"), step!("grants_owed", "computer/0006_grants_owed.sql")], variants: &[], kept: &["wiped"] };
+pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql"), step!("grants_forward_only", "computer/0005_grants_forward_only.sql"), step!("grants_owed", "computer/0006_grants_owed.sql"), step!("uses_owed", "computer/0007_uses_owed.sql")], variants: &[], kept: &["wiped"] };
 
 /// A fragment life's search index: its end releases its storage whole
 /// (`deleteAll`), so it keeps nothing.
