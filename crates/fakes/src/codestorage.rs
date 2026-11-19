@@ -213,6 +213,24 @@ struct State {
     /// (`advertise_upload_max`); none, as an older platform's.
     #[serde(skip)]
     upload_max: Option<u64>,
+    /// The host's blob store once a test keeps one (`keep_blobs`, with
+    /// `host_routes`): a fragment's status then answers (its threshold
+    /// 1 MiB), and `PUT`, `HEAD` and `GET /api/f/{name}/blobs/{sha}` keep
+    /// and serve bytes by fragment and hash, as the cell's do. None: no
+    /// status and no blobs, an older host's.
+    #[serde(skip)]
+    host_blobs: Option<BTreeMap<(String, String), Vec<u8>>>,
+    /// Blob uploads still to answer 503, keeping nothing (`fail_blob_puts`).
+    #[serde(skip)]
+    blob_puts_failing: u32,
+    /// Blobs served with their first byte changed (`corrupt_blob`): a store
+    /// that answers other bytes than it was given.
+    #[serde(skip)]
+    blobs_corrupt: BTreeSet<String>,
+    /// What a fragment's status says it is (`describe`): its visibility
+    /// and kind, else members and app.
+    #[serde(skip)]
+    described: BTreeMap<String, (String, String)>,
 }
 
 struct Inner {
@@ -549,6 +567,9 @@ impl Inner {
         let path = req.path.as_str();
         let m = req.method.as_str();
         if self.host_routes {
+            if let Some(answer) = self.host_blob_route(st, req) {
+                return answer;
+            }
             if let Some(name) = path.strip_prefix("/api/f/").and_then(|p| p.strip_suffix("/storage-token")) {
                 // an unknown name is a fresh repo with no branches yet
                 let url = match st.url_of(name) {
@@ -870,6 +891,65 @@ impl Inner {
                 key.token(&Claims { iss: &self.org, sub: "fake", repo, scopes, iat: now, exp: now + ttl_s })
             }
         }
+    }
+
+    /// A fragment's status and its blobs, as the host answers them, once a
+    /// test keeps blobs (`keep_blobs`); None for any other request.
+    fn host_blob_route(&self, st: &mut State, req: &Request) -> Option<Response> {
+        let (name, rest) = req.path.strip_prefix("/api/f/")?.split_once('/')?;
+        st.host_blobs.as_ref()?;
+        let m = req.method.as_str();
+        if (m, rest) == ("GET", "status") {
+            let Some(url) = st.url_of(name) else { return Some(problem(404, &format!("no fragment {name}"))) };
+            let (visibility, kind) = st.described.get(name).cloned().unwrap_or_else(|| ("members".into(), "app".into()));
+            let role = if st.viewing.contains(name) { "viewer" } else { "owner" };
+            let main = st.repos[&url].branches.get("main").cloned();
+            // the whole of fragment_proto::FragmentStatus, as the cell answers it
+            return Some(Response::json(
+                200,
+                &json!({
+                    "name": name, "kind": kind, "npub": "npub1fake", "owner": "npub1fake", "role": role, "visibility": visibility, "repo": url,
+                    "pins": { "main": main, "live": null }, "counts": { "files": 0, "events": 0, "members": 1 },
+                    "code": { "sha": null, "id": null, "operations": {}, "error": null }, "viewToken": null, "inboxToken": null,
+                    "urls": { "canonical": format!("http://{name}.fragment.localhost"), "platform": self.url }, "blobMinBytes": fragment_core::blob::BLOB_MIN_BYTES,
+                }),
+            ));
+        }
+        let sha = rest.strip_prefix("blobs/")?;
+        let key = (name.to_string(), sha.to_string());
+        let blobs = st.host_blobs.as_mut().expect("kept: checked above");
+        Some(match m {
+            "PUT" => {
+                if st.upload_max.is_some_and(|max| req.body.len() as u64 > max) {
+                    return Some(Response::json(413, &json!({ "error": "too_large", "message": "past the upload limit" })));
+                }
+                if st.blob_puts_failing > 0 {
+                    st.blob_puts_failing -= 1;
+                    return Some(problem(503, "the blob store is unavailable (the fake's lever)"));
+                }
+                if fragment_core::blob::sha256_hex(&req.body) != sha {
+                    return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "the bytes are not that hash's" })));
+                }
+                let size = req.body.len();
+                blobs.insert(key, req.body.clone());
+                Response::json(200, &json!({ "ok": true, "sha": sha, "size": size, "stored": true }))
+            }
+            // a HEAD's answer has no body
+            "HEAD" => Response::bytes(if blobs.contains_key(&key) { 200 } else { 404 }, "application/octet-stream", Vec::new()),
+            "GET" => match blobs.get(&key) {
+                Some(bytes) => {
+                    let mut bytes = bytes.clone();
+                    if st.blobs_corrupt.contains(sha) {
+                        if let Some(b) = bytes.first_mut() {
+                            *b ^= 0xff;
+                        }
+                    }
+                    Response::bytes(200, "application/octet-stream", bytes)
+                }
+                None => Response::json(404, &json!({ "error": "not_found", "message": "no such blob" })),
+            },
+            _ => Response::json(404, &json!({ "error": "not_found", "message": "no such blob" })),
+        })
     }
 }
 
@@ -1376,6 +1456,39 @@ impl CodeStorage {
     /// `host_routes`) advertises from now on; None, none.
     pub fn advertise_upload_max(&self, bytes: Option<u64>) {
         self.with(|st| st.upload_max = bytes);
+    }
+
+    /// The host routes keep a blob store from now on: a fragment's status
+    /// answers (members, an app, its threshold 1 MiB), and its blobs are
+    /// kept and served (`host_blob_route`).
+    pub fn keep_blobs(&self) {
+        self.with(|st| st.host_blobs.get_or_insert_with(BTreeMap::new).clear());
+    }
+
+    /// The bytes the host's blob store keeps for `name`'s `sha`.
+    pub fn blob(&self, name: &str, sha: &str) -> Option<Vec<u8>> {
+        self.with(|st| st.host_blobs.as_ref()?.get(&(name.to_string(), sha.to_string())).cloned())
+    }
+
+    /// The next `n` blob uploads answer 503 and keep nothing.
+    pub fn fail_blob_puts(&self, n: u32) {
+        self.with(|st| st.blob_puts_failing = n);
+    }
+
+    /// Blob `sha` is served with its first byte changed (true), or as kept.
+    pub fn corrupt_blob(&self, sha: &str, on: bool) {
+        self.with(|st| {
+            if on {
+                st.blobs_corrupt.insert(sha.to_string());
+            } else {
+                st.blobs_corrupt.remove(sha);
+            }
+        });
+    }
+
+    /// What `name`'s status says it is: its visibility and its kind.
+    pub fn describe(&self, name: &str, visibility: &str, kind: &str) {
+        self.with(|st| st.described.insert(name.to_string(), (visibility.to_string(), kind.to_string())));
     }
 
     /// Turns on the search write API for fragment `name` (with

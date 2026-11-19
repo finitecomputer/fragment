@@ -9,14 +9,14 @@
 //! holds. A file whose path says it may hold a secret is left out of the
 //! source unread, and named (`open`): the import never reads a secret.
 
-mod files;
+pub(crate) mod files;
 mod layout;
 mod plan;
 mod routines;
-mod rules;
+pub(crate) mod rules;
 mod skills;
 pub mod source;
-mod survey;
+pub(crate) mod survey;
 
 use std::path::{Path, PathBuf};
 
