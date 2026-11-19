@@ -110,7 +110,8 @@ Every change is checked against this table.
 | An agent's colour | its identity, through one function (`agent-color.js`) | none: never stored |
 | The model route's models, its routes (name, label, default) and each route's Fast and Deep | the deployment's `models` (`FRAGMENT_MODELS`) | ids only, in each computer's view and its owner's; `GET /v1/models` reads the config |
 | A computer's agents | the Computer DO's `agents` | the agent fragment's `computer` and the registry's `agent_fragments`; a delete unassigns it (cell/src/ended.rs) |
-| A shared key's charges this last hour, per person | their computer's `key_hour` (`fragment_core::key_hour`), counted as `computer/used` counts each call | none |
+| What a person's agents used of each provider, by month | their ledger's `uses` (`fragment_core::ledger::uses`), counted after each swap's answer, best effort | none; a computer's months from before the move (Computer step 7) are owed, taken once by id, then forgotten |
+| A shared key's charges this last hour, per person | their computer's `key_hour` (`fragment_core::key_hour`), counted by `computer/used` after a swap a shared key charged | none |
 | A person's hourly cap on a shared key | their computer's `key_caps` (no row: `key_hour::KEY_HOUR_CAP`) | none: its pause notice is worked out on read |
 | A computer's XFTP relays | the Computer DO: leases in memory, the day's bytes in `relay_day` | none |
 | A fragment's scheduled records | its supervisor's `record_schedules` (docs/api.md, "Scheduled records") | each fire appended once, keyed by schedule and minute; a computer keeps none |

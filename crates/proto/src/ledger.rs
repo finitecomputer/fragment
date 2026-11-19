@@ -427,3 +427,27 @@ mod tests {
         assert_eq!(cap.micros, None);
     }
 }
+
+/// One agent's use of one provider in a month: its calls the provider
+/// answered through a computer's swap, and what they were charged (an
+/// operator key's, as the swap priced it; zero for a connection or an own
+/// key, which are counted, never charged).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUse {
+    pub provider: String,
+    /// The agent fragment.
+    pub agent: String,
+    pub calls: u64,
+    pub micros: i64,
+}
+
+/// `GET /api/ledger/uses[/{YYYY-MM}]`: a month's uses of the deployment's
+/// providers by a person's agents (docs/ledger.md, "Usage").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerUses {
+    /// `YYYY-MM`, UTC.
+    pub month: String,
+    pub uses: Vec<ProviderUse>,
+}
