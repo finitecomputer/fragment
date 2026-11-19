@@ -236,13 +236,15 @@ test("a chat picked from the launcher's results is a pick: it races the computer
   assert.deepEqual(p.woken, ["wake"], "the person's pick of a result");
 });
 
-// shell.js itself does not load here (it is the page), so its two wirings
-// of a pick are read from its source: Continue's Open (continue.js
-// `navigation.openChat`), and the chat an alert's click opens with no
-// shell open (`?chat=`, alerts-sw.js) are picks, through `pickChat`.
-test("shell.js: Continue's chats and an alert's chat opened with no shell are picks (`pickChat`), not page loads", () => {
+// shell.js itself does not load here (it is the page), so its wirings
+// are read from its source: Continue's Open (continue.js
+// `navigation.openChat`) is a pick, through `pickChat`; the chat its start
+// opens (`?chat=` included, which any page may send its tab to) is not.
+test("shell.js: Continue's chats are picks (`pickChat`); the chat its start opens, `?chat=` included, is no pick", () => {
   const shell = readFileSync(new URL("../shell/shell.js", import.meta.url), "utf8");
   const continuing = shell.slice(shell.indexOf("const continuing = createContinue("), shell.indexOf("const sessionArchive = createSessionArchive("));
   assert.match(continuing, /navigation: \{ openChat: pickChat, leaveSidebar \}/, "Continue opens its chats as picks");
-  assert.match(shell, /else if \(pick\) \(pick === alerted \? pickChat : openChat\)\(pick\);/, "the alerted chat, as start opens it, is a pick");
+  const start = shell.slice(shell.indexOf("async function start(open)"), shell.indexOf("// ---- a guest"));
+  assert.match(start, /else if \(pick\) openChat\(pick\);/, "start opens its chat as a load, not a pick");
+  assert.doesNotMatch(start, /\b(pickChat|prewake)\(/, "nothing in start wakes the computer");
 });

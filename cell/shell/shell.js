@@ -2261,9 +2261,11 @@ async function start(open) {
   else if (settings && location.pathname === SCHEDULES) openSchedules(false);
   else if (settings && location.pathname === MOVE) openMove(false);
   else if (settings) await openSettings(false);
-  // the chat an alert's click opened, with no shell open (alerts-sw.js):
-  // the person's pick, as when the shell was open
-  else if (pick) (pick === alerted ? pickChat : openChat)(pick);
+  // a chat an alert's click opened with no shell open (`?chat=`) too:
+  // `?chat=` is an address any page may send its tab to, so its load is
+  // no sign. An alert comes as its agent replies, so its computer is
+  // awake then, and for the idle wait after (computer.js `prewake`).
+  else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");
   // an Add a reload cut short goes on from what it made (`resumeFirstRun`)

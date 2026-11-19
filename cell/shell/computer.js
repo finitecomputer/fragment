@@ -48,9 +48,9 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   }
   // The pre-wake races the computer's start against what the person is
   // about to ask of it. Each sign that they mean to use their agent (a
-  // chat picked, shell.js `pickChat`, from an alert or the launcher's
-  // results too; the launcher opened in the shell, launcher.js
-  // `openedByPerson`) is their own
+  // chat picked, shell.js `pickChat`, from an alert with the shell open or
+  // the launcher's results too; the launcher opened in the shell,
+  // launcher.js `openedByPerson`) is their own
   // wake (`POST …/wake`), held the idle wait as every wake is
   // (docs/computers.md, "It stays awake"). A page left open, or loaded
   // again, asks nothing, so it sleeps; nor does a page's own ask (a
