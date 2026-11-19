@@ -382,6 +382,10 @@ Node's, and its Chromium's policy).
   `DirectoryBackup` saves and restores `/data` through it.
 - `sh` (with its `test`), `true`, `mkdir`, `touch`, `rm` and `cat`, with
   which the DO polls, marks and reads its markers.
+- Optional: GNU `find` (findutils, its `-newercm` and `-newermt`), a
+  `sleep` that takes a fraction, `sync -f` and `mv`, with which a save
+  keeps an unchanged work's record (below, "Saves and what a wake
+  restores"). Without them every save copies the work whole.
 
 ### The hold
 
@@ -423,8 +427,8 @@ the DO removes them from one started from a snapshot.
   Hermes' home and the bridge's state). Each is a `DirectoryBackup`
   record of its own, restored together, `/data` first; the work's record
   leaves out only the caches the guest named in it. The DO makes
-  `/data/work` with its hold, so it
-  always exists to save.
+  `/data/work` with its hold, so it always exists to save, and keeps its
+  stamps in `/data/.work-stamps/`, which no record keeps.
 - With `RESTORE_PENDING=1`, the image waits for `/run/computer/restored`
   before it reads `/data`. Without it, `/data` is ready at start (a
   snapshot's wake, or a first start).
@@ -442,6 +446,20 @@ the DO removes them from one started from a snapshot.
   save a start proved, the last a start falls back to), each taken
   under the hold; its view lists them (`saves`), newest first, each
   saying whether its guest answered (`held`).
+- **A save keeps an unchanged work's record** (P9). The DO stamps each
+  work record in the container (a file named by it in
+  `/data/.work-stamps/`, as its backup starts or once its restore ends,
+  then a tick of the clock past it, and a backup's writes the
+  filesystem's dirty pages back, so a store through a mapping after it
+  changes its file's ctime), and a save asks whether anything under
+  `/data/work` has a change time (ctime) newer than the stamp of the
+  work's last record in that container, within 6 s. Only a clean no keeps
+  that record, now several saves', and only for a save that leaves out
+  what it left out (its name says so); an answer, an error, no stamp, a
+  mount under the work, or no answer in time copies the work. A record a
+  kept save holds is never deleted (`fragment_core::computer::work`). A
+  guest that writes nothing under its work when nothing changed (a start
+  that chowns or rewrites nothing there) gets the most of it.
 - **A wake restores the current save**, the newest not found unusable. A
   start whose save will never restore (its archive gone or altered)
   marks it unusable and starts again at once from the one before, with no

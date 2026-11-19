@@ -202,6 +202,66 @@ async fn read_data(root: &std::path::Path, rel: &str) -> String {
     }
 }
 
+/// Entries `hash` reads at most, and bytes of them.
+const HASH_ENTRIES_MAX: usize = 10_000;
+const HASH_BYTES_MAX: u64 = 256 << 20;
+
+/// `hash <path>`: one digest of the tree at a path under the data root,
+/// of each entry under it in path order (its path, its kind and mode, a
+/// regular file's bytes, a link's target), so a restore's tree can be told
+/// the same as the one saved; `none` when there is none. Bounded: what is
+/// neither a directory, a link nor a regular file (a FIFO) is named, never
+/// opened, and files are read as they hash, at most `HASH_BYTES_MAX` in all.
+async fn hash_data(root: &std::path::Path, rel: &str) -> String {
+    use sha2::Digest;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let Some(top) = data_path(root, rel) else { return format!("hash refused: {rel:?} is no path under the data") };
+    if std::fs::symlink_metadata(&top).is_err() {
+        return format!("hash {rel}: none");
+    }
+    let mut h = sha2::Sha256::new();
+    let mut stack = vec![top.clone()];
+    let (mut seen, mut read) = (0usize, 0u64);
+    // bounded by HASH_ENTRIES_MAX
+    while let Some(path) = stack.pop() {
+        seen += 1;
+        if seen > HASH_ENTRIES_MAX {
+            return format!("hash refused: more than {HASH_ENTRIES_MAX} entries");
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { return format!("hash failed: {} went", path.display()) };
+        let name = path.strip_prefix(&top).map(|p| p.display().to_string()).unwrap_or_default();
+        h.update(format!("{name}\0{:o}\0", meta.permissions().mode()).as_bytes());
+        if meta.is_dir() {
+            let Ok(entries) = std::fs::read_dir(&path) else { return format!("hash failed: {} unread", path.display()) };
+            let mut names: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            // popped in path order
+            names.sort_by(|a, b| b.cmp(a));
+            stack.extend(names);
+        } else if meta.file_type().is_symlink() {
+            h.update(std::fs::read_link(&path).map(|t| t.display().to_string()).unwrap_or_default().as_bytes());
+        } else if meta.is_file() {
+            let left = HASH_BYTES_MAX - read;
+            // opened without blocking, and read only if what it opened is a
+            // regular file still (one swapped for a FIFO is never read)
+            let opened = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&path).and_then(|f| {
+                if f.metadata()?.is_file() {
+                    Ok(f)
+                } else {
+                    Err(std::io::Error::other("no longer a regular file"))
+                }
+            });
+            let copied = opened.and_then(|f| std::io::copy(&mut std::io::Read::take(f, left + 1), &mut h));
+            match copied {
+                Ok(n) if n > left => return format!("hash refused: more than {HASH_BYTES_MAX} bytes"),
+                Ok(n) => read += n,
+                Err(e) => return format!("hash failed: {e}"),
+            }
+        }
+        h.update(b"\0");
+    }
+    format!("hash {rel}: {} of {seen}", crate::records::hex(&h.finalize()))
+}
+
 pub struct Script {
     pub config: ScriptConfig,
 }
@@ -860,6 +920,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if let Some(rest) = ts.text.strip_prefix("read ") {
         reply = read_data(&cfg.data, rest.trim()).await;
     }
+    if let Some(rest) = ts.text.strip_prefix("hash ") {
+        reply = hash_data(&cfg.data, rest.trim()).await;
+    }
     if let Some(rest) = ts.text.strip_prefix("transcribe ") {
         reply = match transcribe(&ts.agent.fragment, rest).await {
             Ok(text) => format!("heard: {text}"),
@@ -1121,6 +1184,34 @@ mod tests {
         assert_eq!(read_data(&root, "notes/keep.txt").await, "read notes/keep.txt: kept, hello");
         assert_eq!(read_data(&root, "notes/gone.txt").await, "read notes/gone.txt: none");
         assert!(write_data(&root, "../escape x").await.starts_with("write refused"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `hash` tells one tree from another: the same files hash the same
+    /// wherever they are; a change to one's bytes, a new file, or a
+    /// rename hashes otherwise; none is none.
+    #[tokio::test]
+    async fn hash_tells_a_tree_from_another() {
+        let root = std::env::temp_dir().join(format!("script-hash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(hash_data(&root, "work").await, "hash work: none");
+        for (rel, text) in [("work/a/x.txt", "x"), ("work/b.txt", "b"), ("other/a/x.txt", "x"), ("other/b.txt", "b")] {
+            write_data(&root, &format!("{rel} {text}")).await;
+        }
+        let hash = |r: String| r.split(' ').nth(2).unwrap_or_default().to_string();
+        let work = hash(hash_data(&root, "work").await);
+        assert_eq!(work.len(), 64);
+        assert_eq!(hash(hash_data(&root, "other").await), work, "the same tree elsewhere");
+        write_data(&root, "other/b.txt c").await;
+        assert_ne!(hash(hash_data(&root, "other").await), work, "a file's bytes");
+        write_data(&root, "other/b.txt b").await;
+        assert_eq!(hash(hash_data(&root, "other").await), work);
+        std::fs::rename(root.join("other/b.txt"), root.join("other/c.txt")).unwrap();
+        assert_ne!(hash(hash_data(&root, "other").await), work, "a rename");
+        // a FIFO is named, never opened (it would never answer)
+        assert!(std::process::Command::new("mkfifo").arg(root.join("work/pipe")).status().unwrap().success());
+        let piped = hash(hash_data(&root, "work").await);
+        assert!(piped.len() == 64 && piped != work, "{piped}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

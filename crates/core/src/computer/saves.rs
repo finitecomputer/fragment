@@ -415,23 +415,47 @@ impl Saves {
         self.let_go(dropped.into_iter().flat_map(|s| s.records).collect())
     }
 
-    /// `records` are no save's now (a save pushed out, or what a failed
-    /// save took before it failed): the DO deletes each (`forgetting`),
-    /// and each is kept here until that worked (`forgot`). Answers those
+    /// `records` are no longer a save's (a save pushed out, or what a
+    /// failed save took before it failed): the DO deletes each no kept save
+    /// still holds (`forgetting`), and each is kept here until that worked
+    /// (`forgot`). A record several saves hold (a work's, kept unchanged:
+    /// `work_of`) is deleted only once no kept save holds it. Answers those
     /// pushed past `FORGETTING_MAX`, oldest first, which no one will delete.
     pub fn let_go(&mut self, records: Vec<Value>) -> Vec<Value> {
         assert!(records.iter().all(|r| r["id"].as_str().is_some_and(|id| !id.is_empty())), "a record has an id: {records:?}");
-        assert!(!records.iter().any(|r| self.saves.iter().any(|s| s.records.contains(r))), "a record let go of is no kept save's");
-        self.forgetting.extend(records);
+        // each once, by its id: one batch may name a record several of its
+        // saves held (Codex on #1377)
+        for r in records {
+            if !self.holds(&r) && !self.forgetting.iter().any(|f| f["id"] == r["id"]) {
+                self.forgetting.push(r);
+            }
+        }
         let over = self.forgetting.len().saturating_sub(FORGETTING_MAX);
         let lost: Vec<Value> = self.forgetting.drain(..over).collect();
         assert!(self.forgetting.len() <= FORGETTING_MAX, "at most FORGETTING_MAX records to delete");
         lost
     }
 
-    /// The records let go of and not deleted yet, oldest first.
-    pub fn forgetting(&self) -> &[Value] {
-        &self.forgetting
+    /// The records let go of and not deleted yet, oldest first, but any a
+    /// kept save holds (`let_go` admits none such): never deleted.
+    pub fn forgetting(&self) -> Vec<Value> {
+        self.forgetting.iter().filter(|r| !self.holds(r)).cloned().collect()
+    }
+
+    /// Whether a kept save holds `record`.
+    fn holds(&self, record: &Value) -> bool {
+        self.saves.iter().any(|s| s.records.iter().any(|r| r["id"] == record["id"]))
+    }
+
+    /// The work's record (`/data/work`'s) of the save the container of
+    /// start `generation` last took or came up from: its newest save of its
+    /// own that is kept, else the one it restored (or its snapshot's), if
+    /// usable and kept. A save keeps it, unchanged (`WORK_CHANGED`).
+    pub fn work_of(&self, generation: u64) -> Option<&Value> {
+        let came_up_from = self.restored.as_ref().filter(|r| r.generation == generation).and_then(|r| r.save.as_deref());
+        let last = self.saves.iter().find(|s| s.generation == generation).or_else(|| self.saves.iter().find(|s| Some(s.id.as_str()) == came_up_from))?;
+        (!last.unusable).then_some(())?;
+        last.records.iter().find(|r| r["dir"] == "/data/work")
     }
 
     /// Whether a save of start `generation` begun at `since_ms` was
@@ -450,7 +474,13 @@ impl Saves {
     /// record is a save's or waits to be deleted, never both.
     pub fn every_record(&self) -> Vec<Value> {
         let kept = self.saves.iter().flat_map(|s| s.records.iter());
-        let out: Vec<Value> = kept.chain(self.forgetting.iter()).cloned().collect();
+        let mut out: Vec<Value> = Vec::new();
+        // once each: a work's record may be several saves'
+        for r in kept.chain(self.forgetting.iter()) {
+            if !out.iter().any(|o| o["id"] == r["id"]) {
+                out.push(r.clone());
+            }
+        }
         assert!(out.len() <= (SAVES_KEPT + 1) * SAVE_RECORDS_MAX + FORGETTING_MAX, "a computer's records are bounded");
         out
     }
@@ -817,14 +847,81 @@ mod tests {
         assert_eq!(ids(&s)[0], "m0");
     }
 
-    /// Invalid: a record a kept save holds is never let go of (its delete
-    /// would take what a wake restores).
+    /// Goal (P9): a record several kept saves hold (a work's, kept
+    /// unchanged by a later save) is let go of only once no kept save
+    /// holds it: a save pushed out, or one that failed, never deletes what
+    /// a wake restores; a wipe names it once. Valid, invalid (a record a
+    /// kept save holds, let go of: kept), replay (let go of twice: deleted
+    /// once), restart (stored and read back).
     #[test]
-    #[should_panic(expected = "no kept save's")]
-    fn a_kept_saves_record_is_never_let_go_of() {
+    fn a_record_kept_saves_hold_outlives_the_saves_that_let_go_of_it() {
+        let ids = |l: &[Value]| l.iter().map(|r| r["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let mut s = Saves::default();
-        s.saved(1, rec("a"), T, true);
-        s.let_go(rec("a"));
+        s.saved(1, save("h1", "w1"), T, true);
+        // three more saves keep w1, unchanged
+        for (i, h) in ["h2", "h3", "h4"].into_iter().enumerate() {
+            assert!(s.saved(1, save(h, "w1"), T + 1 + i as i64, true).is_empty());
+        }
+        assert_eq!(ids(&s.forgetting()), ["h1"], "the save pushed out lets go of its home alone: w1 is the kept saves'");
+        // a failed save that kept w1 lets go of its home alone; replayed, nothing more
+        s.let_go(save("h5", "w1"));
+        s.let_go(save("h5", "w1"));
+        assert_eq!(ids(&s.forgetting()), ["h1", "h5"]);
+        assert_eq!(ids(&s.every_record()), ["h4", "w1", "h3", "h2", "h1", "h5"], "a wipe names it once");
+        // restart: stored and read back
+        let mut s: Saves = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        // its work changed: w2; w1 goes once the last save holding it does
+        s.saved(1, save("h6", "w2"), T + 10, true);
+        s.saved(1, save("h7", "w2"), T + 11, true);
+        assert_eq!(ids(&s.forgetting()), ["h1", "h5", "h2", "h3"]);
+        s.saved(1, save("h8", "w2"), T + 12, true);
+        assert_eq!(ids(&s.forgetting()), ["h1", "h5", "h2", "h3", "h4", "w1"]);
+        // one batch that names a record twice (two saves pushed out
+        // together, both holding it) queues it once
+        let mut once = Saves::default();
+        once.let_go([save("x1", "wx"), save("x2", "wx")].concat());
+        assert_eq!(ids(&once.forgetting()), ["x1", "wx", "x2"]);
+        // invalid: a stored list of records to delete that names one a kept
+        // save holds (`let_go` admits none) never hands it out to delete
+        let mut v = serde_json::to_value(&s).unwrap();
+        v["forgetting"].as_array_mut().unwrap().push(json!({ "id": "w2", "dir": "/data/work" }));
+        let odd: Saves = serde_json::from_value(v).unwrap();
+        assert_eq!(ids(&odd.forgetting()), ["h1", "h5", "h2", "h3", "h4", "w1"]);
+    }
+
+    /// A save of a home and its work, as the DO takes one.
+    fn save(home: &str, work: &str) -> Vec<Value> {
+        vec![json!({ "id": home, "dir": "/data" }), json!({ "id": work, "dir": "/data/work" })]
+    }
+
+    /// Goal (P9): the work's last record of a running container, which its
+    /// next save keeps when nothing under the work changed, is its own
+    /// newest save's, else the one it came up from; never one of another
+    /// start's, nor an unusable save's.
+    #[test]
+    fn the_works_last_record_is_its_own_newest_saves_or_the_one_it_came_up_from() {
+        let work = |s: &Saves, g: u64| s.work_of(g).map(|r| r["id"].as_str().unwrap().to_string());
+        let mut s = Saves::default();
+        assert_eq!(work(&s, 1), None, "no save");
+        s.saved(1, save("h1", "w1"), T, true);
+        assert_eq!(work(&s, 1).as_deref(), Some("w1"));
+        assert_eq!(work(&s, 2), None, "another start came up from none of them");
+        s.saved(1, save("h2", "w2"), T + 1, true);
+        // the next life came up from h2: its work's last record is h2's
+        s.starting(2, RestoreSource::Backup);
+        assert!(s.came_up(2, RestoreSource::Backup, Some("h2"), Some(IMAGE), T + 20).is_some());
+        assert_eq!(work(&s, 2).as_deref(), Some("w2"));
+        // its own save, a new work: that one
+        s.saved(2, save("h3", "w3"), T + 21, true);
+        assert_eq!(work(&s, 2).as_deref(), Some("w3"));
+        // a save of its own found unusable: none kept
+        s.saved(2, save("h4", "w3"), T + 22, true);
+        assert!(s.unusable("h4"));
+        assert_eq!(work(&s, 2), None);
+        // a save of only its home (from before the work's own record): none
+        let mut s = Saves::default();
+        s.saved(1, rec("h1"), T, true);
+        assert_eq!(work(&s, 1), None);
     }
 
     /// Goal (P9, Codex on #1378): an awake save that a newer save of its

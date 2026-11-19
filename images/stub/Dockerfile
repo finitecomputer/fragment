@@ -71,11 +71,20 @@ RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
  && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
 
+# GNU find, with which a save asks whether anything under the work changed
+# (`-newercm`, which busybox's lacks: docs/computers.md, "What every image
+# carries"), so the platform's lanes see an unchanged work kept, as on our
+# Hermes image. Alpine's, with the musl loader it runs on.
+FROM alpine:3.20 AS findutils
+RUN apk add --no-cache findutils
+
 # busybox for the few commands the Computer DO runs in a container (`true`
 # while it polls, `touch` for the restore marker); sandbox-shim for its
 # DirectoryBackup.
 FROM busybox:1.37-musl
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+COPY --from=findutils /lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
+COPY --from=findutils /usr/bin/find /usr/local/bin/find
 COPY --from=build /fragment-bridge /usr/local/bin/fragment-bridge
 COPY --from=cli /out/fragment /usr/local/bin/fragment
 COPY images/stub/screen /opt/fragment/screen

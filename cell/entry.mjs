@@ -439,10 +439,11 @@ class ContainerHost {
   }
 
   // Saves `dir`, leaving out what `exclude` names (gitignore patterns,
-  // relative to `dir`): its record, within `ms` (`Overdue` past it).
-  async backup(generation, dir, exclude, ms) {
+  // relative to `dir`): its record, named `name` (or by its start), within
+  // `ms` (`Overdue` past it).
+  async backup(generation, dir, exclude, ms, name) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
-    const options = { dir, name: `generation ${generation}`, exclude: exclude || [] };
+    const options = { dir, name: name || `generation ${generation}`, exclude: exclude || [] };
     return bounded(`the backup of ${dir}`, ms, (signal) => this.#backups.backup({ ...options, signal }));
   }
 
