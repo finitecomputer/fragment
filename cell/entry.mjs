@@ -287,8 +287,13 @@ class ContainerHost {
   #usedEvery = 60_000;
   #usedAt = 0;
   #usedLater = null;
-  // each open tab's close (`port`), for a stop to close them (`closeTabs`)
+  // each open tab's close (`port`), for a sleep to close them (`closeTabs`)
   #tabs = new Set();
+  // the sleeps begun (`closeTabs`), and the last one's why: a socket
+  // admitted before one, its upgrade still on its way as it began, is
+  // closed as the open ones were, never registered (`port`)
+  #sleeps = 0;
+  #sleptWhy = "asleep";
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -540,10 +545,24 @@ class ContainerHost {
   // such send.
   async port(port, request, usedEvery) {
     if (usedEvery > 0) this.#usedEvery = usedEvery;
+    const sleeps = this.#sleeps;
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
     if (!upstream) return resp;
     const [client, server] = Object.values(new WebSocketPair());
+    if (this.#sleeps !== sleeps) {
+      // a sleep began as its upgrade waited: closed with its why, as the
+      // tabs open then were, so nothing its page sends reaches the
+      // container that sleep saves (nothing awaited from here to its
+      // registering below, so no sleep slips in after this)
+      for (const ws of [upstream, server]) {
+        try {
+          ws.accept();
+          ws.close(4000, this.#sleptWhy);
+        } catch {}
+      }
+      return new Response(null, { status: 101, webSocket: client });
+    }
     let closed = false;
     // its opening is told (before that, a word from its page is the opening's)
     let told = false;
@@ -597,6 +616,8 @@ class ContainerHost {
   // says why and waits for its person (images/hermes/screen/index.html).
   // Answers how many it closed.
   closeTabs(why) {
+    this.#sleeps += 1;
+    this.#sleptWhy = why;
     const tabs = [...this.#tabs];
     for (const close of tabs) close(4000, why);
     return tabs.length;
