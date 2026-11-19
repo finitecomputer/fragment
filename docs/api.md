@@ -728,7 +728,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
-| `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; past the overdraft 402 |
+| `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed` 403; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`; none 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent) | its app's database, for an export (`__dump`, cell/platform.mjs). No `table`: `{schema: [{type, name, table, sql}], tables}`, the platform's own tables left out. A `table`: `{table, offset, rows, next}`, at most 1000 rows and about 4 MiB from `offset`, each a JSON object (a blob `{"$base64"}`); not in the schema 404. No app code: 404 `no_code` |
@@ -1702,7 +1702,8 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   is keyed by its schedule and minute (`fragment_core::schedule::fire_key`),
   so it appends once; one reached late is one fire, missed minutes
   skipped. Past the owner's overdraft none fires (`schedules.blocked`); a
-  channel no longer taking its records skips it (`schedule.unfired`).
+  channel no longer taking its records, or a record that relays someone
+  (kept before that was refused), skips it (`schedule.unfired`).
 - Viewers list them; editors add, pause, resume and remove them (an agent
   on its own fragment is its editor: no special case).
 - **Bounds** (`fragment_core::schedule`), each a typed refusal: `cron` five
@@ -1710,9 +1711,10 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   `RECORD_SCHEDULE_EVERY_MIN_MINUTES` (each fire wakes and costs its owner;
   more often belongs in a cron trigger), else `invalid_request`; `record`
   any JSON of at most `RECORD_SCHEDULE_BODY_MAX_BYTES` as canonical JSON,
-  else `too_large`; `channel` declared, taking posts, and not only from one
-  kind of member (`from`), else `invalid_request`, and the caller holding
-  its post role, else 403; at most `RECORD_SCHEDULES_MAX` a fragment.
+  else `too_large`, and relaying no one (no `relayed`: the fragment's own
+  key is no door), else 403; `channel` declared, taking posts, and not
+  only from one kind of member (`from`), else `invalid_request`, and the
+  caller holding its post role, else 403; at most `RECORD_SCHEDULES_MAX` a fragment.
 - The same schedule again answers the one there (`replayed: true`).
   Paused, it fires nothing and has no `nextAt`; resumed, it fires from its
   next minute. Events: `schedule.added`, `.paused`, `.resumed`,
