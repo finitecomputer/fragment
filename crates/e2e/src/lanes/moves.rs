@@ -1321,3 +1321,265 @@ fn check_by_keys(b: &mut crate::browser::Browser, page: &crate::browser::Page, s
     let drawn = b.eval(page, "getComputedStyle(document.querySelector('#move-page input.check')).appearance")?;
     Ok(json!({ "at": at, "drawn": drawn, "off": off, "on": on, "empty": empty, "fill": fill }))
 }
+
+/// The room a move-big computer has: less than its stage, more than what
+/// its import keeps on the disk.
+const BIG_ROOM: u64 = 24 * 1024 * 1024;
+
+/// A move bigger than its new computer can hold (2026-11-18: an old
+/// agent's 47 GB import failed on a computer with about 10 GB free). The
+/// bound agent's CLI runs as a computer whose disk has less room than the
+/// stage (`Suite::cli_in_room`: no file may grow past it), as the agent
+/// (a key of its own, as its computer's egress signs). The old way,
+/// downloading the stage first, finds no room; the import reads the stage
+/// where the platform keeps it, and keeps on the disk only what it keeps.
+/// The reader's windows and refusals, and the files' rules, are
+/// host-tested (cli/src/home/).
+pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("move-big", &[Need::Fakes, Need::Levers, Need::Move]) {
+        return Ok(());
+    }
+    const MIB: usize = 1024 * 1024;
+    let mover = Mover::new(&api.base, s.mover.clone());
+    let old = format!("{}-o1", s.name("mb"));
+    let owner = api.person()?;
+    let workos_id = s.workos.user(&Api::email_of(&owner)).id;
+    let (agent_keys, agent) = super::delegation::agent_of(api, &owner)?;
+    let home = s.dir("move-big-agent");
+    std::fs::create_dir_all(home.join(".config/fragment"))?;
+    std::fs::write(home.join(".config/fragment/config.json"), json!({ "secret_key": agent_keys.secret_hex() }).to_string())?;
+
+    // the old home: the fixture, and work larger than the computer's room
+    let pattern = |n: usize, seed: u32| -> Vec<u8> { (0..n as u32).map(|i| (i.wrapping_mul(2_654_435_761) ^ seed).rotate_right(11) as u8).collect() };
+    let zip_at = s.dir("move-big-stage").join("stage.zip");
+    let extra = [
+        ("workspace/videos/trip.mp4", pattern(40 * MIB, 1)),
+        ("workspace/photos/garden.jpg", pattern(3 * MIB, 2)),
+        ("workspace/datasets/readings.csv", pattern(6 * MIB, 3)),
+        // what the files' pick leaves: weights larger than the computer's
+        // room, a project's history (a hidden folder), a key file
+        ("workspace/models/llama.gguf", pattern(30 * MIB, 4)),
+        ("workspace/projects/app/.git/HEAD", b"ref: refs/heads/main\n".to_vec()),
+        ("workspace/projects/app/.git/objects/ab/cdef", pattern(4096, 5)),
+        ("workspace/projects/app/.env", b"TOKEN=not-read".to_vec()),
+    ];
+    let files = fragment_fakes::old_home::stage(&zip_at, &extra)?;
+    let zip = std::fs::read(&zip_at)?;
+    let bytes: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+    anyhow::ensure!(zip.len() as u64 > 2 * BIG_ROOM, "the stage is larger than the computer's room");
+    mover.home(zip.clone(), 16 * MIB, files.len() as u64, bytes);
+    let layout = fragment_fakes::old_home::layout().to_str().context("a utf-8 path")?.to_string();
+
+    // Yes with this agent, and staged
+    let people = vec![person(&workos_id, &[&old])];
+    let r = mover.push(&Roster { snapshot: format!("{old}-s1"), observed_ms: 1_800_000_000_000, people })?;
+    anyhow::ensure!(r.status == 200, "the roster: {} {}", r.status, r.body);
+    let visit = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(&owner) })))?;
+    anyhow::ensure!(visit.status == 200, "its owner opens the move: {visit}");
+    let yes = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "answer", "old": old, "answer": "yes", "agent": agent })))?;
+    anyhow::ensure!(yes.status == 200, "Yes: {yes}");
+    mover.run_once()?;
+    let stage = format!("{old}.p1.1");
+    let base = format!("/api/migrations/stages/{stage}");
+    let opened = api.signed(&agent_keys, "POST", &format!("{base}/open"), Some(&json!({})))?;
+    anyhow::ensure!(opened.status == 200 && opened.body["manifest"]["zip_bytes"] == zip.len(), "the agent opens its stage: {opened}");
+
+    // the old way: the stage downloaded onto the computer first, which has no room for it
+    let url = format!("{}{base}/zip", api.base);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+    let mut curl = std::process::Command::new("curl");
+    curl.args(["-fsS", "-o"]).arg(home.join("home.zip")).args(["-H", &format!("authorization: {}", agent_keys.header("GET", &url, b"", now)), &url]);
+    crate::with_room(&mut curl, BIG_ROOM);
+    let downloaded = curl.output()?;
+    let held = std::fs::metadata(home.join("home.zip")).map(|m| m.len()).unwrap_or(0);
+    s.ok(
+        "the old way, downloading the stage first, finds no room on a computer smaller than it: the download fails partway",
+        !downloaded.status.success() && held <= BIG_ROOM,
+        format!("{:?} {held} bytes: {}", downloaded.status.code(), String::from_utf8_lossy(&downloaded.stderr)),
+    );
+    std::fs::remove_file(home.join("home.zip")).ok();
+
+    // the import reads it where it is
+    let source = format!("stage:{stage}");
+    let run = |s: &Suite, args: &[&str]| -> Result<Value> { crate::cli_data(args, &s.cli_in_room(api, &home, BIG_ROOM, args)) };
+    let survey = run(s, &["home", "survey", &source, "--layout", &layout, "--json"])?;
+    s.ok(
+        "the survey reads the stage in place: its files, the cap's pick of its work, its skills",
+        survey["source"]["kind"] == "stage"
+            && survey["source"]["files"].as_u64().unwrap_or(0) + survey["source"]["skipped"].as_array().map_or(0, Vec::len) as u64 == files.len() as u64
+            && survey["files"]["brought"]["files"].as_u64().is_some_and(|n| n >= 3),
+        json!({ "source": survey["source"], "files": survey["files"]["brought"] }),
+    );
+    let made = s.create(api, &owner, "old-files")?;
+    let name = made["name"].as_str().unwrap_or_default().to_string();
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "its files' fragment made members-only: {r}");
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent edits it: {r}");
+    let brought = run(s, &["home", "files", &source, "--layout", &layout, "--into", &name, "--json"])?;
+    let file = |p: &str| api.signed(&owner, "GET", &format!("/api/f/{name}/file?path={}", crate::api::url_enc(p)), None);
+    let video = file("files/videos/trip.mp4")?;
+    s.ok(
+        "its files come from the stage into a fragment of files, the video larger than the computer's room among them, whole",
+        brought["files"].as_u64().is_some_and(|n| n >= 3) && video.status == 200 && video.bytes == extra[0].1 && file("files/datasets/readings.csv")?.bytes == extra[2].1,
+        json!({ "brought": brought, "video": video.status }),
+    );
+    let kept = disk_used(&home);
+    s.ok("what the import keeps on the computer is within its room: the stage never came onto it", kept <= BIG_ROOM, format!("{kept} bytes"));
+
+    // nothing left behind: the rest of the home kept in storage, a note where each was
+    let storage = s.create(api, &owner, "storage")?["name"].as_str().unwrap_or_default().to_string();
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{storage}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "its storage made members-only: {r}");
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{storage}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent edits its storage: {r}");
+    let notes = home.join("old-agent/home");
+    let notes_arg = notes.to_str().context("a utf-8 path")?.to_string();
+    let store = |s: &Suite| run(s, &["home", "files", &source, "--layout", &layout, "--into", &name, "--store", &storage, "--notes", &notes_arg, "--json"]);
+    let all = store(s)?;
+    let stored = &all["stored"];
+    // count and hash every file of the stage: each in one place, whole, but those never read
+    let read = |fragment: &str, path: &str| api.signed(&owner, "GET", &format!("/api/f/{fragment}/file?path={}", crate::api::url_enc(path)), None);
+    let (mut here, mut there, mut unread, mut wrong) = (0, 0, 0, vec![]);
+    for (path, want) in &files {
+        let in_files = match path.strip_prefix("workspace/") {
+            Some(rel) => Some(read(&name, &format!("files/{rel}"))?),
+            None => None,
+        };
+        let in_storage = read(&storage, &format!("home/{path}"))?;
+        let files_status = in_files.as_ref().map_or(404, |r| r.status);
+        match (in_files.is_some_and(|r| r.status == 200 && r.bytes == *want), in_storage.status == 200 && in_storage.bytes == *want) {
+            (true, false) => here += 1,
+            (false, true) => there += 1,
+            (false, false) if path.ends_with("/.env") && files_status == 404 && in_storage.status == 404 => unread += 1,
+            _ => wrong.push(format!("{path}: files {files_status} storage {}", in_storage.status)),
+        }
+    }
+    let manifest = opened.body["manifest"]["files"].as_u64().unwrap_or(0);
+    s.ok(
+        "nothing is left behind: every file of the stage, counted against its manifest and hashed, is in the files or kept whole in storage, but a key file, never read",
+        wrong.is_empty() && here + there + unread == manifest as usize && unread == 1 && there >= 10 && stored["files"].as_u64() == Some(there as u64) && all["unread"] == 1,
+        json!({ "here": here, "there": there, "unread": unread, "manifest": manifest, "wrong": wrong, "stored": stored }),
+    );
+    let note_of = |p: &str| notes.join(format!("{p}.offloaded.md"));
+    // the work kept is one note (within a note's bounds), larger than the room
+    let weights = note_of("workspace");
+    let left = String::from_utf8_lossy(&read(&name, "left-behind.md")?.bytes).to_string();
+    s.ok(
+        "a note where each kept folder or file was, laid out as the old home, and the files' list says where the rest is",
+        weights.is_file() && std::fs::read_to_string(&weights).unwrap_or_default().contains(&format!("`{storage}`")) && note_of("agent").is_file() && left.starts_with("# Kept in storage") && left.contains(&storage),
+        json!({ "notes": stored["notes_written"], "left": left.lines().take(3).collect::<Vec<_>>() }),
+    );
+    let kept = disk_used(&home);
+    s.ok("the rest of the home never came onto the computer: what it keeps there is still within its room", kept <= BIG_ROOM, format!("{kept} bytes"));
+    // back, as the agent brings back what it offloads: within its room, and not past it
+    let back = |s: &Suite, note: &std::path::Path| s.cli_in_room(api, &home, BIG_ROOM, &["offload", "--back", note.to_str().unwrap_or_default(), "--json"]);
+    let agent_back = back(s, &note_of("agent"));
+    let soul = files.iter().find(|(p, _)| p == "agent/hermes-home/SOUL.md").map(|(_, b)| b.clone()).unwrap_or_default();
+    let too_big = back(s, &weights);
+    s.ok(
+        "a note comes back as `fragment offload` brings one back, each file checked against the old one; one larger than the computer's room does not, and its note stays",
+        agent_back.status.success() && std::fs::read(notes.join("agent/hermes-home/SOUL.md")).ok() == Some(soul) && !note_of("agent").exists() && !too_big.status.success() && weights.is_file(),
+        format!("{} | {}", String::from_utf8_lossy(&agent_back.stdout), String::from_utf8_lossy(&too_big.stdout)),
+    );
+    let again = store(s)?;
+    s.ok(
+        "again, nothing more is kept: what its notes name, and what came back, is kept already",
+        again["stored"]["files"] == 0 && again["stored"]["already"] == stored["files"] && again["files"] == 0,
+        &again["stored"],
+    );
+    // what its owner sees: the files, and their storage, each a page of files
+    for f in [&name, &storage] {
+        let deployed = s.cli_in_room(api, &home, BIG_ROOM, &["deploy", f]);
+        anyhow::ensure!(deployed.status.success(), "the agent deploys {f}: {}", String::from_utf8_lossy(&deployed.stderr));
+    }
+    owner_sees(s, api, &owner, &[(&name, "files", "files"), (&storage, "storage", "home")])?;
+
+    // the copy, stage to blobs on the platform: the bound agent's alone,
+    // into a fragment it (or its owner, `for`) edits, within the zip and
+    // its upload limit
+    let (at, len) = (zip.windows(4).position(|w| w == b"PK\x03\x04").unwrap_or(0) as u64, 2 * MIB as u64);
+    let copy = |k: &crate::Keys, into: &str, q: &str| api.signed(k, "POST", &format!("{base}/copy?into={into}&{q}"), None);
+    let range = format!("offset={at}&bytes={len}");
+    let want = fragment_core::blob::sha256_hex(&zip[at as usize..(at + len) as usize]);
+    let mine = copy(&agent_keys, &name, &range)?;
+    let held = api.signed(&owner, "GET", &format!("/api/f/{name}/blobs/{want}"), None)?;
+    s.ok(
+        "the bound agent copies a range of its stage into a fragment it edits, on the platform: the blob of those bytes",
+        mine.status == 200 && mine.body["sha256"] == want.as_str() && mine.body["bytes"] == len && held.status == 200 && held.bytes == zip[at as usize..(at + len) as usize],
+        format!("{mine} | {}", held.status),
+    );
+    let owners = s.create(api, &owner, "owners")?["name"].as_str().unwrap_or_default().to_string();
+    let me = api.signed(&owner, "GET", "/api/identities/me", None)?.body["id"].as_str().unwrap_or_default().to_string();
+    let for_owner = copy(&agent_keys, &owners, &format!("{range}&for={me}"))?;
+    let as_itself = copy(&agent_keys, &owners, &range)?;
+    s.ok(
+        "acting for its owner, it copies into its owner's fragment it is no member of, as its computer's egress signs; as itself, the fragment refuses it (403)",
+        for_owner.status == 200 && for_owner.body["sha256"] == want.as_str() && api.signed(&owner, "GET", &format!("/api/f/{owners}/blobs/{want}"), None)?.status == 200 && as_itself.status == 403,
+        format!("{for_owner} | {as_itself}"),
+    );
+    let stranger = api.person()?;
+    let theirs = copy(&stranger, &name, &range)?;
+    let past = copy(&agent_keys, &name, &format!("offset={}&bytes={len}", zip.len() as u64 - len + 1))?;
+    let over = copy(&agent_keys, &name, &format!("offset=0&bytes={}", fragment_proto::limits::BLOB_MAX_BYTES + 1))?;
+    let none = copy(&agent_keys, &name, "offset=0&bytes=0")?;
+    s.ok(
+        "a copy is refused to anyone but the bound agent (403), past the zip's end (400), past its upload limit (413), and of nothing (400)",
+        theirs.status == 403 && past.status == 400 && over.status == 413 && none.status == 400,
+        format!("{} {} {} {}", theirs.status, past.status, over.status, none.status),
+    );
+
+    let done = api.signed(&agent_keys, "POST", &format!("{base}/done"), Some(&json!({ "ok": true })))?;
+    let after = copy(&agent_keys, &name, &range)?;
+    s.ok("it says it is done: the move waits for staff, and its stage copies no more (409)", done.status == 200 && done.body["state"] == "retiring" && after.status == 409, format!("{done} | {}", after.status));
+    Ok(())
+}
+
+/// Each of `pages` (a fragment, what to call its picture, and a folder its
+/// page of files lists) as `owner` opens it from their apps, in Chrome, at
+/// 1280 and 390 px, light and dark: its picture taken once the page in its
+/// frame lists that folder (no Chrome, none).
+fn owner_sees(s: &mut Suite, api: &Api, owner: &crate::Keys, pages: &[(&str, &str, &str)]) -> Result<()> {
+    let Some(mut b) = s.browser()? else {
+        println!("      (no Chrome: no pictures of the owner's pages)");
+        return Ok(());
+    };
+    let shots = s.dir("move-big");
+    let session = api.sign_in(&Api::email_of(owner))?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let wait = Duration::from_secs(30);
+    for (name, called, folder) in pages {
+        let row = format!("document.querySelector({})", serde_json::to_string(&format!("#apps [data-key=\"app:{name}\"]"))?);
+        let lists = format!("(document.body?.innerText ?? '').split(/\\s+/).includes({})", serde_json::to_string(folder)?);
+        let mut seen = Vec::new();
+        for (width, height, phone) in [(1280, 800, false), (390, 844, true)] {
+            for scheme in ["light", "dark"] {
+                let page = b.open(&format!("{}/", api.base))?;
+                b.viewport(&page, width, height, phone)?;
+                b.color_scheme(&page, scheme)?;
+                let opened = b.until(&page, &format!("!!{row}"), wait) && {
+                    b.eval(&page, &format!("({row}.click(), true)"))?;
+                    b.until(&page, "!!document.querySelector('.viewer iframe')", wait)
+                };
+                let shown = opened && s.eventually(wait, || b.eval_in_frame(&page, name, &lists).ok() == Some(json!(true)));
+                std::thread::sleep(Duration::from_millis(500));
+                let _ = b.screenshot(&page, &shots.join(format!("{called}-{width}-{scheme}.png")));
+                seen.push((format!("{width}-{scheme}"), shown));
+                b.close(page)?;
+            }
+        }
+        s.ok(&format!("its owner opens its {called} from their apps: a page of its files, listing {folder}/, at 1280 and 390 px, light and dark"), seen.iter().all(|(_, shown)| *shown), json!(seen));
+    }
+    println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// The bytes the files under `dir` hold.
+fn disk_used(dir: &std::path::Path) -> u64 {
+    let Ok(listed) = std::fs::read_dir(dir) else { return 0 };
+    listed.flatten().map(|e| match e.file_type() {
+        Ok(t) if t.is_dir() => disk_used(&e.path()),
+        Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+        _ => 0,
+    }).sum()
+}

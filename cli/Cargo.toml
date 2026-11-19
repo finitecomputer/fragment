@@ -30,6 +30,8 @@ bytes = "1"
 sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
+# a file's CRC-32, as a zip names it (a move's import, and its note: offload.rs)
+crc32fast = "=1.5.2"
 rand = "0.8"
 dirs = "5"
 anyhow = "1"
