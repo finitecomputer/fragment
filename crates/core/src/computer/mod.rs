@@ -6,9 +6,9 @@
 //! container that came up after it was put to sleep) changes nothing.
 //!
 //! What it decides:
-//! - **Waking.** A record on a subscribed channel, an open port tab,
-//!   its owner's typing begun in a chat of theirs it follows (a
-//!   pre-wake), one of its agents added to a fragment, or the owner. A wake while asleep
+//! - **Waking.** A record on a subscribed channel, an open port tab, one
+//!   of its agents added to a fragment, or the owner (also their shell's
+//!   pre-wake, on a chat picked or the launcher opened). A wake while asleep
 //!   starts the container; one while it starts or is awake holds it
 //!   longer; one while it is going to sleep starts it again once it is
 //!   asleep (the newest push wins: lesson 3 of docs/cloudflare-v1.md).
@@ -90,4 +90,4 @@ pub use limits::{
 };
 pub use notices::{notices, support_url_ok, SUPPORT_URL_MAX_BYTES};
 pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};
-pub use which::{default_computer_of, prewoken};
+pub use which::default_computer_of;

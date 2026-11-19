@@ -1,12 +1,10 @@
 //! The live socket's bounds (cell/src/live.rs), as pure logic: the
-//! queries one principal may run over its sockets, how often a socket
-//! may change its presence, and which change is its person beginning to
-//! type.
+//! queries one principal may run over its sockets, and how often a socket
+//! may change its presence.
 
 use std::collections::BTreeSet;
 
-use fragment_proto::{limits, Role};
-use serde_json::Value;
+use fragment_proto::limits;
 
 /// Why a socket's query was not run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,58 +85,6 @@ pub fn presence_admit(due_ms: i64, now_ms: i64) -> Option<i64> {
     let next = due + PRESENCE_EVERY_MS;
     assert!(next > now_ms, "the next change is due after this one");
     Some(next)
-}
-
-/// Whether a socket's presence change says its person began typing (a
-/// use of their own computer, when its agents follow the fragment:
-/// `computer::prewoken`, decision 39): `typing` is `true` now and was not
-/// on this socket before, on a page whose code is the platform's own
-/// (`platform`, asked only then: a blessed template's release, decision
-/// 40). The chat's composer turns it on at the first keystroke after a
-/// pause and off after a send or `TYPING_MS` of quiet; nothing else of a
-/// presence is read. A page sends its presence again as its socket
-/// reconnects, and as its tab is shown or hidden: none of those is typing
-/// begun. An app's page, whose code is its author's, may say it types with
-/// no one there: its presence wakes nothing.
-pub fn typing_began(platform: impl FnOnce() -> bool, before: Option<&Value>, now: &Value) -> bool {
-    let typing = |v: &Value| v.get("typing") == Some(&Value::Bool(true));
-    typing(now) && !before.is_some_and(typing) && platform()
-}
-
-/// Whether a page's typing is its person's own, as far as the platform
-/// can tell (decision 39). A page sets its presence itself, and any page on
-/// a fragment's origin can: an app's code, or a page someone added to a
-/// blessed fragment's site (served beside the release's, serve.rs), may
-/// say it types with no one there. So it counts only on a fragment of the
-/// platform's code (`blessed`, a blessed template's release, decision 40,
-/// asked only for its owner) and only from its owner (`role`): every page
-/// on their fragment's origin is theirs or one they let its editors add,
-/// and the computer it wakes is their own (`computer::prewoken`).
-pub fn typing_trusted(role: Role, blessed: impl FnOnce() -> bool) -> bool {
-    role == Role::Owner && blessed()
-}
-
-/// How often a fragment's owner's computer is pre-woken at most (decision
-/// 39): typing in bursts is one sign.
-pub const PREWAKE_EVERY_MS: i64 = 30_000;
-
-/// When a fragment's owner's computer is next pre-woken: at most every
-/// `PREWAKE_EVERY_MS`. Only its owner's typing pre-wakes (`typing_trusted`),
-/// so one pace a fragment holds back no one else's. A fragment's memory
-/// only: one that slept forgets, and its next typing begun wakes once more.
-#[derive(Debug, Default)]
-pub struct PrewakeDue(i64);
-
-impl PrewakeDue {
-    /// Whether the pre-wake is due at `now_ms`: when it is, it is next due
-    /// `PREWAKE_EVERY_MS` on.
-    pub fn take(&mut self, now_ms: i64) -> bool {
-        if now_ms < self.0 {
-            return false;
-        }
-        self.0 = now_ms + PREWAKE_EVERY_MS;
-        true
-    }
 }
 
 #[cfg(test)]
@@ -238,66 +184,5 @@ mod tests {
         let flood: Vec<i64> = (0..10_000).map(|i| t + i).collect();
         let through = admitted(&flood).iter().filter(|a| **a).count() as i64;
         assert_eq!(through, limits::PRESENCE_BURST + 10 * limits::PRESENCE_PER_S - 1, "a burst, then ten a second");
-    }
-
-    /// Goal (Paul, 2026-11-18): only typing begun is a use; a page that
-    /// loads, reconnects, or is shown again sends its presence too, and is
-    /// none. Valid (begun, on a fresh socket too), invalid (other values,
-    /// shapes), replay (typing that goes on, or the same presence again).
-    #[test]
-    fn only_typing_turning_on_is_typing_begun() {
-        let page = serde_json::json!({ "typing": false, "looking": true });
-        let hidden = serde_json::json!({ "typing": false, "looking": false });
-        let typing = serde_json::json!({ "typing": true, "looking": true });
-        assert!(!typing_began(|| true, None, &page), "a page loaded, or its socket reconnected, says it is here");
-        assert!(!typing_began(|| true, Some(&page), &hidden) && !typing_began(|| true, Some(&hidden), &page), "the tab hidden, then shown again");
-        assert!(typing_began(|| true, Some(&page), &typing), "the first keystroke after a pause");
-        assert!(typing_began(|| true, None, &typing), "a socket reconnected as its person types");
-        assert!(!typing_began(|| true, Some(&typing), &serde_json::json!({ "typing": true, "looking": false })), "typing goes on");
-        assert!(!typing_began(|| true, Some(&typing), &typing), "the same presence again");
-        assert!(typing_began(|| true, Some(&page), &typing) && !typing_began(|| true, Some(&typing), &page), "a pause, then typing again begins again");
-        for other in [serde_json::json!({ "typing": "yes" }), serde_json::json!({ "typing": 1 }), serde_json::json!(null), serde_json::json!([true]), serde_json::json!("typing"), serde_json::json!({ "x": 1, "y": 2 })] {
-            assert!(!typing_began(|| true, None, &other), "{other}");
-        }
-    }
-
-    /// Goal (review of #1351): an app's page, whose code is its author's,
-    /// may set `typing` with no one there; only a page of the platform's
-    /// code is a person typing. And the platform's code is asked only
-    /// when typing began, not at every presence.
-    #[test]
-    fn an_apps_own_page_typing_is_no_sign() {
-        let page = serde_json::json!({ "typing": false, "looking": true });
-        let typing = serde_json::json!({ "typing": true, "looking": true });
-        assert!(!typing_began(|| false, Some(&page), &typing), "an app's page says it types");
-        assert!(typing_began(|| true, Some(&page), &typing), "the platform's chat");
-        assert!(!typing_began(|| panic!("asked for a presence that began nothing"), Some(&page), &page));
-    }
-
-    /// Goal: a fragment's owner's typing in bursts pre-wakes their computer
-    /// once a pace. Valid (the first), replay (within the pace, nothing),
-    /// the bound (once it passed, again).
-    #[test]
-    fn its_owners_computer_is_pre_woken_once_a_pace() {
-        let mut due = PrewakeDue::default();
-        assert!(due.take(1_000));
-        assert!(!due.take(1_000 + PREWAKE_EVERY_MS - 1), "within its pace");
-        assert!(due.take(1_000 + PREWAKE_EVERY_MS), "once its pace passed");
-    }
-
-    /// Goal (review of #1351): a page may set `typing` on its own, so only
-    /// the fragment's owner's typing on a fragment of the platform's code
-    /// counts. Invalid: anyone else on a blessed chat (a visitor opening a
-    /// page someone added to its site, a member, a reader), and its owner
-    /// on a fragment of its own code; and the platform's code is asked
-    /// only for its owner.
-    #[test]
-    fn only_the_owners_typing_on_the_platforms_code_is_trusted() {
-        assert!(typing_trusted(Role::Owner, || true), "its owner, in their chat");
-        for role in [Role::Public, Role::Viewer, Role::Editor] {
-            assert!(!typing_trusted(role, || true), "{role:?}, on someone else's blessed chat");
-            assert!(!typing_trusted(role, || panic!("asked for one who is not its owner")));
-        }
-        assert!(!typing_trusted(Role::Owner, || false), "its owner, on a fragment of its own code");
     }
 }

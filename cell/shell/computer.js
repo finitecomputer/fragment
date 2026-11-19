@@ -51,9 +51,9 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // chat picked, shell.js `pickChat`; the launcher opened in the shell,
   // launcher.js `openedByPerson`) is their own
   // wake (`POST …/wake`), held the idle wait as every wake is
-  // (docs/computers.md, "It stays awake"). Their typing in a chat wakes
-  // their computer from the chat's own socket (decision 39). A page
-  // left open, or loaded again, asks nothing, so it sleeps. Their agent's
+  // (docs/computers.md, "It stays awake"). A page left open, or loaded
+  // again, asks nothing, so it sleeps; nor does a page's own ask (a
+  // framed page's, or its presence). Their agent's
   // desktop is woken by its own port. One ask a minute at most: the wait
   // is twenty, so signs closer than that are one sign.
   // A computer that won't start is not woken by the person's presence: its

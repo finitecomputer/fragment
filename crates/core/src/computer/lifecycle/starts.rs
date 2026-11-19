@@ -268,8 +268,8 @@ mod tests {
         let g = started(&mut l, T);
         let slept = T + IDLE_MS;
         assert!(l.apply(Event::Alarm, slept).actions.contains(&Action::Sleep { generation: g }), "the idle sleep, in an alarm");
-        // a presence wake as it holds
-        assert!(l.apply(Event::Wake { why: Wake::Presence }, slept + 1_000).actions.is_empty());
+        // a wake as it holds (a port tab's)
+        assert!(l.apply(Event::Wake { why: Wake::Tab }, slept + 1_000).actions.is_empty());
         let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, slept + 2_000));
         let saved = slept + 2_000 + 11 * 60_000;
         assert_eq!(l.apply(Event::Saved { generation: g, seq }, saved).actions, vec![Action::Stop { generation: g, saved: true }]);
@@ -434,14 +434,14 @@ mod tests {
         }
         assert!(matches!(&l.phase, Phase::Failed { why, .. } if why == "storage error") && l.generation() == STARTS_FAILED_MAX as u64, "{l:?}");
         // too soon: refused, as before
-        let s = l.apply(Event::Wake { why: Wake::Presence }, gave_up + WONT_WAKE_RETRY_MS - 1);
+        let s = l.apply(Event::Wake { why: Wake::Tab }, gave_up + WONT_WAKE_RETRY_MS - 1);
         assert!(s.actions.is_empty() && s.refused.is_some(), "{s:?}");
         // its pause passed: one try, its last strike
         let s = l.apply(Event::Wake { why: Wake::Record }, gave_up + WONT_WAKE_RETRY_MS);
         let g = STARTS_FAILED_MAX as u64 + 1;
         assert_eq!((s.actions, s.refused, l.failures), (vec![Action::Start { generation: g }], None, STARTS_FAILED_MAX - 1));
         // another wake as it starts holds it, and starts nothing more
-        assert!(l.apply(Event::Wake { why: Wake::Presence }, gave_up + WONT_WAKE_RETRY_MS + 1).actions.is_empty());
+        assert!(l.apply(Event::Wake { why: Wake::Tab }, gave_up + WONT_WAKE_RETRY_MS + 1).actions.is_empty());
         // it fails again: it gives up at once, and its pause runs anew
         let again = gave_up + WONT_WAKE_RETRY_MS + 5_000;
         let s = l.apply(Event::StartFailed { generation: g, why: "storage error".into() }, again);
@@ -460,7 +460,7 @@ mod tests {
         let mut stored = serde_json::to_value(Lifecycle { phase: Phase::Failed { why: "old".into(), since_ms: T }, ..Lifecycle::new() }).unwrap();
         assert!(stored["phase"].as_object_mut().unwrap().remove("since_ms").is_some());
         let (mut old, _) = Lifecycle::read(&stored.to_string()).unwrap();
-        assert_eq!(old.apply(Event::Wake { why: Wake::Presence }, T).actions, vec![Action::Start { generation: 1 }]);
+        assert_eq!(old.apply(Event::Wake { why: Wake::Tab }, T).actions, vec![Action::Start { generation: 1 }]);
     }
 
     /// Goal: a container that stops on its own is started again while it
@@ -831,7 +831,7 @@ mod tests {
         assert!(!l.fell_back && l.failures == 0);
         // with nothing wanting it any more, a fallback leaves it asleep
         let mut l = Lifecycle::new();
-        let s = l.apply(Event::Wake { why: Wake::Presence }, T);
+        let s = l.apply(Event::Wake { why: Wake::Tab }, T);
         let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
         let s = l.apply(Event::SnapshotFailed { generation, why: "slow".into() }, T + IDLE_MS + 1);
         assert!(s.actions.is_empty() && matches!(l.phase, Phase::Asleep { .. }), "{s:?}");
@@ -1234,7 +1234,7 @@ mod tests {
                 (gave_up + WONT_WAKE_RETRY_MS + 1_100, Event::Exited { generation: 5 }, None),
                 (gave_up + WONT_WAKE_RETRY_MS + 1_200, Event::StartFailed { generation: 5, why: r502() }, None),
                 (gave_up + WONT_WAKE_RETRY_MS + 60_000, Event::Wake { why: Wake::Record }, None),
-                (gave_up + 2 * WONT_WAKE_RETRY_MS + 1_200, Event::Wake { why: Wake::Presence }, Some(6)),
+                (gave_up + 2 * WONT_WAKE_RETRY_MS + 1_200, Event::Wake { why: Wake::Tab }, Some(6)),
                 (gave_up + 2 * WONT_WAKE_RETRY_MS + 1_300, Event::StartFailed { generation: 6, why: r502() }, None),
                 (gave_up + 2 * WONT_WAKE_RETRY_MS + 2_000, Event::Restart { generation: 6 }, None),
                 (gave_up + 2 * WONT_WAKE_RETRY_MS + 2_000, Event::Alarm, Some(7)),
