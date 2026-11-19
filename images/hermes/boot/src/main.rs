@@ -1649,12 +1649,17 @@ async fn boot_main() {
                         }
                         let (read, _) = with_runtimes(&api, c.agents, &runtime_names, again).await;
                         let change = agents::diff(&agents::hermes(&agents), &agents::hermes(&read));
-                        // another runtime's agent new here, switched to it, or
-                        // whose last try failed: its own files back before
-                        // the ready file names it for that runtime
-                        restore(&api, &read, &home, &own, &mut restored).await;
+                        // the roster first (an agent still to restore is in it,
+                        // its turns held), then another runtime's agent new
+                        // here, switched to it, or whose last try failed: its
+                        // own files back, then ready for that runtime
+                        restored.retain(|(f, r)| read.iter().any(|a| &a.fragment == f && agents::runtime_of(a) == r));
                         if !change.is_empty() || agents::ready_file(&read, &restored) != ready_now {
                             ready_now = follow_agents(&api, &change, &read, &restored, &home, ids, &route, &credential_env, &team).await;
+                        }
+                        restore(&api, &read, &home, &own, &mut restored).await;
+                        if agents::ready_file(&read, &restored) != ready_now {
+                            ready_now = write_ready(&read, &restored, &home);
                         }
                         agents = read;
                     }

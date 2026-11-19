@@ -148,6 +148,28 @@ fn a_runtime_down_holds_only_its_agents() {
     assert_eq!(routed(&s)[0].0, "other");
 }
 
+/// Goal (FIN-542): an agent not ready yet for the runtime it names (its
+/// files not restored for it: `Input::Unready`) keeps its turns, waiting
+/// and unclaimed, while the others run; once ready, its waiting turn is
+/// claimed on that runtime. Its turns are never dropped, as a gone agent's
+/// are.
+#[test]
+fn an_agent_not_ready_for_its_runtime_holds_its_turns() {
+    let (j, r) = (agent("juniper"), on("rowan", "other"));
+    let mut e = two_runtimes(&[j.clone(), r.clone()]);
+    e.step(Input::Unready([r.fragment.clone()].into()), T0);
+    let s = to_own_chat(&mut e, &r, 1, json!({ "text": "hi" }), T0 + 1);
+    assert!(posts(&s).is_empty() && started(&s).is_none(), "rowan's turn waits, unclaimed: {s:?}");
+    let s = e.step(Input::Agents(vec![j.clone(), r.clone()]), T0 + 2);
+    assert!(posts(&s).is_empty(), "the roster read again: still waiting");
+    let s = to_own_chat(&mut e, &j, 1, json!({ "text": "hi" }), T0 + 3);
+    assert!(started(&s).is_some(), "juniper is ready");
+    let s = e.step(Input::Unready(BTreeSet::new()), T0 + 4);
+    let s = answered(&mut e, s, T0 + 4);
+    let t = started(&s).expect("rowan's turn, claimed once it is ready");
+    assert_eq!((t.agent.fragment.as_str(), routed(&s)[0].0.as_str()), (r.fragment.as_str(), "other"));
+}
+
 /// Goal: an agent whose `agent.json` names a runtime this bridge does not
 /// run has its turns refused, both records posted, the end saying so; none
 /// is handed to another runtime, and none waits. A name that is no

@@ -8,10 +8,11 @@
 //!
 //! The file is `{"agents": ["juniper--k3x9", …], "runtimes": {"rowan--k3x9":
 //! "claude"}}`, the host's, written whole and renamed into place, so a read
-//! never sees half of one. Each agent is ready for the runtime it was made
-//! ready for: the one `runtimes` names, else the default (Hermes'). An
-//! agent whose `agent.json` names another runtime now is not run until the
-//! file says it is ready for that one (FIN-542: a Claude agent's files are
+//! never sees half of one. Each agent named is the bridge's to run, made
+//! ready for the runtime `runtimes` names, else the default (Hermes'). One
+//! whose `agent.json` names another runtime now stays the bridge's, its
+//! turns waiting (`unready`, the engine's `Input::Unready`), until the file
+//! says it is ready for that one (FIN-542: a Claude agent's files are
 //! restored before its first turn). A missing file is no agent ready. One
 //! that does not read keeps the set before it (a host's bug must not stop
 //! the agents it had made ready), and says so.
@@ -30,8 +31,9 @@ use crate::runtime::Agent;
 pub const READY_FILE_MAX_BYTES: usize = 16 * 1024;
 /// A name in it is at most this long (a fragment's `<label>--<suffix>`).
 pub const READY_NAME_MAX_BYTES: usize = 128;
-/// A runtime's name in it is at most this long.
-pub const READY_RUNTIME_MAX_BYTES: usize = 32;
+/// A runtime's name in it is at most this long: any an `agent.json` names
+/// (`runtime::named`), whatever it holds.
+pub const READY_RUNTIME_MAX_BYTES: usize = crate::runtime::RUNTIME_NAMED_MAX_BYTES;
 
 const _: () = assert!(limits::AGENTS_MAX * (2 * READY_NAME_MAX_BYTES + READY_RUNTIME_MAX_BYTES + 12) < READY_FILE_MAX_BYTES);
 
@@ -71,16 +73,21 @@ pub fn parse(bytes: &[u8]) -> Result<Prepared, String> {
         return Err(format!("{bad:?} is no agent fragment's name"));
     }
     let agents: BTreeSet<String> = f.agents.into_iter().collect();
-    if let Some((a, r)) = f.runtimes.iter().find(|(a, r)| !agents.contains(*a) || r.is_empty() || r.len() > READY_RUNTIME_MAX_BYTES || r.chars().any(char::is_whitespace)) {
-        return Err(format!("{a:?} is ready for {r:?}: no agent it names, or no runtime's name"));
+    if let Some((a, r)) = f.runtimes.iter().find(|(a, r)| !agents.contains(*a) || r.len() > READY_RUNTIME_MAX_BYTES) {
+        return Err(format!("{a:?} is ready for {r:?}: no agent it names, or past {READY_RUNTIME_MAX_BYTES} bytes"));
     }
     Ok(Prepared { agents, runtimes: f.runtimes })
 }
 
-/// The platform's agents that are ready for their runtimes, in the
-/// platform's order.
+/// The platform's agents the file names, in the platform's order.
 pub fn gate(agents: Vec<Agent>, ready: &Prepared) -> Vec<Agent> {
-    agents.into_iter().filter(|a| ready.runs(a)).collect()
+    agents.into_iter().filter(|a| ready.agents.contains(&a.fragment)).collect()
+}
+
+/// Those of `agents` not ready yet for the runtime they name now: their
+/// turns wait.
+pub fn unready(agents: &[Agent], ready: &Prepared) -> BTreeSet<String> {
+    agents.iter().filter(|a| !ready.runs(a)).map(|a| a.fragment.clone()).collect()
 }
 
 /// What tells one version of the file from the next: a rename makes a new
@@ -157,21 +164,27 @@ mod tests {
     }
 
     /// Goal (FIN-542): an agent is run only on the runtime it was made ready
-    /// for. Invalid: switched to Claude, an entry made ready for Hermes does
-    /// not run it on Claude (its files may not be restored yet), nor one made
-    /// ready for Claude on Hermes. Valid: once the file says Claude, it does.
+    /// for; otherwise it stays the bridge's, its turns waiting. Invalid:
+    /// switched to Claude, an entry made ready for Hermes does not run it on
+    /// Claude (its files may not be restored yet), nor one made ready for
+    /// Claude on Hermes. Valid: once the file says Claude, it runs. A
+    /// runtime's name the file carries is any an `agent.json` gives, so one
+    /// odd name never stops the others.
     #[test]
     fn an_agent_runs_only_on_the_runtime_it_was_made_ready_for() {
         let on = |label: &str, runtime: Option<&str>| Agent { runtime: runtime.map(str::to_string), ..agent(label) };
-        let names = |got: Vec<Agent>| got.into_iter().map(|a| a.fragment).collect::<Vec<_>>();
         let for_hermes = parse(br#"{"agents": ["juniper--k3x9"]}"#).unwrap();
-        assert_eq!(names(gate(vec![on("juniper", None)], &for_hermes)), ["juniper--k3x9"]);
-        assert_eq!(names(gate(vec![on("juniper", Some("hermes"))], &for_hermes)), ["juniper--k3x9"]);
-        assert!(gate(vec![on("juniper", Some("claude"))], &for_hermes).is_empty(), "switched to Claude: not ready for it yet");
+        assert!(unready(&[on("juniper", None), on("juniper", Some("hermes"))], &for_hermes).is_empty());
+        let switched = [on("juniper", Some("claude"))];
+        assert_eq!(gate(switched.to_vec(), &for_hermes).len(), 1, "still the bridge's");
+        assert_eq!(unready(&switched, &for_hermes).into_iter().collect::<Vec<_>>(), ["juniper--k3x9"], "switched to Claude: its turns wait");
         let for_claude = parse(br#"{"agents": ["juniper--k3x9"], "runtimes": {"juniper--k3x9": "claude"}}"#).unwrap();
-        assert_eq!(names(gate(vec![on("juniper", Some("claude"))], &for_claude)), ["juniper--k3x9"]);
-        assert!(gate(vec![on("juniper", None)], &for_claude).is_empty(), "back on Hermes: its profile first");
-        for bad in [&br#"{"agents": [], "runtimes": {"juniper--k3x9": "claude"}}"#[..], br#"{"agents": ["juniper--k3x9"], "runtimes": {"juniper--k3x9": ""}}"#, br#"{"agents": ["juniper--k3x9"], "runtimes": {"juniper--k3x9": "a b"}}"#] {
+        assert!(unready(&switched, &for_claude).is_empty(), "ready for Claude: it runs");
+        assert_eq!(unready(&[on("juniper", None)], &for_claude).len(), 1, "back on Hermes: its profile first");
+        let odd = parse(br#"{"agents": ["juniper--k3x9", "oak--k3x9"], "runtimes": {"oak--k3x9": "Claude Code! "}}"#).unwrap();
+        assert!(unready(&[on("juniper", None), on("oak", Some("Claude Code! "))], &odd).is_empty(), "an odd runtime's name stops no one");
+        let long = format!(r#"{{"agents": ["oak--k3x9"], "runtimes": {{"oak--k3x9": "{}"}}}}"#, "x".repeat(READY_RUNTIME_MAX_BYTES + 1));
+        for bad in [&br#"{"agents": [], "runtimes": {"juniper--k3x9": "claude"}}"#[..], long.as_bytes()] {
             assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
     }

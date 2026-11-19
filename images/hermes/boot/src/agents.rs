@@ -97,13 +97,13 @@ pub fn restored_key(a: &Agent) -> (String, String) {
 }
 
 /// The bridge's ready file (its `ready.rs`): every agent it may run, in the
-/// platform's order, each with the runtime it is ready for: one of Hermes'
-/// once its profile is written (the default), any other once its own files
-/// are restored for the runtime it names (`restored`, FIN-542), never before.
+/// platform's order (one of Hermes' once its profile is written), each
+/// ready for Hermes' runtime, or for the one it names once its own files
+/// are restored for it (`restored`, FIN-542). Until then the bridge holds
+/// its turns, never dropping them.
 pub fn ready_file(agents: &[Agent], restored: &Restored) -> String {
-    let ready: Vec<&Agent> = agents.iter().filter(|a| of_hermes(a) || restored.contains(&restored_key(a))).collect();
-    let runtimes: BTreeMap<&str, &str> = ready.iter().filter(|a| !of_hermes(a)).map(|a| (a.fragment.as_str(), runtime_of(a))).collect();
-    json!({ "agents": ready.iter().map(|a| a.fragment.as_str()).collect::<Vec<_>>(), "runtimes": runtimes }).to_string()
+    let runtimes: BTreeMap<&str, &str> = agents.iter().filter(|a| !of_hermes(a) && restored.contains(&restored_key(a))).map(|a| (a.fragment.as_str(), runtime_of(a))).collect();
+    json!({ "agents": agents.iter().map(|a| a.fragment.as_str()).collect::<Vec<_>>(), "runtimes": runtimes }).to_string()
 }
 
 /// The profiles of `agents` the gateway's answer to `rescan-profiles` does
@@ -148,11 +148,11 @@ mod tests {
     }
 
     /// Goal (FIN-258): Hermes runs an agent naming no runtime or its own,
-    /// and only those have a profile; every agent is in the ready file once
-    /// its own files are restored, each for its runtime (FIN-542). Valid:
-    /// one switched to Claude leaves Hermes as a removed agent does, and
-    /// leaves the ready file until its files are restored for Claude; one
-    /// switched back is added. Invalid: a runtime no one runs is not
+    /// and only those have a profile; every agent is in the ready file, each
+    /// ready for its runtime once its own files are restored for it
+    /// (FIN-542). Valid: one switched to Claude leaves Hermes as a removed
+    /// agent does, and is ready for Claude only once its files are restored
+    /// for it; one switched back is added. Invalid: a runtime no one runs is not
     /// Hermes'. Replay: the same runtimes again are no change.
     #[test]
     fn hermes_runs_only_the_agents_that_name_it() {
@@ -165,7 +165,7 @@ mod tests {
         let switched = [named("juniper", Some("claude")), named("maple", Some("hermes"))];
         let c = diff(&hermes(&set[..2]), &hermes(&switched));
         assert_eq!((names(&c.added), names(&c.removed)), (vec![], vec!["juniper--k3x9"]), "to Claude: its profile goes");
-        assert_eq!(ready_file(&switched, &restored), r#"{"agents":["maple--k3x9"],"runtimes":{}}"#, "to Claude: not ready until its files are restored for it");
+        assert_eq!(ready_file(&switched, &restored), r#"{"agents":["juniper--k3x9","maple--k3x9"],"runtimes":{}}"#, "to Claude: not ready for it until its files are restored");
         let ready = Restored::from([("juniper--k3x9".to_string(), "claude".to_string())]);
         assert_eq!(ready_file(&switched, &ready), r#"{"agents":["juniper--k3x9","maple--k3x9"],"runtimes":{"juniper--k3x9":"claude"}}"#, "then ready for Claude");
         let c = diff(&hermes(&switched), &hermes(&set[..2]));
@@ -239,6 +239,9 @@ mod tests {
         let file = ready_file(&[agent("maple"), rowan.clone()], &Restored::from([restored_key(&rowan)]));
         let read = fragment_bridge::ready::parse(file.as_bytes()).unwrap();
         assert!(read.runs(&agent("maple")) && read.runs(&rowan) && !read.runs(&agent("rowan")));
+        let file = ready_file(&[agent("maple"), rowan.clone()], &Restored::new());
+        let read = fragment_bridge::ready::parse(file.as_bytes()).unwrap();
+        assert_eq!(fragment_bridge::ready::unready(&[agent("maple"), rowan.clone()], &read).into_iter().collect::<Vec<_>>(), ["rowan--k3x9"], "not restored: its turns wait");
     }
 
     /// The gateway's answer says whether it serves the new profiles; an

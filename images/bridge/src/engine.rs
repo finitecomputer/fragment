@@ -559,6 +559,10 @@ pub enum Input {
     /// its owner's phone (`mirror`). Their relayed records are honored with
     /// or without it.
     Relaying(BTreeMap<String, Option<String>>),
+    /// The computer's agents not ready yet for the runtime their
+    /// `agent.json` names now (ready.rs, `unready`): theirs, their turns
+    /// wait, none claimed, until they are ready.
+    Unready(BTreeSet<String>),
     /// An open card's option answered on the agent's computer (its `/answer`
     /// page: screen.rs), never in a record: `reply` names the request the
     /// answer goes back to (`Effect::ComputerAnswered`).
@@ -690,6 +694,10 @@ pub struct Engine {
     /// Never written to `/data`: the bridge reads it from each link's file
     /// as it starts.
     relaying: BTreeMap<String, Option<String>>,
+    /// The agents not ready for their runtime yet (`Input::Unready`): no turn
+    /// of theirs is claimed. Never written to `/data`: the driver says it
+    /// with each read of the computer.
+    unready: BTreeSet<String>,
     /// Per agent and chat, its turn there the runtime's notices belong to
     /// (the one running, else the last this life handed there) and how many
     /// it posted, the one used last at the back (at most
@@ -788,6 +796,7 @@ impl Engine {
             closed_late: BTreeSet::new(),
             published: BTreeSet::new(),
             relaying: BTreeMap::new(),
+            unready: BTreeSet::new(),
             noticed: VecDeque::new(),
             helpers_said: BTreeMap::new(),
             helpers_n: 0,
@@ -908,6 +917,13 @@ impl Engine {
             Input::Relaying(agents) => {
                 assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
                 self.relaying = agents;
+            }
+            Input::Unready(agents) => {
+                assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
+                if agents != self.unready {
+                    self.unready = agents;
+                    self.pump_all();
+                }
             }
         }
         self.finish()
@@ -1742,6 +1758,9 @@ impl Engine {
     /// answered, so a life that ends meanwhile leaves it for the next to
     /// claim (a 409 then, if this claim had landed).
     fn pump(&mut self, agent: &str, fragment: &str) {
+        if self.unready.contains(agent) {
+            return;
+        }
         let runtime = self.runtime_of(agent);
         match self.runtimes.get(&runtime) {
             Some(r) if r.connected => {}

@@ -981,7 +981,7 @@ async fn a_claude_agents_self_outlasts_its_computer() {
     let model = Model::start("0.0.0.0:0").await;
     let (work, memory) = ("/data/work/rowan--k3x9", "/data/hermes/.claude/projects/-data-work-rowan--k3x9/memory");
     let run = || Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SYNC_MS", "2000")]);
-    let ready = |c: &Container| c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]).contains("rowan--k3x9");
+    let ready = |c: &Container| c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]).contains(r#""rowan--k3x9":"claude""#);
     let owner = |c: &Container, p: &str| c.exec_out(&["stat", "-c", "%U", p]).trim().to_string();
 
     let c = run();
@@ -1025,7 +1025,7 @@ async fn a_claude_agents_self_outlasts_its_computer() {
     fake.add_agent_with("hazel", r#"{"tier":"cheap","runtime":"claude"}"#);
     fake.with(|w| w.fragments.get_mut("hazel--k3x9").unwrap().files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Hazel.\n")));
     let t = Instant::now();
-    while !c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]).contains("hazel--k3x9") {
+    while !c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]).contains(r#""hazel--k3x9":"claude""#) {
         assert!(t.elapsed() < Duration::from_secs(60), "the ready file never named hazel");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -1034,61 +1034,66 @@ async fn a_claude_agents_self_outlasts_its_computer() {
     assert_eq!(kept, ["CLAUDE.md", "SOUL.md", "agent.json", "memories/claude/MEMORY.md", "memories/claude/tomatoes.md"], "main whole: nothing deleted by the empty disk");
 }
 
-/// Until `label` is in the ready file: never before its soul is in its folder.
-async fn ready_with_soul(c: &Container, label: &str) {
+/// `turn`'s first Claude turn (Claude Code's install card, none being
+/// installed here): by then `label`'s soul is in its folder.
+async fn claude_turn_after_its_soul(fake: &Fake, c: &Container, chat: &str, turn: &str, label: &str) {
     let t = Instant::now();
-    loop {
-        if c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]).contains(&format!("\"{label}--k3x9\"")) {
-            assert!(c.exec(&["test", "-f", &format!("/data/work/{label}--k3x9/SOUL.md")]), "{label} named ready before its files were restored");
-            return;
-        }
-        assert!(t.elapsed() < Duration::from_secs(90), "{label} never ready: {}", c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]));
+    while !fake.with(|w| w.bodies(chat, "work", "turn.prompt").iter().any(|p| p["turn"] == turn && p["prompt"] == "install")) {
+        assert!(t.elapsed() < Duration::from_secs(120), "{label}'s Claude turn never came");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    assert!(c.exec(&["test", "-f", &format!("/data/work/{label}--k3x9/SOUL.md")]), "a Claude turn of {label}'s ran before its files were restored");
 }
 
-/// Goal (FIN-542): a Claude agent's first turn waits for its own files.
-/// The ready file names it, for Claude, only once a sync restored them,
-/// and the bridge runs it on Claude only once the file says so. Invalid,
-/// then restart: its files' listing failing at a start keeps it out of the
-/// ready file, tried again until it answers; the same for one assigned
-/// while the computer runs. Valid: a Hermes agent switched to Claude while
-/// its files cannot be read gets no Claude turn (here, Claude Code's
-/// install card) until its soul is in its folder.
+/// Goal (FIN-542): a Claude agent's first turn waits for its own files:
+/// the ready file says it is ready for Claude only once a sync restored
+/// them, and until then the bridge holds its turns, never dropping them.
+/// Invalid, then restart: its files' listing failing at a start keeps its
+/// turn waiting, the sync tried again until it answers; the same for one
+/// assigned while the computer runs. Valid: a Hermes agent switched to
+/// Claude while its files cannot be read gets no Claude turn until its
+/// soul is in its folder. A Claude turn here is Claude Code's install card.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_claude_agent_waits_for_its_files() {
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     let soul = |label: &str, text: &'static str| fake.with(|w| w.fragments.get_mut(&format!("{label}--k3x9")).unwrap().files.insert("SOUL.md".into(), bytes::Bytes::from_static(text.as_bytes())));
+    let ask = |chat: &str, label: &str| {
+        let asked = fake.say(chat, &person("paul"), json!({ "text": format!("hello {label}") }));
+        fragment_bridge::records::turn_id(&format!("{label}--k3x9"), chat, "chat", asked["seq"].as_u64().unwrap())
+    };
+    let workshop = fake.chat("workshop", &["rowan"]);
     fake.add_agent_with("rowan", r#"{"tier":"cheap","runtime":"claude"}"#);
     soul("rowan", "You are Rowan.\n");
     soul("juniper", "You are Juniper.\n");
-    // rowan's files don't list for its start's sync and the next tries
+    // rowan's files don't list for its start's sync and the next tries,
+    // and a message waits for it
     fake.with(|w| w.fail_files.insert("rowan--k3x9".into(), 3));
+    let rowan_turn = ask(&workshop, "rowan");
     let model = Model::start("0.0.0.0:0").await;
     let chat = fake.chat("talk", &["juniper"]);
     let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
-    let soul_here = |c: &Container, label: &str| c.exec(&["test", "-f", &format!("/data/work/{label}--k3x9/SOUL.md")]);
     let failed = |c: &Container, label: &str| c.logs().lines().any(|l| l.contains("\"sync.failed\"") && l.contains(&format!("{label}--k3x9")));
     let read_as_claude = |c: &Container| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "agent.runtime" && e["agent"] == "juniper--k3x9" && e["runtime"] == "claude").count();
 
     // a start whose first reads of rowan's files fail
-    fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    claude_turn_after_its_soul(&fake, &c, &workshop, &rowan_turn, "rowan").await;
     assert!(failed(&c, "rowan"), "its start's sync failed");
-    ready_with_soul(&c, "rowan").await;
     assert_eq!(fake.with(|w| w.fail_files["rowan--k3x9"]), 0, "tried again until it answered");
 
     // one assigned while the computer runs, its files failing too
+    let grove = fake.chat("grove", &["hazel"]);
     fake.with(|w| w.fail_files.insert("hazel--k3x9".into(), 3));
     fake.add_agent_with("hazel", r#"{"tier":"cheap","runtime":"claude"}"#);
     soul("hazel", "You are Hazel.\n");
-    ready_with_soul(&c, "hazel").await;
+    let hazel_turn = ask(&grove, "hazel");
+    claude_turn_after_its_soul(&fake, &c, &grove, &hazel_turn, "hazel").await;
     assert!(failed(&c, "hazel"), "its first syncs failed");
 
     // juniper, of Hermes', switched to Claude while its files can't be read:
     // a message to it gets no Claude turn before its soul is in its folder
-    assert!(!soul_here(&c, "juniper"), "a Hermes agent's soul is in its profile");
+    assert!(!c.exec(&["test", "-f", "/data/work/juniper--k3x9/SOUL.md"]), "a Hermes agent's soul is in its profile");
     fake.with(|w| {
         w.fail_files.insert("juniper--k3x9".into(), 6);
         w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap","runtime":"claude"}"#));
@@ -1100,14 +1105,8 @@ async fn a_claude_agent_waits_for_its_files() {
         assert!(t.elapsed() < Duration::from_secs(120), "juniper never read as Claude's by both: {}", read_as_claude(&c));
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let asked = fake.say(&chat, &person("paul"), json!({ "text": "hello, on Claude now" }));
-    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
-    let t = Instant::now();
-    while !fake.with(|w| w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["turn"] == turn.as_str() && p["prompt"] == "install")) {
-        assert!(t.elapsed() < Duration::from_secs(120), "juniper's Claude turn never came");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(soul_here(&c, "juniper"), "a Claude turn ran before juniper's files were restored");
+    let juniper_turn = ask(&chat, "juniper");
+    claude_turn_after_its_soul(&fake, &c, &chat, &juniper_turn, "juniper").await;
     assert!(failed(&c, "juniper"), "its first syncs for Claude failed");
 }
 

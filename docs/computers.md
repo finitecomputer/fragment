@@ -1016,10 +1016,11 @@ gates it.
   from its work directory comes back rather than leaving the fragment. A
   computer whose `/data` is lost or new, or an agent newly assigned to
   it or switched to Claude, has all of it back before the bridge runs the
-  agent: the ready file names an agent with the runtime it was made ready
-  for, and a Claude agent only once a sync restored its files (a failed
-  one is tried again at each read of the computer's agents, every 3 s);
-  the bridge runs an agent only on the runtime its entry names.
+  agent: the ready file names each agent with the runtime it was made
+  ready for, a Claude agent's only once a sync restored its files (a
+  failed one is tried again at each read of the computer's agents, every
+  3 s), and the bridge holds the turns of an agent not ready for the
+  runtime it names, never dropping them.
 
 ## Billing
 
