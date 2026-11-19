@@ -117,6 +117,10 @@ pub struct RegistryCell {
     /// import to make at each person's (connection_signin.rs `turn`). In
     /// memory, as `finishing`.
     deciding: RefCell<fragment_core::connection_accounts::Deciding>,
+    /// The invites whose mail is on its way, each `(email, fragment)`
+    /// (invites.rs `invite`): written only once it went, each counts
+    /// against its email's cap meanwhile. In memory, as `finishing`.
+    mailing: RefCell<Vec<(String, String)>>,
     /// Its schema as it started (schema.rs): ready, or refused, which
     /// refuses every sign-in and key until newer code or a reset.
     schema: crate::schema::Schema,
@@ -145,6 +149,7 @@ impl DurableObject for RegistryCell {
             cli_begins,
             finishing: RefCell::default(),
             deciding: RefCell::default(),
+            mailing: RefCell::default(),
             schema,
         }
     }

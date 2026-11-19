@@ -145,6 +145,22 @@ struct DueRow {
     due: Option<i64>,
 }
 
+/// An invite's place under its email's cap while its mail is on its way
+/// (`RegistryCell::mailing`), given up when this is dropped.
+struct Mailing<'a> {
+    cell: &'a std::cell::RefCell<Vec<(String, String)>>,
+    key: (String, String),
+}
+
+impl Drop for Mailing<'_> {
+    fn drop(&mut self) {
+        let mut mailing = self.cell.borrow_mut();
+        if let Some(at) = mailing.iter().position(|k| *k == self.key) {
+            mailing.swap_remove(at);
+        }
+    }
+}
+
 impl RegistryCell {
     /// `/invite`: the invite mailed, then kept against the email for its
     /// person's yes. Written only once its mail went, so a mail not sent
@@ -170,7 +186,10 @@ impl RegistryCell {
             "SELECT COUNT(*) AS n FROM invites_waiting WHERE email = ? AND fragment != ?",
             vec![i.email.as_str().into(), i.fragment.as_str().into()],
         )?;
-        if waiting >= limits::INVITES_PER_EMAIL_MAX as u64 {
+        // and those to other fragments whose mail is on its way: a replacement
+        // takes its own place, never another
+        let mailing = self.mailing.borrow().iter().filter(|(e, f)| *e == i.email && *f != i.fragment).count() as u64;
+        if waiting + mailing >= limits::INVITES_PER_EMAIL_MAX as u64 {
             return Err(CellError::new(ErrorCode::RateLimited, format!("{} invites wait on {} already", limits::INVITES_PER_EMAIL_MAX, i.email)));
         }
         self.count_mail(&i.sharer, now)?;
@@ -180,7 +199,13 @@ impl RegistryCell {
         let link = format!("{}/auth/fragment?name={}", self.cfg.platform(), i.fragment);
         let days = limits::INVITE_TTL_S / (24 * 3600);
         let invite = mail::invite(&i.email, &from, &i.title, i.role == Role::Editor, &link, days);
+        let key = (i.email.clone(), i.fragment.clone());
+        self.mailing.borrow_mut().push(key.clone());
+        // its place under the cap held until it is written or refused, a
+        // request dropped meanwhile included
+        let held = Mailing { cell: &self.mailing, key };
         crate::mail::send(&self.env, self.cfg, &invite).await?;
+        drop(held);
         self.exec(
             "INSERT INTO invites_waiting (email, fragment, expires_at, role, title, sharer, app) VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (email, fragment) DO UPDATE SET expires_at = excluded.expires_at, role = excluded.role, title = excluded.title,
