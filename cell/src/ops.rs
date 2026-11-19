@@ -185,16 +185,19 @@ impl FragmentCell {
     /// fragment's `TestHold` names it, at most `TEST_HOLD_MAX_MS`, and says
     /// where it waits (`TestHoldAt`), so an e2e puts another request, or a
     /// restart, between two of its turns. Nothing outside a test fleet.
-    pub(crate) async fn test_hold(&self, step: &str) {
+    /// Boxed: each step that waits polls one copy of its loop, not its own.
+    pub(crate) fn test_hold<'a>(&'a self, step: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
         const TEST_HOLD_MAX_MS: i64 = 30_000;
-        if !self.cfg.test_hooks {
-            return;
-        }
-        let begun = js::now_ms();
-        while self.meta(MetaKey::TestHold).ok().flatten().as_deref() == Some(step) && js::now_ms() - begun < TEST_HOLD_MAX_MS {
-            let _ = self.set_meta(MetaKey::TestHoldAt, step);
-            worker::Delay::from(std::time::Duration::from_millis(50)).await;
-        }
+        Box::pin(async move {
+            if !self.cfg.test_hooks {
+                return;
+            }
+            let begun = js::now_ms();
+            while self.meta(MetaKey::TestHold).ok().flatten().as_deref() == Some(step) && js::now_ms() - begun < TEST_HOLD_MAX_MS {
+                let _ = self.set_meta(MetaKey::TestHoldAt, step);
+                worker::Delay::from(std::time::Duration::from_millis(50)).await;
+            }
+        })
     }
 
     /// The running app facet for the installed code. A call reads only
