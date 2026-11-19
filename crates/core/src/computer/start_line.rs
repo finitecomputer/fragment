@@ -313,6 +313,11 @@ impl Starts {
     /// keepalive (a turn), or the lifecycle runs it no more (it ended).
     /// Answers its line, when that ends it.
     pub fn after(&mut self, event: &Event, life: &Lifecycle, now_ms: i64) -> Option<String> {
+        // a wake that leaves it awake was answered by the container it has
+        // (it cancelled an idle sleep): no start comes for its ask
+        if matches!(event, Event::Wake { .. }) && matches!(life.phase, Phase::Awake { .. }) {
+            self.asked = None;
+        }
         let l = self.line.as_mut()?;
         if life.running() != Some(l.generation) {
             // ended: as it came up, or as it failed
@@ -690,5 +695,36 @@ mod tests {
         assert_eq!(starts.asked, Some((91_000, Woke::Restart)), "a restart is its own wake");
         starts.asked(Woke::Wake(Wake::Record), &Phase::Asleep { retry: Some(Retry { at_ms: 95_000, owed: true }) }, 92_000);
         assert_eq!(starts.asked, Some((91_000, Woke::Restart)), "a start owed: the first ask stands");
+    }
+
+    /// Goal (#1357 with #1344): a wake during an idle sleep's hold cancels
+    /// the sleep and starts nothing, so the container it has answers its
+    /// ask: the start after (its container stopping under a turn an hour
+    /// on) is no wake's, timed from its own beginning. Method: the
+    /// lifecycle driven as the DO drives it, the wake asked as the cell
+    /// asks it, the lines parsed.
+    #[test]
+    fn a_wake_that_cancels_a_sleep_is_answered_by_it() {
+        let mut d = Driven::new();
+        let s = d.wake(Wake::Owner);
+        let (g1, _) = d.start(&s, Outcome::Ready);
+        d.turn();
+        let _ = d.line(g1);
+        // its hold runs out: its idle sleep, at its hold
+        d.c.now = d.c.life.held_until_ms() - 1_000;
+        let s = d.apply(Event::Alarm);
+        assert_eq!(s.actions.last(), Some(&Action::Sleep { generation: g1 }), "{s:?}");
+        // a message's wake cancels it: awake on its container, no start
+        let s = d.wake(Wake::Record);
+        assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })) && matches!(d.c.life.phase, Phase::Awake { .. }), "{s:?}");
+        // an hour on, its container stops under a turn: a start of its own
+        d.c.now += 3_600_000;
+        d.apply(Event::Opened { socket: Socket::Keepalive });
+        let s = d.apply(Event::Exited { generation: g1 });
+        let s = d.owed(&s);
+        let (g2, _) = d.start(&s, Outcome::Ready);
+        d.turn();
+        let l = d.line(g2);
+        assert_eq!((&l["woke"], ms(&l, "beganMs")), (&"itself".into(), 0), "{l}");
     }
 }
