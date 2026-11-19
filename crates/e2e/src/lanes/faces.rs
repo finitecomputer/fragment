@@ -297,11 +297,12 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         said.as_ref().is_ok_and(|v| v["name"] == "Frances" && v["changed"] == true) && followed && status == "Frances" && asked["title"] == "Frances" && asked["name"] == label.as_str(),
         json!({ "cli": said.map_err(|e| e.to_string()), "status": status, "people": asked }),
     );
-    let r = api.share(&agent, &bob_id, "viewer")?;
+    // Bob a viewer of the chat it is in again (its own fragment is Paul's alone)
+    let r = api.share(&chat, &bob_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "Bob, a viewer again: {r}");
     let out = s.cli(api, &home, &["access"]);
     let printed = String::from_utf8_lossy(&out.stdout).to_string();
-    let r = api.signed(&paul, "DELETE", &format!("/api/f/{agent}/members/{bob_id}"), None)?;
+    let r = api.signed(&paul, "DELETE", &format!("/api/f/{chat}/members/{bob_id}"), None)?;
     anyhow::ensure!(r.status == 200, "Bob, out again: {r}");
     let line = printed.lines().find(|l| l.contains("Frances") || l.split('\t').any(|w| w.trim() == label));
     s.ok("`fragment access` names it by its name, never its label", out.status.success() && line.is_some_and(|l| l.contains("Frances")), &printed);
