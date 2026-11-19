@@ -161,6 +161,10 @@ struct State {
     /// Per repo url: commit packs still to land with their answer dropped.
     #[serde(skip)]
     unanswered: BTreeMap<String, u32>,
+    /// The next repo create is made, this many repos made after it, and
+    /// its answer dropped (`lose_repo_create_answer`).
+    #[serde(skip)]
+    create_unanswered: Option<usize>,
     #[serde(skip)]
     commit_packs: u32,
     #[serde(skip)]
@@ -446,6 +450,19 @@ impl State {
         self.repo_by(name_or_url).map(|r| r.url.clone())
     }
 
+    /// `n` empty repos made after every existing one (`seed_filler`).
+    fn fill(&mut self, n: usize) {
+        let base = self.repos.values().map(|r| r.created_at_ms).max().unwrap_or(0).max(now_ms());
+        for i in 0..n {
+            let id = fresh_sha(&mut self.counter, "filler");
+            let name = format!("filler-{}", &id[..12]);
+            let url = uuid_like(&id);
+            let mut repo = Repo::new(&name, &url, &format!("repo_{}", &id[..20]));
+            repo.created_at_ms = base + 1 + i as i64;
+            self.repos.insert(url, repo);
+        }
+    }
+
     /// Writes a commit; returns (old, new).
     fn commit(&mut self, url: &str, w: Write<'_>) -> (String, String) {
         let Write { branch, message, author, changes, from } = w;
@@ -651,6 +668,10 @@ impl Inner {
             let repo_id = format!("repo_{}", &fresh_sha(&mut st.counter, name)[..20]);
             let url = uuid_like(&fresh_sha(&mut st.counter, &repo_id));
             st.repos.insert(url.clone(), Repo::new(name, &url, &repo_id));
+            if let Some(after) = st.create_unanswered.take() {
+                st.fill(after);
+                return Response::unanswered();
+            }
             return Response::json(
                 201,
                 &json!({ "repo_id": repo_id, "repo_name": name, "http_url": format!("{}/{url}", self.url), "message": "repository created" }),
@@ -1230,17 +1251,14 @@ impl CodeStorage {
     /// `n` empty repos made after every existing one (a busy org, so a
     /// lookup by name must page).
     pub fn seed_filler(&self, n: usize) {
-        self.with(|st| {
-            let base = st.repos.values().map(|r| r.created_at_ms).max().unwrap_or(0).max(now_ms());
-            for i in 0..n {
-                let id = fresh_sha(&mut st.counter, "filler");
-                let name = format!("filler-{}", &id[..12]);
-                let url = uuid_like(&id);
-                let mut repo = Repo::new(&name, &url, &format!("repo_{}", &id[..20]));
-                repo.created_at_ms = base + 1 + i as i64;
-                st.repos.insert(url, repo);
-            }
-        });
+        self.with(|st| st.fill(n));
+    }
+
+    /// The next repo create is made, then `fillers` repos after it (a busy
+    /// org, so a lookup of it by name must page), and its answer is lost:
+    /// the connection closes without a response.
+    pub fn lose_repo_create_answer(&self, fillers: usize) {
+        self.with(|st| st.create_unanswered = Some(fillers));
     }
 
     /// The url-form identity of a repo named `name`.
@@ -1268,6 +1286,11 @@ impl CodeStorage {
     /// Whether the repo `url` was deleted (`DELETE /api/repos/{repo}`).
     pub fn repo_deleted(&self, url: &str) -> bool {
         self.with(|st| st.deleted.contains_key(url))
+    }
+
+    /// Whether a repo named `name` was made and then deleted.
+    pub fn repo_named_deleted(&self, name: &str) -> bool {
+        self.with(|st| st.deleted.values().any(|n| n == name))
     }
 
     pub fn branch(&self, repo: &str, branch: &str) -> Option<String> {
@@ -1671,6 +1694,24 @@ mod tests {
         assert!(listed["repos"].as_array().unwrap().iter().all(|r| r["repo_name"] != "todo--paul--abc"), "{listed}");
         let remade = send("POST", &format!("{}/api/repos", cs.url), &cs.token("todo--paul--abc", &["repo:write"]), Some(r#"{"repo_name":"todo--paul--abc"}"#));
         assert_eq!((remade.0, remade.1["code"].as_str()), (409, Some("repository_deleted")), "its name is never made again");
+    }
+
+    /// Goal: a repo create whose answer is lost (`lose_repo_create_answer`)
+    /// made the repo all the same, behind the repos made after it, so its
+    /// maker's try again is a 409 and its lookup by name must page; the
+    /// create after it is answered as ever. Method: the lever, a create,
+    /// the org's first page, the same create again, and another.
+    #[test]
+    fn a_lost_repo_create_answer_made_the_repo() {
+        let cs = CodeStorage::start(Options::default()).unwrap();
+        cs.lose_repo_create_answer(150);
+        let make = |name: &str| send("POST", &format!("{}/api/repos", cs.url), &cs.token(name, &["repo:write"]), Some(&format!(r#"{{"repo_name":"{name}"}}"#)));
+        assert_eq!(make("chat--lost--abc").0, 0, "no answer");
+        assert!(cs.repo_url("chat--lost--abc").is_some(), "made all the same");
+        let first = get(&format!("{}/api/repos?limit=100", cs.url), &cs.token("fragment-dev", &["org:read"])).1;
+        assert!(first["repos"].as_array().unwrap().iter().all(|r| r["repo_name"] != "chat--lost--abc") && first["has_more"] == true, "behind a full page of newer ones: {first}");
+        assert_eq!(make("chat--lost--abc").0, 409, "made again: it exists");
+        assert_eq!(make("chat--next--abc").0, 201, "the next create is answered");
     }
 
     /// Goal: a commit pack that changes nothing is refused as the real

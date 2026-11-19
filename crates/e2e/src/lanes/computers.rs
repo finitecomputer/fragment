@@ -1125,6 +1125,17 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
         r.status == 200 && r.body["door"] == "telegram" && r.body["agent"] == c.agent && bound.body["bound"] == json!({ "door": "telegram", "agent": c.agent }) && role_of(c.identity) == Some(json!("viewer")),
         format!("{r} {bound} {:?}", role_of(c.identity)),
     );
+    // the rows its members list says a door on (the list is the same to
+    // every member: its agent's bridge reads it so); none when the list
+    // did not read, so a failed read never passes for "no door"
+    let doors = || -> Option<Vec<(String, String)>> {
+        let r = api.signed(c.owner, "GET", &format!("/api/f/{name}/members"), None).ok().filter(|r| r.status == 200)?;
+        let rows = r.body["members"].as_array().filter(|rows| !rows.is_empty())?.clone();
+        Some(rows.iter().filter_map(|m| Some((m["principal"].as_str()?.to_string(), m["door"].as_str()?.to_string()))).collect())
+    };
+    let telegram_door = Some(vec![(c.identity.to_string(), "telegram".to_string())]);
+    let bound_doors = doors();
+    s.ok("bound, its members list says so on its agent's row alone (`door`: telegram)", bound_doors == telegram_door, json!(bound_doors));
 
     // a direct message from the paired account: their words to their agent,
     // asked as them, and its reply back to Telegram
@@ -1243,6 +1254,8 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     let off = ran(&deliver(Telegram::message(20, PAUL, "Paul", "while it is off"), Some(HOOK2))?);
     let published = records(api, c.owner, &name, "chat").iter().any(|r| r["body"]["text"] == "while it is off");
     s.ok("with Telegram off, its owner's message is published nowhere and nothing is sent", off["output"]["ignored"] == "not linked" && !published && tg.sent().len() == before, json!({ "run": off, "sent": tg.sent() }));
+    let off_doors = doors();
+    s.ok("with Telegram off, no row of its members says a door", off_doors == Some(vec![]), json!(off_doors));
     anyhow::ensure!(policy(Value::Null)?.status == 200, "the connectors lever");
 
     // unlinked from its page (its owner's session there): the door is shut
@@ -1262,6 +1275,8 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
         unlinked.status == 200 && seen.body["bound"].is_null() && after["output"]["ignored"] == "not linked" && !published && sent("This chat isn't linked to your agent.").is_some(),
         json!({ "unlink": unlinked.body, "bound": seen.body, "run": after, "sent": tg.sent() }),
     );
+    let unlinked_doors = doors();
+    s.ok("unlinked, no row of its members says a door, its agent's (still a viewer) included", unlinked_doors == Some(vec![]), json!(unlinked_doors));
     let typed = api.signed(c.owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "typed-after-unlink", "body": { "text": "typed after the unlink" } })))?;
     let answered = s.eventually(wake, || agent_replies(&records(api, c.owner, &name, "chat"), c.identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("typed after the unlink"))));
     s.ok(
@@ -1288,6 +1303,8 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     // code, then the template again, and it is no door, with none back
     let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
     anyhow::ensure!(r.status == 200, "bound again: {r}");
+    let rebound = doors();
+    s.ok("bound again, its agent's row says its door again", rebound == telegram_door, json!(rebound));
     let own = br#"import { DurableObject } from "cloudflare:workers";
 export class App extends DurableObject { noop() { return {}; } }
 "#;
@@ -1301,6 +1318,8 @@ export class App extends DurableObject { noop() { return {}; } }
         forked && unmade && secrets().is_empty() && event.as_ref().is_some_and(|e| e["data"]["secrets"] == json!(ours)),
         json!({ "secrets": secrets(), "event": event }),
     );
+    let unmade_doors = doors();
+    s.ok("unmade by a fork, no row of its members says a door", unmade_doors == Some(vec![]), json!(unmade_doors));
     s.commit(&made.body, &[("fragment.json", Some(br#"{"template":"telegram"}"#.as_slice())), ("app.mjs", None)]);
     let tip = s.deploy(&made.body);
     let back = installed(s, &tip);
@@ -1314,6 +1333,8 @@ export class App extends DurableObject { noop() { return {}; } }
         back && r.status == 403 && r.text.contains("is no connector") && later.status == 403 && later.text.contains("bad inbox secret") && !published && secrets().is_empty(),
         json!({ "bind": r.body, "delivery": later.status, "secrets": secrets() }),
     );
+    let back_doors = doors();
+    s.ok("with its template again, still no row says a door", back_doors == Some(vec![]), json!(back_doors));
     // its agent, with no Telegram chat now, set up from Settings (FIN-393):
     // this chat, no door for good since its fork, deleted first, so its
     // agent has no Telegram chat at all, and Settings' shots show only what
