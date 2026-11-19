@@ -666,6 +666,19 @@ pub struct StageOpened {
     pub manifest: Manifest,
 }
 
+/// `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=`: one
+/// range of the stage's zip (a file's bytes, or a part of them) copied into
+/// a fragment's blobs on the platform, never through the agent's computer:
+/// the blob it is, by its bytes' SHA-256 (hex), their length, and their
+/// CRC-32, which the caller checks against the zip entry's own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StageCopied {
+    pub sha256: String,
+    pub bytes: u64,
+    pub crc32: u32,
+}
+
 /// `POST /api/migrations/stages/{stage}/done`: the import ended, well or
 /// not. The same `ok` again changes nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -721,12 +734,13 @@ pub struct Offer {
     pub agent: Option<String>,
 }
 
-/// `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a
-/// new agent of their own, which the move's stage is imported into.
+/// `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to an
+/// agent of their own, which the move's stage is imported into: a new one,
+/// or one they have already that no other move is bound to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OfferYes {
-    /// The new agent: its identity's id or npub.
+    /// The agent: its identity's id or npub.
     pub agent: String,
 }
 

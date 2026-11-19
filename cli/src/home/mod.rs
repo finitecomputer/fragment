@@ -16,6 +16,7 @@ mod routines;
 pub(crate) mod rules;
 mod skills;
 pub mod source;
+pub(crate) mod store;
 pub(crate) mod survey;
 
 use std::path::{Path, PathBuf};
@@ -34,7 +35,8 @@ pub enum HomeCmd {
     /// its chats, SOUL, memories, settings, skills (with where each came
     /// from), scheduled jobs as routines in UTC, and its files: what the
     /// cap brings and what stays behind, and why. SOURCE is the home's
-    /// folder, or a zip of it
+    /// folder, a zip of it, or a move's stage (`stage:<the stage>`, read
+    /// where the platform keeps it, never downloaded)
     Survey {
         source: PathBuf,
         /// Where the home keeps things: `hermes` (a bare Hermes home), or
@@ -47,12 +49,26 @@ pub enum HomeCmd {
     /// `files/`, large ones as blobs, the cap's pick (photos, video, audio
     /// and documents first, the newest first, up to 10 GiB), and
     /// `left-behind.md` listing what stayed and why. Running it again goes
-    /// on where it stopped, and sends nothing twice
+    /// on where it stopped, and sends nothing twice. With --store, nothing
+    /// stays behind: every other file of the home (but those whose names
+    /// say they may hold a password or key, never read) is kept whole in a
+    /// storage fragment, a note where each was (`fragment offload --back`
+    /// brings it back)
     Files {
         source: PathBuf,
         /// The fragment to bring them into
         #[arg(long)]
         into: String,
+        /// The members-only storage fragment the rest of the home is kept
+        /// in (a move's import: from a stage, copied there on the platform,
+        /// never through this disk). One that fills says what is left, for
+        /// another
+        #[arg(long, requires = "notes", conflicts_with = "plan")]
+        store: Option<String>,
+        /// The folder the notes go in, laid out as the home: one for each
+        /// folder or file kept, `<name>.offloaded.md`
+        #[arg(long, requires = "store")]
+        notes: Option<PathBuf>,
         /// Only say what it would bring and leave; send nothing
         #[arg(long)]
         plan: bool,
@@ -88,8 +104,19 @@ fn usage(msg: String) -> anyhow::Error {
 /// named (`Source::skipped`). A person's own zip may hold one by mistake
 /// (an `.npmrc`, a test key), and skipping it keeps it out of everything
 /// an import makes as well as refusing would, while the rest moves.
+#[cfg(test)]
 pub fn open(path: &Path, layout: &Layout) -> Result<Source> {
-    let mut src = Source::open(path)?;
+    open_from(None, path, layout)
+}
+
+/// `open`, where `path` may name a move's stage (`stage:<the stage>`),
+/// read in place through `c` as the agent the move is bound to.
+pub fn open_from(c: Option<&crate::api::Client>, path: &Path, layout: &Layout) -> Result<Source> {
+    let mut src = match (source::stage_of(path), c) {
+        (Some(stage), Some(c)) => Source::stage(c, stage)?.1,
+        (Some(_), None) => bail!(usage(format!("{} is read from the platform: run it where you are signed in", path.display()))),
+        (None, _) => Source::open(path)?,
+    };
     let globs = layout.secret_globs().map_err(|e| usage(format!("the layout {}: {e}", layout.name)))?;
     src.skip(|path| rules::secret_name(path.rsplit('/').next().unwrap_or(path)) || globs.is_match(path));
     Ok(src)
@@ -122,9 +149,12 @@ fn extract(src: &Source, paths: &[String], to: &Path) -> Result<Extracted> {
     }
     std::fs::create_dir_all(to).with_context(|| format!("making {}", to.display()))?;
     let to = to.canonicalize().with_context(|| format!("reading {}", to.display()))?;
-    let origin = src.origin().canonicalize().with_context(|| format!("reading {}", src.origin().display()))?;
-    if to.starts_with(&origin) || origin.starts_with(&to) {
-        bail!(usage(format!("--to {} and the home {} overlap: copy into a folder apart from it", to.display(), origin.display())));
+    // a stage is on the platform: nothing here is it
+    if src.stage_id().is_none() {
+        let origin = src.origin().canonicalize().with_context(|| format!("reading {}", src.origin().display()))?;
+        if to.starts_with(&origin) || origin.starts_with(&to) {
+            bail!(usage(format!("--to {} and the home {} overlap: copy into a folder apart from it", to.display(), origin.display())));
+        }
     }
     let (mut files, mut bytes) = (0, 0);
     for e in picked {
@@ -190,32 +220,38 @@ impl Serialize for Done {
 }
 
 impl HomeCmd {
-    /// Whether it calls the platform (and so needs a key to sign with).
+    /// Whether it calls the platform (and so needs a key to sign with):
+    /// files brought, or a stage read.
     pub fn calls(&self) -> bool {
-        matches!(self, HomeCmd::Files { plan: false, .. })
+        let source = match self {
+            HomeCmd::Files { plan: false, .. } => return true,
+            HomeCmd::Files { source, .. } | HomeCmd::Survey { source, .. } | HomeCmd::Extract { source, .. } => source,
+        };
+        source::stage_of(source).is_some()
     }
 }
 
 /// `c`: the platform's client, for a command that `calls` it.
 pub fn run(sub: HomeCmd, c: Option<&crate::api::Client>) -> Result<Done> {
     match sub {
-        HomeCmd::Files { source, into, plan, layout } => {
+        HomeCmd::Files { source, into, plan, layout, store, notes } => {
             let layout = Layout::named(&layout)?;
-            let src = open(&source, &layout)?;
+            let src = open_from(c, &source, &layout)?;
+            let store = store.as_deref().zip(notes.as_deref()).map(|(into, notes)| files::Store { into, notes });
             match c {
-                Some(c) if !plan => Ok(Done::Brought(files::bring(c, &src, &layout, &into)?)),
+                Some(c) if !plan => Ok(Done::Brought(files::bring(c, &src, &layout, &into, store)?)),
                 _ => Ok(Done::Planned(Box::new(files::planned(&src, &layout)?))),
             }
         }
         HomeCmd::Survey { source, layout } => {
             let layout = Layout::named(&layout)?;
-            let src = open(&source, &layout)?;
+            let src = open_from(c, &source, &layout)?;
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
             Ok(Done::Survey(Box::new(survey::survey(&src, &layout, now)?)))
         }
         HomeCmd::Extract { source, paths, to, layout } => {
             let layout = Layout::named(&layout)?;
-            let src = open(&source, &layout)?;
+            let src = open_from(c, &source, &layout)?;
             Ok(Done::Extracted(extract(&src, &paths, &to)?))
         }
     }
