@@ -177,7 +177,7 @@ fn an_agent_not_ready_for_its_runtime_holds_its_turns() {
 #[test]
 fn a_claim_answered_while_its_agent_is_not_ready_waits() {
     let r = on("rowan", crate::runtime::DEFAULT);
-    let mut e = two_runtimes(&[r.clone()]);
+    let mut e = two_runtimes(std::slice::from_ref(&r));
     let chat = format!("{}-talk--k3x9", r.name);
     let s = e.step(Input::Record { agent: r.fragment.clone(), fragment: chat.clone(), record: rec(1, "npub1paul", json!({ "text": "hi" })), view: Some(view(&[&r])), since: 0 }, T0);
     let turn = s.effects.iter().find_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).expect("claimed on Hermes");
@@ -200,7 +200,7 @@ fn a_claim_answered_while_its_agent_is_not_ready_waits() {
 #[test]
 fn a_held_turn_starts_on_the_runtime_its_agent_names_once_ready() {
     let r = on("rowan", "other");
-    let mut e = two_runtimes(&[r.clone()]);
+    let mut e = two_runtimes(std::slice::from_ref(&r));
     let typo = on("rowan", "othre");
     e.step(Input::Agents(vec![typo.clone()]), T0);
     e.step(Input::Unready([r.fragment.clone()].into()), T0);
