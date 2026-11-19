@@ -14,7 +14,7 @@ import { avatar } from "./agent-identity.js";
 import { colorOf } from "./agent-color.js";
 import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
-import { createAppsPage } from "./apps-page.js";
+import { createAppsPage, shot } from "./apps-page.js";
 import { createHistoryPage } from "./history-page.js";
 import { createSchedulesPage } from "./schedules-page.js";
 import { createMovePage } from "./move-page.js";
@@ -1059,7 +1059,8 @@ async function loadCard(name) {
   cards.set(name, { etag: r.headers.get("etag"), url });
   return "new";
 }
-// every listed app's, again after a deploy may have made one: an app with
+// every listed app's that has one shot (`shot`: never a members-only
+// one's of theirs), again after a deploy may have made one: an app with
 // none yet is asked again, waiting longer each time (2 s to a minute), and
 // the rest when the page comes back after a minute away. `only` (a set of
 // names, after a change to the list): those, and the apps still without one.
@@ -1067,7 +1068,7 @@ const cardsLoad = { wait: 0, timer: null, at: 0 };
 async function loadCards(only = null) {
   clearTimeout(cardsLoad.timer);
   cardsLoad.at = Date.now();
-  const listed = docked().map((f) => f.name);
+  const listed = docked().filter(shot).map((f) => f.name);
   for (const [name, card] of cards) if (!listed.includes(name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
   const asked = listed.filter((name) => !only || only.has(name) || !cards.has(name));
   const got = await Promise.all(asked.map((name) => loadCard(name).catch(() => "same")));

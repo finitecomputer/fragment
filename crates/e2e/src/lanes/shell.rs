@@ -8246,6 +8246,54 @@ fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
     Ok(())
 }
 
+/// Goal: the shell never asks for a card the platform never shoots
+/// (docs/api.md, Cards: a members-only page is not shot; Paul's preview
+/// console, 2026-11-19: one brain's card 404 65 times in a session). Valid:
+/// a link brain made beside it is asked for its card by the dock and by
+/// the Brains page. Invalid: their own members-only brain, its row saying
+/// so, by neither. Method: each card read counted by name, the two brains
+/// made together, so every list change and visit that asks for one card
+/// asks for both; counted once the link one's has been asked twice (the
+/// dock, then a visit to Brains). Apps is open again at the end, and both
+/// brains gone.
+fn members_only_no_card_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    b.eval(
+        page,
+        "(() => { const real = window.fetch.bind(window); const reads = window.__cardReads = {}; \
+         window.fetch = (url, o) => { const m = /^\\/api\\/f\\/([^/]+)\\/card$/.exec(String(url)); if (m && (o?.method ?? 'GET') === 'GET') reads[m[1]] = (reads[m[1]] ?? 0) + 1; return real(url, o); }; \
+         window.__cardReadsRestore = () => { window.fetch = real; return true; }; return true; })()",
+    )?;
+    let make = |b: &mut Browser, body: Value| -> Result<String> {
+        let made = b.eval(page, &format!("fetch('/api/fragments', {{ method: 'POST', headers: {{ 'x-fragment-shell': '1', 'content-type': 'application/json' }}, body: {}, credentials: 'same-origin' }}).then(async (r) => ({{ status: r.status, body: await r.json() }}))", js(&body.to_string())))?;
+        let name = made["body"]["name"].as_str().unwrap_or_default().to_string();
+        anyhow::ensure!(made["status"] == 200 && !name.is_empty(), "a brain was not made: {made}");
+        Ok(name)
+    };
+    let private = make(b, json!({ "label": "private-brain", "template": "brain", "visibility": "members" }))?;
+    let linked = make(b, json!({ "label": "linked-brain", "template": "brain" }))?;
+    let reads = |name: &str| format!("(window.__cardReads[{}] ?? 0)", js(name));
+    let docked = |name: &str| format!("!!document.querySelector({})", js(&format!("#apps [data-key=\"app:{name}\"]")));
+    let on_brains = |name: &str| format!("!!document.querySelector({})", js(&format!("#brains-page .app-row[data-fragment=\"{name}\"]")));
+    let by_dock = b.until(page, &format!("{} && {} && {} >= 1", docked(&private), docked(&linked), reads(&linked)), wait);
+    b.eval(page, "(document.getElementById('brains-link').click(), true)")?;
+    let by_visit = b.until(page, &format!("location.pathname === '/brains' && {} && {} && {} >= 2", on_brains(&private), on_brains(&linked), reads(&linked)), wait);
+    let counted = b.eval(page, "window.__cardReads")?;
+    s.ok(
+        "the dock and the Brains page ask for a link brain's card, and never for their own members-only brain's, which is never shot",
+        by_dock && by_visit && counted.get(&private).is_none(),
+        json!({ "private": private, "linked": linked, "reads": counted }),
+    );
+    b.eval(page, "window.__cardReadsRestore()")?;
+    for name in [&private, &linked] {
+        let gone = b.eval(page, &format!("fetch('/api/f/{name}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
+        anyhow::ensure!(gone == 200, "{name} was not deleted: {gone}");
+    }
+    b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+    anyhow::ensure!(b.until(page, &format!("location.pathname === '/apps' && !{} && !{}", docked(&private), docked(&linked)), wait), "Apps did not open again with both brains gone");
+    Ok(())
+}
+
 /// Goal: an app's Reaches shows only on one that reaches the person's
 /// accounts, and such an app has no share link and is not public (Paul on
 /// FIN-352; the cell's rule, reach.rs). Invalid: an app with no key and no
@@ -8600,6 +8648,7 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     apps_sharing_refresh_ui(s, b, page, app)?;
     apps_response_races_ui(s, b, page, app)?;
     apps_arrival_ui(s, b, page)?;
+    members_only_no_card_ui(s, b, page)?;
     apps_reach_ui(s, b, page, app)?;
     b.eval(page, &format!("(() => {{ if (!{row}?.querySelector('.icon-editor')) {}?.click(); return true; }})()", control("appearance")))?;
     apps_preview_visit_ui(s, b, page, app)?;

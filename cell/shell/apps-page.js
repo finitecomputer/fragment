@@ -59,6 +59,12 @@ export const shelfOf = (f) => (f.kind === "brain" ? "brains" : "apps");
 const kindWord = (f) => (f.kind === "app" || f.kind === "brain" ? "" : "Other");
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
+// Whether the platform shoots its card (docs/api.md, Cards): one the dock
+// shows, unless its row says it is members only (its owner's row alone
+// says), whose page no shot opens. Its card is never asked for, so a card
+// that will never come is not asked for again and again (Paul's preview
+// console, 2026-11-19); one an editor uploads to it is not shown here.
+export const shot = (f) => dockable(f) && !(owns(f) && f.sharing?.visibility === "members");
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
 const SHELL = { "x-fragment-shell": "1" };
 // how long a preview is waited for here, asked every second
@@ -69,9 +75,10 @@ const CARD_READS_MAX = 6;
 const NAMES_SHOWN = 2;
 
 // The Apps page's cards (`GET /api/f/<name>/card`), read with the page's
-// session as the dock's are: every one on a visit's open; afterwards a new
-// or changed row's, and one whose card is not there yet, asked again with
-// bounded backoff and retries. `visit()` is the page's visit now (a read
+// session as the dock's are, of the apps that have one shot (`shot`):
+// every one on a visit's open; afterwards a new or changed row's, and one
+// whose card is not there yet, asked again with bounded backoff and
+// retries. `visit()` is the page's visit now (a read
 // made in an earlier one, or one a newer read of its row superseded,
 // changes nothing), `shown()` whether the page is open, `rows()` the apps
 // it may show a card for, `draw()` draws the page again. Its own function
@@ -164,7 +171,7 @@ export function createAppsPage(page, h, shelf = "apps") {
   const busy = new Map();
   const said = new Map();
   const cards = createCards({
-    rows: () => h.state.fragments.filter((f) => onShelf(f) && dockable(f)),
+    rows: () => h.state.fragments.filter((f) => onShelf(f) && shot(f)),
     visit: () => asks.now(ask),
     shown: () => shown,
     draw: () => render(),
@@ -545,7 +552,7 @@ export function createAppsPage(page, h, shelf = "apps") {
         const editor = h.el("div");
         editor.dataset.iconEditor = name;
         panel.append(editor);
-        if (dockable(f) && !(owns(f) && f.sharing?.visibility === "members")) {
+        if (shot(f)) {
           const preview = h.el("section", "app-preview-editor");
           preview.append(h.el("h2", null, "Preview"));
           if (card) { const img = h.el("img", "app-preview-image"); img.alt = ""; img.src = card.url; preview.append(img); }
