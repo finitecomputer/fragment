@@ -268,7 +268,9 @@ impl FragmentCell {
         // its own (app_members.rs): one with no life has nothing to take
         let to = |key: &str| principal.strip_prefix(key).filter(|name| fragment_proto::valid_fragment_name(name));
         if let Some((name, from_app)) = to(crate::app_members::TO_APP).map(|n| (n, false)).or_else(|| to(crate::app_members::FROM_APP).map(|n| (n, true))) {
-            let told = AppTold { from_app, fragment: change.fragment.clone(), role: change.role, incarnation: change.incarnation, version: change.version };
+            // a role is the word of the app held under the name now
+            let key = if from_app || change.role.is_none() { None } else { self.app_named(name).ok().flatten() };
+            let told = AppTold { from_app, fragment: change.fragment.clone(), role: change.role, incarnation: change.incarnation, version: change.version, key };
             return match crate::fragment::call(&self.env, name, &told).await {
                 Ok(()) => Ok(()),
                 Err(e) if e.code == ErrorCode::NotFound => Ok(()),
