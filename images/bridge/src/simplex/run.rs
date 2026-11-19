@@ -2747,13 +2747,48 @@ pub async fn ensure_chat(api: &Api, agent: &Agent, chat: &str) -> Result<(), Cha
             Ok(())
         }
         Err(e) if e.status() == Some(409) => match api.members(&agent.fragment, chat).await {
-            Ok(m) if m.iter().any(|m| m.principal == agent.identity) && m.iter().any(|m| m.principal == agent.owner && m.role == "owner") => Ok(()),
+            Ok(m) if theirs(&m, agent) => Ok(()),
             Ok(_) => Err(ChatNot::Taken),
             Err(e) if matches!(e.status(), Some(403 | 404)) => Err(ChatNot::Taken),
             Err(e) => Err(ChatNot::Made(e)),
         },
         Err(e) => Err(ChatNot::Made(e)),
     }
+}
+
+/// Whether a chat's members (`m`) make it its owner's SimpleX chat: the
+/// agent in it, and its owner the owner.
+fn theirs(m: &[api::Member], agent: &Agent) -> bool {
+    m.iter().any(|m| m.principal == agent.identity) && m.iter().any(|m| m.principal == agent.owner && m.role == "owner")
+}
+
+/// Whether `chat` is its owner's still (`theirs`), asked before each post:
+/// a name is no life. Its owner may delete it, its name free at once, and a
+/// stranger's public chat made by that name takes posts from anyone, the
+/// door's signed ones too (they sign the name, not the life), so a word of
+/// its owner's is posted only where the chat is known to be theirs. A
+/// platform that does not answer is asked again, as a post is; out of
+/// tries, or refused (403, 404: gone, or not the agent's to read), false.
+/// None once the bridge stops. A post can still land in a chat deleted and
+/// made again between this read and it: only the platform can refuse that.
+async fn still_theirs(api: &Api, agent: &Agent, chat: &str, stop: &watch::Receiver<bool>) -> Option<bool> {
+    let mut backoff = crate::net::Backoff::default();
+    // bounded: POST_TRIES_MAX reads, a backoff between
+    for attempt in 1..=crate::limits::POST_TRIES_MAX {
+        match api.members(&agent.fragment, chat).await {
+            Ok(m) => return Some(theirs(&m, agent)),
+            Err(e) if e.retryable() && attempt < crate::limits::POST_TRIES_MAX => {
+                if !backoff.wait(stop.clone()).await {
+                    return None;
+                }
+            }
+            Err(e) => {
+                crate::ev!("simplex.chat_unread", { "agent": agent.fragment, "chat": chat, "error": e.to_string() });
+                return Some(false);
+            }
+        }
+    }
+    unreachable!("the last read returns")
 }
 
 /// Its SimpleX chat made or found by its name (`ensure_chat`), tried every
@@ -2783,7 +2818,9 @@ async fn ensure_until(api: &Api, agent: &Agent, chat: &str, manager: &mpsc::Send
 /// unless it is there (as its link is bound, so it shows in its owner's
 /// chats before anything is said), then each of its owner's messages, in
 /// order, as a relayed record there, its file uploaded first and let go
-/// once posted. A post refused (the chat deleted meanwhile, among others)
+/// once posted, each only while the chat is its owner's still
+/// (`still_theirs`). A post refused, or a chat no longer theirs (deleted
+/// meanwhile, its name maybe another's now), is a message undelivered, and
 /// has the chat made again, unless it is there, before the next.
 async fn poster(api: Api, agent: Agent, chat: String, mut rx: mpsc::Receiver<Post>, manager: mpsc::Sender<Msg>, stop: watch::Receiver<bool>) {
     if !ensure_until(&api, &agent, &chat, &manager, &stop).await {
@@ -2791,6 +2828,20 @@ async fn poster(api: Api, agent: Agent, chat: String, mut rx: mpsc::Receiver<Pos
     }
     // bounded by the bridge's life: one message per pass
     while let Some(p) = rx.recv().await {
+        match still_theirs(&api, &agent, &chat, &stop).await {
+            None => return,
+            Some(true) => {}
+            // its file kept, as a refused post's is (read again at the next
+            // start's catch-up)
+            Some(false) => {
+                crate::ev!("simplex.not_theirs", { "agent": agent.fragment, "chat": chat, "kind": p.inbound.kind, "file": p.file.is_some() });
+                let _ = manager.send(Msg::Delivered { agent: agent.fragment.clone(), item: p.inbound.item, ok: false, seq: None }).await;
+                if !ensure_until(&api, &agent, &chat, &manager, &stop).await {
+                    return;
+                }
+                continue;
+            }
+        }
         let text = match &p.note {
             Some(note) if p.inbound.text.trim().is_empty() => note.clone(),
             Some(note) => format!("{}\n\n{note}", p.inbound.text),

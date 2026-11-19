@@ -1,12 +1,13 @@
-//! Security repro (candidate 10): an agent's SimpleX chat is bound by its
-//! name, not by its life. The poster checks the chat is its owner's once
-//! (`ensure_chat`, as it starts, and again only after a refusal), then posts
-//! each of its owner's SimpleX messages to the chat by name. Its owner
+//! An agent's SimpleX chat is bound by its name, and a name is no life
+//! (security candidate 10). The poster checked the chat was its owner's
+//! once (`ensure_chat`, as it started, and again only after a refusal),
+//! then posted each of its owner's SimpleX messages to the chat by name;
+//! now it checks before each (`still_theirs`). Its owner
 //! deletes the chat (its name free at once: docs/api.md, `DELETE
 //! /api/f/{name}`); a stranger makes a fragment of that name in full (a
 //! create may name one: docs/api.md, Names), public, its `chat` channel
 //! `"read": "public", "post": "public"` (deployable: e2e posts lane). The
-//! owner's next message is posted there: a relayed record is checked for
+//! owner's next message was posted there: a relayed record is checked for
 //! its door's signature over the fragment's name (cell/src/channels.rs
 //! `door_checked`), never for who owns the fragment.
 //!
@@ -30,12 +31,12 @@ use hyper::{Method, Request, Response, StatusCode};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
-use crate::simplex::door::{self, Key};
-use crate::simplex::link::Inbound;
 use super::{poster, ChatNot, Msg, Post};
 use crate::api::Api;
 use crate::net::{self, Body};
 use crate::runtime::Agent;
+use crate::simplex::door::{self, Key};
+use crate::simplex::link::Inbound;
 
 const OWNER: &str = "npub1paul";
 const STRANGER: &str = "npub1mallory";
@@ -57,6 +58,8 @@ struct World {
     fragments: BTreeMap<String, Frag>,
     /// The door key each agent registered (`POST /api/computer/door`).
     doors: BTreeMap<String, String>,
+    /// The next this many reads of members answer 503 (a deploying platform).
+    fail_members: u32,
 }
 
 impl World {
@@ -99,6 +102,10 @@ async fn handle(req: Request<Incoming>, world: Arc<Mutex<World>>) -> Response<Bo
             }
             w.fragments.insert(name.clone(), Frag { members: vec![(OWNER.into(), "owner".into()), (IDENTITY.into(), "editor".into())], public: false, records: vec![] });
             net::json_answer(StatusCode::OK, &json!({ "name": name, "owner": OWNER }))
+        }
+        (Method::GET, ["api", "f", _, "members"]) if w.fail_members > 0 => {
+            w.fail_members -= 1;
+            refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying")
         }
         (Method::GET, ["api", "f", name, "members"]) => {
             let Some(f) = w.fragments.get(*name) else { return refuse(StatusCode::NOT_FOUND, "no such fragment") };
@@ -164,8 +171,8 @@ fn said(item: i64, text: &str, door_key: &Key) -> Post {
 
 /// The manager's next word of a delivery: (item, ok).
 async fn delivered(manager: &mut mpsc::Receiver<Msg>) -> (i64, bool) {
-    // bounded: five seconds
-    let wait = tokio::time::timeout(Duration::from_secs(5), async {
+    // bounded: fifteen seconds (two backoffs fit)
+    let wait = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             match manager.recv().await {
                 Some(Msg::Delivered { item, ok, .. }) => return (item, ok),
@@ -174,7 +181,7 @@ async fn delivered(manager: &mut mpsc::Receiver<Msg>) -> (i64, bool) {
             }
         }
     });
-    wait.await.expect("a delivery within 5 s")
+    wait.await.expect("a delivery within 15 s")
 }
 
 /// The stranger's chat, made by the name the owner's chat had: public,
@@ -188,8 +195,10 @@ fn stranger_remakes(world: &Arc<Mutex<World>>) {
 /// Goal (security candidate 10): an owner's SimpleX message reaches only a
 /// chat its owner owns. The owner's chat is deleted while the computer is
 /// awake and a stranger makes a public chat of the same name; the owner's
-/// next SimpleX message must not be posted to the stranger's chat.
-/// Fails while the poster posts by name after its one ownership check.
+/// next SimpleX message must not be posted to the stranger's chat: it is
+/// undelivered (`ok=false`, read again at the next start's catch-up), and
+/// its manager told the name is taken, which names another. Failed before
+/// the poster checked before each post.
 #[tokio::test]
 async fn an_owners_message_never_reaches_a_chat_remade_by_a_stranger() {
     let door_key = Key::generate().expect("a door key");
@@ -216,13 +225,81 @@ async fn an_owners_message_never_reaches_a_chat_remade_by_a_stranger() {
     // the owner's next message from their phone
     tx.send(said(2, "my door code is 4321", &door_key)).await.expect("the poster");
     let (item, ok) = delivered(&mut manager).await;
+    {
+        let w = p.world.lock().expect("the world");
+        let leaked = w.texts(CHAT);
+        assert!(
+            !leaked.iter().any(|t| t.contains("4321")),
+            "the owner's SimpleX message was posted to a chat the stranger {STRANGER} owns ({CHAT}, re-made by name): {leaked:?}"
+        );
+        assert_eq!(w.owner_of(CHAT).as_deref(), Some(STRANGER), "the stranger's chat, untouched");
+    }
+    assert_eq!((item, ok), (2, false), "undelivered, said so");
+    assert!(taken(&mut manager).await, "its manager told the name is someone else's");
+}
+
+/// The manager's next word of a name taken: whether it came for `CHAT`.
+async fn taken(manager: &mut mpsc::Receiver<Msg>) -> bool {
+    // bounded: five seconds
+    let wait = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match manager.recv().await {
+                Some(Msg::ChatTaken { chat, .. }) => return chat == CHAT,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    });
+    wait.await.expect("a word within 5 s")
+}
+
+/// Goal: a chat its owner deleted (its name free, no one's) takes nothing
+/// as it is gone. Valid: the message that met it gone is undelivered
+/// (`ok=false`), the chat is made again for its owner, and the next is
+/// posted there. Invalid: a post to a name with no chat behind it.
+#[tokio::test]
+async fn a_message_to_a_deleted_chat_is_undelivered_and_the_chat_made_again() {
+    let door_key = Key::generate().expect("a door key");
+    let p = platform(&door_key).await;
+    let api = Api::new(&p.url).expect("an address");
+    let (tx, rx) = mpsc::channel(16);
+    let (manager_tx, mut manager) = mpsc::channel(16);
+    let (_stop_tx, stop) = watch::channel(false);
+    tokio::spawn(poster(api, agent(), CHAT.into(), rx, manager_tx, stop));
+    tx.send(said(1, "first", &door_key)).await.expect("the poster");
+    assert_eq!(delivered(&mut manager).await, (1, true));
+    p.world.lock().expect("the world").fragments.remove(CHAT);
+    tx.send(said(2, "met it gone", &door_key)).await.expect("the poster");
+    assert_eq!(delivered(&mut manager).await, (2, false), "undelivered");
+    tx.send(said(3, "after", &door_key)).await.expect("the poster");
+    assert_eq!(delivered(&mut manager).await, (3, true));
     let w = p.world.lock().expect("the world");
-    let leaked = w.texts(CHAT);
-    eprintln!("delivery of item {item}: ok={ok}; the stranger's ({:?}) chat {CHAT} holds {leaked:?}", w.owner_of(CHAT));
-    assert!(
-        !leaked.iter().any(|t| t.contains("4321")),
-        "the owner's SimpleX message was posted to a chat the stranger {STRANGER} owns ({CHAT}, re-made by name): {leaked:?}"
-    );
+    assert_eq!(w.owner_of(CHAT).as_deref(), Some(OWNER), "made again for its owner");
+    assert_eq!(w.texts(CHAT), ["after"], "the one that met it gone is posted nowhere");
+}
+
+/// Goal: the check before each post is no new way to lose a message. Valid:
+/// a platform that fails the read twice (503, deploying) is asked again,
+/// and the message posted. Replay: the next message is checked and posted.
+#[tokio::test]
+async fn a_check_the_platform_fails_for_now_is_tried_again() {
+    let door_key = Key::generate().expect("a door key");
+    let p = platform(&door_key).await;
+    let api = Api::new(&p.url).expect("an address");
+    let (tx, rx) = mpsc::channel(16);
+    let (manager_tx, mut manager) = mpsc::channel(16);
+    let (_stop_tx, stop) = watch::channel(false);
+    tokio::spawn(poster(api, agent(), CHAT.into(), rx, manager_tx, stop));
+    tx.send(said(1, "first", &door_key)).await.expect("the poster");
+    assert_eq!(delivered(&mut manager).await, (1, true));
+    p.world.lock().expect("the world").fail_members = 2;
+    tx.send(said(2, "through a deploy", &door_key)).await.expect("the poster");
+    assert_eq!(delivered(&mut manager).await, (2, true), "posted once the platform answered");
+    tx.send(said(3, "after", &door_key)).await.expect("the poster");
+    assert_eq!(delivered(&mut manager).await, (3, true));
+    let w = p.world.lock().expect("the world");
+    assert_eq!(w.fail_members, 0, "both failed reads were asked");
+    assert_eq!(w.texts(CHAT), ["first", "through a deploy", "after"]);
 }
 
 /// Control: a poster that starts (a bridge restart) on a name a stranger
