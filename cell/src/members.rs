@@ -122,6 +122,7 @@ fn member_json(r: &Value) -> CellResult<Member> {
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
         owner: r["owner"].as_str().map(str::to_string),
         email: None,
+        door: None,
     })
 }
 
@@ -508,10 +509,18 @@ impl FragmentCell {
     }
 
     /// Every member, the first added first (a chat's lead is its first
-    /// agent): the API's list, and a page's (`__members`, serve.rs).
+    /// agent): the API's list, and a page's (`__members`, serve.rs). On a
+    /// connector bound as an agent's door, that agent's row says which
+    /// door, while it is open (`door_member`).
     pub(crate) fn member_list(&self) -> CellResult<MemberList> {
         let rows = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members ORDER BY added_at, principal"), vec![])?;
-        Ok(MemberList { members: rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()? })
+        let mut members = rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()?;
+        if let Some((identity, door)) = self.door_member()? {
+            if let Some(m) = members.iter_mut().find(|m| m.principal == identity) {
+                m.door = Some(door);
+            }
+        }
+        Ok(MemberList { members })
     }
 
     /// Its agent members as every list's row names them: the first added
