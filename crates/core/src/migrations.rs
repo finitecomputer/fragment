@@ -280,6 +280,8 @@ pub enum Refused {
     /// Its old agent may be stopped or retired: a person's Yes, or the
     /// cutoff, began its move (409).
     Begun,
+    /// A Yes into an agent another move may still import into (409).
+    Taken,
 }
 
 impl Refused {
@@ -292,6 +294,7 @@ impl Refused {
             Refused::Unfit(why) => (*why).into(),
             Refused::Why => format!("a withdrawal says why, in 1 to {WHY_MAX_BYTES} bytes"),
             Refused::Begun => "its move began (its person said Yes, or the cutoff took it): its old agent may be stopped or retired, so it is not offered again; bring it over by hand".into(),
+            Refused::Taken => "that agent is taking in another upgrade: choose another, or wait until that one is done".into(),
         }
     }
 }
@@ -602,6 +605,25 @@ pub fn ask_again(m: &Move, now: i64) -> Outcome {
         MoveState::Open => Ok(None),
         s => Err(Refused::NotNow(s)),
     }
+}
+
+/// Whether a move in `state` may still import into the agent it is bound
+/// to: its Yes given and its import not done, or held (staff may try it
+/// again into the same agent). An agent takes in one move at a time: two
+/// imports at once would share its one import folder, and each would undo
+/// the other's place in it (the import-agent-home skill).
+pub fn imports_into(state: MoveState) -> bool {
+    matches!(state, MoveState::Asked | MoveState::Staging | MoveState::Importing | MoveState::Held)
+}
+
+/// "Yes" into `agent`, a new one or one the person had already, whose
+/// other moves bound to it are in `others`: refused while one of them may
+/// still import into it (`imports_into`), else as `yes`.
+pub fn yes_into(m: &Move, agent: &str, others: &[MoveState], now: i64) -> Outcome {
+    if others.iter().copied().any(imports_into) {
+        return Err(Refused::Taken);
+    }
+    yes(m, agent, now)
 }
 
 /// "Yes", bound to `agent` (the object checked it is the person's own):
@@ -1197,6 +1219,24 @@ mod tests {
         assert_eq!(yes(&restarted(&a), "npub1other", T0 + 1), Err(Refused::NotNow(MoveState::Asked)), "another agent");
         assert_eq!(yes(&Move::listed("o", "u", false, T0), AGENT, T0), Err(Refused::NotNow(MoveState::Listed)), "unbound");
         assert_eq!(to(yes(&to(never(&open_move(), T0)), AGENT, T0)).state, MoveState::Asked, "from never too");
+    }
+
+    /// Goal: an agent the person had already may take in an old agent, but
+    /// one move at a time (Paul 11-19). Valid: none of its other moves may
+    /// still import into it (none, or done, retiring, moved, open again).
+    /// Invalid: one asked, staging, importing or held. Replay: this move's
+    /// own Yes again changes nothing.
+    #[test]
+    fn a_yes_into_an_agent_another_move_may_still_import_into_is_refused() {
+        let free = [MoveState::Open, MoveState::Retiring, MoveState::Moved, MoveState::Withdrawn];
+        let a = to(yes_into(&open_move(), AGENT, &free, T0));
+        assert_eq!((a.state, a.agent.as_deref()), (MoveState::Asked, Some(AGENT)));
+        assert_eq!(yes_into(&a, AGENT, &[], T0 + 1), Ok(None), "replay");
+        for busy in [MoveState::Asked, MoveState::Staging, MoveState::Importing, MoveState::Held] {
+            assert_eq!(yes_into(&open_move(), AGENT, &[MoveState::Moved, busy], T0), Err(Refused::Taken), "{busy:?}");
+        }
+        let archived = Move { state: MoveState::Archived, staged_ms: Some(T0), ..open_move() };
+        assert_eq!(yes_into(&archived, AGENT, &[MoveState::Importing], T0), Err(Refused::Taken), "a kept stage's import too");
     }
 
     #[test]

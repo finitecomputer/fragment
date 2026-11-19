@@ -288,7 +288,7 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 
 #### `migrations.yes`
 
-`POST /api/migrations/offers/{old}/yes`: The person's Yes, bound to a new agent of their own: the old agent is stopped and its stage made, which the new agent imports.
+`POST /api/migrations/offers/{old}/yes`: The person's Yes, bound to an agent of their own, a new one or one they have (one move at a time): the old agent is stopped and its stage made, which that agent imports.
 
 - Credentials: NIP-98, the shell's session
 - Body: [`OfferYes`](#offeryes)
@@ -840,11 +840,11 @@ out. One old agent of the person's, and where its move is.
 
 ### `OfferYes`
 
-in. `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a new agent of their own, which the move's stage is imported into.
+in. `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to an agent of their own, which the move's stage is imported into: a new one, or one they have already, while no other move may still import into it.
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `agent` | `string` | required | The new agent: its identity's id or npub. |
+| `agent` | `string` | required | The agent: its identity's id or npub. |
 
 ### `Offers`
 

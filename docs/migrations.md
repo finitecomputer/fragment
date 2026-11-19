@@ -52,7 +52,7 @@ same one. Its answers:
 
 | Answer | Does |
 |---|---|
-| Upgrade <name> (Yes) | Opens `/move` (F6), which asks what the import needs, makes the new agent, and posts `yes {agent}` |
+| Upgrade <name> (Yes) | Opens `/move` (F6), which asks what the import needs, makes the new agent (or takes one the person has), and posts `yes {agent}` |
 | Not now | `POST /api/migrations/offers/{old}/later`: asked again after `LATER_MS` (a day) |
 | Never | `POST …/never`: asked no more until `POST …/ask-again` (from `/move`) |
 
@@ -89,18 +89,39 @@ it, the offer's cover stands aside: it is answered there.
 - The one question: which to upgrade. Each new agent takes its old
   one's name (the import brings who it is; it is renamed as any agent). A
   Never'd one has Ask again.
+- **Into an agent they have.** Someone with an agent here already (one
+  who moved by hand, Paul 11-19) is asked, for each old agent: "You
+  already have an agent here. Make a new one for this upgrade, or use
+  <name>?", its answers "Make a new one" and each of theirs, nothing
+  chosen for them; Upgrade waits for each answer. Theirs are their own
+  agents on a computer and on Hermes (the import is a Hermes skill),
+  each free: none made for another old agent still to answer, and none a
+  move may still import into (asked, staging, importing, held). One
+  agent takes in one upgrade at a time: the server refuses a Yes into an
+  agent another move may still import into (409,
+  `fragment_core::migrations::yes_into`), and choosing it for a second
+  old agent on the page takes it from the first. One of theirs is taken
+  as it is: its Yes alone, nothing made, nothing written to it. Until
+  that Yes lands nothing is decided, so a reload asks again; once it
+  lands the move names the agent (the offer's `agent`), and nothing is
+  asked. An old agent an agent was made for already (`from`) is not
+  asked: that agent is its answer. The import into one of theirs adds
+  to it and never replaces what it was (`import-agent-home`, "You may
+  be someone already").
 - Upgrade: `POST /api/migrations/offers` opens the move (binds them;
   the comp, once), the page waits for the seat to reach the ledger, then
   for each, one at a time, a new agent is made as Settings' Add makes one
-  (`addAgent`, its chat made but not opened), and `…/offers/{old}/yes
-  {agent}` posted: the old agent is stopped then. One new agent per old
-  agent: its agent.json keeps the old one it was made for (`from`), and
-  the page hands that agent back to Add (`agent`), which goes on with
-  what it lacks, its chat too; one cut short before its agent.json is
-  found by its name, the old one's each time. A Yes that never arrived, a
-  reload, or a lost answer never makes a second. An agent.json that could
-  not be read (not missing) makes nothing: the page stops, to be tried
-  again. A refusal shows the server's words.
+  (`addAgent`, its chat made but not opened), or one of theirs taken, and
+  `…/offers/{old}/yes {agent}` posted: the old agent is stopped then. One
+  new agent per old agent: its agent.json keeps the old one it was made
+  for (`from`), and the page hands that agent back to Add (`agent`),
+  which goes on with what it lacks, its chat too; one cut short before
+  its agent.json is found by its name, the old one's each time. A Yes
+  that never arrived, a reload, or a lost answer never makes a second.
+  Upgrade reads each of their agent.json files first: one that could not
+  be read (not missing) makes nothing, and the page stops, to be tried
+  again; a question new since the page drew is asked first. A refusal
+  shows the server's words.
 - Once its new agent exists, a move is that agent's to tell: it imports
   in its own chat, and asks its person there. Each row with a new agent
   (the offer's `agent`) has Open chat, that agent's own chat. An import
@@ -202,8 +223,11 @@ revoked.
   bound to the new agent's fragment, named `<kind>-<fragment>`, or, when
   that is over 32 bytes, `<kind>-<label…>-<hash>--<suffix>` (the label
   cut short beside 6 hex of the fragment name's SHA-256). A hand-off
-  never takes the name of a secret bound to other agents (the Vault
-  refuses it, 409):
+  never takes the place of a secret that is there (the Vault refuses
+  it, 409): another agent's, or the same agent's, one its person set or
+  one another old agent's move into it handed off (an agent they had
+  may take in a second old agent once the first's import is done; the
+  first's keys stay):
 
   | Kind | Hosts | Place |
   |---|---|---|

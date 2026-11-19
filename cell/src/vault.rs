@@ -143,8 +143,9 @@ struct HandOff<P>(String, P);
 /// hand-off (FIN-463 F11), once for `receipt`: its receipt kept in the
 /// turn that puts it, so the same hand-off again (a retry, or a call
 /// beside it) puts nothing, even once its person removed, moved or set
-/// that secret since. It never takes the name of a secret bound to
-/// another agent (409).
+/// that secret since. It never takes the place of a secret that is there
+/// (409): another agent's, or the same agent's, put by its person or by
+/// another old agent's move into it (Paul 11-19).
 pub(crate) async fn hand_off(env: &Env, person: &str, name: &str, receipt: &str, put: &PutSecret) -> CellResult<Vec<u8>> {
     crate::routed::ask_bytes(env, "VAULT", person, &op_path("handoff", name)?, &HandOff(receipt.to_string(), put)).await
 }
@@ -328,11 +329,11 @@ impl VaultCell {
             if received(r)? {
                 return Ok("{}".into());
             }
-            if let Some(row) = existing.first() {
-                let held: Bound = stored(row)?;
-                if held.agents != checked.agents {
-                    return Err(CellError::new(ErrorCode::Conflict, format!("{name} is a secret of other agents' here: a hand-off never takes its place")));
-                }
+            // a hand-off never takes a secret's place: the name held by
+            // another agent's, or by this agent's own (its person's, or
+            // another old agent's moved into it), keeps what it holds
+            if !existing.is_empty() {
+                return Err(CellError::new(ErrorCode::Conflict, format!("{name} is held already: a hand-off never takes a secret's place")));
             }
         }
         let exists = !existing.is_empty();

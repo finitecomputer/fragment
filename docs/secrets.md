@@ -111,7 +111,9 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   move puts each into their Vault, bound to the new agent
   (`vault/handoff`), and keeps a receipt in the same turn, so a retry
   never puts back one they removed or moved since. A hand-off never
-  takes the name of another agent's secret.
+  takes the place of a secret that is there: another agent's, or the
+  same agent's (one its person set, or another old agent's moved into
+  it).
 - **A secret moves out once, whole**: its person may move one into a
   fragment they edit as that fragment's secret (`fromVault` on `PUT
   /api/f/{name}/secrets/{KEY}`; `fragment secret set … --from-vault`), as
