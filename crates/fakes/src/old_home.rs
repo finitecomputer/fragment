@@ -38,14 +38,15 @@ fn files() -> Result<Vec<(String, PathBuf)>> {
 }
 
 /// The home as one zip at `to`, as a stage brings it, with `extra` files
-/// (path, bytes) beside its own.
-pub fn stage(to: &Path, extra: &[(&str, Vec<u8>)]) -> Result<()> {
+/// (path, bytes) beside its own: every file it holds, in its order.
+pub fn stage(to: &Path, extra: &[(&str, Vec<u8>)]) -> Result<Vec<(String, Vec<u8>)>> {
     let mut all: Vec<(String, Vec<u8>)> = Vec::new();
     for (rel, path) in files()? {
         all.push((rel, std::fs::read(&path)?));
     }
     all.extend(extra.iter().map(|(p, b)| (p.to_string(), b.clone())));
-    zip(to, &all)
+    zip(to, &all)?;
+    Ok(all)
 }
 
 /// `files` (path, bytes) as a zip at `to`, as a stage writes one: zip64,

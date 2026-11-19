@@ -14,6 +14,13 @@
 //! went, how to bring it back, and each file's size and sha256), and only
 //! then are the files removed.
 //!
+//! **A move's import keeps files the same way** (`home::store`): what an
+//! old agent's home holds past its files' pick goes from its stage into
+//! storage, never through this disk, with a note where each was. Its note
+//! names each file's CRC-32 (the zip's, made from the old file itself)
+//! where it knows no sha256 (a file of several parts, copied on the
+//! platform part by part), and `--back` reads it back the same way.
+//!
 //! **Back** brings each file from main into a hidden file beside where it
 //! goes, checks it against the note's sha256, and links it into place,
 //! never over a file there (one with the note's bytes is back already).
@@ -60,7 +67,7 @@ pub const NOTE_SUFFIX: &str = ".offloaded.md";
 pub const FILES_MAX: usize = 10_000;
 /// The parts one move's files are in, at most (20 GB in parts of 100 MB
 /// is 200, and a part a small file): a note naming more is no move's.
-const PARTS_MAX: u64 = 100_000;
+pub(crate) const PARTS_MAX: u64 = 100_000;
 /// Where the note's record begins and ends.
 const RECORD_OPEN: &str = "\n```json\n";
 const RECORD_CLOSE: &str = "\n```\n";
@@ -73,46 +80,59 @@ fn coded(code: Code, msg: impl Into<String>) -> anyhow::Error {
 /// files went to, where they were, and each file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Record {
-    fragment: String,
+pub(crate) struct Record {
+    pub(crate) fragment: String,
     /// The folder in the fragment each file's path is under.
-    at: String,
+    pub(crate) at: String,
     /// The path moved, as it was then.
-    from: String,
+    pub(crate) from: String,
     /// Each file's parts are this long, its last one at most.
-    part_bytes: u64,
+    pub(crate) part_bytes: u64,
     /// A folder's folders, its own first, each with its permission bits:
     /// made again as they were, the empty ones too. None for a file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    dirs: Vec<Folder>,
-    files: Vec<Moved>,
+    pub(crate) dirs: Vec<Folder>,
+    pub(crate) files: Vec<Moved>,
 }
 
 /// One folder of a folder moved: its path from the note's folder, and its
 /// permission bits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Folder {
-    path: String,
-    mode: u32,
+pub(crate) struct Folder {
+    pub(crate) path: String,
+    pub(crate) mode: u32,
 }
 
 /// One file moved: its path from the note's folder (the name moved first),
-/// its size, its bytes' sha256 and its permission bits.
+/// its size, its bytes' sha256 or their CRC-32 (a move's import, which
+/// knows the zip's: at least one), and its permission bits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Moved {
-    path: String,
-    size: u64,
-    sha256: String,
-    mode: u32,
+pub(crate) struct Moved {
+    pub(crate) path: String,
+    pub(crate) size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) crc32: Option<u32>,
+    pub(crate) mode: u32,
+}
+
+impl Moved {
+    /// Whether bytes that hash to `sha256` and `crc32` are this file's, by
+    /// every sum its record names.
+    pub(crate) fn matches(&self, sha256: &str, crc32: u32) -> bool {
+        assert!(self.sha256.is_some() || self.crc32.is_some(), "a record names a sum of each file");
+        self.sha256.as_deref().is_none_or(|s| s == sha256) && self.crc32.is_none_or(|c| c == crc32)
+    }
 }
 
 impl Record {
     /// The fragment's paths of `f`'s parts, in order, with each one's
     /// length: the file's own path when it is one part, else
     /// `<path>.part-0001-of-0003` and on.
-    fn parts(&self, f: &Moved) -> Vec<(String, u64)> {
+    pub(crate) fn parts(&self, f: &Moved) -> Vec<(String, u64)> {
         assert!(self.part_bytes > 0, "a part holds bytes");
         let n = f.size.div_ceil(self.part_bytes).max(1);
         (0..n)
@@ -126,7 +146,7 @@ impl Record {
             .collect()
     }
 
-    fn bytes(&self) -> u64 {
+    pub(crate) fn bytes(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
     }
 }
@@ -136,15 +156,31 @@ fn quoted(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"))
 }
 
+/// What a note says of how its files came to storage: its title, and the
+/// words after what it moved.
+pub(crate) struct Said {
+    pub(crate) title: &'static str,
+    pub(crate) came: String,
+}
+
+impl Said {
+    /// Moved off this disk by `fragment offload`, `when`.
+    fn offloaded(when: &str) -> Said {
+        Said { title: "Moved to storage", came: format!("was moved off this disk on {when}") }
+    }
+}
+
 /// The note: what was moved, where to, and how to bring it back, in words;
 /// then its record, one file a line.
-fn note_text(r: &Record, note: &Path, name: &str, when: &str) -> String {
+pub(crate) fn note_text(r: &Record, note: &Path, name: &str, said: Said) -> String {
     let what = match r.files.as_slice() {
         [one] if one.path == name => format!("`{name}` ({})", size(one.size)),
         files => format!("`{name}/` ({} files, {})", files.len(), size(r.bytes())),
     };
     let mut out = format!(
-        "# Moved to storage\n\n{what} was moved off this disk on {when}, into the fragment `{}`, under `{}/`.\n\nTo bring it back here: `fragment offload --back {}`\n\nIts record, which that reads (keep it as it is):\n",
+        "# {}\n\n{what} {}, in the fragment `{}`, under `{}/`.\n\nTo bring it back here: `fragment offload --back {}`\n\nIts record, which that reads (keep it as it is):\n",
+        said.title,
+        said.came,
         r.fragment,
         r.at,
         quoted(note)
@@ -168,7 +204,7 @@ fn note_text(r: &Record, note: &Path, name: &str, when: &str) -> String {
 }
 
 /// A note's record (`note_text`).
-fn record_of(text: &str) -> Result<Record> {
+pub(crate) fn record_of(text: &str) -> Result<Record> {
     let start = text.rfind(RECORD_OPEN).ok_or_else(|| anyhow!("it holds no record"))? + RECORD_OPEN.len();
     let end = text[start..].find(RECORD_CLOSE).ok_or_else(|| anyhow!("its record has no end"))? + start;
     let r: Record = serde_json::from_str(&text[start..end]).context("its record")?;
@@ -179,7 +215,7 @@ fn record_of(text: &str) -> Result<Record> {
     let fits = parts.is_some_and(|n| n <= PARTS_MAX)
         && (1..=FILES_MAX).contains(&r.files.len())
         && r.dirs.len() <= FILES_MAX
-        && r.files.iter().all(|f| blob::valid_sha(&f.sha256) && f.mode <= 0o777 && plain(&f.path) && in_fragment(f))
+        && r.files.iter().all(|f| f.sha256.as_deref().is_none_or(blob::valid_sha) && (f.sha256.is_some() || f.crc32.is_some()) && f.mode <= 0o777 && plain(&f.path) && in_fragment(f))
         && r.dirs.iter().all(|d| d.mode <= 0o777 && plain(&d.path))
         && r.files.iter().try_fold(0u64, |n, f| n.checked_add(f.size)).is_some();
     if !fits {
@@ -338,6 +374,7 @@ fn at_now(dir: &Path) -> (String, String) {
 struct Hashing<'a> {
     part: Sha256,
     whole: &'a mut Sha256,
+    crc: &'a mut crc32fast::Hasher,
     n: u64,
     out: Option<&'a mut File>,
 }
@@ -349,6 +386,7 @@ impl Write for Hashing<'_> {
         }
         self.part.update(buf);
         self.whole.update(buf);
+        self.crc.update(buf);
         self.n += buf.len() as u64;
         Ok(buf.len())
     }
@@ -360,15 +398,15 @@ impl Write for Hashing<'_> {
 /// Reads `f` back from `rev` of the fragment, each part as git holds it
 /// (its blob's bytes from the store), into `out` when given: an error
 /// unless every part and the whole hash as the record says.
-fn read_back(c: &Client, held: &mut Held, r: &Record, rev: &str, f: &Moved, mut out: Option<&mut File>) -> Result<()> {
-    let mut whole = Sha256::new();
+pub(crate) fn read_back(c: &Client, held: &mut Held, r: &Record, rev: &str, f: &Moved, mut out: Option<&mut File>) -> Result<()> {
+    let (mut whole, mut crc) = (Sha256::new(), crc32fast::Hasher::new());
     for (path, len) in r.parts(f) {
         let git = match held.get(c)?.read_file(&path, rev) {
             Ok(git) => git,
             Err(CsError::NotFound(_)) => bail!(coded(Code::NotFound, format!("{} has no {path} at {rev}: its copy is not there", r.fragment))),
             Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {path} back"))),
         };
-        let mut h = Hashing { part: Sha256::new(), whole: &mut whole, n: 0, out: out.as_deref_mut() };
+        let mut h = Hashing { part: Sha256::new(), whole: &mut whole, crc: &mut crc, n: 0, out: out.as_deref_mut() };
         match blob::parse(&git) {
             Some(p) if p.size == len => {
                 c.download_into(&format!("/api/f/{}/blobs/{}", r.fragment, p.sha256), len, || Ok(&mut h)).with_context(|| format!("reading {path}'s bytes back"))?;
@@ -383,7 +421,7 @@ fn read_back(c: &Client, held: &mut Held, r: &Record, rev: &str, f: &Moved, mut 
             bail!("{path} reads back as {} bytes, not the {len} moved", h.n);
         }
     }
-    if hex::encode(whole.finalize()) != f.sha256 {
+    if !f.matches(&hex::encode(whole.finalize()), crc.finalize()) {
         bail!("{} reads back from {} as other bytes than were moved", f.path, r.fragment);
     }
     Ok(())
@@ -411,10 +449,22 @@ fn unchanged(l: &Local) -> bool {
     fs::symlink_metadata(&l.abs).is_ok_and(|m| m.is_file() && m.len() == l.size && m.modified().ok() == Some(l.modified) && id_of(&m) == l.id)
 }
 
-fn sha_of(path: &Path) -> Result<String> {
-    let mut h = Sha256::new();
+/// A file's sha256 (hex) and CRC-32, as `Moved::matches` takes them.
+fn sums_of(path: &Path) -> Result<(String, u32)> {
+    struct Both(Sha256, crc32fast::Hasher);
+    impl Write for Both {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.update(buf);
+            self.1.update(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut h = Both(Sha256::new(), crc32fast::Hasher::new());
     std::io::copy(&mut File::open(path).with_context(|| format!("reading {}", path.display()))?, &mut h)?;
-    Ok(hex::encode(h.finalize()))
+    Ok((hex::encode(h.0.finalize()), h.1.finalize()))
 }
 
 /// A new file in `dir` under a random hidden name, made exclusively and
@@ -437,7 +487,7 @@ fn fresh(dir: &Path) -> Result<(PathBuf, File)> {
 /// Writes `text` as the note at `path` whole or not at all: into a fresh
 /// file, synced, then linked into place (never over a note there), and its
 /// folder synced. A disk too full for it keeps no part of it.
-fn publish(path: &Path, text: &str) -> Result<()> {
+pub(crate) fn publish(path: &Path, text: &str) -> Result<()> {
     let dir = path.parent().expect("a note has a folder");
     let (tmp, mut f) = fresh(dir).with_context(|| format!("writing {}; nothing was removed", path.display()))?;
     let wrote = f.write_all(text.as_bytes()).and_then(|()| f.sync_all()).and_then(|()| fs::hard_link(&tmp, path));
@@ -457,7 +507,7 @@ fn lock(dir: &Path) -> Result<File> {
     }
 }
 
-fn sync_dir(dir: &Path) -> Result<()> {
+pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
     File::open(dir).and_then(|d| d.sync_all()).with_context(|| format!("syncing {}", dir.display()))
 }
 
@@ -489,7 +539,7 @@ fn remove(p: &Planned) -> Result<Vec<String>> {
 
 /// The fragment a move goes into: one the caller edits, an app's (never
 /// a chat, an agent, a brain, skills or a Session Archive), members-only.
-fn check_into(c: &Client, into: &str) -> Result<String> {
+pub(crate) fn check_into(c: &Client, into: &str) -> Result<String> {
     let name = c.fragment(into)?;
     let s: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
     if s.kind != FragmentKind::App {
@@ -519,7 +569,7 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
     // every path it writes is a repo path, and its own
     let mut paths = std::collections::BTreeSet::new();
     for l in &p.files {
-        let probe = Moved { path: l.rel.clone(), size: l.size, sha256: String::new(), mode: l.mode };
+        let probe = Moved { path: l.rel.clone(), size: l.size, sha256: None, crc32: None, mode: l.mode };
         for (path, _) in r.parts(&probe) {
             RepoPath::parse(&path).map_err(|e| coded(Code::InvalidUsage, format!("{} cannot go into a fragment as {e}", l.abs.display())))?;
             if !paths.insert(path.clone()) {
@@ -540,7 +590,7 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
     for l in &p.files {
         let mut file = File::open(&l.abs).with_context(|| format!("reading {}", l.abs.display()))?;
         let mut whole = Sha256::new();
-        let probe = Moved { path: l.rel.clone(), size: l.size, sha256: String::new(), mode: l.mode };
+        let probe = Moved { path: l.rel.clone(), size: l.size, sha256: None, crc32: None, mode: l.mode };
         for (path, len) in r.parts(&probe) {
             let mut bytes = vec![0u8; len as usize];
             file.read_exact(&mut bytes).with_context(|| format!("reading {}: it changed while it was read; nothing was removed", l.abs.display()))?;
@@ -556,7 +606,7 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
         if file.read(&mut [0u8; 1])? != 0 {
             bail!(coded(Code::Conflict, format!("{} grew while it was read; nothing was removed: move it once it is done changing", l.abs.display())));
         }
-        r.files.push(Moved { path: l.rel.clone(), size: l.size, sha256: hex::encode(whole.finalize()), mode: l.mode });
+        r.files.push(Moved { path: l.rel.clone(), size: l.size, sha256: Some(hex::encode(whole.finalize())), crc32: None, mode: l.mode });
     }
     if !batch.is_empty() {
         head = commit(c, &mut held, &author, head, &message, &batch)?;
@@ -574,7 +624,7 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
     if let Some(l) = p.files.iter().find(|l| !unchanged(l)) {
         bail!(coded(Code::Conflict, format!("{} changed while it was moved; nothing was removed (a copy of it as it was is in {into}, under {}/): move it once it is done changing", l.abs.display(), r.at)));
     }
-    publish(&p.note, &note_text(&r, &p.note, &p.name, &when))?;
+    publish(&p.note, &note_text(&r, &p.note, &p.name, Said::offloaded(&when)))?;
     let kept = remove(&p)?;
     Ok(Offloaded { fragment: into, at: r.at.clone(), note: p.note.display().to_string(), files: r.files.len(), bytes: r.bytes(), resumed: false, kept })
 }
@@ -588,7 +638,7 @@ fn resume(c: &Client, p: &Planned) -> Result<Offloaded> {
     // each file here is one the note moved, as it moved it (a removal cut
     // off may have removed the rest)
     let moved: std::collections::BTreeMap<&str, &Moved> = r.files.iter().map(|f| (f.path.as_str(), f)).collect();
-    let same = p.files.iter().all(|l| moved.get(l.rel.as_str()).is_some_and(|f| f.size == l.size && sha_of(&l.abs).is_ok_and(|s| s == f.sha256)));
+    let same = p.files.iter().all(|l| moved.get(l.rel.as_str()).is_some_and(|f| f.size == l.size && sums_of(&l.abs).is_ok_and(|(s, c)| f.matches(&s, c))));
     if !same {
         bail!(coded(
             Code::Conflict,
@@ -671,7 +721,7 @@ pub fn back(c: &Client, path: &Path) -> Result<Back> {
         let target = dir.join(&f.path);
         match fs::symlink_metadata(&target) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => todo.push(f),
-            Ok(m) if m.is_file() && m.len() == f.size && sha_of(&target)? == f.sha256 => already += 1,
+            Ok(m) if m.is_file() && m.len() == f.size && { let (s, c) = sums_of(&target)?; f.matches(&s, c) } => already += 1,
             Ok(_) => bail!(coded(Code::Conflict, format!("{} is there already, and is not what was moved: move it aside, then bring this back; nothing was changed", target.display()))),
             Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", target.display()))),
         }
@@ -1018,9 +1068,9 @@ mod tests {
             from: "/data/work/odd `name'".into(),
             part_bytes: 4,
             dirs: vec![Folder { path: "odd `name'".into(), mode: 0o700 }],
-            files: vec![Moved { path: "odd `name'/f".into(), size: 9, sha256: "a".repeat(64), mode: 0o644 }],
+            files: vec![Moved { path: "odd `name'/f".into(), size: 9, sha256: Some("a".repeat(64)), crc32: None, mode: 0o644 }],
         };
-        let text = note_text(&r, Path::new("/data/work/odd `name'.offloaded.md"), "odd `name'", "2026-11-18 at 10:31 UTC");
+        let text = note_text(&r, Path::new("/data/work/odd `name'.offloaded.md"), "odd `name'", Said::offloaded("2026-11-18 at 10:31 UTC"));
         assert_eq!(record_of(&text).unwrap(), r);
         assert!(text.contains(r#"fragment offload --back '/data/work/odd `name'\''.offloaded.md'"#), "{text}");
         assert_eq!(r.parts(&r.files[0]).iter().map(|(p, n)| (p.rsplit('.').next().unwrap().to_string(), *n)).collect::<Vec<_>>(), [("part-0001-of-0003".into(), 4), ("part-0002-of-0003".into(), 4), ("part-0003-of-0003".into(), 1)]);
@@ -1035,7 +1085,7 @@ mod tests {
         ] {
             assert!(record_of(&bad).is_err(), "{bad}");
         }
-        let empty = Moved { path: "e".into(), size: 0, sha256: "a".repeat(64), mode: 0 };
+        let empty = Moved { path: "e".into(), size: 0, sha256: Some("a".repeat(64)), crc32: None, mode: 0 };
         assert_eq!(r.parts(&empty), [(format!("{}/e", r.at), 0)], "an empty file is one part");
     }
 
@@ -1045,7 +1095,7 @@ mod tests {
     fn back_stays_under_its_name() {
         let (_mock, c) = host();
         let root = tempdir("escape");
-        let file = |path: &str| Moved { path: path.into(), size: 1, sha256: "a".repeat(64), mode: 0 };
+        let file = |path: &str| Moved { path: path.into(), size: 1, sha256: Some("a".repeat(64)), crc32: None, mode: 0 };
         let note = root.join("a.offloaded.md");
         let folder = |path: &str| Folder { path: path.into(), mode: 0o755 };
         for (dirs, files, says) in [
@@ -1055,7 +1105,7 @@ mod tests {
             (vec![folder("a"), folder("a/link/new")], vec![file("a/f")], "does not name"),
         ] {
             let r = Record { fragment: NAME.into(), at: "x".into(), from: "/x".into(), part_bytes: 4, dirs, files };
-            fs::write(&note, note_text(&r, &note, "a", "now")).unwrap();
+            fs::write(&note, note_text(&r, &note, "a", Said::offloaded("now"))).unwrap();
             let e = back(&c, &note).unwrap_err();
             assert!(format!("{e:#}").contains(says), "{e:#}");
         }
