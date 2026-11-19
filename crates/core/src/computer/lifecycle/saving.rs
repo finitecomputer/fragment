@@ -93,9 +93,20 @@ impl Lifecycle {
         }
     }
 
-    /// Whether the save under way already let go of its hold.
-    pub(super) fn unheld(&self) -> bool {
-        matches!(self.saving, Some(Saving::Save { unheld: true, .. }))
+    /// Whether the guest of start `generation` may be let go of now: it is
+    /// awake, and no hold, nor a save that holds it, is under way (none, or
+    /// an awake save past its home). The DO asks it as it unmarks, so an
+    /// unhold never takes a newer hold's mark (a sleep's, asked meanwhile).
+    pub fn lets_go(&self, generation: u64) -> bool {
+        matches!(self.phase, Phase::Awake { generation: g, .. } if g == generation) && matches!(self.saving, None | Some(Saving::Save { unheld: true, .. }))
+    }
+
+    /// Whether save `seq`, done, was superseded: a newer save was asked as
+    /// it ran (its owner's sleep or restart, once an awake save let go of
+    /// its hold and its guest went on), kept or not. The DO lets its records
+    /// go: never the newest kept, ahead of a newer capture.
+    pub fn superseded(&self, seq: u64) -> bool {
+        seq < self.save_seq
     }
 
     /// A save worked: nothing of this life is unsaved since it was asked,
@@ -168,11 +179,13 @@ mod tests {
     }
 
     /// Goal (P9): an awake save holds its guest only while its home's
-    /// record is taken: once that is in (`HomeSaved`) it lets go, once, and
-    /// its end lets go of nothing more; a sleep keeps its hold to its stop.
-    /// Method: the events as the DO reports them, valid, invalid (another
-    /// save's, another start's, before its save began, a sleep's), replayed,
-    /// and across a store and read back.
+    /// record is taken: once that is in (`HomeSaved`) it lets go, once (its
+    /// end lets go again, in case that exec failed); a sleep keeps its hold
+    /// to its stop, and the DO may unmark only while `lets_go` says so. An
+    /// awake save that a sleep's save overtook is superseded. Method: the
+    /// events as the DO reports them, valid, invalid (another save's,
+    /// another start's, before its save began, a sleep's), replayed, and
+    /// across a store and read back.
     #[test]
     fn an_awake_save_holds_its_home_only() {
         // a save asked once a turn's work settles, its hold answered
@@ -189,8 +202,10 @@ mod tests {
         // valid: its home in, it lets go; its end lets go of nothing more
         let (mut l, g, seq, at) = awake_save();
         let alarm = l.next_alarm();
+        assert!(!l.lets_go(g), "its home is not in yet");
         let s = l.apply(Event::HomeSaved { generation: g, seq }, at + 2_000);
         assert_eq!(s.actions, vec![Action::Unhold { generation: g }]);
+        assert!(l.lets_go(g) && !l.lets_go(g + 1), "its own start's guest, its home in");
         assert_eq!((s.alarm_ms, l.saving().map(Saving::deadline_ms)), (alarm, Some(at + 500 + SAVE_DEADLINE_MS)), "its work's record is still the save's, under its deadline");
         // replay: once only
         let before = l.clone();
@@ -200,7 +215,8 @@ mod tests {
         let mut l = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap().0;
         assert_eq!(l.saving(), before.saving());
         let s = l.apply(Event::Saved { generation: g, seq }, at + 60_000);
-        assert!(s.actions.is_empty() && l.saving().is_none(), "let go already: {s:?}");
+        assert_eq!(s.actions, vec![Action::Unhold { generation: g }], "let go again (its first unhold's exec may have failed)");
+        assert!(l.saving().is_none() && l.lets_go(g) && !l.superseded(seq));
         assert_eq!(s.note, SaveNote::Clear);
         assert!(l.apply(Event::HomeSaved { generation: g, seq }, at + 60_100).actions.is_empty(), "a late one, once it is done");
         // its work's record failing after it let go: tried again, its
@@ -228,6 +244,7 @@ mod tests {
         l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
         l.apply(Event::Closed { socket: Socket::Keepalive }, T + 10_000);
         l.apply(Event::Alarm, T + 10_000 + SAVE_SETTLE_MS);
+        assert!(!l.lets_go(g), "held: a hold under way is never let go of");
         assert!(l.apply(Event::HomeSaved { generation: g, seq: 1 }, T + 41_000).actions.is_empty(), "at its hold, no save is under way");
         // a sleep's save keeps its hold to its stop
         let mut l = Lifecycle::new();
@@ -235,6 +252,7 @@ mod tests {
         l.apply(Event::Alarm, T + IDLE_MS);
         let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + IDLE_MS + 500));
         assert!(l.apply(Event::HomeSaved { generation: g, seq }, T + IDLE_MS + 2_000).actions.is_empty());
+        assert!(!l.lets_go(g), "a sleep's save holds its guest");
         assert_eq!(l.apply(Event::Saved { generation: g, seq }, T + IDLE_MS + 4_000).actions, vec![Action::Stop { generation: g, saved: true }]);
         // its owner's sleep while an awake save copies its work: the sleep's
         // hold is never let go by the awake save's late reports
@@ -242,8 +260,14 @@ mod tests {
         l.apply(Event::HomeSaved { generation: g, seq }, at + 2_000);
         assert_eq!(l.apply(Event::Sleep, at + 3_000).actions, vec![Action::Sleep { generation: g }]);
         assert!(l.apply(Event::HomeSaved { generation: g, seq }, at + 3_100).actions.is_empty());
-        assert!(l.apply(Event::Saved { generation: g, seq }, at + 3_200).actions.is_empty());
+        assert!(!l.lets_go(g), "the sleep's hold");
         assert!(matches!(l.saving(), Some(Saving::Hold { .. })), "the sleep's own hold: {:?}", l.saving());
+        // the sleep's save asked as the awake one copies its work: that one
+        // is superseded, never the newest kept; its late report changes nothing
+        let (_, _, newer) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 3_150));
+        assert!(newer > seq && l.superseded(seq) && !l.superseded(newer));
+        assert!(l.apply(Event::Saved { generation: g, seq }, at + 3_200).actions.is_empty());
+        assert!(!l.lets_go(g));
         // a lifecycle stored before `unheld` was kept reads it unset: held to
         // its end, as that release would have
         let (l, g, seq, at) = awake_save();

@@ -604,13 +604,11 @@ impl Lifecycle {
             }
             (Phase::Awake { .. } | Phase::Sleeping { .. }, Event::HomeSaved { generation, seq }) => self.home_saved(generation, seq, &mut step),
             (Phase::Awake { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
-                // held to its end, unless it let go once its home was in
-                let unheld = self.unheld();
+                // let go again, though it let go once its home was in: that
+                // unhold's exec may have failed (Codex on #1378)
                 self.saving = None;
                 self.saved(now_ms, &mut step);
-                if !unheld {
-                    step.actions.push(Action::Unhold { generation });
-                }
+                step.actions.push(Action::Unhold { generation });
             }
             (Phase::Sleeping { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
                 // its try heard late (its meter passed over the time since,
