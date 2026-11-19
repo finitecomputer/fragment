@@ -80,7 +80,6 @@ impl Woke {
     fn code(self) -> &'static str {
         match self {
             Woke::Wake(Wake::Record) => "record",
-            Woke::Wake(Wake::Presence) => "presence",
             Woke::Wake(Wake::Tab) => "tab",
             Woke::Wake(Wake::Owner) => "owner",
             Woke::Wake(Wake::Joined) => "joined",
@@ -547,7 +546,7 @@ mod tests {
         // a quiet computer: no event at all until a turn past the wait (Codex
         // on #1344): written then, without that turn
         let mut quiet = Driven::new();
-        let s = quiet.wake(Wake::Presence);
+        let s = quiet.wake(Wake::Tab);
         let (q1, _) = quiet.start(&s, Outcome::Ready);
         quiet.c.now += TURN_WAIT_MS + 14_000;
         quiet.apply(Event::Opened { socket: Socket::Keepalive });
@@ -574,7 +573,7 @@ mod tests {
         // a snapshot that comes up dead: its line, then its fallback's, a
         // whole restore because of it, from the same ask
         d.sleep("b3", Some("s3"));
-        let s = d.wake(Wake::Presence);
+        let s = d.wake(Wake::Tab);
         let (g6, s) = d.start(&s, Outcome::Fails(Failed::Dead));
         let l = d.line(g6);
         assert_eq!((&l["end"], &l["failed"], &l["path"]), (&"failed".into(), &"dead".into(), &"snapshot".into()), "{l}");
@@ -582,7 +581,7 @@ mod tests {
         let (g7, _) = d.start(&s, Outcome::Ready);
         d.turn();
         let l = d.line(g7);
-        assert_eq!((&l["path"], &l["why"], &l["woke"]), (&"restore".into(), &"dead_snapshot".into(), &"presence".into()), "{l}");
+        assert_eq!((&l["path"], &l["why"], &l["woke"]), (&"restore".into(), &"dead_snapshot".into(), &"tab".into()), "{l}");
         // once each, all seven
         assert_eq!(d.lines.len(), 7, "{:?}", d.lines);
         for g in 1..=7 {
@@ -628,7 +627,7 @@ mod tests {
         c.wake();
         c.turn_saved("b2");
         let mut idle = c.saves.clone();
-        idle.ended(Ended { generation: c.life.generation(), by: LifeEnd::Sleep, saved: true, at_ms: c.now, restart: false, quiet: true });
+        idle.ended(Ended { generation: c.life.generation(), by: LifeEnd::Sleep, saved: true, at_ms: c.now, restart: false, quiet: true, unchanged: true });
         assert_eq!(idle.full_why(Some(IMAGE), false), Some(Full::NoSnapshot));
         c.apply(Event::Opened { socket: Socket::Keepalive });
         c.crash();
@@ -673,7 +672,7 @@ mod tests {
         let sleeping = Phase::Sleeping { generation: 1, since_ms: 0, owner: false, restarting: false, owes_start: false };
         let mut starts = Starts::default();
         starts.asked(Woke::Wake(Wake::Record), &sleeping, 10_000);
-        starts.asked(Woke::Wake(Wake::Presence), &sleeping, 20_000);
+        starts.asked(Woke::Wake(Wake::Tab), &sleeping, 20_000);
         starts.begin("computer:1", 2, 70_000);
         let mut life = Lifecycle::new();
         life.apply(Event::Wake { why: Wake::Record }, 69_000);

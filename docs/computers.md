@@ -492,8 +492,8 @@ minute), or its life ends, whichever is first.
   snapshot that came up dead, or the `alive-check` lever),
   `unusable` (its save would not restore), `exit` (its container stopped
   first), `deadline`, `other`.
-- `woke`: what asked for the wake it answers: `record`, `presence`, `tab`,
-  `owner`, `joined`, `restart`; `itself` when nothing did (a start after a
+- `woke`: what asked for the wake it answers: `record`, `tab`, `owner`,
+  `joined`, `restart`; `itself` when nothing did (a start after a
   crash, an always-on start, or an ask an earlier isolate heard). A wake's
   fallback and retries carry its first ask.
 - `path`: `snapshot`, `restore` (the image, then the save whole), `fresh`
