@@ -428,16 +428,51 @@ impl Source {
         self.stage.as_deref()
     }
 
-    /// Where a stage's file's bytes are in its zip, as they are (stored):
-    /// (offset, length). None for a folder's or a zip's on this computer
-    /// (read here), or one compressed in the zip.
+    /// Where a zip's file's bytes are in it, as they are (stored):
+    /// (offset, length). None for a folder's, or one compressed in the zip.
     pub fn span(&self, path: &str) -> Result<Option<(u64, u64)>> {
-        let (Backing::Zip(archive), Some(_)) = (&self.backing, &self.remote) else { return Ok(None) };
+        let Backing::Zip(archive) = &self.backing else { return Ok(None) };
         let (_, index) = *self.at.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?;
         let mut archive = archive.clone();
         let e = archive.by_index_raw(index).with_context(|| format!("finding {path} in the zip"))?;
         let start = e.data_start().ok_or_else(|| anyhow!("{path}: its bytes' place in the zip is not known"))?;
         Ok((e.compression() == zip::CompressionMethod::Stored && e.compressed_size() == e.size()).then_some((start, e.size())))
+    }
+
+    /// A zip's file's CRC-32 and permission bits, as its directory names
+    /// them (the old file's own, made where it was zipped). None for a
+    /// folder's file.
+    pub fn sums(&self, path: &str) -> Result<Option<(u32, Option<u32>)>> {
+        let Backing::Zip(archive) = &self.backing else { return Ok(None) };
+        let (_, index) = *self.at.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?;
+        let e = archive.by_index_data(index).with_context(|| format!("finding {path} in the zip"))?;
+        Ok(Some((e.crc32(), e.unix_mode().map(|m| m & 0o777))))
+    }
+
+    /// `len` bytes of a file from `offset` (a part of it): for one stored
+    /// in a zip, read where they are; else read from its start.
+    pub fn read_range(&self, path: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        let size = self.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?.size;
+        let end = offset.checked_add(len).filter(|e| *e <= size).ok_or_else(|| anyhow!("{path}: bytes {offset}+{len} are past its {size}"))?;
+        assert!(end - offset == len, "a range is its length");
+        let mut out = vec![0u8; len as usize];
+        match (&self.backing, self.span(path)?) {
+            (Backing::Zip(archive), Some((start, _))) => {
+                let mut at = archive.clone().into_inner();
+                at.seek(SeekFrom::Start(start + offset))?;
+                at.read_exact(&mut out).with_context(|| format!("reading {path}"))?;
+            }
+            (Backing::Dir(root), _) => {
+                let mut f = File::open(root.join(path)).with_context(|| format!("opening {path}"))?;
+                f.seek(SeekFrom::Start(offset))?;
+                f.read_exact(&mut out).with_context(|| format!("reading {path}"))?;
+            }
+            (Backing::Zip(_), None) => self.with_reader(path, |r| {
+                io::copy(&mut r.take(offset), &mut io::sink())?;
+                r.read_exact(&mut out).with_context(|| format!("reading {path}"))
+            })?,
+        }
+        Ok(out)
     }
 
     /// `len` bytes of a stage's zip from `offset` copied into `into`'s blobs

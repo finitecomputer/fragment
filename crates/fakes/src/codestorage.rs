@@ -239,6 +239,10 @@ struct State {
     /// bytes in all (`POST …/copy`).
     #[serde(skip)]
     stage_copies: (u64, u64),
+    /// Copies still to answer 503 once this many more have worked
+    /// (`fail_stage_copies`): (worked first, then failing).
+    #[serde(skip)]
+    stage_copies_failing: (u32, u32),
 }
 
 struct Inner {
@@ -975,6 +979,14 @@ fn stage_route(st: &mut State, req: &Request) -> Option<Response> {
             if st.upload_max.is_some_and(|max| len > max) {
                 return Some(Response::json(413, &json!({ "error": "too_large", "message": "past the upload limit" })));
             }
+            if st.stage_copies_failing.1 > 0 {
+                if st.stage_copies_failing.0 > 0 {
+                    st.stage_copies_failing.0 -= 1;
+                } else {
+                    st.stage_copies_failing.1 -= 1;
+                    return Some(problem(503, "the stage's copy is unavailable (the fake's lever)"));
+                }
+            }
             let bytes = zip[offset as usize..(offset + len) as usize].to_vec();
             let sha = fragment_core::blob::sha256_hex(&bytes);
             let Some(blobs) = st.host_blobs.as_mut() else { return Some(Response::json(404, &json!({ "error": "not_found", "message": "this host keeps no blobs" }))) };
@@ -1535,6 +1547,12 @@ impl CodeStorage {
     /// The ranges the stages' zips answered so far, and their bytes in all.
     pub fn stage_reads(&self) -> (u64, u64) {
         self.with(|st| st.stage_reads)
+    }
+
+    /// After `worked` more copies from a stage, the next `n` answer 503
+    /// and keep nothing: an import cut off partway.
+    pub fn fail_stage_copies(&self, worked: u32, n: u32) {
+        self.with(|st| st.stage_copies_failing = (worked, n));
     }
 
     /// The ranges copied from stages into fragments' blobs so far, and

@@ -181,6 +181,11 @@ import keeps comes onto your disk. Each can read it until you say
 `done`. One that stops partway (the network) is run again the same way:
 it goes on where it stopped.
 
+**Nothing is left behind.** In a move, every file of the old home comes:
+what you bring in the steps below, and the rest kept whole in your
+storage, with a note where each was (step 3). Only the files whose names
+say they may hold a password or key stay with the old platform, unread.
+
 **What the old platform kept back.** Name it in the report (step 8),
 grouped by its `why`, in plain words, with how many files and how large:
 - `secret`: passwords and keys. They are never copied; they stay in
@@ -256,7 +261,10 @@ survey:
 - Your home needs the bytes of the `parts` free (each brain and site is
   copied out to be made), plus a fifth more.
 
-If there isn't room, tell your owner how much is needed, and stop.
+If there isn't room, tell your owner how much is needed, and stop. In a
+move, don't stop: everything is kept in storage (step 3) whatever you
+bring here, so bring what fits, a brain or the chats at a time, and say
+in the report what stayed in storage for lack of room.
 
 **Files left out unread.** `source.skipped` names each file whose name
 says it may hold a password or key (an `.env`, a private key). The
@@ -299,13 +307,18 @@ don't read them into your memory or a brain.
 
 ## 3. Files, into an app
 
-When the survey's `files.brought.files` is more than 0 (make it once, as
-the rules say):
+When the survey's `files.brought.files` is more than 0, or in a move
+(make each fragment once, as the rules say):
 
 ```sh
 fragment create old-files --visibility members
-fragment home files <source> --layout <L> --into <its name>
 fragment rename <its name> "Files from <the old platform>"
+```
+
+Not in a move:
+
+```sh
+fragment home files <source> --layout <L> --into <its name>
 fragment deploy <its name>
 ```
 
@@ -313,6 +326,39 @@ It brings the cap's pick: photos, video, audio and documents first, the
 newest first, up to 10 GiB. It writes `left-behind.md` beside them,
 listing what stayed and why. Its page shows the files. If it stops
 partway, run it again: it sends only what is missing.
+
+**In a move, nothing stays behind.** The rest of the old home is kept
+whole in your storage: the one members-only fragment of your owner's
+that holds what you move off your disk (`disk-space-finite`). Use yours
+if `fragment list` has it, else make it once, named for you
+(`fragment create <your name>-storage --visibility members`), and write
+its full name in `progress.md`. A big home takes a while: when the
+survey's files are more than 5 GB, first tell your owner in one short
+sentence that your upgrade is under way and will take a while, and that
+you'll tell them when it's done. Then run this in the background,
+without `notify`, and wait for it with your `process` tool:
+
+```sh
+fragment home files <source> --layout <L> --into <its name> --store <your storage> --notes "$HOME/old-agent/home" --json
+```
+
+It brings the cap's pick as above, and keeps every other file of the old
+home (its self, its brains' files, what the cap leaves) whole in your
+storage, copied there by the platform, never through your disk. Each
+folder or file kept gets a note in `~/old-agent/home/`, laid out as the
+old home was, as `fragment offload` leaves one: `fragment offload --back
+<its note>` brings it back when you need it (only once there is room for
+it). Its answer counts the home's files: here, in storage, and unread.
+- **It stops partway:** run it again the same way. It goes on.
+- **`stored.more`:** your storage is full (a fragment holds about 20,000
+  files). Make another, `<your name>-storage-2`, write its name in
+  `progress.md`, and run it again with `--store` naming that one.
+
+Then deploy each, once: `fragment deploy <its name>` and
+`fragment deploy <your storage>`. And save one memory: the rest of your
+old home is kept in your storage, a note for each folder or file in
+`~/old-agent/home/`, and `fragment offload --back <its note>` brings one
+back.
 
 ## 4. Personality
 
@@ -439,14 +485,18 @@ you're upgraded and here, then the rest:
   the profile made. The old chats are in their History (how many, as
   the import printed), where search finds them by what was said. The old
   memories are kept whole on your computer, in its `old-agent` folder
-  (`report.md` names the path).
+  (`report.md` names the path). In a move, the rest of the old home is
+  kept whole in their storage (its link), and you can bring any of it
+  back when they ask: say how many files and how large.
 - **What came over:** your personality, how many memories, the skills (by
   name), and the routines (when they run, in your owner's time).
 - **What didn't, and why**, a sentence each:
   - every skill left out;
   - the jobs that are no routine;
-  - the files left behind, by kind (the survey's `files.left_by_why`:
-    how many videos, archives and the like, with the largest by name);
+  - not in a move, the files left behind, by kind (the survey's
+    `files.left_by_why`: how many videos, archives and the like, with the
+    largest by name); in a move, none are: say what stayed in storage for
+    lack of room here, if anything did;
   - the files left out unread for holding what may be a password or
     key (`source.skipped`), by name;
   - in a move, what the old platform kept back (the manifest's `left`);

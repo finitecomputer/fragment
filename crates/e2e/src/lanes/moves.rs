@@ -1147,6 +1147,12 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
         ("workspace/videos/trip.mp4", pattern(40 * MIB, 1)),
         ("workspace/photos/garden.jpg", pattern(3 * MIB, 2)),
         ("workspace/datasets/readings.csv", pattern(6 * MIB, 3)),
+        // what the files' pick leaves: weights larger than the computer's
+        // room, a project's history (a hidden folder), a key file
+        ("workspace/models/llama.gguf", pattern(30 * MIB, 4)),
+        ("workspace/projects/app/.git/HEAD", b"ref: refs/heads/main\n".to_vec()),
+        ("workspace/projects/app/.git/objects/ab/cdef", pattern(4096, 5)),
+        ("workspace/projects/app/.env", b"TOKEN=not-read".to_vec()),
     ];
     let files = fragment_fakes::old_home::stage(&zip_at, &extra)?;
     let zip = std::fs::read(&zip_at)?;
@@ -1212,6 +1218,74 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
     let kept = disk_used(&home);
     s.ok("what the import keeps on the computer is within its room: the stage never came onto it", kept <= BIG_ROOM, format!("{kept} bytes"));
 
+    // nothing left behind: the rest of the home kept in storage, a note where each was
+    let storage = s.create(api, &owner, "storage")?["name"].as_str().unwrap_or_default().to_string();
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{storage}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "its storage made members-only: {r}");
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{storage}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent edits its storage: {r}");
+    let notes = home.join("old-agent/home");
+    let notes_arg = notes.to_str().context("a utf-8 path")?.to_string();
+    let store = |s: &Suite| run(s, &["home", "files", &source, "--layout", &layout, "--into", &name, "--store", &storage, "--notes", &notes_arg, "--json"]);
+    let all = store(s)?;
+    let stored = &all["stored"];
+    // count and hash every file of the stage: each in one place, whole, but those never read
+    let read = |fragment: &str, path: &str| api.signed(&owner, "GET", &format!("/api/f/{fragment}/file?path={}", crate::api::url_enc(path)), None);
+    let (mut here, mut there, mut unread, mut wrong) = (0, 0, 0, vec![]);
+    for (path, want) in &files {
+        let in_files = match path.strip_prefix("workspace/") {
+            Some(rel) => Some(read(&name, &format!("files/{rel}"))?),
+            None => None,
+        };
+        let in_storage = read(&storage, &format!("home/{path}"))?;
+        let files_status = in_files.as_ref().map_or(404, |r| r.status);
+        match (in_files.is_some_and(|r| r.status == 200 && r.bytes == *want), in_storage.status == 200 && in_storage.bytes == *want) {
+            (true, false) => here += 1,
+            (false, true) => there += 1,
+            (false, false) if path.ends_with("/.env") && files_status == 404 && in_storage.status == 404 => unread += 1,
+            _ => wrong.push(format!("{path}: files {files_status} storage {}", in_storage.status)),
+        }
+    }
+    let manifest = opened.body["manifest"]["files"].as_u64().unwrap_or(0);
+    s.ok(
+        "nothing is left behind: every file of the stage, counted against its manifest and hashed, is in the files or kept whole in storage, but a key file, never read",
+        wrong.is_empty() && here + there + unread == manifest as usize && unread == 1 && there >= 10 && stored["files"].as_u64() == Some(there as u64) && all["unread"] == 1,
+        json!({ "here": here, "there": there, "unread": unread, "manifest": manifest, "wrong": wrong, "stored": stored }),
+    );
+    let note_of = |p: &str| notes.join(format!("{p}.offloaded.md"));
+    // the work kept is one note (within a note's bounds), larger than the room
+    let weights = note_of("workspace");
+    let left = String::from_utf8_lossy(&read(&name, "left-behind.md")?.bytes).to_string();
+    s.ok(
+        "a note where each kept folder or file was, laid out as the old home, and the files' list says where the rest is",
+        weights.is_file() && std::fs::read_to_string(&weights).unwrap_or_default().contains(&format!("`{storage}`")) && note_of("agent").is_file() && left.starts_with("# Kept in storage") && left.contains(&storage),
+        json!({ "notes": stored["notes_written"], "left": left.lines().take(3).collect::<Vec<_>>() }),
+    );
+    let kept = disk_used(&home);
+    s.ok("the rest of the home never came onto the computer: what it keeps there is still within its room", kept <= BIG_ROOM, format!("{kept} bytes"));
+    // back, as the agent brings back what it offloads: within its room, and not past it
+    let back = |s: &Suite, note: &std::path::Path| s.cli_in_room(api, &home, BIG_ROOM, &["offload", "--back", note.to_str().unwrap_or_default(), "--json"]);
+    let agent_back = back(s, &note_of("agent"));
+    let soul = files.iter().find(|(p, _)| p == "agent/hermes-home/SOUL.md").map(|(_, b)| b.clone()).unwrap_or_default();
+    let too_big = back(s, &weights);
+    s.ok(
+        "a note comes back as `fragment offload` brings one back, each file checked against the old one; one larger than the computer's room does not, and its note stays",
+        agent_back.status.success() && std::fs::read(notes.join("agent/hermes-home/SOUL.md")).ok() == Some(soul) && !note_of("agent").exists() && !too_big.status.success() && weights.is_file(),
+        format!("{} | {}", String::from_utf8_lossy(&agent_back.stdout), String::from_utf8_lossy(&too_big.stdout)),
+    );
+    let again = store(s)?;
+    s.ok(
+        "again, nothing more is kept: what its notes name, and what came back, is kept already",
+        again["stored"]["files"] == 0 && again["stored"]["already"] == stored["files"] && again["files"] == 0,
+        &again["stored"],
+    );
+    // what its owner sees: the files, and their storage, each a page of files
+    for f in [&name, &storage] {
+        let deployed = s.cli_in_room(api, &home, BIG_ROOM, &["deploy", f]);
+        anyhow::ensure!(deployed.status.success(), "the agent deploys {f}: {}", String::from_utf8_lossy(&deployed.stderr));
+    }
+    owner_sees(s, api, &owner, &[(&name, "files"), (&storage, "storage")])?;
+
     // the copy, stage to blobs on the platform: the bound agent's alone,
     // into a fragment it (or its owner, `for`) edits, within the zip and
     // its upload limit
@@ -1249,6 +1323,39 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
     let done = api.signed(&agent_keys, "POST", &format!("{base}/done"), Some(&json!({ "ok": true })))?;
     let after = copy(&agent_keys, &name, &range)?;
     s.ok("it says it is done: the move waits for staff, and its stage copies no more (409)", done.status == 200 && done.body["state"] == "retiring" && after.status == 409, format!("{done} | {}", after.status));
+    Ok(())
+}
+
+/// Each of `pages` (a fragment, and what to call its picture) as `owner`
+/// opens it from their apps, in Chrome, at 1280 and 390 px, light and
+/// dark: the move-big section's pictures (no Chrome, none).
+fn owner_sees(s: &mut Suite, api: &Api, owner: &crate::Keys, pages: &[(&str, &str)]) -> Result<()> {
+    let Some(mut b) = s.browser()? else {
+        println!("      (no Chrome: no pictures of the owner's pages)");
+        return Ok(());
+    };
+    let shots = s.dir("move-big");
+    let session = api.sign_in(&Api::email_of(owner))?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let wait = Duration::from_secs(30);
+    for (name, called) in pages {
+        let row = format!("document.querySelector({})", serde_json::to_string(&format!("#apps [data-key=\"app:{name}\"]"))?);
+        let mut shown = true;
+        for (width, height, phone) in [(1280, 800, false), (390, 844, true)] {
+            for scheme in ["light", "dark"] {
+                let page = b.open(&format!("{}/", api.base))?;
+                b.viewport(&page, width, height, phone)?;
+                b.color_scheme(&page, scheme)?;
+                let opened = b.until(&page, &format!("!!{row}"), wait) && { b.eval(&page, &format!("({row}.click(), true)"))?; b.until(&page, "!!document.querySelector('.viewer iframe')", wait) };
+                std::thread::sleep(Duration::from_millis(1500));
+                let _ = b.screenshot(&page, &shots.join(format!("{called}-{width}-{scheme}.png")));
+                shown &= opened;
+                b.close(page)?;
+            }
+        }
+        s.ok(&format!("its owner opens its {called} from their apps, a page of its files"), shown, name);
+    }
+    println!("      (screenshots: {})", shots.display());
     Ok(())
 }
 

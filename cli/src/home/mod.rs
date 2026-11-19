@@ -16,6 +16,7 @@ mod routines;
 pub(crate) mod rules;
 mod skills;
 pub mod source;
+pub(crate) mod store;
 pub(crate) mod survey;
 
 use std::path::{Path, PathBuf};
@@ -48,12 +49,26 @@ pub enum HomeCmd {
     /// `files/`, large ones as blobs, the cap's pick (photos, video, audio
     /// and documents first, the newest first, up to 10 GiB), and
     /// `left-behind.md` listing what stayed and why. Running it again goes
-    /// on where it stopped, and sends nothing twice
+    /// on where it stopped, and sends nothing twice. With --store, nothing
+    /// stays behind: every other file of the home (but those whose names
+    /// say they may hold a password or key, never read) is kept whole in a
+    /// storage fragment, a note where each was (`fragment offload --back`
+    /// brings it back)
     Files {
         source: PathBuf,
         /// The fragment to bring them into
         #[arg(long)]
         into: String,
+        /// The members-only storage fragment the rest of the home is kept
+        /// in (a move's import: from a stage, copied there on the platform,
+        /// never through this disk). One that fills says what is left, for
+        /// another
+        #[arg(long, requires = "notes", conflicts_with = "plan")]
+        store: Option<String>,
+        /// The folder the notes go in, laid out as the home: one for each
+        /// folder or file kept, `<name>.offloaded.md`
+        #[arg(long, requires = "store")]
+        notes: Option<PathBuf>,
         /// Only say what it would bring and leave; send nothing
         #[arg(long)]
         plan: bool,
@@ -219,11 +234,12 @@ impl HomeCmd {
 /// `c`: the platform's client, for a command that `calls` it.
 pub fn run(sub: HomeCmd, c: Option<&crate::api::Client>) -> Result<Done> {
     match sub {
-        HomeCmd::Files { source, into, plan, layout } => {
+        HomeCmd::Files { source, into, plan, layout, store, notes } => {
             let layout = Layout::named(&layout)?;
             let src = open_from(c, &source, &layout)?;
+            let store = store.as_deref().zip(notes.as_deref()).map(|(into, notes)| files::Store { into, notes });
             match c {
-                Some(c) if !plan => Ok(Done::Brought(files::bring(c, &src, &layout, &into)?)),
+                Some(c) if !plan => Ok(Done::Brought(files::bring(c, &src, &layout, &into, store)?)),
                 _ => Ok(Done::Planned(Box::new(files::planned(&src, &layout)?))),
             }
         }
