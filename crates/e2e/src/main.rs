@@ -976,6 +976,7 @@ impl Suite {
             log_dir: self.scratch.clone(),
             // a crash kills wrangler and workerd as one
             own_group: true,
+            trace_store: false,
         };
         let (node, _) = match &self.celld {
             None => devstack::Node::start(tools, &opts)?,
