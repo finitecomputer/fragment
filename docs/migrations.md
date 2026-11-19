@@ -101,8 +101,9 @@ it, the offer's cover stands aside: it is answered there.
   staff's retry of the first could start while the second imports. The
   server refuses a Yes into an agent another move is bound to (409,
   `fragment_core::migrations::yes_into`), whatever that move's state,
-  and choosing it for a second old agent on the page takes it from the
-  first. One of theirs is taken as it is: its Yes alone, nothing made,
+  and staff's retry that would stage or import into such an agent again
+  (`retry_into`; one that only retires goes on), and choosing it for a
+  second old agent on the page takes it from the first. One of theirs is taken as it is: its Yes alone, nothing made,
   nothing written to it. Until that Yes lands nothing is decided, so a
   reload asks again; once it lands the move names the agent (the
   offer's `agent`), and nothing is asked. An old agent that an agent was
@@ -433,7 +434,7 @@ staff read a move's state and act on it here.
 | Route | Answer |
 |---|---|
 | `GET /api/admin/migrations[?after=<old>]` | `AdminMoves`: each move by old id, a page at a time, with staff's `why` on each they withdrew |
-| `POST /api/admin/migrations/{old}` `AdminAct {op, why?}` | `AdminMove`, after `op`: `retry` (a held move, or a good import waiting for staff, asked again as a new attempt), `restart-old` (the old agent started again, the move offered again), `retire` (the old agent retired as migrated: a good import waiting for staff's word, or a held move), `withdraw` with `why` (the move out of the roster's hands: offered no more), or `include` (staff's withdrawal taken back); `null` once the move is gone |
+| `POST /api/admin/migrations/{old}` `AdminAct {op, why?}` | `AdminMove`, after `op`: `retry` (a held move, or a good import waiting for staff, asked again as a new attempt; 409 when that would import into an agent another move is bound to), `restart-old` (the old agent started again, the move offered again), `retire` (the old agent retired as migrated: a good import waiting for staff's word, or a held move), `withdraw` with `why` (the move out of the roster's hands: offered no more), or `include` (staff's withdrawal taken back); `null` once the move is gone |
 
 ### The will-not-move list
 

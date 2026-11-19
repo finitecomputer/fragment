@@ -562,7 +562,7 @@ fn text_ok(what: &str, s: &str) -> CellResult<()> {
 /// A refusal of the machine's, as the route answers it.
 fn refused(r: Refused) -> CellError {
     let code = match r {
-        Refused::NotNow(_) | Refused::Stale | Refused::Begun | Refused::Taken => ErrorCode::Conflict,
+        Refused::NotNow(_) | Refused::Stale | Refused::Begun | Refused::Taken | Refused::RetryTaken => ErrorCode::Conflict,
         Refused::NotYours => ErrorCode::Forbidden,
         Refused::NoStage => ErrorCode::NotFound,
         Refused::Unfit(_) | Refused::Why => ErrorCode::InvalidRequest,
@@ -1070,8 +1070,7 @@ impl MigrationsCell {
             ("never", _) => machine::never(&m, now),
             ("ask-again" | "ask_again", _) => machine::ask_again(&m, now),
             ("yes", Some((agent, owner))) if owner == theirs => {
-                let elsewhere = !parts.rows("SELECT old FROM moves WHERE agent = ? AND old <> ? LIMIT 1", vec![text_value(agent), text_value(old)])?.is_empty();
-                machine::yes_into(&m, agent, elsewhere, now)
+                machine::yes_into(&m, agent, self.bound_elsewhere(old, agent)?, now)
             }
             ("yes", _) => return Err(CellError::new(ErrorCode::Forbidden, "yes binds an agent of the person's own")),
             (other, _) => return Err(CellError::invalid(format!("no answer {other}"))),
@@ -1084,6 +1083,12 @@ impl MigrationsCell {
                 Ok(at)
             }
         }
+    }
+
+    /// Whether a move other than `old`'s is bound to `agent`: an agent takes
+    /// in one move, ever (`machine::yes_into`, `machine::retry_into`).
+    fn bound_elsewhere(&self, old: &str, agent: &str) -> CellResult<bool> {
+        Ok(!self.parts().rows("SELECT old FROM moves WHERE agent = ? AND old <> ? LIMIT 1", vec![text_value(agent), text_value(old)])?.is_empty())
     }
 
     /// When the move's comp (F5) the WorkOS user's person is owed ends, if
@@ -1142,7 +1147,9 @@ impl MigrationsCell {
             (None, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move"))),
         };
         let outcome = match act {
-            "retry" => machine::retry(&m, now),
+            // a retry imports into its agent again: refused while another
+            // move is bound to that agent, as a Yes into it is
+            "retry" => machine::retry_into(&m, m.agent.as_deref().map(|a| self.bound_elsewhere(old, a)).transpose()?.unwrap_or(false), now),
             "restart-old" => machine::restart_old(&m, now),
             "retire" => machine::retire(&m, now),
             "withdraw" => machine::withdraw(&m, why, now),
