@@ -219,9 +219,6 @@ const BACKUPS_MS: i64 = ALARM_WALL_MS - ALARM_OTHER_MS - HOLD_STEPS_MS - MARK_EX
 /// start fits an alarm of its own (a retry's, or one owed after a sleep:
 /// `Lifecycle::start_due`).
 const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS - DISK_READ_MS - ALARM_OTHER_MS;
-/// Let-gos of a hold one `unhold` makes at most: its own, and those asked
-/// while it ran (each a command within `MARK_EXEC_MS`).
-const UNHOLD_ROUNDS: usize = 3;
 /// The lever's `slow-tell` waits at most this: a restart's request is held
 /// no longer than a request's wait in the lane.
 const SLOW_TELL_MAX_MS: u64 = 30_000;
@@ -450,10 +447,6 @@ pub struct ComputerCell {
     /// a let-go never waits for a touch in flight, whose answer lets go
     /// again if its sleep was cancelled (`Lifecycle`'s late `Held`).
     marking: futures_util::lock::Mutex<()>,
-    /// A let-go asked while the marker's turn was taken: the let-go holding
-    /// it makes this one too, after its own (`unhold`), so none is lost
-    /// when the one under way fails.
-    unhold_owed: std::cell::Cell<bool>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
     /// guest's view lists, and what a swap may use: a token is asked of
@@ -502,7 +495,6 @@ impl DurableObject for ComputerCell {
             adopted: std::cell::Cell::new(false),
             taking_over: futures_util::lock::Mutex::new(()),
             marking: futures_util::lock::Mutex::new(()),
-            unhold_owed: std::cell::Cell::new(false),
             states: RefCell::default(),
             accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
@@ -1118,7 +1110,7 @@ impl ComputerCell {
             }
             self.alarm_at(step.alarm_ms).await?;
             refused = refused.or(step.refused.clone());
-            for next in self.perform(step).await? {
+            for next in self.perform(step, matches!(applied, Event::Held { .. })).await? {
                 queue.push(next);
             }
             // its disk, once an awake save worked (a start reads its own
@@ -1217,7 +1209,9 @@ impl ComputerCell {
     }
 
     /// Performs a step's actions: the events they report, in order.
-    async fn perform(&self, step: Step) -> CellResult<Vec<Event>> {
+    /// `after_held`: the step answered a hold, so its let-go is a late
+    /// answer's, which waits for the marker's turn (`unhold`).
+    async fn perform(&self, step: Step, after_held: bool) -> CellResult<Vec<Event>> {
         let mut reported = vec![];
         for action in step.actions {
             match action {
@@ -1225,7 +1219,7 @@ impl ComputerCell {
                 Action::Sleep { generation } => reported.extend(self.hold(generation, true).await),
                 Action::Hold { generation } => reported.extend(self.hold(generation, false).await),
                 Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
-                Action::Unhold { generation } => self.unhold(generation).await,
+                Action::Unhold { generation } => self.unhold(generation, after_held).await,
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved).await),
                 Action::Meter { from_ms, to_ms } => {
                     // kept until the owner's ledger has it: a flush that fails
@@ -1971,27 +1965,27 @@ impl ComputerCell {
     /// and one a newer hold, save or stop holds now is that one's (its
     /// owner's sleep just after a wake cancelled one): left as it is. It
     /// takes the marker's turn (`marking`) for its look and its command, so
-    /// a newer touch waits for it. Asked while the turn is taken, it is
-    /// owed (`unhold_owed`): the let-go holding the turn makes it after its
-    /// own; a touch holding it hands it to its answer's let-go.
-    async fn unhold(&self, generation: u64) {
-        self.unhold_owed.set(true);
-        let Some(_marking) = self.marking.try_lock() else { return };
-        // bounded: its own, then each asked as it ran (a cancelled hold's
-        // answer lets go again), each looking afresh
-        for _ in 0..UNHOLD_ROUNDS {
-            if !self.unhold_owed.replace(false) {
-                return;
-            }
-            if !self.container_running().await || self.lifecycle().is_ok_and(|l| l.saving().is_some()) {
-                continue;
-            }
-            // (the lever's `stall-unhold`: a let-go slow to land, after its look)
-            self.lever_wait(MetaKey::StallUnhold, STALL_FAILING_START_MAX_MS).await;
-            let g = JsValue::from_f64(generation as f64);
-            if let Err(e) = self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await {
-                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unhold": "failed", "generation": generation, "error": e.message }));
-            }
+    /// a newer touch waits for it. With the turn taken it does nothing, never
+    /// waiting on a person's path (a wake's): a touch in flight hands it to
+    /// its answer's let-go. That one (`after_held`, a late hold's answer,
+    /// in an alarm: an idle sleep's or an awake save's) waits for the turn,
+    /// so it lands after a let-go in flight, whether or not that one did.
+    async fn unhold(&self, generation: u64, after_held: bool) {
+        let _marking = match after_held {
+            true => self.marking.lock().await,
+            false => match self.marking.try_lock() {
+                Some(turn) => turn,
+                None => return,
+            },
+        };
+        if !self.container_running().await || self.lifecycle().is_ok_and(|l| l.saving().is_some()) {
+            return;
+        }
+        // (the lever's `stall-unhold`: a let-go slow to land, after its look)
+        self.lever_wait(MetaKey::StallUnhold, STALL_FAILING_START_MAX_MS).await;
+        let g = JsValue::from_f64(generation as f64);
+        if let Err(e) = self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unhold": "failed", "generation": generation, "error": e.message }));
         }
     }
 
