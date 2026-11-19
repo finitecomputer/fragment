@@ -2863,6 +2863,10 @@ fn kind_of(cmd: &Cmd) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "name_reuse_tests.rs"]
+mod name_reuse_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
