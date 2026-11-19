@@ -1169,7 +1169,10 @@ impl ComputerCell {
             let mut life = self.lifecycle()?;
             let logged = json!(event);
             let applied = event.clone();
-            let step = life.apply_with(event, js::now_ms(), &rules);
+            let now = js::now_ms();
+            // an owner's restart it takes asks its start as it applies
+            self.starts.borrow_mut().applying(&applied, &life, now);
+            let step = life.apply_with(event, now, &rules);
             // one line per event (lesson 14): what happened, and what it led to
             let mut line = json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions });
             if let Some(ended) = step.ended {
@@ -1399,12 +1402,8 @@ impl ComputerCell {
         }
         if !matches!(life.phase, Phase::Starting { .. }) {
             // the start under way is the restart's, asked of no ledger again
-            let asked = js::now_ms();
             self.may_start(json!("restart")).await?;
             self.update_saves(|s| s.restart_fresh())?;
-            if let Ok(restarting) = self.lifecycle() {
-                self.starts.borrow_mut().asked(Woke::Restart, &restarting.phase, asked);
-            }
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": life.generation(), "phase": life.phase }));
         }
         // its answer, the view as its start was owed (`drive_events`); one
