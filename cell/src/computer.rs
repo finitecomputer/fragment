@@ -1928,7 +1928,8 @@ impl ComputerCell {
         let logged = json!(event);
         let applied = self.lifecycle().and_then(|mut life| {
             let step = life.apply_with(event, js::now_ms(), &self.rules());
-            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions }));
+            // (whether it lets go, not its actions: their encoder costs the Wasm)
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "unhold": !step.actions.is_empty() }));
             self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)?;
             Ok(step)
         });
@@ -1937,7 +1938,7 @@ impl ComputerCell {
             Ok(step) => {
                 assert!(step.ended.is_none() && step.note == SaveNote::Same, "a save's home ends no life and says nothing of its saves");
                 for action in step.actions {
-                    let Action::Unhold { generation } = action else { unreachable!("a save's home asks for its unhold alone: {action:?}") };
+                    let Action::Unhold { generation } = action else { unreachable!("a save's home asks for its unhold alone") };
                     self.unhold(generation).await;
                 }
             }
