@@ -29,3 +29,5 @@ tar = { version = "0.4", default-features = false }
 # makes, from the CLI's fixture of what Hermes writes, the state.db the
 # sessions section imports
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+# a computer's room, as the move-big section gives its CLI one (setrlimit)
+libc = "=0.2.189"

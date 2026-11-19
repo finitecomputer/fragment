@@ -139,7 +139,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         return part(req, env, url, &m.mover, stage, n).await;
     }
     if let ["stages", stage, op] = rest {
-        return stage_route(req, env, url, stage, op).await;
+        return stage_route(req, env, cfg, url, stage, op).await;
     }
     if let ["offers", old, op] = rest {
         return offer_route(req, env, cfg, url, old, op).await;
@@ -376,10 +376,17 @@ fn pass(env: &Env, op: String, body: String) -> Waits<'_, Response> {
 /// itself (its computer's egress signs so). The object says whether the
 /// stage is that agent's to read now: only the agent its person's Yes
 /// bound, while the move imports it. `open` answers its manifest; `zip`
-/// its bytes, whole or by a range; `done` ends the import.
-fn stage_route<'a>(mut req: Request, env: &'a Env, url: &'a Url, stage: &'a str, op: &'a str) -> Waits<'a, Response> {
+/// its bytes, whole or by a range; `copy` one range of them into a
+/// fragment's blobs; `done` ends the import.
+fn stage_route<'a>(mut req: Request, env: &'a Env, cfg: &'a Config, url: &'a Url, stage: &'a str, op: &'a str) -> Waits<'a, Response> {
     Box::pin(async move {
         let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+        if (req.method(), op) == (Method::Post, "copy") {
+            // as the agent, or for its owner (`for`): the fragment it writes
+            // is often its owner's, as a fragment's own routes take it
+            let who = crate::signer_for(env, &req, url, &bytes).await?;
+            return copy(env, cfg, url, stage, who).await;
+        }
         let agent = crate::signer(env, &req, url, &bytes).await?.identity.id;
         match (req.method(), op) {
             (Method::Post, "open") => pass(env, format!("open/{stage}/{agent}"), String::new()).await,
@@ -392,6 +399,45 @@ fn stage_route<'a>(mut req: Request, env: &'a Env, url: &'a Url, stage: &'a str,
             (Method::Post, "done") => pass(env, format!("done/{stage}/{agent}"), text(bytes)?).await,
             _ => Err(crate::no_route(url.path())),
         }
+    })
+}
+
+/// `POST …/copy?into=&offset=&bytes=`: one range of the stage's zip (a
+/// file's bytes, or a part of them) into the blobs of `into`, on the
+/// platform: never through the agent's computer, which may hold far less
+/// than its stage (2026-11-18: a 47 GB import failed on 20 GB). Hashed as
+/// R2 reads it, with its CRC-32 (the zip's own check, which the caller
+/// compares with the entry's: a damaged one is never taken for the file),
+/// then read again into `into`'s blob upload as the agent (or for its
+/// owner): the fragment checks the caller edits it, and the hash again as
+/// the bytes arrive. Answers `StageCopied`: the blob, by its bytes'
+/// SHA-256, and their CRC-32.
+fn copy<'a>(env: &'a Env, cfg: &'a Config, url: &'a Url, stage: &'a str, who: crate::routed::Signed) -> Waits<'a, Response> {
+    Box::pin(async move {
+        let into = crate::named_fragment(&query(url, "into"))?;
+        let number = |k: &str| query(url, k).parse::<u64>().map_err(|_| CellError::invalid(format!("a copy's {k} is a number of bytes")));
+        let (offset, len) = (number("offset")?, number("bytes")?);
+        let most = cfg.uploads_for(who.identity.kind).upload_max_bytes;
+        if len == 0 {
+            return Err(CellError::invalid("a copy holds a byte at least"));
+        }
+        if len > most {
+            return Err(CellError::too_large("a copy", len as usize, most as usize));
+        }
+        let key = text(ask(env, format!("readable/{stage}/{}", who.identity.id), String::new()).await?)?;
+        let gone = || CellError::host(format!("stage {stage} imports, and its zip is gone"));
+        let size = js::object_size(env, STAGE, &key).await?.ok_or_else(gone)?;
+        let end = offset.checked_add(len).filter(|e| *e <= size).ok_or_else(|| CellError::invalid(format!("bytes {offset} to {offset}+{len} are past the zip's {size}")))?;
+        let range = format!("bytes={offset}-{}", end - 1);
+        let (sha, crc) = js::digest_and_crc(js::blob_get(env, STAGE, &key, Some(&range)).await?.ok_or_else(gone)?.body).await?;
+        let body = js::blob_get(env, STAGE, &key, Some(&range)).await?.ok_or_else(gone)?.body;
+        let routed = crate::routed::Routed { name: into, url: url.clone(), signed: Some(who), credential: None };
+        let stored = crate::stream_to(env, routed, Method::Put, &format!("/api/blobs/{sha}"), body, len).await?;
+        if stored.status_code() != 200 {
+            return Ok(stored);
+        }
+        // `StageCopied`, its hash 64 hex
+        crate::json_passed(format!("{{\"sha256\":\"{sha}\",\"bytes\":{len},\"crc32\":{crc}}}").into_bytes())
     })
 }
 
@@ -551,7 +597,7 @@ fn text_ok(what: &str, s: &str) -> CellResult<()> {
 /// A refusal of the machine's, as the route answers it.
 fn refused(r: Refused) -> CellError {
     let code = match r {
-        Refused::NotNow(_) | Refused::Stale | Refused::Begun => ErrorCode::Conflict,
+        Refused::NotNow(_) | Refused::Stale | Refused::Begun | Refused::Taken | Refused::RetryTaken => ErrorCode::Conflict,
         Refused::NotYours => ErrorCode::Forbidden,
         Refused::NoStage => ErrorCode::NotFound,
         Refused::Unfit(_) | Refused::Why => ErrorCode::InvalidRequest,
@@ -1039,8 +1085,9 @@ impl MigrationsCell {
     /// A person's answer to `old`'s offer (`later`, `never`, `ask-again`,
     /// `yes` with an agent and its owner): `person` names who answers, its
     /// move theirs (404 otherwise); `None` is a lever's, for its person.
-    /// A Yes binds an agent of the person's own alone (403). The move's
-    /// state and attempt after.
+    /// A Yes binds an agent of the person's own alone (403): a new one, or
+    /// one they had already, that no other move is bound to (409,
+    /// `machine::yes_into`). The move's state and attempt after.
     fn answer(&self, old: &str, person: Option<&str>, op: &str, agent: Option<(&str, &str)>) -> CellResult<(MoveState, u32)> {
         let parts = self.parts();
         let m = match person {
@@ -1053,7 +1100,9 @@ impl MigrationsCell {
             ("later", _) => machine::later(&m, now),
             ("never", _) => machine::never(&m, now),
             ("ask-again" | "ask_again", _) => machine::ask_again(&m, now),
-            ("yes", Some((agent, owner))) if owner == theirs => machine::yes(&m, agent, now),
+            ("yes", Some((agent, owner))) if owner == theirs => {
+                machine::yes_into(&m, agent, self.bound_elsewhere(old, agent)?, now)
+            }
             ("yes", _) => return Err(CellError::new(ErrorCode::Forbidden, "yes binds an agent of the person's own")),
             (other, _) => return Err(CellError::invalid(format!("no answer {other}"))),
         };
@@ -1065,6 +1114,12 @@ impl MigrationsCell {
                 Ok(at)
             }
         }
+    }
+
+    /// Whether a move other than `old`'s is bound to `agent`: an agent takes
+    /// in one move, ever (`machine::yes_into`, `machine::retry_into`).
+    fn bound_elsewhere(&self, old: &str, agent: &str) -> CellResult<bool> {
+        Ok(!self.parts().rows("SELECT old FROM moves WHERE agent = ? AND old <> ? LIMIT 1", vec![text_value(agent), text_value(old)])?.is_empty())
     }
 
     /// Whether the WorkOS user's person is owed the move's comp (F5): an
@@ -1120,7 +1175,9 @@ impl MigrationsCell {
             (None, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move"))),
         };
         let outcome = match act {
-            "retry" => machine::retry(&m, now),
+            // a retry imports into its agent again: refused while another
+            // move is bound to that agent, as a Yes into it is
+            "retry" => machine::retry_into(&m, m.agent.as_deref().map(|a| self.bound_elsewhere(old, a)).transpose()?.unwrap_or(false), now),
             "restart-old" => machine::restart_old(&m, now),
             "retire" => machine::retire(&m, now),
             "withdraw" => machine::withdraw(&m, why, now),
