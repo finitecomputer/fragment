@@ -181,6 +181,22 @@ pub(crate) fn app_loader(ctx: &JsValue, env: &JsValue, sql: SqlStorage) -> js::A
 }
 
 impl FragmentCell {
+    /// A test hook (`hold`): a request reaching `step` waits while the
+    /// fragment's `TestHold` names it, at most `TEST_HOLD_MAX_MS`, and says
+    /// where it waits (`TestHoldAt`), so an e2e puts another request, or a
+    /// restart, between two of its turns. Nothing outside a test fleet.
+    pub(crate) async fn test_hold(&self, step: &str) {
+        const TEST_HOLD_MAX_MS: i64 = 30_000;
+        if !self.cfg.test_hooks {
+            return;
+        }
+        let begun = js::now_ms();
+        while self.meta(MetaKey::TestHold).ok().flatten().as_deref() == Some(step) && js::now_ms() - begun < TEST_HOLD_MAX_MS {
+            let _ = self.set_meta(MetaKey::TestHoldAt, step);
+            worker::Delay::from(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// The running app facet for the installed code. A call reads only
     /// whether there is code: the facet table answers the running facet,
     /// and the loader's callbacks read the code when there is none.
@@ -755,6 +771,18 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "pollAt": now })
             }
+            Some("hold") => {
+                // a request at `step` waits while it is held (`test_hold`);
+                // none lets every held request go on
+                self.del_meta(MetaKey::TestHoldAt)?;
+                match body["step"].as_str() {
+                    Some(step) => self.set_meta(MetaKey::TestHold, step)?,
+                    None => self.del_meta(MetaKey::TestHold)?,
+                }
+                json!({ "held": body["step"] })
+            }
+            // where a held request waits, if one does
+            Some("hold-at") => json!({ "at": self.meta(MetaKey::TestHoldAt)? }),
             Some("hold-rows") => {
                 // while on, the alarm sends no list row (`on_alarm`): a row
                 // a list shows was sent by a request's own flush or its
