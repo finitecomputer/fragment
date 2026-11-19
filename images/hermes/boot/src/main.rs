@@ -27,7 +27,7 @@ mod skills;
 mod skill_references;
 mod sync;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -1699,12 +1699,23 @@ async fn boot_main() {
                         // their own, and it ready for that runtime once they
                         // are (meanwhile in the roster, its turns held)
                         restore(&api, &read, &home, ids, &quiet, &restoring);
-                        let restored = restoring.lock().expect("the restores are never poisoned").done.clone();
-                        if !change.is_empty() || agents::ready_file(&read, &restored) != ready_now {
-                            ready_now = follow_agents(&api, &change, &read, &restored, &home, ids, &route, &credential_env, &team).await;
+                        let (restored, running) = {
+                            let r = restoring.lock().expect("the restores are never poisoned");
+                            (r.done.clone(), r.running.keys().cloned().collect::<BTreeSet<String>>())
+                        };
+                        // one switched back to Hermes while a restore of its
+                        // files runs: its profile is written (and synced) once
+                        // that ended, so one sync at a time pushes its files;
+                        // the change waits for a read after it
+                        if let Some(a) = change.added.iter().find(|a| running.contains(&a.fragment)) {
+                            ev!("agents.waiting", { "agent": a.fragment, "why": "a restore of its files is still under way" });
+                        } else {
+                            if !change.is_empty() || agents::ready_file(&read, &restored) != ready_now {
+                                ready_now = follow_agents(&api, &change, &read, &restored, &home, ids, &route, &credential_env, &team).await;
+                            }
+                            published = restored;
+                            agents = read;
                         }
-                        published = restored;
-                        agents = read;
                     }
                     // once per outage: the next read that answers ends it
                     Err(e) if !agents_unread => {
