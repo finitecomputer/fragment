@@ -443,6 +443,16 @@ A stage is never downloaded: the importer reads it in place, by ranges
 computer's disk nor its `/data` saves (docs/computers.md) ever hold it.
 An old agent's home can be larger than a new computer's whole disk.
 
+Nothing is left behind (Paul, 11-19). Beside what the import brings,
+`fragment home files --store` keeps every other file of the stage whole
+in the agent's storage (its owner's members-only fragment, the one
+`fragment offload` moves into), each large file copied there by the
+platform (`…/copy`), never through the computer, with a note where each
+was that `fragment offload --back` brings back. Only a file whose name
+says it may hold a password or key stays behind, unread, as before. Kept
+blobs bill the owner's ledger as any fragment's storage does (R2's
+price, with the margin: about $0.02 a GB a month).
+
 ## The operators' routes
 
 `/api/admin/migrations`, from the CLI: the whole admin surface. There

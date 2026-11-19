@@ -44,6 +44,10 @@ const MANIFEST_BYTES: &[u8] = b"{\n  \"files\": { \"page\": true }\n}\n";
 #[derive(Debug, Serialize)]
 pub struct Brought {
     pub fragment: String,
+    /// The home's files in all, those that may hold a password or key
+    /// among them, which nothing reads (`unread`).
+    pub home_files: usize,
+    pub unread: usize,
     /// Sent now.
     pub files: usize,
     pub bytes: u64,
@@ -53,6 +57,17 @@ pub struct Brought {
     pub left: usize,
     pub left_bytes: u64,
     pub left_behind: &'static str,
+    /// The rest of the home, kept in storage (`--store`): every file not
+    /// brought here, but those unread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored: Option<super::store::Stored>,
+}
+
+/// Where the rest of a home is kept (`--store`): the storage fragment, and
+/// the folder its notes go in.
+pub struct Store<'a> {
+    pub into: &'a str,
+    pub notes: &'a std::path::Path,
 }
 
 fn coded(code: Code, msg: String) -> anyhow::Error {
@@ -70,9 +85,16 @@ fn code_span(path: &str) -> String {
 }
 
 /// `left-behind.md`: what the plan leaves, by reason, each reason's
-/// folders first and then its files, the largest first.
-pub fn left_behind(plan: &Plan, counted: &Counted) -> String {
-    let mut out = String::from("# Left behind\n\nThe old agent's files that were not brought here, and why. They are still where they were.\n\n");
+/// folders first and then its files, the largest first; and where they
+/// are kept, when they are (`kept_in`, a storage fragment).
+pub fn left_behind(plan: &Plan, counted: &Counted, kept_in: Option<&str>) -> String {
+    let mut out = match kept_in {
+        None => String::from("# Left behind\n\nThe old agent's files that were not brought here, and why. They are still where they were.\n\n"),
+        Some(store) => format!(
+            "# Kept in storage\n\nThe old agent's files that were not brought here, and why. Each is kept whole in storage, as it was in the old agent's home: in `{}`, or in the next storage fragment once one fills, a note for each saying where. But those whose names say they may hold a password or key were never read, and stay with the old platform.\n\n",
+            code_span(store).trim_matches('`')
+        ),
+    };
     out.push_str(&format!(
         "Brought: {} files ({}). Left behind: {} files ({}).\n",
         counted.brought.files,
@@ -174,7 +196,7 @@ pub(crate) fn manifest(c: &Client, held: &mut Held, author: &Author, mut head: S
 /// less than its stage), its pointer; else its bytes as read, a blob's
 /// uploaded first.
 fn stored(src: &Source, blobs: &Blobs, into: &str, p: &plan::Picked) -> Result<Vec<u8>> {
-    if blobs.keeps(p.bytes)? {
+    if src.stage_id().is_some() && blobs.keeps(p.bytes)? {
         if let Some((offset, len)) = src.span(&p.from)? {
             let (sha, crc) = src.copy(into, offset, len).with_context(|| format!("copying {}", p.from))?;
             // the zip's own check of the file, which reading it made
@@ -191,7 +213,7 @@ fn stored(src: &Source, blobs: &Blobs, into: &str, p: &plan::Picked) -> Result<V
 
 /// The files the plan brings, into the fragment `into`, and
 /// `left-behind.md`.
-pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str) -> Result<Brought> {
+pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str, store: Option<Store>) -> Result<Brought> {
     // the most one upload of the caller's may be, as its platform says,
     // before anything is written: a file past it stays behind, listed
     let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
@@ -229,18 +251,38 @@ pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str) -> Result<Br
             (batch, batch_bytes) = (Vec::new(), 0);
         }
     }
-    batch.push(Change::Upsert { path: RepoPath::parse(LEFT_BEHIND).expect("a repo path"), bytes: blobs.store(left_behind(&plan, &counted).into_bytes())? });
+    batch.push(Change::Upsert { path: RepoPath::parse(LEFT_BEHIND).expect("a repo path"), bytes: blobs.store(left_behind(&plan, &counted, store.as_ref().map(|s| s.into)).into_bytes())? });
     let head = commit(c, &mut held, &author, head, &format!("home files: {total} files, and what stayed behind"), &batch)?;
     if !there.contains_key(MANIFEST) {
         let head = head.ok_or_else(|| anyhow!("{into}'s main has no head after its files' commit"))?;
         manifest(c, &mut held, &author, head)?;
     }
     crate::sync::refresh_pins(c, into, MAIN);
-    Ok(Brought { fragment: into.to_string(), files, bytes, already, left: counted.left.files, left_bytes: counted.left.bytes, left_behind: LEFT_BEHIND })
+    // the rest of the home, every file not brought here but those unread
+    let stored = match store {
+        Some(s) => {
+            let picked: std::collections::HashSet<&str> = plan.picked.iter().map(|p| p.from.as_str()).collect();
+            let rest: Vec<String> = src.entries().iter().map(|e| e.path.clone()).filter(|p| !picked.contains(p.as_str())).collect();
+            let stored = super::store::keep(c, src, rest, s.into, s.notes)?;
+            let accounted = stored.files + stored.already + stored.more.map_or(0, |m| m.files) + plan.picked.len();
+            assert!(accounted == src.entries().len(), "every file of the home is brought or kept: {accounted} of {}", src.entries().len());
+            Some(stored)
+        }
+        None => None,
+    };
+    let unread = src.skipped.len();
+    Ok(Brought { fragment: into.to_string(), home_files: src.entries().len() + unread, unread, files, bytes, already, left: counted.left.files, left_bytes: counted.left.bytes, left_behind: LEFT_BEHIND, stored })
 }
 
 pub fn print(b: &Brought) {
-    println!("{}: {} files brought ({}), {} there already; {} left behind ({}), listed in {}", b.fragment, b.files, size(b.bytes), b.already, b.left, size(b.left_bytes), b.left_behind);
+    match &b.stored {
+        None => println!("{}: {} files brought ({}), {} there already; {} left behind ({}), listed in {}", b.fragment, b.files, size(b.bytes), b.already, b.left, size(b.left_bytes), b.left_behind),
+        Some(s) => {
+            println!("{}: {} files brought ({}), {} there already; the rest listed, and why, in {}", b.fragment, b.files, size(b.bytes), b.already, b.left_behind);
+            super::store::print(s);
+            println!("The home's {} files: {} here, {} in storage, {} unread (their names say they may hold a password or key).", b.home_files, b.files + b.already, s.files + s.already, b.unread);
+        }
+    }
 }
 
 pub fn print_planned(c: &Counted) {
@@ -282,7 +324,7 @@ mod tests {
         let mock = crate::mockcs::start();
         mock.seed_repo(NAME, &[]);
         let c = Client::new(&mock.url, crate::auth::fixed(7));
-        let b = bring(&c, &src, &layout(), NAME).unwrap();
+        let b = bring(&c, &src, &layout(), NAME, None).unwrap();
         assert_eq!((b.files, b.already, b.left), (2, 0, 2));
         assert_eq!(mock.file_at(NAME, "main", "files/notes/a.md").as_deref(), Some(&b"# a"[..]));
         assert_eq!(mock.file_at(NAME, "main", "files/photos/b.png").as_deref(), Some(&b"png"[..]));
@@ -293,13 +335,13 @@ mod tests {
         assert!(mock.refresh_count() >= 1);
 
         let head = mock.branch(NAME, "main");
-        let again = bring(&c, &src, &layout(), NAME).unwrap();
+        let again = bring(&c, &src, &layout(), NAME, None).unwrap();
         assert_eq!((again.files, again.already), (0, 2));
         assert_eq!(mock.branch(NAME, "main"), head, "nothing sent, and the same left-behind.md: no commit lands");
 
         let other = "old-files--b2c3";
         mock.seed_repo(other, &[("fragment.json", br#"{"meta":{"title":"Mine"}}"#), ("files/notes/a.md", b"# a")]);
-        let cut = bring(&c, &src, &layout(), other).unwrap();
+        let cut = bring(&c, &src, &layout(), other, None).unwrap();
         assert_eq!((cut.files, cut.already), (1, 1), "what is there already is not sent again");
         assert_eq!(mock.file_at(other, "main", MANIFEST).as_deref(), Some(&br#"{"meta":{"title":"Mine"}}"#[..]), "a manifest of its own is kept");
     }
@@ -323,7 +365,7 @@ mod tests {
         mock.seed_stage("old1.p1.1", std::fs::read(&zip).unwrap());
         let c = Client::new(&mock.url, crate::auth::fixed(7));
         let src = super::super::open_from(Some(&c), std::path::Path::new("stage:old1.p1.1"), &layout()).unwrap();
-        let b = bring(&c, &src, &layout(), NAME).unwrap();
+        let b = bring(&c, &src, &layout(), NAME, None).unwrap();
         assert_eq!((b.files, b.already), (2, 0));
         let pointer = blob::parse(&mock.file_at(NAME, "main", "files/videos/trip.mp4").unwrap()).expect("the video is a blob's pointer");
         assert_eq!((pointer.sha256.as_str(), pointer.size), (blob::sha256_hex(&video).as_str(), video.len() as u64));
@@ -333,7 +375,7 @@ mod tests {
         let (_, read) = mock.stage_reads();
         assert_eq!((copies, copied), (1, video.len() as u64), "the video copied on the platform, once");
         assert!(read < video.len() as u64, "and never read here: {read} bytes read");
-        let again = bring(&c, &src, &layout(), NAME).unwrap();
+        let again = bring(&c, &src, &layout(), NAME, None).unwrap();
         assert_eq!((again.files, again.already, mock.stage_copies().0), (0, 2, 1), "again: nothing copied twice");
     }
 
@@ -356,7 +398,7 @@ mod tests {
         mock.seed_stage("old1.p1.1", bytes);
         let c = Client::new(&mock.url, crate::auth::fixed(7));
         let src = super::super::open_from(Some(&c), std::path::Path::new("stage:old1.p1.1"), &layout()).unwrap();
-        let e = bring(&c, &src, &layout(), NAME).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        let e = bring(&c, &src, &layout(), NAME, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("is not the old file it names"), "{e}");
         assert!(mock.file_at(NAME, "main", "files/videos/trip.mp4").is_none(), "nothing committed for it");
     }
@@ -398,7 +440,7 @@ mod tests {
         let theirs = br#"{"meta":{"title":"Theirs"}}"#.to_vec();
         mock.sabotage_commit_packs_with(1, vec![(MANIFEST.to_string(), Some(theirs.clone()))]);
         let c = Client::new(&mock.url, crate::auth::fixed(7));
-        let b = bring(&c, &src, &layout(), NAME).unwrap();
+        let b = bring(&c, &src, &layout(), NAME, None).unwrap();
         assert_eq!(b.files, 1);
         assert_eq!(mock.file_at(NAME, "main", MANIFEST), Some(theirs), "the other writer's manifest, not the files page's");
         assert_eq!(mock.file_at(NAME, "main", "files/notes/a.md").as_deref(), Some(&b"# a"[..]));
@@ -418,7 +460,7 @@ mod tests {
         let theirs = br#"{"meta":{"title":"Theirs"}}"#.to_vec();
         mock.land_before_next_commit(vec![(MANIFEST.to_string(), Some(theirs.clone()))]);
         let c = Client::new(&mock.url, crate::auth::fixed(7));
-        assert_eq!(bring(&c, &src, &layout(), NAME).unwrap().files, 1);
+        assert_eq!(bring(&c, &src, &layout(), NAME, None).unwrap().files, 1);
         assert_eq!(mock.file_at(NAME, "main", MANIFEST), Some(theirs), "theirs, not the files page's");
         assert_eq!(mock.file_at(NAME, "main", "files/notes/a.md").as_deref(), Some(&b"# a"[..]));
     }
@@ -435,7 +477,7 @@ mod tests {
         let mock = crate::mockcs::start();
         mock.seed_repo(NAME, &[]);
         let c = Client::new(&mock.url, crate::auth::fixed(7));
-        let b = bring(&c, &src, &layout(), NAME).unwrap();
+        let b = bring(&c, &src, &layout(), NAME, None).unwrap();
         assert_eq!((b.files, b.left), (2, 1));
         assert_eq!(mock.file_at(NAME, "main", "files/notes/a.md").as_deref(), Some(&b"# a"[..]));
         assert_eq!(mock.file_at(NAME, "main", "files/proj/main.py").as_deref(), Some(&b"print(1)"[..]));
@@ -462,7 +504,7 @@ mod tests {
         mock.seed_repo(NAME, &[]);
         mock.advertise_upload_max(Some(2_000));
         let c = Client::new(&mock.url, crate::auth::fixed(7));
-        let b = bring(&c, &src, &layout(), NAME).unwrap();
+        let b = bring(&c, &src, &layout(), NAME, None).unwrap();
         assert_eq!((b.files, b.left), (2, 1));
         assert!(mock.file_at(NAME, "main", "files/videos/clip.mp4").is_none());
         assert!(mock.file_at(NAME, "main", "files/photos/p.png").is_some() && mock.file_at(NAME, "main", "files/notes/a.md").is_some());
@@ -470,12 +512,12 @@ mod tests {
         assert!(left.contains("## Larger than one upload here may be (2.0 KB) (1 files, 3.0 KB)\n\n- `videos/clip.mp4` (3.0 KB)"), "{left}");
 
         let head = mock.branch(NAME, "main");
-        let again = bring(&c, &src, &layout(), NAME).unwrap();
+        let again = bring(&c, &src, &layout(), NAME, None).unwrap();
         assert_eq!((again.files, again.already, again.left), (0, 2, 1), "a rerun stops at nothing");
         assert_eq!(mock.branch(NAME, "main"), head);
 
         mock.advertise_upload_max(Some(4_000));
-        let more = bring(&c, &src, &layout(), NAME).unwrap();
+        let more = bring(&c, &src, &layout(), NAME, None).unwrap();
         assert_eq!((more.files, more.already, more.left), (1, 2, 0), "a larger limit brings it");
         assert_eq!(mock.file_at(NAME, "main", "files/videos/clip.mp4").map(|b| b.len()), Some(3_000));
     }
@@ -491,7 +533,7 @@ mod tests {
         mock.seed_repo(NAME, &[]);
         mock.view_only(NAME, true);
         let c = Client::new(&mock.url, crate::auth::fixed(7));
-        let e = bring(&c, &src, &layout(), NAME).unwrap_err();
+        let e = bring(&c, &src, &layout(), NAME, None).unwrap_err();
         assert!(format!("{e:#}").contains("editor"), "{e:#}");
         assert!(mock.paths(NAME, "main").is_empty());
     }
@@ -508,7 +550,7 @@ mod tests {
             ],
             upload_max_bytes: Some(100_000_000),
         };
-        let text = left_behind(&plan, &plan.counted(10, 10));
+        let text = left_behind(&plan, &plan.counted(10, 10), None);
         assert!(text.contains("Left behind: 1202 files (3.5 GB)"), "{text}");
         assert!(text.contains("## Dependencies or a cache, made again by the tools that made them (1200 files, 300.0 MB)\n\n- `app/node_modules/` (1200 files, 300.0 MB)"), "{text}");
         assert!(text.contains("- `videos/trip.mov` (3.2 GB)\n- `` odd`name.txt `` (10 bytes)"), "{text}");
