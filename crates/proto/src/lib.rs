@@ -792,10 +792,13 @@ pub enum Reason {
     /// A shared key's calls are paused: its charges this last hour reached
     /// the cap its person holds them to (FIN-448, `fragment_core::key_hour`).
     KeyPaused,
+    /// A trial is for a seat of one: while the org's subscription is a
+    /// trial, it takes no further paid seat (offered, given or accepted).
+    TrialSeatOfOne,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 28] = [
+    pub const ALL: [Reason; 29] = [
         Reason::TrialUnknown,
         Reason::TrialEnded,
         Reason::TrialUsed,
@@ -824,6 +827,7 @@ impl Reason {
         Reason::PrivateWhileReaching,
         Reason::UnshareFirst,
         Reason::KeyPaused,
+        Reason::TrialSeatOfOne,
     ];
 
     /// Its name on the wire.
@@ -857,6 +861,7 @@ impl Reason {
             Reason::PrivateWhileReaching => "private_while_reaching",
             Reason::UnshareFirst => "unshare_first",
             Reason::KeyPaused => "key_paused",
+            Reason::TrialSeatOfOne => "trial_seat_of_one",
         }
     }
 
@@ -3011,6 +3016,7 @@ mod tests {
             (PrivateWhileReaching, "private_while_reaching"),
             (UnshareFirst, "unshare_first"),
             (KeyPaused, "key_paused"),
+            (TrialSeatOfOne, "trial_seat_of_one"),
         ];
         assert_eq!(all.len(), Reason::ALL.len(), "every reason is named here");
         for (reason, wire) in all {

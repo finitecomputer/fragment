@@ -335,9 +335,10 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
 /// A trial is for a seat of one (docs/billing.md, "Trials"; team trials
 /// are not in v1): while its org's subscription is trialing, its admin
 /// offers no further paid seat, so no one is granted a seat's included
-/// credit on a trial's place they did not redeem (the security audit's
-/// finding 5, 2026-11-18). Checkout alone refused it: `add_seat` asked only
-/// that the org pays, and a trialing one does.
+/// credit on a trial's place they did not redeem. An offer made before
+/// the org trialed waits for it to be paid; the same seat asked again is
+/// answered as it is, and an admin's place is offered as ever
+/// (`fragment_core::org::seating`). Valid, invalid, replay.
 pub fn trial_seats(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("trial-seats", &[Need::Fakes, Need::Deployment]) {
         return Ok(());
@@ -375,7 +376,7 @@ pub fn trial_seats(s: &mut Suite, api: &Api) -> Result<()> {
     let view = api.signed(&kim, "GET", "/api/org", None)?;
     s.ok(
         "while its trial runs, an org's admin offers no further paid seat (a trial is for a seat of one): refused, no offer made, and Stripe's subscription stays one seat, trialing",
-        (400..500).contains(&offered.status) && view.body["members"].as_array().map(Vec::len) == Some(1) && !billed && seats(s) == Some(("trialing".to_string(), 1)),
+        offered.status == 400 && offered.body["reason"] == "trial_seat_of_one" && view.body["members"].as_array().map(Vec::len) == Some(1) && !billed && seats(s) == Some(("trialing".to_string(), 1)),
         json!({ "offered": [offered.status, offered.body.clone()], "members": view.body["members"], "stripe": format!("{:?}", seats(s)) }),
     );
     // were it offered, its accept would seat them, and their ledger follow
@@ -390,6 +391,66 @@ pub fn trial_seats(s: &mut Suite, api: &Api) -> Result<()> {
         "so no one is granted a seat's included credit on a trial's place they did not redeem: who was offered it holds no seat, and their ledger is as it was (a guest, granted nothing more)",
         !seated && !granted && seat(api, &lee)["seat"].is_null() && after["plan"] == "guest" && after["includedGrantedMicros"] == before["includedGrantedMicros"] && after["balanceMicros"] == before["balanceMicros"],
         json!({ "accept": took.map(|r| r.status), "seat": seat(api, &lee)["seat"], "before": before, "after": after }),
+    );
+
+    // ---- the same seat asked again is answered as it is, adding nothing
+    let again = api.signed(&kim, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&kim) })))?;
+    s.ok(
+        "while it trials, its admin asking for a seat already held (their own) is answered as it is (200, created: false), and Stripe stays one seat",
+        again.status == 200 && again.body["created"] == false && seats(s) == Some(("trialing".to_string(), 1)),
+        json!({ "again": [again.status, again.body.clone()], "stripe": format!("{:?}", seats(s)) }),
+    );
+
+    // ---- an admin's place is no paid seat: offered as ever; a seat joining it is refused
+    let place = api.signed(&kim, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&lee) })))?;
+    let joined = api.signed(&kim, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&lee) })))?;
+    let view = api.signed(&kim, "GET", "/api/org", None)?;
+    let waiting = view.body["members"].as_array().and_then(|m| m.iter().find(|m| m["email"] == Api::email_of(&lee)).cloned()).unwrap_or(Value::Null);
+    s.ok(
+        "while it trials, an admin's place is offered as ever (200), but a seat to join that offer is refused (400 trial_seat_of_one): the offer stays an admin's place alone, and Stripe one seat",
+        place.status == 200 && joined.status == 400 && joined.body["reason"] == "trial_seat_of_one" && waiting["admin"] == true && waiting["seat"].is_null() && seats(s) == Some(("trialing".to_string(), 1)),
+        json!({ "place": place.status, "joined": [joined.status, joined.body.clone()], "offer": waiting, "stripe": format!("{:?}", seats(s)) }),
+    );
+
+    // ---- an offer of a seat made before its org trialed waits until it is paid
+    let pat = api.person()?;
+    let pat_org = super::billing::buys(s, api, &pat)?;
+    let pat_sub = super::billing::subscription_of(s, &pat_org).context("pat's subscription")?;
+    let ned = api.person()?;
+    let ned_id = api.identity(&ned)?;
+    let r = api.signed(&operator, "POST", &format!("/api/ledger/{ned_id}/plan"), Some(&json!({ "id": "trial-seats-ned", "plan": "guest" })))?;
+    anyhow::ensure!(r.status == 200, "making a guest: {r}");
+    let r = api.signed(&pat, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&ned) })))?;
+    anyhow::ensure!(r.status == 200, "an offer while it pays: {r}");
+    let offer = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let ned_before = ledger(&ned);
+    s.stripe.set_status(&pat_sub, "trialing").map_err(anyhow::Error::msg)?;
+    let mut held = None;
+    let waited = s.eventually(PUSHED, || {
+        let r = super::billing::answer(api, &ned, &offer, "accept").ok();
+        let refused = r.as_ref().is_some_and(|r| r.status == 400 && r.body["reason"] == "trial_seat_of_one");
+        held = r.map(|r| [r.status.into(), r.body]);
+        refused
+    });
+    let ned_during = ledger(&ned);
+    s.ok(
+        "an offer of a seat made before its org trialed is not accepted while it trials (400 trial_seat_of_one): who was offered it holds no seat, and is granted nothing",
+        waited && seat(api, &ned)["seat"].is_null() && ned_during["plan"] == "guest" && ned_during["includedGrantedMicros"] == ned_before["includedGrantedMicros"],
+        json!({ "accept": held, "seat": seat(api, &ned)["seat"], "before": ned_before, "during": ned_during }),
+    );
+    s.stripe.set_status(&pat_sub, "active").map_err(anyhow::Error::msg)?;
+    let mut took = None;
+    let accepted = s.eventually(PUSHED, || {
+        let r = super::billing::answer(api, &ned, &offer, "accept").ok();
+        let ok = r.as_ref().is_some_and(|r| r.status == 200);
+        took = r.map(|r| [r.status.into(), r.body]);
+        ok
+    });
+    let seated = s.eventually(PUSHED, || seat(api, &ned)["seat"]["good"] == true && ledger(&ned)["plan"] == "seat_always_on");
+    s.ok(
+        "once its org pays, the same offer is accepted (200) and its seat holds, as ever",
+        accepted && seated,
+        json!({ "accept": took, "seat": seat(api, &ned)["seat"], "ledger": ledger(&ned)["plan"] }),
     );
     Ok(())
 }
