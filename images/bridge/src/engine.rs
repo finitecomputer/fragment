@@ -31,10 +31,12 @@
 //!   next turn in that chat is told what was cut (P5): its note is built
 //!   from the chat's journal alone, before its claim (note.rs), so it is
 //!   said once, and the same in any life.
-//! - A turn another life claimed (409) ran after this life's `/data` was
-//!   saved, so its runtime remembers none of it: the agent's next turn in
-//!   that chat is told what those turns were (`TurnStart::forgotten`,
-//!   note.rs "forgotten"), once in this life.
+//! - A turn another life ran after this life's `/data` was saved (its
+//!   claim answered 409, and its lost end too: that life ended it) is in
+//!   no memory of its runtime's: the agent's next turn in that chat is told
+//!   the chat (`TurnStart::forgotten`, note.rs `recap`), once in this life.
+//!   One whose lost end lands as this life's was cut in that life: the cut
+//!   note tells it.
 //! - A turn is claimed only while the runtime can take it (`Connected`),
 //!   so a turn waits, unclaimed, for a runtime that is still starting.
 //! - Every turn gets both records: a turn refused, or stopped while it
@@ -187,7 +189,7 @@ pub fn refused_budget() -> String {
     )
 }
 
-/// What the bridge keeps across restarts (`/data/bridge/state.json`): a
+/// What the bridge keeps across restarts (`/data/bridge`, store.rs): a
 /// cache of where to read from and what it has in hand, never the
 /// authority on which turns have run (the journal is).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -355,6 +357,10 @@ pub struct Prompt {
     pub computer: Vec<String>,
     pub expires_at: u64,
     pub closed: bool,
+    /// Until when it holds the computer (0, never): an option for the
+    /// computer is this life's alone (`COMPUTER_CARD_HOLD_MS`). Never kept.
+    #[serde(skip)]
+    pub holds_until: u64,
     /// Its owner's answer, held from the runtime until its closure is on
     /// `work` (`Effect::Fence`). A restart ends its turn, so never kept.
     #[serde(skip)]
@@ -441,6 +447,14 @@ pub struct Turn {
     /// turn not queued, and a turn's end clears this.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub asking: bool,
+    /// Its question was answered by a voice memo alone (`Command::Tell`'s
+    /// `voice`), which its runtime hears or not: one it hears nothing in
+    /// leaves its question open, and says nothing (Hermes' clarify keeps
+    /// waiting). So it is `asking` still until the turn goes on (its next
+    /// event: a draft, a reply, a step, a card, a question, its end), and
+    /// its asker's next message meanwhile answers it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hearing: bool,
     /// Its text is a command of the runtime's menu, said to it as it is
     /// (`TurnStart::command`). A state from before commands holds none.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -502,6 +516,11 @@ pub struct ChatView {
     pub people: Vec<String>,
     /// What to call its writers, by identity.
     pub names: BTreeMap<String, String>,
+    /// The door this chat is of the agent reading it, as the agent's own row
+    /// of its members says (`door`: a connector bound as the agent's door,
+    /// while open: docs/api.md, "An agent's doors"): `telegram`, …. None for
+    /// any other chat, and from a platform before the row said it.
+    pub door: Option<String>,
 }
 
 impl ChatView {
@@ -542,6 +561,9 @@ pub enum Input {
     Posted { turn: String, id: String, kept: bool },
     /// Time passed: expiries, quiet turns, and claims to try again.
     Tick,
+    /// A slice of the computer's counters from `from` (ms) to now, over a
+    /// floor or not; none under the platform's hold (load.rs).
+    Slice { from: u64, over: Option<bool> },
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
     /// The agents whose SimpleX link is bound now (simplex/run.rs), each
@@ -645,17 +667,27 @@ pub struct Engine {
     agents: Vec<Agent>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
+    /// Its agents' work held the computer at the last step: a turn queued
+    /// or running, or a runtime's own work.
+    busy: bool,
+    /// Work left running (docs/bridge.md): the last `LOAD_SLICES` slices
+    /// (start, `Input::Slice`'s `over`); when this life's agents' work last
+    /// stopped holding the computer; whether it holds it now. Never saved:
+    /// a wake's own start never holds a computer woken for a look.
+    slices: VecDeque<(u64, Option<bool>)>,
+    left_from: Option<u64>,
+    left: bool,
     /// Turns that ran here and ended lately, oldest first (at most
     /// `ENDED_HOPS_MAX`, each for `ENDED_HOPS_MS`): a reply of one read after
     /// it was let go is one hop past it (`hop_of`). Never written to `/data`.
     ended: VecDeque<EndedTurn>,
-    /// Per agent and chat, its turns there another life ran since this
-    /// life's `/data` was saved (each claim answered 409), the newest at
-    /// most `NOTE_FORGOTTEN_MAX`, and how many more: its runtime remembers
-    /// none of them, so its next turn there is told (`TurnStart::forgotten`)
-    /// and the entry goes. Never written to `/data`: a life that restores
-    /// the same old `/data` reads them again, and is told again.
-    forgotten: BTreeMap<(String, String), (VecDeque<String>, u32)>,
+    /// The agents and chats where another life ran a turn of the agent's
+    /// since this life's `/data` was saved (its lost end answered 409, or
+    /// refused: `posted`): its runtime remembers none of it, so its next
+    /// turn there is told the chat (`TurnStart::forgotten`) and the entry
+    /// goes. Never written to `/data`: a life that restores the same old
+    /// `/data` reads them again, and is told again.
+    forgotten: BTreeSet<(String, String)>,
     /// Cut turns another life ran (claims answered 409) that may be
     /// continued once their lost end is this life's, which the journal
     /// decides then (`Effect::ReadCut`). Never written to `/data`: a life
@@ -771,8 +803,12 @@ impl Engine {
             agents: Vec::new(),
             views: HashMap::new(),
             keepalive: false,
+            busy: false,
+            slices: VecDeque::new(),
+            left_from: None,
+            left: false,
             ended: VecDeque::new(),
-            forgotten: BTreeMap::new(),
+            forgotten: BTreeSet::new(),
             unread_cuts: BTreeSet::new(),
             reading_cuts: BTreeMap::new(),
             closed_late: BTreeSet::new(),
@@ -876,6 +912,9 @@ impl Engine {
             self.end(id, Outcome::Error(LOST.into()), Closed::Expired);
         }
         assert!(self.state.turns.values().all(|t| matches!(t.phase, Phase::Queued | Phase::Ended)), "a recovered life holds only queued and ended turns");
+        // an earlier life's turns, ended here, are no work of this life's
+        self.busy = false;
+        self.left_from = None;
         self.pump_all();
         self.finish()
     }
@@ -895,6 +934,12 @@ impl Engine {
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
             Input::ComputerAnswer { agent, turn, prompt, option, words, reply } => self.computer_answer(&agent, &turn, &prompt, &option, words, reply),
+            Input::Slice { from, over } => {
+                if self.slices.len() == limits::LOAD_SLICES {
+                    self.slices.pop_front();
+                }
+                self.slices.push_back((from, over));
+            }
             Input::Relaying(agents) => {
                 assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
                 self.relaying = agents;
@@ -913,9 +958,28 @@ impl Engine {
     fn finish(&mut self) -> Step {
         let working = self.runtimes.values().any(|r| r.working);
         let busy = working || self.state.turns.values().any(|t| t.phase == Phase::Queued || (t.phase == Phase::Running && !t.asking));
-        if busy != self.keepalive {
-            self.keepalive = busy;
-            self.out.push(Effect::Keepalive(busy));
+        // a card only this life can take holds it too; it waits on a
+        // person, so work left running counts from its start
+        let card = self.state.turns.values().any(|t| t.active() && t.prompts.iter().any(|p| !p.closed && self.now < p.holds_until));
+        if self.busy && !busy {
+            self.left_from = Some(self.now);
+        }
+        self.busy = busy;
+        // only slices wholly after the agents' work count, and a save's
+        // (none) keep a hold as it was
+        let window = limits::LOAD_SLICES as u64 * limits::LOAD_SLICE_MS;
+        let fresh = |start: u64| start + window + limits::LOAD_SLICE_MS > self.now;
+        let working = |from: u64| self.slices.iter().any(|&(start, over)| over == Some(true) && start >= from && fresh(start));
+        let saving = self.slices.back().is_some_and(|&(start, over)| over.is_none() && start + 2 * limits::LOAD_SLICE_MS > self.now);
+        let left = !busy && self.left_from.is_some_and(|from| self.now < from + limits::LEFT_RUNNING_HOLD_MS && (working(from) || (saving && self.left)));
+        if left != self.left {
+            self.left = left;
+            crate::ev!("keepalive.left", { "hold": left, "from": self.left_from });
+        }
+        let hold = busy || card || left;
+        if hold != self.keepalive {
+            self.keepalive = hold;
+            self.out.push(Effect::Keepalive(hold));
         }
         assert!(self.state.turns.len() <= limits::TURNS_OPEN_MAX, "admission bounds the open turns");
         // the format it holds: 3 only while a turn holds a return
@@ -1054,10 +1118,12 @@ impl Engine {
         match record.channel.as_str() {
             // its owner's words through one of its doors (docs/chat-records.md,
             // "A relayed message") are their message, as theirs, whichever
-            // door and whoever carried them: the platform takes such a record
-            // only through a door its owner opened, so no door need be linked
-            // on this computer. Another agent of the chat carrying them is a
-            // hand-off from that agent at most, never its owner.
+            // door: the platform takes such a record only through a door its
+            // owner opened, so no door need be linked on this computer. Only
+            // a carrier that is that door counts (`relayed_for`); from any
+            // other it is the record without the mark: another agent of the
+            // chat carrying them is a hand-off from that agent at most, never
+            // its owner.
             records::CHAT if self.relayed_for(&agent, fragment, &record) => {
                 let via = records::relayed(&record.body).map(|r| r.via).unwrap_or_default();
                 crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": via });
@@ -1152,13 +1218,33 @@ impl Engine {
     }
 
     /// Whether `record` relays `agent`'s owner through `agent`'s own door,
-    /// carried by the agent itself or by a key that is none of the chat's
-    /// members (a hosted connector publishes as its own fragment's key), as
-    /// the chat's page reads it.
+    /// carried by that door (docs/api.md, "An agent's doors"):
+    ///
+    /// - **the agent itself**: its SimpleX door's, which the platform took
+    ///   only signed by the door key its owner's ticket registered;
+    /// - **a hosted door**: a key none of the chat's members (a connector
+    ///   publishes as its own fragment), in a chat whose members mark the
+    ///   agent's row as that door (`ChatView::door`), whose `via` it is.
+    ///
+    /// Any other key that is none of the chat's members (the chat's own,
+    /// firing a record one of its editors scheduled, which the platform
+    /// took until it refused relaying schedules; or one no one holds)
+    /// speaks for no one: the record is its carrier's, without the mark,
+    /// and is logged as such.
     fn relayed_for(&self, agent: &Agent, fragment: &str, record: &Record) -> bool {
-        let member = |v: &ChatView| v.agents.contains(&record.principal) || v.people.contains(&record.principal);
-        let carrier = record.principal == agent.identity || self.views.get(fragment).is_some_and(|v| !member(v));
-        carrier && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment)
+        let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) else { return false };
+        if record.principal == agent.identity {
+            return true;
+        }
+        let Some(v) = self.views.get(fragment) else { return false };
+        if v.agents.contains(&record.principal) || v.people.contains(&record.principal) {
+            return false;
+        }
+        let door = v.door.as_deref() == Some(r.via.as_str());
+        if !door {
+            crate::ev!("relayed.untrusted", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "principal": record.principal, "via": r.via, "door": v.door, "why": "carried by a key none of the chat's members, in a chat whose members mark no such door on its agent's row: its carrier's, never its owner's" });
+        }
+        door
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
@@ -1432,6 +1518,7 @@ impl Engine {
             stop_requested: false,
             owed: Vec::new(),
             asking: false,
+            hearing: false,
             command: matches!(ask, Ask::Command | Ask::Refused(_)),
             reply_to: m.reply_to,
             note: None,
@@ -1593,11 +1680,21 @@ impl Engine {
         }
         let chat = (t.agent.clone(), t.fragment.clone());
         let cut = (kept && settled).then(|| t.clone());
+        // a lost end refused as another life's (409: that life ran the
+        // turn, or ended it, after this /data was saved): the runtime does
+        // not remember it, and the agent's next turn here is told the chat.
+        // One that lands as this life's was cut in that life: the cut note
+        // tells it.
+        let forgot = !kept && post == records::work_id(id, "end") && t.owed.iter().any(|o| o.id == post && o.body["error"] == LOST);
         t.owed.retain(|o| o.id != post);
         self.dirty = true;
         if t.owed.is_empty() {
             self.state.turns.remove(id);
             crate::ev!("turn.closed", { "turn": id });
+        }
+        if forgot {
+            crate::ev!("turn.forgotten", { "turn": id, "agent": chat.0, "fragment": chat.1 });
+            self.forgotten.insert(chat.clone());
         }
         // another life's cut turn: its read is due now, or never (that life
         // ended it, or its asker stopped it first)
@@ -1696,6 +1793,7 @@ impl Engine {
             stop_requested: false,
             owed: Vec::new(),
             asking: false,
+            hearing: false,
             command: false,
             reply_to: None,
             note: None,
@@ -1808,15 +1906,9 @@ impl Engine {
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.dirty = true;
                 crate::ev!("turn.lost", { "turn": id, "agent": agent, "why": "another life claimed it" });
-                // that life ran it after this /data was saved: the runtime
-                // remembers nothing of it, and its next turn here is told
-                let (newest, more) = self.forgotten.entry((agent.clone(), fragment.clone())).or_default();
-                newest.push_back(id.to_string());
-                if newest.len() > limits::NOTE_FORGOTTEN_MAX {
-                    newest.pop_front();
-                    *more = more.saturating_add(1);
-                }
-                assert!(newest.len() <= limits::NOTE_FORGOTTEN_MAX, "a note names its newest forgotten turns");
+                // whether that life ran it, which the runtime does not
+                // remember, its end's answer says (`posted`), before the
+                // chat's next claim: it is first in the chat's lane
                 self.owe(&agent, &fragment, id, end);
                 self.owe_answer(id, &Outcome::Error(LOST.into()), false);
                 self.pump(&agent, &fragment);
@@ -1851,9 +1943,9 @@ impl Engine {
             crate::ev!("turn.refused", { "turn": id, "agent": agent, "fragment": fragment, "why": "its runtime is none this bridge runs", "runtime": runtime });
             return self.end(id, Outcome::Error(refused_runtime(&runtime)), Closed::Expired);
         };
-        // what another life ran here that the runtime does not remember,
-        // told once: this turn takes it
-        let (forgotten, forgotten_more) = self.forgotten.remove(&(agent.clone(), fragment.clone())).map(|(newest, more)| (Vec::from(newest), more)).unwrap_or_default();
+        // the runtime does not remember what another life ran here: this
+        // turn is told the chat, once
+        let forgotten = self.forgotten.remove(&(agent.clone(), fragment.clone()));
         // the menu, once a life in each chat, as the agent first runs there
         if !menu.is_empty() && self.published.insert((agent.clone(), fragment.clone())) {
             self.post(&agent, &fragment, records::WORK, records::menu_id(&self.life), records::commands(&a.identity, menu), Vec::new());
@@ -1897,7 +1989,6 @@ impl Engine {
             note: t.note.clone(),
             age,
             forgotten,
-            forgotten_more,
             command: t.command,
             reply_to: t.reply_to,
             quote: None,
@@ -1939,12 +2030,20 @@ impl Engine {
             if answers != principal {
                 return false;
             }
+            // a voice memo alone: no words, every file audio (Austin,
+            // 2026-11-17: words typed with a memo are a written answer, as
+            // they were, since Hermes answers a clarify heard in audio with
+            // the audio's words alone)
+            // within Hermes' media cap, as the relay hosts it: a larger one
+            // is its file's line, a written answer
+            let voice = text.trim().is_empty() && !m.attachments.is_empty() && m.attachments.iter().all(|a| a.media_type.starts_with("audio/") && a.size <= limits::HERMES_MEDIA_MAX_BYTES);
             let t = self.state.turns.get_mut(&id).expect("found");
-            t.asking = false;
+            t.asking = voice;
+            t.hearing = voice;
             t.last_ms = self.now;
             self.dirty = true;
-            crate::ev!("turn.told", { "turn": id, "seq": seq, "files": m.attachments.len() });
-            self.tell_runtime(&id, Command::Tell { turn: id.clone(), seq, by: principal.to_string(), by_name, text, attached });
+            crate::ev!("turn.told", { "turn": id, "seq": seq, "files": m.attachments.len(), "voice": voice });
+            self.tell_runtime(&id, Command::Tell { turn: id.clone(), seq, by: principal.to_string(), by_name, text, attached, files: Vec::new(), voice });
             return true;
         }
         // its card that takes words, the oldest open one: its owner's alone
@@ -2219,7 +2318,17 @@ impl Engine {
                 return;
             }
             match self.state.turns.get_mut(&id) {
-                Some(t) if t.active() => t.last_ms = self.now,
+                Some(t) if t.active() => {
+                    t.last_ms = self.now;
+                    // it went on from a voice answer: heard (its question,
+                    // if it asks again, is a new one: `Event::Asked`)
+                    if t.hearing {
+                        t.hearing = false;
+                        t.asking = false;
+                        self.dirty = true;
+                        crate::ev!("turn.heard", { "turn": id });
+                    }
+                }
                 _ => {
                     crate::ev!("runtime.stale", { "turn": id, "why": "the bridge holds no running turn by that id" });
                     return;
@@ -2307,7 +2416,7 @@ impl Engine {
                 if t.ret.is_some() {
                     crate::ev!("turn.asked_back", { "turn": turn });
                     let (by, by_name) = (t.asker.clone(), t.asker_name.clone());
-                    self.tell_runtime(&turn, Command::Tell { turn: turn.clone(), seq: ASKED_BACK_SEQ, by, by_name, text: ASKED_BACK.into(), attached: None });
+                    self.tell_runtime(&turn, Command::Tell { turn: turn.clone(), seq: ASKED_BACK_SEQ, by, by_name, text: ASKED_BACK.into(), attached: None, files: Vec::new(), voice: false });
                     return;
                 }
                 let t = self.state.turns.get_mut(&turn).expect("checked");
@@ -2543,7 +2652,9 @@ impl Engine {
         let expires_at = self.now + ttl;
         let t = self.state.turns.get_mut(id).expect("checked");
         let Some(owner) = self.agents.iter().find(|a| a.fragment == t.agent).map(|a| a.owner.clone()) else { return };
-        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words && !o.computer).map(|o| o.id.clone()).collect(), computer: options.iter().filter(|o| o.computer).map(|o| o.id.clone()).collect(), expires_at, closed: false, held: None });
+        let computer: Vec<String> = options.iter().filter(|o| o.computer).map(|o| o.id.clone()).collect();
+        let holds_until = if computer.is_empty() { 0 } else { expires_at.min(self.now + limits::COMPUTER_CARD_HOLD_MS) };
+        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words && !o.computer).map(|o| o.id.clone()).collect(), computer, expires_at, closed: false, holds_until, held: None });
         t.phase = Phase::Waiting;
         self.dirty = true;
         let (agent, fragment) = (t.agent.clone(), t.fragment.clone());

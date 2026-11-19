@@ -461,9 +461,10 @@ async fn a_turn_asks_to_install_claude_code_and_runs_once_it_is() {
 /// card, to sign in: the card links Anthropic's sign-in as `claude auth
 /// login` said it, and takes the code that page shows on the computer alone
 /// (`computer`); the login takes it, and the turn says it signed in and
-/// goes on to what was asked. Invalid: a code the login calls invalid is
-/// asked again, on a new card. No record holds a code. Replay: signed in,
-/// the next turn asks nothing.
+/// goes on to what was asked, the card holding the computer while it
+/// waits. Invalid: a code the login calls invalid is asked again, on a new
+/// card. No record holds a code. Replay: signed in, the next turn asks
+/// nothing.
 #[tokio::test]
 async fn a_turn_asks_its_person_to_sign_in_and_runs_once_signed_in() {
     let drain = Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT);
@@ -477,6 +478,11 @@ async fn a_turn_asks_its_person_to_sign_in_and_runs_once_signed_in() {
     assert_eq!(card["options"], json!([{ "id": "code", "label": "Paste the code", "words": true, "computer": true }]));
     assert!(s.ends().is_empty() && s.replies().is_empty(), "the turn waits");
     assert_eq!(running(&s.bin), 1, "its login waits for the code");
+    // the card holds the computer (P4): a later life would refuse its code.
+    // A card that does not hold drops the keepalive in the step that posts
+    // it, so a while after the card it is still open, or never was.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(s.with(|w| w.keepalive_open > 0), "the sign-in card holds the computer");
 
     // invalid: the login says so, and a new card of the same turn asks again
     assert_eq!(s.code(&base, &card, "a-wrong-code").await.0, 200);
@@ -710,8 +716,7 @@ async fn an_agents_model_and_effort_are_its_sessions_flags() {
             routine: false,
             claim_seq: None,
             note: None,
-            forgotten: vec![],
-            forgotten_more: 0,
+            forgotten: false,
             command: false,
             reply_to: None,
             quote: None,

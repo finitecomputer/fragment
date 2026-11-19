@@ -348,22 +348,21 @@ pub struct TurnStart {
     /// (crate::note), by the driver, before the runtime hears of the turn;
     /// `None` when that turn ended any other way. Every runtime is handed
     /// it: Relay as the inbound's read-only `context`, the scripted agent
-    /// echoes it. It also says what the agent no longer remembers of this
-    /// chat (`forgotten`).
+    /// echoes it. It also tells the chat, when the runtime forgot it
+    /// (`forgotten`).
     pub note: Option<String>,
     /// How old its message is, in plain words, when it is handed long after
     /// it was said (crate::note, `age`): the driver puts it first in
     /// `note`, before a card's or a cut turn's. Its own field, as `note`
     /// set by the engine means a card's, in the cut note's place.
     pub age: Option<String>,
-    /// The agent's turns in this chat that another life ran since the
-    /// `/data` this life restored (their claims answered 409: a rollback
-    /// sent the cursor back), the newest at most `NOTE_FORGOTTEN_MAX`, and
-    /// how many more: in no memory of the runtime's, so the note says what
-    /// they were (crate::note, "forgotten"). Said once, at the agent's
-    /// first turn in the chat after them.
-    pub forgotten: Vec<String>,
-    pub forgotten_more: u32,
+    /// Another life ran a turn of the agent's in this chat after the
+    /// `/data` this life woke with was saved, or woke with none (its claim
+    /// and its lost end answered 409: a rollback or a loss sent the cursor
+    /// back): in no memory of the runtime's, so the note tells the chat
+    /// (crate::note, `recap`). Said once a life, at the agent's first turn
+    /// in the chat after it.
+    pub forgotten: bool,
     /// Its text is a command of the runtime's menu (`/<name> <args>`), said
     /// to it as it is; a message's never is.
     pub command: bool,
@@ -403,9 +402,14 @@ pub enum Command {
     /// them something to answer in words (`Event::Asked`): the answer,
     /// handed to the running turn at once, never a turn of its own. `seq`
     /// is the message's record (a fresh message id). Its words, its files
-    /// or both: `attached`, which the driver puts in its words and takes off
-    /// (`Attached`): a runtime never sees them here.
-    Tell { turn: String, seq: u64, by: String, by_name: String, text: String, attached: Option<Attached> },
+    /// or both: `attached`, which the driver downloads, names in its words
+    /// and takes off (`Attached`): a runtime never sees them here, but gets
+    /// the downloaded files as `files`, as a turn's start does
+    /// (`TurnStart::files`). `voice`: the answer is a voice memo alone (no
+    /// words, every file audio), which a runtime that hears audio answers
+    /// with what it hears (the relay's), its question open until the turn
+    /// goes on (`Turn::hearing`).
+    Tell { turn: String, seq: u64, by: String, by_name: String, text: String, attached: Option<Attached>, files: Vec<LocalFile>, voice: bool },
     /// A command of the menu said in the agent's chat at once, beside
     /// whatever turn runs there, no turn of its own (`How::Steer` into the
     /// running turn `turn`, `How::Aside`): `/<name> <args>`, its id the

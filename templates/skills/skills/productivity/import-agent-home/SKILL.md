@@ -1,6 +1,6 @@
 ---
 name: import-agent-home
-description: Become an agent your owner kept on another platform, from a copy of its home (a zip they attach or link, a folder, or a move's stage) — its chats into History, its personality, memories, skills and routines into you, its files into an app. Use when your owner asks you to bring an old agent over, or import an agent's home or its zip, or bring their old sites over from finite.site, or when a routine says to bring yourself over from finite.computer with a stage.
+description: Become an agent your owner kept on another platform, from a copy of its home (a zip they attach or link, a folder, or a move's stage) — its chats into History, its personality, memories, skills and routines into you, its files into an app. Use when your owner asks you to bring an old agent over, or import an agent's home or its zip, or bring their old sites over from finite.site, or point an old finite.site address at its new one, or when a routine says to bring yourself over from finite.computer with a stage.
 ---
 
 # Bring an agent's home over
@@ -70,7 +70,8 @@ comes (step 8 says what didn't), and your key here is new: never say it
 is the same.
 
 **Only the old sites.** When your owner asks for their old agent's sites
-from finite.site (after its import, or with none), do only that: the
+from finite.site, or to point an old site's address at its new one
+(after its import, or with none), do only that: the
 finite-computer profile's "Sites on finite.site"
 (`${HERMES_SKILL_DIR}/profiles/finite-computer.md`), with the rules
 above, after loading `apps-finite`. Their answers are which sites (else
@@ -146,6 +147,8 @@ while the move runs. Your terminal reaches it as you
 **No answers come with a move.** Your name is already the old agent's:
 leave it. Keep its picture, as if your owner had said to keep the old
 name and picture (step 4 and the profile). Keep every site private.
+The stage holds no sites: bring them from finite.site, as the profile
+says ("Sites on finite.site").
 
 **Open it at once.** It must be opened within two hours of the message,
 or the move is paused for Finite's team. Run this as one command, then

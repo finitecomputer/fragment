@@ -34,6 +34,10 @@ The survey's `parts` lists them: `brains` (each a folder under
 step 4 (personality). Load `brain-finite` before the brains, and
 `apps-finite` before the sites.
 
+Then, in every import, do "Sites on finite.site" (below), even when
+`parts` lists no sites: the old agent's sites are there, and a move's
+stage never holds `sites/`.
+
 **Run each block below as one command, as written.** Your terminal
 starts every command in your work folder, and a variable or a `cd` never
 carries over to the next: each block sets what it needs and names every
@@ -103,11 +107,19 @@ if ls "$W" | grep -vxF -e fragment.json -f <(ls "$H" | grep -vxF -e AGENTS.md -e
 ```
 
 If it says STOP, push nothing, and say in the report what it listed.
-Otherwise check that search finds it:
+Otherwise search it once:
 
 ```sh
 fragment call <its name> search --input '{"q": "<a word from one of its pages>"}'
 ```
+
+A big brain's index takes a while to take in the sync. If the answer
+says `"indexing": true`, don't wait or ask again: its `changed` job
+finishes the index by itself from the synced files. Look once at
+`fragment runs <its name>`. If its newest `changed` run (the first
+listed) is `held` or `blocked`, the index stopped: say so in the report.
+Otherwise say this brain's search is still catching up, and go on. If
+it isn't indexing and still finds nothing, say that in the report.
 
 The old brain's folder permissions don't carry over: everyone the brain
 is shared with reads all of it. Invite no one. Your owner reinvites their
@@ -244,13 +256,17 @@ Write each old address (`sites/<site>.json`'s `url`, else
 The old agent's sites are also on finite.site, each a git repository it
 owned. From there, bring over each site the zip didn't, and send a site's
 old address on to its new one once your owner makes it public. Do this
-after the zip's sites, or alone when your owner asks for their old sites
-later (`SKILL.md`, step 0).
+in every import, after the zip's sites, and when the zip has none: a
+move's stage never does, so in a move every site comes from here. Do it
+alone when your owner asks later for their old sites, or to point an
+old address (`SKILL.md`, step 0).
 
 **The key.** finite.site knows the old agent by its Nostr key. A move
 puts that key in your owner's Vault for you, and it never comes to you:
 each request you send to finite.site carries its placeholder, and your
-computer has the Vault sign it on the way. Find the placeholder:
+computer has the Vault sign it on the way. You never need the key
+itself, nor the old `fsite` tool: every step here, pointing an old
+address too, works with the placeholder alone. Find the placeholder:
 
 ```sh
 curl -fsS http://api.fragment.internal/api/computer | jq -r --arg a "$FRAGMENT_AS_AGENT" '.agents[] | select(.fragment == $a) | .credentials[] | select((.provider | startswith("nostr-")) and (.hosts | index("finite.site"))) | "\(.provider) \(.placeholder)"'
@@ -266,12 +282,23 @@ curl -fsS http://api.fragment.internal/api/computer | jq -r --arg a "$FRAGMENT_A
   has to be set up there for me first. Ask Finite's team, then ask me
   again." The rest of an import goes on.
 
-**Its sites.** List them:
+Then save its header in a file, once:
 
 ```sh
 ph="<the placeholder>" && mkdir -p "$HOME/home-import" && \
-curl -sS -o "$HOME/home-import/finite-site.json" -w 'finite.site: %{http_code}\n' -H "Authorization: Nostr $ph" "https://finite.site/api/v2/projects" && \
-jq -c '.projects[] | select(.role == "owner" and .site != null) | {slug, site: .site.name, url: .site.url, status: .site.status, visibility: .site.visibility, branch: .site.branch, redirect_to: .site.redirect_to}' "$HOME/home-import/finite-site.json"
+printf '%s: Nostr %s\n' Authorization "$ph" > "$HOME/home-import/finite-site.auth" && echo saved
+```
+
+Every request below sends it from that file
+(`-H @"$HOME/home-import/finite-site.auth"`). Never write the header
+into a command yourself: your tools show a credential header as `***`,
+and a header copied from what they show goes out unsigned.
+
+**Its sites.** List them:
+
+```sh
+curl -sS -o "$HOME/home-import/finite-site.json" -w 'finite.site: %{http_code}\n' -H @"$HOME/home-import/finite-site.auth" "https://finite.site/api/v2/projects" && \
+jq -c '.projects[] | select(.role == "owner" and .site != null) | {slug, site: .site.name, url: .site.url, status: .site.status, visibility: .site.visibility, branch: .site.branch, spa: .site.spa, redirect_to: .site.redirect_to}' "$HOME/home-import/finite-site.json"
 ```
 
 - **200:** each line is a site the old agent owned. Leave out one whose
@@ -294,7 +321,9 @@ jq -c '.projects[] | select(.role == "owner" and .site != null) | {slug, site: .
   that `progress.md` says is deployed, came over before: make nothing
   for it again, and only point its old address, if your owner now makes
   it public. One `progress.md` names but not as deployed was cut short:
-  go on from its first step not done, with the app named there.
+  go on from its first step not done, with the app named there. Asked
+  only to point an old address, bring nothing over: point only a site
+  that came over before, and name any other in your message.
 
 **Bring one over.** finite.site gives a login for its repository alone:
 it is used for this one clone, into `/tmp`, then deleted. Its files then
@@ -303,11 +332,11 @@ which leaves out every file whose name says it may hold a password or
 key:
 
 ```sh
-ph="<the placeholder>" slug="<its slug>" branch="<its branch>" && \
+slug="<its slug>" branch="<its branch>" && \
 case "$slug" in "" | *[!a-z0-9-]*) echo "STOP: not a plain slug" ;; *) \
   t="/tmp/finite-site-$FRAGMENT_AS_AGENT-$slug" H="$HOME/home-import/home/sites/$slug" && \
   rm -rf -- "$t" "$H" && mkdir -p "$t/src/sites" && chmod 700 "$t" && \
-  curl -fsS -X POST -H "Authorization: Nostr $ph" -H "content-type: application/json" -d '{}' -o "$t/auth.json" "https://finite.site/api/v2/projects/$slug/git-auth" && \
+  curl -fsS -X POST -H @"$HOME/home-import/finite-site.auth" -H "content-type: application/json" -d '{}' -o "$t/auth.json" "https://finite.site/api/v2/projects/$slug/git-auth" && \
   jq -r '"https://\(.username | @uri):\(.password | @uri)@finite.site"' "$t/auth.json" > "$t/login" && \
   git -c credential.helper= -c credential.helper="store --file=$t/login" clone --quiet --depth 1 --branch "$branch" "https://finite.site/$slug.git" "$t/src/sites/$slug"; \
   ok=$?; rm -f -- "$t/auth.json" "$t/login"; rm -rf -- "$t/src/sites/$slug/.git"; \
@@ -355,8 +384,8 @@ address keeps serving, and the report names the pages that failed.
 Otherwise:
 
 ```sh
-ph="<the placeholder>" slug="<its slug>" to="<its new address>" && \
-curl -sS -w '\nfinite.site: %{http_code}\n' -X POST -H "Authorization: Nostr $ph" -H "content-type: application/json" -d "$(jq -cn --arg to "$to" '{to: $to}')" "https://finite.site/api/v2/projects/$slug/site/redirect"
+slug="<its slug>" to="<its new address>" && \
+curl -sS -w '\nfinite.site: %{http_code}\n' -X POST -H @"$HOME/home-import/finite-site.auth" -H "content-type: application/json" -d "$(jq -cn --arg to "$to" '{to: $to}')" "https://finite.site/api/v2/projects/$slug/site/redirect"
 ```
 
 A 200 answers `redirect_to`, the new address. Check it: `curl -sS -o
@@ -364,7 +393,8 @@ A 200 answers `redirect_to`, the new address. Check it: `curl -sS -o
 and the new address. Every page of the old address now goes to the
 same page at the new one. A site kept private gets no redirect: its old
 address keeps serving as it did, to those it was shared with. In a move,
-every site stays private, so none is pointed. With no key (above),
+every site stays private, so none is pointed until your owner makes one
+public here and asks you to point it. With no key (above),
 nothing is pointed: say so, and that the old address still serves.
 
 ## The old platform, and this one
@@ -414,4 +444,7 @@ Tell your owner, in the report:
   ("Whose it is").
 - **Old sites:** one made public here sends its old address's visitors
   to its new one. The others keep serving at their old addresses until
-  they are turned off. Give them the new addresses.
+  they are turned off. Give them the new addresses. For one kept private
+  (in a move, every one), their next step: make it public here, then ask
+  you to point its old address at the new one. Not for a single-page
+  app, which is never pointed, nor when finite.site had no key for you.

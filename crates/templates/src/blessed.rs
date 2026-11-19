@@ -408,6 +408,7 @@ mod tests {
         assert!(names.contains("gws-docs"), "the upstream Docs guide complements connected Google");
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
         assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
+        assert!(names.contains("disk-space-finite"), "room made on a filling disk, files moved to storage");
         // a connection's skill is its docs and its quirks, and no code; and
         // the connection's one caller is `fragment connection call`, which a
         // skill of it says (another of its skills may be a guide to its

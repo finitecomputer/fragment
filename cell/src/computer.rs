@@ -34,10 +34,9 @@
 //!   from WorkOS Pipes, asked for each request; an operator
 //!   key, metered; an own key its owner gave, sealed here. Each call a
 //!   provider answered is counted by agent and month (`uses`).
-//! - **Its agents' new fragments** (`computer/joined`, from a fragment an
-//!   agent of its was added to): the agent's own fragment posts `joined`
-//!   on its `tasks`, and the fragment that added it then wakes the
-//!   computer (`Wake::Joined`; docs/computers.md).
+//! - **Its agents' new fragments**: the fragment an agent of its was added
+//!   to tells the agent's own fragment, which posts `joined` on its `tasks`
+//!   and names this computer, and then wakes it (`Wake::Joined`; runs_on.rs).
 //! - **A wipe of its owner** (docs/api.md, Operators: `computer/wipe`)
 //!   marks it wiped before anything else, destroys its container, deletes
 //!   every save from R2 (each record, then whatever else is under its saves'
@@ -54,8 +53,9 @@ use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
     alive, awake_batch, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
-    SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
+    SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
+use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
 use fragment_core::ledger::{MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
@@ -160,15 +160,8 @@ const DISK_READ_MS: i64 = 5_000;
 const CHECK: &str = "test ! -x /usr/local/bin/computer-check || exec /usr/local/bin/computer-check";
 const CHECK_EXEC_MS: i64 = 120_000;
 const CHECK_UNUSABLE: i64 = 3;
-/// What a save saves (docs/computers.md, "Data and the restore gate"):
-/// `/data/work`, what the guest's tools
-/// write, and the rest of `/data`, the guest's own state, each a record of
-/// its own and restored together, the first first (a restore replaces its
-/// directory whole, so `/data`'s record goes in before the work's).
-/// `/data`'s record leaves the work out (`WORK_LEFT_OUT`), and what a held
-/// guest names; the work's record leaves out only what it named under
-/// `/work/` (`work_left_out`: its agents' caches).
-const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
+/// What `/data`'s record leaves out (`fragment_core::computer::SAVED_DIRS`):
+/// its work, a record of its own.
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
@@ -351,6 +344,10 @@ enum MetaKey {
     /// The test lever's takeover destroys still to fail
     /// (`fail-takeover-destroys`).
     FailTakeOverDestroys,
+    /// The rows from before the grants' move its agents' fragments had not
+    /// taken when step 6 dropped them (`fragment_core::grants::Owed`): each
+    /// handed over at its agent's next ask, then forgotten. None owed, no row.
+    GrantsOwed,
 }
 
 impl MetaKey {
@@ -377,6 +374,7 @@ impl MetaKey {
             MetaKey::FailStarts => "fail_starts",
             MetaKey::StallTakeOver => "stall_take_over",
             MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
+            MetaKey::GrantsOwed => "grants_owed",
         }
     }
 }
@@ -394,6 +392,8 @@ struct Planned {
     alive_ms: Option<i64>,
     /// The lever's `alive-check` with `freeze`: its guest stopped as it starts.
     freeze: bool,
+    /// What its start's line says it restores (`start_line`).
+    facts: Facts,
 }
 
 /// Why a start did not come up.
@@ -450,6 +450,10 @@ pub struct ComputerCell {
     /// start that waits for its guest waits for (`alive`). In memory only:
     /// a start and its guest's reads are one isolate's.
     heard_ms: std::cell::Cell<Option<i64>>,
+    /// Its start under way, and the wake asked it answers, for that start's
+    /// log line (`start_line`). In memory only: a line its isolate took
+    /// with it is not written.
+    starts: RefCell<Starts>,
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
@@ -482,6 +486,7 @@ impl DurableObject for ComputerCell {
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
+            starts: RefCell::default(),
             armed: RefCell::new(None),
             relays: RefCell::default(),
             schema,
@@ -546,6 +551,9 @@ fn wiped_computer() -> CellError {
 #[derive(Deserialize)]
 struct WakeBody {
     why: Wake,
+    /// When the record (or the join's notice) that brings it was posted.
+    #[serde(default)]
+    at: Option<i64>,
 }
 
 /// `computer/export`: its owner's export asks for the save it copies.
@@ -652,15 +660,6 @@ struct OwnKeysAsk {
     accounts: Option<BTreeMap<String, Vec<Held>>>,
 }
 
-/// `computer/joined`'s body: the agent `identity` was added to `fragment`,
-/// its membership made at `at` (which keys the notice: runs_on.rs).
-#[derive(Deserialize)]
-struct JoinedAsk {
-    identity: String,
-    fragment: String,
-    at: i64,
-}
-
 #[derive(Deserialize)]
 struct Pin {
     image: String,
@@ -699,7 +698,8 @@ struct RelayClosed {
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
 /// `times` is `fail-saves`', `on` is `always-on`'s, `ms` is `hang-backups`'
-/// and `alive-check`'s, `freeze` is `alive-check`'s.
+/// and `alive-check`'s, `freeze` is `alive-check`'s, `total` and `free`
+/// are `disk`'s.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TestLever {
@@ -720,15 +720,28 @@ struct TestLever {
     /// `legacy-grants`': the agent fragment whose row it reads or writes.
     #[serde(default)]
     agent: Option<String>,
-    /// `legacy-grants`': what it writes of the row, as a release before the
-    /// move writes it: `connections` as stored, `accounts` provider → id.
+    /// `legacy-grants`': the row it makes owed, as step 6 keeps it:
+    /// `connections` as stored, `accounts` provider → id.
     #[serde(default)]
     row: Option<Value>,
+    /// `disk`'s read: its size and what is free, in bytes.
+    #[serde(default)]
+    total: Option<u64>,
+    #[serde(default)]
+    free: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct Tab {
     open: bool,
+}
+
+/// A start's line, once it ends (`start_line`; docs/computers.md, "The
+/// start line").
+fn log_start(line: Option<String>) {
+    if let Some(line) = line {
+        console_log!("{line}");
+    }
 }
 
 fn sha_hex(s: &str) -> String {
@@ -1080,6 +1093,8 @@ impl ComputerCell {
                 line["note"] = json!(note);
             }
             console_log!("{line}");
+            // the start under way came up, took a turn, or ended: its line
+            log_start(self.starts.borrow_mut().after(&applied, &life, js::now_ms()));
             self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)?;
             // in the same write as the lifecycle (nothing awaits between), and
             // before its actions: the start it may make reads how this life ended
@@ -1222,8 +1237,14 @@ impl ComputerCell {
     /// credit, no wakes). A computer already up is not asked about. A
     /// ledger that does not answer lets it wake (docs/ledger.md).
     async fn wake(&self, why: Wake) -> CellResult<()> {
+        let asked = js::now_ms();
         if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Starting { .. }) {
             self.may_start(json!(why)).await?;
+            // what the start it brings counts its time from (a read that
+            // fails costs the line its ask, never the wake)
+            if let Ok(life) = self.lifecycle() {
+                self.starts.borrow_mut().asked(Woke::Wake(why), &life.phase, asked);
+            }
         }
         // a wake that started nothing says why
         if let Some(why) = self.drive(Event::Wake { why }).await? {
@@ -1278,8 +1299,12 @@ impl ComputerCell {
         }
         if !matches!(life.phase, Phase::Starting { .. }) {
             // the start under way is the restart's, asked of no ledger again
+            let asked = js::now_ms();
             self.may_start(json!("restart")).await?;
             self.update_saves(|s| s.restart_fresh())?;
+            if let Ok(restarting) = self.lifecycle() {
+                self.starts.borrow_mut().asked(Woke::Restart, &restarting.phase, asked);
+            }
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": life.generation(), "phase": life.phase }));
         }
         // its answer, the view as its start was owed (`drive_events`); one
@@ -1426,10 +1451,16 @@ impl ComputerCell {
     /// it, when there is one . A start that comes up records what it
     /// restored, and logs it (P7).
     async fn start(&self, generation: u64) -> Event {
+        let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
+        log_start(self.starts.borrow_mut().begin(&id, generation, js::now_ms()));
         let planned = match self.plan(generation).await {
             Ok(p) => p,
-            Err(e) => return Event::StartFailed { generation, why: e.message },
+            Err(e) => {
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Start);
+                return Event::StartFailed { generation, why: e.message };
+            }
         };
+        self.starts.borrow_mut().planned(generation, planned.facts);
         let from = planned.plan.source();
         let save_id = planned.save.as_ref().map(|s| s.id.clone());
         let started = self.try_start(generation, &planned).await;
@@ -1457,6 +1488,7 @@ impl ComputerCell {
                 Event::Ready { generation }
             }
             Err(Unstarted::Unusable(why)) => {
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Unusable);
                 let id = save_id.expect("only a start from a save finds it unusable");
                 let older = self.update_saves(|s| s.unusable(&id)).unwrap_or(false);
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": "unusable", "id": id, "generation": generation, "why": why, "older": older }));
@@ -1464,6 +1496,7 @@ impl ComputerCell {
                 Event::RestoreFailed { generation, why, older }
             }
             Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Snapshot);
                 // forgotten before the destroy: any start after it restores
                 // the save
                 let forgot = self.update_saves(|s| s.snapshot_failed());
@@ -1472,6 +1505,7 @@ impl ComputerCell {
                 Event::SnapshotFailed { generation, why: e.message }
             }
             Err(Unstarted::Dead(why)) => {
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Dead);
                 // as a snapshot that would not start : its snapshot
                 // forgotten and its container destroyed, whose exit is this
                 // report's to make (`start_failing`), and the same wake starts the
@@ -1483,6 +1517,7 @@ impl ComputerCell {
                 Event::SnapshotFailed { generation, why }
             }
             Err(Unstarted::Failed(e)) => {
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Start);
                 let _ = self.destroy(generation, "the start failed").await;
                 Event::StartFailed { generation, why: e.message }
             }
@@ -1496,11 +1531,16 @@ impl ComputerCell {
         // what the start runs is what it looked at: the version it comes up on
         let reference = self.look().await?;
         let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
-        let (plan, save) = self.update_saves(|s| {
+        let fell_back = self.lifecycle().is_ok_and(|l| l.fell_back());
+        let (plan, save, facts) = self.update_saves(|s| {
             let plan = s.plan(snapshots);
+            // its line's: why a whole restore, and whether it runs another image
+            let (why, new_image) = (s.full_why(snapshots, fell_back), s.last_image().map(|ran| Some(ran) != reference.as_deref()));
             s.starting(generation, plan.source());
             let save = s.current().cloned().filter(|_| plan != Restore::Nothing);
-            (plan, save)
+            let bytes = save.as_ref().map(|s| s.records.iter().filter_map(|r| r["size"].as_u64()).sum());
+            let facts = Facts { path: plan.source(), why, bytes, new_image };
+            (plan, save, facts)
         })?;
         assert_eq!(plan == Restore::Nothing, save.is_none(), "a start restores the save there is");
         // a start from a snapshot waits for its guest (#362); the lever's
@@ -1512,7 +1552,7 @@ impl ComputerCell {
             (Restore::Backup | Restore::Nothing, None) => None,
         };
         let freeze = lever.is_some_and(|(_, freeze)| freeze);
-        Ok(Planned { plan, image, reference, save, alive_ms, freeze })
+        Ok(Planned { plan, image, reference, save, alive_ms, freeze, facts })
     }
 
     /// The lever's `alive-check` for the start that takes it, once: `(ms,
@@ -1568,6 +1608,7 @@ impl ComputerCell {
         match &planned.plan {
             Restore::Backup => {
                 self.exec_ready(&g).await?;
+                self.starts.borrow_mut().up(generation, js::now_ms());
                 let save = planned.save.as_ref().expect("a start from the save has its records");
                 // a directory's record before any inside it, as it was taken;
                 // together within `RESTORE_MS`, each given what is left
@@ -1593,11 +1634,13 @@ impl ComputerCell {
                 // start's slowest moment (FIN-462)
                 self.read_disk(generation).await;
                 self.mark(&g, RESTORED_MARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("opening the restore gate: {}", e.message)))?;
+                self.starts.borrow_mut().data(generation, js::now_ms());
             }
             Restore::Snapshot { .. } => {
                 // its sleep held the guest before it took the snapshot: a
                 // container started from it must not wake held
                 self.exec_ready(&g).await?;
+                self.starts.borrow_mut().up(generation, js::now_ms());
                 // its disk, before its guest is let go (as a restore's)
                 self.read_disk(generation).await;
                 self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
@@ -1810,19 +1853,25 @@ impl ComputerCell {
         // `hang-backups`: its own), each given what is left
         let budget = self.meta(MetaKey::HangBackups).ok().flatten().and_then(|ms| ms.parse::<i64>().ok()).filter(|ms| (1..=BACKUPS_MS).contains(ms)).unwrap_or(BACKUPS_MS);
         let until = js::now_ms() + budget;
+        // each record's stored bytes and time, by what it holds
+        let mut took = json!({});
         for dir in SAVED_DIRS {
-            // the guest's own state leaves its work out (a record of its
-            // own) and what it copied or named; its work leaves out only the
-            // caches it named in it
-            let exclude = match dir {
-                "/data" => std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>(),
+            // the guest's own state (its home) leaves its work out (a record
+            // of its own) and what it copied or named; its work leaves out
+            // only the caches it named in it
+            let (name, exclude) = match dir {
+                "/data" => ("home", std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>()),
                 // what it named in its work (its agents' caches), relative to it
-                _ => fragment_core::computer::work_left_out(&left_out),
+                _ => ("work", fragment_core::computer::work_left_out(&left_out)),
             };
             let exclude = js::to_js(&json!(exclude));
-            let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
+            let t = js::now_ms();
+            let left = JsValue::from_f64((until - t).max(1) as f64);
             match self.call("backup", &[g.clone(), dir.into(), exclude, left]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
-                Ok(record) => records.push(record),
+                Ok(record) => {
+                    took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
+                    records.push(record);
+                }
                 Err(e) => {
                     console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": e.message, "ms": js::now_ms() - t0 }));
                     match self.update_saves(|s| s.let_go(std::mem::take(&mut records))) {
@@ -1836,8 +1885,9 @@ impl ComputerCell {
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
         match self.keep_save(generation, records, held).await {
             Ok(save) => {
-                // one line per save (lesson 14): which, how big, how long
-                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0 }));
+                // one line per save (lesson 14): which, how big, how long,
+                // and its home's and its work's apart
+                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0, "home": took["home"], "work": took["work"] }));
                 Event::Saved { generation, seq }
             }
             Err(e) => {
@@ -2032,14 +2082,16 @@ impl ComputerCell {
 
     /// What agent fragment `fragment` (its agent `identity`) may use, asked
     /// of it, with its owner's change when they make one (its fields:
-    /// runs_on.rs `grants`). Until its fragment has taken the row this
-    /// computer kept for it before the move, each ask carries that row
-    /// (`taken`); once answered, the row is marked `MOVED` and sent no
-    /// more. A fragment holding grants of its own ignores a row, so one
-    /// sent late or again changes nothing (`grants::answered`).
+    /// runs_on.rs `grants`). While this computer owes it the row it kept
+    /// before the move (`owed`), the ask carries it (`taken`); once
+    /// answered, it is forgotten. A fragment holding grants of its own
+    /// ignores a row, so one sent late or again changes nothing
+    /// (`grants::answered`). A row kept for another agent of that name (its
+    /// fragment made again since) is no one's to take, and goes.
     async fn grants_of(&self, fragment: &str, identity: &str, change: Option<(&str, Value)>) -> CellResult<Grants> {
-        let taken = self.row(fragment)?.filter(|r| r.connections != grants::MOVED);
-        let mut ask = json!({ "computer": self.must(MetaKey::Id)?, "identity": identity, "taken": taken.as_ref().map(grants::Row::value) });
+        let owed = self.owed()?.0.remove(fragment);
+        let taken = owed.as_ref().filter(|(kept_for, _)| kept_for == identity).map(|(_, row)| row.value());
+        let mut ask = json!({ "computer": self.must(MetaKey::Id)?, "identity": identity, "taken": taken });
         if let Some((owner, change)) = change {
             ask["owner"] = json!(owner);
             for (k, v) in change.as_object().into_iter().flatten() {
@@ -2047,8 +2099,8 @@ impl ComputerCell {
             }
         }
         let grants = self.ask_grants(fragment, &ask).await?;
-        if taken.is_some() {
-            self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![grants::MOVED.into(), fragment.into()])?;
+        if owed.is_some() {
+            self.forget_owed(fragment)?;
         }
         Ok(grants)
     }
@@ -2058,30 +2110,39 @@ impl ComputerCell {
         Some(grants).filter(Grants::valid).ok_or_else(|| CellError::host(format!("{fragment} answered grants no agent may hold")))
     }
 
-    /// `fragment`'s row as this computer kept what it may use before the
-    /// move, as it stands: none for an agent that does not run here.
-    fn row(&self, fragment: &str) -> CellResult<Option<grants::Row>> {
-        let rows = self.rows("SELECT connections FROM agents WHERE fragment = ?", vec![fragment.into()])?;
-        let Some(connections) = rows.first().and_then(|r| r["connections"].as_str()).map(str::to_string) else { return Ok(None) };
-        let mut accounts = BTreeMap::new();
-        for r in self.rows("SELECT provider, account FROM agent_accounts WHERE agent = ?", vec![fragment.into()])? {
-            if let (Some(p), Some(a)) = (r["provider"].as_str(), r["account"].as_str()) {
-                accounts.insert(p.to_string(), a.to_string());
-            }
+    /// The rows it owes its agents' fragments (`MetaKey::GrantsOwed`).
+    fn owed(&self) -> CellResult<grants::Owed> {
+        match self.meta(MetaKey::GrantsOwed)? {
+            Some(stored) => grants::Owed::read(&stored, AGENTS_MAX as usize).map_err(|e| CellError::host(format!("its owed grants: {e}"))),
+            None => Ok(grants::Owed::default()),
         }
-        Ok(Some(grants::Row { connections, accounts }))
     }
 
-    /// Hands `fragment`'s row to its fragment while it is not yet taken
-    /// (before this release's upsert or delete loses it): a fragment gone,
-    /// or made again since (another agent's), has no one to take it, and
-    /// it goes as it is.
-    async fn move_row(&self, fragment: &str) -> CellResult<()> {
-        if self.row(fragment)?.is_none_or(|r| r.connections == grants::MOVED) {
+    /// `fragment`'s owed row forgotten (read again: an ask may have answered
+    /// meanwhile); the last one, its row too. Logged with how many are left
+    /// (`grants_owed`), so production says when none is.
+    fn forget_owed(&self, fragment: &str) -> CellResult<()> {
+        let mut owed = self.owed()?;
+        if owed.0.remove(fragment).is_none() {
             return Ok(());
         }
-        let rows = self.rows("SELECT identity FROM agents WHERE fragment = ?", vec![fragment.into()])?;
-        let identity = rows.first().and_then(|r| r["identity"].as_str()).unwrap_or_default().to_string();
+        match owed.stored() {
+            Some(stored) => self.set_meta(MetaKey::GrantsOwed, &stored)?,
+            None => self.delete_meta(MetaKey::GrantsOwed)?,
+        }
+        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "grants_owed": owed.0.len(), "forgot": fragment }));
+        Ok(())
+    }
+
+    /// Hands `fragment`'s owed row to its fragment before its agent leaves
+    /// here: its fragment keeps what it may use, should it run here again.
+    /// A fragment gone, or made again since, has no one to take it, and
+    /// `unassign` forgets it.
+    async fn hand_over(&self, fragment: &str) -> CellResult<()> {
+        if !self.owed()?.0.contains_key(fragment) {
+            return Ok(());
+        }
+        let Ok(identity) = self.runs(fragment) else { return Ok(()) };
         match self.grants_of(fragment, &identity, None).await {
             Err(e) if !matches!(e.code, ErrorCode::NotFound | ErrorCode::Forbidden) => Err(e),
             _ => Ok(()),
@@ -2547,9 +2608,9 @@ impl ComputerCell {
     /// with `freeze` its guest stopped so it never does (#362); `always-on
     /// {on}` is its owner's plan changing (the plan itself does not reach a
     /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
-    /// past its time; `legacy-grants {agent, row?}` writes an agent's row as
-    /// a release before the grants' move did (`fragment_core::grants`):
-    /// `row.connections`, `row.accounts` or both, then reads it.
+    /// past its time; `legacy-grants {agent, row?}` makes an agent's row from
+    /// before the grants' move owed, as step 6 keeps one its fragment had not
+    /// taken (`fragment_core::grants::Owed`), then reads what is owed.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         if b.op == "schema" {
@@ -2682,6 +2743,16 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation }));
                 Ok(json!({ "computer": id, "killed": generation }))
             }
+            "disk" => {
+                // a read of its disk as `DISK_READ`'s answer would give it,
+                // kept and told as one is (`read_disk`): a test fleet's
+                // computers share their host's disk, which never fills
+                let (total, free) = b.total.zip(b.free).filter(|(t, f)| *t > 0 && f <= t).ok_or_else(|| CellError::invalid("disk names its total and free bytes, free at most total"))?;
+                let d = fragment_core::computer::ComputerDisk { total, free, at: js::now_ms(), generation: self.lifecycle()?.generation() };
+                let kept = self.update_saves(|s| s.measured(d))?;
+                console_log!("{}", json!({ "computer": id, "lever": "disk", "total": total, "free": free, "kept": kept }));
+                Ok(json!({ "computer": id, "disk": d, "kept": kept }))
+            }
             "saves" => {
                 let life = self.lifecycle()?;
                 let mut v = serde_json::to_value(self.saves()?).map_err(|e| CellError::host(e.to_string()))?;
@@ -2702,32 +2773,20 @@ impl ComputerCell {
                 Ok(v)
             }
             "legacy-grants" => {
-                // an agent's row as a release before the move wrote it (a
-                // computer from before it, or one rolled back to): written
-                // when named, then read
+                // an agent's row from before the move that its fragment had
+                // not taken when step 6 dropped the old rows: owed, as that
+                // step keeps it (`{connections, accounts}`), when named; then
+                // what is owed, or none
                 let agent = b.agent.as_deref().ok_or_else(|| CellError::invalid("legacy-grants names its agent"))?;
-                self.runs(agent)?;
-                let row = b.row.as_ref().unwrap_or(&Value::Null);
-                // each part as that release writes it: its connections (a
-                // list's PUT), or its picks (an account's PUT or reset)
-                if let Some(connections) = row["connections"].as_str() {
-                    self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![connections.into(), agent.into()])?;
+                let identity = self.runs(agent)?;
+                if let Some(written) = &b.row {
+                    let row = grants::Row::of(written).ok_or_else(|| CellError::invalid("a row is its connections as stored and its accounts"))?;
+                    let mut owed = self.owed()?;
+                    owed.0.insert(agent.to_string(), (identity, row));
+                    self.set_meta(MetaKey::GrantsOwed, &owed.stored().expect("one owed"))?;
                 }
-                if let Some(accounts) = row["accounts"].as_object() {
-                    self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![agent.into()])?;
-                    for (provider, account) in accounts {
-                        self.exec("INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?)", vec![agent.into(), provider.as_str().into(), account.as_str().unwrap_or_default().into()])?;
-                    }
-                }
-                let connections = self.rows("SELECT connections FROM agents WHERE fragment = ?", vec![agent.into()])?;
-                let connections = connections.first().and_then(|r| r["connections"].as_str()).unwrap_or_default().to_string();
-                let mut accounts = serde_json::Map::new();
-                for r in self.rows("SELECT provider, account FROM agent_accounts WHERE agent = ?", vec![agent.into()])? {
-                    if let (Some(p), Some(a)) = (r["provider"].as_str(), r["account"].as_str()) {
-                        accounts.insert(p.to_string(), json!(a));
-                    }
-                }
-                Ok(json!({ "computer": id, "agent": agent, "row": { "connections": connections, "accounts": accounts } }))
+                let row = self.owed()?.0.remove(agent).map(|(_, row)| row.value());
+                Ok(json!({ "computer": id, "agent": agent, "row": row }))
             }
             op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in, always-on or legacy-grants"))),
         }
@@ -2790,6 +2849,10 @@ impl ComputerCell {
             "computer/wake" => {
                 let b: WakeBody = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
+                // work for its guest, unless taken up already (docs/computers.md, Lifecycle)
+                if let Some(at_ms) = b.at.filter(|_| matches!(b.why, Wake::Record | Wake::Joined)) {
+                    self.drive(Event::Posted { at_ms }).await?;
+                }
                 self.wake(b.why).await?;
                 json_response(&self.view().await?)
             }
@@ -2871,10 +2934,6 @@ impl ComputerCell {
                 }
                 json_response(&json!({ "providers": self.own_key_names()? }))
             }
-            "computer/joined" => {
-                let b: JoinedAsk = body_json(&mut req).await?;
-                json_response(&self.joined(b).await?)
-            }
             "computer/redeem" => {
                 let b: Redeem = body_json(&mut req).await?;
                 let now = js::now_ms();
@@ -2895,7 +2954,9 @@ impl ComputerCell {
             }
             "computer/guest" => {
                 // its guest is alive: what a start that waits for it waits for
-                self.heard_ms.set(Some(js::now_ms()));
+                let now = js::now_ms();
+                self.heard_ms.set(Some(now));
+                log_start(self.starts.borrow_mut().heard(now));
                 let b: GuestAsk = body_json(&mut req).await?;
                 if b.simplex {
                     self.said_simplex().await?;
@@ -3052,22 +3113,28 @@ impl ComputerCell {
                 json_response(&self.view().await?)
             }
             (Method::Put, ["agents", fragment]) => {
+                // a computer full refuses before the agent fragment takes it,
+                // which then names it as its computer; asked again after, as
+                // another assign may have come in meanwhile
+                let full = |cell: &ComputerCell| -> CellResult<()> {
+                    let n = cell.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![(*fragment).into()])?;
+                    match n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
+                        true => Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents"))),
+                        false => Ok(()),
+                    }
+                };
+                full(self)?;
                 // the agent fragment takes the computer first (its owner must
                 // be the computer's), and its key becomes the agent's identity
                 let took = crate::fragment::ask(&self.env, fragment, "computer/assign", &json!({ "computer": self.must(MetaKey::Id)?, "owner": who })).await?;
                 let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
-                let n = self.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![(*fragment).into()])?;
-                if n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
-                    return Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents")));
-                }
+                full(self)?;
                 // what it may use is its fragment's (a new agent's every
                 // connection its owner has: decision 44), kept as it was when
-                // assigned again; a row from before the move is handed over
-                // first
-                self.move_row(fragment).await?;
+                // assigned again
                 self.exec(
-                    "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, ?) ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity, connections = excluded.connections",
-                    vec![(*fragment).into(), identity.into(), who.as_str().into(), js::now_ms().into(), grants::MOVED.into()],
+                    "INSERT INTO agents (fragment, identity, owner, added_at) VALUES (?, ?, ?, ?) ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
+                    vec![(*fragment).into(), identity.into(), who.as_str().into(), js::now_ms().into()],
                 )?;
                 let view = self.view().await?;
                 // it comes in where its person is (decision 64), once both the
@@ -3077,9 +3144,9 @@ impl ComputerCell {
                 json_response(&view)
             }
             (Method::Delete, ["agents", fragment]) => {
-                // what it may use stays its fragment's: a row from before the
-                // move is handed over before the row goes
-                self.move_row(fragment).await?;
+                // what it may use stays its fragment's: a row still owed from
+                // before the move is handed over before the agent goes
+                self.hand_over(fragment).await?;
                 // an agent fragment gone (deleted: its own delete unassigns it,
                 // ended.rs) has nothing to say: its computer runs it no more
                 match crate::fragment::ask(&self.env, fragment, "computer/unassign", &json!({ "computer": self.must(MetaKey::Id)?, "owner": who })).await {
@@ -3202,7 +3269,8 @@ impl ComputerCell {
         };
         assert!(gone.len() <= 1, "a computer runs a fragment once");
         if !gone.is_empty() {
-            self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![fragment.into()])?;
+            // a row still owed has no one to take it now
+            self.forget_owed(fragment)?;
         }
         let view = self.view().await?;
         if !gone.is_empty() {
@@ -3324,26 +3392,6 @@ impl ComputerCell {
             secrets.push(json!({ "provider": provider.name, "tag": p.tag, "connection": p.connection, "secret": secret }));
         }
         Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "grantsMs": grants_ms }))
-    }
-
-    /// The agent `b.identity` was added to `b.fragment` (runs_on.rs, from
-    /// that fragment's outbox): when it runs here, its own fragment posts
-    /// `joined` on its `tasks` (once by the membership: a retry posts
-    /// nothing twice), so a guest that is awake lists its fragments again.
-    /// Answers `{runs}`: whether it runs here, and so whether there is a
-    /// computer to wake (its caller wakes it, on its own: a member's change
-    /// never waits for a start). Here is no one's computer, or the
-    /// identity no agent of it: nothing to tell.
-    async fn joined(&self, b: JoinedAsk) -> CellResult<Value> {
-        if !fragment_core::npub::is_identity(&b.identity) || !fragment_proto::valid_fragment_name(&b.fragment) || b.at <= 0 {
-            return Err(CellError::invalid("a join names an identity, a fragment and when it joined"));
-        }
-        let Some(id) = self.meta(MetaKey::Id)? else { return Ok(json!({ "runs": false })) };
-        let rows = self.rows("SELECT fragment FROM agents WHERE identity = ?", vec![b.identity.as_str().into()])?;
-        let Some(agent) = rows.first().and_then(|r| r["fragment"].as_str()).map(str::to_string) else { return Ok(json!({ "runs": false })) };
-        let posted = crate::fragment::ask(&self.env, &agent, "computer/joined", &json!({ "computer": id, "fragment": b.fragment, "at": b.at })).await?;
-        console_log!("{}", json!({ "computer": id, "joined": b.fragment, "agent": agent, "posted": posted["posted"] }));
-        Ok(json!({ "runs": true, "computer": id, "agent": agent, "posted": posted["posted"] }))
     }
 
     /// `owner`'s token for `provider`: WorkOS Pipes', for the WorkOS user

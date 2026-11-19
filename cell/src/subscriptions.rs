@@ -145,6 +145,11 @@ impl FragmentCell {
     /// The delivery of record `seq` of `channel` to subscription `sub`, or
     /// `None` when there is nothing to send: the subscription ended, or the
     /// record is past its retention.
+    /// When record `seq` of `channel` was posted (ms), if it is there.
+    pub(crate) fn record_at(&self, channel: &str, seq: i64) -> Option<i64> {
+        self.read_channel(channel, seq - 1, 1).ok()?.into_iter().find(|r| r.seq == seq).map(|r| r.at)
+    }
+
     pub(crate) fn record_delivery(&self, sub: i64, channel: &str, seq: i64, fragment: &str, incarnation: &str) -> CellResult<Option<Delivery>> {
         let subs = self.rows("SELECT url FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
         let Some(url) = subs.first().map(|r| r["url"].as_str().expect("subs.url is TEXT").to_string()) else { return Ok(None) };

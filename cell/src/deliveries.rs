@@ -77,13 +77,15 @@ struct PendingPush {
 /// What a computer's wake subscription names in place of a URL (runs_on.rs).
 const WAKE_PREFIX: &str = "computer:";
 
-/// The wake of `computer` that outbox row `id` holds, for record `seq` of `channel`.
+/// The wake of `computer` that outbox row `id` holds, for record `seq` of
+/// `channel`, posted at `at` (ms).
 struct Wake {
     id: i64,
     attempts: i64,
     computer: String,
     channel: String,
     seq: i64,
+    at: Option<i64>,
 }
 
 /// How a wake went.
@@ -207,7 +209,10 @@ impl FragmentCell {
             let (id, attempts) = (row["id"].as_i64().expect("delivery_outbox.id"), row["attempts"].as_i64().expect("delivery_outbox.attempts"));
             match decode(row) {
                 Pending::Record { sub, channel, seq } => match self.record_delivery(sub, &channel, seq, &fragment, &incarnation) {
-                    Ok(Some(d)) if d.url.starts_with(WAKE_PREFIX) => wakes.push(Wake { id, attempts, computer: d.url, channel, seq }),
+                    Ok(Some(d)) if d.url.starts_with(WAKE_PREFIX) => {
+                        let at = self.record_at(&channel, seq);
+                        wakes.push(Wake { id, attempts, computer: d.url, channel, seq, at })
+                    }
                     Ok(Some(d)) => singles.push((id, attempts, d)),
                     Ok(None) => self.outbox_done(id),
                     Err(e) => self.outbox_failed(&mut failed, id, attempts, &e.message),
@@ -259,11 +264,12 @@ impl FragmentCell {
     }
 
     /// Wakes the computer a wake subscription names, for record `seq` of
-    /// `channel` (its guest reads the record itself), and says how it went
-    /// in one line.
+    /// `channel` (its guest reads the record itself), with when the record
+    /// was posted (whether its guest has taken it up yet: docs/computers.md,
+    /// Lifecycle), and says how it went in one line.
     async fn wake(&self, w: &Wake, fragment: &str) -> Woken {
         let laps = js::Laps::start();
-        let woken = match crate::computer::ask(&self.env, &w.computer, "computer/wake", &json!({ "why": "record" })).await {
+        let woken = match crate::computer::ask(&self.env, &w.computer, "computer/wake", &json!({ "why": "record", "at": w.at })).await {
             Ok(_) => Woken::Up,
             // one that won't wake, or whose owner cannot pay, is not worth retrying
             Err(e) if matches!(e.code, ErrorCode::WontWake | ErrorCode::BudgetUsedUp | ErrorCode::NotFound) => Woken::Refused(e.message),

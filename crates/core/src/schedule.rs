@@ -10,12 +10,14 @@
 //! for their next minute (`Cron::next_fire`).
 //!
 //! Here: what a schedule may be, checked once for every way one is added
-//! (`check`, `admit_channel`); the key that makes each fire append once
+//! (`check`, `admit_channel`), and what may append at its fire (`fires`:
+//! a record that relays no one); the key that makes each fire append once
 //! (`fire_key`); and a schedule in words (`said`).
 
 use std::fmt;
 
 use fragment_proto::{canonical_json, limits, AddSchedule, ChannelDecl, ErrorCode, Role};
+use serde_json::Value;
 
 use crate::cron::Cron;
 
@@ -39,6 +41,10 @@ pub enum Refusal {
     FromMembers(String),
     /// The one adding it may not post there: the channel's post role.
     BelowPostRole { channel: String, post: Role },
+    /// Its record says it relays someone (`relayed`, `door::relays`): a
+    /// scheduled record is the fragment's own, and only a door its agent's
+    /// owner opened carries their words (docs/chat-records.md).
+    Relays,
 }
 
 impl Refusal {
@@ -46,7 +52,7 @@ impl Refusal {
     pub fn code(&self) -> ErrorCode {
         match self {
             Refusal::RecordTooLarge(_) => ErrorCode::TooLarge,
-            Refusal::BelowPostRole { .. } => ErrorCode::Forbidden,
+            Refusal::BelowPostRole { .. } | Refusal::Relays => ErrorCode::Forbidden,
             Refusal::Cron(_) | Refusal::TooOften(_) | Refusal::NoChannel(_) | Refusal::TakesNoPosts(_) | Refusal::FromMembers(_) => ErrorCode::InvalidRequest,
         }
     }
@@ -67,6 +73,7 @@ impl fmt::Display for Refusal {
             Refusal::TakesNoPosts(c) => write!(f, "channel {c} takes no posts, so nothing is appended to it on a schedule"),
             Refusal::FromMembers(c) => write!(f, "only its members of one kind post on channel {c}, and a scheduled record is the fragment's own"),
             Refusal::BelowPostRole { channel, post } => write!(f, "posting on channel {channel} needs the {} role, so scheduling a record there does too", post.as_str()),
+            Refusal::Relays => write!(f, "a scheduled record is the fragment's own, and relays no one (`relayed`): an agent's owner's words come only through a door its owner opened"),
         }
     }
 }
@@ -82,9 +89,11 @@ pub struct Checked {
 }
 
 /// `add`, checked: its cron parses and fires at most every
-/// `RECORD_SCHEDULE_EVERY_MIN_MINUTES`, and its record is within
-/// `RECORD_SCHEDULE_BODY_MAX_BYTES`. Its channel is its fragment's to
-/// admit (`admit_channel`).
+/// `RECORD_SCHEDULE_EVERY_MIN_MINUTES`, its record is within
+/// `RECORD_SCHEDULE_BODY_MAX_BYTES` and relays no one (`fires`): the fire
+/// appends it as the fragment's own key, no member's, which a computer's
+/// bridge would take as its agent's owner's words. Its channel is its
+/// fragment's to admit (`admit_channel`).
 pub fn check(add: &AddSchedule) -> Result<Checked, Refusal> {
     let expr = add.cron.split_whitespace().collect::<Vec<_>>().join(" ");
     let cron = Cron::parse(&expr).map_err(Refusal::Cron)?;
@@ -97,7 +106,19 @@ pub fn check(add: &AddSchedule) -> Result<Checked, Refusal> {
         return Err(Refusal::RecordTooLarge(body.len()));
     }
     const { assert!(limits::RECORD_SCHEDULE_BODY_MAX_BYTES < limits::RECORD_BODY_MAX_BYTES, "a scheduled record fits a channel record") };
+    fires(&add.record)?;
     Ok(Checked { cron, expr, channel: add.channel.clone(), body })
+}
+
+/// Whether a kept schedule's record may append at its fire: one that
+/// relays someone does not (`Refusal::Relays`). `check` refuses such a
+/// record at its add; a release before that kept some, and stored rows stay
+/// readable (docs/MODEL.md), so its fire is refused too.
+pub fn fires(record: &Value) -> Result<(), Refusal> {
+    match crate::door::relays(record) {
+        true => Err(Refusal::Relays),
+        false => Ok(()),
+    }
 }
 
 /// Whether a record may be scheduled on `channel` (its fragment's
@@ -269,6 +290,43 @@ mod tests {
             assert_eq!(r.code(), ErrorCode::InvalidRequest, "{r}");
         }
         assert!(Refusal::TooOften(5).to_string().contains("fires 5 minutes apart at its closest; a scheduled record fires at most every 15 minutes"));
+    }
+
+    /// Invalid: a scheduled record relays no one. `relayed` at all (as
+    /// `door::relays` reads it: well-formed, malformed or null, at the top
+    /// level only) is refused at its add, 403 as a post's would be, and a
+    /// stored one (kept before this refusal) is refused at its fire; a record
+    /// that only mentions it deeper, an ordinary one and an agent's routine
+    /// pass both.
+    #[test]
+    fn a_scheduled_record_relays_no_one() {
+        let door = json!({ "via": "simplex", "for": "npub1owner", "agent": "maple" });
+        let relaying = [
+            json!({ "text": "hi", "to": ["npub1agent"], "relayed": door }),
+            json!({ "text": "hi", "relayed": { "via": "simplex", "for": "npub1owner", "agent": "maple", "at": 1, "sig": "ab".repeat(64) } }),
+            json!({ "text": "hi", "relayed": "the owner" }),
+            json!({ "text": "hi", "relayed": null }),
+            json!({ "relayed": {} }),
+        ];
+        for record in &relaying {
+            assert!(crate::door::relays(record), "{record}");
+            assert_eq!(check(&add("0 * * * *", record.clone())), Err(Refusal::Relays), "{record}");
+            assert_eq!(fires(record), Err(Refusal::Relays), "stored: {record}");
+        }
+        assert_eq!(Refusal::Relays.code(), ErrorCode::Forbidden);
+        assert!(Refusal::Relays.to_string().contains("relays no one"), "{}", Refusal::Relays);
+        let passing = [
+            json!({ "kind": "routine", "text": "check the shelf", "chat": "none" }),
+            json!({ "source": "schedule", "payload": "water the plants" }),
+            json!({ "text": "hi", "payload": { "relayed": door } }),
+            json!("relayed"),
+            json!(["relayed"]),
+        ];
+        for record in &passing {
+            assert!(!crate::door::relays(record), "{record}");
+            assert!(check(&add("0 * * * *", record.clone())).is_ok(), "{record}");
+            assert_eq!(fires(record), Ok(()), "{record}");
+        }
     }
 
     /// Replay: a fire's key names its schedule and the minute it was due, so

@@ -17,8 +17,9 @@
 //!   (twenty minutes after a record or the last socket closed, a minute
 //!   after a pre-wake). An always-on computer never sleeps.
 //! - **Saving** (docs/computers.md, Durability, step 1). `/data` is saved when
-//!   work ends (the guest's last keepalive closes, and `SAVE_SETTLE_MS`
-//!   pass with none opened again, so turns back to back save once), every
+//!   work ends (the guest's last keepalive or its owner's last port tab
+//!   closes, and `SAVE_SETTLE_MS` pass with no keepalive opened again, so
+//!   turns back to back, or tabs, save once), every
 //!   `SAVE_EVERY_MS` while a keepalive stays open, and at every sleep. A
 //!   save is a hold (the DO touches `/run/computer/hold` and waits for the
 //!   guest's `/run/computer/held`), the save, and, awake, the hold let go.
@@ -29,6 +30,10 @@
 //!   it was held, so it stays awake (docs/computers.md, Lifecycle).
 //!   A sleep whose save fails keeps its container and is tried again, for
 //!   at most `Rules::unsaved_max_ms`; then it sleeps unsaved, and says so.
+//!   A container its host stops unasked while it is idle, with all this
+//!   life did in a save of its own and no wake its guest has not taken up,
+//!   has slept too: no strike, no rollback, and nothing starts it again
+//!   until something wants it.
 //! - **Failing.** A start that fails, never reports ready, or whose
 //!   container stops before it is ready, is tried again with a growing
 //!   pause: one strike, however many ways its failure is heard. After
@@ -57,6 +62,7 @@
 //! something was done on the life it lost after the save it went back to.
 
 pub mod said;
+pub mod start_line;
 
 mod awake;
 mod disk;
@@ -72,7 +78,7 @@ mod which;
 
 pub use awake::awake_batch;
 pub use disk::{disk_clear, disk_filling, disk_of_df, reads_disk_after, ComputerDisk, DISK_CLEAR_FREE_MIN, DISK_CLEAR_USED_PCT, DISK_READ, DISK_TOLD_FREE_MAX, DISK_TOLD_USED_PCT};
-pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_MAX, LEFT_OUT_PATTERN_MAX_BYTES, UNHELD_MAX_BYTES};
+pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_MAX, LEFT_OUT_PATTERN_MAX_BYTES, SAVED_DIRS, UNHELD_MAX_BYTES};
 pub use images::{does_simplex, image_running, valid_version, version_now, version_of, version_running, Images, VERSION_HEX};
 pub use lifecycle::{alive, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};
 pub use limits::{
