@@ -288,10 +288,11 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
 
 /// The disk checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes.
-const DISK_CHECKS: [&str; 3] = [
+const DISK_CHECKS: [&str; 4] = [
     "its disk is read in its start, before its guest runs: its size and what is free, read by that start",
     "and in its next start, by that start",
     "its owner's open pages are told as its phase changes, its notices the same: as it sleeps, and as it wakes",
+    "its owner's sleep while a wake's start waits on telling them (the lever's slow-start-tell) ends that start: none is made, it stays asleep, and its next wake starts it",
 ];
 
 /// Its disk, read (`df`) in each start before its guest is let go
@@ -336,6 +337,37 @@ fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
         DISK_CHECKS[2],
         before < 10 && slept.body["phase"] == "asleep" && told_slept > 0 && told_woke > 0 && slept.body["notices"] == v["notices"] && woke.body["notices"] == v["notices"],
         json!({ "before": before, "slept": [&slept.body["phase"], told_slept], "woke": [&woke.body["phase"], told_woke], "notices": [&v["notices"], &slept.body["notices"], &woke.body["notices"]] }),
+    );
+    // its owner's sleep while a wake's start waits on telling them (Codex
+    // and review on #1381: a start made after it would run a container
+    // behind an asleep view): that start is not made
+    std::thread::sleep(QUEUE_DRAIN);
+    let asleep = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let g = asleep.body["generation"].as_u64().unwrap_or(0);
+    let slow = Duration::from_secs(8);
+    let slowed = lever_with(api, c.id, json!({ "op": "slow-start-tell", "ms": slow.as_millis() as u64 }))?;
+    let (waking, ended) = std::thread::scope(|scope| {
+        let waking = scope.spawn(|| api.patient(slow + Duration::from_secs(60)).signed(c.owner, "POST", &path("/wake"), Some(&json!({}))));
+        std::thread::sleep(slow / 3);
+        let ended = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})));
+        (waking.join().map_err(|_| anyhow::anyhow!("the wake's thread panicked")), ended)
+    });
+    let (waking, ended) = (waking??, ended?);
+    std::thread::sleep(Duration::from_secs(3));
+    let after = lever(api, c.id, "saves")?.body;
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    s.ok(
+        DISK_CHECKS[3],
+        asleep.body["phase"] == "asleep"
+            && slowed.status == 200
+            && waking.status == 200
+            && ended.status == 200
+            && ended.body["phase"] == "asleep"
+            && after["running"] == false
+            && after["phase"]["phase"] == "asleep"
+            && woke.body["phase"] == "awake"
+            && woke.body["generation"].as_u64().is_some_and(|n| n > g + 1),
+        json!({ "asleep": g, "waking": [waking.status, &waking.body["phase"], &waking.body["generation"]], "ended": &ended.body["phase"], "after": { "running": &after["running"], "phase": &after["phase"] }, "woke": [&woke.body["phase"], &woke.body["generation"]] }),
     );
     Ok(())
 }

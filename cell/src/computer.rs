@@ -339,6 +339,8 @@ enum MetaKey {
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
     SlowTell,
+    /// The test lever's wait before a start's owner is told (`slow-start-tell`), in ms.
+    SlowStartTell,
     /// The test lever's wait between a failing start's `StartFailing` and
     /// its destroy (`stall-failing-start`), in ms.
     StallFailingStart,
@@ -376,6 +378,7 @@ impl MetaKey {
             MetaKey::RelayDay => "relay_day",
             MetaKey::ClockOffset => "clock_offset",
             MetaKey::SlowTell => "slow_tell",
+            MetaKey::SlowStartTell => "slow_start_tell",
             MetaKey::StallFailingStart => "stall_failing_start",
             MetaKey::FailStarts => "fail_starts",
             MetaKey::StallTakeOver => "stall_take_over",
@@ -1075,7 +1078,7 @@ impl ComputerCell {
             let was = phase_told(&life);
             let logged = json!(event);
             let applied = event.clone();
-            let step = life.apply_with(event, js::now_ms(), &rules);
+            let mut step = life.apply_with(event, js::now_ms(), &rules);
             // one line per event (lesson 14): what happened, and what it led to
             let mut line = json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions });
             if let Some(ended) = step.ended {
@@ -1107,8 +1110,16 @@ impl ComputerCell {
             // starts); every other change is told as the drive ends. Awaited,
             // never a task of its own: background work on a lifecycle route
             // slowed container destroys (#1343)
-            if phase_told(&life) != was && step.actions.iter().any(|a| matches!(a, Action::Start { .. })) {
+            let start = step.actions.iter().find_map(|a| if let Action::Start { generation } = a { Some(*generation) } else { None });
+            if let Some(g) = start.filter(|_| phase_told(&life) != was) {
+                self.lever_wait(MetaKey::SlowStartTell, SLOW_TELL_MAX_MS).await;
                 self.tell_owner().await;
+                // what came in as it was told (its owner's sleep, a newer
+                // wake) may have ended this start: then none is made
+                if !matches!(self.lifecycle()?.phase, Phase::Starting { generation, .. } if generation == g) {
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "start": g, "superseded": "as its owner was told" }));
+                    step.actions.retain(|a| !matches!(a, Action::Start { .. }));
+                }
             }
             refused = refused.or(step.refused.clone());
             for next in self.perform(step).await? {
@@ -2624,16 +2635,18 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
             }
-            "slow-tell" => {
-                // its next restart's owner is told `ms` late (0: on time),
-                // as a slow principal answers: the window in which its alarm
-                // makes the start the restart owed (`drive_events`' answer)
-                let ms = b.ms.map(u64::from).filter(|ms| *ms <= SLOW_TELL_MAX_MS).ok_or_else(|| CellError::invalid(format!("slow-tell names its ms, 0 to {SLOW_TELL_MAX_MS}")))?;
+            "slow-tell" | "slow-start-tell" => {
+                // its next restart's (or start's) owner is told `ms` late (0:
+                // on time), as a slow principal answers: the window in which
+                // its alarm makes the start the restart owed (`drive_events`'
+                // answer), or its owner's sleep ends a start before it is made
+                let key = if b.op == "slow-tell" { MetaKey::SlowTell } else { MetaKey::SlowStartTell };
+                let ms = b.ms.map(u64::from).filter(|ms| *ms <= SLOW_TELL_MAX_MS).ok_or_else(|| CellError::invalid(format!("{} names its ms, 0 to {SLOW_TELL_MAX_MS}", b.op)))?;
                 match ms {
-                    0 => self.delete_meta(MetaKey::SlowTell)?,
-                    ms => self.set_meta(MetaKey::SlowTell, &ms.to_string())?,
+                    0 => self.delete_meta(key)?,
+                    ms => self.set_meta(key, &ms.to_string())?,
                 }
-                console_log!("{}", json!({ "computer": id, "lever": "slow-tell", "ms": ms }));
+                console_log!("{}", json!({ "computer": id, "lever": b.op, "ms": ms }));
                 Ok(json!({ "computer": id, "slowTell": ms }))
             }
             "fail-starts" | "fail-takeover-destroys" => {
