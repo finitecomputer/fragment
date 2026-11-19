@@ -158,14 +158,14 @@ impl Stage {
     /// `len` bytes of the zip from `offset` copied into `into`'s blobs on
     /// the platform (`POST …/copy`), never through this computer: the blob
     /// they are, by their SHA-256. The same range again is the same blob.
-    pub fn copy(&self, into: &str, offset: u64, len: u64) -> Result<String> {
+    pub fn copy(&self, into: &str, offset: u64, len: u64) -> Result<(String, u32)> {
         let base = self.path.strip_suffix("/zip").expect("a stage's zip path");
         let path = format!("{base}/copy?into={}&offset={offset}&bytes={len}", crate::api::encode_q(into));
         let copied: fragment_proto::migrations::StageCopied = self.client.call_as(self.client.post_safe(&path, len)?).with_context(|| format!("copying {len} bytes of the stage into {into}"))?;
         if copied.bytes != len || !fragment_core::blob::valid_sha(&copied.sha256) {
             bail!("a copy of {len} bytes answered {} bytes, blob {:?}", copied.bytes, copied.sha256);
         }
-        Ok(copied.sha256)
+        Ok((copied.sha256, copied.crc32))
     }
 }
 
@@ -440,9 +440,19 @@ impl Source {
         Ok((e.compression() == zip::CompressionMethod::Stored && e.compressed_size() == e.size()).then_some((start, e.size())))
     }
 
+    /// A zip's file's CRC-32 and permission bits, as its directory names
+    /// them (the old file's own, made where it was zipped). None for a
+    /// folder's file.
+    pub fn sums(&self, path: &str) -> Result<Option<(u32, Option<u32>)>> {
+        let Backing::Zip(archive) = &self.backing else { return Ok(None) };
+        let (_, index) = *self.at.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?;
+        let e = archive.by_index_data(index).with_context(|| format!("finding {path} in the zip"))?;
+        Ok(Some((e.crc32(), e.unix_mode().map(|m| m & 0o777))))
+    }
+
     /// `len` bytes of a stage's zip from `offset` copied into `into`'s blobs
-    /// on the platform (`Stage::copy`): the blob they are.
-    pub fn copy(&self, into: &str, offset: u64, len: u64) -> Result<String> {
+    /// on the platform (`Stage::copy`): the blob they are, and their CRC-32.
+    pub fn copy(&self, into: &str, offset: u64, len: u64) -> Result<(String, u32)> {
         self.remote.as_ref().ok_or_else(|| anyhow!("only a stage's bytes are copied on the platform"))?.copy(into, offset, len)
     }
 

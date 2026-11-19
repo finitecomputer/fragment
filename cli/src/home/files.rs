@@ -176,7 +176,12 @@ pub(crate) fn manifest(c: &Client, held: &mut Held, author: &Author, mut head: S
 fn stored(src: &Source, blobs: &Blobs, into: &str, p: &plan::Picked) -> Result<Vec<u8>> {
     if blobs.keeps(p.bytes)? {
         if let Some((offset, len)) = src.span(&p.from)? {
-            let sha = src.copy(into, offset, len).with_context(|| format!("copying {}", p.from))?;
+            let (sha, crc) = src.copy(into, offset, len).with_context(|| format!("copying {}", p.from))?;
+            // the zip's own check of the file, which reading it made
+            let (want, _) = src.sums(&p.from)?.ok_or_else(|| anyhow!("{}: its zip names no CRC-32", p.from))?;
+            if crc != want {
+                bail!("{} in the stage is not the old file it names (its CRC-32 is {crc:08x}, the zip's {want:08x}): nothing was committed for it", p.from);
+            }
             return Ok(blob::pointer(&sha, len).into_bytes());
         }
     }
@@ -330,6 +335,30 @@ mod tests {
         assert!(read < video.len() as u64, "and never read here: {read} bytes read");
         let again = bring(&c, &src, &layout(), NAME).unwrap();
         assert_eq!((again.files, again.already, mock.stage_copies().0), (0, 2, 1), "again: nothing copied twice");
+    }
+
+    /// Goal (Codex on #1388): a stage's file whose bytes are not those its
+    /// zip's CRC-32 names (damaged, its directory whole) is never taken for
+    /// the old file: a copy on the platform answers its CRC-32, checked as
+    /// reading the file checks it, and nothing is committed for it.
+    #[test]
+    fn a_damaged_file_in_a_stage_is_never_taken_for_the_old_one() {
+        let t = Temp::new();
+        let video: Vec<u8> = (0..5 * 1024 * 1024u32).map(|i| (i % 247) as u8).collect();
+        let zip = t.0.join("stage.zip");
+        fragment_fakes::old_home::zip(&zip, &[("work/videos/trip.mp4".into(), video)]).unwrap();
+        let mut bytes = std::fs::read(&zip).unwrap();
+        let start = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).unwrap().by_index_raw(0).unwrap().data_start().unwrap();
+        bytes[start as usize + 100] ^= 1;
+        let mock = crate::mockcs::start();
+        mock.keep_blobs();
+        mock.seed_repo(NAME, &[]);
+        mock.seed_stage("old1.p1.1", bytes);
+        let c = Client::new(&mock.url, crate::auth::fixed(7));
+        let src = super::super::open_from(Some(&c), std::path::Path::new("stage:old1.p1.1"), &layout()).unwrap();
+        let e = bring(&c, &src, &layout(), NAME).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("is not the old file it names"), "{e}");
+        assert!(mock.file_at(NAME, "main", "files/videos/trip.mp4").is_none(), "nothing committed for it");
     }
 
     /// Goal: a file of 1 MiB or more counts as there already only when a

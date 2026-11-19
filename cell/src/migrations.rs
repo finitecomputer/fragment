@@ -417,10 +417,12 @@ fn stage_route<'a>(mut req: Request, env: &'a Env, cfg: &'a Config, url: &'a Url
 /// file's bytes, or a part of them) into the blobs of `into`, on the
 /// platform: never through the agent's computer, which may hold far less
 /// than its stage (2026-11-18: a 47 GB import failed on 20 GB). Hashed as
-/// R2 reads it, none of it through Wasm, then read again into `into`'s
-/// blob upload as the agent (or for its owner): the fragment checks the
-/// caller edits it, and the hash again as the bytes arrive. Answers
-/// `StageCopied`: the blob, by its bytes' SHA-256.
+/// R2 reads it, with its CRC-32 (the zip's own check, which the caller
+/// compares with the entry's: a damaged one is never taken for the file),
+/// then read again into `into`'s blob upload as the agent (or for its
+/// owner): the fragment checks the caller edits it, and the hash again as
+/// the bytes arrive. Answers `StageCopied`: the blob, by its bytes'
+/// SHA-256, and their CRC-32.
 fn copy<'a>(env: &'a Env, cfg: &'a Config, url: &'a Url, stage: &'a str, who: crate::routed::Signed) -> Waits<'a, Response> {
     Box::pin(async move {
         let into = crate::named_fragment(&query(url, "into"))?;
@@ -438,7 +440,7 @@ fn copy<'a>(env: &'a Env, cfg: &'a Config, url: &'a Url, stage: &'a str, who: cr
         let size = js::object_size(env, STAGE, &key).await?.ok_or_else(gone)?;
         let end = offset.checked_add(len).filter(|e| *e <= size).ok_or_else(|| CellError::invalid(format!("bytes {offset} to {offset}+{len} are past the zip's {size}")))?;
         let range = format!("bytes={offset}-{}", end - 1);
-        let sha = js::digest(js::blob_get(env, STAGE, &key, Some(&range)).await?.ok_or_else(gone)?.body).await?;
+        let (sha, crc) = js::digest_and_crc(js::blob_get(env, STAGE, &key, Some(&range)).await?.ok_or_else(gone)?.body).await?;
         let body = js::blob_get(env, STAGE, &key, Some(&range)).await?.ok_or_else(gone)?.body;
         let routed = crate::routed::Routed { name: into, url: url.clone(), signed: Some(who), credential: None };
         let stored = crate::stream_to(env, routed, Method::Put, &format!("/api/blobs/{sha}"), body, len).await?;
@@ -446,7 +448,7 @@ fn copy<'a>(env: &'a Env, cfg: &'a Config, url: &'a Url, stage: &'a str, who: cr
             return Ok(stored);
         }
         // `StageCopied`, its hash 64 hex
-        crate::json_passed(format!("{{\"sha256\":\"{sha}\",\"bytes\":{len}}}").into_bytes())
+        crate::json_passed(format!("{{\"sha256\":\"{sha}\",\"bytes\":{len},\"crc32\":{crc}}}").into_bytes())
     })
 }
 

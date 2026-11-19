@@ -134,6 +134,7 @@ bound Sizes.total range u64
 bound Sizes.work range u64
 bound StageCompleted.zip_bytes range u64
 bound StageCopied.bytes range u64
+bound StageCopied.crc32 range u32
 bound StageDone.report_sha256 default null
 bound StageDone.why default null
 bound StagePart.bytes range u64
@@ -472,6 +473,7 @@ field StageComplete.manifest required Manifest
 field StageCompleted.manifest_sha256 required string
 field StageCompleted.zip_bytes required integer
 field StageCopied.bytes required integer
+field StageCopied.crc32 required integer
 field StageCopied.sha256 required string
 field StageDone.ok required boolean
 field StageDone.report_sha256 optional string|null
