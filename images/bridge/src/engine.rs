@@ -698,6 +698,11 @@ pub struct Engine {
     /// of theirs is claimed. Never written to `/data`: the driver says it
     /// with each read of the computer.
     unready: BTreeSet<String>,
+    /// Turns claimed as this life's while their agent was not ready (its
+    /// claim was in flight as it became so), each with its claim's seq:
+    /// handed once it is (`Input::Unready`). Never written to `/data`: a
+    /// life that ends meanwhile leaves them cut, as any claimed turn.
+    parked: BTreeMap<String, Option<u64>>,
     /// Per agent and chat, its turn there the runtime's notices belong to
     /// (the one running, else the last this life handed there) and how many
     /// it posted, the one used last at the back (at most
@@ -797,6 +802,7 @@ impl Engine {
             published: BTreeSet::new(),
             relaying: BTreeMap::new(),
             unready: BTreeSet::new(),
+            parked: BTreeMap::new(),
             noticed: VecDeque::new(),
             helpers_said: BTreeMap::new(),
             helpers_n: 0,
@@ -918,13 +924,7 @@ impl Engine {
                 assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
                 self.relaying = agents;
             }
-            Input::Unready(agents) => {
-                assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
-                if agents != self.unready {
-                    self.unready = agents;
-                    self.pump_all();
-                }
-            }
+            Input::Unready(agents) => self.set_unready(agents),
         }
         self.finish()
     }
@@ -1767,7 +1767,7 @@ impl Engine {
             Some(_) => return,
             None => return self.refuse_queued(agent, fragment, &runtime),
         }
-        let busy = self.state.turns.values().any(|t| t.agent == agent && t.fragment == fragment && (t.active() || self.claiming.contains(&t.id)));
+        let busy = self.state.turns.values().any(|t| t.agent == agent && t.fragment == fragment && (t.active() || self.claiming.contains(&t.id) || self.parked.contains_key(&t.id)));
         if busy || self.settling(agent, fragment) {
             return;
         }
@@ -1810,6 +1810,28 @@ impl Engine {
         }
     }
 
+    /// The agents not ready for their runtime now (`Input::Unready`): those
+    /// ready again hand their parked turns, and their queues move. Said
+    /// after the roster (`Input::Agents`), so a turn starts on the runtime
+    /// its agent names now.
+    fn set_unready(&mut self, agents: BTreeSet<String>) {
+        assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
+        let ready: Vec<String> = self.unready.difference(&agents).cloned().collect();
+        self.unready = agents;
+        let parked: Vec<(String, Option<u64>)> = self.parked.iter().filter(|(id, _)| self.state.turns.get(*id).is_none_or(|t| !self.unready.contains(&t.agent))).map(|(id, seq)| (id.clone(), *seq)).collect();
+        for (id, seq) in parked {
+            self.parked.remove(&id);
+            // stopped, or its agent gone, while parked: nothing to hand
+            if self.state.turns.get(&id).is_some_and(|t| t.phase == Phase::Queued && self.agent(&t.agent).is_some()) {
+                self.hand(&id, seq);
+            }
+        }
+        let chats: BTreeSet<(String, String)> = self.state.turns.values().filter(|t| ready.contains(&t.agent)).map(|t| (t.agent.clone(), t.fragment.clone())).collect();
+        for (agent, fragment) in chats {
+            self.pump(&agent, &fragment);
+        }
+    }
+
     /// Every chat's queue moves (a claim may be due in any).
     fn pump_all(&mut self) {
         let chats: BTreeSet<(String, String)> = self.state.turns.values().map(|t| (t.agent.clone(), t.fragment.clone())).collect();
@@ -1829,6 +1851,12 @@ impl Engine {
         }
         assert!(self.state.turns.get(id).is_some_and(|t| t.phase == Phase::Queued), "a turn being claimed is held, queued: {id}");
         match answer {
+            // its agent stopped being ready while its claim was in flight:
+            // claimed, it waits until its agent is ready again
+            ClaimAnswer::Ours { seq } if self.state.turns.get(id).is_some_and(|t| self.unready.contains(&t.agent)) => {
+                crate::ev!("turn.parked", { "turn": id, "why": "its agent is not ready for its runtime yet" });
+                self.parked.insert(id.to_string(), seq);
+            }
             ClaimAnswer::Ours { seq } => self.hand(id, seq),
             ClaimAnswer::Theirs => {
                 // It owes its end as lost (a 409 itself when that life ended

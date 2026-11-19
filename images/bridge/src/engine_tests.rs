@@ -170,6 +170,49 @@ fn an_agent_not_ready_for_its_runtime_holds_its_turns() {
     assert_eq!((t.agent.fragment.as_str(), routed(&s)[0].0.as_str()), (r.fragment.as_str(), "other"));
 }
 
+/// Goal (FIN-542): a turn whose claim was in flight as its agent stopped
+/// being ready for its runtime (switched while restoring) is not handed:
+/// claimed, it waits, and nothing else of the chat is claimed; once the
+/// agent is ready, it is handed to the runtime the agent names now.
+#[test]
+fn a_claim_answered_while_its_agent_is_not_ready_waits() {
+    let r = on("rowan", crate::runtime::DEFAULT);
+    let mut e = two_runtimes(&[r.clone()]);
+    let chat = format!("{}-talk--k3x9", r.name);
+    let s = e.step(Input::Record { agent: r.fragment.clone(), fragment: chat.clone(), record: rec(1, "npub1paul", json!({ "text": "hi" })), view: Some(view(&[&r])), since: 0 }, T0);
+    let turn = s.effects.iter().find_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).expect("claimed on Hermes");
+    // switched to `other` while its claim is out, not ready for it
+    let switched = on("rowan", "other");
+    e.step(Input::Agents(vec![switched.clone()]), T0 + 1);
+    e.step(Input::Unready([r.fragment.clone()].into()), T0 + 1);
+    let s = e.step(Input::Claimed { turn: turn.clone(), answer: ClaimAnswer::Ours { seq: None } }, T0 + 2);
+    assert!(routed(&s).is_empty(), "claimed, not handed while its agent is not ready: {s:?}");
+    let s = e.step(Input::Record { agent: r.fragment.clone(), fragment: chat, record: rec(2, "npub1paul", json!({ "text": "and this" })), view: Some(view(&[&switched])), since: 0 }, T0 + 3);
+    assert!(!s.effects.iter().any(|x| matches!(x, Effect::Claim { .. })), "nothing else of the chat is claimed meanwhile");
+    let s = e.step(Input::Unready(BTreeSet::new()), T0 + 4);
+    let handed = routed(&s);
+    assert!(matches!(handed.first(), Some((rt, Command::Start(t))) if rt == "other" && t.turn == turn), "handed to its runtime now, once ready: {handed:?}");
+}
+
+/// Goal (FIN-542): the roster comes before who of it is ready (the
+/// driver's order), so a turn held while its agent named a runtime by
+/// mistake starts on the one it names again, never refused for the old.
+#[test]
+fn a_held_turn_starts_on_the_runtime_its_agent_names_once_ready() {
+    let r = on("rowan", "other");
+    let mut e = two_runtimes(&[r.clone()]);
+    let typo = on("rowan", "othre");
+    e.step(Input::Agents(vec![typo.clone()]), T0);
+    e.step(Input::Unready([r.fragment.clone()].into()), T0);
+    let s = to_own_chat(&mut e, &typo, 1, json!({ "text": "hi" }), T0 + 1);
+    assert!(posts(&s).is_empty(), "held: {s:?}");
+    // its owner corrects it, and it is ready for that runtime again
+    e.step(Input::Agents(vec![r.clone()]), T0 + 2);
+    let s = e.step(Input::Unready(BTreeSet::new()), T0 + 2);
+    let s = answered(&mut e, s, T0 + 2);
+    assert!(started(&s).is_some_and(|t| t.agent.runtime.as_deref() == Some("other")), "started on its runtime, not refused: {s:?}");
+}
+
 /// Goal: an agent whose `agent.json` names a runtime this bridge does not
 /// run has its turns refused, both records posted, the end saying so; none
 /// is handed to another runtime, and none waits. A name that is no

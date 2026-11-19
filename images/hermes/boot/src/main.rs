@@ -739,21 +739,45 @@ async fn sync_own(api: &Api, a: &Agent, home: &Path, own: &(dyn Fn(&Path) + Sync
     }
 }
 
-/// Each agent of another runtime than Hermes' whose own files are not yet
-/// restored for the runtime it names now: synced, and restored once a sync
-/// succeeds (FIN-542). One that failed stays unrestored, out of the ready
-/// file (agents.rs, `ready_file`), and is tried again at the next read of
-/// the computer's agents. An agent that left, or names another runtime,
-/// is forgotten: back, it is restored again.
-async fn restore(api: &Api, agents: &[Agent], home: &Path, own: &(dyn Fn(&Path) + Sync), restored: &mut agents::Restored) {
-    restored.retain(|(f, r)| agents.iter().any(|a| &a.fragment == f && agents::runtime_of(a) == r));
-    let todo: Vec<&Agent> = agents.iter().filter(|a| !agents::of_hermes(a) && !restored.contains(&agents::restored_key(a))).collect();
-    let synced = futures_util::future::join_all(todo.iter().map(|a| sync_own(api, a, home, own))).await;
-    for (a, d) in todo.into_iter().zip(synced) {
-        if d.is_some() {
-            restored.insert(agents::restored_key(a));
+/// The restores of agents' own files (`restore`): those done, and those
+/// under way, each by (fragment, runtime).
+#[derive(Default)]
+struct Restores {
+    done: agents::Restored,
+    running: agents::Restored,
+}
+
+type Restoring = std::sync::Arc<std::sync::Mutex<Restores>>;
+
+/// A restore started for each agent of another runtime than Hermes' whose
+/// own files are not restored, nor being restored, for the runtime it
+/// names now (FIN-542): done once its sync succeeds. One that failed is
+/// not, so it is ready for no runtime (agents.rs, `ready_file`), and is
+/// tried again at the next read of the computer's agents. An agent that
+/// left, or names another runtime, is forgotten: back, it is restored
+/// again. Each runs on its own, a round under way for a hold (`Busy`), so
+/// a slow one keeps no other agent waiting; a start waits for them.
+fn restore(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, quiet: &std::sync::Arc<Quiet>, restoring: &Restoring) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut r = restoring.lock().expect("the restores are never poisoned");
+    r.done.retain(|(f, rt)| agents.iter().any(|a| &a.fragment == f && agents::runtime_of(a) == rt));
+    let mut started = Vec::new();
+    for a in agents.iter().filter(|a| !agents::of_hermes(a)) {
+        let key = agents::restored_key(a);
+        if r.done.contains(&key) || !r.running.insert(key.clone()) {
+            continue;
         }
+        let (api, a, home, restoring, busy) = (api.clone(), a.clone(), home.to_path_buf(), restoring.clone(), Busy::new(quiet));
+        started.push(tokio::spawn(async move {
+            let _busy = busy;
+            let restored = sync_own(&api, &a, &home, &move |p: &Path| chown(p, ids)).await.is_some();
+            let mut r = restoring.lock().expect("the restores are never poisoned");
+            r.running.remove(&key);
+            if restored {
+                r.done.insert(key);
+            }
+        }));
     }
+    started
 }
 
 /// An agent's agent fragment's title and role, its name and what it does
@@ -1523,13 +1547,14 @@ async fn boot_main() {
     // the other runtimes' agents' own files, as each Hermes agent's came
     // with its profile: back before the ready file names them
     let own = move |p: &Path| chown(p, ids);
-    let mut restored = agents::Restored::new();
-    restore(&api, &agents, &home, &own, &mut restored).await;
-    let mut ready_now = write_ready(&agents, &restored, &home);
+    // what a hold waits for, for its whole life (answered from the
+    // gateway's start, below): the restores are rounds of it
+    let quiet = std::sync::Arc::new(Quiet::default());
+    let restoring = Restoring::default();
+    futures_util::future::join_all(restore(&api, &agents, &home, ids, &quiet, &restoring)).await;
+    let mut ready_now = write_ready(&agents, &restoring.lock().expect("the restores are never poisoned").done, &home);
     let mut bridge = spawn_bridge(card_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
-    // its answer to the platform's holds, for its whole life
-    let quiet = std::sync::Arc::new(Quiet::default());
     tokio::spawn(answer_holds(quiet.clone(), ids));
     ev!("boot.ready", { "ms": t0.elapsed().as_millis() as u64 });
 
@@ -1649,17 +1674,14 @@ async fn boot_main() {
                         }
                         let (read, _) = with_runtimes(&api, c.agents, &runtime_names, again).await;
                         let change = agents::diff(&agents::hermes(&agents), &agents::hermes(&read));
-                        // the roster first (an agent still to restore is in it,
-                        // its turns held), then another runtime's agent new
-                        // here, switched to it, or whose last try failed: its
-                        // own files back, then ready for that runtime
-                        restored.retain(|(f, r)| read.iter().any(|a| &a.fragment == f && agents::runtime_of(a) == r));
+                        // another runtime's agent new here, switched to it, or
+                        // whose last try failed: its own files restored on
+                        // their own, and it ready for that runtime once they
+                        // are (meanwhile in the roster, its turns held)
+                        restore(&api, &read, &home, ids, &quiet, &restoring);
+                        let restored = restoring.lock().expect("the restores are never poisoned").done.clone();
                         if !change.is_empty() || agents::ready_file(&read, &restored) != ready_now {
                             ready_now = follow_agents(&api, &change, &read, &restored, &home, ids, &route, &credential_env, &team).await;
-                        }
-                        restore(&api, &read, &home, &own, &mut restored).await;
-                        if agents::ready_file(&read, &restored) != ready_now {
-                            ready_now = write_ready(&read, &restored, &home);
                         }
                         agents = read;
                     }

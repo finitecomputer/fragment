@@ -76,9 +76,10 @@ with its default. What an image sets:
   and answers the platform itself.
 - `BRIDGE_RUNTIME`: `relay` (with `BRIDGE_RELAY_SECRET_FILE`, the secret
   Hermes is given too) or `script`.
-- `BRIDGE_AGENTS_FILE`: the agents the image has made ready, each for the
-  runtime it names (`ready.rs`): the turns of one whose `agent.json` names
-  another now wait until the file names it for that one.
+- `BRIDGE_AGENTS_FILE`: the agents the image has made ready, each with
+  the runtime it is ready for (`ready.rs`; one named with none is ready for
+  none): the turns of one whose `agent.json` names another wait, a claim
+  answered meanwhile included, until the file names it for that one.
   Unset, every agent the platform lists runs.
 - `BRIDGE_SCREEN_LISTEN`, `BRIDGE_SCREENS_FILE` and `BRIDGE_SCREEN_START`:
   each agent's screen (`screen.rs`, `screens.rs`, `lease.rs`).

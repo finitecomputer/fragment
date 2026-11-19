@@ -9,11 +9,12 @@
 //! The file is `{"agents": ["juniper--k3x9", …], "runtimes": {"rowan--k3x9":
 //! "claude"}}`, the host's, written whole and renamed into place, so a read
 //! never sees half of one. Each agent named is the bridge's to run, made
-//! ready for the runtime `runtimes` names, else the default (Hermes'). One
-//! whose `agent.json` names another runtime now stays the bridge's, its
-//! turns waiting (`unready`, the engine's `Input::Unready`), until the file
-//! says it is ready for that one (FIN-542: a Claude agent's files are
-//! restored before its first turn). A missing file is no agent ready. One
+//! ready for the runtime `runtimes` names (none: for none yet). A file with
+//! no `runtimes` at all has every agent ready for the default (Hermes'). One
+//! whose `agent.json` names another runtime than it is ready for stays the
+//! bridge's, its turns waiting (`unready`, the engine's `Input::Unready`),
+//! until the file says it is ready for that one (FIN-542: a Claude agent's
+//! files are restored before its first turn). A missing file is no agent ready. One
 //! that does not read keeps the set before it (a host's bug must not stop
 //! the agents it had made ready), and says so.
 
@@ -41,22 +42,24 @@ const _: () = assert!(limits::AGENTS_MAX * (2 * READY_NAME_MAX_BYTES + READY_RUN
 #[serde(deny_unknown_fields)]
 struct File {
     agents: Vec<String>,
-    #[serde(default)]
-    runtimes: BTreeMap<String, String>,
+    runtimes: Option<BTreeMap<String, String>>,
 }
 
 /// The agents a ready file names, and the runtime each is ready for.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Prepared {
     pub agents: BTreeSet<String>,
-    runtimes: BTreeMap<String, String>,
+    runtimes: Option<BTreeMap<String, String>>,
 }
 
 impl Prepared {
     /// Whether `a` is ready for the runtime its `agent.json` names now.
     pub fn runs(&self, a: &Agent) -> bool {
-        let for_runtime = self.runtimes.get(&a.fragment).map_or(crate::runtime::DEFAULT, String::as_str);
-        self.agents.contains(&a.fragment) && for_runtime == a.runtime.as_deref().unwrap_or(crate::runtime::DEFAULT)
+        let ready_for = match &self.runtimes {
+            None => Some(crate::runtime::DEFAULT),
+            Some(m) => m.get(&a.fragment).map(String::as_str),
+        };
+        self.agents.contains(&a.fragment) && ready_for == Some(a.runtime.as_deref().unwrap_or(crate::runtime::DEFAULT))
     }
 }
 
@@ -73,7 +76,7 @@ pub fn parse(bytes: &[u8]) -> Result<Prepared, String> {
         return Err(format!("{bad:?} is no agent fragment's name"));
     }
     let agents: BTreeSet<String> = f.agents.into_iter().collect();
-    if let Some((a, r)) = f.runtimes.iter().find(|(a, r)| !agents.contains(*a) || r.len() > READY_RUNTIME_MAX_BYTES) {
+    if let Some((a, r)) = f.runtimes.iter().flatten().find(|(a, r)| !agents.contains(*a) || r.len() > READY_RUNTIME_MAX_BYTES) {
         return Err(format!("{a:?} is ready for {r:?}: no agent it names, or past {READY_RUNTIME_MAX_BYTES} bytes"));
     }
     Ok(Prepared { agents, runtimes: f.runtimes })
@@ -181,7 +184,9 @@ mod tests {
         let for_claude = parse(br#"{"agents": ["juniper--k3x9"], "runtimes": {"juniper--k3x9": "claude"}}"#).unwrap();
         assert!(unready(&switched, &for_claude).is_empty(), "ready for Claude: it runs");
         assert_eq!(unready(&[on("juniper", None)], &for_claude).len(), 1, "back on Hermes: its profile first");
-        let odd = parse(br#"{"agents": ["juniper--k3x9", "oak--k3x9"], "runtimes": {"oak--k3x9": "Claude Code! "}}"#).unwrap();
+        let for_none = parse(br#"{"agents": ["juniper--k3x9"], "runtimes": {}}"#).unwrap();
+        assert_eq!(unready(&[on("juniper", None), on("juniper", Some("claude"))], &for_none).len(), 1, "named, ready for no runtime yet: not even Hermes'");
+        let odd = parse(br#"{"agents": ["juniper--k3x9", "oak--k3x9"], "runtimes": {"juniper--k3x9": "hermes", "oak--k3x9": "Claude Code! "}}"#).unwrap();
         assert!(unready(&[on("juniper", None), on("oak", Some("Claude Code! "))], &odd).is_empty(), "an odd runtime's name stops no one");
         let long = format!(r#"{{"agents": ["oak--k3x9"], "runtimes": {{"oak--k3x9": "{}"}}}}"#, "x".repeat(READY_RUNTIME_MAX_BYTES + 1));
         for bad in [&br#"{"agents": [], "runtimes": {"juniper--k3x9": "claude"}}"#[..], long.as_bytes()] {
