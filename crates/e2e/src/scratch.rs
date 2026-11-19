@@ -549,8 +549,10 @@ mod tests {
         .expect("room");
         assert!(!dead_dir.exists() && !root.join("dddddddddd").exists(), "the dead runs' directories are swept");
         assert!(kept(&dead_disk));
-        let status = leftover.wait().unwrap();
-        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGKILL), "its leftover is killed");
+        // the sweep waited for it to go: reaped now, or it was never killed
+        let status = leftover.try_wait().unwrap();
+        let _ = leftover.kill();
+        assert_eq!(status.and_then(|s| std::os::unix::process::ExitStatusExt::signal(&s)), Some(libc::SIGKILL), "its leftover is killed");
         assert!(alive.dir().is_dir() && root.join("not-a-run").is_dir());
         alive.end(false);
         next.end(false);
