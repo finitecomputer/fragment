@@ -124,25 +124,6 @@ struct EmailRow {
     email: String,
 }
 
-/// An invite waiting, as its person's yes reads it: `expires_at` is its
-/// generation, which only its own answer forgets.
-#[derive(Deserialize)]
-struct ToRow {
-    email: String,
-    expires_at: i64,
-}
-
-/// The invite waiting that a newer one replaces, which a mail not sent
-/// puts back.
-#[derive(Deserialize)]
-struct WaitingRow {
-    expires_at: i64,
-    role: Option<String>,
-    title: Option<String>,
-    sharer: Option<String>,
-    app: Option<String>,
-}
-
 /// A kept claim that is due, as the alarm reads it: whether its invite
 /// still waits, and who holds its email now.
 #[derive(Deserialize)]
@@ -189,7 +170,9 @@ impl RegistryCell {
         }
         self.count_mail(&i.sharer, now)?;
         let text = |t: Option<&str>| t.map_or(SqlStorageValue::Null, Into::into);
-        let before = self.row::<WaitingRow>(
+        // the one it replaces, which a mail not sent puts back (read as the
+        // rows `waiting_on` reads: no decoder of its own)
+        let before = self.row::<serde_json::Value>(
             "SELECT expires_at, role, title, sharer, app FROM invites_waiting WHERE email = ? AND fragment = ?",
             vec![i.email.as_str().into(), i.fragment.as_str().into()],
         )?;
@@ -217,7 +200,8 @@ impl RegistryCell {
                 vec![i.email.as_str().into(), i.fragment.as_str().into(), SqlStorageValue::Integer(i.expires_at)],
             )?;
             if let (Some(w), false) = (before, ours.is_empty()) {
-                write(w.expires_at, w.role.as_deref(), w.title.as_deref(), w.sharer.as_deref(), w.app.as_deref(), "NOTHING")?;
+                let s = |k: &str| w[k].as_str();
+                write(w["expires_at"].as_i64().unwrap_or_default(), s("role"), s("title"), s("sharer"), s("app"), "NOTHING")?;
             }
             return Err(e);
         }
@@ -352,15 +336,17 @@ impl RegistryCell {
     }
 
     /// The email of `person`'s that `fragment`'s invite waits on for their
-    /// yes, and that invite's generation, or 404.
-    fn invite_to(&self, person: &str, fragment: &str) -> CellResult<ToRow> {
-        let row = self.row::<ToRow>(
+    /// yes, and that invite's generation (its `expires_at`, which only its
+    /// own answer forgets), or 404.
+    fn invite_to(&self, person: &str, fragment: &str) -> CellResult<(String, i64)> {
+        let row = self.row::<serde_json::Value>(
             "SELECT email, expires_at FROM invites_waiting WHERE fragment = ? AND role IS NOT NULL AND expires_at > ?
                AND email IN (SELECT email FROM subjects WHERE identity = ?) ORDER BY expires_at LIMIT 1",
             vec![fragment.into(), SqlStorageValue::Integer(js::now_ms()), person.into()],
         )?;
         let gone = || CellError::new(ErrorCode::NotFound, format!("no invite to {fragment} waits on you: it was taken back, answered, or ran out")).because(Reason::Gone);
-        row.ok_or_else(gone)
+        let row = row.ok_or_else(gone)?;
+        Ok((row["email"].as_str().unwrap_or_default().to_string(), row["expires_at"].as_i64().unwrap_or_default()))
     }
 
     /// Forgets `fragment`'s invite waiting on `email`, the one made at
@@ -388,7 +374,7 @@ impl RegistryCell {
     /// answered.
     async fn answer_invite(&self, b: AnswerInvite) -> CellResult<Option<Role>> {
         let who = self.invitee_by(&b.by, b.acting_for.as_deref())?;
-        let ToRow { email, expires_at } = self.invite_to(&who.id, &b.fragment)?;
+        let (email, expires_at) = self.invite_to(&who.id, &b.fragment)?;
         let answer = InviteAnswer { email: email.clone(), identity: who.id.clone(), agents: self.agents_of(&who.id)?, yes: b.yes, expires_at: Some(expires_at) };
         let met = match crate::fragment::call(&self.env, &b.fragment, &answer).await {
             Ok(met) => Some(met),
