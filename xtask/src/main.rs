@@ -420,6 +420,7 @@ fn dev(args: &[String]) -> Result<()> {
         own_group: false,
         // the local explorer's traces, for a person looking
         trace_store: true,
+        tmp: None,
     };
     let (node, took) = match &celld {
         None => devstack::Node::start(&tools, &opts)?,

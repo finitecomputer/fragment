@@ -735,6 +735,9 @@ pub struct NodeOptions {
     /// explorer. `xtask dev` keeps it; the e2e reads none, and it was three
     /// quarters of what a run wrote (2026-11-19: 3.0 of a whole run's 3.9 GB).
     pub trace_store: bool,
+    /// The node's `TMPDIR` (`None`: this process's): miniflare's own files,
+    /// its Browser Rendering's Chrome profiles among them.
+    pub tmp: Option<PathBuf>,
 }
 
 impl NodeOptions {
@@ -981,6 +984,10 @@ impl Node {
             .env("WRANGLER_REGISTRY_PATH", opts.project.join(".wrangler/registry"));
         if !opts.trace_store {
             cmd.env("X_LOCAL_OBSERVABILITY", "false");
+        }
+        if let Some(tmp) = &opts.tmp {
+            fs::create_dir_all(tmp)?;
+            cmd.env("TMPDIR", tmp);
         }
         for var in WRANGLER_VARS_CLEARED {
             cmd.env_remove(var);

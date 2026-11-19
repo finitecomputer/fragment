@@ -20,7 +20,7 @@ fn a_node_whose_worker_does_not_build_fails_its_start_with_the_build_error() {
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("worker.js"), "import { said } from \"./missing.mjs\";\nexport default { fetch() { return new Response(said); } };\n").unwrap();
     std::fs::write(devstack::local_config(&project), r#"{ "name": "build-failed", "main": "worker.js", "compatibility_date": "2026-01-01" }"#).unwrap();
-    let opts = devstack::NodeOptions { project: project.clone(), listener: devstack::hold_port(0).unwrap(), log_dir: project.clone(), own_group: true, trace_store: false };
+    let opts = devstack::NodeOptions { project: project.clone(), listener: devstack::hold_port(0).unwrap(), log_dir: project.clone(), own_group: true, trace_store: false, tmp: None };
     let t0 = Instant::now();
     let Err(e) = devstack::Node::start(&tools, &opts) else { panic!("a Worker that imports a missing file started") };
     let said = format!("{e:#}");

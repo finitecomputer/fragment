@@ -441,15 +441,19 @@ impl Browser {
 
     /// One Chrome, up: its process, its DevTools socket's URL, and its
     /// profile, whose `chrome.log` keeps what it said (a start that fails
-    /// says why).
+    /// says why). Its temporary files (the components it fetches) go in
+    /// `scratch` too, as its profile does.
     fn start(bin: &Path, scratch: &Path, args: &[&str], preferences: Option<&Value>) -> Result<(Child, String, PathBuf)> {
         let profile = scratch.join(format!("chrome-{}", fragment_devstack::random_hex(4)));
         std::fs::create_dir_all(profile.join("Default"))?;
+        let tmp = scratch.join("tmp");
+        std::fs::create_dir_all(&tmp)?;
         if let Some(p) = preferences {
             std::fs::write(profile.join("Default/Preferences"), p.to_string())?;
         }
         let log = std::fs::File::create(profile.join("chrome.log"))?;
         let mut child = Command::new(bin)
+            .env("TMPDIR", &tmp)
             .args(args)
             .args([
                 "--headless=new",

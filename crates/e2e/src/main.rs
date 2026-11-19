@@ -989,6 +989,9 @@ impl Suite {
             // a crash kills wrangler and workerd as one
             own_group: true,
             trace_store: false,
+            // miniflare's own files (its Browser Rendering's Chrome
+            // profiles), with the node's state: in RAM, or the scratch
+            tmp: Some(self.disposable().join("tmp")),
         };
         let (node, _) = match &self.celld {
             None => devstack::Node::start(tools, &opts)?,
@@ -1278,7 +1281,9 @@ impl Suite {
             .and_then(|v| v["secret_key"].as_str().and_then(Keys::from_secret_hex))
     }
 
-    /// Where the run's Chromes keep their profiles: in RAM, or the scratch.
+    /// Where the run's node and Chromes keep what is disposable (the
+    /// node's project, the Chromes' profiles, their `TMPDIR`): in RAM, or
+    /// the scratch.
     pub fn disposable(&self) -> &Path {
         self.ram.as_ref().map_or(&self.scratch, |r| r.dir())
     }

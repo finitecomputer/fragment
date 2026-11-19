@@ -7,7 +7,8 @@
 //!
 //! What goes there is what no one reads once a run has passed: its node's
 //! project (the staged cell and its `.wrangler/state`, the Durable Objects'
-//! SQLite, R2 and Workflows) and its Chromes' profiles. The run's scratch
+//! SQLite, R2 and Workflows), its Chromes' profiles, and the `TMPDIR` of
+//! both (miniflare's files, its Browser Rendering's Chrome profiles). The run's scratch
 //! on disk (`target/e2e/<run>`) keeps the rest: each node boot's log, the
 //! lanes' directories and screenshots. A run that does not pass (a FAIL, an
 //! error, a panic, a signal, its cap) has its state copied there before its
@@ -63,9 +64,9 @@ const LOCK: &str = ".lock";
 /// In a run's directory: its scratch on disk, where its state is kept.
 const SCRATCH: &str = ".scratch";
 /// What a run's state kept on disk leaves out: the release's copy (the
-/// cell's build) and wrangler's bundles, both made again by any run, and
-/// the directory's own files.
-const NOT_KEPT: [&str; 4] = ["cell/build", "cell/.wrangler/tmp", LOCK, SCRATCH];
+/// cell's build), wrangler's bundles and the temporary files, all made
+/// again by any run, and the directory's own files.
+const NOT_KEPT: [&str; 5] = ["cell/build", "cell/.wrangler/tmp", "tmp", LOCK, SCRATCH];
 
 /// The box's room for one more run in RAM.
 #[derive(Debug, Clone, Copy)]
@@ -429,7 +430,7 @@ mod tests {
 
     /// A run's directory as a node and a Chrome leave it.
     fn fill(dir: &Path) {
-        for (path, body) in [("cell/.wrangler/state/v3/do/x.sqlite", "rows"), ("cell/build/worker.wasm", "built"), ("cell/.wrangler/tmp/bundle.js", "bundled"), ("chrome-ab12/chrome.log", "said")] {
+        for (path, body) in [("cell/.wrangler/state/v3/do/x.sqlite", "rows"), ("cell/build/worker.wasm", "built"), ("cell/.wrangler/tmp/bundle.js", "bundled"), ("chrome-ab12/chrome.log", "said"), ("tmp/miniflare-ab/x", "temp")] {
             fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
             fs::write(dir.join(path), body).unwrap();
         }
@@ -495,7 +496,7 @@ mod tests {
         assert!(kept(&disk));
         assert_eq!(fs::read_to_string(disk.join("chrome-ab12/chrome.log")).unwrap(), "said");
         assert_eq!(fs::read_link(disk.join("chrome-ab12/SingletonLock")).unwrap(), Path::new("host-123"));
-        for gone in ["cell/build", "cell/.wrangler/tmp", LOCK, SCRATCH] {
+        for gone in ["cell/build", "cell/.wrangler/tmp", "tmp", LOCK, SCRATCH] {
             assert!(!disk.join(gone).exists(), "{gone} is not kept");
         }
     }
