@@ -155,8 +155,8 @@ unfinished design, not debt.
 - **Shortcut:** an agent fragment is its owner's alone from 2026-11-18
   (`cell/src/alone.rs`): new sharing is refused, but one shared before
   keeps its other members, invites, link or public, so no one's settings
-  change silently. How many there are, and their cleanup, is Paul's call;
-  `shared_past_owner` answers it for one fragment.
+  change silently. Their cleanup is Paul's call; `fragment operator reach`
+  lists them by name (`shared_past_owner`, each fragment's answer).
 - **Risk:** whoever was let in before still reads its `memories/`, and an
   editor still steers its agent.
 - **Delete when:** they are counted and narrowed. Then drop the sheet's
