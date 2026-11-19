@@ -310,7 +310,7 @@ calls the same.
 | `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`, pinned as its owner's `PUT /api/computers/{id}/image` pins it; logged (`pin`). An image the deployment lacks 400; no computer 404 |
 | `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` |
 | `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` |
-| `GET /api/admin/glance?dayStart=` | the same | → `AdminGlance {at, signups: {hour, today, week, total}, signedIn: {day, week}, newPeople: [{npub, email, joinedAt, lastSignInAt, seat, agentAt, computer, computerUp}], logs: {state: "notConfigured"} \| {state: "failed", why} \| {state: "read", computersAwakeNow, computersAwakeToday, computersAwakeWeek, fragmentsAwakeNow, fragmentsAwakeToday, trouble: [{computer, kind: wont_wake \| saves_failing \| disk_filling, lines, npub, email}]}}`: the registry's people (signups since `dayStart`, the operator's midnight, at most a day and an hour ago, else 400; unnamed, UTC's), and what the deployment's Workers Logs say, its own Worker's lines alone (`FRAGMENT_WORKER_NAME`: an account holds other deployments), read afresh with its read-only key (`observability_read`; docs/secrets.md) and never from a person's own objects (`fragment_core::glance`). The newest 50 people; trouble in the last day, the most lines first. A fleet with test levers counts its e2e people too |
+| `GET /api/admin/glance?dayStart=` | the same | → `AdminGlance {at, signups: {hour, today, week, total}, signedIn: {day, week}, newPeople: [{npub, email, joinedAt, lastSignInAt, seat, agentAt, computer, computerUp}], logs: {state: "notConfigured"} \| {state: "failed", why} \| {state: "read", computersAwakeNow, computersAwakeToday, computersAwakeWeek, fragmentsAwakeNow, fragmentsAwakeToday, trouble: [{computer, kind: wont_wake \| saves_failing \| disk_filling, lines, npub, email, why?: {at, text}}], whyUnread?}}`: the registry's people (signups since `dayStart`, the operator's midnight, at most a day and an hour ago, else 400; unnamed, UTC's), and what the deployment's Workers Logs say, its own Worker's lines alone (`FRAGMENT_WORKER_NAME`: an account holds other deployments), read afresh with its read-only key (`observability_read`; docs/secrets.md) and never from a person's own objects (`fragment_core::glance`). The newest 50 people; trouble in the last day, the most lines first, a failed save's row with `why`: the reason its newest line gave, and when, if that line is among the day's newest such lines read (`fragment_core::glance::WHYS_READ_MAX`; the platform's words, short, a person's paths left out: `glance::why`; when those lines can't be read, `whyUnread` says why, and the rest stands). A fleet with test levers counts its e2e people too |
 | `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: every comp, trial code, pin and ledger command; the newest 10,000 kept |
 | `POST /api/admin/objects/{class}/wake` | the same | `{id}` → `{class, id, ready: true}`: starts the platform object `id` (as Cloudflare lists it) of `class` (Registry, Principal, Ledger, Fragment, Computer) as a call would, its schema made current, and answers as a deploy's probe; refused, its `schema_refused`. An id of another class 400. Not logged: it changes nothing a call would not |
 | `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code and `/welcome?trial=<code>`; an ended code 400 |
@@ -728,7 +728,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
-| `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; past the overdraft 402 |
+| `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed` 403; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`; none 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent) | its app's database, for an export (`__dump`, cell/platform.mjs). No `table`: `{schema: [{type, name, table, sql}], tables}`, the platform's own tables left out. A `table`: `{table, offset, rows, next}`, at most 1000 rows and about 4 MiB from `offset`, each a JSON object (a blob `{"$base64"}`); not in the schema 404. No app code: 404 `no_code` |
@@ -1702,7 +1702,8 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   is keyed by its schedule and minute (`fragment_core::schedule::fire_key`),
   so it appends once; one reached late is one fire, missed minutes
   skipped. Past the owner's overdraft none fires (`schedules.blocked`); a
-  channel no longer taking its records skips it (`schedule.unfired`).
+  channel no longer taking its records, or a record that relays someone
+  (kept before that was refused), skips it (`schedule.unfired`).
 - Viewers list them; editors add, pause, resume and remove them (an agent
   on its own fragment is its editor: no special case).
 - **Bounds** (`fragment_core::schedule`), each a typed refusal: `cron` five
@@ -1710,9 +1711,10 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   `RECORD_SCHEDULE_EVERY_MIN_MINUTES` (each fire wakes and costs its owner;
   more often belongs in a cron trigger), else `invalid_request`; `record`
   any JSON of at most `RECORD_SCHEDULE_BODY_MAX_BYTES` as canonical JSON,
-  else `too_large`; `channel` declared, taking posts, and not only from one
-  kind of member (`from`), else `invalid_request`, and the caller holding
-  its post role, else 403; at most `RECORD_SCHEDULES_MAX` a fragment.
+  else `too_large`, and relaying no one (no `relayed`: the fragment's own
+  key is no door), else 403; `channel` declared, taking posts, and not
+  only from one kind of member (`from`), else `invalid_request`, and the
+  caller holding its post role, else 403; at most `RECORD_SCHEDULES_MAX` a fragment.
 - The same schedule again answers the one there (`replayed: true`).
   Paused, it fires nothing and has no `nextAt`; resumed, it fires from its
   next minute. Events: `schedule.added`, `.paused`, `.resumed`,
