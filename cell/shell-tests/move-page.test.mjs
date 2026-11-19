@@ -558,3 +558,41 @@ test("an agent of theirs the page could not read as it opened, read at Upgrade, 
   assert.equal(p.question("a").said, ASKED, "asked now");
   assert.equal(p.button("Upgrade").disabled, true, "to answer first");
 });
+
+test("an agent a move took in, even one long done, is no one's choice: an agent takes in one move, ever", async (t) => {
+  const own = { agents: ["pip--a1b2", "rook--c3d4"], ids: new Map([["pip--a1b2", "npub1pip"], ["rook--c3d4", "npub1rook"]]), names: new Map([["pip--a1b2", "Pip"], ["rook--c3d4", "Rook"]]) };
+  const p = page(t, own);
+  await opened(p, [["pip--a1b2", { tier: "standard" }], ["rook--c3d4", { tier: "standard" }]], [offer("a", "open", READY), offer("z", "moved", "Upgraded.", { agent: "npub1rook" })]);
+  assert.deepEqual(p.question("a").answers.map((a) => a.said), [NEW, "Use Pip"], "Rook took in z");
+});
+
+test("an agent made for an old agent but bound to another move is not that old agent's answer: it is asked, never given a new one unasked", async (t) => {
+  // Juniper made for a, whose Yes never landed; a was put off (Never) and
+  // Juniper used for b; a is offered again
+  const own = { agents: ["pip--a1b2", "juniper--k3x9"], ids: new Map([["pip--a1b2", "npub1pip"], ["juniper--k3x9", "npub1juniper"]]), names: new Map([["pip--a1b2", "Pip"]]) };
+  const p = page(t, own);
+  const agents = [["pip--a1b2", { tier: "standard" }], ["juniper--k3x9", { tier: "standard", from: "a" }]];
+  await opened(p, agents, [offer("a", "open", READY), offer("b", "asked", "Pausing Old b for its upgrade…", { agent: "npub1juniper" })]);
+  assert.deepEqual(p.question("a").answers.map((a) => a.said), [NEW, "Use Pip"], "asked, Juniper being b's");
+  assert.equal(p.button("Upgrade").disabled, true);
+});
+
+test("an old agent answered in another tab since the page drew: Upgrade makes nothing for it, posts no Yes, and the page shows the server's word", async (t) => {
+  const p = page(t, pip());
+  const agents = [["pip--a1b2", { tier: "standard" }]];
+  await opened(p, agents);
+  p.choose("a", NEW);
+  p.button("Upgrade").onclick();
+  await settle();
+  p.next("GET", "/api/f/pip--a1b2/file?path=agent.json").ok({ tier: "standard" });
+  await settle();
+  p.next("POST", "/api/migrations/offers").ok({ offers: [offer("a", "asked", "Pausing Old a for its upgrade…", { agent: "npub1pip" })] });
+  await settle();
+  p.next("GET", "/api/ledger").ok({ plan: "seat" });
+  await settle();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "asked", "Pausing Old a for its upgrade…", { agent: "npub1pip" })] });
+  await settle();
+  assert.equal(p.made.length, 0, "no agent made");
+  assert.equal(p.calls.filter((c) => c.path.endsWith("/yes")).length, 0, "no Yes");
+  assert.deepEqual(p.rows()[0].words, ["Old a", "Pausing Old a for its upgrade…"]);
+});

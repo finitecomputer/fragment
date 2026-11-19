@@ -91,10 +91,9 @@ folder (`~/home-import-<n>/`) says what it brought: its `report.md`, the
 fragments its `progress.md` names, and its `site-map.json`.
 - **Sites:** add every earlier `site-map.json`'s entries to this
   import's: those sites came over already, and the profile skips them.
-- **Files:** when an earlier import brought this same old agent (its
-  `report.md` names it), bring them into the files app it made (its
-  `progress.md` names it): `fragment home files` sends only what is
-  missing there.
+- **Files:** always into a new app (step 3), never into one an earlier
+  import made: sending there would replace a file changed since. Say in
+  the report that the earlier one is there too.
 - **Brains:** never push into a brain an earlier import made, or make a
   second of one: keep a reference copy, and compare it with that brain
   (the profile's "Once you are in the real one").
@@ -511,7 +510,9 @@ times as they are; don't convert them yourself.
 - **Its script.** If the job has one, copy it out (`scripts/<script>` in
   the Hermes home). Read all of it, as you read a skill (step 6). Keep it
   in `~/routines/<job>/` only if it still works here and does only what
-  the job says, and have the routine run it.
+  the job says, and have the routine run it. Never into a folder that is
+  there already (a routine of yours uses it): then `~/routines/<job>-2/`,
+  or the next number free.
 - **Where it runs.** Leave `--chat` out, so it reaches your owner in their
   home.
 - **Its time.** When `routines.dst` is true, a routine fires an hour

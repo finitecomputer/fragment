@@ -472,10 +472,11 @@ mod tests {
     }
 
     /// `script` in bash, as the agent's terminal runs it: its `$HOME` and
-    /// `$HERMES_HOME` (`.hermes`) under `home`, starting there.
-    fn run_in(home: &std::path::Path, script: &str) {
+    /// `$HERMES_HOME` (`.hermes`) under `home`, starting there. Whether it
+    /// succeeded.
+    fn run_in(home: &std::path::Path, script: &str) -> bool {
         let ran = std::process::Command::new("bash").arg("-c").arg(script).env("HOME", home).env("HERMES_HOME", home.join(".hermes")).current_dir(home).output().unwrap();
-        assert!(ran.status.code().is_some(), "{script}: {ran:?}");
+        ran.status.success()
     }
 
     /// Goal: an import into an agent that was someone already loses nothing
@@ -498,19 +499,19 @@ mod tests {
         // an old agent's memories, kept whole: a second import's beside the first's
         let memories = import_block("old-agent/memories").replace("<its path>", "agent/hermes-home/memories");
         put("home-import/home/agent/hermes-home/memories/MEMORY.md", "the first old agent's");
-        run_in(&home, &memories);
+        assert!(run_in(&home, &memories));
         put("home-import/home/agent/hermes-home/memories/MEMORY.md", "the second's");
-        run_in(&home, &memories);
+        assert!(run_in(&home, &memories));
         assert_eq!(read("old-agent/memories/memories/MEMORY.md").as_deref(), Some("the first old agent's"), "the first copy is never written over");
         assert_eq!(read("old-agent/memories-2/memories/MEMORY.md").as_deref(), Some("the second's"));
 
         // an earlier import's folder, set aside whole, each beside the last
         let aside = import_block("home-import-$n");
         put("home-import/progress.md", "an earlier import");
-        run_in(&home, &aside);
+        assert!(run_in(&home, &aside));
         put("home-import/progress.md", "another");
-        run_in(&home, &aside);
-        run_in(&home, &aside);
+        assert!(run_in(&home, &aside));
+        assert!(!run_in(&home, &aside), "replay: nothing to set aside, so its move fails");
         assert_eq!((read("home-import-1/progress.md").as_deref(), read("home-import-2/progress.md").as_deref()), (Some("an earlier import"), Some("another")));
         assert!(!home.join("home-import").exists() && !home.join("home-import-3").exists(), "replay: nothing to set aside, nothing moved");
 
@@ -518,7 +519,7 @@ mod tests {
         put(".hermes/SOUL.md", "who I am");
         put(".hermes/memories/MEMORY.md", "what I remember");
         put(".hermes/skills/mine/SKILL.md", "what I made");
-        run_in(&home, &import_block("self-before-import"));
+        assert!(run_in(&home, &import_block("self-before-import")));
         let copies: Vec<_> = std::fs::read_dir(home.join("self-before-import")).unwrap().map(|e| e.unwrap().path()).collect();
         assert_eq!(copies.len(), 1);
         let copy = |p: &str| std::fs::read_to_string(copies[0].join(p)).ok();

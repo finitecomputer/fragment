@@ -552,7 +552,7 @@ pub const ROUTES: &[Route] = &[
         operation: "migrations.yes",
         method: Method::Post,
         path: "/api/migrations/offers/{old}/yes",
-        summary: "The person's Yes, bound to an agent of their own, a new one or one they have (one move at a time): the old agent is stopped and its stage made, which that agent imports.",
+        summary: "The person's Yes, bound to an agent of their own, a new one or one they have that no other move took: the old agent is stopped and its stage made, which that agent imports.",
         auth: SIGNED,
         params: &[OLD],
         request: Some(Body::Json(ty::<OfferYes>())),

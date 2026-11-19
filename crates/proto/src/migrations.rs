@@ -723,7 +723,7 @@ pub struct Offer {
 
 /// `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to an
 /// agent of their own, which the move's stage is imported into: a new one,
-/// or one they have already, while no other move may still import into it.
+/// or one they have already that no other move is bound to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OfferYes {

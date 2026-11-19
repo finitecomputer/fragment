@@ -94,20 +94,23 @@ it, the offer's cover stands aside: it is answered there.
   already have an agent here. Make a new one for this upgrade, or use
   <name>?", its answers "Make a new one" and each of theirs, nothing
   chosen for them; Upgrade waits for each answer. Theirs are their own
-  agents on a computer and on Hermes (the import is a Hermes skill),
-  each free: none made for another old agent still to answer, and none a
-  move may still import into (asked, staging, importing, held). One
-  agent takes in one upgrade at a time: the server refuses a Yes into an
-  agent another move may still import into (409,
-  `fragment_core::migrations::yes_into`), and choosing it for a second
-  old agent on the page takes it from the first. One of theirs is taken
-  as it is: its Yes alone, nothing made, nothing written to it. Until
-  that Yes lands nothing is decided, so a reload asks again; once it
-  lands the move names the agent (the offer's `agent`), and nothing is
-  asked. An old agent an agent was made for already (`from`) is not
-  asked: that agent is its answer. The import into one of theirs adds
-  to it and never replaces what it was (`import-agent-home`, "You may
-  be someone already").
+  agents on a computer and on Hermes (the import is a Hermes skill) that
+  no move is bound to, and none made for another old agent still to
+  answer. An agent takes in one move, ever: two would share its import
+  folder, its SimpleX staging and its keys' names in the Vault, and
+  staff's retry of the first could start while the second imports. The
+  server refuses a Yes into an agent another move is bound to (409,
+  `fragment_core::migrations::yes_into`), whatever that move's state,
+  and choosing it for a second old agent on the page takes it from the
+  first. One of theirs is taken as it is: its Yes alone, nothing made,
+  nothing written to it. Until that Yes lands nothing is decided, so a
+  reload asks again; once it lands the move names the agent (the
+  offer's `agent`), and nothing is asked. An old agent that an agent was
+  made for already (`from`, bound to no other move) is not asked: that
+  agent is its answer. Upgrade goes on only with old agents the move's
+  opening still answers askable (another tab may have answered one).
+  The import into one of theirs adds to it and never replaces what it
+  was (`import-agent-home`, "You may be someone already").
 - Upgrade: `POST /api/migrations/offers` opens the move (binds them;
   the comp, once), the page waits for the seat to reach the ledger, then
   for each, one at a time, a new agent is made as Settings' Add makes one
@@ -223,11 +226,8 @@ revoked.
   bound to the new agent's fragment, named `<kind>-<fragment>`, or, when
   that is over 32 bytes, `<kind>-<label…>-<hash>--<suffix>` (the label
   cut short beside 6 hex of the fragment name's SHA-256). A hand-off
-  never takes the place of a secret that is there (the Vault refuses
-  it, 409): another agent's, or the same agent's, one its person set or
-  one another old agent's move into it handed off (an agent they had
-  may take in a second old agent once the first's import is done; the
-  first's keys stay):
+  never takes the name of a secret bound to other agents (the Vault
+  refuses it, 409):
 
   | Kind | Hosts | Place |
   |---|---|---|

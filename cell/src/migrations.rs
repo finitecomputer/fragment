@@ -1055,8 +1055,8 @@ impl MigrationsCell {
     /// `yes` with an agent and its owner): `person` names who answers, its
     /// move theirs (404 otherwise); `None` is a lever's, for its person.
     /// A Yes binds an agent of the person's own alone (403): a new one, or
-    /// one they had already, while no other move may still import into it
-    /// (409, `machine::yes_into`). The move's state and attempt after.
+    /// one they had already, that no other move is bound to (409,
+    /// `machine::yes_into`). The move's state and attempt after.
     fn answer(&self, old: &str, person: Option<&str>, op: &str, agent: Option<(&str, &str)>) -> CellResult<(MoveState, u32)> {
         let parts = self.parts();
         let m = match person {
@@ -1070,9 +1070,8 @@ impl MigrationsCell {
             ("never", _) => machine::never(&m, now),
             ("ask-again" | "ask_again", _) => machine::ask_again(&m, now),
             ("yes", Some((agent, owner))) if owner == theirs => {
-                let others = parts.rows("SELECT state FROM moves WHERE agent = ? AND old <> ?", vec![text_value(agent), text_value(old)])?;
-                let others: Vec<MoveState> = others.iter().filter_map(|r| r["state"].as_str().and_then(MoveState::parse)).collect();
-                machine::yes_into(&m, agent, &others, now)
+                let elsewhere = !parts.rows("SELECT old FROM moves WHERE agent = ? AND old <> ? LIMIT 1", vec![text_value(agent), text_value(old)])?.is_empty();
+                machine::yes_into(&m, agent, elsewhere, now)
             }
             ("yes", _) => return Err(CellError::new(ErrorCode::Forbidden, "yes binds an agent of the person's own")),
             (other, _) => return Err(CellError::invalid(format!("no answer {other}"))),

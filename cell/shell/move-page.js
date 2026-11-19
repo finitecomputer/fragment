@@ -23,9 +23,10 @@
 // is: its Yes alone, nothing made, and the import adds to it (the
 // import-agent-home skill keeps its self). Nothing is written to it: until
 // its Yes lands nothing is decided, so a reload asks again; once it lands,
-// the move names it (the offer's `agent`), and no question is left. One an
-// agent was made for already (its `from`) is not asked: that agent is its
-// answer, gone on with as before.
+// the move names it (the offer's `agent`), and no question is left. An
+// agent takes in one move, ever (the server refuses another,
+// `yes_into`). One an agent was made for already (its `from`, `madeFor`)
+// is not asked: that agent is its answer, gone on with as before.
 //
 // Once its new agent exists, a move is that agent's to tell (FIN-463: the
 // first move's agent asked its person a question in its own chat while
@@ -45,10 +46,6 @@ import { platformImage } from "./computer.js";
 
 const IN_FLIGHT = new Set(["asked", "staging", "importing", "retiring", "archiving"]);
 const ASKABLE = new Set(["open", "later", "archived"]);
-// a move whose agent it may still import into (its Yes given, its import
-// not done; a held one may be tried again): that agent is no one else's
-// choice until then (the server refuses it too, `imports_into`)
-const TAKEN = new Set(["asked", "staging", "importing", "held"]);
 // a move far enough along that its SimpleX chat, if it had one, waits in
 // the new agent's Settings (FIN-463: its bridge sets it aside as it imports)
 const CARRIED = new Set(["importing", "retiring", "moved"]);
@@ -125,15 +122,24 @@ export function createMovePage(root, h) {
     if (at === opening) mine = got.filter(Boolean);
   }
 
+  // the agents some move of theirs is bound to: each takes in one, ever
+  const bound = () => new Set((offers ?? []).map((x) => x.agent).filter(Boolean));
+
+  // The agent of theirs made for `o` before (its agent.json's `from`) that
+  // no move is bound to, by its fragment's name, or null
+  function madeFor(o) {
+    const taken = bound();
+    return (mine ?? []).find((a) => a.from === o.old && !(a.identity && taken.has(a.identity)))?.fragment ?? null;
+  }
+
   // What `o` may be upgraded into besides a new one: none once an agent was
   // made for it (its answer, gone on with as before); else each of theirs
-  // on a computer and on Hermes that is free: not made for another old
-  // agent still to answer, and not one a move may still import into.
+  // on a computer and on Hermes that is free: no move bound to it, and not
+  // made for another old agent still to answer.
   function choices(o) {
-    if (!mine) return [];
-    if (mine.some((a) => a.from === o.old)) return [];
+    if (!mine || madeFor(o)) return [];
     const open = new Set((offers ?? []).filter((x) => ASKABLE.has(x.state)).map((x) => x.old));
-    const taken = new Set((offers ?? []).filter((x) => TAKEN.has(x.state) && x.agent).map((x) => x.agent));
+    const taken = bound();
     return mine.filter((a) => a.identity && a.hermes && !taken.has(a.identity) && !(a.from && open.has(a.from)));
   }
 
@@ -318,14 +324,6 @@ export function createMovePage(root, h) {
     }
   }
 
-  // The agent of theirs made for `o` before (its agent.json's `from`) that
-  // no move is bound to, by its fragment's name, or null, as Upgrade read
-  // them, whole
-  function madeFor(o) {
-    const bound = new Set((offers ?? []).map((x) => x.agent).filter(Boolean));
-    return mine.find((a) => a.from === o.old && !(a.identity && bound.has(a.identity)))?.fragment ?? null;
-  }
-
   async function bring() {
     if (!ready() || busy) return;
     busy = true;
@@ -367,9 +365,13 @@ export function createMovePage(root, h) {
       into.delete(lost.o.old);
       throw new Error(`Choose again for ${lost.o.name}.`);
     }
-    await api("POST", "/api/migrations/offers", {});
+    // the server's offers as it opens the move: one answered since the page
+    // drew (another tab) is gone on with no further, nothing made for it
+    let now = (await api("POST", "/api/migrations/offers", {}))?.offers ?? [];
     await seated();
     for (const { o, name, theirs } of picks) {
+      const at = now.find((x) => x.old === o.old);
+      if (at && !ASKABLE.has(at.state)) continue;
       if (theirs) {
         // one of theirs: its Yes alone, nothing made or written
         doing = { old: o.old, said: `Starting ${o.name}'s upgrade…` };
@@ -377,6 +379,7 @@ export function createMovePage(root, h) {
         await api("POST", `/api/migrations/offers/${o.old}/yes`, { agent: theirs.identity });
         doing = null;
         await read();
+        now = offers ?? [];
         draw();
         continue;
       }
@@ -393,6 +396,7 @@ export function createMovePage(root, h) {
       await api("POST", `/api/migrations/offers/${o.old}/yes`, { agent: made.id });
       doing = null;
       await read();
+      now = offers ?? [];
       draw();
     }
   }

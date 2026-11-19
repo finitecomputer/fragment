@@ -2028,7 +2028,7 @@
         "x-fragment-direction": "out"
       },
       "OfferYes": {
-        "description": "`POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to an\nagent of their own, which the move's stage is imported into: a new one,\nor one they have already, while no other move may still import into it.",
+        "description": "`POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to an\nagent of their own, which the move's stage is imported into: a new one,\nor one they have already that no other move is bound to.",
         "properties": {
           "agent": {
             "description": "The agent: its identity's id or npub.",
@@ -6250,7 +6250,7 @@
             "session": []
           }
         ],
-        "summary": "The person's Yes, bound to an agent of their own, a new one or one they have (one move at a time): the old agent is stopped and its stage made, which that agent imports.",
+        "summary": "The person's Yes, bound to an agent of their own, a new one or one they have that no other move took: the old agent is stopped and its stage made, which that agent imports.",
         "tags": [
           "migrations"
         ]
