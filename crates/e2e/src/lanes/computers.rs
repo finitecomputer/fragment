@@ -1719,6 +1719,7 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     s.ok("its agent answers it as its owner's message, with no SimpleX core on its computer", answered && start["body"]["asker"] == c.owner_id, json!({ "turn.start": start }));
     let other = fetched(s, 405, "door other signed by another key")?;
     s.ok("with its door open, one signed by any other key is still refused", other.starts_with("door refused: 403"), &other);
+    door_into_theirs(s, api, c, wake)?;
     let pending = ticket(c.owner, "link")?;
     let still = fetched(s, 408, "door say while a new link waits")?;
     let heard = s.eventually(wake, || echo("while a new link waits").is_some());
@@ -1759,6 +1760,44 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     s.ok("the agent binds no fragment as its own door, acting for its owner", agent.starts_with("door refused: 403") && agent.contains("in person"), &agent);
     // two of them its owner's words, each answered
     Ok(14)
+}
+
+/// A door signs a fragment's name, not its life (`door::lands_in_owners`):
+/// a chat someone else owns, as a name its owner deleted and a stranger
+/// made again is, takes no record the door signs there, though its
+/// signature, agent and `for` are all good. Its owner and agent are
+/// members, its owner asks there; the agent's reply is the refusal.
+fn door_into_theirs(s: &mut Suite, api: &Api, c: &Doors, wake: Duration) -> Result<()> {
+    let theirs = s.named(api, c.stranger, "door-theirs")?;
+    let made = s.create(api, c.stranger, &theirs)?;
+    s.commit(&made, &[("fragment.json", Some(CHAT_JSON))]);
+    s.deploy(&made);
+    for who in [c.owner_id, c.identity] {
+        let r = api.share(&theirs, who, "editor")?;
+        anyhow::ensure!(r.status == 200, "{who} an editor of {theirs}: {r}");
+    }
+    let followed = s.eventually(wake, || {
+        api.signed(c.stranger, "GET", &format!("/api/f/{theirs}/subscriptions"), None)
+            .ok()
+            .is_some_and(|r| r.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat")))
+    });
+    anyhow::ensure!(followed, "its agent follows {theirs}");
+    let r = api.signed(c.owner, "POST", &format!("/api/f/{theirs}/channels/chat"), Some(&json!({ "id": "m412", "body": { "text": "door say into their chat" } })))?;
+    anyhow::ensure!(r.status == 200, "its owner's message there: {r}");
+    let turn = turn_of(c.agent, &theirs, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+    let chat = || records(api, c.stranger, &theirs, "chat");
+    let reply = || agent_replies(&chat(), c.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
+    s.eventually(wake, || reply().is_some());
+    let said = reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let taken: Vec<Value> = chat().into_iter().filter(|r| r["body"]["relayed"].is_object()).collect();
+    s.ok(
+        "a chat someone else owns (a name its owner deleted, made again by a stranger), its owner and agent in it, takes no record its door signs there (403), and keeps none",
+        said.starts_with("door refused: 403") && said.contains("owner owns") && taken.is_empty(),
+        json!({ "said": said, "taken": taken }),
+    );
+    let r = api.signed(c.stranger, "DELETE", &format!("/api/f/{theirs}"), None)?;
+    anyhow::ensure!(r.status == 200, "{theirs} deleted: {r}");
+    Ok(())
 }
 
 /// A 40 MB file its agent syncs from its computer (FIN-405): `fragment
