@@ -1374,6 +1374,25 @@ impl FragmentCell {
                 }
                 None => None,
             };
+            // a blessed template's face is known now: the owner's list says
+            // it is a chat or an agent from the start, not once it installs
+            // (a read of the release that fails leaves it to the install,
+            // which sets it from the same manifest). An agent's own is made
+            // shared with no one (alone.rs): refused before anything is made
+            let face = match body.template.as_deref() {
+                Some(t) => {
+                    let face = match crate::assets::blessed_manifest(&self.env, t).await {
+                        Ok(Ok(m)) if m.kind() == fragment_proto::FragmentKind::Agent && body.visibility.is_some_and(|v| v != Visibility::Members) => {
+                            return Err(CellError::new(ErrorCode::Forbidden, crate::alone::AGENT));
+                        }
+                        Ok(Ok(m)) => Some(crate::members::face(m.kind(), body.title.as_deref().map(str::trim).or(m.title()), m.role(), None)),
+                        _ => None,
+                    };
+                    laps.lap("manifest");
+                    face
+                }
+                None => None,
+            };
             // its own key, this life's alone, which names its repo
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             let fragment_npub = npub::encode(&pubkey);
@@ -1386,21 +1405,6 @@ impl FragmentCell {
                     Some(repo)
                 }
                 false => None,
-            };
-            // a blessed template's face is known now: the owner's list says
-            // it is a chat or an agent from the start, not once it installs
-            // (a read of the release that fails leaves it to the install,
-            // which sets it from the same manifest)
-            let face = match body.template.as_deref() {
-                Some(t) => {
-                    let face = match crate::assets::blessed_manifest(&self.env, t).await {
-                        Ok(Ok(m)) => Some(crate::members::face(m.kind(), body.title.as_deref().map(str::trim).or(m.title()), m.role(), None)),
-                        _ => None,
-                    };
-                    laps.lap("manifest");
-                    face
-                }
-                None => None,
             };
             Ok::<_, CellError>((agent, repo, fragment_npub, sealed, face))
         };

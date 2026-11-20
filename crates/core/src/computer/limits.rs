@@ -23,8 +23,14 @@ pub const WONT_WAKE_RETRY_MS: i64 = 30 * 60_000;
 /// leaves an alarm's other events room: a start made by an alarm fits it).
 pub const START_DEADLINE_MS: i64 = 15 * 60_000;
 /// A sleep's stop (snapshot, signal, five seconds of exit, destroy)
-/// finishes within this, or it is asked again.
-pub const SLEEP_DEADLINE_MS: i64 = 60_000;
+/// finishes within this, or it is asked again: its snapshot is given up to
+/// five minutes, a full disk's first one (the cell's `SNAPSHOT_MAX_MS`),
+/// and its other steps seconds.
+pub const SLEEP_DEADLINE_MS: i64 = 6 * 60_000;
+/// A stop under way is looked at this often (its alarm), so a new
+/// isolate's look (the cell's `adopt`) finds one whose end its isolate lost,
+/// its container gone, as soon as when its deadline was a minute.
+pub const STOP_LOOK_MS: i64 = 60_000;
 /// Awake time is metered at least this often.
 pub const METER_EVERY_MS: i64 = 5 * 60_000;
 /// A running computer is heard from at least every `METER_EVERY_MS` (its
@@ -92,7 +98,9 @@ pub const SAVES_KEPT: usize = 3;
 /// once): the one after its container went, one past a snapshot that
 /// would not start, and one past each kept save that would not restore
 /// (`restore_fallbacks`); the next failure is a strike, retried after a
-/// pause. A request makes them all as it waits (the cell's `drive_with`).
+/// pause. A request makes them all as it waits (the cell's `drive_with`),
+/// as it does starts the container before them held up
+/// (`Event::StartBlocked`), and its alarm the rest.
 pub const STARTS_OWED_MAX: u32 = SAVES_KEPT as u32 + 2;
 /// A start from a snapshot is up only once its guest has read its own view
 /// (`GET /api/computer`, which an image reads as its entrypoint starts:
@@ -113,6 +121,7 @@ const _: () = assert!(SAVE_SETTLE_MS < IDLE_MS, "work that ended is saved before
 const _: () = assert!(TAB_USED_EVERY_MS < IDLE_MS && TAB_USED_EVERY_MS < SAVE_EVERY_MS, "a tab in use is heard well within its hold and its saves");
 const _: () = assert!(SAVE_RETRY_MS < SAVE_EVERY_MS && SAVE_EVERY_MS < UNSAVED_MAX_MS_DEFAULT, "a failed save is tried again within its bound");
 const _: () = assert!(HOLD_WAIT_MS < HOLD_DEADLINE_MS, "a hold's wait fits its deadline");
+const _: () = assert!(STOP_LOOK_MS < SLEEP_DEADLINE_MS, "a stop is looked at before its deadline");
 const _: () = assert!(SAVES_KEPT >= 2, "a save to fall back to");
 const _: () = assert!(UNSAVED_NOTICE_FAILURES >= 1, "told after a failure, never before");
 const _: () = assert!(ALIVE_MS < START_DEADLINE_MS, "a start's wait for its guest fits its deadline");

@@ -460,6 +460,74 @@ mod tests {
         assert_eq!(the_folders_it_names_are_whole("guide.md", guide).len(), 5, "{:?}", the_folders_it_names_are_whole("guide.md", guide));
     }
 
+    /// The import skill's one `sh` block that holds `token`, as its agent
+    /// runs it.
+    fn import_block(token: &str) -> String {
+        let skills = template("skills").unwrap();
+        let f = skills.file("skills/productivity/import-agent-home/SKILL.md").unwrap();
+        let text = String::from_utf8(bytes_of(skills, f)).unwrap();
+        let blocks: Vec<String> = text.split("```sh\n").skip(1).filter_map(|b| b.split("\n```").next()).filter(|b| b.contains(token)).map(str::to_string).collect();
+        assert_eq!(blocks.len(), 1, "one block of the skill's runs {token}");
+        blocks[0].clone()
+    }
+
+    /// `script` in bash, as the agent's terminal runs it: its `$HOME` and
+    /// `$HERMES_HOME` (`.hermes`) under `home`, starting there. Whether it
+    /// succeeded.
+    fn run_in(home: &std::path::Path, script: &str) -> bool {
+        let ran = std::process::Command::new("bash").arg("-c").arg(script).env("HOME", home).env("HERMES_HOME", home.join(".hermes")).current_dir(home).output().unwrap();
+        ran.status.success()
+    }
+
+    /// Goal: an import into an agent that was someone already loses nothing
+    /// of it, nor anything an earlier import kept (Paul 11-19). Method: the
+    /// skill's own commands, each run again as a second import would: each
+    /// keeps what was there and puts its own beside it. Invalid: the skill
+    /// before, whose second import's copy of an old agent's memories went
+    /// over the first's. Replay: run again with nothing new, nothing moves.
+    #[test]
+    fn the_import_skill_keeps_what_was_there() {
+        let home = std::env::temp_dir().join(format!("import-skill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let put = |path: &str, text: &str| {
+            let p = home.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        let read = |path: &str| std::fs::read_to_string(home.join(path)).ok();
+
+        // an old agent's memories, kept whole: a second import's beside the first's
+        let memories = import_block("old-agent/memories").replace("<its path>", "agent/hermes-home/memories");
+        put("home-import/home/agent/hermes-home/memories/MEMORY.md", "the first old agent's");
+        assert!(run_in(&home, &memories));
+        put("home-import/home/agent/hermes-home/memories/MEMORY.md", "the second's");
+        assert!(run_in(&home, &memories));
+        assert_eq!(read("old-agent/memories/memories/MEMORY.md").as_deref(), Some("the first old agent's"), "the first copy is never written over");
+        assert_eq!(read("old-agent/memories-2/memories/MEMORY.md").as_deref(), Some("the second's"));
+
+        // an earlier import's folder, set aside whole, each beside the last
+        let aside = import_block("home-import-$n");
+        put("home-import/progress.md", "an earlier import");
+        assert!(run_in(&home, &aside));
+        put("home-import/progress.md", "another");
+        assert!(run_in(&home, &aside));
+        assert!(!run_in(&home, &aside), "replay: nothing to set aside, so its move fails");
+        assert_eq!((read("home-import-1/progress.md").as_deref(), read("home-import-2/progress.md").as_deref()), (Some("an earlier import"), Some("another")));
+        assert!(!home.join("home-import").exists() && !home.join("home-import-3").exists(), "replay: nothing to set aside, nothing moved");
+
+        // a copy of the agent as it was, before anything of it changes
+        put(".hermes/SOUL.md", "who I am");
+        put(".hermes/memories/MEMORY.md", "what I remember");
+        put(".hermes/skills/mine/SKILL.md", "what I made");
+        assert!(run_in(&home, &import_block("self-before-import")));
+        let copies: Vec<_> = std::fs::read_dir(home.join("self-before-import")).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(copies.len(), 1);
+        let copy = |p: &str| std::fs::read_to_string(copies[0].join(p)).ok();
+        assert_eq!((copy("SOUL.md"), copy("memories/MEMORY.md"), copy("skills/mine/SKILL.md")), (Some("who I am".into()), Some("what I remember".into()), Some("what I made".into())));
+        assert_eq!(read(".hermes/SOUL.md").as_deref(), Some("who I am"), "the agent itself as it was");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     #[test]
     fn faults_say_why() {
         assert!(CodeFault::TooManyModules(65).message().contains("64"));

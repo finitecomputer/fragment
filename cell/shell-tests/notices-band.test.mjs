@@ -559,11 +559,11 @@ test("an offer to upgrade an old agent (the move's): its picture beside its word
   globalThis.location = { origin: "https://chat.test", href: "https://chat.test/" };
   t.after(() => delete globalThis.location);
   const offer = {
-    id: "move:prj_1", kind: "move_offer", level: "info", title: "Ada's upgrade is ready", text: "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key. You'll get a month free.", mustAnswer: true, image: "/api/migrations/offers/prj_1/picture",
+    id: "move:prj_1", kind: "move_offer", level: "info", title: "Ada's upgrade is ready", text: "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key.", mustAnswer: true, image: "/api/migrations/offers/prj_1/picture",
     actions: [{ label: "Upgrade Ada", open: "https://chat.test/move" }, { label: "Not now", post: "/api/migrations/offers/prj_1/later" }, { label: "Never", post: "/api/migrations/offers/prj_1/never" }],
   };
   const p = page(t, [offer]);
-  assert.deepEqual(p.asked(), { id: "move:prj_1", words: ["Ada's upgrade is ready", "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key. You'll get a month free."], actions: [{ open: "https://chat.test/move" }, { label: "Not now", enabled: true }, { label: "Never", enabled: true }] });
+  assert.deepEqual(p.asked(), { id: "move:prj_1", words: ["Ada's upgrade is ready", "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key."], actions: [{ open: "https://chat.test/move" }, { label: "Not now", enabled: true }, { label: "Never", enabled: true }] });
   const row = p.cover.children.find((r) => r.dataset.id);
   const pic = walk(row).find((n) => n.tag === "img");
   assert.equal(pic?.dataset.src, "/api/migrations/offers/prj_1/picture", "its picture, drawn (read with the shell's credential)");
@@ -576,7 +576,7 @@ test("an offer to upgrade an old agent (the move's): its picture beside its word
   await settle();
   p.calls[1].ok({ notices: [offer] });
   await settle();
-  assert.deepEqual(p.asked().words, ["Ada's upgrade is ready", "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key. You'll get a month free.", "Not now: this move is asked."]);
+  assert.deepEqual(p.asked().words, ["Ada's upgrade is ready", "Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key.", "Not now: this move is asked."]);
 });
 
 test("on the platform's page one of its answers opens (the move's /move), a notice that must be answered stands aside, there alone: anywhere else it covers the page", (t) => {

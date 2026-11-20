@@ -108,6 +108,61 @@ unfinished design, not debt.
   computers something touched, so its silence alone is not enough: say
   so if cutting on it.
 
+## A computer keeps its owner's own keys from before the move
+
+- **Shortcut:** a person's own keys and their sign-ins moved from their
+  computer (`own_keys`, `own_signins`) to their Vault (M16; docs/secrets.md,
+  "A person's Vault"). The tables stay, written by nothing but the test
+  levers: a computer hands its keys over at its owner's next read of it
+  or of their connections, or its agent's next call through one
+  (`ComputerCell::hand_over_logged`; never a start, an exit, a takeover or
+  its guest's request: #1343) and deletes
+  each, taken or not; the Vault takes one only where its person set or
+  removed none since (a removal is kept, `sealed` NULL). A sign-in its
+  person's Vault holds none of is asked of their computer, found by
+  `default_computer_of` (`vault::signed_in`). The release is forward only
+  (the Vault's step 4). The test levers `legacy-own-key` and
+  `legacy-sign-in` make a computer as before the move.
+- **Risk:** no rollback across this release. A computer nothing touches
+  keeps its keys owed; a Vault that does not answer leaves them owed, and
+  its agents' calls through one refused until it does. The removals the
+  Vault keeps outlive the hand-over.
+- **Delete when:** production has run this release for ten minutes (no
+  sign-in begun on a computer is under way), and a sweep that reads every
+  computer (FIN-527's) finds none holding an own key, or production has
+  logged no `"ownKeys":"handed"` line for 14 days (the log sees only
+  computers something touched: say so when cutting). Then a Computer
+  schema step drops `own_keys` and `own_signins`; `hand_over_own`,
+  `owed_own`, `computer/signed-in` and the Vault's fallback to it,
+  `computer/own-keys`' `providers`, both levers and the Vault's
+  `own-handover` go, its removals may, and `GET /api/connections` asks
+  the computer and the Vault at once (it asks the Vault after the
+  computer's hand-over until then).
+
+## A computer owes its owner's ledger its months of uses
+
+- **Shortcut:** what a person's agents used of each provider moved from
+  each computer's `uses` to the person's ledger
+  (`fragment_core::ledger::uses`; M16). The Computer's step 7 dropped
+  `uses`, keeping each month it held in the computer's `meta`
+  `uses_owed:<month>`, as the ledger reads a hand-over's rows. As its
+  owner reads its view, once an activation and in a task of its own
+  (`ComputerCell::uses_later`), the computer hands each month to its
+  owner's ledger (`uses::TakeUses`, under `<computer>:<month>`), which
+  takes it once by that id and keeps the id in its `meta`
+  (`uses_taken:<id>`); the computer forgets each month the ledger took
+  or refused, logging how many it still owes (`uses_owed`). The test
+  lever `legacy-uses` makes a month owed.
+- **Risk:** a computer nothing touches keeps owing, and its person's
+  Settings shows those months short until it hands them over. Dropped
+  instead, up to 13 months of a person's usage would be lost.
+- **Delete when:** a sweep has asked every computer and found none owing
+  (no `uses_owed:` row; the sweep FIN-527 asks for the grants' rows can
+  ask both). Then a Computer step deletes those `meta` rows, and
+  `uses_later`, `hand_over_uses`, `TakeUses`, `/take-uses` and the lever
+  go; a Ledger step may drop its `uses_taken:` rows. The log sees only
+  computers something touched, so its silence alone is not enough.
+
 ## The bridge copies the platform's file bounds; the app, an older platform's
 
 - **Shortcut:** a file's bounds are proto's `limits`, which the platform
@@ -154,6 +209,19 @@ unfinished design, not debt.
   reach.rs's two refusals and their call sites, the share sheet's lock,
   the two reasons (kept on the wire as add-only names), the census route
   and command, and the `legacy-reach` lever.
+
+## Agent fragments shared before FIN-544
+
+- **Shortcut:** an agent fragment is its owner's alone from 2026-11-18
+  (`cell/src/alone.rs`): new sharing is refused, but one shared before
+  keeps its other members, invites, link or public, so no one's settings
+  change silently. Their cleanup is Paul's call; `fragment operator reach`
+  lists them by name (`shared_past_owner`, each fragment's answer).
+- **Risk:** whoever was let in before still reads its `memories/`, and an
+  editor still steers its agent.
+- **Delete when:** they are counted and narrowed. Then drop the sheet's
+  switch for an agent's link (share.rs `alone_now`) and the
+  `legacy-visibility` lever.
 
 ## An app facet's subrequests are the account's, for the facet's life
 
@@ -504,18 +572,6 @@ unfinished design, not debt.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.
-
-## Own keys assume one computer per person
-
-- **Shortcut:** a person has one computer (decision 13), so own keys are
-  sealed in it (cell/src/computer.rs, `own_keys`), and an own key's
-  sign-in callback finds it by `default_computer_of`, never the URL (the
-  audit's H3).
-- **Risk:** a second computer needs the keys again; a deleted one loses
-  them.
-- **Delete when:** own keys live in the person's own cell, proven by two
-  computers swapping one key, and a sign-in's computer is found from its
-  bound state alone, never the URL, with the H3 checks run against it.
 
 ## An imported connection's refresh is unproven
 
