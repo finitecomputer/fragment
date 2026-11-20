@@ -1044,7 +1044,8 @@ fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Resul
 /// deploys under `site/` is never a page of its origin: the write and
 /// the deploy are taken (the file is its data, read at `__file`), and the
 /// path is none (404). The same of a template that runs no code (an
-/// agent's), and of a path the release does not ship (`sub/`).
+/// agent's, whose fragment is its owner's alone (FIN-544), so its owner
+/// plants it), and of a path the release does not ship (`sub/`).
 fn blessed_serves_no_page_of_its_own(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let editor = api.person()?;
@@ -1067,23 +1068,26 @@ fn blessed_serves_no_page_of_its_own(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.create_with(&owner, json!({ "name": agent, "template": "agent" }))?;
     anyhow::ensure!(r.status == 200, "making the agent on the template: {r}");
     s.owned(&r.body, &owner);
-    let (r, deployed) = planted(s, api, &owner, &editor, &agent, "notes.html")?;
+    let (r, deployed) = planted(s, api, &owner, &owner, &agent, "notes.html")?;
     let page = site_page(api, &owner, &agent, "")?;
     s.ok(
-        "nor on an agent's fragment, whose template runs no code: its page is still the release's",
+        "nor on an agent's fragment, whose template runs no code (its owner's alone, so its owner plants it): its page is still the release's",
         none(&r) && page.status == 200 && page.text.contains("agent.js"),
         format!("{deployed} / notes.html {} / its page {}", shown(&r), page.status),
     );
     Ok(())
 }
 
-/// What a blessed fragment's editor plants as a page at `at` (its own
+/// What `editor` plants in a blessed fragment as a page at `at` (its own
 /// `site/` path), written and deployed as any file of the fragment's is,
 /// and the answer there to its owner's browser: the owner signed in,
-/// navigating to it, once the deploy is live.
+/// navigating to it, once the deploy is live. An editor other than its
+/// owner joins it first.
 fn planted(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, editor: &fragment_nip98::Keys, name: &str, at: &str) -> Result<(Reply, String)> {
-    let joined = api.share(name, &api.identity(editor)?, "editor")?;
-    anyhow::ensure!(joined.status == 200, "an editor joins {name}: {joined}");
+    if editor.pubkey_hex() != owner.pubkey_hex() {
+        let joined = api.share(name, &api.identity(editor)?, "editor")?;
+        anyhow::ensure!(joined.status == 200, "an editor joins {name}: {joined}");
+    }
     let path = if at.ends_with('/') { format!("site/{at}index.html") } else { format!("site/{at}") };
     let files = json!({ "files": [{ "path": path, "text": format!("<!doctype html><script>/* an editor's own, {at} */</script>") }] });
     let wrote = api.signed(editor, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
