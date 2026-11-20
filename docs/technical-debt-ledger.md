@@ -108,6 +108,37 @@ unfinished design, not debt.
   computers something touched, so its silence alone is not enough: say
   so if cutting on it.
 
+## A computer keeps its owner's own keys from before the move
+
+- **Shortcut:** a person's own keys and their sign-ins moved from their
+  computer (`own_keys`, `own_signins`) to their Vault (M16; docs/secrets.md,
+  "A person's Vault"). The tables stay, written by nothing but the test
+  levers: a computer hands its keys over at its owner's next read of it
+  or of their connections, or its agent's next call through one
+  (`ComputerCell::hand_over_logged`; never a start, an exit, a takeover or
+  its guest's request: #1343) and deletes
+  each, taken or not; the Vault takes one only where its person set or
+  removed none since (a removal is kept, `sealed` NULL). A sign-in its
+  person's Vault holds none of is asked of their computer, found by
+  `default_computer_of` (`vault::signed_in`). The release is forward only
+  (the Vault's step 4). The test levers `legacy-own-key` and
+  `legacy-sign-in` make a computer as before the move.
+- **Risk:** no rollback across this release. A computer nothing touches
+  keeps its keys owed; a Vault that does not answer leaves them owed, and
+  its agents' calls through one refused until it does. The removals the
+  Vault keeps outlive the hand-over.
+- **Delete when:** production has run this release for ten minutes (no
+  sign-in begun on a computer is under way), and a sweep that reads every
+  computer (FIN-527's) finds none holding an own key, or production has
+  logged no `"ownKeys":"handed"` line for 14 days (the log sees only
+  computers something touched: say so when cutting). Then a Computer
+  schema step drops `own_keys` and `own_signins`; `hand_over_own`,
+  `owed_own`, `computer/signed-in` and the Vault's fallback to it,
+  `computer/own-keys`' `providers`, both levers and the Vault's
+  `own-handover` go, its removals may, and `GET /api/connections` asks
+  the computer and the Vault at once (it asks the Vault after the
+  computer's hand-over until then).
+
 ## A computer owes its owner's ledger its months of uses
 
 - **Shortcut:** what a person's agents used of each provider moved from
@@ -541,18 +572,6 @@ unfinished design, not debt.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.
-
-## Own keys assume one computer per person
-
-- **Shortcut:** a person has one computer (decision 13), so own keys are
-  sealed in it (cell/src/computer.rs, `own_keys`), and an own key's
-  sign-in callback finds it by `default_computer_of`, never the URL (the
-  audit's H3).
-- **Risk:** a second computer needs the keys again; a deleted one loses
-  them.
-- **Delete when:** own keys live in the person's own cell, proven by two
-  computers swapping one key, and a sign-in's computer is found from its
-  bound state alone, never the URL, with the H3 checks run against it.
 
 ## An imported connection's refresh is unproven
 

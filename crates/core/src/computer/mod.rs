@@ -10,7 +10,9 @@
 //!   page's presence (a pre-wake), one of its agents added to a fragment,
 //!   or the owner. A wake while asleep
 //!   starts the container; one while it starts or is awake holds it
-//!   longer; one while it is going to sleep starts it again once it is
+//!   longer; one during an idle sleep's hold or save cancels that sleep,
+//!   and it stays awake on the container it has; one during its owner's
+//!   sleep, or once a sleep's stop began, starts it again once it is
 //!   asleep (the newest push wins: lesson 3 of docs/cloudflare-v1.md).
 //! - **Staying awake.** While the guest holds a keepalive socket or a
 //!   port tab is open; with nothing open, until the latest hold runs out
@@ -27,7 +29,9 @@
 //! - **Sleeping.** Its hold and its save, then its stop (snapshot, signal,
 //!   wait, destroy), reported back by `Asleep`. A keepalive that opens
 //!   during an idle sleep's hold cancels the sleep: the guest took work as
-//!   it was held, so it stays awake (docs/computers.md, Lifecycle).
+//!   it was held, so it stays awake (docs/computers.md, Lifecycle). So
+//!   does a wake during its hold or its save: a save under way goes on as
+//!   an awake save, and is kept or failed as one.
 //!   A sleep whose save fails keeps its container and is tried again, for
 //!   at most `Rules::unsaved_max_ms`; then it sleeps unsaved, and says so.
 //!   A container its host stops unasked while it is idle, with all this
