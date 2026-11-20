@@ -18,7 +18,8 @@
 //! - a stylesheet (`.css`): `@import`, and `url()` (a font's `src`, an image);
 //! - a script (`.js`, `.mjs`, `.cjs`): a statement's `import … from` and
 //!   `import "…"` (not the words in a string of prose), `import()`,
-//!   `importScripts()`, and an element's `.src` or `.href` set, or
+//!   `importScripts()`, and an element's `.src` or `.href` set, a `src` or
+//!   `href` property (`Object.assign(link, {href: …})`), or
 //!   `setAttribute("src" | "href", …)`, to a URL written out (a script that
 //!   adds a stylesheet: an anchor's `href` a person follows is no load, and
 //!   is named in `ALLOWED`);
@@ -26,9 +27,10 @@
 //!   `<link>`'s `href`, and `@import` (not `url(`, a Rust function's name).
 //!
 //! Which files: each one git tracks or would add (`js_syntax::listed`) of
-//! those kinds, less `js_syntax::VENDORED`, found in code and in comments
-//! alike (so no exception hides in one). A person's own fragment is theirs
-//! and may load what it likes: this pass reads this repo alone.
+//! those kinds that is served (`served`: not a test), less
+//! `js_syntax::VENDORED`, found in code and in comments alike (so no
+//! exception hides in one). A person's own fragment is theirs and may load
+//! what it likes: this pass reads this repo alone.
 //!
 //! An exception is a place that must name another domain where a load
 //! would: `ALLOWED`, each with why (today, two anchors a person follows).
@@ -104,12 +106,19 @@ pub struct Load {
     pub url: String,
 }
 
-/// The repo's files of the kinds read, less the vendored.
+/// Whether a file is one a browser may be served: a test is run, never
+/// served (`*.test.mjs`, the e2e's harness and fixtures in crates/e2e/), and
+/// mocks pages' URLs freely.
+pub fn served(path: &str) -> bool {
+    !(path.starts_with("crates/e2e/") || path.ends_with(".test.mjs") || path.ends_with(".test.js"))
+}
+
+/// The repo's served files of the kinds read, less the vendored.
 pub fn sources(root: &Path) -> Result<Vec<Source>> {
     let mut out = vec![];
     for path in crate::js_syntax::listed(root)? {
         let Some(kind) = kind(&path) else { continue };
-        if crate::js_syntax::vendored(&path) {
+        if crate::js_syntax::vendored(&path) || !served(&path) {
             continue;
         }
         let text = std::fs::read_to_string(root.join(&path)).with_context(|| format!("read {path}"))?;
@@ -149,8 +158,10 @@ fn spaced(text: &str) -> &str {
     text.trim_start_matches([' ', '\t', '\n', '\r'])
 }
 
-/// Each tag in `lower` (`<` and a letter, to its `>`): where it starts and
-/// ends, and its name.
+/// Each tag in `lower` (`<` and a letter, to its `>` outside an
+/// attribute's quoted value: `data-label="x > y"` ends no tag; a quote
+/// counts only right after an `=`, so Rust's `&'static` opens none): where
+/// it starts and ends, and its name.
 fn tags(lower: &str) -> impl Iterator<Item = (usize, usize, &str)> + '_ {
     lower.match_indices('<').filter_map(move |(open, _)| {
         let rest = &lower[open + 1..];
@@ -158,7 +169,26 @@ fn tags(lower: &str) -> impl Iterator<Item = (usize, usize, &str)> + '_ {
         if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
             return None;
         }
-        Some((open, rest.find('>').map_or(lower.len(), |e| open + 1 + e), name))
+        let (mut quote, mut last) = (None, ' ');
+        let end = rest.char_indices().find_map(|(i, c)| {
+            let end = match (quote, c) {
+                (None, '"' | '\'') if last == '=' => {
+                    quote = Some(c);
+                    None
+                }
+                (Some(q), c) if c == q => {
+                    quote = None;
+                    None
+                }
+                (None, '>') => Some(open + 1 + i),
+                _ => None,
+            };
+            if !c.is_ascii_whitespace() {
+                last = c;
+            }
+            end
+        });
+        Some((open, end.unwrap_or(lower.len()), name))
     })
 }
 
@@ -175,9 +205,21 @@ fn attribute<'a>(lower: &'a str, (open, end): (usize, usize), attr: &'a str) -> 
 }
 
 /// Where a script sets an element's `.src` or `.href` (`el.src = …`, not
-/// `==`, `.srcset` or `.hrefs`), or calls `setAttribute("src" | "href",
+/// `==`, `.srcset` or `.hrefs`), names a `src` or `href` property
+/// (`{href: …}`, `{"src": …}`), or calls `setAttribute("src" | "href",
 /// …)`: what, and where its value starts.
 fn dom_sets(lower: &str) -> impl Iterator<Item = (usize, &'static str, usize)> + '_ {
+    let keys = ["src", "href"].into_iter().flat_map(move |key| {
+        starts(lower, key).filter_map(move |i| {
+            let after = &lower[i + key.len()..];
+            let after = after.strip_prefix(['"', '\'']).unwrap_or(after);
+            if after.starts_with(|c: char| ident(c)) {
+                return None;
+            }
+            let value = spaced(after).strip_prefix(':')?;
+            Some((i, "a script's src or href property", lower.len() - value.len()))
+        })
+    });
     let props = [".src", ".href"].into_iter().flat_map(move |prop| {
         lower.match_indices(prop).filter_map(move |(i, _)| {
             let after = &lower[i + prop.len()..];
@@ -195,7 +237,7 @@ fn dom_sets(lower: &str) -> impl Iterator<Item = (usize, &'static str, usize)> +
         let value = spaced(rest).strip_prefix(',')?;
         matches!(name, "src" | "href").then_some((i, "a script's setAttribute()", lower.len() - value.len()))
     });
-    props.chain(calls)
+    props.chain(keys).chain(calls)
 }
 
 /// A page's inline scripts' bodies, where each starts and ends.
@@ -212,25 +254,40 @@ fn script_bodies(lower: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// Whether the word at `at` starts a statement: only spaces back to the
+/// text's start, a line's, a `;`, a brace or a tag's `>`.
+fn statement_start(lower: &str, at: usize) -> bool {
+    let before = lower[..at].trim_end_matches([' ', '\t']);
+    before.is_empty() || before.ends_with(['\n', '\r', ';', '{', '}', '>'])
+}
+
+/// Whether the `from` at `at` ends an import's or an export's clause: the
+/// nearest `import` or `export` before it starts a statement, and only
+/// names, braces, commas, `*` and spaces lie between (`import a,\n  { b as
+/// c } from`, `export * from`), so the words in a string of prose are none
+/// (`'Get it from "https://…"'`, `'please import it from "…"'`).
+fn ends_clause(lower: &str, at: usize) -> bool {
+    let clause_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | ',' | '{' | '}' | '*' | ' ' | '\t' | '\n' | '\r');
+    let Some(kw) = ["import", "export"].iter().filter_map(|w| lower[..at].rfind(w)).max() else { return false };
+    let between = &lower[kw + "import".len()..at];
+    !between.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$') && between.chars().all(clause_char) && statement_start(lower, kw)
+}
+
 /// Where a module's specifier starts after the word at `at`, when a
 /// string follows it and the word stands alone (`important`, `fromage` and
-/// `importScripts` are none): `import(` anywhere, and a statement's
-/// `import "…"` or `… from "…"`: the words in a string of prose are none
-/// (`'Get it from "https://…"'`). A statement starts its line, or follows
-/// a `;` or a tag's `>`; a `from` is a statement's when it starts with
-/// `import` or `export`, or with the `}` that closes a list of names.
+/// `importScripts` are none): `import(` anywhere, a statement's `import
+/// "…"`, and a clause's `from "…"` (`ends_clause`).
 fn specifier(lower: &str, at: usize) -> Option<usize> {
     let word = if lower[at..].starts_with("from") { "from" } else { "import" };
     let after = &lower[at + word.len()..];
     if after.chars().next().is_some_and(ident) {
         return None;
     }
-    let head = spaced(&lower[lower[..at].rfind(['\n', ';', '>']).map_or(0, |i| i + 1)..at]);
     let rest = spaced(after);
     let rest = match (word, rest.strip_prefix('(')) {
         ("import", Some(call)) => spaced(call),
-        ("import", None) if head.is_empty() => rest,
-        ("from", _) if ["import", "export", "}"].iter().any(|w| head.starts_with(w)) => rest,
+        ("import", None) if statement_start(lower, at) => rest,
+        ("from", _) if ends_clause(lower, at) => rest,
         _ => return None,
     };
     rest.starts_with(['"', '\'', '`']).then_some(lower.len() - rest.len())
@@ -345,6 +402,11 @@ mod tests {
             ("s.js", "el.setAttribute( \"src\", 'https://cdn.example/x.js');\n", 1, "a script's setAttribute()", "https://cdn.example/x.js"),
             ("t.html", "<p>x</p>\n<script>\n  font.href = 'https://fonts.example/f.css';\n</script>\n", 3, "a script's .src or .href", "https://fonts.example/f.css"),
             ("u.mjs", "import {\n  a,\n  b,\n} from 'https://esm.example/ab.js';\n", 4, "a module's import", "https://esm.example/ab.js"),
+            ("v.html", "<script data-label=\"x > y\" src = \"https://cdn.example/app.js\"></script>\n", 1, "an element's src", "https://cdn.example/app.js"),
+            ("w.js", "document.head.append(Object.assign(document.createElement(\"link\"), { rel: \"stylesheet\", href: \"https://cdn.example/app.css\" }));\n", 1, "a script's src or href property", "https://cdn.example/app.css"),
+            ("x.mjs", "import client,\n  { connect } from \"https://cdn.example/client.js\";\n", 2, "a module's import", "https://cdn.example/client.js"),
+            ("y.js", "const a = b\nimport \"https://cdn.example/side.js\"\n", 2, "a module's import", "https://cdn.example/side.js"),
+            ("z.mjs", "f()\nexport { c as d } from 'https://cdn.example/cd.js'\n", 2, "a module's import", "https://cdn.example/cd.js"),
         ];
         for (path, text, line, what, url) in planted {
             let s = source(path, text);
@@ -364,7 +426,7 @@ mod tests {
         let clean = [
             ("a.html", "<link rel=\"stylesheet\" href=\"./__fonts/fonts.css\">\n<link rel=\"preload\" as=\"font\" href=\"/__shell/jetbrains-mono-400.woff2\" crossorigin>\n<link rel=\"stylesheet\" href=\"{{sheet}}\">\n<script type=\"module\" src=\"./chat.js\"></script>\n<img src=\"data:image/png;base64,AA\">\n<a href=\"https://github.com/finitecomputer/fragment\">source</a>\n<p>It came from \"https://example.com\" once.</p>\n"),
             ("b.css", "@import url(\"__fonts/fonts.css\");\n@font-face { font-family: F; src: url(\"funnel-sans-400.ttf\") format(\"truetype\"); }\n.a { background: url(platform-landscape.jpg) }\n"),
-            ("c.mjs", "import { a } from \"./__fragment.js\";\nconst m = await import(\"./__markdown.js\");\nconst u = new URL(\"https://api.example.com/v1\");\nfetch(\"https://api.example.com/v1\");\n// an important note, imported from https://example.com\nconst link = 'https://example.com/a';\nconst hint = 'Download it from \"https://example.com\".';\nconst how = \"Paste it, then import \\\"https://example.com/x\\\" there\";\nif (img.src === 'https://example.com/a' || a.href == \"https://x.example\") el.srcset = 'https://x.example/a.png 2x';\nel.setAttribute(\"title\", \"https://example.com\");\n"),
+            ("c.mjs", "import { a } from \"./__fragment.js\";\nconst m = await import(\"./__markdown.js\");\nconst u = new URL(\"https://api.example.com/v1\");\nfetch(\"https://api.example.com/v1\");\n// an important note, imported from https://example.com\nconst link = 'https://example.com/a';\nconst hint = 'Download it from \"https://example.com\".';\nconst how = \"Paste it, then import \\\"https://example.com/x\\\" there\";\nif (img.src === 'https://example.com/a' || a.href == \"https://x.example\") el.srcset = 'https://x.example/a.png 2x';\nel.setAttribute(\"title\", \"https://example.com\");\nconst said = 'Please import it from \"https://example.com\"';\nconst pick = a ? b.src : c;\nconst links = { label: \"docs\", url: \"https://example.com\" };\n"),
             ("d.html", "<p>Get it from \"https://example.com\", then import \"https://example.com/x\".</p>\n<img alt=\"logo\" src = \"./logo.svg\">\n<link rel = \"stylesheet\" href = \"/__shell/fonts.css\">\n"),
             ("cell/src/page.rs", "let u = url(\"https://api.example.com/v1\");\nlet h = format!(\"<link rel=\\\"stylesheet\\\" href=\\\"{}\\\">\", versioned(\"sheet.css\"));\nlet data_src = \"<div data-src=\\\"https://x.example\\\">\";\nlet src = \"https://api.example.com/v1\";\n"),
         ];
@@ -375,6 +437,8 @@ mod tests {
         assert_eq!(kind("docs/api.md"), None, "prose is read for no load");
         assert_eq!(kind("crates/core/src/secrets.rs"), None, "Rust that renders no page is not read");
         assert_eq!(kind("cell/src/share.rs"), Some(Kind::Rust));
+        assert!(served("cell/shell/shell.js") && served("templates/chat/site/chat.js"), "a page's files are read");
+        assert!(!served("cell/shell-tests/notices-band.test.mjs") && !served("crates/e2e/src/lanes/agent-watch.js") && !served("crates/e2e/fixtures/x.html"), "a test, which mocks pages' URLs, is not");
     }
 
     /// Goal: an exception exempts its file's URL and nothing else, and a
