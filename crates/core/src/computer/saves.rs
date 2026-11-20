@@ -614,8 +614,13 @@ impl Saves {
     /// kept until a newer one is (Codex on #1378). So saves of one start
     /// are kept in the order they were asked, whichever ends first: by
     /// their numbers, never their clocks, which two may share (Codex).
+    /// That start's newest kept save, set aside or not: one set aside since
+    /// (an operator's choice of an older save as it ran) still overtakes
+    /// it, so it never becomes the current save ahead of that choice (Codex
+    /// on this PR).
     pub fn overtaken(&self, generation: u64, seq: u64) -> bool {
-        self.saves.first().is_some_and(|s| s.generation == generation && s.seq.is_some_and(|newest| newest > seq))
+        let newest = self.every_save().into_iter().find(|s| s.generation == generation);
+        newest.is_some_and(|s| s.seq.is_some_and(|newest| newest > seq))
     }
 
     /// Every record a wipe deletes (docs/api.md, Operators): each kept
@@ -1055,6 +1060,25 @@ mod tests {
         v["saves"][0].as_object_mut().unwrap().remove("seq");
         let old: Saves = serde_json::from_value(v).unwrap();
         assert!(!old.overtaken(1, 1) && old.all()[0].seq.is_none(), "a save stored before it overtakes nothing");
+    }
+
+    /// Goal (Codex on this PR): a save set aside still overtakes an older
+    /// save of its start that lands after it. A life's awake save waits on
+    /// its upload while its sleep's save, asked after it, is kept and its
+    /// container stops; an operator then chooses an older save, setting
+    /// the sleep's aside. The awake save that lands then is overtaken, so
+    /// it never becomes the current save ahead of the operator's choice.
+    /// Another start's, or one asked after it, is not.
+    #[test]
+    fn a_save_set_aside_still_overtakes_an_older_one_of_its_start() {
+        let mut s = Saves::default();
+        s.saved(1, rec("b1"), 1, T, true);
+        s.saved(2, rec("b3"), 3, T + 20, true);
+        assert!(s.overtaken(2, 2), "its sleep's save was asked after it");
+        assert_eq!(s.choose(1, T + 30), Ok(vec![]));
+        assert!(s.overtaken(2, 2), "set aside, it is still that start's newest");
+        assert!(!s.overtaken(2, 4) && !s.overtaken(3, 2), "one asked after it, or another start's");
+        assert_eq!(s.current().map(|c| c.id.as_str()), Some("b1"));
     }
 
     #[test]
