@@ -8,7 +8,8 @@
 //! sets one, so only they say where its value goes: with a value, or
 //! keeping the one it holds where that value means the same (`kept`).
 
-use fragment_proto::vault::{Place, PutSecret};
+use fragment_proto::notice::{Notice, NoticeAction, NoticeField, NoticeLevel, Until};
+use fragment_proto::vault::{AskSecret, Place, PutSecret, Secret};
 
 use crate::catalog::{self, Catalog, Half, Placement};
 
@@ -84,6 +85,8 @@ pub enum VaultError {
     Hosts(String),
     Place(String),
     Agents(String),
+    /// An agent's ask, or its person's answer to one.
+    Ask(String),
 }
 
 impl std::fmt::Display for VaultError {
@@ -94,6 +97,7 @@ impl std::fmt::Display for VaultError {
             VaultError::Hosts(why) => write!(f, "a secret's hosts: {why}"),
             VaultError::Place(why) => write!(f, "where a secret goes: {why}"),
             VaultError::Agents(why) => write!(f, "a secret's agents: {why}"),
+            VaultError::Ask(why) => write!(f, "an ask: {why}"),
         }
     }
 }
@@ -262,6 +266,113 @@ pub fn take(name: &str, claim: Option<&str>, to: &str) -> Result<(), Claimed> {
 /// claimant, and only the value it took: one set since stays.
 pub fn completes(claim: Option<&str>, held: &str, to: &str, taken: &str) -> bool {
     claim == Some(to) && held == taken
+}
+
+/// How long an ask waits on its person's card.
+pub const ASK_TTL_MS: i64 = 10 * 60_000;
+/// How long an ask that ended is still read by its agent (a CLI that
+/// polled late learns how it ended), then forgotten.
+pub const ASK_KEPT_MS: i64 = 60 * 60_000;
+/// The most asks waiting on one person at once.
+pub const ASKS_MAX: usize = 8;
+/// An ask's reason, at most, in characters.
+pub const WHY_MAX_CHARS: usize = 200;
+
+/// May an agent ask its person for `ask`, the secret under its name held
+/// as `held`? Its name a secret's (`name_ok`), its reason one short line,
+/// its hosts a secret's (`host_ok`, at most `HOSTS_MAX`). Asking for no
+/// value (`keepValue`) asks to send one held to more hosts, so it names
+/// one held and at least one host. What it asks is checked whole again as
+/// it is answered (`answered`, then `check`).
+pub fn ask_ok(ask: &AskSecret, held: Option<&Secret>, catalog: &Catalog) -> Result<(), VaultError> {
+    name_ok(&ask.name, catalog)?;
+    let why = ask.why.trim();
+    if why.is_empty() || ask.why.chars().count() > WHY_MAX_CHARS || ask.why.chars().any(char::is_control) {
+        return Err(VaultError::Ask(format!("say why in one line of 1 to {WHY_MAX_CHARS} characters")));
+    }
+    if ask.hosts.len() > HOSTS_MAX {
+        return Err(VaultError::Hosts(format!("at most {HOSTS_MAX}, not {}", ask.hosts.len())));
+    }
+    if let Some(bad) = ask.hosts.iter().find(|h| !host_ok(h)) {
+        return Err(VaultError::Hosts(format!("{bad:?} is not one: an exact public DNS name, lower case, with no scheme, port, path or wildcard")));
+    }
+    if ask.keep_value {
+        if held.is_none() {
+            return Err(VaultError::Ask(format!("{} is not in your person's vault yet: ask for its value (no --keep-value)", ask.name)));
+        }
+        if ask.hosts.is_empty() {
+            return Err(VaultError::Ask("asking to send a secret somewhere new names a host (--to)".into()));
+        }
+    }
+    Ok(())
+}
+
+/// What `agent`'s ask puts in its person's Vault as they answer it with
+/// `value` (what they pasted; none for an ask with `keepValue`), the
+/// secret under its name held as `held`: its hosts the asked joined to
+/// the held, its place the held (none, the default), and its agents the
+/// held with `agent`. So an answer never takes a host or an agent from a
+/// secret, and the `PutSecret` is held to the Vault's own rules (`check`).
+pub fn answered(ask: &AskSecret, agent: &str, held: Option<&Secret>, value: Option<String>) -> Result<PutSecret, VaultError> {
+    let value = match (ask.keep_value, value) {
+        (true, None) => None,
+        (true, Some(_)) => return Err(VaultError::Ask("this ask is Allow or Don't allow: it takes no value".into())),
+        (false, Some(v)) if !v.trim().is_empty() => Some(v.trim().to_string()),
+        (false, _) => return Err(VaultError::Ask("paste the secret first".into())),
+    };
+    let mut hosts: Vec<String> = held.map(|h| h.hosts.clone()).unwrap_or_default();
+    hosts.extend(ask.hosts.iter().cloned());
+    hosts.sort();
+    hosts.dedup();
+    let mut agents: Vec<String> = held.map(|h| h.agents.clone()).unwrap_or_default();
+    agents.push(agent.to_string());
+    agents.sort();
+    agents.dedup();
+    let place = held.map(|h| h.place.clone()).unwrap_or_default();
+    Ok(PutSecret { value, hosts, place, agents })
+}
+
+/// An ask on its person's card (`GET /api/notices`): `agent` is what they
+/// call the agent (its title, else its label), `picture` its face, and
+/// `held` whether they keep a secret of that name already. The field and
+/// Save for a value; Allow for one held, sent somewhere new. Its words say
+/// where it goes and that the agent never sees it.
+pub fn ask_notice(id: &str, ask: &AskSecret, agent: &str, picture: Option<String>, expires_at: i64, held: bool) -> Notice {
+    let route = format!("/api/vault/asks/{id}");
+    let to = ask.hosts.join(", ");
+    let (title, detail, field, actions) = if ask.keep_value {
+        (
+            format!("{agent} asks to use {} somewhere new", ask.name),
+            format!("Sends the {} you keep to {to} too. {agent} never sees it.", ask.name),
+            None,
+            vec![NoticeAction::post("Allow", route.clone(), serde_json::json!({})), NoticeAction::post("Don't allow", format!("{route}/decline"), serde_json::json!({}))],
+        )
+    } else {
+        let goes = match to.is_empty() {
+            true => "It goes nowhere until you say where.".to_string(),
+            false => format!("It only works with {to}."),
+        };
+        let replaces = if held { format!(" It replaces the {} you keep.", ask.name) } else { String::new() };
+        (
+            format!("{agent} asks for {}", ask.name),
+            format!("{goes}{replaces} {agent} gets a stand-in, never what you paste."),
+            Some(NoticeField { placeholder: "Paste it here".into() }),
+            vec![NoticeAction::post_field("Save", route.clone(), serde_json::json!({})), NoticeAction::post("Decline", format!("{route}/decline"), serde_json::json!({}))],
+        )
+    };
+    Notice {
+        id: format!("vault_ask:{id}"),
+        kind: "vault_ask".into(),
+        level: NoticeLevel::Info,
+        title,
+        text: Some(ask.why.trim().to_string()),
+        detail: Some(detail),
+        until: Some(Until { at: expires_at, said: "Expires".into() }),
+        actions,
+        must_answer: false,
+        image: picture,
+        field,
+    }
 }
 
 #[cfg(test)]
@@ -522,5 +633,99 @@ mod tests {
         // the first move's completion, late, removes nothing of the new
         // value, now claimed by another move
         assert!(!row.moved("one/BOT", &taken));
+    }
+
+    fn ask(name: &str, why: &str, hosts: &[&str], keep_value: bool) -> AskSecret {
+        AskSecret { name: name.into(), why: why.into(), hosts: hosts.iter().map(|h| h.to_string()).collect(), keep_value }
+    }
+
+    fn held(hosts: &[&str], place: Place, agents: &[&str]) -> Secret {
+        Secret { name: "github".into(), hosts: hosts.iter().map(|h| h.to_string()).collect(), place, agents: agents.iter().map(|a| a.to_string()).collect(), set_at: 1 }
+    }
+
+    /// Goal: an agent asks for a secret by a Vault name, in one short line,
+    /// toward a secret's hosts. Method: each part valid, then each wrong.
+    #[test]
+    fn an_ask_names_a_secret_why_in_a_line_and_a_secrets_hosts() {
+        assert!(ask_ok(&ask("github", "To push your shop's code", &["api.github.com"], false), None, &catalog()).is_ok());
+        assert!(ask_ok(&ask("github", "Kept for later", &[], false), None, &catalog()).is_ok(), "no hosts: parked, as a put may be");
+        for (bad, what) in [
+            (ask("openrouter", "a key the deployment offers", &[], false), "name"),
+            (ask("GitHub", "x", &[], false), "name"),
+            (ask("github", "", &[], false), "why"),
+            (ask("github", "   ", &[], false), "why"),
+            (ask("github", &"x".repeat(WHY_MAX_CHARS + 1), &[], false), "why"),
+            (ask("github", "two\nlines", &[], false), "why"),
+            (ask("github", "x", &["https://api.github.com"], false), "hosts"),
+            (ask("github", "x", &["*.github.com"], false), "hosts"),
+            (ask("github", "x", &["api.fragment.internal"], false), "hosts"),
+            (ask("github", "x", &["a.example.com"; 9], false), "hosts"),
+        ] {
+            assert!(ask_ok(&bad, None, &catalog()).is_err(), "{what}: {bad:?}");
+        }
+        assert!(ask_ok(&ask("github", &"é".repeat(WHY_MAX_CHARS), &[], false), None, &catalog()).is_ok(), "counted in characters, not bytes");
+    }
+
+    /// Goal: asking to send a secret somewhere new asks about one held,
+    /// toward a host. Method: none held, and no host, each refused.
+    #[test]
+    fn an_ask_with_no_value_names_one_held_and_a_host() {
+        let h = held(&["api.github.com"], Place::default(), &[AGENT]);
+        assert!(ask_ok(&ask("github", "Upload a release", &["uploads.github.com"], true), Some(&h), &catalog()).is_ok());
+        assert!(matches!(ask_ok(&ask("github", "Upload", &["uploads.github.com"], true), None, &catalog()), Err(VaultError::Ask(_))));
+        assert!(matches!(ask_ok(&ask("github", "Upload", &[], true), Some(&h), &catalog()), Err(VaultError::Ask(_))));
+    }
+
+    /// Goal: an answer adds, never takes away: the hosts and agents held
+    /// stay, the asker and the asked hosts join, the place held is kept,
+    /// and the result passes the Vault's own rules. Method: a new secret,
+    /// one held by another agent replaced, and one held sent further.
+    #[test]
+    fn an_answer_joins_what_is_held_and_takes_nothing() {
+        let new = answered(&ask("github", "push", &["api.github.com"], false), AGENT, None, Some(" ghp_abc \n".into())).expect("answered");
+        assert_eq!(new, PutSecret { value: Some("ghp_abc".into()), hosts: vec!["api.github.com".into()], place: Place::default(), agents: vec![AGENT.into()] }, "trimmed as a paste ends");
+        assert!(check("github", &new, None, &catalog()).is_ok());
+
+        let h = held(&["api.github.com"], Place { header: Some("x-token".into()), format: Some("{}".into()), ..Place::default() }, &["bea--k3x9"]);
+        let replaced = answered(&ask("github", "push", &["uploads.github.com"], false), AGENT, Some(&h), Some("ghp_new".into())).expect("answered");
+        assert_eq!(replaced.hosts, ["api.github.com", "uploads.github.com"]);
+        assert_eq!(replaced.agents, [AGENT, "bea--k3x9"]);
+        assert_eq!(replaced.place, h.place, "where it goes stays the person's");
+
+        let allowed = answered(&ask("github", "upload", &["uploads.github.com"], true), AGENT, Some(&h), None).expect("allowed");
+        assert_eq!(allowed.value, None, "Allow keeps the value held");
+        assert_eq!(allowed.hosts, ["api.github.com", "uploads.github.com"]);
+        assert!(check("github", &allowed, Some(&h.place), &catalog()).is_ok());
+    }
+
+    /// Goal: a value ask needs a paste, and an Allow takes none. Method:
+    /// an empty or blank paste, and a value sent to an Allow.
+    #[test]
+    fn a_value_ask_needs_a_paste_and_an_allow_takes_none() {
+        for blank in [None, Some(String::new()), Some("  \n".into())] {
+            assert!(matches!(answered(&ask("github", "push", &[], false), AGENT, None, blank.clone()), Err(VaultError::Ask(_))), "{blank:?}");
+        }
+        let h = held(&["api.github.com"], Place::default(), &[AGENT]);
+        assert!(matches!(answered(&ask("github", "upload", &["uploads.github.com"], true), AGENT, Some(&h), Some("v".into())), Err(VaultError::Ask(_))));
+    }
+
+    /// Goal: the card says who asks, why, where it goes, and that the
+    /// agent never sees it; a value ask carries the field its Save sends,
+    /// an Allow none. Method: both kinds, on the wire.
+    #[test]
+    fn the_card_says_who_why_where_and_carries_the_field() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let n = ask_notice(id, &ask("github", "To push your shop's code", &["api.github.com"], false), "Juniper", Some("/p".into()), 9, false);
+        assert_eq!(n.title, "Juniper asks for github");
+        assert_eq!(n.text.as_deref(), Some("To push your shop's code"));
+        assert_eq!(n.detail.as_deref(), Some("It only works with api.github.com. Juniper gets a stand-in, never what you paste."));
+        assert_eq!(n.until, Some(Until { at: 9, said: "Expires".into() }));
+        assert!(n.field.is_some() && n.actions[0].field && n.actions[0].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef"));
+        assert!(!n.actions[1].field && n.actions[1].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef/decline"));
+        let again = ask_notice(id, &ask("github", "Rotate", &[], false), "Juniper", None, 9, true);
+        assert!(again.detail.as_deref().is_some_and(|d| d.starts_with("It goes nowhere until you say where. It replaces the github you keep.")), "{:?}", again.detail);
+        let allow = ask_notice(id, &ask("github", "Upload", &["uploads.github.com"], true), "Juniper", None, 9, true);
+        assert_eq!(allow.title, "Juniper asks to use github somewhere new");
+        assert!(allow.field.is_none() && allow.actions.iter().all(|a| !a.field) && allow.actions[0].label == "Allow");
     }
 }

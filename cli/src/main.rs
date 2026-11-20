@@ -1107,6 +1107,88 @@ enum VaultCmd {
         #[arg(value_parser = vault_name)]
         name: String,
     },
+    /// As an agent on a computer: ask your person for a secret. They get a
+    /// card on their page with a masked field and paste it there; you
+    /// never see it. Waits for their answer (at most 10 minutes), then
+    /// prints the stand-in to send in its place, toward the hosts it works
+    /// with. `--keep-value`: ask instead to send one they keep somewhere
+    /// new (they Allow or Don't allow)
+    Ask {
+        #[arg(value_parser = vault_name)]
+        name: String,
+        /// Why you need it, in one line: the card shows it
+        #[arg(long, required = true)]
+        why: String,
+        /// A host it would go to (repeat for more): `api.example.com`, no
+        /// scheme, port, or path. None: kept, and sent nowhere
+        #[arg(long = "to", value_name = "HOST")]
+        hosts: Vec<String>,
+        /// Ask for no value: the secret your person keeps, sent to these
+        /// hosts too, and yours to use
+        #[arg(long)]
+        keep_value: bool,
+    },
+}
+
+/// How often `fragment vault ask` reads how its ask stands.
+const ASK_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `fragment vault ask`: the ask made, followed until it ends, and, saved,
+/// the stand-in this agent's computer gives it (`GET /api/computer`, which
+/// also has its egress catch the new hosts). Every ending is an answer:
+/// `--json` says which; otherwise one not saved exits 1, saying why.
+fn vault_ask(c: &api::Client, j: bool, ask: fragment_proto::vault::AskSecret) -> Result<()> {
+    use fragment_proto::vault::{AskState, SecretAsk};
+    let Some(me) = c.agent().map(|m| m.agent.clone()) else {
+        return Err(usage("an agent on a computer asks its person for a secret: your own you set with `fragment vault set`"));
+    };
+    let name = ask.name.clone();
+    let mut at: SecretAsk = c.call_as(c.post_json("/api/vault/asks", &ask)?)?;
+    if !j {
+        eprintln!("asked your person for {name}: waiting for their answer (at most 10 minutes)");
+    }
+    // the platform ends it in ten minutes; this stops reading a minute
+    // after, whatever it says
+    let reads = (fragment_core::vault::ASK_TTL_MS as u128 + 60_000) / ASK_POLL.as_millis();
+    for _ in 0..reads {
+        if at.state != AskState::Waiting {
+            break;
+        }
+        std::thread::sleep(ASK_POLL);
+        at = c.call_as(c.get(&format!("/api/vault/asks/{}", at.id))?)?;
+    }
+    #[derive(serde::Deserialize)]
+    struct View {
+        agents: Vec<Agent>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Agent {
+        fragment: String,
+        #[serde(default)]
+        credentials: Vec<Credential>,
+    }
+    #[derive(serde::Deserialize, Serialize, Clone)]
+    struct Credential {
+        provider: String,
+        placeholder: String,
+        #[serde(default)]
+        hosts: Vec<String>,
+    }
+    let given = match at.state {
+        AskState::Saved => {
+            let view: View = c.call_as(c.get("/api/computer")?).context("reading this computer's view for the stand-in")?;
+            view.agents.into_iter().find(|a| a.fragment == me).and_then(|a| a.credentials.into_iter().find(|c| c.provider == name))
+        }
+        _ => None,
+    };
+    json_exit(j, &json!({ "ask": at, "placeholder": given.as_ref().map(|g| &g.placeholder), "hosts": given.as_ref().map(|g| &g.hosts) }));
+    match (at.state, given) {
+        (AskState::Saved, Some(g)) => println!("{name} saved: send {} in its place, toward {}. You never see the secret itself", g.placeholder, g.hosts.join(", ")),
+        (AskState::Saved, None) => println!("{name} saved, and sent nowhere yet: to use it, ask again with --keep-value --to <host>"),
+        (AskState::Declined, _) => return Err(anyhow::Error::new(api::CodedError { code: api::Code::Forbidden, msg: format!("your person declined {name}") })),
+        _ => return Err(anyhow::Error::new(api::CodedError { code: api::Code::Conflict, msg: format!("no answer for {name}: the ask expired, or you asked again since") })),
+    }
+    Ok(())
 }
 
 /// A Vault secret's name, of its form (`fragment_core::vault::name_form`)
@@ -2649,6 +2731,7 @@ fn run(cli: Cli) -> Result<()> {
                 json_exit(j, &v);
                 println!("{}", if v.removed { format!("secret {name} removed") } else { format!("no secret {name}") });
             }
+            VaultCmd::Ask { name, why, hosts, keep_value } => vault_ask(&c, j, fragment_proto::vault::AskSecret { name, why, hosts, keep_value })?,
         },
         Cmd::Inbox { name, payload, source } => {
             let token = from_env_or_stdin(INBOX_TOKEN_ENV, "inbox token")?;

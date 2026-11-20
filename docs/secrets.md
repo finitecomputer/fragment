@@ -141,6 +141,35 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   removing it, ends it (`fragment_core::vault::Claimed`); set again with
   no value, the value claimed is the one held, and its claim stands. A Nostr key never moves.
 
+### An agent asks
+
+An agent that needs a secret asks its person for it (`fragment vault ask
+<name> --why "…" [--to <host>]`; docs/api.md, "A person's Vault"), the
+way T3 Code's secret prompt does: the agent never sees what they give.
+
+- **The card is the platform's.** The ask waits in the person's Vault and
+  shows as one of their notices (`vault/notices`), in the band the shell
+  draws above their chat: who asks, why, where it would go, a masked
+  field, Save and Decline. A chat, an app or a fork of either draws no
+  part of it, so no app code ever has the field.
+- **The paste goes to the Vault alone**: from the shell's page to `POST
+  /api/vault/asks/{id}`, sealed there in the same turn, never in a chat's
+  records, a log or an answer. The page keeps it in its input only while
+  the card shows, and empties it once posted.
+- **Only the person asked answers**, from their own session; an agent,
+  theirs or another's, is refused, and anyone else finds no ask.
+- **An answer adds, never takes away.** It is a put under the Vault's own
+  rules: the hosts asked joined to any held, the asking agent to its
+  agents, the place held kept. A secret held already is replaced only by
+  a paste its card says it replaces.
+- **Somewhere new** (`--keep-value`): an agent asks to send a secret its
+  person keeps to more hosts; the card is Allow or Don't allow, with no
+  field.
+- **It ends**: saved, declined, or after ten minutes unanswered (or asked
+  again by the same agent for the same name). At most 8 wait on a person.
+  The agent's CLI then reads its computer's view, which arms the egress
+  for the new hosts, and prints the stand-in (`fck_<name>_<tag>`).
+
 ## The Secrets Store
 
 The deployment's config names each secret by its store name. `cargo

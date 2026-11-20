@@ -31,6 +31,7 @@ pub fn standing(standing: Standing, may_buy: bool) -> Option<Notice> {
         actions: buy.into_iter().collect(),
         must_answer: false,
         image: None,
+        field: None,
     })
 }
 

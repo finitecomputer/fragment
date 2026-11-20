@@ -1,7 +1,8 @@
 //! `GET /api/notices` (FIN-458): what a person is told now. The router
 //! asks each owner for its own notices, in its own words, at once, and
 //! puts them together, the most pressing first: their ledger's (their
-//! agents stopped for want of credit), their computer's, then the
+//! agents stopped for want of credit), their Vault's (an agent waiting on
+//! them for a secret: `vault::notices`), their computer's, then the
 //! registry's (the invites waiting on their emails), then the move's (an
 //! offer to bring an old agent over: `migrations::notices`). It keeps none, and
 //! reads nothing in them: their lists are joined as bytes
@@ -10,7 +11,7 @@
 //! (`principal::calls::Changed`). An owner that does not answer fails the
 //! read: a page says it couldn't refresh, never that nothing is told.
 
-use futures_util::future::join4;
+use futures_util::future::join5;
 use worker::*;
 
 use crate::error::{CellError, CellResult};
@@ -26,9 +27,10 @@ pub(crate) async fn route(req: &Request, env: &Env, cfg: &crate::config::Config,
     }
     let person = who.identity.id;
     let asked = serde_json::to_string(&NoticesOf { person: person.clone() }).map_err(|e| CellError::host(format!("a registry call: {e}")))?;
-    let (ledger, computer, registry, moves) = join4(
+    let (ledger, vault, computer, registry, moves) = join5(
         // its body is `{}` (`NoticesOf {}`): the ledger reads none of it
         crate::ledger::asked(env, &person, crate::ledger::NoticesOf::PATH, "{}".into()),
+        crate::vault::notices(env, &person),
         crate::computer::notices_for(env, &person),
         crate::registry_round_trip(env, NoticesOf::PATH, asked),
         crate::migrations::notices(env, cfg, &person),
@@ -41,6 +43,6 @@ pub(crate) async fn route(req: &Request, env: &Env, cfg: &crate::config::Config,
     }
     let computer = computer.bytes().await?;
     let ledger = ledger.map_err(CellError::from)?;
-    let joined = fragment_core::notice::joined(&[&ledger, &computer, &registry?, &moves?]).ok_or_else(|| CellError::host("an owner's notices are not a notice list"))?;
+    let joined = fragment_core::notice::joined(&[&ledger, &vault?, &computer, &registry?, &moves?]).ok_or_else(|| CellError::host("an owner's notices are not a notice list"))?;
     Ok(Response::builder().with_header("content-type", "application/json")?.fixed(joined))
 }

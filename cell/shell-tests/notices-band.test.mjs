@@ -593,3 +593,59 @@ test("on the platform's page one of its answers opens (the move's /move), a noti
   const elsewhere = page(t, [offer]);
   assert.equal(elsewhere.asked()?.id, "move:prj_1", "anywhere else: over the page");
 });
+
+// A Vault ask (FIN-466): its card carries a masked field, and only the
+// action that takes it (`field`) sends what it holds, as `value`.
+const ASK = "/api/vault/asks/0123456789abcdef0123456789abcdef";
+const asked = (o = {}) => ({
+  id: "vault_ask:0123456789abcdef0123456789abcdef", kind: "vault_ask", level: "info", title: "Juniper asks for github", text: "To push your shop's code",
+  field: { placeholder: "Paste it here" },
+  actions: [{ label: "Save", post: ASK, body: {}, field: true }, { label: "Decline", post: `${ASK}/decline`, body: {} }],
+  ...o,
+});
+const fieldIn = (p) => walk(p.box).find((n) => n.tag === "input");
+
+test("a notice's field is masked, and Save sends what it holds as its value, once, and keeps no copy", async (t) => {
+  const p = page(t, [asked()]);
+  const input = fieldIn(p);
+  assert.ok(input, "its field is drawn");
+  assert.equal(input.type, "password", "masked");
+  assert.equal(input.autocomplete, "off");
+  assert.equal(input.placeholder, "Paste it here");
+  input.value = "ghp_secret123";
+  p.tap(asked().id, "Save");
+  assert.equal(p.calls.length, 1);
+  assert.deepEqual([p.calls[0].path, p.calls[0].body], [ASK, { value: "ghp_secret123" }], "posted with the paste as value");
+  p.calls[0].ok({ id: "0123456789abcdef0123456789abcdef", name: "github", state: "saved", expiresAt: 1 });
+  await settle();
+  assert.equal(input.value, "", "taken: no copy stays in the page");
+  assert.equal(p.calls[1].path, "/api/notices", "then read again");
+  p.calls[1].ok({ notices: [] });
+  await settle();
+  assert.deepEqual(p.shown(), [], "answered, the card is gone");
+});
+
+test("an empty field posts nothing and says so; Decline sends no value", async (t) => {
+  const p = page(t, [asked()]);
+  p.tap(asked().id, "Save");
+  assert.equal(p.calls.length, 0, "nothing posted");
+  assert.ok(p.shown()[0].words.includes("Paste it first."), JSON.stringify(p.shown()));
+  fieldIn(p).value = "typed but not saved";
+  p.tap(asked().id, "Decline");
+  assert.deepEqual([p.calls[0].path, p.calls[0].body], [`${ASK}/decline`, {}], "Decline takes no field");
+});
+
+test("what the person pasted survives a redraw of the band, and goes with its notice", (t) => {
+  const p = page(t, [asked()]);
+  const input = fieldIn(p);
+  input.value = "half-pasted";
+  p.ui.renderComputer();
+  assert.equal(fieldIn(p), input, "the same input, moved into the new row");
+  assert.equal(fieldIn(p).value, "half-pasted");
+  p.shell.notices = [];
+  p.ui.renderComputer();
+  p.shell.notices = [asked()];
+  p.ui.renderComputer();
+  assert.notEqual(fieldIn(p), input, "its notice gone, its field went with it");
+  assert.equal(fieldIn(p).value, "");
+});

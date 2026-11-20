@@ -184,6 +184,31 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       cover.focus();
     }
   }
+  // Each notice's secret field (`n.field`: a Vault ask's), by the notice's
+  // id: one input for as long as its notice shows, moved into each redraw
+  // of its row, so what the person pasted survives a redraw (a countdown's
+  // minute) and goes only with that notice's action that takes it. Masked,
+  // never read but by that action, and gone with its notice.
+  const fields = new Map();
+  function fieldOf(n) {
+    let input = fields.get(n.id);
+    if (!input) {
+      input = el("input", "notice-field");
+      Object.assign(input, { type: "password", value: "", autocomplete: "off", spellcheck: false, placeholder: n.field.placeholder ?? "" });
+      input.setAttribute("aria-label", n.title);
+      input.dataset.lpignore = "true";
+      fields.set(n.id, input);
+    }
+    input.disabled = pending.has(n.id);
+    // Enter is the action that takes it (Save)
+    input.onkeydown = (e) => {
+      const a = e.key === "Enter" ? (n.actions ?? []).find((x) => x.field) : null;
+      if (!a) return;
+      e.preventDefault();
+      act(n, a);
+    };
+    return input;
+  }
   // the countdowns as last drawn, each its line and its time (`countdown`)
   let counting = [];
   let tick = null;
@@ -204,6 +229,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     }
     if (failed.has(n.id)) copy.append(el("p", null, failed.get(n.id).said));
     if (n.detail) copy.append(el("p", "notice-detail", n.detail));
+    if (n.field) copy.append(fieldOf(n));
     (n.actions ?? []).forEach((a, i) => actions.append(actionOf(n, a, i === 0)));
     // its picture (an agent's), a platform path; one that won't load goes
     if (n.image) {
@@ -265,12 +291,23 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     // the start the server named, so a stale row's press restarts nothing newer
     if (restarts(a)) return restartComputer(a.body?.generation);
     if (pending.has(n.id)) return;
+    // an action that takes its notice's field sends what it holds as `value`
+    // (a client of before posts none, and the server refuses the empty)
+    const input = a.field ? fields.get(n.id) : null;
+    if (a.field && !input?.value.trim()) {
+      failed.set(n.id, { said: "Paste it first.", refused: false, title: n.title, level: n.level });
+      renderComputer();
+      input?.focus();
+      return;
+    }
     pending.add(n.id);
     failed.delete(n.id);
     renderComputer();
     let answer = null;
     try {
-      answer = await api("POST", a.post, a.body ?? {});
+      answer = await api("POST", a.post, input ? { ...(a.body ?? {}), value: input.value } : (a.body ?? {}));
+      // taken: no copy of it stays in the page
+      if (input) input.value = "";
     } catch (e) {
       const refused = !!e?.status;
       failed.set(n.id, { said: refused ? e.message : "Couldn't do that. Try again.", refused, title: n.title, level: n.level });
@@ -365,8 +402,13 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     // a read that failed, its notices' too: what the last said stays, under its line
     const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed || reads().noticesFailed ? ["refresh"] : [];
     const refusals = gone.filter(([, f]) => f.refused).map(([id, f]) => refusalRow(id, f));
+    // a field whose notice is not drawn goes, with whatever it held
+    for (const id of fields.keys()) if (!told.some((n) => n.id === id && n.field)) fields.delete(id);
+    // the field the person is typing in keeps their focus through the redraw
+    const typing = [...fields.values()].find((i) => i === document.activeElement);
     const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.filter((n) => !n.mustAnswer).map(noticeRow), ...refusals];
     box.replaceChildren(...rows);
+    typing?.focus();
     box.hidden = !rows.length;
     drawAsked(told.find((n) => n.mustAnswer && !answeredHere(n)), own);
     countdown();
