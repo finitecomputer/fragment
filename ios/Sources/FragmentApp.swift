@@ -433,22 +433,20 @@ final class Library {
         return Array(scalars[first...last])
     }
     /// The person's imported chats: their session archive's rows of kind
-    /// `chat` (its app's `sessions`, templates/sessions/README.md), apart
-    /// from the rest of the list, the newest 2,000; while its list is not
-    /// whole (an archive imported before its rows were, or a host before
-    /// them), its `index/chat.json` when it has one, as the web's History
-    /// reads it. A read that fails keeps what was read before, and nothing
-    /// else waits on it.
+    /// `chat` (its app's `sessions`, templates/sessions/README.md) and any
+    /// chat of the `index/chat.json` older clients keep that no row lists,
+    /// as the web's History reads them, apart from the rest of the list, the
+    /// newest 2,000. A read that fails keeps what was read before, and
+    /// nothing else waits on it.
     private func loadImported(_ api: FragmentAPI, _ requestID: UUID) async {
         struct Index: Decodable { let sessions: [ImportedSession] }
-        struct Page: Decodable { let sessions: [ImportedSession]; let next: String?; let whole: Bool? }
+        struct Page: Decodable { let sessions: [ImportedSession]; let next: String? }
         struct Answer: Decodable { let result: Page }
         guard let archive = fragments.first(where: { $0.kind == "sessions" && $0.role == "owner" }) else {
             if loadID == requestID { imported = [] }
             return
         }
         var rows: [ImportedSession] = []
-        var whole = false
         do {
             var after = ""
             for page in 0..<64 {
@@ -459,17 +457,17 @@ final class Library {
                     break
                 }
                 rows += answer.result.sessions
-                whole = answer.result.whole == true
                 guard let next = answer.result.next, next > after else { break }
                 after = next
             }
-            if !whole, let index = try await api.optional(Index.self, "api/f/\(archive.name)/file", query: [URLQueryItem(name: "path", value: "index/chat.json")]) {
-                rows = index.sessions
-            }
+            let held = Set(rows.map(\.key))
+            let index = try await api.optional(Index.self, "api/f/\(archive.name)/file", query: [URLQueryItem(name: "path", value: "index/chat.json")])
+            rows += (index?.sessions ?? []).filter { !held.contains($0.key) }
         } catch { return }
         guard loadID == requestID, !Task.isCancelled else { return }
         imported = Array(rows.sorted { $0.at > $1.at }.prefix(2_000))
     }
+
     func watch(_ api: FragmentAPI) async {
         var attempt = 0
         // One foreground watcher. Cancellation closes an outstanding receive;

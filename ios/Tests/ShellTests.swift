@@ -120,22 +120,23 @@ struct ShellTests {
     }
 
     /// The archive's rows are its list (templates/sessions/app.mjs): every
-    /// page of its chats, asked of its app, newest first, and no index file
-    /// read once the list is whole; a list not whole yet (or none, a host
-    /// before it) reads its index file (the tests around this).
+    /// page of its chats, asked of its app, newest first, and beside them
+    /// any chat of the index file older clients keep (an older CLI's import)
+    /// that no row lists; with no rows, or none to ask (a host before
+    /// them), that file alone (the tests around this).
     @Test func theArchivesRowsListItsChats() async throws {
         let stub = Stub { seen, before in
             guard seen.route == "POST /api/f/archive--s1/ops/sessions" else { return Self.platform(seen, before) }
             return before.contains { $0.route == seen.route }
-                ? (200, #"{"result":{"sessions":[{"key":"hermes-b","kind":"chat","title":"Second","started_at":"2026-10-03T10:00:00.250Z"}],"next":null,"whole":true},"replayed":false}"#)
-                : (200, #"{"result":{"sessions":[{"key":"hermes-a","kind":"chat","title":"First","ended_at":"2026-10-02T10:00:00.000Z","commit":"0123456789abcdef0123456789abcdef01234567"}],"next":"hermes-a","whole":true},"replayed":false}"#)
+                ? (200, #"{"result":{"sessions":[{"key":"hermes-b","kind":"chat","title":"Second","started_at":"2026-10-03T10:00:00.250Z"}],"next":null},"replayed":false}"#)
+                : (200, #"{"result":{"sessions":[{"key":"hermes-a","kind":"chat","title":"First","ended_at":"2026-10-02T10:00:00.000Z","commit":"0123456789abcdef0123456789abcdef01234567"}],"next":"hermes-a"},"replayed":false}"#)
         }
         let library = Library()
         await library.load(try stub.api())
-        #expect(library.error == nil && library.imported.map(\.key) == ["hermes-b", "hermes-a"], "newest first")
-        #expect(library.imported.map(\.at) == [1_791_021_600_250, 1_790_935_200_000], "times with milliseconds, as an archive writes them")
+        #expect(library.error == nil && library.imported.map(\.key) == ["hermes-b", "hermes-a", "imported-chat"], "newest first, the index file's chat no row lists beside them")
+        #expect(Array(library.imported.map(\.at).prefix(2)) == [1_791_021_600_250, 1_790_935_200_000], "times with milliseconds, as an archive writes them")
         #expect(stub.seen.filter { $0.route == "POST /api/f/archive--s1/ops/sessions" }.count == 2)
-        #expect(!stub.seen.contains { $0.route == "GET /api/f/archive--s1/file" })
+        #expect(stub.seen.filter { $0.route == "GET /api/f/archive--s1/file" }.count == 1, "the index file older clients keep, read once")
     }
 
     /// The archive's index is optional: one of other kinds alone (cron,

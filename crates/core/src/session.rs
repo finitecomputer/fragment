@@ -19,6 +19,10 @@
 //! a crash, or another writer, is put right by the next import of
 //! anything.
 //!
+//! **Index files, for older clients.** Clients from before the rows read
+//! and write an index file a kind (`Index`, `index/<kind>.json`), which
+//! each import writes again after its rows (docs/technical-debt-ledger.md).
+//!
 //! **Keyed by the original id.** A conversation's key is its origin and its
 //! id there (`key`), so importing the same one again (a re-run, a retry
 //! after a crash, the same chats from another of the origin's stores)
@@ -355,6 +359,17 @@ pub fn key_of_path(path: &str) -> Option<&str> {
     path.strip_prefix("sessions/")?.strip_suffix(".json").filter(|k| !k.is_empty() && !k.contains('/'))
 }
 
+/// Where a kind's index file is (`index/<kind>.json`): a copy of the
+/// list for clients from before its rows (docs/technical-debt-ledger.md).
+pub fn index_path(kind: &Kind) -> String {
+    format!("index/{}.json", kind.as_str())
+}
+
+/// The kind whose index file a path is, when it is one.
+pub fn kind_of_index_path(path: &str) -> Option<Kind> {
+    Kind::parse(path.strip_prefix("index/")?.strip_suffix(".json")?)
+}
+
 impl Session {
     /// The conversation as an archive keeps it: tool output, reasoning and
     /// arguments cut (`clip`), structured text its origin stored as JSON
@@ -470,7 +485,7 @@ fn is_zero(n: &u64) -> bool {
 }
 
 impl Entry {
-    /// When it was last said, else begun.
+    /// When it was last said, else begun: what an index file sorts by.
     fn when(&self) -> Option<&str> {
         self.ended_at.as_deref().or(self.started_at.as_deref())
     }
@@ -483,6 +498,31 @@ impl Entry {
     /// it) never replaces a newer one, nor an equal one as late.
     pub fn newer(&self, held: &Entry) -> bool {
         (self.when(), self.reader, self.media) > (held.when(), held.reader, held.media)
+    }
+}
+
+/// A kind's index file: its conversations, newest first, as clients from
+/// before the list's rows read and write it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Index {
+    pub format: String,
+    pub kind: Kind,
+    pub sessions: Vec<Entry>,
+}
+
+impl Index {
+    /// The index of `kind` over `entries` (any order; those of other kinds
+    /// left out), newest first, then by key.
+    pub fn of(kind: Kind, entries: &BTreeMap<String, Entry>) -> Index {
+        let mut sessions: Vec<Entry> = entries.values().filter(|e| e.kind == kind).cloned().collect();
+        sessions.sort_unstable_by(|a, b| b.when().cmp(&a.when()).then_with(|| a.key.cmp(&b.key)));
+        Index { format: FORMAT.to_string(), kind, sessions }
+    }
+
+    pub fn file(&self) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(self).expect("an index serializes");
+        bytes.push(b'\n');
+        bytes
     }
 }
 
@@ -824,6 +864,11 @@ mod tests {
         assert_eq!(key_of_path(&session_path(&k)), Some(k.as_str()));
         assert!(fragment_proto::valid_repo_path(&session_path(&hashed)));
         assert_eq!(key_of_path("sessions/a/b.json"), None);
+        assert_eq!(index_path(&Kind::Cron), "index/cron.json");
+        assert_eq!(kind_of_index_path("index/heartbeat.json"), Some(Kind::Other("heartbeat".into())));
+        for path in ["index/a/b.json", "index/.json", "sessions/hermes-a.json", "index/Chat.json"] {
+            assert_eq!(kind_of_index_path(path), None, "{path}");
+        }
     }
 
     /// Goal: a file a message held is kept by its hash, at a path its kind

@@ -64,32 +64,35 @@ characters), `sha256` and `bytes` are its file's, and `media` the bytes
 of the files its messages held.
 
 - `sessions` (a query, its viewers): `{kind?, after?}` → `{sessions:
-  [row], next, whole}`, by key after `after`, of one kind or all, at most
-  1000 rows and about 768 KiB an answer; `next` the key to ask after for
-  more; `whole`, whether an import has filed a row for every
-  conversation the archive held. A reader sorts them (newest first: by
-  `ended_at`, else `started_at`).
-- `filed` (a mutation, its editors): `{rows, gone, whole?}`, at most 200
-  rows and 1000 keys a call: each row put in place of its key's, each
-  key of `gone` dropped, and the list said whole (or not). One that is
-  not an entry (its fields missing or of another type, an entry past
-  8 KiB) refuses the call.
+  [row], next}`, by key after `after`, of one kind or all, at most 1000
+  rows and about 768 KiB an answer; `next` the key to ask after for
+  more. A reader sorts them (newest first: by `ended_at`, else
+  `started_at`).
+- `filed` (a mutation, its editors): `{rows, gone}`, at most 200 rows
+  and 1000 keys a call: each row put in place of its key's, and each key
+  of `gone` dropped. One that is not an entry (its fields missing or of
+  another type, an entry past 8 KiB) refuses the call.
 
 The import writes the rows, as the writer holding each conversation's
 bytes: an app reads no file of 1 MiB or more (a blob), and a
-conversation may be 8 MiB. Its last call says the list is whole. On a
-host whose archive has no list (older than the CLI) an import is
+conversation may be 8 MiB. On a host whose archive has no list (older than the CLI) an import is
 refused before it writes a conversation. A list takes at most
 `LIST_MAX_BYTES` (13 MiB) of the app's 16 MiB database, each row
 counted as SQLite stores it (`list_cost`): a whole archive of entries of
 about 500 bytes fits, one of longer entries holds fewer. An import past
 it is refused whole, as one past the archive's other limits is.
 
-An archive imported before its list was rows holds an index file a kind
-instead (`index/<kind>.json`, `{format, kind, sessions: [entry]}`): its
-page and History read its chats from it while its list is not whole,
-and its next import of anything lists every conversation as rows, from
-its files, says the list whole, then takes its index files away.
+**The index files, for older clients.** Clients from before the list's
+rows (an iPhone build, a computer's CLI) read and write an index file a
+kind, `index/<kind>.json`, `{format, kind, sessions: [entry]}`, newest
+first. Until they are gone (docs/technical-debt-ledger.md) every import
+writes them again after its rows, from the same entries, whenever the
+list moved: one try on the head it left, so a file another writer
+changed since is newer than them, and an older CLI reads it. Readers
+list the rows and, beside them, any conversation of an index file that
+no row lists: one an older CLI imported, or an archive from before its
+rows, whose next import of anything lists every conversation as rows
+from its files.
 
 A conversation's key is its origin and its id there,
 `hermes-20261029_183012_ab12cd`; an id that is no file name's (another

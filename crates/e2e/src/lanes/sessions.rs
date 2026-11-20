@@ -267,14 +267,14 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let call = |op: &str, input: Value| api.signed(&keys, "POST", &format!("/api/f/{name}/ops/{op}"), Some(&json!({ "id": format!("e2e-old-{op}-{}", nanos()), "input": input })));
     let held = call("sessions", json!({}))?;
     let held_keys: Vec<Value> = held.body["result"]["sessions"].as_array().into_iter().flatten().map(|e| e["key"].clone()).collect();
-    let dropped = call("filed", json!({ "gone": held_keys, "whole": false }))?;
+    let dropped = call("filed", json!({ "gone": held_keys }))?;
     let entry = |key: &str, title: &str, at: &str| json!({ "key": key, "id": key.trim_start_matches("hermes-"), "origin": "hermes", "reader": 11, "kind": "chat", "title": title, "ended_at": at, "messages": 2, "preview": "", "sha256": "0".repeat(64), "bytes": 1 });
     let old = json!({ "format": archive::FORMAT, "kind": "chat", "sessions": [entry("hermes-e2e_beans", "Beans, as its index lists it", "2026-10-03T09:00:00Z"), entry("hermes-e2e_big", "A long letter", "2026-10-02T09:00:00Z")] }).to_string();
     let made = json!({ "repo": api.status(&keys, &name)?.body["repo"], "name": name });
     s.owned(&made, &keys);
     s.commit(&made, &[("index/chat.json", Some(old.as_bytes()))]);
     let left = call("sessions", json!({}))?;
-    let emptied = left.body["result"]["sessions"].as_array().is_some_and(Vec::is_empty) && left.body["result"]["whole"] == false;
+    let emptied = left.body["result"]["sessions"].as_array().is_some_and(Vec::is_empty);
     // a fresh shell reads its archive's list at once
     b.eval(&page, "(location.reload(), true)")?;
     b.until(&page, "!document.getElementById('layout').hidden && !!document.getElementById('history-link')?.offsetParent", wait);
@@ -282,14 +282,17 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let from_index = b.eval(&page, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent)"))?;
     let page_from_index = list_shots(s, &mut b, "index", "Beans, as its index lists it")?;
     s.ok(
-        "an archive whose list is not whole yet, its chats' index file alone, is listed from that file by History and by its page",
+        "an archive with no rows yet, its chats' index file alone (as the CLI before the rows left it), is listed from that file by History and by its page",
         dropped.status == 200 && emptied && from_index == json!(["Beans, as its index lists it", "A long letter"]) && page_from_index,
         json!({ "history": from_index, "page": b.eval_in_frame(&page, &name, "document.body.innerText.slice(0, 300)").unwrap_or_default() }),
     );
     let again = s.cli_json(api, &home, &["session", "import", root.to_str().expect("utf-8 path"), "--json"])?;
     let refill = call("sessions", json!({ "kind": "chat" }))?;
     let refilled: Vec<Value> = refill.body["result"]["sessions"].as_array().into_iter().flatten().map(|e| e["title"].clone()).collect();
-    let index_gone = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=index/chat.json"), None)?.status == 404;
+    // its index file written again from its files, for older clients
+    let index_now = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=index/chat.json"), None)?;
+    let index_titles: Vec<Value> = index_now.body["sessions"].as_array().into_iter().flatten().map(|e| e["title"].clone()).collect();
+    let index_rewritten = Value::Array(index_titles.clone()) == json!(["A long letter", "Beans"]);
     // a fresh shell, at History, reads the archive's list at once
     let fresh = b.open(&format!("{}/history", api.base))?;
     b.viewport(&fresh, 1280, 900, false)?;
@@ -297,9 +300,9 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.click(&fresh, ".history-filter[data-filter=\"imported\"]")?;
     let relisted = b.until(&fresh, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent).join('|') === 'A long letter|Beans'"), wait);
     s.ok(
-        "the next import of anything lists it as rows from its files, takes its index file away, and History lists them so",
-        again["added"] == 0 && again["unchanged"] == 3 && Value::Array(refilled.clone()) == json!(["Beans", "A long letter"]) && refill.body["result"]["whole"] == true && index_gone && relisted,
-        json!({ "import": again, "rows": refilled, "index_gone": index_gone }),
+        "the next import of anything lists it as rows from its files, writes its index file again from them for older clients, and History lists them so",
+        again["added"] == 0 && again["unchanged"] == 3 && Value::Array(refilled.clone()) == json!(["Beans", "A long letter"]) && index_rewritten && relisted,
+        json!({ "import": again, "rows": refilled, "index": index_titles }),
     );
     Ok(())
 }
@@ -400,14 +403,13 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a picture a message held is kept in the archive by its hash", pic.status == 200 && pic.bytes == DOT_PNG(), pic.status);
     let big_listed = index.body["result"]["sessions"].as_array().and_then(|l| l.iter().find(|e| e["key"] == "hermes-e2e_big").cloned()).unwrap_or_default();
     s.ok(
-        "its list, whole, holds a row each of its chats, a conversation of 1 MiB or more (a blob, which reads back whole) as its file is, and no index file",
+        "its list holds a row each of its chats, a conversation of 1 MiB or more (a blob, which reads back whole) as its file is, and its chats' index file lists them for older clients",
         keys_of(&index) == ["hermes-e2e_beans", "hermes-e2e_big"]
-            && index.body["result"]["whole"] == true
+            && file(&keys, "index/chat.json")?.body["sessions"].as_array().is_some_and(|l| l.len() == 2)
             && big_row["sha256"].is_string()
             && big_listed["sha256"] == big_row["sha256"]
             && big_listed["commit"] == big_row["lastCommitSha"]
-            && big_read.is_some_and(|b| b.messages[0].text.as_ref().is_some_and(|t| t.len() > 1_500_000))
-            && files.body["files"].as_array().is_some_and(|l| l.iter().all(|f| !f["path"].as_str().unwrap_or("").starts_with("index/"))),
+            && big_read.is_some_and(|b| b.messages[0].text.as_ref().is_some_and(|t| t.len() > 1_500_000)),
         json!({ "index": index.body, "big": big_row }),
     );
 

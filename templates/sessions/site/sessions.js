@@ -46,19 +46,19 @@ function row(e) {
   return li;
 }
 
-// The archive's rows, every page of them, and whether they are its whole
-// list; null when they could not be read (a host before its list: none).
+// The archive's rows, every page of them; none on a host before them; null
+// when they could not be read.
 async function rows() {
   const out = [];
   let after = "";
   for (let i = 0; i < 64; i++) {
     const r = await fetch("__op/sessions", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: `list-${Date.now()}-${i}`, input: { after } }) }).catch(() => null);
     // no list at all (a host before it); one gone after its first page failed
-    if (r?.status === 404) return i === 0 ? { sessions: [], whole: false } : null;
+    if (r?.status === 404) return i === 0 ? [] : null;
     const page = r?.ok ? (await r.json().catch(() => null))?.result : null;
     if (!Array.isArray(page?.sessions)) return null;
     out.push(...page.sessions);
-    if (!page.next || page.next <= after) return { sessions: out, whole: page.whole === true };
+    if (!page.next || page.next <= after) return out;
     after = page.next;
   }
   return null;
@@ -70,12 +70,14 @@ const newest = (a, b) => (b.ended_at ?? b.started_at ?? "").localeCompare(a.ende
 async function list(page) {
   const listed = await rows();
   if (!listed) throw new Error("its list was not read");
-  // An archive whose list is not whole yet (imported before its rows were)
-  // lists its index files until an import fills it (docs/technical-debt-ledger.md).
-  const indexed = listed.whole ? [] : await Promise.all(KINDS.map(([kind]) => file(`index/${kind}.json`)));
-  const lists = indexed.some(Boolean)
-    ? indexed.map((v) => (Array.isArray(v?.sessions) ? v.sessions : []))
-    : KINDS.map(([kind]) => listed.sessions.filter((e) => e.kind === kind).sort(newest));
+  // its rows, and any conversation of the index files older clients keep
+  // that no row lists yet (docs/technical-debt-ledger.md)
+  const indexed = await Promise.all(KINDS.map(([kind]) => file(`index/${kind}.json`)));
+  const held = new Set(listed.map((e) => e.key));
+  const lists = KINDS.map(([kind], i) => {
+    const older = Array.isArray(indexed[i]?.sessions) ? indexed[i].sessions.filter((e) => typeof e?.key === "string" && !held.has(e.key)) : [];
+    return [...listed.filter((e) => e.kind === kind), ...older].sort(newest);
+  });
   const head = el("header", "archive-head");
   head.append(el("h1", null, "Session Archive"));
   if (lists.every((l) => !l.length)) {

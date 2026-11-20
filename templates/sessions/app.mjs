@@ -12,9 +12,9 @@
 // A row names the commit its file was last changed in as described; the next
 // import reads again any file whose last commit is not its row's, so a row
 // is never trusted for bytes it did not describe (cli/src/session/mod.rs).
-// The list is `whole` once an import has filed a row for every conversation
-// the archive held: until then (an archive from before its rows, its first
-// fill cut off) a reader lists its index files instead.
+// Its readers list these rows and, beside them, any conversation of the
+// index files older clients read and write (`index/<kind>.json`) that no
+// row lists yet (docs/technical-debt-ledger.md).
 import { DurableObject } from "cloudflare:workers";
 
 // a conversation's key and a kind's name, as fragment_core::session makes them
@@ -36,16 +36,11 @@ export class App extends DurableObject {
     const sql = ctx.storage.sql;
     sql.exec("CREATE TABLE IF NOT EXISTS sessions (key TEXT PRIMARY KEY, kind TEXT NOT NULL, entry TEXT NOT NULL, commit_sha TEXT)");
     sql.exec("CREATE INDEX IF NOT EXISTS sessions_by_kind ON sessions (kind, key)");
-    sql.exec("CREATE TABLE IF NOT EXISTS list_state (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
-  }
-
-  #whole() {
-    return this.ctx.storage.sql.exec("SELECT v FROM list_state WHERE k = 'whole'").toArray().length > 0;
   }
 
   // Its rows after `after`, by key, of one kind or of all: `{sessions:
-  // [entry, with its `commit` when one is named], next, whole}`, `next` the
-  // key to ask after for more, null at the end.
+  // [entry, with its `commit` when one is named], next}`, `next` the key to
+  // ask after for more, null at the end.
   sessions({ kind = null, after = "" } = {}) {
     const sql = this.ctx.storage.sql;
     const rows =
@@ -56,21 +51,19 @@ export class App extends DurableObject {
     let bytes = 0;
     for (const r of rows) {
       const size = utf8.encode(r.entry).length + 64;
-      if (sessions.length === PAGE_MAX || bytes + size > PAGE_MAX_BYTES) return { sessions, next: sessions.at(-1).key, whole: this.#whole() };
+      if (sessions.length === PAGE_MAX || bytes + size > PAGE_MAX_BYTES) return { sessions, next: sessions.at(-1).key };
       const entry = JSON.parse(r.entry);
       if (r.commit_sha) entry.commit = r.commit_sha;
       sessions.push(entry);
       bytes += size;
     }
-    return { sessions, next: null, whole: this.#whole() };
+    return { sessions, next: null };
   }
 
   // The import's rows (an entry, and the commit its file was last changed
-  // in as described, or null when it cannot say), the keys whose files are
-  // gone, and `whole`: true once every conversation the archive holds has
-  // its row, false to say it may not (its readers list its index files).
-  // One that is not an entry refuses the whole call.
-  filed({ rows = [], gone = [], whole = null }) {
+  // in as described, or null when it cannot say), and the keys whose files
+  // are gone. One that is not an entry refuses the whole call.
+  filed({ rows = [], gone = [] }) {
     const sql = this.ctx.storage.sql;
     const count = (v) => Number.isSafeInteger(v) && v >= 0;
     const text = (v) => typeof v === "string";
@@ -91,8 +84,6 @@ export class App extends DurableObject {
       );
     }
     for (const key of gone) sql.exec("DELETE FROM sessions WHERE key = ?", key);
-    if (whole === true) sql.exec("INSERT OR REPLACE INTO list_state (k, v) VALUES ('whole', '1')");
-    if (whole === false) sql.exec("DELETE FROM list_state WHERE k = 'whole'");
-    return { filed: rows.length, gone: gone.length, whole: this.#whole() };
+    return { filed: rows.length, gone: gone.length };
   }
 }
