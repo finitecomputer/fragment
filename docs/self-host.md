@@ -557,7 +557,7 @@ app's own trust and tailnet).
 | CLI update notice | speaks only when its host is finite.chat | silent elsewhere |
 | In-app invites, sharing to named people, vanity addresses | the registry | |
 | Export, wipe, keyword search, Vault, doors | the platform | a wipe needs no container (`ContainerHost` reads none running) |
-| Web shell fonts | fonts.googleapis.com, fetched by the client | offline clients fall back |
+| Web fonts (the shell, the chat, `__fragment.css`) | the release's own files, served by the cell | nothing outbound: no page of ours loads from another domain |
 
 ### Works with extra setup
 

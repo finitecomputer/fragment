@@ -7,6 +7,7 @@ mod codestorage;
 mod home;
 mod mcp;
 mod notice;
+mod offload;
 mod operator;
 mod quote;
 mod search;
@@ -172,8 +173,8 @@ enum Cmd {
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
     /// Delete a fragment you own, for everyone in it: its pages, data and
-    /// blobs go, and its name is free; its repo's history stays. At a
-    /// terminal it asks you to type its name first, unless --yes
+    /// files go, and its name is free. At a terminal it asks you
+    /// to type its name first, unless --yes
     Rm {
         name: String,
         /// Delete without asking (only a terminal asks)
@@ -333,6 +334,20 @@ enum Cmd {
         #[command(subcommand)]
         sub: BlobCmd,
     },
+    /// Move a file or folder off this disk into a members-only fragment
+    /// you edit: copied, read back and checked, and only then removed
+    /// here, a note (`<name>.offloaded.md`) left in its place. `--back`
+    /// brings it back from that note, checked; the fragment keeps its copy
+    Offload {
+        /// The file or folder to move; with --back, its note (or where it was)
+        path: PathBuf,
+        /// The fragment it goes into
+        #[arg(long, required_unless_present = "back", conflicts_with = "back")]
+        into: Option<String>,
+        /// Bring it back from its note
+        #[arg(long)]
+        back: bool,
+    },
     /// Search fragments' own indexes by their words and their meaning, as
     /// one (a reader's, in each): each result a section of one of their
     /// sources, best first, named by its fragment, with a snippet. `--json`
@@ -427,7 +442,7 @@ enum Cmd {
     /// Show or set who can see a fragment: public | link | members
     Visibility { name: String, value: Option<String> },
     /// Show or change an agent's name and picture, as every page shows it:
-    /// its agent fragment's title and its avatar.png, put live at once
+    /// its agent fragment's title and its avatar.png, set at once
     Agent {
         /// The agent fragment (`juniper--k3x9`); an agent on a computer
         /// names itself by leaving it out
@@ -547,7 +562,8 @@ enum OperatorCmd {
     },
     /// FIN-352's census: of everyone's fragments, how many of each kind
     /// hold a key or a door, and how many of those are open by their link
-    /// or public. Counts only, no names
+    /// or public; and, by name, each agent fragment shared beyond its
+    /// owner (FIN-544). No other names
     Reach {
         #[arg(long)]
         key_file: Option<PathBuf>,
@@ -1587,6 +1603,7 @@ fn run(cli: Cli) -> Result<()> {
             let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
             let (mut people, mut owned, mut unanswered) = (0u64, 0u64, 0u64);
             let (mut reaching, mut beyond) = (std::collections::BTreeMap::<String, u64>::new(), std::collections::BTreeMap::<String, u64>::new());
+            let mut shared: Vec<String> = vec![];
             let mut after: Option<String> = None;
             loop {
                 let page = admin_answer(&c, c.get(&format!("/api/admin/people?after={}", api::encode_q(after.as_deref().unwrap_or(""))))?)?;
@@ -1601,17 +1618,23 @@ fn run(cli: Cli) -> Result<()> {
                             *into.entry(kind.clone()).or_default() += n.as_u64().unwrap_or(0);
                         }
                     }
+                    // none from a release before it lists them
+                    shared.extend(r["sharedAgents"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string));
                 }
                 match page["next"].as_str() {
                     Some(next) => after = Some(next.to_string()),
                     None => break,
                 }
             }
-            json_exit(j, &json!({ "people": people, "owned": owned, "reaching": reaching, "beyond": beyond, "unanswered": unanswered }));
+            json_exit(j, &json!({ "people": people, "owned": owned, "reaching": reaching, "beyond": beyond, "sharedAgents": shared, "unanswered": unanswered }));
             let say = |m: &std::collections::BTreeMap<String, u64>| if m.is_empty() { "none".to_string() } else { m.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ") };
             println!("{people} people, {owned} fragments owned ({unanswered} did not answer)");
             println!("with a key or a door: {}", say(&reaching));
             println!("of those, open by link or public: {}", say(&beyond));
+            println!("agent fragments shared beyond their owner: {}", shared.len());
+            for name in &shared {
+                println!("  {name}");
+            }
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::People { q, after, key_file } } => {
@@ -2114,7 +2137,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Rm { name, yes } => {
             let name = c.fragment(&name)?;
             if !yes && std::io::stdin().is_terminal() {
-                eprintln!("Delete {name} for everyone in it? Its pages, data and blobs go. This can't be undone.");
+                eprintln!("Delete {name} for everyone in it? Its pages, data and files go. This can't be undone.");
                 eprint!("Type {name} to delete it: ");
                 let mut typed = String::new();
                 std::io::stdin().read_line(&mut typed)?;
@@ -2124,7 +2147,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             c.call(c.delete(&format!("/api/f/{name}"))?)?;
             json_exit(j, &json!({ "deleted": true, "name": name }));
-            println!("deleted {name} for everyone in it: its pages, data and blobs are gone, and the name is free. Its repo's history stays, and comes back if you make {name} again.");
+            println!("deleted {name} for everyone in it: its pages, data and files go, and the name is free.");
         }
         Cmd::Archive { name } => {
             let done = set_archived(&c, &name, true)?;
@@ -2824,6 +2847,19 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &v);
             println!("{sha}");
         }
+        Cmd::Offload { path, into, back } => match (into, back) {
+            (Some(into), false) => {
+                let moved = offload::offload(&c, &path, &into)?;
+                json_exit(j, &moved);
+                offload::print(&moved);
+            }
+            (None, true) => {
+                let back = offload::back(&c, &path)?;
+                json_exit(j, &back);
+                offload::print_back(&back);
+            }
+            _ => unreachable!("clap requires --into or --back, never both"),
+        },
         Cmd::Mcp { name, write } => {
             // stdout carries the protocol's messages and nothing else
             mcp::serve(&c, &name, write, std::io::stdin().lock(), std::io::stdout().lock())?;
@@ -2904,26 +2940,19 @@ fn run(cli: Cli) -> Result<()> {
             let Some(agent) = agent.or_else(|| c.agent().map(|m| m.agent.clone())) else {
                 return Err(usage("name the agent fragment: `fragment agent juniper--k3x9 --name Frank`"));
             };
-            let files = agent_face_writes(&c, &agent, name.as_deref(), picture.as_deref(), no_picture)?;
-            if !files.is_empty() {
-                // one commit, keyed by what it writes: the same change sent again commits nothing twice
-                let key = format!("agent-face-{}", &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(serde_json::to_vec(&files)?))[..16]);
-                c.call_as::<Value>(c.post_json(&format!("/api/f/{agent}/files"), &json!({ "files": files, "message": "its name and picture", "key": key }))?)?;
-                let Deployed::Live { live_tip, .. } = deploy(&c, &agent, None, None)? else { unreachable!("a deploy of no folder syncs nothing") };
-                refused_live(&c, &agent, &live_tip)?;
-            }
-            // as its list says it: the platform's face of it, a moment after a change
+            let changed = agent_face(&c, &agent, name.as_deref(), picture.as_deref(), no_picture)?;
+            // as its list says it: the platform's face of it
             let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
             let row = list.fragments.into_iter().find(|f| f.name == agent);
             let shown_name = name.unwrap_or_else(|| fragment_core::face::agent_name(row.as_ref().and_then(|r| r.title.as_deref()), &agent).to_string());
-            let shown_picture = if files.is_empty() { row.and_then(|r| r.picture) } else { None };
-            json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": !files.is_empty() }));
+            let shown_picture = if changed { None } else { row.and_then(|r| r.picture) };
+            json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": changed }));
             println!("{agent}: {shown_name}");
             match (&picture, no_picture, shown_picture) {
                 (Some(p), _, _) => println!("picture: {} (it shows everywhere within seconds)", p.display()),
                 (None, true, _) => println!("no picture"),
                 (None, false, Some(url)) => println!("picture: {url}"),
-                (None, false, None) if files.is_empty() => println!("no picture"),
+                (None, false, None) if !changed => println!("no picture"),
                 _ => {}
             }
         }
@@ -3012,8 +3041,8 @@ fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>) -
 }
 
 /// A fragment's status after a deploy to `live_tip`, or the refusal of
-/// what it put live: the deploy installed live (or refused its code, an
-/// agent's picture among it) before it answered.
+/// what it put live: the deploy installed live (or refused its code)
+/// before it answered.
 fn refused_live(c: &api::Client, name: &str, live_tip: &str) -> Result<FragmentStatus> {
     let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
     if let Some(why) = st.code.error.as_deref().filter(|_| st.code.sha.as_deref() != Some(live_tip)) {
@@ -3025,52 +3054,39 @@ fn refused_live(c: &api::Client, name: &str, live_tip: &str) -> Result<FragmentS
     Ok(st)
 }
 
-/// What `fragment agent` writes to an agent fragment for a new name (its
-/// `fragment.json`'s `meta.title`, as live says it now), a new picture
-/// (`avatar.png`, checked here as the platform checks it), or none: the
-/// files of one `POST …/files` (docs/api.md, "An agent's name and
-/// picture").
-fn agent_face_writes(c: &api::Client, agent: &str, name: Option<&str>, picture: Option<&Path>, no_picture: bool) -> Result<Vec<Value>> {
-    let mut files = vec![];
-    if let Some(name) = name.map(str::trim) {
-        if name.is_empty() || name.chars().count() > fragment_proto::limits::TITLE_MAX_CHARS {
-            return Err(usage(format!("a name is 1 to {} characters", fragment_proto::limits::TITLE_MAX_CHARS)));
-        }
-        let mut manifest: Value = c.call_as(c.get(&format!("/api/f/{agent}/manifest"))?)?;
-        anyhow::ensure!(manifest.is_object(), "{agent}'s fragment.json is not an object: {manifest}");
-        let old = manifest["meta"]["title"].as_str().map(str::to_string);
-        manifest["meta"]["title"] = json!(name);
-        files.push(json!({ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }));
-        // its job says its new name where it said an old one, in the same
-        // commit (docs/api.md, "An agent's name and picture"): its name at
-        // main, and the one the shell's first job gave it
-        if let Some(job) = agent_job(c, agent)? {
-            let olds: Vec<&str> = old.as_deref().into_iter().chain(fragment_core::face::job_first_name(&job)).collect();
-            if let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, name) {
-                files.push(json!({ "path": fragment_core::face::JOB, "text": renamed }));
-            }
-        }
+/// What `fragment agent` changes of an agent (docs/api.md, "An agent's
+/// name and picture"): a new name, its face's title (its cell says it in
+/// its job too); a new picture, its `avatar.png`, or none, a commit (main
+/// shows it, with no deploy). Its picture is checked as the platform
+/// checks it before anything is sent, so a bad file changes nothing.
+/// Whether it asked for any change.
+fn agent_face(c: &api::Client, agent: &str, name: Option<&str>, picture: Option<&Path>, no_picture: bool) -> Result<bool> {
+    let name = name.map(str::trim);
+    if name.is_some_and(|n| n.is_empty() || n.chars().count() > fragment_proto::limits::TITLE_MAX_CHARS) {
+        return Err(usage(format!("a name is 1 to {} characters", fragment_proto::limits::TITLE_MAX_CHARS)));
     }
     let at = fragment_core::face::AGENT_PICTURE;
-    if let Some(path) = picture {
-        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        fragment_core::face::check_picture(&bytes).map_err(|r| usage(r.message(&path.display().to_string())))?;
-        files.push(json!({ "path": at, "base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes) }));
-    } else if no_picture {
-        files.push(json!({ "path": at, "delete": true }));
+    let write = match picture {
+        Some(path) => {
+            let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            fragment_core::face::check_picture(&bytes).map_err(|r| usage(r.message(&path.display().to_string())))?;
+            Some(json!({ "path": at, "base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes) }))
+        }
+        None if no_picture => Some(json!({ "path": at, "delete": true })),
+        None => None,
+    };
+    if let Some(name) = name {
+        let change = fragment_proto::FaceChange { title: Some(name.to_string()), ..Default::default() };
+        c.call_as::<Value>(c.put_json(&format!("/api/f/{agent}/face"), &change)?)?;
     }
-    Ok(files)
-}
-
-/// An agent's job (`SOUL.md`) at main, as text: none when it has none, or
-/// one past what a rename rewrites, or not text.
-fn agent_job(c: &api::Client, agent: &str) -> Result<Option<String>> {
-    let r = c.get(&format!("/api/f/{agent}/file?path={}", fragment_core::face::JOB))?;
-    if r.status == 404 {
-        return Ok(None);
+    if let Some(write) = &write {
+        // one key a change: its retries commit nothing twice, and a later
+        // change back to this picture commits again
+        let key = format!("agent-picture-{:032x}", rand::random::<u128>());
+        let done = if name.is_some() { "its name was changed; its picture was not" } else { "its picture was not changed" };
+        c.call_as::<Value>(c.post_json(&format!("/api/f/{agent}/files"), &json!({ "files": [write], "message": "its picture", "key": key }))?).context(done)?;
     }
-    anyhow::ensure!(r.ok(), "reading {agent}'s {}: {}", fragment_core::face::JOB, String::from_utf8_lossy(&r.body));
-    Ok((r.body.len() <= fragment_core::face::JOB_RENAME_MAX_BYTES).then(|| String::from_utf8(r.body).ok()).flatten())
+    Ok(name.is_some() || write.is_some())
 }
 
 fn writer_id(c: &api::Client) -> String {
@@ -3287,35 +3303,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Goal: `fragment agent --picture` checks the picture as the platform
-    /// does (fragment_core::face) before anything is sent, and writes the
-    /// one path an agent's picture has. Valid: a PNG becomes its
-    /// `avatar.png`, base64; `--no-picture` deletes it. Invalid: text, and
-    /// a picture past 256 KiB, each refused as usage (exit 2), naming the
-    /// file, with no request made (the host here answers nothing).
+    /// Goal: `fragment agent` refuses what the platform would before
+    /// anything is sent (the host here answers nothing), so a bad picture
+    /// never leaves a rename half done: a blank name, one past 120
+    /// characters, a picture file that is no image, missing, or past 256
+    /// KiB (`face::check_picture`), each usage (exit 2) or an error,
+    /// naming why.
     #[test]
-    fn an_agents_picture_is_checked_before_anything_is_sent() {
+    fn an_agents_name_and_picture_are_checked_before_anything_is_sent() {
         let c = api::Client::new("http://127.0.0.1:9", auth::fixed(7));
+        for name in ["  ", &"n".repeat(fragment_proto::limits::TITLE_MAX_CHARS + 1)] {
+            let err = agent_face(&c, "j--k3x9", Some(name), None, false).unwrap_err();
+            assert_eq!(classify_err(&err), Code::InvalidUsage);
+            assert!(err.to_string().contains("1 to 120 characters"), "{err}");
+        }
+        assert!(!agent_face(&c, "j--k3x9", None, None, false).unwrap(), "nothing asked, nothing sent");
         let dir = std::env::temp_dir().join(format!("fragment-agent-face-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let png = dir.join("me.png");
-        std::fs::write(&png, b"\x89PNG\r\n\x1a\n-a-tiny-picture").unwrap();
-        let writes = agent_face_writes(&c, "j--k3x9", None, Some(&png), false).unwrap();
-        assert_eq!(writes, vec![json!({ "path": "avatar.png", "base64": "iVBORw0KGgotYS10aW55LXBpY3R1cmU=" })]);
-        assert_eq!(agent_face_writes(&c, "j--k3x9", None, None, true).unwrap(), vec![json!({ "path": "avatar.png", "delete": true })]);
-        assert!(agent_face_writes(&c, "j--k3x9", None, None, false).unwrap().is_empty(), "nothing asked, nothing written");
-        let text = dir.join("me.txt");
+        let (text, big) = (dir.join("me.txt"), dir.join("big.png"));
         std::fs::write(&text, "not a picture").unwrap();
-        let big = dir.join("big.png");
         std::fs::write(&big, [&b"\x89PNG"[..], &vec![0u8; fragment_proto::limits::PICTURE_MAX_BYTES]].concat()).unwrap();
         for (file, said) in [(&text, "is not a picture"), (&big, "a picture is at most 262144")] {
-            let err = agent_face_writes(&c, "j--k3x9", None, Some(file), false).unwrap_err();
+            let err = agent_face(&c, "j--k3x9", Some("Frank"), Some(file), false).unwrap_err();
             assert_eq!(classify_err(&err), Code::InvalidUsage, "{}", file.display());
-            let err = agent_face_writes(&c, "j--k3x9", None, Some(file), false).unwrap_err().to_string();
-            assert!(err.contains(&file.display().to_string()) && err.contains(said), "{err}");
+            assert!(err.to_string().contains(&file.display().to_string()) && err.to_string().contains(said), "{err}");
         }
-        let err = agent_face_writes(&c, "j--k3x9", Some("  "), None, false).unwrap_err().to_string();
-        assert!(err.contains("1 to 120 characters"), "{err}");
+        let err = agent_face(&c, "j--k3x9", Some("Frank"), Some(&dir.join("gone.png")), false).unwrap_err().to_string();
+        assert!(err.contains("reading") && err.contains("gone.png"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

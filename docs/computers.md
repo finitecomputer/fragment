@@ -39,14 +39,24 @@ an image may rely on this:
 
 - **It is woken** by a record on a channel one of its agents subscribed
   to with `wake: true`, one of its agents added to a fragment, an open
-  port tab, a page's presence on a subscribed fragment (a pre-wake, held
-  a minute), or its owner. Never by its own guest's traffic.
-- **It stays awake** while a port tab is open or the guest holds its
-  keepalive socket, and `IDLE_MS` (20 minutes) after neither does. An
-  always-on seat's computer never sleeps (decision 25; docs/billing.md).
+  port tab, or its owner, also as they begin to use it in their shell: a
+  chat picked, or the launcher opened by its button or ⌘K (their own
+  wake). Never by a page acting on its own (a framed page's ask, or
+  anything a page's presence says, typing included: a page sets its
+  own), its own guest's traffic, a page loading, a tab shown again, a
+  socket reconnecting, or a timer.
+- **It stays awake** while the guest holds its keepalive socket, and
+  `IDLE_MS` (20 minutes) after what last held it: a keepalive's close, a
+  wake, or a port tab's opening, close or use (a message from its page).
+  A port tab merely open holds nothing (Paul, 2026-11-18: "an open tab,
+  without any action touching the agent, should not keep the agent awake
+  indefinitely"). An always-on seat's computer never sleeps (decision 25;
+  docs/billing.md).
 - **It is saved** when its work ends (its last keepalive or its last
-  port tab closes, and 30 s pass with no keepalive opened again), every 15 minutes while a keepalive stays
-  open, and at every sleep (below, "Saves and what a wake restores").
+  port tab closes, and 30 s pass with no keepalive opened again), every
+  15 minutes while a keepalive stays open or a port tab is in use
+  (counted from its first use since the last save), and at every sleep
+  (below, "Saves and what a wake restores").
 - **A sleep** is, in order: the hold, the save, a container snapshot
   (only after a save that worked), SIGTERM, up to 5 s for the guest to
   exit, destroy. A keepalive opened during an idle sleep's hold cancels
@@ -54,6 +64,16 @@ an image may rely on this:
   again; after `computers.unsaved_max_ms` (30 minutes unless the
   deployment says otherwise) of failed tries it sleeps unsaved, and its
   next wake is a rollback.
+- **A wake cancels an idle sleep until its stop begins.** A wake of any
+  kind during an idle sleep's hold or save keeps it awake on the
+  container it has: nothing is restored or started, and the message
+  that woke it runs there. A hold not yet answered is let go at once,
+  and the save it was for is due when work settles. A save under way
+  goes on as an awake save, holding the guest to its end (a backup cut
+  short could be neither kept nor safely forgotten), and is kept or
+  failed as one: its failure opens no unsaved window. Its owner's sleep
+  or restart is never cancelled, nor a sleep whose stop began: a wake
+  then starts it again once it is asleep.
 - **A restart** (its owner's) is a sleep that saves if it can and stops
   whether or not it did, then a fresh start: from the image and the
   newest good save, never the snapshot, which could carry what broke it
@@ -62,8 +82,9 @@ an image may rely on this:
   every path, and its owner's page follows it to awake.
 - **A stop nothing asked for, while idle, is a sleep.** A host may stop
   a container for its own reasons (its maintenance, a host short of
-  memory). One that stops while its computer is awake with nothing open
-  (no keepalive, no port tab), no save under way, all this life did in a
+  memory). One that stops while its computer is awake with no keepalive
+  open (a port tab open holds nothing; its use is work), no save under
+  way, all this life did in a
   save it made since it came up, and no message or join it was woken for
   that its guest has not taken up, has slept: no strike, no rollback,
   nothing told, and nothing starts it again, though the hold after its
@@ -89,15 +110,27 @@ an image may rely on this:
   container still running, tells nothing and tries again at the next
   event, an alarm it keeps a minute on at the latest (on its last strike
   nothing else may come).
+- **A start held up by the container before it** is no failure. A
+  sleep's snapshot the runtime still takes holds its container past the
+  sleep's destroy (it takes no signal), so the next start can find that
+  container still running. That start started nothing: it is made again
+  at once, told as `starting`, no strike, until the container has had a
+  stop's deadline (`SLEEP_DEADLINE_MS`, 6 minutes) since the first such
+  try; after that each try is a strike, so one that never goes gives up
+  as failing starts do. Nothing it would have started from is forgotten.
+  A new isolate that finds such a start (it planned nothing yet) never
+  takes the running container over as its own: it reports the start held
+  up. A port's request meanwhile answers that the computer is still
+  starting (409, try again) rather than reach the earlier container.
 - **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
   share `RESTORE_MS`), never one that follows a restore's progress: a
   restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,
   2026-11-02), so its nine minutes and 25 seconds hold about 22 GB, more
   than a computer's 20 GB disk. Any restore that fits the disk fits the
   deadline; one that does not fit is set aside, not waited for.
-- **A start owed after its container goes** (a sleep's end with a wake
-  or a restart asked, a crash while wanted, a start that fell back past a
-  bad save) is due at once, told as `starting`: the request that saw it go
+- **A start owed after its container goes** (a sleep's end with a
+  restart asked or a wake it did not cancel, a crash while wanted, a
+  start that fell back past a bad save) is due at once, told as `starting`: the request that saw it go
   (a restart's aside) makes it, and each
   one after it as a start falls back (`STARTS_OWED_MAX` at most), or, in
   an alarm, the alarm it asks for, never the rest of the alarm that ran
@@ -129,10 +162,13 @@ back in time without changing what happens.
 | A messenger's encryption state | SimpleX's core's databases in `/data`, as of the newest save (docs/bridge.md, "SimpleX") | |
 
 A guest holds its keepalive only for live work: a turn queued or
-running, or delegated work still running after its parent replied
-(decision 65; docs/bridge.md, "Runtime work outside a turn"). Waiting on
-a person never holds it. That work is never saved: a restarted runtime
-has none of it.
+running, delegated work still running after its parent replied
+(decision 65; docs/bridge.md, "Runtime work outside a turn"), or work
+left running while the computer is working, up to 2 hours after the last
+of those (docs/bridge.md, "Work left running"). Waiting on a person
+never holds it, but for a card only this life can take, up to 10 minutes
+(docs/bridge.md, "An answer for the computer"). That work is never saved: a restarted runtime has none
+of it.
 
 - **P1, one life per turn.** A turn runs only in the life of the bridge
   that journaled its start, once the platform answered that post. A
@@ -205,7 +241,10 @@ The owner's view carries `notices` (proto's `ComputerNotice`, from
 `fragment_core::computer::notices`; their fields are docs/api.md's), the
 most pressing first. Each is derived from the Computer DO's own state
 with no clock, so every reader is told the same, and when they change the
-DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
+DO tells its owner's open pages (`/api/fragments/watch`'s `changed`), as
+it does when its phase changes (`Lifecycle::shown`: a chat with their
+agent says it is getting ready while it starts, before the start's own
+steps; its "no reply yet" waits until it is up):
 
 - `wont_wake`: its starts kept failing.
 - `disk_filling`: its disk, read (`df`) in each start that restores a
@@ -215,13 +254,20 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   `DISK_TOLD_FREE_MAX` (5 GB) free: the room left, told until a read finds
   clearly more (at most `DISK_CLEAR_USED_PCT`, 70%, used, or at least
   `DISK_CLEAR_FREE_MIN`, 6 GB, free), so a disk at the edge never shows
-  and clears it in turn. Each read logs a `disk` line of its own.
+  and clears it in turn. Each read logs a `disk` line of its own. It
+  tells its owner to ask their agent to move big files to storage: the
+  agent reads the same disk (`df`, the relay hint's `DISK`), and its
+  `disk-space-finite` skill makes room with `fragment offload`, which
+  removes a file only once its copy in a members-only fragment of the
+  owner's reads back as it was (cli/GUIDE.md, "Moving files off a disk").
 - `unsaved`: this life's saves are failing (a sleep's at once, awake ones
   from the second in a row): since when its work is in no save, and when
   the bound stops it.
 - `went_back`: a start went back to an older save, or will at its next
   start, told until its owner says they saw it. None when nothing was
-  done on the lost life after that save (Paul, 2026-10-23).
+  done on the lost life after that save (Paul, 2026-10-23). When nothing
+  that may change its files ran after it (no turn, no port tab used:
+  `unchanged`), it says where it went back to and no loss.
 - `update`: it is awake, with no keepalive open, on another version than
   its next start runs, until its owner puts that version off.
 - `key_paused`: a shared key's charges this last hour reached its owner's
@@ -267,9 +313,9 @@ draws them over every chat and Settings with no code of its own for any.
   failing idle computer is kept. That time is the platform's, not metered
   (docs/ledger.md, "Who pays").
 - **The agent** is told what a cut lost, and the chat when a rollback or
-  a loss of `/data` made its runtime forget it, in its next turn in each
-  chat (docs/bridge.md, "The turn after a cut one is told" and "What a
-  runtime forgot").
+  a loss of `/data`, or of its runtime's memory alone, made its runtime
+  forget it, in its next turn in each chat (docs/bridge.md, "The turn
+  after a cut one is told" and "What a runtime forgot").
 - **Getting help**: a deployment may name `support_url`, which a
   `wont_wake` notice offers beside Restart.
 
@@ -385,11 +431,14 @@ touches `/run/computer/hold`, and waits up to `HOLD_WAIT_MS` (20 s) for
 the guest to touch `/run/computer/held`: its answer that it claims
 nothing now (no claim in flight, none new while the hold exists) and has
 copied what a hot copy would tear. Then the DO saves. An awake save lets
-go after (it removes the files); a sleep keeps the hold until its
-container is gone. A guest that never answers is saved anyway, the save
-recorded as not `held`. What the guest already claimed may run on. A
-fresh container never has the files: the DO removes them from one started
-from a snapshot.
+go (it removes the files) once its home's record is taken, the rest of
+`/data` with the copies in it, and takes its work's while its guest
+works: the hold never made the work whole (what the guest already claimed
+writes to it during any save, and nothing in it is copied under the
+hold). A sleep keeps the hold until its container is gone. A guest that
+never answers is saved anyway, the save recorded as not `held`. What the
+guest already claimed may run on. A fresh container never has the files:
+the DO removes them from one started from a snapshot.
 
 - **What the save leaves out.** `held` may name, one per line, what the
   save of `/data` leaves out: gitignore patterns relative to `/data`, the
@@ -452,6 +501,58 @@ from a snapshot.
   life before it crashed, slept unsaved, or its start fell back past its
   newest save. Nothing's correctness depends on the guest reading either.
 
+### The start line
+
+The Computer DO logs one line per start (`fragment_core::computer::start_line`),
+for Workers Logs and `wrangler tail` to count which path wakes take and how
+long each step is. It begins `{"start":{"generation":`, names the computer
+by its id alone, and is at most 512 bytes:
+
+```json
+{"start":{"generation":7,"end":"ready","woke":"record","path":"restore","why":"crash","bytes":1480000000,"newImage":false,"beganMs":40,"upMs":900,"dataMs":37000,"readyMs":37050,"heardMs":37800,"turnMs":39100},"computer":"computer:17c33cdf88c6d1d8f58b7a0f"}
+```
+
+It is written once, as the start ends: `failed`; `replaced` (a later start
+began before its end was heard); or `ready`, once its guest opens its first
+keepalive (a turn), `TURN_WAIT_MS` (a minute) passes after it came up (it
+is written at the next event or view read: the guest reads its view each
+minute), or its life ends, whichever is first.
+
+- `failed`: `start` (its own steps), `snapshot` (the snapshot would not
+  start), `dead` (its guest never read its view within its wait: a
+  snapshot that came up dead, or the `alive-check` lever),
+  `unusable` (its save would not restore), `exit` (its container stopped
+  first), `deadline`, `blocked` (the container before it still ran: it
+  started nothing, and the start made again counts from the same wake),
+  `other`.
+- `woke`: what asked for the wake it answers: `record`, `tab`, `owner`,
+  `joined`, `restart`; `itself` when nothing did (a start after a
+  crash, an always-on start, or an ask an earlier isolate heard). A wake's
+  fallback and retries carry its first ask.
+- `path`: `snapshot`, `restore` (the image, then the save whole), `fresh`
+  (no save yet).
+- `why`, for a restore, the first that holds: `off` (no snapshots here),
+  `restart`, `unusable` (a newer save would not restore), `image` (the
+  snapshot is of another image), `dead_snapshot` (this wake's snapshot
+  start failed), `crash`, `unsaved` (its last sleep could not save),
+  `no_snapshot` (its last life ended saved and no snapshot was kept: a host
+  stopped it idle, or that sleep's snapshot failed), `other`.
+- `bytes`: the stored, compressed size of the save it restores, or that
+  its snapshot caches.
+- `newImage`: it runs another image than its last life did (absent before
+  its first life). Whether the host pulled it is not known to the DO.
+- Times, in ms from the wake asked (or the start's own beginning when
+  nothing asked): `beganMs` the start made (a sleep under way delays it),
+  `upMs` its container took an exec (snapshot and restore only), `dataMs`
+  the restore's gate opened, `readyMs` it came up, `heardMs` its guest
+  first read its view (our image's boot reads it first, then its bridge),
+  `turnMs` its first keepalive (its bridge has a turn queued or running).
+  When its bridge follows its chats is not visible to the DO, so it is
+  left out.
+
+The line is in memory until it is written: a deploy or a crash of the
+platform during a start, or before its first turn, loses that start's line.
+
 ### Bounds
 
 Every step the DO takes in a container ends within a bound, and one past
@@ -464,7 +565,18 @@ backups get what the rest leaves (`BACKUPS_MS`, 11 minutes 10 seconds).
 That is the most any save can have, so it is fixed, not one that follows
 a save's progress. Saves over 1 GB moved 9 to 156 MB/s on production
 (2026-10-27 to 11-03), so a full disk's save (about 10.8 GB) fits all but
-the slowest 6% of tries, each tried again. A start takes an alarm of its
+the slowest 6% of tries, each tried again. The snapshot after it is given
+what the hold and the save left of the sleep's 14 minutes, at least 30
+seconds and at most five (`snapshot_ms`): a snapshot is incremental, but
+the first after a disk grew took about 85 s for 9 GB (preview,
+2026-11-18), and 30 s for every one lost each over about 1.5 GB. A
+snapshot cut short frees nothing sooner: the runtime's takes no signal and
+holds the container until it ends. A wake that comes during the stop
+starts once the stop ends (`owes_start`), made by its alarm, never by its
+owner's sleep, which answers within its steps. The stop's deadline is six
+minutes, but every minute (`STOP_LOOK_MS`) its alarm looks whether its
+container is gone, so one whose end its isolate lost is found as soon as
+before. A start takes an alarm of its
 own: the one start an alarm makes (a retry's, or one owed after a sleep),
 its disk's read among its steps, with the alarm's other events, fits
 15 minutes (`RESTORE_MS` leaves them their 65 seconds). So an owner's
@@ -651,6 +763,17 @@ provider's own hosts.
   deployment, or given by its owner, and not narrowed from it), and
   `credentialEnv`, every variable of the catalog, held or not, so an image
   can pass them all through once.
+- **An own key is its person's Vault's** (M16; docs/secrets.md, "A
+  person's Vault"), its own kind, used by each agent not narrowed from
+  it. The computer asks the Vault for it at each request it swaps, beside
+  its ask of the agent's fragment (so it waits on no hop more), and for
+  which keys the person holds at each read of a view. A computer from
+  before the move held them (`own_keys`, `own_signins`): it hands its keys
+  to the Vault at its owner's next read of it or of their connections, or
+  its agent's next call through one (never a start, an exit, a takeover or
+  its guest's request), and the Vault takes one only where its person said
+  nothing since. Until then its views list the keys it still owes. A
+  sign-in begun there finishes from there.
 - **The intercept** catches the catalog's hosts on HTTPS and HTTP, sends
   on over HTTPS, and swaps each placeholder where its row says it goes
   (`swap::Plan`). It refuses the request, reaching no provider, for a
@@ -684,8 +807,13 @@ provider's own hosts.
   (`grants::Owed`): an agent's next ask carries its row, taken whole by a
   fragment holding none of its own and ignored by one that does
   (`grants::answered`), then forgotten.
-- Each call a provider answered is counted in the computer's `uses`; an
-  operator key's is charged to its agent's owner (docs/ledger.md).
+- Each call a provider answered is counted as its agent's in the owner's
+  ledger (docs/ledger.md, "Usage"), after the answer; an operator key's
+  is charged to its agent's owner too. A computer from before kept its
+  own `uses`; its step 7 keeps the months it held as owed (`meta`
+  `uses_owed:<month>`), each handed to the owner's ledger as the owner
+  reads the computer's view (never from a start, an exit or a takeover),
+  taken once, then forgotten.
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
   each secret bound to an agent, with a host, is one of its credentials,
   kind `own`, named by the secret, with no variable. Its hosts join the
@@ -693,7 +821,7 @@ provider's own hosts.
   its guest reads its view). The intercept asks the Vault for it per
   request, plans it beside the catalog's rows, and names each value it
   filled in the answer (`{{name}}`); a Nostr key's is a signature the
-  Vault makes. A Vault's calls are not counted in `uses`.
+  Vault makes. A Vault's calls are not counted in usage.
 
 ### An agent's own model
 
@@ -729,8 +857,16 @@ agent; their account pays.
 - Only the platform's page may frame a port, so an image's page may not
   frame its own ports either: a screen is one page, its sockets relative
   to it.
-- A WebSocket on a port holds the computer awake while open. The
-  container may speak first. A close at either end closes the other.
+- A WebSocket on a port holds the computer awake only while its page
+  speaks: its opening, and each message from the page's end (heard a
+  minute at a time), hold it `IDLE_MS`; one whose page says nothing lets
+  it sleep, and a page that stops speaking when no one is at it lets it
+  sleep under an open tab. The container may speak first; its words hold
+  nothing. A close at either end closes the other. A sleep (a restart's
+  too) closes each as it begins, before its hold, with 4000 and `asleep`
+  or `restarting` (one whose upgrade was still on its way too), so nothing
+  a page sends after reaches the container its save holds; a request to a
+  port while it sleeps wakes it after, and is answered 503.
 - **The screen** (decision 11) is a page on port 6080, one for each
   agent, at `/p/6080/?agent=<agent fragment>`. The platform carries the
   query and reads nothing in it: which desktop is the agent's, and
@@ -740,6 +876,13 @@ agent; their account pays.
   `postMessage({fragment: "screen", agent, name})`; a page takes it only
   from its parent and only for its own agent. Opened in a tab of its own,
   it names none: the computer knows an agent by its label, never its name.
+  The shell also tells the screens on view that its person is at it
+  (`{fragment: "screen", agent, active: true}`, every 30 s at most).
+  Our screen backs off to silence (`images/hermes/screen/attend.js`): no
+  key, press, pointer or touch on it or the shell for five minutes
+  pauses its stream, its last frame kept; the next one resumes it. Once
+  its sockets close (a sleep, a restart, the network), only a press or a
+  key opens them again, once each, and a computer asleep wakes for them.
 
 ## Our images
 
@@ -853,8 +996,8 @@ same inputs ask nothing.
 
 ### Its name, in our Hermes image
 
-An agent's name is its agent fragment's title, and its role its
-`meta.role` (docs/api.md, "An agent's name and picture"). The image tells
+An agent's name is its agent fragment's title, and its role its face's
+role (docs/api.md, "An agent's name and picture"). The image tells
 the agent both in its system prompt at every turn (`hermes::told`),
 read again every 10 s, so a rename or a new role is its next turn's,
 nothing restarted.

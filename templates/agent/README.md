@@ -12,14 +12,14 @@ beside its model in Settings: docs/computers.md, "Our images"), its picture
 of at most 256 KiB), and what its runtime keeps
 (`memories/`, `skills/`); the platform serves this template's manifest and
 page from its release. A fragment on it names it in its own
-`fragment.json`: `{"template": "agent", "meta": {"title": "Juniper"}}`.
+`fragment.json`: `{"template": "agent"}`.
 
-Its name is that title, and its picture that `avatar.png`, as live has
-them: every page and the platform show the agent by them (docs/api.md,
-"An agent's name and picture"). Its owner changes them in Settings, and
-the agent with `fragment agent --name <name> --picture <file>`; either
-writes them and puts them live. A runtime's own files (Hermes'
-`profile.yaml`) are written from them, never the other way. Its colour
+Its name is its own title, kept by its cell, and its picture that
+`avatar.png` at main: every page and the platform show the agent by them
+(docs/api.md, "An agent's name and picture"). Its owner changes them in
+Settings, and the agent with `fragment agent --name <name> --picture
+<file>`; either shows at once, deploying nothing. A runtime's own files
+(Hermes' `profile.yaml`) are written from them, never the other way. Its colour
 is chosen by its identity (`site/agent-color.js`, which the chat
 template's page and the shell link to), never stored.
 

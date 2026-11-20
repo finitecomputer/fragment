@@ -184,6 +184,17 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Answer: [`StageCompleted`](#stagecompleted)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
+#### `migrations.copy`
+
+`POST /api/migrations/stages/{stage}/copy`: One range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer, for the new agent bound to the move while it imports. The agent, or its owner (`for`), must edit the fragment.
+
+- Credentials: NIP-98
+- Query `into` (`string`, required): The fragment whose blobs it goes into.
+- Query `offset` (`integer`, required): Where in the zip the range starts.
+- Query `bytes` (`integer`, required): Its length: 1 to the caller's upload limit.
+- Answer: [`StageCopied`](#stagecopied)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
+
 #### `migrations.done`
 
 `POST /api/migrations/stages/{stage}/done`: The new agent says its import ended, well or not: its stage's reads end, and the old agent is retired once it went well. A phase 1 stage is deleted; a phase 2 stage is kept until it expires.
@@ -288,7 +299,7 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 
 #### `migrations.yes`
 
-`POST /api/migrations/offers/{old}/yes`: The person's Yes, bound to a new agent of their own: the old agent is stopped and its stage made, which the new agent imports.
+`POST /api/migrations/offers/{old}/yes`: The person's Yes, bound to an agent of their own, a new one or one they have that no other move took: the old agent is stopped and its stage made, which that agent imports.
 
 - Credentials: NIP-98, the shell's session
 - Body: [`OfferYes`](#offeryes)
@@ -482,7 +493,7 @@ out. `GET /api/f/<name>/status` (viewer and up).
 | `code` | [`CodeStatus`](#codestatus) | required |  |
 | `counts` | [`Counts`](#counts) | required |  |
 | `inboxToken` | `string` or `null` | required | Editors and up see the inbox token. |
-| `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, and its title, as its live `fragment.json` last said (an app with no title until it has). |
+| `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, as its live `fragment.json` last said (an app until it has), and its title, its face's (`PUT /api/f/{name}/face`). |
 | `name` | `string` | required |  |
 | `npub` | `string` | required |  |
 | `owner` | `string` | required |  |
@@ -564,15 +575,15 @@ out. A fragment the signer holds a role on: a row of `GET /api/fragments` (and o
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `agentRole` | `string` or `null` | optional | An agent fragment's role (its live `fragment.json`'s `meta.role`, trimmed; none when it says nothing), as its last install said: the tag the shell shows beside its name. Never any other fragment's. |
+| `agentRole` | `string` or `null` | optional | An agent fragment's role, as its face says it (trimmed; none when it says nothing): the tag the shell shows beside its name. Never any other fragment's. |
 | `agents` | `array` of `string` | optional | Its agent members, the first added (a chat's lead) first, at most `limits::LISTED_AGENTS_MAX`, as the fragment last said. |
 | `archived` | `boolean` | optional | The signer archived it: their own view, not the fragment's (the shell's sidebar leaves it out; search still finds it). |
 | `dock` | `boolean` | optional | On the signer's dock: their own choice, not the fragment's (`PUT /api/fragments/{name}/dock`), true until they take it off (the shell's dock shows apps and brains, less these and the archived). Left out while true, so a row from before the choice, or from an older platform, reads as on it. |
-| `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, and its title, as its live `fragment.json` last said (an app with no title until it has). |
+| `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, as its live `fragment.json` last said (an app until it has), and its title, its face's (`PUT /api/f/{name}/face`). |
 | `listed` | `array` of [`ListedRecord`](#listedrecord) | optional | What its members are doing, as its channels that declare `listed` last said (each member's newest such record, the newest first, at most `limits::LISTED_POSTERS_MAX`): only those of channels this row's role may read; none when there are none. |
 | `name` | `string` | required |  |
 | `owned` | `boolean` | optional | An agent's list `for` someone: whether that someone owns it (beside the role the agent acts with there), as no name says any more. |
-| `picture` | `string` or `null` | optional | Its picture, as the address on the platform that serves it: an agent fragment's `avatar.png` at live (its agent's identity's `/api/identities/<npub>/picture?v=…`), any other's icon (`/api/f/<name>/icon?v=…`, docs/api.md, Icons). |
+| `picture` | `string` or `null` | optional | Its picture, as the address on the platform that serves it: an agent fragment's `avatar.png` at main (its agent's identity's `/api/identities/<npub>/picture?v=…`), any other's icon (`/api/f/<name>/icon?v=…`, docs/api.md, Icons). |
 | `pinned` | `boolean` | optional | The signer pinned it: their own view, not the fragment's (`PUT /api/fragments/{name}/pinned`; the shell's sidebar shows it first in its section). Left out while false, so a row from an older platform reads as not pinned. |
 | `preview` | `string` or `null` | optional | A chat's newest message, its first line (at most `limits::LISTED_PREVIEW_MAX_BYTES`), as the signer's search holds it (none when it holds none: docs/api.md, Search). |
 | `previewAt` | `integer` or `null` | optional | With `preview`: when its message was said (ms), so a list can put its chats newest first. |
@@ -743,6 +754,7 @@ out.
 | --- | --- | --- | --- |
 | `addedAt` | `integer` | required |  |
 | `addedBy` | `string` | required | Who granted it: the owner, or their agent for them (an invite's maker). |
+| `door` | `string` or `null` | optional | On a connector bound as an agent's door, that agent's row alone: the door it is (`telegram`), while it is open (docs/api.md, "An agent's doors"). Its records relaying that agent's owner come through it, so the agent's bridge and its pages take them as its owner's words (docs/chat-records.md). Add-only: absent from an older platform. |
 | `email` | `string` or `null` | optional | A person member's email, as the share sheet shows it (decision 48): in `GET members` to the owner and their agent for them, and in no other list (add-only: absent from an older platform). |
 | `kind` | [`IdentityKind`](#identitykind) or `null` | optional | `person` or `agent`. |
 | `owner` | `string` or `null` | optional | An agent member's owner, who reads what it reads. |
@@ -840,11 +852,11 @@ out. One old agent of the person's, and where its move is.
 
 ### `OfferYes`
 
-in. `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a new agent of their own, which the move's stage is imported into.
+in. `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to an agent of their own, which the move's stage is imported into: a new one, or one they have already that no other move is bound to.
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `agent` | `string` | required | The new agent: its identity's id or npub. |
+| `agent` | `string` | required | The agent: its identity's id or npub. |
 
 ### `Offers`
 
@@ -1202,6 +1214,16 @@ out. The manifest as written, by its SHA-256 (hex): what the mover's `staged` re
 | --- | --- | --- | --- |
 | `manifest_sha256` | `string` | required |  |
 | `zip_bytes` | `integer` | required |  |
+
+### `StageCopied`
+
+out. `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=`: one range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer: the blob it is, by its bytes' SHA-256 (hex), their length, and their CRC-32, which the caller checks against the zip entry's own.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `bytes` | `integer` | required |  |
+| `crc32` | `integer` | required |  |
+| `sha256` | `string` | required |  |
 
 ### `StageDone`
 

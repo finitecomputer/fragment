@@ -194,7 +194,7 @@ impl FragmentCell {
         let meta: Value = self.meta(MetaKey::MetaLive)?.and_then(|m| crate::json_text(&m).ok()).unwrap_or(Value::Null);
         let name = self.name()?;
         let label = fragment_proto::split_fragment_name(&name).map_or(name.as_str(), |(label, _)| label).to_string();
-        let title = meta["title"].as_str().map(str::to_string).or(self.shown_as()?.1).unwrap_or(label);
+        let title = self.shown_as()?.1.or(meta["title"].as_str().map(str::to_string)).unwrap_or(label);
         let input = icon::subject_input(&title, meta["description"].as_str(), hint);
         let named = match crate::models::run(&self.env, icon::SUBJECT_MODEL, &input, owner, None).await {
             Ok((200, bytes, _)) => {

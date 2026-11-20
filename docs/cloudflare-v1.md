@@ -212,7 +212,7 @@ computers) returns once this product works.
 37. **Agents can do anything they could do in Finite.** Services that act
     as you are connections (22); paid APIs that need only a key use the
     operator's keys, priced per call (`price::DEFAULT_KEYS`); a person's
-    own keys are sealed by their computer and never metered.
+    own keys are sealed in their Vault and never metered.
 38. **Routines are fragment cron:** scheduled records on any fragment, an
     agent's on its own `tasks` (`fragment schedule add --routine`).
     Hermes' scheduler is off (docs/api.md, "Scheduled records").
@@ -220,10 +220,13 @@ computers) returns once this product works.
 ### The generic pieces
 
 39. **A subscription wakes a computer.** A record on a channel its bridge
-    follows wakes it. It stays awake while a port tab or the guest's
-    keepalive socket to the Computer DO is open (container traffic does
-    not count), then sleeps after `computer::IDLE_MS`. A page that opens
-    a fragment it follows pre-wakes it (`PREWAKE_MS`). An agent added to
+    follows wakes it. It stays awake while the guest's keepalive socket
+    to the Computer DO is open, or a port tab's page speaks (container
+    traffic does not count; Paul, 2026-11-18: a tab merely open holds
+    nothing), then sleeps after `computer::IDLE_MS`. Its owner's shell
+    pre-wakes it as they pick a chat or open the launcher, held as any
+    wake is; a page opening, reconnecting, or anything its presence says
+    (a page sets its own) does not. An agent added to
     a fragment wakes it with `{kind: "joined"}` on its `tasks`.
 40. **Blessed templates run the platform's release.** A chat, agent, brain
     or skills fragment runs its template's code from the release, so one

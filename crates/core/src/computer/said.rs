@@ -62,23 +62,35 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             actions: vec![restart("Restart now")],
             ..notice("unsaved".into(), "unsaved", NoticeLevel::Warn, "Your computer can't save right now".into())
         },
-        ComputerNotice::WentBack { life, pending, save, saved_at, ended_at, .. } => {
-            // what went: the span between the save it goes back to and the
-            // loss, which stays true however long the notice waits
-            let lost = match (save, saved_at, ended_at) {
-                (None, _, _) => None,
-                (Some(_), Some(saved), Some(ended)) => Some(format!("made in the {} before it stopped", span(ended - saved))),
-                (Some(_), _, _) => Some("on it since its last save".to_string()),
+        ComputerNotice::WentBack { life, pending, save, saved_at, ended_at, unchanged, .. } => {
+            // the span between the save it goes back to and its stop, which
+            // stays true however long the notice waits
+            let since = match (saved_at, ended_at) {
+                (Some(saved), Some(ended)) => Some(span(ended - saved)),
+                _ => None,
             };
-            let said = match (lost, pending) {
-                (Some(lost), true) => format!("When it starts again, changes {lost} won't be there."),
-                (Some(lost), false) => format!("Changes {lost} weren't kept."),
-                (None, true) => "Nothing on it was saved yet, so it will start fresh.".into(),
-                (None, false) => "Nothing on it was saved yet, so it started fresh.".into(),
+            let said = match (save, unchanged, since, pending) {
+                (None, _, _, true) => "Nothing on it was saved yet, so it will start fresh. Your chats are all here.".into(),
+                (None, _, _, false) => "Nothing on it was saved yet, so it started fresh. Your chats are all here.".into(),
+                // nothing ran on it after that save that may change its
+                // files: where it went back to, and no loss (a warning only
+                // where one is literally true)
+                (Some(_), true, since, pending) => {
+                    let back_to = since.map_or("its last save".to_string(), |since| format!("its save from {since} before it stopped"));
+                    let goes = if *pending { "When it starts again, it goes back to" } else { "It went back to" };
+                    format!("{goes} {back_to}. Your agents' work and chats are all here.")
+                }
+                (Some(_), false, since, pending) => {
+                    let lost = since.map_or("on it since its last save".to_string(), |since| format!("made in the {since} before it stopped"));
+                    match pending {
+                        true => format!("When it starts again, changes {lost} won't be there. Your chats are all here."),
+                        false => format!("Changes {lost} weren't kept. Your chats are all here."),
+                    }
+                }
             };
             let title = if *pending { "Your computer stopped" } else { "Your computer restarted" };
             Notice {
-                text: Some(format!("{said} Your chats are all here.")),
+                text: Some(said),
                 actions: vec![NoticeAction::post("OK", at("notices/seen"), body("life", *life))],
                 ..notice(format!("went_back:{life}"), "went_back", NoticeLevel::Info, title.into())
             }
@@ -91,7 +103,9 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             ..notice(format!("update:{version}"), "update", NoticeLevel::Info, "An update is ready for your computer".into())
         },
         ComputerNotice::DiskFilling { free, .. } => Notice {
-            text: Some("Delete files you don't need, or ask an agent to tidy up.".into()),
+            // Paul, 2026-11-18: its agent makes room (`fragment offload`, the
+            // `disk-space-finite` skill)
+            text: Some("Ask your agent to move big files to storage.".into()),
             ..notice("disk_filling".into(), "disk_filling", NoticeLevel::Warn, format!("Your computer is almost full ({} left)", size(*free)))
         },
         ComputerNotice::KeyPaused { provider, spent_micros, cap_micros, allow_micros, resumes_at } => Notice {
@@ -163,7 +177,7 @@ mod tests {
         assert_eq!(post(unsaved), vec![("Restart now".into(), format!("{at}/restart"), json!({ "generation": 7 }))]);
 
         let back = |pending, save: Option<u64>, ended_at: Option<i64>| {
-            said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at, pending, save, saved_at: save.map(|_| 20 * MIN), at: None }], &f).remove(0)
+            said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at, pending, save, saved_at: save.map(|_| 20 * MIN), at: None, unchanged: false }], &f).remove(0)
         };
         let told = back(false, Some(2), Some(60 * MIN));
         assert_eq!((told.level, told.title.as_str(), told.id.as_str()), (NoticeLevel::Info, "Your computer restarted", "went_back:6"));
@@ -173,9 +187,23 @@ mod tests {
         assert_eq!(back(true, Some(2), None).text.as_deref(), Some("When it starts again, changes on it since its last save won't be there. Your chats are all here."));
         assert_eq!(back(false, None, None).text.as_deref(), Some("Nothing on it was saved yet, so it started fresh. Your chats are all here."));
         // a loss within a minute of its save reads as words too (the e2e's shot: "in the a minute")
-        let quick = said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at: Some(20 * MIN + 30_000), pending: false, save: Some(2), saved_at: Some(20 * MIN), at: None }], &f);
+        let quick = said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at: Some(20 * MIN + 30_000), pending: false, save: Some(2), saved_at: Some(20 * MIN), at: None, unchanged: false }], &f);
         assert_eq!(quick[0].text.as_deref(), Some("Changes made in the 1 minute before it stopped weren't kept. Your chats are all here."));
         assert_eq!(back(true, None, Some(60 * MIN)).title, "Your computer stopped");
+        // no turn ran and no port tab was used after its save (11-18: a
+        // tab left open overnight was told as 11 hours of changes lost):
+        // it says what it went back to, and no loss
+        let unchanged = |pending, ended_at: Option<i64>| {
+            said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at, pending, save: Some(2), saved_at: Some(20 * MIN), at: None, unchanged: true }], &f).remove(0)
+        };
+        let told = unchanged(false, Some(20 * MIN + 11 * 60 * MIN));
+        assert_eq!((told.level, told.title.as_str()), (NoticeLevel::Info, "Your computer restarted"));
+        assert_eq!(told.text.as_deref(), Some("It went back to its save from 11 hours before it stopped. Your agents' work and chats are all here."));
+        assert_eq!(unchanged(true, Some(60 * MIN)).text.as_deref(), Some("When it starts again, it goes back to its save from 40 minutes before it stopped. Your agents' work and chats are all here."));
+        assert_eq!(unchanged(false, None).text.as_deref(), Some("It went back to its last save. Your agents' work and chats are all here."));
+        assert_eq!(unchanged(true, None).text.as_deref(), Some("When it starts again, it goes back to its last save. Your agents' work and chats are all here."));
+        let fresh = said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at: None, pending: false, save: None, saved_at: None, at: None, unchanged: true }], &f);
+        assert_eq!(fresh[0].text.as_deref(), Some("Nothing on it was saved yet, so it started fresh. Your chats are all here."), "no save: as ever");
 
         let update = &said(&[ComputerNotice::Update { version: "0123456789ab".into() }], &f)[0];
         assert_eq!(update.text.as_deref(), Some("Restart to get it; your chats and work are kept. It also updates by itself the next time your computer sleeps."));
@@ -185,6 +213,7 @@ mod tests {
 
         let disk = &said(&[ComputerNotice::DiskFilling { total: 20_000_002_048, free: 3_240_662_016 }], &f)[0];
         assert_eq!(disk.title, "Your computer is almost full (3.2 GB left)");
+        assert_eq!(disk.text.as_deref(), Some("Ask your agent to move big files to storage."));
         assert!(disk.actions.is_empty());
 
         let paused = |allow_micros| said(&[ComputerNotice::KeyPaused { provider: "elevenlabs".into(), spent_micros: 5_030_000, cap_micros: 5_000_000, allow_micros, resumes_at: 123 * MIN }], &f).remove(0);

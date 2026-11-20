@@ -127,7 +127,7 @@ pub(crate) fn trip_spent(trip: Trip, url: &Url) -> String {
 
 /// A round trip coming back to the browser that began it: the only thing
 /// that finishes one. What finishes a round trip takes it by value
-/// (`calls::Exchange::of`, `computer::SignedIn::of`), never a state read
+/// (`calls::Exchange::of`, `vault::SignedIn::of`), never a state read
 /// from a URL. Its fields are private to this module, it is neither
 /// `Clone` nor `Deserialize`, and only `trip_bound` makes one, from the
 /// request's own cookie; xtask's `a_round_trip_is_bound_only_by_its_request`

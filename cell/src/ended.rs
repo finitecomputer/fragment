@@ -10,7 +10,7 @@
 //!
 //! The ended life's rows live in tables of their own: the ended lives
 //! (one row each, until all is cleaned), the lists each has still to
-//! tell, a wipe's repo, and an agent fragment's agent (its `computer` none
+//! tell, its repo, and an agent fragment's agent (its `computer` none
 //! once that runs it no more), `migrate::FRAGMENT.kept` (crates/core/
 //! migrations/fragment). The delete keeps them while it drops the life's
 //! own and makes them again empty, as the life's steps made them
@@ -30,13 +30,30 @@
 //! still running it. A computer gone (its owner's wipe) is done, as an
 //! agent unassigned already is (`fragment_core::ended::agent_left`).
 //!
-//! A delete keeps the life's code.storage repo (made again, the name finds
-//! it). A wipe's end of a life (`end_life_wiped`: docs/api.md, Operators)
-//! is the same end with its repo recorded beside it (`ended_repos`), which
-//! the alarm deletes with the rest, retried as the rest are: the life is
-//! cleaned up only once its repo is gone too. It records no agent: the wipe
-//! empties the computer before (its `computer` step) and the registry's
-//! rows after (`registry`).
+//! **Its code.storage repo goes with it** (Paul, 2026-11-18: a delete is
+//! when the files are really gone), when the repo is named by the life's
+//! own key (`fragment_core::ended::repo_goes`; its `RepoOfLife` mark). Its
+//! end records the repo beside it (`ended_repos`), which the alarm deletes
+//! with the rest, retried as the rest are: the life is cleaned up only
+//! once its repo is gone too. A name made again before that delete gets a
+//! fresh repo of its own (`fragment_core::codestorage::repo_name`), so
+//! the delete never reaches it. A blessed fragment's repo is made at its
+//! first file (`seed::Making::SeedsLater`): one whose life ended while
+//! code.storage made it is recorded by that seed (`end_repo_of_no_life`).
+//!
+//! A repo named by its owner (a life made before repos were named by its
+//! key) stays with a delete: an older release, rolled back to, names a
+//! repo so, and its create of the name would find one whose delete was
+//! still to come (FIN-538). Those wait for a sweep once no rollback can
+//! reach such a release (FIN-540; docs/technical-debt-ledger.md). Nor does
+//! a delete reach copies an agent's computer synced, or exports people
+//! downloaded.
+//!
+//! A wipe's end of a life (`end_life_wiped`: docs/api.md, Operators) is the
+//! same end, its repo recorded however it is named (a wiped person never
+//! makes the name again), and no agent recorded: the wipe empties the
+//! computer before (its `computer` step) and the registry's rows after
+//! (`registry`).
 //!
 //! **A try that fails** is told apart (`fragment_core::ended`): a part
 //! already gone is done (a repo code.storage says is gone, or was never
@@ -56,7 +73,7 @@
 //! refuses every change (one from before its table had a column master
 //! writes) holds no wipe.
 
-use fragment_core::ended::{self as rules, Failure};
+use fragment_core::ended::{self as rules, End, Failure};
 use fragment_core::npub;
 use fragment_core::seed::Stage;
 use fragment_core::wipe::{LifeLeft, LIVES_SHOWN_MAX};
@@ -126,7 +143,7 @@ struct Untold {
     name: String,
 }
 
-/// An ended life's repo, still to delete (a wipe's).
+/// An ended life's repo, still to delete.
 #[derive(Deserialize)]
 struct EndedRepo {
     incarnation: i64,
@@ -161,18 +178,36 @@ impl FragmentCell {
     /// Ends this life in one synchronous step, with no await: a crash
     /// leaves the life whole, or ended with all its cleanup recorded, and
     /// a delete asked again after an error records nothing twice.
-    /// Records what the alarm cleans after (an agent fragment's agent
-    /// among it), stops the app, closes the sockets, and drops the life's
-    /// tables, made again empty.
+    /// Records what the alarm cleans after (its repo, and an agent
+    /// fragment's agent, among it), stops the app, closes the sockets, and
+    /// drops the life's tables, made again empty.
     pub(crate) fn end_life(&self) -> CellResult<Ended> {
-        self.end(true)
+        self.end(End::Delete)
+    }
+
+    /// A wipe's end of this life (docs/api.md, Operators): `end_life`, with
+    /// no agent recorded, as the wipe empties its computer and the
+    /// registry's names itself.
+    pub(crate) fn end_life_wiped(&self) -> CellResult<Ended> {
+        self.end(End::Wipe)
     }
 
     /// `end_life`, its agent recorded to leave its computer and the
-    /// registry's names (`agent`), or not (a wipe's, which empties both).
-    fn end(&self, agent: bool) -> CellResult<Ended> {
-        let [name, created_at, owner, npub, version, identity, computer, search] =
-            self.metas([MetaKey::Name, MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Npub, MetaKey::IndexVersion, MetaKey::AgentIdentity, MetaKey::Computer, MetaKey::Search])?;
+    /// registry's names (a delete's), or not (a wipe's, which empties
+    /// both), and its repo recorded when it goes (`rules::repo_goes`).
+    fn end(&self, by: End) -> CellResult<Ended> {
+        let [name, created_at, owner, npub, version, identity, computer, search, repo, of_life] = self.metas([
+            MetaKey::Name,
+            MetaKey::CreatedAt,
+            MetaKey::Owner,
+            MetaKey::Npub,
+            MetaKey::IndexVersion,
+            MetaKey::AgentIdentity,
+            MetaKey::Computer,
+            MetaKey::Search,
+            MetaKey::Repo,
+            MetaKey::RepoOfLife,
+        ])?;
         let name = name.ok_or_else(|| missing(MetaKey::Name))?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
         let owner = owner.ok_or_else(|| missing(MetaKey::Owner))?;
@@ -200,11 +235,24 @@ impl FragmentCell {
              ON CONFLICT (incarnation, principal) DO NOTHING",
             vec![SqlStorageValue::Integer(incarnation), SqlStorageValue::Integer(version), now],
         )?;
+        // its repo, deleted by the alarm: a wipe's always, a delete's when
+        // named by this life's key (an owner-named one stays: FIN-538); a
+        // life whose repo was not made (a blessed fragment's, made at its
+        // first file: `seed::Making::SeedsLater`) records none here,
+        // and its seed records one it makes after (`end_repo_of_no_life`)
+        let repo = repo.filter(|_| rules::repo_goes(by, of_life.is_some()));
+        if let Some(repo) = &repo {
+            assert!(!repo.is_empty(), "a made repo has a name");
+            self.exec(
+                "INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
+                vec![SqlStorageValue::Integer(incarnation), repo.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+            )?;
+        }
         // an agent fragment's agent, whose key was this life's alone: it
         // ran on its owner's one computer (decision 13), named while it is
         // assigned. Unassigned since, that computer is asked all the same
         // (a no-op): nothing else reaches its row once this life is gone
-        if let (true, Some(identity)) = (agent, identity) {
+        if let (End::Delete, Some(identity)) = (by, identity) {
             let computer = computer.unwrap_or_else(|| fragment_core::computer::default_computer_of(&owner));
             self.exec(
                 "INSERT INTO ended_agents (incarnation, identity, computer, next_at) VALUES (?, ?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
@@ -220,33 +268,35 @@ impl FragmentCell {
         }
         crate::schema::remake(self.sql(), &fragment_core::migrate::FRAGMENT)?;
         assert!(self.meta(MetaKey::CreatedAt)?.is_none(), "an ended life leaves no fragment");
+        assert_eq!(self.ended_repo_rows(incarnation)?, u64::from(repo.is_some()), "the ended life's repo, if it goes, is recorded beside it");
         Ok(Ended { owner })
-    }
-
-    /// A wipe's end of this life (docs/api.md, Operators): `end_life`, and
-    /// its repo recorded for the alarm to delete, in the same synchronous
-    /// step (no await): a crash leaves the life whole, or ended with its
-    /// repo's delete recorded. A delete keeps its repo; a wipe never does.
-    pub(crate) fn end_life_wiped(&self) -> CellResult<Ended> {
-        let [created_at, repo] = self.metas([MetaKey::CreatedAt, MetaKey::Repo])?;
-        let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
-        // a life whose repo was not made yet (its template seeds after the
-        // create's answer, publish.rs `seeds_later`) records none
-        if let Some(repo) = &repo {
-            assert!(!repo.is_empty(), "a made repo has a name");
-            self.exec(
-                "INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
-                vec![SqlStorageValue::Integer(incarnation), repo.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
-            )?;
-        }
-        let ended = self.end(false)?;
-        assert_eq!(self.ended_repo_rows(incarnation)?, u64::from(repo.is_some()), "the ended life's repo, if it had one, is recorded beside it");
-        Ok(ended)
     }
 
     fn ended_repo_rows(&self, incarnation: i64) -> CellResult<u64> {
         let rows = self.rows("SELECT COUNT(*) AS n FROM ended_repos WHERE incarnation = ?", vec![SqlStorageValue::Integer(incarnation)])?;
         rows.first().and_then(|r| r["n"].as_u64()).ok_or_else(|| CellError::host("COUNT answered no row"))
+    }
+
+    /// A repo a seed made for the life `life`, which ended while
+    /// code.storage made it (publish.rs `seed_step`): its end recorded no
+    /// repo, so this records it for the alarm to delete, as an end records
+    /// one (`ended.repo-of-no-life`), in one synchronous step. The repo is
+    /// that life's alone (named by its key): no life made since has it.
+    /// Its life's row, if already cleaned up and forgotten, is made again
+    /// with nothing left but the repo, so the object's storage is kept
+    /// (`forget_ended`) and a wipe waits for it.
+    pub(crate) async fn end_repo_of_no_life(&self, life: i64, name: &str, repo: &str) -> CellResult<()> {
+        assert!(!repo.is_empty(), "a made repo has a name");
+        assert!(self.meta(MetaKey::CreatedAt)?.and_then(|at| at.parse::<i64>().ok()) != Some(life), "only an ended life's repo is recorded as one of no life");
+        let (inc, now) = (SqlStorageValue::Integer(life), SqlStorageValue::Integer(js::now_ms()));
+        self.exec(
+            "INSERT INTO ended (incarnation, name, npub, facet, ended_at, stored, next_at) VALUES (?, ?, '', '', ?, 0, ?) ON CONFLICT (incarnation) DO NOTHING",
+            vec![inc.clone(), name.into(), now.clone(), now.clone()],
+        )?;
+        self.exec("INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING", vec![inc, repo.into(), now])?;
+        assert_eq!(self.ended_repo_rows(life)?, 1, "the ended life's repo is recorded");
+        console_log!("{}", json!({ "event": "ended.repo-of-no-life", "fragment": name, "repo": repo, "incarnation": life }));
+        self.schedule().await
     }
 
     /// How many ended lives this object has still to clean up (a wipe asks:
@@ -392,7 +442,7 @@ impl FragmentCell {
         }
     }
 
-    /// Deletes the repos of the ended lives due (a wipe's), at most
+    /// Deletes the repos of the ended lives due, at most
     /// `REPOS_PER_PASS`, and forgets each one code.storage says is gone
     /// (deleted now, before, or never there).
     async fn clear_repos(&self) {
@@ -583,7 +633,7 @@ impl FragmentCell {
 
     /// A wipe's call is the retry: every part of every ended life here is
     /// due now, held ones too (`fragment_core::ended`), one try a call.
-    fn ended_due_now(&self) -> CellResult<()> {
+    pub(crate) fn ended_due_now(&self) -> CellResult<()> {
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec("UPDATE ended_index SET next_at = ?1 WHERE next_at > ?1", vec![now.clone()])?;
         self.exec("UPDATE ended SET next_at = ?1 WHERE stored = 1 AND next_at > ?1", vec![now.clone()])?;
