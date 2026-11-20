@@ -107,11 +107,6 @@ pub struct AskSecret {
     #[serde(default)]
     #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub hosts: Vec<String>,
-    /// Asks for no value: the secret its person keeps already, sent to
-    /// `hosts` too and usable by this agent (Allow or Don't allow).
-    #[serde(default, skip_serializing_if = "crate::is_default")]
-    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
-    pub keep_value: bool,
 }
 
 /// Where an ask stands.
@@ -123,7 +118,7 @@ pub enum AskState {
     Waiting,
     /// Answered: the secret is in their Vault, bound to the agent.
     Saved,
-    /// Their Decline (or Don't allow).
+    /// Their Decline.
     Declined,
     /// Not answered in time, or asked again since.
     Expired,
@@ -159,17 +154,10 @@ pub struct SecretAsk {
     pub expires_at: i64,
 }
 
-/// `POST /api/vault/asks/{id}`: the person's answer. `value` is what they
-/// pasted (an ask with `keepValue` takes none: its answer is Allow).
+/// `POST /api/vault/asks/{id}`: the person's answer, what they pasted.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AnswerAsk {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
-    pub value: Option<String>,
-    /// Which secret its card showed held under the ask's name (its
-    /// revision, `none` for none), as the card's action carries it: the
-    /// answer grants what the card said, or nothing (409).
-    pub held: String,
+    pub value: String,
 }

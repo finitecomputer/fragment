@@ -1111,8 +1111,7 @@ enum VaultCmd {
     /// card on their page with a masked field and paste it there; you
     /// never see it. Waits for their answer (at most 10 minutes), then
     /// prints the stand-in to send in its place, toward the hosts it works
-    /// with. `--keep-value`: ask instead to send one they keep somewhere
-    /// new (they Allow or Don't allow)
+    /// with. It only ever makes a new secret, never replaces one they keep
     Ask {
         #[arg(value_parser = vault_name)]
         name: String,
@@ -1123,10 +1122,6 @@ enum VaultCmd {
         /// scheme, port, or path. None: kept, and sent nowhere
         #[arg(long = "to", value_name = "HOST")]
         hosts: Vec<String>,
-        /// Ask for no value: the secret your person keeps, sent to these
-        /// hosts too, and yours to use
-        #[arg(long)]
-        keep_value: bool,
     },
 }
 
@@ -1186,7 +1181,7 @@ fn vault_ask(c: &api::Client, j: bool, ask: fragment_proto::vault::AskSecret) ->
     json_exit(j, &json!({ "ask": at, "placeholder": given.as_ref().map(|g| &g.placeholder), "hosts": given.as_ref().map(|g| &g.hosts) }));
     match (at.state, given) {
         (AskState::Saved, Some(g)) => println!("{name} saved: send {} in its place, toward {}. You never see the secret itself", g.placeholder, g.hosts.join(", ")),
-        (AskState::Saved, None) => println!("{name} saved, and sent nowhere yet: to use it, ask again with --keep-value --to <host>"),
+        (AskState::Saved, None) => println!("{name} saved, and sent nowhere yet: ask your person to say where it goes"),
         (AskState::Declined, _) => return Err(anyhow::Error::new(api::CodedError { code: api::Code::Forbidden, msg: format!("your person declined {name}") })),
         _ => return Err(anyhow::Error::new(api::CodedError { code: api::Code::Conflict, msg: format!("no answer for {name}: the ask expired, or you asked again since") })),
     }
@@ -2733,7 +2728,7 @@ fn run(cli: Cli) -> Result<()> {
                 json_exit(j, &v);
                 println!("{}", if v.removed { format!("secret {name} removed") } else { format!("no secret {name}") });
             }
-            VaultCmd::Ask { name, why, hosts, keep_value } => vault_ask(&c, j, fragment_proto::vault::AskSecret { name, why, hosts, keep_value })?,
+            VaultCmd::Ask { name, why, hosts } => vault_ask(&c, j, fragment_proto::vault::AskSecret { name, why, hosts })?,
         },
         Cmd::Inbox { name, payload, source } => {
             let token = from_env_or_stdin(INBOX_TOKEN_ENV, "inbox token")?;

@@ -149,28 +149,24 @@ way T3 Code's secret prompt does: the agent never sees what they give.
 
 - **The card is the platform's.** The ask waits in the person's Vault and
   shows as one of their notices (`vault/notices`), in the band the shell
-  draws above their chat: who asks, why, every host it would then work
-  with (those it holds already too), whether it replaces one they keep and
-  other agents use it, a masked field, Save and Decline. A chat, an app or a fork of either draws no
-  part of it, so no app code ever has the field.
+  draws above their chat: who asks, why, the hosts it would work with, a
+  masked field, Save and Decline. A chat, an app or a fork of either draws
+  no part of it, so no app code ever has the field.
 - **The paste goes to the Vault alone**: from the shell's page to `POST
   /api/vault/asks/{id}`, sealed there in the same turn, never in a chat's
   records, a log or an answer. The page keeps it in its input only while
   the card shows, and empties it once posted.
 - **Only the person asked answers**, from their own session; an agent,
   theirs or another's, is refused, and anyone else finds no ask.
-- **An answer adds, never takes away.** It is a put under the Vault's own
-  rules: the hosts asked joined to any held, the asking agent to its
-  agents, the place held kept. A secret held already is replaced only by
-  a paste its card says it replaces. Their answer carries which secret its
-  card showed held (its revision) and grants only what the card said: a
-  secret set or changed since, or a card declined, expired or answered
-  meanwhile (checked again after the seal's wait), writes nothing. An
-  Allow never gives back an agent its person took off the secret since.
-- **Somewhere new** (`--keep-value`): an agent asks to send a secret its
-  person keeps to more hosts, one it is given already (asked of any other,
-  or of none, it is refused the same way: it learns nothing of secrets it
-  is not given); the card is Allow or Don't allow, with no field.
+- **An answer only makes a new secret**: a put under the Vault's own
+  rules, toward the hosts asked, in the default place, for the asking
+  agent alone. It never replaces or widens one the person keeps: asked for
+  a name they keep, the card says so and offers only Decline, and an
+  answer is refused (409), checked again after the seal's wait, as is a
+  card declined, expired or answered meanwhile. Pointing a secret at more
+  hosts, or giving it to more agents, stays the person's own
+  (`fragment vault set`). The agent learns nothing of secrets it is not
+  given: its ask is taken the same either way.
 - **It ends**: saved, declined, or after ten minutes unanswered (or asked
   again by the same agent for the same name). At most 8 wait on a person,
   and their Vault keeps at most 64, ended ones an hour.

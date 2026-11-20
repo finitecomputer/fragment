@@ -385,12 +385,11 @@ value they do not know; a closed object refuses a field it does not know.
 
 ### `AnswerAsk`
 
-in, closed. `POST /api/vault/asks/{id}`: the person's answer. `value` is what they pasted (an ask with `keepValue` takes none: its answer is Allow).
+in, closed. `POST /api/vault/asks/{id}`: the person's answer, what they pasted.
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `held` | `string` | required | Which secret its card showed held under the ask's name (its revision, `none` for none), as the card's action carries it: the answer grants what the card said, or nothing (409). |
-| `value` | `string` or `null` | optional |  |
+| `value` | `string` | required |  |
 
 ### `Archived`
 
@@ -408,7 +407,6 @@ in, closed. `POST /api/vault/asks`: an agent asks its person for a secret (or to
 | field | type | | |
 | --- | --- | --- | --- |
 | `hosts` | `array` of `string` | optional | The hosts it would go to (exact DNS names, at most 8); none, kept and sent nowhere until its person says where. |
-| `keepValue` | `boolean` | optional | Asks for no value: the secret its person keeps already, sent to `hosts` too and usable by this agent (Allow or Don't allow). |
 | `name` | `string` | required | The secret's name in its person's Vault (1 to 32 of `a-z0-9-`). |
 | `why` | `string` | required | Why, in the agent's words, shown on the card: 1 to 200 characters. |
 

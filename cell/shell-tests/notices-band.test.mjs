@@ -649,21 +649,3 @@ test("what the person pasted survives a redraw of the band, and goes with its no
   assert.notEqual(fieldIn(p), input, "its notice gone, its field went with it");
   assert.equal(fieldIn(p).value, "");
 });
-
-test("a card that says something new (its grant changed) is a new, empty field: the paste meant for the last goes nowhere", async (t) => {
-  const card = (held, detail) => asked({ detail, actions: [{ label: "Save", post: ASK, body: { held }, field: true }] });
-  const p = page(t, [card("none", "It only works with api.example.com.")]);
-  const input = fieldIn(p);
-  input.focus();
-  input.value = "test-secret";
-
-  const refresh = p.load();
-  p.calls[0].ok({ notices: [card("r2", "It only works with api.example.com, uploads.example.com.")] });
-  await refresh;
-
-  const now = fieldIn(p);
-  assert.notEqual(now, input, "a new field for the new card");
-  assert.equal(now.value, "");
-  now.onkeydown?.({ key: "Enter", preventDefault() {} });
-  assert.deepEqual(p.calls.filter((c) => c.method === "POST").map((c) => c.body), [], "Enter on it sends nothing: it holds no paste");
-});

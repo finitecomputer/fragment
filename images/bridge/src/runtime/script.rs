@@ -99,9 +99,9 @@
 //!   linked`, `door said <seq>`, `door bound`, `door poked <what>` (and
 //!   `, its share link shown` when the answer holds it), or `door
 //!   refused: <why>`;
-//! - `vault-ask [keep] <name> <host|-> <why>`: its person asked for a
-//!   secret with the fragment CLI, `fragment vault ask <name> --to <host>
-//!   --why <why>` (`keep`: `--keep-value`; `-`: no host), as the agent,
+//! - `vault-ask <name> <host|-> <why>`: its person asked for a secret
+//!   with the fragment CLI, `fragment vault ask <name> --to <host> --why
+//!   <why>` (`-`: no host), as the agent,
 //!   the turn waiting on their card: the reply is `vault-asked <state>
 //!   <placeholder, or none>`, or `vault-ask refused: <why>`;
 //! - `ask <agent> <words>`: another agent of its computer asked `<words>`
@@ -499,23 +499,15 @@ async fn ask_another(agent: &crate::runtime::Agent, chat: &str, turn: &str, rest
 /// CLI a minute past: this a little more.
 const VAULT_ASK_WAIT: Duration = Duration::from_secs(12 * 60);
 
-/// `vault-ask [keep] <name> <host|-> <why>`: the CLI's ask, as the agent.
+/// `vault-ask <name> <host|-> <why>`: the CLI's ask, as the agent.
 async fn vault_ask(agent: &crate::runtime::Agent, rest: &str) -> String {
-    let rest = rest.trim();
-    let (keep, rest) = match rest.strip_prefix("keep ") {
-        Some(r) => (true, r.trim_start()),
-        None => (false, rest),
-    };
-    let mut words = rest.splitn(3, char::is_whitespace);
+    let mut words = rest.trim().splitn(3, char::is_whitespace);
     let (Some(name), Some(host), Some(why)) = (words.next(), words.next(), words.next()) else {
-        return "say `vault-ask [keep] <name> <host|-> <why>`".into();
+        return "say `vault-ask <name> <host|-> <why>`".into();
     };
     let mut args = vec!["--json", "vault", "ask", name, "--why", why.trim()];
     if host != "-" {
         args.extend(["--to", host]);
-    }
-    if keep {
-        args.push("--keep-value");
     }
     let run = tokio::process::Command::new(CLI).args(&args).env("FRAGMENT_AS_AGENT", &agent.fragment).env("FRAGMENT_FOR", &agent.owner).kill_on_drop(true).output();
     let out = match tokio::time::timeout(VAULT_ASK_WAIT, run).await {

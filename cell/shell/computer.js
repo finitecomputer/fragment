@@ -185,23 +185,19 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     }
   }
   // Each notice's secret field (`n.field`: a Vault ask's), by the notice's
-  // id and what its action that takes it posts (a Vault ask's, the secret
-  // its card showed held): one input for as long as that card shows, moved
-  // into each redraw of its row, so what the person pasted survives a
-  // redraw (a countdown's minute) and goes only with that card's action.
-  // A card that says something new (a secret set meanwhile: its grant
-  // changed) is a new, empty field, never the paste meant for the last.
-  // Masked, never read but by that action, and gone with its card.
+  // id: one input for as long as its notice shows, moved into each redraw
+  // of its row, so what the person pasted survives a redraw (a countdown's
+  // minute) and goes only with that notice's action that takes it. Masked,
+  // never read but by that action, and gone with its notice (or its field).
   const fields = new Map();
-  const fieldKey = (n) => `${n.id}\n${JSON.stringify((n.actions ?? []).find((x) => x.field)?.body ?? null)}`;
   function fieldOf(n) {
-    let input = fields.get(fieldKey(n));
+    let input = fields.get(n.id);
     if (!input) {
       input = el("input", "notice-field");
       Object.assign(input, { type: "password", value: "", autocomplete: "off", spellcheck: false, placeholder: n.field.placeholder ?? "" });
       input.setAttribute("aria-label", n.title);
       input.dataset.lpignore = "true";
-      fields.set(fieldKey(n), input);
+      fields.set(n.id, input);
     }
     input.disabled = pending.has(n.id);
     // Enter is the action that takes it (Save)
@@ -297,7 +293,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (pending.has(n.id)) return;
     // an action that takes its notice's field sends what it holds as `value`
     // (a client of before posts none, and the server refuses the empty)
-    const input = a.field ? fields.get(fieldKey(n)) : null;
+    const input = a.field ? fields.get(n.id) : null;
     if (a.field && !input?.value.trim()) {
       failed.set(n.id, { said: "Paste it first.", refused: false, title: n.title, level: n.level });
       renderComputer();
@@ -407,7 +403,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed || reads().noticesFailed ? ["refresh"] : [];
     const refusals = gone.filter(([, f]) => f.refused).map(([id, f]) => refusalRow(id, f));
     // a field whose notice is not drawn goes, with whatever it held
-    for (const key of fields.keys()) if (!told.some((n) => n.field && fieldKey(n) === key)) fields.delete(key);
+    for (const id of fields.keys()) if (!told.some((n) => n.id === id && n.field)) fields.delete(id);
     // the field the person is typing in keeps their focus through the redraw
     const typing = [...fields.values()].find((i) => i === document.activeElement);
     const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.filter((n) => !n.mustAnswer).map(noticeRow), ...refusals];
