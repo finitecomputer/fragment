@@ -314,8 +314,9 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     // git holds it (its mark taken), rename nothing
     let old_rename = |name: &str, title: &str, key: Option<&str>| -> Result<(Value, bool, Value)> {
         let m = api.signed(&paul, "GET", &format!("/api/f/{name}/manifest"), None)?;
-        // (an app with no fragment.json: one of its own)
-        let mut body = if m.status == 200 { m.body.clone() } else { json!({}) };
+        // (one with no fragment.json is 404: such a CLI renames none)
+        anyhow::ensure!(m.status == 200, "{name}'s manifest: {m}");
+        let mut body = m.body.clone();
         body["meta"]["title"] = json!(title);
         let mut files = json!({ "message": "its name", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&body)?) }] });
         if let Some(key) = key {
@@ -339,7 +340,9 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     let unrelated = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "a note", "files": [{ "path": "notes.md", "text": "a note\n" }] })))?.status == 200
         && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200
         && title_of(&agent) == "Frank";
-    let app_first = reface(&app, "Faces app")? && old_rename(&app, "Garden app", None)?.1 && title_of(&app) == "Garden app";
+    // (an app with a fragment.json of its own, as one that CLI renames has)
+    let app_manifest = api.signed(&paul, "POST", &format!("/api/f/{app}/files"), Some(&json!({ "message": "its manifest", "files": [{ "path": "fragment.json", "text": "{}\n" }] })))?.status == 200;
+    let app_first = app_manifest && reface(&app, "Faces app")? && old_rename(&app, "Garden app", None)?.1 && title_of(&app) == "Garden app";
     let app_back = reface(&app, "Faces app")? && old_rename(&app, "Garden app", None)?.1 && title_of(&app) == "Garden app";
     let raw = api.signed(&paul, "GET", &format!("/api/f/{app}/file?path=fragment.json"), None)?.text;
     let mut rewritten: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
