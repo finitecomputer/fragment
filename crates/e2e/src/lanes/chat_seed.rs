@@ -100,7 +100,7 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
         "code.storage back, the alarm's pass makes its repo (named for its life) and lands its template: main and live at its one commit, the code installed from live, the messages said before kept",
         landed
             && s.fake.repo_url(&repo_name(&name, &st["npub"])).as_deref() == Some(repo.as_str())
-            && manifest == json!({ "template": "chat", "meta": { "title": "Seeded" } })
+            && manifest == json!({ "template": "chat" })
             && s.fake.paths(&repo, "main") == ["fragment.json"]
             && st["code"]["sha"] == st["pins"]["live"]
             && said.body["records"].as_array().is_some_and(|r| r.len() == 2),
@@ -170,7 +170,7 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
         "a chat deleted as its seed makes its repo is gone at once (404), and the same name made again lands in a fresh repo of its own (named for its new life), its own template on main",
         first.status == 200 && making && unrecorded && deleted.status == 200 && missing == 404 && again.status == 200 && landed
             && s.fake.repo_url(&repo_name(&gone, &again.body["npub"])).as_deref() == Some(new_repo.as_str())
-            && manifest == json!({ "template": "chat", "meta": { "title": "Seeded again" } }),
+            && manifest == json!({ "template": "chat" }),
         format!("{deleted} {missing} {again} {st} {manifest}"),
     );
     let (cleaned, last) = s.ended_cleaned(api, &gone);
@@ -223,7 +223,7 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     let url = repo_url(s, &lost).unwrap_or_default();
     s.ok(
         "its repo made and the answer lost, behind 150 newer repos: the next pass finds that repo by its name, past the list's first page, and lands its template there",
-        made && failed && landed && status(&lost)["repo"] == url.as_str() && manifest_at(s, &url) == json!({ "template": "chat", "meta": { "title": "Lost" } }),
+        made && failed && landed && status(&lost)["repo"] == url.as_str() && manifest_at(s, &url) == json!({ "template": "chat" }),
         status(&lost),
     );
 
@@ -296,17 +296,14 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
 
     // ---- its life ends while its deploy's first live refresh is in
     // flight, the name made again (Alex, #1042: 2, at b6472432 and
-    // 6e9635a3): a 90-character title makes its fragment.json a possible
-    // blob pointer, which that refresh reads after listing live's files and
-    // before it writes live's pin and tree; then the install reads it again
+    // 6e9635a3): that refresh lists live's files, writes live's pin and
+    // tree, and the install reads its manifest
     s.fake.set_latency(DEPLOY_SLOW);
     let label = s.name("seed-deploy-gone");
-    let long = format!("Seeded {}", "a".repeat(83));
-    assert_eq!(long.chars().count(), 90, "a 90-character title");
-    let first = api.create_with(owner, json!({ "label": label, "template": "chat", "title": long }))?;
+    let first = api.create_with(owner, json!({ "label": label, "template": "chat", "title": "Seeded" }))?;
     let gone = first.body["name"].as_str().unwrap_or("").to_string();
-    // its deploy made live, and its refresh listed live's files: its read
-    // of the manifest as a possible pointer is on its way
+    // its deploy made live, and its refresh listed live's files: its next
+    // read of the manifest is on its way
     let live_made = s.eventually(wait, || repo_url(s, &gone).is_some_and(|url| s.fake.branch(&url, "live").is_some()));
     let url = repo_url(s, &gone).unwrap_or_default();
     let listed = s.fake.requests(&url, "GET files/metadata");
@@ -334,9 +331,9 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     let st = status(&gone);
     let manifest = manifest_at(s, st["repo"].as_str().unwrap_or(""));
     s.ok(
-        "a chat deleted while its first deploy's live refresh is in flight, the name made again: the delete waits for that step, the old seed writes nothing into the new life, which is made (no stale pin) and lands its own template, its title on main",
+        "a chat deleted while its first deploy's live refresh is in flight, the name made again: the delete waits for that step, the old seed writes nothing into the new life, which is made (no stale pin) and lands its own template on main",
         first.status == 200 && deploying && deleted.status == 200 && read && again == "200" && healed
-            && manifest == json!({ "template": "chat", "meta": { "title": "Seeded after its deploy" } }) && events(&gone, "template").len() == 1,
+            && manifest == json!({ "template": "chat" }) && events(&gone, "template").len() == 1,
         format!("{deleted} {again} {st} {manifest}"),
     );
     // ---- a deleted chat's name made again by its owner, its template's
@@ -382,8 +379,8 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     let st = status(&kept);
     let (cleaned, last) = s.ended_cleaned(api, &kept);
     s.ok(
-        "commits back, its own template lands in its own repo: committed and deployed in this life, its title on main, installed from its live; the deleted life's repo, with its live, is deleted",
-        healed && manifest_at(s, &new_url) == json!({ "template": "chat", "meta": { "title": "The second life" } }) && events(&kept, "template").len() == 1
+        "commits back, its own template lands in its own repo: committed and deployed in this life, installed from its live; the deleted life's repo, with its live, is deleted",
+        healed && manifest_at(s, &new_url) == json!({ "template": "chat" }) && events(&kept, "template").len() == 1
             && cleaned && s.fake.repo_deleted(&url) && !s.fake.repo_deleted(&new_url),
         format!("{st} {} / {last}", manifest_at(s, &new_url)),
     );

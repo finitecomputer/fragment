@@ -470,7 +470,7 @@ export function createAppsPage(page, h, shelf = "apps") {
       say(name, "");
       render();
       try {
-        await h.retitle(name, edit.draft.trim(), "rename app");
+        await h.retitle(name, edit.draft.trim());
         editing.delete(name);
         await h.reload();
       } catch (error) { say(name, error.message); }

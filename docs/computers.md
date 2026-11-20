@@ -990,8 +990,8 @@ same inputs ask nothing.
 
 ### Its name, in our Hermes image
 
-An agent's name is its agent fragment's title, and its role its
-`meta.role` (docs/api.md, "An agent's name and picture"). The image tells
+An agent's name is its agent fragment's title, and its role its face's
+role (docs/api.md, "An agent's name and picture"). The image tells
 the agent both in its system prompt at every turn (`hermes::told`),
 read again every 10 s, so a rename or a new role is its next turn's,
 nothing restarted.

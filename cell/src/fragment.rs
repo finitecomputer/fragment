@@ -97,6 +97,9 @@ pub struct FragmentCell {
     /// refused (publish.rs). Its stage is in its rows, not here
     /// (`fragment_core::seed`).
     pub(crate) seeding: futures_util::lock::Mutex<()>,
+    /// Serializes an agent's renames: each reads its job, commits it and
+    /// sets its face (members.rs `face_put`).
+    pub(crate) renaming: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
     /// Whether this activation has swept its pending mutations.
     pub(crate) swept: Cell<bool>,
@@ -158,6 +161,7 @@ impl DurableObject for FragmentCell {
             cfg,
             plane: futures_util::lock::Mutex::new(()),
             seeding: futures_util::lock::Mutex::new(()),
+            renaming: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
             woke: Cell::new(false),
@@ -335,7 +339,8 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
-    /// The title a template's fragment starts with (`TemplatePending`'s).
+    /// The title a copied template's fragment starts with
+    /// (`TemplatePending`'s), stamped into its `fragment.json`.
     TemplateTitle,
     /// The commits the cell pins (plane.rs).
     PinMain,
@@ -365,12 +370,24 @@ pub(crate) enum MetaKey {
     /// The blessed template live runs and its release (`<name>@<release>`,
     /// blessed.rs in crates/templates), when it names one.
     Blessed,
-    /// What its members' lists show of it (`{kind, title, picture?}`), as
-    /// last sent.
+    /// What its members' lists show of it (`{kind, title?, role?,
+    /// picture?}`): its title and an agent's role are kept here alone, set
+    /// at its making and through its face route (members.rs `face_put`).
     Face,
-    /// An agent fragment's picture as live's install read it (`<sha256>
-    /// <type> <commit>`): what `calls::Picture` answers.
+    /// An agent fragment's picture as main's last move read it (`<sha256>
+    /// <type> <commit>`, plane.rs `read_picture`): what `calls::Picture`
+    /// answers.
     Picture,
+    /// An agent's rename whose job commit's answer was lost, and the
+    /// renames before it the job may hold: a JSON array of `[name, sha256
+    /// of the job it wrote]`. The next takes a name for an old one only
+    /// while its job is the one that rename wrote (members.rs `job_says`).
+    Renaming,
+    /// The marks `GET manifest` gave its editors with the title each read
+    /// showed (a JSON array of `[mark, title]`, at most `TITLE_READS_MAX`,
+    /// newest last): a write of `fragment.json` naming one is an older CLI
+    /// renaming it (plane.rs `title_from_read`; the debt ledger).
+    TitleRead,
     /// The channels that list records, their kinds, fields and read
     /// roles, as the rows last carried them (listed.rs `listed_fence`).
     Listed,
@@ -529,6 +546,8 @@ impl MetaKey {
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
+            MetaKey::Renaming => "renaming",
+            MetaKey::TitleRead => "title_read",
             MetaKey::Listed => "listed",
             MetaKey::ListedSentAt => "listed_sent_at",
             MetaKey::ListedDue => "listed_due",
@@ -1210,6 +1229,10 @@ impl FragmentCell {
                 let bytes = req.bytes().await?;
                 self.upload_card(&caller, bytes).await
             }
+            (Method::Put, ["api", "face"]) => {
+                let body = body_json(&mut req).await?;
+                self.face_put(&caller, body).await
+            }
             (Method::Get, ["api", "icon"]) => self.icon_get(&caller, &req).await,
             (Method::Put, ["api", "icon"]) => self.icon_put(&caller, &mut req).await,
             (Method::Delete, ["api", "icon"]) => self.icon_delete(&caller).await,
@@ -1374,22 +1397,23 @@ impl FragmentCell {
                 }
                 None => None,
             };
-            // a blessed template's face is known now: the owner's list says
-            // it is a chat or an agent from the start, not once it installs
-            // (a read of the release that fails leaves it to the install,
-            // which sets it from the same manifest). An agent's own is made
-            // shared with no one (alone.rs): refused before anything is made
+            // its face from the start, its own from then on (docs/api.md, "An
+            // agent's name and picture"): the title given, else its blessed
+            // template's; that template's kind, so the owner's list says it is
+            // a chat or an agent at once. A copied template's (an app), or a
+            // blessed one whose manifest did not read, is an app's until its
+            // install says, its title, if none was given, the install's
+            // default. An agent's own is made shared with no one (alone.rs):
+            // refused before anything is made
             let face = match body.template.as_deref() {
                 Some(t) => {
-                    let face = match crate::assets::blessed_manifest(&self.env, t).await {
-                        Ok(Ok(m)) if m.kind() == fragment_proto::FragmentKind::Agent && body.visibility.is_some_and(|v| v != Visibility::Members) => {
-                            return Err(CellError::new(ErrorCode::Forbidden, crate::alone::AGENT));
-                        }
-                        Ok(Ok(m)) => Some(crate::members::face(m.kind(), body.title.as_deref().map(str::trim).or(m.title()), m.role(), None)),
-                        _ => None,
-                    };
+                    let blessed = crate::assets::blessed_manifest(&self.env, t).await.ok().and_then(Result::ok);
+                    if blessed.as_ref().is_some_and(|m| m.kind() == fragment_proto::FragmentKind::Agent) && body.visibility.is_some_and(|v| v != Visibility::Members) {
+                        return Err(CellError::new(ErrorCode::Forbidden, crate::alone::AGENT));
+                    }
                     laps.lap("manifest");
-                    face
+                    let (kind, title) = blessed.as_ref().map_or((fragment_proto::FragmentKind::App, None), |m| (m.kind(), m.title()));
+                    Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None))
                 }
                 None => None,
             };

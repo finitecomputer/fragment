@@ -2,7 +2,7 @@
 //! template as a new fragment's first commit and first deploy,
 //! `POST /api/files` (one commit to `main`, as a CLI sync makes), and
 //! `POST /api/deploy` (`live` to `main`'s tip, as `fragment deploy` does).
-//! The shell uses the same two routes (an agent's settings, a rename).
+//! The shell uses the same two routes (an agent's settings and job).
 
 use std::collections::BTreeMap;
 
@@ -47,14 +47,11 @@ pub(crate) fn repo_name(cfg: &crate::config::Config, fragment: &str, life: &str)
 }
 
 /// A blessed template's `fragment.json` as its seed commits it: the
-/// template named, and its title. What runs before the commit lands
-/// (`install_pending`) is read from these same bytes.
-pub(crate) fn blessed_manifest_bytes(which: &str, title: Option<&str>) -> Vec<u8> {
-    let mut manifest = json!({ "template": which });
-    if let Some(title) = title {
-        manifest["meta"] = json!({ "title": title });
-    }
-    serde_json::to_vec_pretty(&manifest).expect("a manifest serializes")
+/// template named, nothing else (its face is its cell's, from its making).
+/// What runs before the commit lands (`install_pending`) is read from
+/// these same bytes.
+pub(crate) fn blessed_manifest_bytes(which: &str) -> Vec<u8> {
+    serde_json::to_vec_pretty(&json!({ "template": which })).expect("a manifest serializes")
 }
 
 /// A template a fragment can start from (`fragment_templates::CATALOG`):
@@ -238,7 +235,7 @@ impl FragmentCell {
                     (Some(t), _) => stamped(&self.env, t, name, title.as_deref()).await?,
                     // a blessed template is named, not copied: the release serves it
                     (None, Some(_)) => {
-                        let bytes = blessed_manifest_bytes(&which, title.as_deref());
+                        let bytes = blessed_manifest_bytes(&which);
                         vec![FileWrite { path: RepoPath::parse("fragment.json").expect("fragment.json is a repo path"), bytes: Some(bytes) }]
                     }
                     (None, None) => return Err(CellError::host(format!("no template {which}"))),
@@ -279,7 +276,7 @@ impl FragmentCell {
     /// name made again, between its awaits leaves the next life's pending
     /// template, title and repo to that life's own seed. Asked after an
     /// await and before what the step writes or commits next.
-    fn same_life(&self, life: i64, when: &str) -> CellResult<()> {
+    pub(crate) fn same_life(&self, life: i64, when: &str) -> CellResult<()> {
         if self.meta(MetaKey::CreatedAt)?.and_then(|at| at.parse::<i64>().ok()) == Some(life) {
             return Ok(());
         }
@@ -331,6 +328,7 @@ impl FragmentCell {
     /// files and 1 MiB). A `key` makes a retry commit nothing twice.
     pub(crate) async fn write_files_api(&self, caller: &Caller, body: Value) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        let life = self.life()?;
         self.writable().await?;
         let who = self.caller_id(caller)?.to_string();
         let files = body["files"].as_array().filter(|f| !f.is_empty()).ok_or_else(|| CellError::invalid("files: a list of {path, text | base64 | delete}"))?;
@@ -351,8 +349,8 @@ impl FragmentCell {
         if total > fragment_proto::limits::API_FILES_WRITE_MAX_BYTES {
             return Err(CellError::too_large("the files written", total, fragment_proto::limits::API_FILES_WRITE_MAX_BYTES));
         }
-        // an agent's picture is refused here, before it is committed, as its
-        // install refuses one (docs/api.md, "An agent's name and picture")
+        // an agent's picture is refused here, before it is committed, as main's
+        // read of it would refuse it (docs/api.md, "An agent's name and picture")
         if let Some(bytes) = writes.iter().find(|w| w.path == fragment_core::face::AGENT_PICTURE).and_then(|w| w.bytes.as_deref()) {
             if self.kind()? == fragment_proto::FragmentKind::Agent {
                 fragment_core::face::check_picture(bytes).map_err(|r| crate::picture_refused(r, fragment_core::face::AGENT_PICTURE))?;
@@ -360,8 +358,28 @@ impl FragmentCell {
         }
         let message = body["message"].as_str().map_or_else(|| format!("write {} file(s)", writes.len()), str::to_string);
         let key = format!("api:{who}:{}", body["key"].as_str().map_or_else(js::random_hex::<16>, str::to_string));
+        // an older CLI's rename (plane.rs `title_from_read`) is one at a time
+        // with the face route's, its commit and its face together
+        let manifest = writes.iter().find(|w| w.path.as_str() == "fragment.json").and_then(|w| w.bytes.clone());
+        let _renaming = match manifest {
+            Some(_) => Some(self.renaming.lock().await),
+            None => None,
+        };
+        // one whose read was before a rename since is refused whole, its job
+        // and all, rather than half done
+        if manifest.as_deref().map(|m| self.title_read_stale(m)).transpose()? == Some(true) {
+            return Err(CellError::new(ErrorCode::Conflict, "it was renamed since its manifest was read: nothing was written; read it again"));
+        }
         match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {
-            Wrote::Commit(sha) => json_response(&json!({ "commit": sha })),
+            Wrote::Commit(sha) => {
+                // in the life it was let in to: one ended meanwhile renames no other
+                if let Some(written) = manifest.as_deref().filter(|_| self.life().ok() == Some(life)) {
+                    if self.title_from_read(written, &who)? {
+                        self.flush_index().await;
+                    }
+                }
+                json_response(&json!({ "commit": sha }))
+            }
             // nothing was expected, so nothing can conflict
             Wrote::Conflict(why) => Err(CellError::host(why)),
         }

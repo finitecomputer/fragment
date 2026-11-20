@@ -161,6 +161,10 @@ struct State {
     /// Per repo url: commit packs still to land with their answer dropped.
     #[serde(skip)]
     unanswered: BTreeMap<String, u32>,
+    /// A path whose reads fail (`read_failing`) once a commit's answer is
+    /// dropped (`fail_read_after_lost_answer`).
+    #[serde(skip)]
+    fail_after_lost: Option<String>,
     /// The next repo create is made, this many repos made after it, and
     /// its answer dropped (`lose_repo_create_answer`).
     #[serde(skip)]
@@ -887,6 +891,9 @@ impl Inner {
         let (old, new) = st.commit(url, Write { branch, message, author, changes: &changes, from: None });
         if let Some(left @ 1..) = st.unanswered.get_mut(url) {
             *left -= 1;
+            if let Some(path) = st.fail_after_lost.take() {
+                st.read_failing = Some(path);
+            }
             return Response::unanswered();
         }
         Response::json(
@@ -1506,6 +1513,13 @@ impl CodeStorage {
             let url = st.url_of(repo).expect("drop_commit_answers on a known repo");
             st.unanswered.insert(url, n);
         });
+    }
+
+    /// Once the next commit's answer is dropped (`drop_commit_answers`),
+    /// reads of `path` answer 503 (`fail_file_read`, cleared by it): a
+    /// writer that lost its answer and cannot read back what it wrote.
+    pub fn fail_read_after_lost_answer(&self, path: &str) {
+        self.with(|st| st.fail_after_lost = Some(path.to_string()));
     }
 
     pub fn commit_pack_count(&self) -> u32 {

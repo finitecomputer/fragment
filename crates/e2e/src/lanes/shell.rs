@@ -120,8 +120,8 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     });
     let list = shell(api, &session, "GET", "/api/fragments", None, &[])?;
     s.ok("the person's list says it is an agent, and its title", landed, &list);
-    let manifest = shell(api, &session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?;
-    s.ok("its repo names the template and its face, nothing else", manifest.body == json!({ "template": "agent", "meta": { "title": "Juniper" } }), &manifest);
+    let manifest = shell(api, &session, "GET", &format!("/api/f/{agent}/file?path=fragment.json"), None, &[])?;
+    s.ok("its repo names the template, nothing else (its face is its cell's)", serde_json::from_str::<Value>(&manifest.text).ok() == Some(json!({ "template": "agent" })), &manifest);
     let page = api.call(Call { method: "GET", url: api.site_url(&agent, ""), cookie: None, ..Call::default() })?;
     let owner_page = shell_site(s, api, &session, &agent, "")?;
     s.ok(
@@ -2627,16 +2627,16 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let opened = menu_item(b, page, "Its screen")?;
     let named = opened && screen_named(s, b, "Frank");
     s.ok("its screen's window and page name it by its name, never its label", named, json!({ "label": me.first, "shown": screen_said(b) }));
-    // renamed elsewhere, with `fragment agent --name` (its files, then a
-    // deploy): the sidebar and the chat's page follow; the chat's own title
-    // is the chat's, and stays
+    // renamed elsewhere, with `fragment agent --name` (its face, at once):
+    // the sidebar and the chat's page follow; the chat's own title is the
+    // chat's, and stays
     let wrote = rename_by_cli(s, api, &cli, &agent, "Frankie") && job_now() == job_of("Frankie");
     let followed = b.until(page, &format!("document.querySelector({hero_title})?.textContent === 'Frankie'"), wait);
     let in_frame = s.eventually(wait, || b.eval_in_frame(page, chat, "document.getElementById('head-label')?.textContent === 'Frankie'").ok() == Some(Value::Bool(true)));
     let kept = b.eval(page, &format!("({{ row: document.querySelector({own_row})?.textContent ?? null, header: document.getElementById('chat-title').textContent }})"))?;
     let listed = own_row_of(api, me.session, chat);
     s.ok(
-        "renamed elsewhere (its files and a deploy, as the CLI does), the sidebar and the chat's page follow with no reload, and its first chat keeps its own title: its row, its header and its fragment's",
+        "renamed elsewhere (its face, as the CLI sets it), the sidebar and the chat's page follow with no reload, and its first chat keeps its own title: its row, its header and its fragment's",
         wrote && followed && in_frame && kept["row"] == FIRST_CHAT && kept["header"] == FIRST_CHAT && listed["title"] == FIRST_CHAT,
         json!({ "shown": kept, "chat": listed }),
     );
@@ -2758,35 +2758,50 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     );
     // its page in a tab of its own (Open in a new tab: no shell tells it its
     // name), as every reader shows it (Alex's review of #630): a padded
-    // title trimmed, one of only spaces or none its label, and one that is
-    // its fragment's name in full shown as it is; on a computer, and fresh,
-    // on none yet
+    // title trimmed, none its label (made with none), and one that is its
+    // fragment's name in full shown as it is; on a computer, and fresh, on
+    // none yet. A title of only spaces is refused, the name it had kept
     let fresh = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": "standalone", "template": "agent" })), &[])?;
     let fresh = fresh.body["name"].as_str().unwrap_or("").to_string();
     let mut said = vec![];
     for one in [agent.clone(), fresh.clone()] {
         let label = label_of(&one).to_string();
         let standalone = format!("{}/auth/fragment?name={one}&return=/", api.base);
-        for (title, shown) in [(Some("  Rosalind  "), "Rosalind"), (Some("   "), label.as_str()), (None, label.as_str()), (Some(one.as_str()), one.as_str())] {
-            let wrote = retitle(api, me.session, &one, title)?;
-            let row = s.eventually(wait, || own_row_of(api, me.session, &one)["title"] == json!(title.map(str::trim).filter(|t| !t.is_empty())));
+        let made = if one == fresh { vec![(None, label.as_str())] } else { vec![] };
+        for (title, shown) in made.into_iter().chain([(Some("  Rosalind  "), "Rosalind"), (Some(one.as_str()), one.as_str())]) {
+            let wrote = title.map_or(Ok(true), |t| retitle(api, me.session, &one, t))?;
+            let row = s.eventually(wait, || own_row_of(api, me.session, &one)["title"] == json!(title.map(str::trim)));
             let tab = b.open(&standalone)?;
             let named = b.until(&tab, &format!("document.getElementById('name')?.textContent === {shown:?} && document.title === {shown:?}"), wait);
             said.push(json!({ "agent": one, "title": title, "wrote": wrote, "row": row, "named": named, "page": b.eval(&tab, "({ name: document.getElementById('name')?.textContent ?? null, title: document.title })").ok() }));
             b.close(tab)?;
         }
     }
-    retitle(api, me.session, &agent, Some("Rosalind"))?;
+    let blank = !retitle(api, me.session, &agent, "   ")? && own_row_of(api, me.session, &agent)["title"] == agent.as_str();
+    retitle(api, me.session, &agent, "Rosalind")?;
     // the fresh one goes, so the person's agents are as the rest expects
     let gone = shell(api, me.session, "DELETE", &format!("/api/f/{fresh}"), None, &[])?;
     anyhow::ensure!(gone.status == 200, "the fresh agent's fragment deleted: {gone}");
     s.ok(
-        "its page alone, opened in a tab of its own, names it as every reader does: a padded title trimmed, a blank one or none its label, its fragment's name in full as it is; on its computer, and fresh on none",
-        !fresh.is_empty() && said.len() == 8 && said.iter().all(|c| c["wrote"] == true && c["row"] == true && c["named"] == true),
-        json!(said),
+        "its page alone, opened in a tab of its own, names it as every reader does: a padded title trimmed, none its label, its fragment's name in full as it is; on its computer, and fresh on none; a title of only spaces is refused, the name it had kept",
+        !fresh.is_empty() && blank && said.len() == 5 && said.iter().all(|c| c["wrote"] == true && c["row"] == true && c["named"] == true),
+        json!({ "said": said, "blank refused": blank }),
+    );
+    // a phone's photo, past what a request carries (3 MiB): drawn again in
+    // the browser to a picture, then kept, shown in its image's place
+    b.click(page, "#settings")?;
+    let photo = shots.join("agent-photo.jpg");
+    std::fs::write(&photo, super::faces::heavy_jpeg(3 * 1024 * 1024))?;
+    b.until(page, &format!("!!document.querySelector({})", js(&format!("[data-picture-for={}]", js(&agent)))), wait);
+    b.choose_files(page, &format!("[data-picture-for={}]", js(&agent)), &[&photo])?;
+    let redrawn = format!("(() => {{ const i = document.querySelector({}); return !!i && i.getAttribute('src') !== {} && i.complete && i.naturalWidth === 40; }})()", js(&format!("{hero} img")), js(&path));
+    let photographed = b.until(page, &redrawn, wait);
+    s.ok(
+        "and a photo past what a request carries (3 MiB) is drawn again in the browser and kept: the sidebar shows it, a new address",
+        std::fs::metadata(&photo).map(|m| m.len()).unwrap_or(0) > 3 * 1024 * 1024 && photographed,
+        json!({ "row": own_row_of(api, me.session, &agent), "said": b.eval(page, "document.querySelector('.agent-picture-field')?.closest('.agent-card, details, section')?.textContent?.slice(0, 200) ?? null").ok() }),
     );
     // Remove: gone everywhere
-    b.click(page, "#settings")?;
     let remove = js(&format!("[data-picture-remove={}]", js(&agent)));
     b.until(page, &format!("!!document.querySelector({remove}) && !document.querySelector({remove}).hidden"), wait);
     b.eval(page, &format!("(document.querySelector({remove}).click(), true)"))?;
@@ -2955,30 +2970,18 @@ fn settings_loading(b: &mut Browser, page: &Page, open: &str, wait: std::time::D
 }
 
 /// An agent renamed by its owner with the CLI, `fragment agent --name`
-/// (its `fragment.json`'s `meta.title`, and its job where it named it, in
-/// one commit, then deployed: docs/api.md, "An agent's name and picture"):
-/// whether the CLI said its new name.
+/// (its face's title, and its job where it named it, in a commit beside
+/// it: docs/api.md, "An agent's name and picture"): whether
+/// the CLI said its new name.
 fn rename_by_cli(s: &Suite, api: &Api, home: &std::path::Path, agent: &str, title: &str) -> bool {
     s.cli_json(api, home, &["agent", agent, "--name", title, "--json"]).is_ok_and(|v| v["name"] == title)
 }
 
-/// An agent's `fragment.json`'s `meta.title` written as is, or left out
-/// (`None`), then deployed: what no rename of its owner's makes (a blank
-/// title), as its files route takes it; whether both answered.
-fn retitle(api: &Api, session: &str, agent: &str, title: Option<&str>) -> Result<bool> {
-    let mut manifest = shell(api, session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?.body;
-    match title {
-        Some(t) => manifest["meta"]["title"] = json!(t),
-        None => {
-            if let Some(meta) = manifest["meta"].as_object_mut() {
-                meta.remove("title");
-            }
-        }
-    }
-    let files = json!({ "message": "rename", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }] });
-    let wrote = shell(api, session, "POST", &format!("/api/f/{agent}/files"), Some(&files), &[])?;
-    let deployed = shell(api, session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
-    Ok(wrote.status == 200 && deployed.status == 200)
+/// A fragment renamed through its face (`PUT /api/f/{name}/face`), as
+/// the shell's Rename sets it, with its title as given: whether it was
+/// taken.
+fn retitle(api: &Api, session: &str, name: &str, title: &str) -> Result<bool> {
+    Ok(shell(api, session, "PUT", &format!("/api/f/{name}/face"), Some(&json!({ "title": title })), &[])?.status == 200)
 }
 
 /// Where a document says `old` (a name an agent had), as a person or a
@@ -6846,13 +6849,13 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     let title: String = format!("{}…", said.chars().take(47).collect::<String>().trim_end());
     let answered = s.eventually(agent_wait, || replies(api, me.session, &fresh, &first_id, said) == 1);
     let titled = b.until(page, &format!("document.getElementById('chat-title').textContent === {} && document.querySelector({})?.querySelector('.label')?.textContent === {}", js(&title), js(&format!("#chats [data-key={}]", js(&format!("chat:{fresh}")))), js(&title)), wait);
-    let manifest = shell(api, me.session, "GET", &format!("/api/f/{fresh}/manifest"), None, &[])?;
+    let status = shell(api, me.session, "GET", &format!("/api/f/{fresh}/status"), None, &[])?;
     let first_row = b.eval(page, "document.querySelector('#chats .chat-row')?.dataset.key ?? null")?;
     let _ = b.screenshot(page, &shots.join("desktop-new-chat-titled.png"));
     s.ok(
         "its first message titles it (48 characters at most), the agent answers there, and it heads their chats, the newest",
-        answered && titled && manifest.body["meta"]["title"] == title.as_str() && first_row == format!("chat:{fresh}").as_str(),
-        json!({ "title": manifest.body["meta"]["title"], "want": title, "first": first_row }),
+        answered && titled && status.body["title"] == title.as_str() && first_row == format!("chat:{fresh}").as_str(),
+        json!({ "title": status.body["title"], "want": title, "first": first_row }),
     );
     // their main agent's hero's New chat (Paul, 2026-10-31: a hero's menu
     // starts a chat with its agent): an empty chat with it; asked again
@@ -9217,8 +9220,8 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     anyhow::ensure!(r.status == 200 && b.until(page, &format!("!document.querySelector({})", js(&chat_row(&made))), wait), "its new chat archived: {r}");
     // renamed elsewhere: its hero follows, in its place; renamed back, no copy of the other
     let named = |b: &mut Browser, name: &str| b.until(page, &format!("({HEROES}).map((h) => h.name).join() === {}", js(&format!("{first_title},{name}"))), wait);
-    let renamed = retitle(api, session, reader, Some("Ingrid"))? && named(b, "Ingrid");
-    let back = retitle(api, session, reader, Some("Reader"))? && named(b, "Reader");
+    let renamed = retitle(api, session, reader, "Ingrid")? && named(b, "Ingrid");
+    let back = retitle(api, session, reader, "Reader")? && named(b, "Reader");
     let hits = b.eval(page, &format!("({OLD_NAME_SWEEP})({})", js("Ingrid")))?;
     s.ok(
         "renamed elsewhere, its hero follows with no reload, its section where it was; renamed back, nothing the shell draws says the name it had",

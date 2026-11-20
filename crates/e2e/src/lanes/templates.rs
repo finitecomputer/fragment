@@ -302,8 +302,8 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let name = r.body["name"].as_str().unwrap_or("").to_string();
     s.ok("a skills fragment is made from the blessed skills template", r.status == 200 && !name.is_empty(), &r);
     let view = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
-    let m = api.signed(owner, "GET", &format!("/api/f/{name}/manifest"), None)?;
-    s.ok("its repo names the template, nothing else", m.body == json!({ "template": "skills" }), &m);
+    let m = api.signed(owner, "GET", &format!("/api/f/{name}/file?path=fragment.json"), None)?;
+    s.ok("its repo names the template, nothing else", serde_json::from_str::<Value>(&m.text).ok() == Some(json!({ "template": "skills" })), &m);
     let listed = api.signed(owner, "GET", "/api/fragments", None)?;
     let kind = listed.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str())).map(|f| f["kind"].clone());
     s.ok("its owner's list says it is their skills", kind == Some(json!("skills")), &listed);
