@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { listed, shelfOf, SHELVES } from "../shell/apps-page.js";
+import { listed, shelfOf, shoots, SHELVES } from "../shell/apps-page.js";
 
 const row = (kind, reach) => ({ name: `${kind}--a1b2`, kind, role: "owner", sharing: { visibility: "members", ...(reach === undefined ? {} : { reach }) } });
 
@@ -17,6 +17,20 @@ test("a chat that reaches their accounts (a connector) is listed; one that does 
   assert.equal(listed(row("chat", true)), true);
   assert.equal(listed(row("chat", false)), false);
   assert.equal(listed(row("chat")), false);
+});
+
+// Paul's preview console, 2026-11-19: a members-only brain of his was
+// asked for its card 65 times in a session, each a 404, though the
+// platform never shoots a members-only page (docs/api.md, Cards).
+test("a card is shot of an app or brain unless their own row says it is members only", () => {
+  const of = (kind, role, visibility) => ({ name: `${kind}--a1b2`, kind, role, ...(visibility ? { sharing: { visibility } } : {}) });
+  for (const kind of ["app", "brain"]) {
+    assert.equal(shoots(of(kind, "owner", "members")), false, `their own members-only ${kind}`);
+    for (const visibility of ["link", "public"]) assert.equal(shoots(of(kind, "owner", visibility)), true, `their own ${visibility} ${kind}`);
+    // only an owner's row says its visibility: anyone else's may be shot
+    for (const role of ["editor", "viewer"]) assert.equal(shoots(of(kind, role)), true, `a ${kind} shared with them as ${role}`);
+  }
+  for (const kind of ["chat", "agent", "skills", "sessions", "site"]) assert.equal(shoots(of(kind, "owner", "link")), false, `a ${kind}`);
 });
 
 // Alex on #918: an agent's door is its SimpleX link, opened and closed in
