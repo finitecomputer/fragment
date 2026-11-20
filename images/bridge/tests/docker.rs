@@ -4164,6 +4164,87 @@ async fn a_computer_blown_away_tells_its_agent_the_chat() {
     eprintln!("blown away: the model was sent {} bytes: {last}", last.len());
 }
 
+/// What Hermes sent the model for `said` (the request whose last user
+/// message holds it): told the chat (`[Recent channel messages]` with the
+/// recap's head, holding each of `chat`), or told nothing.
+fn told_chat(calls: &[support::model::Call], said: &str, chat: &[&str]) -> Result<(), String> {
+    let (last, _) = asked_with(calls, said).ok_or_else(|| format!("no model request for {said:?}"))?;
+    let told = last.starts_with("[Recent channel messages]\nYour memory of this chat is behind") && chat.iter().all(|s| last.contains(s));
+    if told { Ok(()) } else { Err(last) }
+}
+
+/// Goal (FIN-543), with real Hermes: an agent's profile lost alone (its
+/// `state.db` with it), the bridge's state kept, is noticed at the next
+/// start. The marker of what Hermes was handed in each chat is beside the
+/// profile (the bridge's seen.rs), and went with it: the agent's next turn
+/// in the chat is told the chat, and the turn after is told nothing.
+/// Before, nothing noticed (no claim of the bridge's was refused), and
+/// Hermes answered from a new profile with no word of the chat.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_profile_lost_alone_is_told_the_chat() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    let code = x.say("remember the codeword: zebra-42");
+    within(fake, chat, &c, 180_000, "the codeword's turn to end", |w| !x.ends(w, &code).is_empty()).await;
+    // its profile lost alone (its sessions with it), then a start
+    assert!(c.exec(&["rm", "-rf", "/data/hermes/profiles/juniper--k3x9"]));
+    assert!(c.exec(&["test", "-s", "/data/bridge/state.json"]) || c.exec(&["test", "-s", "/data/bridge/state.log"]), "the bridge's state is kept");
+    c.restart();
+    let calls_before = x.model.calls.lock().unwrap().len();
+    let asked = x.say("what was the codeword?");
+    within(fake, chat, &c, 240_000, "the question's turn to end", |w| !x.ends(w, &asked).is_empty()).await;
+    let after = x.say("and after that?");
+    within(fake, chat, &c, 120_000, "the turn after's end", |w| !x.ends(w, &after).is_empty()).await;
+    let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
+    told_chat(&calls, "what was the codeword?", &["\nYour owner: remember the codeword: zebra-42\nYou: ", "\n\n[New message]\n[paul] what was the codeword?"]).unwrap_or_else(|last| panic!("the chat is told: {last:?}"));
+    let (asked_after, _) = asked_with(&calls, "and after that?").expect("a request for the message after");
+    assert!(!asked_after.contains("[Recent channel messages]"), "the turn after is told nothing: {asked_after:?}");
+    fake.with(|w| assert_eq!(w.bodies(chat, "work", "turn.start").iter().filter(|s| s["turn"] == code.as_str()).count(), 1, "the codeword's turn ran once"));
+    assert_eq!(c.exec_out(&["cat", &format!("/data/hermes/profiles/juniper--k3x9/fragment-seen/{chat}")]).trim(), after, "the marker beside the profile names the turn Hermes was handed last");
+}
+
+/// Goal (FIN-530), with real Hermes: a computer that comes back with
+/// nothing of its `/data` reads every chat again, and a chat no one writes
+/// in before it sleeps is still told at its next turn, a life later: what
+/// Hermes was handed there is a marker on the disk (none, here), not a
+/// mark in the life that read the chat. Before, that mark was lost with
+/// the life, and the turn was told nothing.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_chat_read_again_is_told_after_a_sleep() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let other = fake.chat("other", &["juniper"]);
+    let x = Expiry { fake, model, chat };
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    let c = x.container(&[]);
+    within(fake, chat, &c, 120_000, "Hermes' bridge to follow both chats", |w| w.live_sockets() >= 3).await;
+    let hello = x.say("hello");
+    within(fake, chat, &c, 180_000, "Hermes' first reply", |w| !x.ends(w, &hello).is_empty()).await;
+    let say_other = |text: &str| fragment_bridge::records::turn_id("juniper--k3x9", &other, "chat", fake.say(&other, &person("paul"), json!({ "text": text }))["seq"].as_u64().unwrap());
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&other, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let colour = say_other("remember the colour: teal-7");
+    within(fake, chat, &c, 180_000, "the other chat's turn to end", |w| ended(w, &colour)).await;
+    // blown away: a computer with an empty disk reads both chats again
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let c = x.container(&[]);
+    let calls_before = x.model.calls.lock().unwrap().len();
+    let here = x.say("what did I say first here?");
+    within(fake, chat, &c, 240_000, "this chat's turn to end", |w| !x.ends(w, &here).is_empty()).await;
+    // and it sleeps before anyone writes in the other chat
+    c.restart();
+    let asked = say_other("what was the colour?");
+    within(fake, chat, &c, 240_000, "the other chat's question to end", |w| ended(w, &asked)).await;
+    let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
+    told_chat(&calls, "what did I say first here?", &["\nYour owner: hello\nYou: "]).unwrap_or_else(|last| panic!("the chat written to first is told: {last:?}"));
+    told_chat(&calls, "what was the colour?", &["\nYour owner: remember the colour: teal-7\nYou: "]).unwrap_or_else(|last| panic!("a sleep later, the other chat is told too: {last:?}"));
+    fake.with(|w| assert_eq!(w.bodies(&other, "work", "turn.start").iter().filter(|s| s["turn"] == colour.as_str()).count(), 1, "the colour's turn ran once"));
+}
+
 /// Goal (Codex on #1305): a chat Hermes compressed answers on after a
 /// turn a crash cut, never paused. A compressed chat's admissions are its
 /// compression lineage's root's, while Hermes lists its newest session,

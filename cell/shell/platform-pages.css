@@ -1,11 +1,8 @@
 /* Standalone platform sheets, from finite-onboarding (1).html.
    Equal outer rows keep the card centered without clipping tall content.
    The shell's first run (#first-run: its splash, welcome and a seat's step)
-   shares its type, tokens, grid and card; the shell loads this file too. */
-@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:400;font-display:swap;src:url("funnel-sans-400.ttf") format("truetype")}
-@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:500;font-display:swap;src:url("funnel-sans-500.ttf") format("truetype")}
-@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:600;font-display:swap;src:url("funnel-sans-600.ttf") format("truetype")}
-@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:700;font-display:swap;src:url("funnel-sans-700.ttf") format("truetype")}
+   shares its type, tokens, grid and card; the shell loads this file too.
+   Its type, Funnel Sans, is fonts.css's, which each page links before it. */
 /* Its tokens are the root's, so the shell's first run has them too: the shell's own are other names. */
 :root{--fg:#20251f;--muted:#646e63;--bg:#f5f6f1;--line:rgba(43,59,40,.17);--line-strong:rgba(43,59,40,.24);--surface:#fff;--soft:rgba(120,145,95,.09);--accent:#466437}
 .platform-page{background:#f5f6f1 url("platform-landscape.jpg") center/cover fixed no-repeat}

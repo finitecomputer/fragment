@@ -369,6 +369,40 @@ fn an_agent_joining_a_fragment_wakes_it() {
     assert!(s.actions.is_empty() && s.refused.is_some(), "{s:?}");
 }
 
+/// Goal: the phase its owner is shown (and told of as it changes) follows
+/// a wake, a sleep, a wake that cancels a sleep, a wake heard once its stop
+/// began, and a start that kept failing; a start owed and due shows as
+/// starting before the alarm makes it.
+#[test]
+fn the_phase_shown_follows_its_wakes_and_sleeps() {
+    use fragment_proto::computer::ComputerPhase as Shown;
+    let mut l = Lifecycle::new();
+    assert_eq!(l.shown(T), Shown::Asleep);
+    let s = l.apply(Event::Wake { why: Wake::Record }, T);
+    let Some(Action::Start { generation: g }) = s.actions.first().cloned() else { panic!("a wake starts it: {s:?}") };
+    assert_eq!(l.shown(T), Shown::Starting, "while it starts, before its guest is up");
+    l.apply(Event::Ready { generation: g }, T + 3_000);
+    assert_eq!(l.shown(T + 3_000), Shown::Awake);
+    l.apply(Event::Alarm, T + IDLE_MS);
+    assert_eq!(l.shown(T + IDLE_MS), Shown::Sleeping);
+    // a message heard before its stop began: awake again at once
+    l.apply(Event::Wake { why: Wake::Record }, T + IDLE_MS + 100);
+    assert_eq!(l.shown(T + IDLE_MS + 100), Shown::Awake, "{:?}", l.phase);
+    // heard once its stop began: its start owed once it is down, shown as starting
+    let later = T + 2 * IDLE_MS + 1_000;
+    l.apply(Event::Alarm, later);
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, later + 500));
+    l.apply(Event::Saved { generation: g, seq }, later + 800);
+    l.apply(Event::Wake { why: Wake::Record }, later + 1_000);
+    assert_eq!(l.shown(later + 1_000), Shown::Sleeping, "{:?}", l.phase);
+    let s = l.apply(Event::Asleep { generation: g }, later + 5_000);
+    assert_eq!(l.shown(later + 5_000), Shown::Starting, "owed and due: {:?}", l.phase);
+    owed(&mut l, &s, later + 5_000);
+    assert_eq!(l.shown(later + 5_000), Shown::Starting);
+    let failed = Lifecycle { phase: Phase::Failed { why: "pull failed".into(), since_ms: T }, ..Lifecycle::new() };
+    assert_eq!(failed.shown(T), Shown::WontWake);
+}
+
 /// Goal: a wake racing a sleep whose stop began (its container is going)
 /// wins, and starts a new generation once the old one is gone; the old
 /// one's late reports change nothing.
@@ -914,7 +948,7 @@ fn any_wake_cancels_an_idle_sleep_before_its_stop() {
         let s = l.apply(Event::Wake { why }, at);
         assert!(s.actions.is_empty(), "its save holds the guest to its end: {why:?}: {s:?}");
         assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: T + IDLE_MS - 1 }, "awake as before its sleep: {why:?}");
-        assert_eq!(l.saving(), Some(Saving::Save { since_ms: T + IDLE_MS + 500, held: true, seq: 1 }), "its save goes on: {why:?}");
+        assert_eq!(l.saving(), Some(Saving::Save { since_ms: T + IDLE_MS + 500, held: true, seq: 1, unheld: false }), "its save goes on: {why:?}");
         let s = l.apply(Event::Saved { generation: g, seq: 1 }, at + 60_000);
         assert_eq!((s.actions, s.note, s.ended), (vec![Action::Unhold { generation: g }], SaveNote::Clear, None), "{why:?}");
         assert!(matches!(l.phase, Phase::Awake { generation, .. } if generation == g) && l.saving().is_none(), "{why:?}");
@@ -1155,26 +1189,31 @@ fn a_turn_open_at_a_cancel_is_saved_as_it_runs() {
     assert!(due.is_some() && s.actions.contains(&Action::Hold { generation: g }), "its turn's save, {} minutes on: {s:?}", SAVE_EVERY_MS / 60_000);
 }
 
-/// Goal (#1357's review): a save its owner's sleep or restart asked anew
-/// after a cancel (the cancelled sleep's save still under way) supersedes
-/// it, while that newer save is under way and after it is kept and its
-/// sleep ended: the DO never keeps the older as its newest. Valid: the
-/// save under way, alone, is no superseded one. Method: `superseded`
-/// through its owner's sleep, to its end.
+/// Goal (#1357's review, then #1378's): a save its owner's sleep or
+/// restart asked anew after a cancel (the cancelled sleep's save still
+/// under way) is the newest once kept: the cancelled one, ending after it,
+/// is overtaken and never kept ahead of it (`Saves::overtaken`); one that
+/// ends first, or whose newer save failed, is kept, a capture never lost
+/// for a save only asked. Method: the lifecycle through its owner's sleep
+/// to its end, the saves kept as the DO keeps them.
 #[test]
-fn a_save_asked_again_after_a_cancel_supersedes_the_one_under_way() {
+fn a_save_asked_again_after_a_cancel_overtakes_the_one_under_way() {
     let at = T + IDLE_MS + 1_000;
+    // the cancelled sleep's save (`idle_sleep`)
+    let began = 1;
     for owner in [Event::Sleep, Event::Restart { generation: 0 }] {
         let (mut l, g, _) = idle_sleep(true);
-        assert!(!l.superseded(1), "a save under way is waited for");
+        let mut saves = Saves::default();
+        assert!(!saves.overtaken(g, began), "a save under way, alone, is kept: {owner:?}");
         l.apply(Event::Wake { why: Wake::Record }, at);
         l.apply(owner.clone(), at + 100);
-        assert!(!l.superseded(1), "a hold asks no save yet: {owner:?}");
         let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 200));
-        assert!(seq == 2 && !l.superseded(2) && l.superseded(1), "{owner:?}");
+        assert_eq!(seq, 2, "{owner:?}");
+        assert!(!saves.overtaken(g, began), "a newer save only asked overtakes nothing: {owner:?}");
+        saves.saved(g, vec![serde_json::json!({ "id": "newer", "dir": "/data" })], seq, at + 300, true);
         l.apply(Event::Saved { generation: g, seq: 2 }, at + 300);
         l.apply(Event::Asleep { generation: g }, at + 400);
         assert!(l.running().is_none(), "its sleep ended: {owner:?}");
-        assert!(l.superseded(1) && !l.superseded(2), "and after its sleep: {owner:?}");
+        assert!(saves.overtaken(g, began) && !saves.overtaken(g, seq), "the cancelled one, asked before it, is overtaken: {owner:?}");
     }
 }

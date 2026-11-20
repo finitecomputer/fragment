@@ -179,7 +179,7 @@ fn simulated_interleavings_keep_the_invariants() {
             if let Some(seq) = kept {
                 // the save the DO keeps, as it reports it kept
                 let (of, at, held) = taken[&seq];
-                saves.saved(of, rec(&format!("b{seed0}-{seq}")), now, held);
+                saves.saved(of, rec(&format!("b{seed0}-{seq}")), seq, now, held);
                 newest_save_ms = at;
                 reached[0] += 1;
                 // what a life did is kept in it: a start that never came up

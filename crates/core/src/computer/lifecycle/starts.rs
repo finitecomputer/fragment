@@ -2,7 +2,7 @@
 //! after a pause, then "won't wake" until its owner asks or the pause
 //! passes), a life's beginning and end, and whether a start's guest is alive.
 
-use fragment_proto::computer::LifeEnd;
+use fragment_proto::computer::{ComputerPhase, LifeEnd};
 
 use super::{Action, Ended, Lifecycle, Phase, Retry, Saving, Step};
 use crate::computer::limits::{RETRY_PAUSE_MS, STARTS_FAILED_MAX, TAB_USED_EVERY_MS};
@@ -217,6 +217,20 @@ impl Lifecycle {
     /// generation the start it restarted until the alarm's start is made.
     pub fn starting(&self, now_ms: i64) -> bool {
         matches!(self.phase, Phase::Starting { .. }) || (self.start_due(now_ms) && self.retry().is_some_and(|r| r.owed || self.wanted(now_ms)))
+    }
+
+    /// The phase its owner's view says at `now_ms` (`ComputerView::phase`);
+    /// its owner's open pages are told each time it changes, as a start
+    /// under way is what a chat waiting on its agent says.
+    pub fn shown(&self, now_ms: i64) -> ComputerPhase {
+        match self.phase {
+            _ if self.starting(now_ms) => ComputerPhase::Starting,
+            Phase::Asleep { .. } => ComputerPhase::Asleep,
+            Phase::Starting { .. } => ComputerPhase::Starting,
+            Phase::Awake { .. } => ComputerPhase::Awake,
+            Phase::Sleeping { .. } => ComputerPhase::Sleeping,
+            Phase::Failed { .. } => ComputerPhase::WontWake,
+        }
     }
 }
 

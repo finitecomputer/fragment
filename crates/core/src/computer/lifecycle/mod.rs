@@ -602,6 +602,7 @@ impl Lifecycle {
                 | Event::SnapshotFailed { .. }
                 | Event::RestoreFailed { .. }
                 | Event::Held { .. }
+                | Event::HomeSaved { .. }
                 | Event::Saved { .. }
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }
@@ -682,6 +683,7 @@ impl Lifecycle {
             (Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. }, Event::Held { generation: g, held }) if g == generation && matches!(self.saving, Some(Saving::Hold { .. })) => {
                 self.save(generation, held, now_ms, &mut step);
             }
+            (Phase::Awake { .. } | Phase::Sleeping { .. }, Event::HomeSaved { generation, seq }) => self.home_saved(generation, seq, &mut step),
             (Phase::Awake { generation, .. }, Event::Held { generation: g, .. }) if g == generation && self.saving.is_none() => {
                 // a hold whose sleep was cancelled as it was made: its touch
                 // may have landed after the cancel let go of it, so it is
@@ -689,6 +691,8 @@ impl Lifecycle {
                 step.actions.push(Action::Unhold { generation });
             }
             (Phase::Awake { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
+                // let go again, though it let go once its home was in: that
+                // unhold's exec may have failed (Codex on #1378)
                 self.saving = None;
                 self.saved(now_ms, &mut step);
                 step.actions.push(Action::Unhold { generation });
@@ -725,6 +729,7 @@ impl Lifecycle {
                 | Event::SnapshotFailed { .. }
                 | Event::RestoreFailed { .. }
                 | Event::Held { .. }
+                | Event::HomeSaved { .. }
                 | Event::Saved { .. }
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }

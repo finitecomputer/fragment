@@ -117,6 +117,11 @@ impl Runtime for Claude {
         MENU
     }
 
+    fn memory(&self) -> Option<super::Memory> {
+        let (config_dir, work_dir) = (self.config.config_dir.clone(), self.config.work_dir.clone());
+        Some(Arc::new(move |agent: &str| project(&config_dir, &work_dir.join(agent))))
+    }
+
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
         Box::pin(run(self.config, io))
     }
@@ -139,27 +144,31 @@ pub fn config_dir(home: &Path) -> PathBuf {
     home.join(".claude")
 }
 
-/// Claude Code's project directory for a working directory: the working
-/// directory with every character but letters and digits a `-` (Claude
-/// Code's sessions docs; ours are well under its 200).
-fn project_dir(config_dir: &Path, cwd: &Path) -> PathBuf {
+/// Claude Code's auto memory for an agent: `memory/` in its project
+/// directory (`project`; its `MEMORY.md` index and a file a topic), when
+/// no setting moves it and its working directory is no git repo's
+/// subfolder (an agent's is its own). The boot syncs it with its agent
+/// fragment (hermes-boot's sync.rs, FIN-542); the bridge's marker of what
+/// the runtime last took (`fragment-seen`, beside it) is not synced, so a
+/// memory restored on a new disk still has the chat told again.
+pub fn memory_dir(config_dir: &Path, cwd: &Path) -> PathBuf {
+    project(config_dir, cwd).join("memory")
+}
+
+/// Where Claude Code keeps a session's transcript, in its project's
+/// directory (`project`).
+pub fn transcript(config_dir: &Path, cwd: &Path, id: &str) -> PathBuf {
+    project(config_dir, cwd).join(format!("{id}.jsonl"))
+}
+
+/// Claude Code's project directory for a working directory, where an
+/// agent's transcripts are (its memory of its chats: `Runtime::memory`):
+/// the working directory with every character but letters and digits a
+/// `-` (Claude Code's sessions docs; ours are well under its 200).
+pub fn project(config_dir: &Path, cwd: &Path) -> PathBuf {
     let project: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     assert!(project.len() <= 200, "a working directory Claude Code names whole: {project}");
     config_dir.join("projects").join(project)
-}
-
-/// Where Claude Code keeps a session's transcript.
-pub fn transcript(config_dir: &Path, cwd: &Path, id: &str) -> PathBuf {
-    project_dir(config_dir, cwd).join(format!("{id}.jsonl"))
-}
-
-/// Claude Code's auto memory for an agent: `memory/` in its project
-/// directory (its `MEMORY.md` index and a file a topic), when no setting
-/// moves it and its working directory is no git repo's subfolder (an
-/// agent's is its own). The boot syncs it with its agent fragment
-/// (hermes-boot's sync.rs, FIN-542).
-pub fn memory_dir(config_dir: &Path, cwd: &Path) -> PathBuf {
-    project_dir(config_dir, cwd).join("memory")
 }
 
 /// Each chat's `/new` count, by `agent|chat` (none: 0), kept in
@@ -1122,8 +1131,11 @@ async fn begin(cfg: &ClaudeConfig, ts: &TurnStart, cwd: &Path, id: &str, proc: &
     }
     let p = proc.as_mut().expect("started");
     let started = p.started;
-    if let Err(e) = write(&mut p.stdin, &user_message(&message)).await {
-        crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() });
+    match write(&mut p.stdin, &user_message(&message)).await {
+        Ok(()) => {
+            let _ = events.send(Event::Taken { turn: ts.turn.clone() }).await;
+        }
+        Err(e) => crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() }),
     }
     *turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), drafted_at: None, draft_due: false, calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false });
 }
@@ -1637,7 +1649,6 @@ mod tests {
             routine: false,
             claim_seq: None,
             note: Some("the turn before was cut".into()),
-            forgotten: false,
             command: false,
             reply_to: None,
             quote: Some(super::super::Quote { id: "q".into(), text: "earlier".into(), own: true }),

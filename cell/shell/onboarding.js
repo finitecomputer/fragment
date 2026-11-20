@@ -476,12 +476,9 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       const runs = setup.runtime === "claude" ? { runtime: "claude" } : { tier: DEFAULT_AGENT_TIER };
       if (setup.from) runs.from = setup.from;
       const files = [{ path: "SOUL.md", text: job(owner) }, { path: "agent.json", text: JSON.stringify(runs, null, 2) + "\n" }];
-      // its role, beside its name in its fragment.json (`meta.role`)
-      if (setup.role) {
-        const manifest = await api("GET", `/api/f/${seg(agent)}/manifest`);
-        manifest.meta = { ...(manifest.meta ?? {}), role: setup.role };
-        files.push({ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" });
-      }
+      // its role, beside its name in its face, before its job (whose file
+      // says it is written: a retry sets the role again, the same)
+      if (setup.role) await api("PUT", `/api/f/${seg(agent)}/face`, { role: setup.role });
       await api("POST", `/api/f/${agent}/files`, { key: "agent-default", message: "its job", files });
     }
     setupChanged({ written: true });

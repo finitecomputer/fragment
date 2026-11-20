@@ -97,6 +97,9 @@ pub struct FragmentCell {
     /// refused (publish.rs). Its stage is in its rows, not here
     /// (`fragment_core::seed`).
     pub(crate) seeding: futures_util::lock::Mutex<()>,
+    /// Serializes an agent's renames: each reads its job, commits it and
+    /// sets its face (members.rs `face_put`).
+    pub(crate) renaming: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
     /// Whether this activation has swept its pending mutations.
     pub(crate) swept: Cell<bool>,
@@ -158,6 +161,7 @@ impl DurableObject for FragmentCell {
             cfg,
             plane: futures_util::lock::Mutex::new(()),
             seeding: futures_util::lock::Mutex::new(()),
+            renaming: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
             woke: Cell::new(false),
@@ -335,7 +339,8 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
-    /// The title a template's fragment starts with (`TemplatePending`'s).
+    /// The title a copied template's fragment starts with
+    /// (`TemplatePending`'s), stamped into its `fragment.json`.
     TemplateTitle,
     /// The commits the cell pins (plane.rs).
     PinMain,
@@ -365,12 +370,24 @@ pub(crate) enum MetaKey {
     /// The blessed template live runs and its release (`<name>@<release>`,
     /// blessed.rs in crates/templates), when it names one.
     Blessed,
-    /// What its members' lists show of it (`{kind, title, picture?}`), as
-    /// last sent.
+    /// What its members' lists show of it (`{kind, title?, role?,
+    /// picture?}`): its title and an agent's role are kept here alone, set
+    /// at its making and through its face route (members.rs `face_put`).
     Face,
-    /// An agent fragment's picture as live's install read it (`<sha256>
-    /// <type> <commit>`): what `calls::Picture` answers.
+    /// An agent fragment's picture as main's last move read it (`<sha256>
+    /// <type> <commit>`, plane.rs `read_picture`): what `calls::Picture`
+    /// answers.
     Picture,
+    /// An agent's rename whose job commit's answer was lost, and the
+    /// renames before it the job may hold: a JSON array of `[name, sha256
+    /// of the job it wrote]`. The next takes a name for an old one only
+    /// while its job is the one that rename wrote (members.rs `job_says`).
+    Renaming,
+    /// The marks `GET manifest` gave its editors with the title each read
+    /// showed (a JSON array of `[mark, title]`, at most `TITLE_READS_MAX`,
+    /// newest last): a write of `fragment.json` naming one is an older CLI
+    /// renaming it (plane.rs `title_from_read`; the debt ledger).
+    TitleRead,
     /// The channels that list records, their kinds, fields and read
     /// roles, as the rows last carried them (listed.rs `listed_fence`).
     Listed,
@@ -529,6 +546,8 @@ impl MetaKey {
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
+            MetaKey::Renaming => "renaming",
+            MetaKey::TitleRead => "title_read",
             MetaKey::Listed => "listed",
             MetaKey::ListedSentAt => "listed_sent_at",
             MetaKey::ListedDue => "listed_due",
@@ -606,8 +625,8 @@ pub(crate) struct Facts {
     pub name: String,
     pub visibility: Visibility,
     pub view_token: String,
-    /// Its repo at code.storage: `None` until its template's seed makes
-    /// it, when its create answered first (publish.rs `seeds_later`).
+    /// Its repo at code.storage: `None` until its first writer's seed makes
+    /// it, a blessed template's (`seed::Making::SeedsLater`).
     pub repo: Option<String>,
     pub pin_main: Option<String>,
     pub pin_live: Option<String>,
@@ -1210,6 +1229,10 @@ impl FragmentCell {
                 let bytes = req.bytes().await?;
                 self.upload_card(&caller, bytes).await
             }
+            (Method::Put, ["api", "face"]) => {
+                let body = body_json(&mut req).await?;
+                self.face_put(&caller, body).await
+            }
             (Method::Get, ["api", "icon"]) => self.icon_get(&caller, &req).await,
             (Method::Put, ["api", "icon"]) => self.icon_put(&caller, &mut req).await,
             (Method::Delete, ["api", "icon"]) => self.icon_delete(&caller).await,
@@ -1346,7 +1369,8 @@ impl FragmentCell {
         let cs_cfg = self.cfg.codestorage();
         let making = match body.template.as_deref() {
             None => seed::Making::Plain,
-            Some(t) if crate::publish::seeds_later(t) => seed::Making::SeedsLater,
+            // the release's code: its repo comes at its first file
+            Some(t) if blessed::template(t).is_some() => seed::Making::SeedsLater,
             Some(_) => seed::Making::SeedsNow,
         };
         // Claim the name before the first await: a concurrent create for the
@@ -1374,22 +1398,23 @@ impl FragmentCell {
                 }
                 None => None,
             };
-            // a blessed template's face is known now: the owner's list says
-            // it is a chat or an agent from the start, not once it installs
-            // (a read of the release that fails leaves it to the install,
-            // which sets it from the same manifest). An agent's own is made
-            // shared with no one (alone.rs): refused before anything is made
+            // its face from the start, its own from then on (docs/api.md, "An
+            // agent's name and picture"): the title given, else its blessed
+            // template's; that template's kind, so the owner's list says it is
+            // a chat or an agent at once. A copied template's (an app), or a
+            // blessed one whose manifest did not read, is an app's until its
+            // install says, its title, if none was given, the install's
+            // default. An agent's own is made shared with no one (alone.rs):
+            // refused before anything is made
             let face = match body.template.as_deref() {
                 Some(t) => {
-                    let face = match crate::assets::blessed_manifest(&self.env, t).await {
-                        Ok(Ok(m)) if m.kind() == fragment_proto::FragmentKind::Agent && body.visibility.is_some_and(|v| v != Visibility::Members) => {
-                            return Err(CellError::new(ErrorCode::Forbidden, crate::alone::AGENT));
-                        }
-                        Ok(Ok(m)) => Some(crate::members::face(m.kind(), body.title.as_deref().map(str::trim).or(m.title()), m.role(), None)),
-                        _ => None,
-                    };
+                    let blessed = crate::assets::blessed_manifest(&self.env, t).await.ok().and_then(Result::ok);
+                    if blessed.as_ref().is_some_and(|m| m.kind() == fragment_proto::FragmentKind::Agent) && body.visibility.is_some_and(|v| v != Visibility::Members) {
+                        return Err(CellError::new(ErrorCode::Forbidden, crate::alone::AGENT));
+                    }
                     laps.lap("manifest");
-                    face
+                    let (kind, title) = blessed.as_ref().map_or((fragment_proto::FragmentKind::App, None), |m| (m.kind(), m.title()));
+                    Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None))
                 }
                 None => None,
             };
@@ -1510,7 +1535,7 @@ impl FragmentCell {
                 // did not land is retried by the alarm, and whichever seed
                 // lands it tells its agents they joined
                 seed::Effect::Commit => {
-                    if let Err(e) = self.seed().await {
+                    if let Err(e) = self.seed(seed::Event::Write, None).await {
                         self.event("template.failed", &e.message, json!({ "code": e.code }));
                     }
                     laps.lap("seed");
@@ -1541,7 +1566,7 @@ impl FragmentCell {
             visibility,
             view_token,
             inbox_token,
-            // empty until its seed makes it (publish.rs `seeds_later`)
+            // a blessed template's: empty until its first file makes it
             repo: repo.unwrap_or_default(),
             canonical: self.cfg.canonical(&caller.url, &body.name),
         })?;
@@ -1587,7 +1612,7 @@ impl FragmentCell {
             owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
             role,
             visibility: facts.visibility,
-            // empty until its repo is made (publish.rs `seeds_later`)
+            // empty until its repo is made (`seed::Making::SeedsLater`)
             repo: facts.repo.unwrap_or_default(),
             pins: Pins { main: facts.pin_main, live: facts.pin_live },
             counts: Counts {
@@ -1669,10 +1694,10 @@ impl FragmentCell {
         }
         self.flush_search().await;
         self.search_forget_due().await;
-        // a template still to land takes its next step (publish.rs `seed`);
-        // a chat made a moment ago takes its first here, its create having
-        // armed this pass at once
-        if let Err(e) = self.seed().await {
+        // a template still to land that the release does not run takes its
+        // next step (publish.rs `seed`); one it runs waits for its first
+        // writer, and asks code.storage nothing here
+        if let Err(e) = self.seed(seed::Event::Alarm, None).await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
         // after its seed: an agent's notice waits until its template is in

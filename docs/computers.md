@@ -241,7 +241,10 @@ The owner's view carries `notices` (proto's `ComputerNotice`, from
 `fragment_core::computer::notices`; their fields are docs/api.md's), the
 most pressing first. Each is derived from the Computer DO's own state
 with no clock, so every reader is told the same, and when they change the
-DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
+DO tells its owner's open pages (`/api/fragments/watch`'s `changed`), as
+it does when its phase changes (`Lifecycle::shown`: a chat with their
+agent says it is getting ready while it starts, before the start's own
+steps; its "no reply yet" waits until it is up):
 
 - `wont_wake`: its starts kept failing.
 - `disk_filling`: its disk, read (`df`) in each start that restores a
@@ -310,9 +313,9 @@ draws them over every chat and Settings with no code of its own for any.
   failing idle computer is kept. That time is the platform's, not metered
   (docs/ledger.md, "Who pays").
 - **The agent** is told what a cut lost, and the chat when a rollback or
-  a loss of `/data` made its runtime forget it, in its next turn in each
-  chat (docs/bridge.md, "The turn after a cut one is told" and "What a
-  runtime forgot").
+  a loss of `/data`, or of its runtime's memory alone, made its runtime
+  forget it, in its next turn in each chat (docs/bridge.md, "The turn
+  after a cut one is told" and "What a runtime forgot").
 - **Getting help**: a deployment may name `support_url`, which a
   `wont_wake` notice offers beside Restart.
 
@@ -428,11 +431,14 @@ touches `/run/computer/hold`, and waits up to `HOLD_WAIT_MS` (20 s) for
 the guest to touch `/run/computer/held`: its answer that it claims
 nothing now (no claim in flight, none new while the hold exists) and has
 copied what a hot copy would tear. Then the DO saves. An awake save lets
-go after (it removes the files); a sleep keeps the hold until its
-container is gone. A guest that never answers is saved anyway, the save
-recorded as not `held`. What the guest already claimed may run on. A
-fresh container never has the files: the DO removes them from one started
-from a snapshot.
+go (it removes the files) once its home's record is taken, the rest of
+`/data` with the copies in it, and takes its work's while its guest
+works: the hold never made the work whole (what the guest already claimed
+writes to it during any save, and nothing in it is copied under the
+hold). A sleep keeps the hold until its container is gone. A guest that
+never answers is saved anyway, the save recorded as not `held`. What the
+guest already claimed may run on. A fresh container never has the files:
+the DO removes them from one started from a snapshot.
 
 - **What the save leaves out.** `held` may name, one per line, what the
   save of `/data` leaves out: gitignore patterns relative to `/data`, the
@@ -991,8 +997,8 @@ same inputs ask nothing.
 
 ### Its name, in our Hermes image
 
-An agent's name is its agent fragment's title, and its role its
-`meta.role` (docs/api.md, "An agent's name and picture"). The image tells
+An agent's name is its agent fragment's title, and its role its face's
+role (docs/api.md, "An agent's name and picture"). The image tells
 the agent both in its system prompt at every turn (`hermes::told`),
 read again every 10 s, so a rename or a new role is its next turn's,
 nothing restarted.

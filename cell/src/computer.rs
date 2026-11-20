@@ -183,6 +183,12 @@ const SHIM_UNHANG: &str = "cd /usr/local/bin && { test ! -e sandbox-shim.real ||
 /// once its container is up, so it never reads its view, as a dead one's
 /// guest never does (#362).
 const SIGSTOP: f64 = 19.0;
+/// SIGKILL: what ends that stopped guest once its start is dead. Stopped,
+/// it takes no SIGTERM, so a destroy waits out the runtime's own kill;
+/// on a loaded host that ran past `DESTROY_MS` and refused the same wake's
+/// next start (the e2e `computers` lane's #362 check). A dead guest that
+/// is not stopped takes its destroy at once, as this one then does.
+const SIGKILL: f64 = 9.0;
 /// A marker's exec answers within this, or it failed: a sleep goes on
 /// without its hold, a start fails.
 const MARK_EXEC_MS: i64 = 30_000;
@@ -222,6 +228,12 @@ const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK
 /// The lever's `slow-tell` waits at most this: a restart's request is held
 /// no longer than a request's wait in the lane.
 const SLOW_TELL_MAX_MS: u64 = 30_000;
+/// A tell to its owner's open pages waits at most this. A call to their
+/// list takes a few ms; past this the computer goes on without it, so a
+/// slow or stuck owner never holds a start, a wake's answer or a sleep
+/// (#1381), and a page that did not hear reads it again at its next change
+/// or as it reconnects.
+const TELL_MAX_MS: u64 = 3_000;
 /// The lever's `stall-failing-start` waits at most this.
 const STALL_FAILING_START_MAX_MS: u64 = 10 * 60_000;
 /// A takeover that failed (`take_over`) is tried again by an alarm within
@@ -294,7 +306,8 @@ const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS 
 const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
 const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS + MARK_EXEC_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, its disk's read among its steps, and an alarm's other events fit an alarm of its own");
 const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
-const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + 2 * UNMARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(SAVE_STEPS_MS + UNMARK_EXEC_MS < SAVE_DEADLINE_MS, "an awake save, its unhold past its home among its steps, reports before its deadline");
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
 const _: () = assert!(ALARM_WALL_MS + ALARM_OTHER_MS < ALARM_LATE_MS, "an alarm held up behind one alarm's run is on time, metered as it was");
@@ -363,6 +376,8 @@ enum MetaKey {
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
     SlowTell,
+    /// The test lever's wait before a start's owner is told (`slow-start-tell`), in ms.
+    SlowStartTell,
     /// The test lever's slow snapshot for its next sleep (`slow-snapshot`),
     /// in ms.
     SlowSnapshot,
@@ -412,6 +427,7 @@ impl MetaKey {
             MetaKey::RelayDay => "relay_day",
             MetaKey::ClockOffset => "clock_offset",
             MetaKey::SlowTell => "slow_tell",
+            MetaKey::SlowStartTell => "slow_start_tell",
             MetaKey::SlowSnapshot => "slow_snapshot",
             MetaKey::SnapshotBound => "snapshot_bound",
             MetaKey::StallFailingStart => "stall_failing_start",
@@ -480,6 +496,8 @@ pub struct ComputerCell {
     /// for a let-go in flight, so a let-go never lands after a newer touch;
     /// a let-go never waits for a touch in flight, whose answer lets go
     /// again if its sleep was cancelled (`Lifecycle`'s late `Held`).
+    /// The same turn orders a start's let-go of its snapshot's hold and
+    /// an awake save's let-go past its home (#1378).
     marking: futures_util::lock::Mutex<()>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
@@ -962,7 +980,7 @@ impl ComputerCell {
     /// `drive_with`, its answer taken as its start is owed when `answer` is
     /// asked for (an owner's restart: `drive_events`).
     async fn drive_answering(&self, first: Option<Event>, asked: bool, mut answer: Option<&mut Option<Unasked>>) -> CellResult<Option<String>> {
-        let told = self.notices()?;
+        let told = (self.notices()?, phase_told(&self.lifecycle()?));
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
         let mut refused = self.drive_events(first, answer.as_deref_mut()).await;
@@ -986,9 +1004,10 @@ impl ComputerCell {
             // in which the alarm makes the start a restart owed
             self.slow_tell().await;
         }
-        // what its owner is told changed: their open pages read it again
-        // (whatever the events did, a step that failed half way included)
-        if self.notices().is_ok_and(|now| now != told) {
+        // what its owner is told changed (its notices, or its phase): their
+        // open pages read it again (whatever the events did, a step that
+        // failed half way included)
+        if self.notices().and_then(|n| Ok((n, phase_told(&self.lifecycle()?)))).is_ok_and(|now| now != told) {
             self.tell_owner().await;
         }
         refused
@@ -1129,13 +1148,30 @@ impl ComputerCell {
         }
     }
 
-    /// Tells its owner's open pages to read it again. One that did not hear
-    /// reads it as it reconnects, or at its next change: logged, never failed.
+    /// Tells its owner's open pages to read it again, within `TELL_MAX_MS`.
+    /// One that did not hear reads it as it reconnects, or at its next
+    /// change: logged, never failed.
     async fn tell_owner(&self) {
+        self.tell_owner_after(None).await;
+    }
+
+    /// `tell_owner`, a lever's wait (`lever`'s ms: `slow-start-tell`) first,
+    /// the two within `TELL_MAX_MS` together: a slow owner, as the lane makes one.
+    async fn tell_owner_after(&self, lever: Option<MetaKey>) {
         let Ok(Some(owner)) = self.meta(MetaKey::Owner) else { return };
-        if let Err(e) = crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await {
-            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": e.message }));
-        }
+        let told = async {
+            if let Some(key) = lever {
+                self.lever_wait(key, SLOW_TELL_MAX_MS).await;
+            }
+            crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await
+        };
+        let bound = Delay::from(std::time::Duration::from_millis(TELL_MAX_MS));
+        let error = match futures_util::future::select(Box::pin(told), Box::pin(bound)).await {
+            futures_util::future::Either::Left((Ok(()), _)) => return,
+            futures_util::future::Either::Left((Err(e), _)) => e.message,
+            futures_util::future::Either::Right(_) => format!("no answer in {TELL_MAX_MS} ms: gone on without it"),
+        };
+        console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": error }));
     }
 
     /// `answer`, when asked for and still empty, takes the view as its
@@ -1165,12 +1201,13 @@ impl ComputerCell {
         // unhold), or at a start or a sleep's end
         while let Some(event) = queue.pop() {
             let mut life = self.lifecycle()?;
+            let was = phase_told(&life);
             let logged = json!(event);
             let applied = event.clone();
             let now = js::now_ms();
             // an owner's restart it takes asks its start as it applies
             self.starts.borrow_mut().applying(&applied, &life, now);
-            let step = life.apply_with(event, now, &rules);
+            let mut step = life.apply_with(event, now, &rules);
             // one line per event (lesson 14): what happened, and what it led to
             let mut line = json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions });
             if let Some(ended) = step.ended {
@@ -1199,6 +1236,21 @@ impl ComputerCell {
                 }
             }
             self.alarm_at(step.alarm_ms).await?;
+            // a start begins: its owner's open pages read it again before
+            // its steps (a chat says its agent is getting ready while it
+            // starts); every other change is told as the drive ends. Awaited,
+            // never a task of its own: background work on a lifecycle route
+            // slowed container destroys (#1343)
+            let start = step.actions.iter().find_map(|a| if let Action::Start { generation } = a { Some(*generation) } else { None });
+            if let Some(g) = start.filter(|_| phase_told(&life) != was) {
+                self.tell_owner_after(Some(MetaKey::SlowStartTell)).await;
+                // what came in as it was told (its owner's sleep, a newer
+                // wake) may have ended this start: then none is made
+                if !matches!(self.lifecycle()?.phase, Phase::Starting { generation, .. } if generation == g) {
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "start": g, "superseded": "as its owner was told" }));
+                    step.actions.retain(|a| !matches!(a, Action::Start { .. }));
+                }
+            }
             refused = refused.or(step.refused.clone());
             for next in self.perform(step, until_ms, matches!(applied, Event::Held { .. })).await? {
                 queue.push(next);
@@ -1681,6 +1733,10 @@ impl ComputerCell {
             // (#1004). Stored, so an isolate after this one knows it too.
             self.start_failing(generation);
             self.stall_failing_start().await;
+            if planned.freeze {
+                // its exit is this failure's now (`start_failing`), no crash
+                let _ = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(SIGKILL)]).await;
+            }
         }
         match started {
             Ok(()) => {
@@ -1853,7 +1909,12 @@ impl ComputerCell {
                 self.starts.borrow_mut().up(generation, js::now_ms());
                 // its disk, before its guest is let go (as a restore's)
                 self.read_disk(generation).await;
-                self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
+                // unless its owner's sleep held it meanwhile (`lets_go`), as
+                // any unhold (Codex on #1378)
+                let _marking = self.marking.lock().await;
+                if self.lifecycle()?.lets_go(generation) {
+                    self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
+                }
             }
             Restore::Nothing => {}
         }
@@ -2028,9 +2089,11 @@ impl ComputerCell {
             let _ = self.call("closeTabs", &[why.into()]).await;
         }
         let t0 = js::now_ms();
+        // its mark's bound counts the wait for an unhold under way (at most
+        // `UNMARK_EXEC_MS`): the hold's steps stay within `HOLD_STEPS_MS`
         let marked = {
             let _marking = self.marking.lock().await;
-            self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await
+            self.mark(&g, HOLD_MARK, (MARK_EXEC_MS - (js::now_ms() - t0)).max(1)).await
         };
         if let Err(e) = marked {
             // a guest the DO cannot mark is saved as it is
@@ -2084,7 +2147,7 @@ impl ComputerCell {
         // its backups together within `BACKUPS_MS` (the lever's
         // `hang-backups`: its own), each given what is left
         let budget = self.meta(MetaKey::HangBackups).ok().flatten().and_then(|ms| ms.parse::<i64>().ok()).filter(|ms| (1..=BACKUPS_MS).contains(ms)).unwrap_or(BACKUPS_MS);
-        let until = js::now_ms() + budget;
+        let mut until = js::now_ms() + budget;
         // the lever's `hold-saves`: held here, within its backups' budget,
         // until the lever lets it go (a test posts as a sleep saves), looked
         // at every 100 ms
@@ -2109,6 +2172,13 @@ impl ComputerCell {
                 Ok(record) => {
                     took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
                     records.push(record);
+                    // its home is in, the copies its guest made under the
+                    // hold with it: an awake save lets go of its hold before
+                    // it takes its work's (`Lifecycle`'s `HomeSaved`)
+                    // (its time, at most `UNMARK_EXEC_MS`, is not the backups')
+                    if dir == "/data" {
+                        until += self.home_saved(generation, seq).await;
+                    }
                 }
                 Err(e) => {
                     console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": e.message, "ms": js::now_ms() - t0 }));
@@ -2121,17 +2191,17 @@ impl ComputerCell {
             }
         }
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
-        // a newer save of its container was asked as this one ran: never
-        // the newest kept (`Lifecycle::superseded`)
-        if self.lifecycle().is_ok_and(|l| l.superseded(seq)) {
-            console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "superseded": true, "ms": js::now_ms() - t0 }));
+        // a newer save of its start was kept as this one ran (its owner's
+        // sleep, once its guest went on): never kept ahead of it
+        if self.saves().is_ok_and(|s| s.overtaken(generation, seq)) {
+            console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "overtaken": true, "ms": js::now_ms() - t0 }));
             match self.update_saves(|s| s.let_go(records)) {
                 Ok(lost) => self.forget(lost).await,
                 Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
             }
-            return Event::SaveFailed { generation, seq, why: "a newer save was asked as it ran".into() };
+            return Event::SaveFailed { generation, seq, why: "a newer save was kept as it ran".into() };
         }
-        match self.keep_save(generation, records, held).await {
+        match self.keep_save(generation, records, seq, held).await {
             Ok(save) => {
                 // one line per save (lesson 14): which, how big, how long,
                 // and its home's and its work's apart
@@ -2143,6 +2213,37 @@ impl ComputerCell {
                 Event::SaveFailed { generation, seq, why: e.message }
             }
         }
+    }
+
+    /// Save `seq`'s home's record is taken: told to its lifecycle as the
+    /// drive tells any event (`drive_events`: stored, one line), within the
+    /// save, and the unhold it asks for (an awake save's, once) made at once,
+    /// so its guest claims turns again while its work is copied. It asks for
+    /// nothing else: no life ends, nothing of its saves is said, and its
+    /// alarm stays the save's deadline. Answers how long its unhold took.
+    async fn home_saved(&self, generation: u64, seq: u64) -> i64 {
+        let event = Event::HomeSaved { generation, seq };
+        let logged = json!(event);
+        let applied = self.lifecycle().and_then(|mut life| {
+            let step = life.apply_with(event, js::now_ms(), &self.rules());
+            // (whether it lets go, not its actions: their encoder costs the Wasm)
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "unhold": !step.actions.is_empty() }));
+            self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)?;
+            Ok(step)
+        });
+        let t = js::now_ms();
+        match applied {
+            Ok(step) => {
+                assert!(step.ended.is_none() && step.note == SaveNote::Same, "a save's home ends no life and says nothing of its saves");
+                for action in step.actions {
+                    let Action::Unhold { generation } = action else { unreachable!("a save's home asks for its unhold alone") };
+                    self.unhold(generation, true).await;
+                }
+            }
+            // held on to its end, as before: its end lets go
+            Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": seq, "homeSaved": "untold", "error": e.message })),
+        }
+        js::now_ms() - t
     }
 
     /// What the held guest of start `g` names as left out of its save (its
@@ -2171,11 +2272,12 @@ impl ComputerCell {
         })
     }
 
-    /// A save worked: it is the newest save, and the ones it pushed out of
-    /// the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
-    async fn keep_save(&self, generation: u64, records: Vec<Value>, held: bool) -> CellResult<Save> {
+    /// Save `seq` worked, and was not overtaken (checked just before, with
+    /// no await between): it is the newest save, and the ones it pushed out
+    /// of the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
+    async fn keep_save(&self, generation: u64, records: Vec<Value>, seq: u64, held: bool) -> CellResult<Save> {
         let at = js::now_ms();
-        let lost = self.update_saves(|s| s.saved(generation, records, at, held))?;
+        let lost = self.update_saves(|s| s.saved(generation, records, seq, at, held))?;
         let saves = self.saves()?;
         let save = saves.all().first().cloned().ok_or_else(|| CellError::host("no save after one was kept"))?;
         assert_eq!((save.generation, save.at_ms), (generation, at), "the save kept is the one just taken");
@@ -2213,16 +2315,18 @@ impl ComputerCell {
         }
     }
 
-    /// Lets go of the guest's hold: an awake save's end, or a sleep that
-    /// kept its container. A container that is gone has nothing to let go,
-    /// and one a newer hold, save or stop holds now is that one's (its
-    /// owner's sleep just after a wake cancelled one): left as it is. It
-    /// takes the marker's turn (`marking`) for its look and its command, so
-    /// a newer touch waits for it. With the turn taken it does nothing, never
-    /// waiting on a person's path (a wake's): a touch in flight hands it to
-    /// its answer's let-go. That one (`after_held`, a late hold's answer,
-    /// in an alarm: an idle sleep's or an awake save's) waits for the turn,
-    /// so it lands after a let-go in flight, whether or not that one did.
+    /// Lets go of the guest's hold, within `UNMARK_EXEC_MS` (an `rm`): an
+    /// awake save past its home or at its end, or a sleep that kept its
+    /// container. A container that is gone has nothing to let go, and one a
+    /// newer hold, save or stop holds now is that one's (`Lifecycle::lets_go`:
+    /// its owner's sleep just after a wake cancelled one, or one asked as an
+    /// awake save copied its work): left as it is. It takes the marker's turn
+    /// (`marking`) for its look and its command, so a newer touch waits for
+    /// it. With the turn taken it does nothing, never waiting on a person's
+    /// path (a wake's): a touch in flight hands it to its answer's let-go.
+    /// That one (`after_held`, a late hold's answer, or an awake save's
+    /// let-go past its home, in an alarm) waits for the turn, so it lands
+    /// after a let-go in flight, whether or not that one did.
     async fn unhold(&self, generation: u64, after_held: bool) {
         let _marking = match after_held {
             true => self.marking.lock().await,
@@ -2231,13 +2335,13 @@ impl ComputerCell {
                 None => return,
             },
         };
-        if !self.container_running().await || self.lifecycle().is_ok_and(|l| l.saving().is_some()) {
+        if !self.lifecycle().is_ok_and(|l| l.lets_go(generation)) || !self.container_running().await {
             return;
         }
         // (the lever's `stall-unhold`: a let-go slow to land, after its look)
         self.lever_wait(MetaKey::StallUnhold, STALL_FAILING_START_MAX_MS).await;
         let g = JsValue::from_f64(generation as f64);
-        if let Err(e) = self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await {
+        if let Err(e) = self.mark(&g, HOLD_UNMARK, UNMARK_EXEC_MS).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unhold": "failed", "generation": generation, "error": e.message }));
         }
     }
@@ -2664,14 +2768,10 @@ impl ComputerCell {
     fn view_unasked(&self) -> CellResult<Unasked> {
         let id = self.must(MetaKey::Id)?;
         let life = self.lifecycle()?;
-        let (phase, why) = match &life.phase {
-            // a start owed and due is told as starting (`Lifecycle::starting`)
-            Phase::Asleep { .. } if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
-            Phase::Asleep { .. } => (ComputerPhase::Asleep, None),
-            Phase::Starting { .. } => (ComputerPhase::Starting, None),
-            Phase::Awake { .. } => (ComputerPhase::Awake, None),
-            Phase::Sleeping { .. } => (ComputerPhase::Sleeping, None),
-            Phase::Failed { why, .. } => (ComputerPhase::WontWake, Some(why.clone())),
+        let phase = life.shown(js::now_ms());
+        let why = match &life.phase {
+            Phase::Failed { why, .. } => Some(why.clone()),
+            _ => None,
         };
         let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
         let saves = self.saves()?;
@@ -2912,16 +3012,18 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "slow-snapshot", "ms": ms }));
                 Ok(json!({ "computer": id, "slowSnapshot": ms }))
             }
-            "slow-tell" => {
-                // its next restart's owner is told `ms` late (0: on time),
-                // as a slow principal answers: the window in which its alarm
-                // makes the start the restart owed (`drive_events`' answer)
-                let ms = b.ms.map(u64::from).filter(|ms| *ms <= SLOW_TELL_MAX_MS).ok_or_else(|| CellError::invalid(format!("slow-tell names its ms, 0 to {SLOW_TELL_MAX_MS}")))?;
+            "slow-tell" | "slow-start-tell" => {
+                // its next restart's (or start's, within TELL_MAX_MS) owner is told `ms` late (0:
+                // on time), as a slow principal answers: the window in which
+                // its alarm makes the start the restart owed (`drive_events`'
+                // answer), or its owner's sleep ends a start before it is made
+                let key = if b.op == "slow-tell" { MetaKey::SlowTell } else { MetaKey::SlowStartTell };
+                let ms = b.ms.map(u64::from).filter(|ms| *ms <= SLOW_TELL_MAX_MS).ok_or_else(|| CellError::invalid(format!("{} names its ms, 0 to {SLOW_TELL_MAX_MS}", b.op)))?;
                 match ms {
-                    0 => self.delete_meta(MetaKey::SlowTell)?,
-                    ms => self.set_meta(MetaKey::SlowTell, &ms.to_string())?,
+                    0 => self.delete_meta(key)?,
+                    ms => self.set_meta(key, &ms.to_string())?,
                 }
-                console_log!("{}", json!({ "computer": id, "lever": "slow-tell", "ms": ms }));
+                console_log!("{}", json!({ "computer": id, "lever": b.op, "ms": ms }));
                 Ok(json!({ "computer": id, "slowTell": ms }))
             }
             "fail-starts" | "fail-takeover-destroys" => {
@@ -3026,7 +3128,7 @@ impl ComputerCell {
                 let Some(generation) = self.lifecycle()?.running() else {
                     return Err(CellError::invalid("it is not running: wake it first"));
                 };
-                let sent = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(9.0)]).await?;
+                let sent = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(SIGKILL)]).await?;
                 if sent.as_bool() != Some(true) {
                     return Err(CellError::host(format!("start {generation}'s container is not running here")));
                 }
@@ -4661,4 +4763,11 @@ fn target_fragment(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/f/").or_else(|| path.strip_prefix("/api/f/"))?;
     let name = rest.split('/').next()?;
     fragment_proto::valid_fragment_name(name).then(|| name.to_string())
+}
+
+/// What its owner's pages show of its phase, and so are told of as it
+/// changes: the phase its view shows (`Lifecycle::shown`), and the stored
+/// one, as a start due (shown starting before its alarm) is made.
+fn phase_told(life: &Lifecycle) -> (std::mem::Discriminant<Phase>, ComputerPhase) {
+    (std::mem::discriminant(&life.phase), life.shown(js::now_ms()))
 }
