@@ -1763,6 +1763,8 @@ impl RuntimeLane {
 #[derive(Clone)]
 struct Marks {
     due: Arc<Mutex<MarksDue>>,
+    /// One write of the markers at a time, so an older never lands last.
+    writing: Arc<Mutex<()>>,
     held: watch::Receiver<bool>,
 }
 
@@ -1770,16 +1772,17 @@ struct Marks {
 type MemoryChat = (PathBuf, String);
 
 /// By turn, where each due one's marker is, and whether it tells the chat;
-/// and the markers to write.
+/// and the markers to write, each with the marker its memory held as its
+/// turn was taken (`seen`: a memory lost since is not hidden).
 #[derive(Default)]
 struct MarksDue {
     due: HashMap<String, (MemoryChat, bool)>,
-    ready: BTreeMap<MemoryChat, String>,
+    ready: BTreeMap<MemoryChat, (String, Option<String>)>,
 }
 
 impl Marks {
     fn new(held: watch::Receiver<bool>) -> Marks {
-        Marks { due: Arc::default(), held }
+        Marks { due: Arc::default(), writing: Arc::default(), held }
     }
 
     /// One turn of an agent runs in a chat at a time: one due there before
@@ -1793,33 +1796,51 @@ impl Marks {
 
     /// Its runtime took the turn (`taken`), or ended it, taken or never.
     fn taken(&self, turn: &str, taken: bool) {
-        let mut d = self.due.lock().expect("marks");
-        if let Some((at, told)) = d.due.remove(turn) {
-            if taken || !told {
-                d.ready.insert(at, turn.to_string());
-            }
+        let Some((at, told)) = self.due.lock().expect("marks").due.remove(turn) else { return };
+        if taken || !told {
+            let on_disk = crate::seen::read(&at.0, &at.1);
+            let mut d = self.due.lock().expect("marks");
+            // one still waiting there was taken over the same marker
+            let before = d.ready.get(&at).map_or(on_disk, |(_, b)| b.clone());
+            d.ready.insert(at, (turn.to_string(), before));
         }
-        drop(d);
         self.write();
     }
 
     /// What the runtime last took in `chat` in this life: a marker a hold
-    /// keeps from its memory still (a save after each turn holds it often,
-    /// and the turn after must not be told the chat for it), else the
+    /// keeps from its memory still, or one being written (a save after each
+    /// turn holds it often, and the turn after must not be told the chat
+    /// for it), while its memory holds the marker it held then; else the
     /// marker in its memory.
     fn seen(&self, memory: &Path, chat: &str) -> Option<String> {
         let waiting = self.due.lock().expect("marks").ready.get(&(memory.to_path_buf(), chat.to_string())).cloned();
-        waiting.or_else(|| crate::seen::read(memory, chat))
+        let on_disk = crate::seen::read(memory, chat);
+        match waiting {
+            Some((turn, before)) if before == on_disk => Some(turn),
+            _ => on_disk,
+        }
     }
 
+    /// Each waiting marker into its memory, unless held; each stays waiting
+    /// (`seen`) until it is written, or its write failed. One whose memory
+    /// no longer holds the marker it held then (lost meanwhile) is not
+    /// written: that memory never had the turn.
     fn write(&self) {
         if *self.held.borrow() {
             return;
         }
-        let ready = std::mem::take(&mut self.due.lock().expect("marks").ready);
-        for ((memory, chat), turn) in ready {
-            if let Err(e) = crate::seen::write(&memory, &chat, &turn) {
+        let _one = self.writing.lock().expect("marks' writes");
+        let ready = self.due.lock().expect("marks").ready.clone();
+        for ((memory, chat), (turn, before)) in ready {
+            if crate::seen::read(&memory, &chat) != before {
+                crate::ev!("seen.unwritten", { "turn": turn, "fragment": chat, "why": "its memory changed while it waited" });
+            } else if let Err(e) = crate::seen::write(&memory, &chat, &turn) {
                 crate::ev!("seen.unwritten", { "turn": turn, "fragment": chat, "error": e.to_string() });
+            }
+            let mut d = self.due.lock().expect("marks");
+            let at = (memory, chat);
+            if d.ready.get(&at).is_some_and(|(t, _)| *t == turn) {
+                d.ready.remove(&at);
             }
         }
     }
@@ -2349,6 +2370,14 @@ mod tests {
         // the turn after, handed while the hold lasts, compares with it
         assert_eq!(marks.seen(&memory, "talk--k3x9").as_deref(), Some("t3"), "held: the turn after sees what it took");
         assert_eq!(marks.seen(&memory, "other--k3x9"), None);
+        // Codex on 625dc1fb: its memory lost while it waits hides nothing
+        let other = root.join("maple--k3x9");
+        crate::seen::write(&other, "talk--k3x9", "m1").unwrap();
+        marks.due("m2", other.clone(), "talk--k3x9", false);
+        marks.taken("m2", true);
+        assert_eq!(marks.seen(&other, "talk--k3x9").as_deref(), Some("m2"));
+        std::fs::remove_dir_all(&other).unwrap();
+        assert_eq!(marks.seen(&other, "talk--k3x9"), None, "its memory lost: no marker, waiting or not");
         hold.send_replace(false);
         for _ in 0..100 {
             if seen().as_deref() == Some("t3") {
@@ -2357,6 +2386,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(seen().as_deref(), Some("t3"), "the hold gone: written");
+        assert!(marks.due.lock().unwrap().ready.is_empty(), "written, or dropped: none waits");
+        assert!(!other.exists(), "a memory lost while its marker waited gets none");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

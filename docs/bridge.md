@@ -250,9 +250,11 @@ marker stays where it is.
   say, leaves the marker as it was, so the next turn asks again.
 - **Under a hold** a marker moves only once the hold is gone, so a save
   never holds a marker newer than Hermes' own copies, which the hold
-  took first. Meanwhile the turn after compares with the marker the hold
-  keeps back, never the older one in memory (a save after each turn holds
-  often).
+  took first. Meanwhile, and until it is written, the turn after
+  compares with the marker the hold keeps back, never the older one in
+  memory (a save after each turn holds often), while that memory still
+  holds what it held when its turn was taken: a memory lost meanwhile is
+  neither hidden nor given the marker.
 - **The runtime's user may change its memory's directory**, and the
   bridge is root. Each directory is opened once, never through a link,
   and everything in it is done relative to it. It reads only a plain
