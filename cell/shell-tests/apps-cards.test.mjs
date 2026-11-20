@@ -114,6 +114,28 @@ test("their members-only app with no card is asked once, never retried nor asked
   assert.equal(timers.waits, 1, "a card a shot may make is asked again later");
 });
 
+test("their members-only app with no card is not asked again by a batch that begins while it is being asked", async () => {
+  const s = server();
+  const cards = createCards({
+    rows: () => [{ name: "potluck--57sb", role: "owner", kind: "app", sharing: { visibility: "members" } }],
+    visit: () => 1,
+    shown: () => true,
+    draw: () => {},
+    fetch: s.fetch,
+    urls: { createObjectURL: () => "blob:1", revokeObjectURL: () => {} },
+    timers: { setTimeout: () => 0, clearTimeout: () => {} },
+  });
+  // a visit's open, then the list changes (the page's `listed`) before its read is answered
+  const opened = cards.load(true);
+  const listed = cards.load();
+  assert.deepEqual(s.waiting(), [POTLUCK], "asked once");
+  s.answer(POTLUCK, 404);
+  await Promise.all([opened, listed]);
+  const visited = cards.load(true);
+  assert.deepEqual(s.waiting(), [], "nor on the next visit");
+  await visited;
+});
+
 test("a read of an earlier visit, or one a newer read of its row superseded, sets nothing", async () => {
   const s = server();
   let visit = 1;

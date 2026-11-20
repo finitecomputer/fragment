@@ -92,7 +92,10 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
   const reads = new Map();
   const attempts = new Map();
   const drawn = new Map();
-  // a row no shot makes a card of, as it was when it had none (404)
+  // a row no shot makes a card of and with none, as it was when it was
+  // asked: no other read asks it again while its row is the same, and only
+  // its 404 keeps it here (a card, a failure or a read of a visit gone lets
+  // it go)
   const cardless = new Map();
   const load = { wait: 0, timer: null, batch: 0 };
 
@@ -106,7 +109,6 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
     const headers = { ...SHELL, ...(known ? { "if-none-match": known.etag } : {}) };
     const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
     if (!current()) return "stale";
-    if (r.ok || r.status === 304) cardless.delete(name);
     if (r.status === 304) return "same";
     if (r.status === 404) return "none";
     if (!r.ok) return "failed";
@@ -137,11 +139,12 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
       if (attempt.count < CARD_READS_MAX) {
         ++attempt.count;
         asked.push(f);
+        if (!shoots(f) && !cards.has(f.name)) cardless.set(f.name, fingerprint);
       }
     }
     if (fresh) load.wait = 0;
     const got = await Promise.all(asked.map(async (f) => [f, await read(f.name, mine).catch(() => "failed")]));
-    for (const [f, result] of got) if (result === "none" && !shoots(f)) cardless.set(f.name, JSON.stringify(f));
+    for (const [f, result] of got) if (result !== "none" && cardless.get(f.name) === JSON.stringify(f)) cardless.delete(f.name);
     if (mine !== visit()) return;
     // a card its read set is drawn, though a newer batch began: that one's
     // read asks with this card's etag and, told it is the same, draws nothing

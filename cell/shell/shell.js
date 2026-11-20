@@ -1064,8 +1064,8 @@ async function loadCard(name) {
 // the rest when the page comes back after a minute away. `only` (a set of
 // names, after a change to the list): those, and the apps still without one.
 // One whose card no shot makes (`shoots`: a members-only one of theirs) and
-// that has none is not asked again until its row changes (`cardless`, its
-// row as it was then).
+// that has none is asked once while its row is the same (`cardless`, its row
+// as it was asked: only its 404 keeps it there).
 const cardsLoad = { wait: 0, timer: null, at: 0 };
 const cardless = new Map();
 async function loadCards(only = null) {
@@ -1074,11 +1074,9 @@ async function loadCards(only = null) {
   const listed = docked();
   for (const [name, card] of cards) if (!listed.some((f) => f.name === name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
   const asked = listed.filter((f) => (!only || only.has(f.name) || !cards.has(f.name)) && cardless.get(f.name) !== JSON.stringify(f));
+  for (const f of asked) if (!shoots(f) && !cards.has(f.name)) cardless.set(f.name, JSON.stringify(f));
   const got = await Promise.all(asked.map(async (f) => [f, await loadCard(f.name).catch(() => "same")]));
-  for (const [f, result] of got) {
-    if (result === "none" && !shoots(f)) cardless.set(f.name, JSON.stringify(f));
-    else cardless.delete(f.name);
-  }
+  for (const [f, result] of got) if (result !== "none" && cardless.get(f.name) === JSON.stringify(f)) cardless.delete(f.name);
   if (got.some(([, result]) => result === "new")) renderApps();
   if (got.some(([f, result]) => result === "none" && shoots(f)) && cardsLoad.wait < 60_000) {
     cardsLoad.wait = Math.min(60_000, cardsLoad.wait ? cardsLoad.wait * 2 : 2_000);
