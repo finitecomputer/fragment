@@ -57,6 +57,7 @@ pub mod models;
 pub mod multipart;
 pub mod names;
 pub mod notice;
+pub mod operator_routes;
 pub mod npub;
 pub mod own_signin;
 pub mod connection_accounts;

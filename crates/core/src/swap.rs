@@ -168,13 +168,16 @@ pub enum SwapError {
     NotAlone { at: String },
     /// More than `PLACEHOLDERS_MAX` placeholders.
     TooMany(usize),
+    /// An operator key on a call none of the platform's features makes
+    /// (`operator_routes`).
+    NotLent { placeholder: String, method: String, path: String },
 }
 
 impl SwapError {
     pub fn code(&self) -> ErrorCode {
         match self {
             // a token is never sent to a host it was not made for
-            SwapError::WrongHost { .. } => ErrorCode::Forbidden,
+            SwapError::WrongHost { .. } | SwapError::NotLent { .. } => ErrorCode::Forbidden,
             _ => ErrorCode::InvalidRequest,
         }
     }
@@ -190,6 +193,7 @@ impl std::fmt::Display for SwapError {
             SwapError::WrongPlace { placeholder, at, places } => write!(f, "{placeholder} goes in {}, not {at}", places.join(" or ")),
             SwapError::NotAlone { at } => write!(f, "{at} takes one placeholder, alone"),
             SwapError::TooMany(n) => write!(f, "at most {PLACEHOLDERS_MAX} placeholders a request, not {n}"),
+            SwapError::NotLent { placeholder, method, path } => write!(f, "{placeholder} is the platform's key, lent only for the calls its features make, not {method} {path}"),
         }
     }
 }
@@ -346,9 +350,9 @@ pub fn resolved(wanted: &[Placeholder], answered: &[(Placeholder, String)]) -> B
 }
 
 impl Plan {
-    /// Reads `headers`, `query` and `path` of a request to `host`. A
-    /// request with no placeholder plans nothing, and goes on as it came.
-    pub fn of(headers: &[(String, String)], query: Option<&str>, path: &str, catalog: &Catalog, host: &str) -> Result<Plan, SwapError> {
+    /// Reads `headers`, `query` and `path` of a `method` request to `host`.
+    /// A request with no placeholder plans nothing, and goes on as it came.
+    pub fn of(method: &str, headers: &[(String, String)], query: Option<&str>, path: &str, catalog: &Catalog, host: &str) -> Result<Plan, SwapError> {
         let found = scan(headers, query, path)?;
         let mut wanted: Vec<Placeholder> = vec![];
         let mut places: Vec<&Location> = vec![];
@@ -380,6 +384,14 @@ impl Plan {
         }
         if wanted.len() > PLACEHOLDERS_MAX {
             return Err(SwapError::TooMany(wanted.len()));
+        }
+        // the platform's own key, only for the calls its features make
+        // (`operator_routes`), once the request is otherwise one to plan
+        for w in &wanted {
+            let operator = catalog.named(&w.provider, w.connection).is_some_and(|p| p.kind == Kind::Operator);
+            if operator && !crate::operator_routes::lent(&w.provider, host, method, path) {
+                return Err(SwapError::NotLent { placeholder: w.named(), method: method.to_string(), path: path.to_string() });
+            }
         }
         Ok(Plan { found, wanted })
     }
@@ -544,25 +556,25 @@ mod tests {
         let c = catalog();
         let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
         let headers = h(&[("authorization", &format!("Bearer {}", p.text())), ("accept", "application/json")]);
-        let plan = Plan::of(&headers, None, "/search", &c, "api.perplexity.ai").unwrap();
+        let plan = Plan::of("POST", &headers, None, "/search", &c, "api.perplexity.ai").unwrap();
         assert_eq!(plan.wanted, vec![p.clone()]);
         let out = plan.apply(&headers, None, &c, &secrets(&[(&p, "pplx-real")]));
         assert_eq!(out.headers, h(&[("authorization", "Bearer pplx-real"), ("accept", "application/json")]));
         let bare = h(&[("authorization", &p.text())]);
-        let out = Plan::of(&bare, None, "/", &c, "api.perplexity.ai").unwrap().apply(&bare, None, &c, &secrets(&[(&p, "pplx-real")]));
+        let out = Plan::of("POST", &bare, None, "/search", &c, "api.perplexity.ai").unwrap().apply(&bare, None, &c, &secrets(&[(&p, "pplx-real")]));
         assert_eq!(out.headers, h(&[("authorization", "Bearer pplx-real")]), "the format is the catalog's");
         let gp = ph(Kind::Operator, "google-places", "juniper--k3x9");
         let headers = h(&[("x-goog-api-key", &gp.text())]);
-        let out = Plan::of(&headers, None, "/v1/places:searchText", &c, "places.googleapis.com").unwrap().apply(&headers, None, &c, &secrets(&[(&gp, "AIzaReal")]));
+        let out = Plan::of("POST", &headers, None, "/v1/places:searchText", &c, "places.googleapis.com").unwrap().apply(&headers, None, &c, &secrets(&[(&gp, "AIzaReal")]));
         assert_eq!(out.headers, h(&[("x-goog-api-key", "AIzaReal")]));
         // nothing to swap: as it came
         let plain = h(&[("authorization", "Bearer sk-own"), ("x-request-id", "a.fck_x")]);
-        let plan = Plan::of(&plain, Some("q=1"), "/", &c, "api.perplexity.ai").unwrap();
+        let plan = Plan::of("POST", &plain, Some("q=1"), "/", &c, "api.perplexity.ai").unwrap();
         assert!(plan.is_empty());
         assert_eq!(plan.apply(&plain, Some("q=1"), &c, &BTreeMap::new()), Outgoing { headers: plain.clone(), query: Some("q=1".into()) });
         // a JWT holding `fck_` inside a token is no placeholder
         let jwt = h(&[("authorization", "Bearer eyJhbGciOi.xfck_perplexity_abc.sig")]);
-        assert!(Plan::of(&jwt, None, "/", &c, "api.perplexity.ai").unwrap().is_empty());
+        assert!(Plan::of("POST", &jwt, None, "/", &c, "api.perplexity.ai").unwrap().is_empty());
     }
 
     /// Header, invalid: a malformed placeholder, another provider's host,
@@ -572,7 +584,7 @@ mod tests {
     fn a_header_placement_refused() {
         let c = catalog();
         let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
-        let plan = |headers: Vec<(String, String)>, host: &str| Plan::of(&headers, None, "/", &c, host);
+        let plan = |headers: Vec<(String, String)>, host: &str| Plan::of("POST", &headers, None, "/search", &c, host);
         let short = &p.text()[..p.text().len() - 1];
         let long = format!("{}0", p.text());
         let run_on = format!("{}Z", p.text());
@@ -596,8 +608,8 @@ mod tests {
         assert!(matches!(plan(h(&[("authorization", &notion.text())]), "api.notion.com"), Err(SwapError::NotOffered { .. })));
         // inside a path's token it is no placeholder: sent as it came, which
         // carries nothing (a key in a URL is a place the catalog cannot name)
-        assert!(Plan::of(&[], None, &format!("/bot{}/send", p.text()), &c, "api.perplexity.ai").unwrap().is_empty());
-        let path = Plan::of(&[], None, &format!("/{}/send", p.text()), &c, "api.perplexity.ai");
+        assert!(Plan::of("POST", &[], None, &format!("/bot{}/send", p.text()), &c, "api.perplexity.ai").unwrap().is_empty());
+        let path = Plan::of("POST", &[], None, &format!("/{}/send", p.text()), &c, "api.perplexity.ai");
         assert!(matches!(path, Err(SwapError::WrongPlace { .. })), "no credential goes in a path: {path:?}");
     }
 
@@ -616,10 +628,10 @@ mod tests {
         let p = ph(Kind::Connection, "salesforce", "juniper--k3x9");
         let headers = h(&[("authorization", &format!("Bearer {}", p.text()))]);
         for host in ["login.salesforce.com", "acme.my.salesforce.com", "acme--uat.sandbox.my.salesforce.com"] {
-            assert_eq!(Plan::of(&headers, None, "/services/data", &c, host).unwrap().wanted, vec![p.clone()], "{host}");
+            assert_eq!(Plan::of("POST", &headers, None, "/services/data", &c, host).unwrap().wanted, vec![p.clone()], "{host}");
         }
         for host in ["my.salesforce.com", "acme.my.salesforce.com.evil.test", "evil.test", "acmemy.salesforce.com"] {
-            let e = Plan::of(&headers, None, "/", &c, host).unwrap_err();
+            let e = Plan::of("POST", &headers, None, "/", &c, host).unwrap_err();
             assert!(matches!(e, SwapError::WrongHost { .. }) && e.to_string().contains("is for login.salesforce.com, *.my.salesforce.com, not"), "{host}: {e}");
         }
     }
@@ -632,17 +644,17 @@ mod tests {
         let c = catalog();
         let gp = ph(Kind::Operator, "google-places", "juniper--k3x9");
         let q = format!("input=caf%C3%A9+near+me&key={}&fields=name", gp.text());
-        let plan = Plan::of(&[], Some(&q), "/maps/api/place", &c, "places.googleapis.com").unwrap();
+        let plan = Plan::of("POST", &[], Some(&q), "/v1/places:searchText", &c, "places.googleapis.com").unwrap();
         let out = plan.apply(&[], Some(&q), &c, &secrets(&[(&gp, "AIza/real+key")]));
         assert_eq!(out.query.as_deref(), Some("input=caf%C3%A9+near+me&key=AIza%2Freal%2Bkey&fields=name"));
         let other = format!("q={}", gp.text());
-        assert!(matches!(Plan::of(&[], Some(&other), "/", &c, "places.googleapis.com"), Err(SwapError::WrongPlace { .. })));
+        assert!(matches!(Plan::of("POST", &[], Some(&other), "/", &c, "places.googleapis.com"), Err(SwapError::WrongPlace { .. })));
         let prefixed = format!("key=x{}", gp.text());
-        assert!(Plan::of(&[], Some(&prefixed), "/", &c, "places.googleapis.com").unwrap().is_empty(), "inside a token: none");
+        assert!(Plan::of("POST", &[], Some(&prefixed), "/", &c, "places.googleapis.com").unwrap().is_empty(), "inside a token: none");
         let spaced = format!("key=my+{}", gp.text());
-        assert!(matches!(Plan::of(&[], Some(&spaced), "/", &c, "places.googleapis.com"), Err(SwapError::NotAlone { .. })));
+        assert!(matches!(Plan::of("POST", &[], Some(&spaced), "/", &c, "places.googleapis.com"), Err(SwapError::NotAlone { .. })));
         let both = format!("key={}&key={}", gp.text(), gp.text());
-        assert!(matches!(Plan::of(&[], Some(&both), "/", &c, "places.googleapis.com"), Err(SwapError::NotAlone { .. })));
+        assert!(matches!(Plan::of("POST", &[], Some(&both), "/", &c, "places.googleapis.com"), Err(SwapError::NotAlone { .. })));
     }
 
     /// Basic auth, valid and invalid: the half its provider names is the
@@ -653,16 +665,16 @@ mod tests {
         let mail = ph(Kind::Own, "mail", "juniper--k3x9");
         let enc = |s: &str| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(s));
         let headers = h(&[("authorization", &enc(&format!("api:{}", mail.text())))]);
-        let plan = Plan::of(&headers, None, "/v3/send", &c, "api.mail.test").unwrap();
+        let plan = Plan::of("POST", &headers, None, "/v3/send", &c, "api.mail.test").unwrap();
         assert_eq!(plan.wanted, vec![mail.clone()]);
         let out = plan.apply(&headers, None, &c, &secrets(&[(&mail, "key-real")]));
         assert_eq!(out.headers, h(&[("authorization", &enc("api:key-real"))]));
         let user = h(&[("authorization", &enc(&format!("{}:", mail.text())))]);
-        assert!(matches!(Plan::of(&user, None, "/", &c, "api.mail.test"), Err(SwapError::WrongPlace { .. })), "the user half is not the one it takes");
+        assert!(matches!(Plan::of("POST", &user, None, "/", &c, "api.mail.test"), Err(SwapError::WrongPlace { .. })), "the user half is not the one it takes");
         let not_basic = h(&[("authorization", &format!("Bearer {}", mail.text()))]);
-        assert!(matches!(Plan::of(&not_basic, None, "/", &c, "api.mail.test"), Err(SwapError::WrongPlace { .. })));
+        assert!(matches!(Plan::of("POST", &not_basic, None, "/", &c, "api.mail.test"), Err(SwapError::WrongPlace { .. })));
         let plain = h(&[("authorization", &enc("api:own-key"))]);
-        assert!(Plan::of(&plain, None, "/", &c, "api.mail.test").unwrap().is_empty());
+        assert!(Plan::of("POST", &plain, None, "/", &c, "api.mail.test").unwrap().is_empty());
     }
 
     /// Replay: planning and applying the same request twice gives the same
@@ -676,32 +688,32 @@ mod tests {
         let headers = h(&[("x-goog-api-key", &gp.text())]);
         let q = format!("key={}", gp.text());
         let s = secrets(&[(&gp, "AIzaReal")]);
-        let once = Plan::of(&headers, Some(&q), "/", &c, "places.googleapis.com").unwrap();
+        let once = Plan::of("POST", &headers, Some(&q), "/v1/places:searchText", &c, "places.googleapis.com").unwrap();
         assert_eq!(once.wanted, vec![gp.clone()], "one placeholder in two places is wanted once");
         let first = once.apply(&headers, Some(&q), &c, &s);
-        let again = Plan::of(&headers, Some(&q), "/", &c, "places.googleapis.com").unwrap().apply(&headers, Some(&q), &c, &s);
+        let again = Plan::of("POST", &headers, Some(&q), "/v1/places:searchText", &c, "places.googleapis.com").unwrap().apply(&headers, Some(&q), &c, &s);
         assert_eq!(first, again);
-        assert!(Plan::of(&first.headers, first.query.as_deref(), "/", &c, "places.googleapis.com").unwrap().is_empty());
+        assert!(Plan::of("POST", &first.headers, first.query.as_deref(), "/", &c, "places.googleapis.com").unwrap().is_empty());
         let enc = |s: &str| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(s));
         let basic = h(&[("authorization", &enc(&format!("api:{}", mail.text())))]);
-        let out = Plan::of(&basic, None, "/", &c, "api.mail.test").unwrap().apply(&basic, None, &c, &secrets(&[(&mail, "key-real")]));
-        assert!(Plan::of(&out.headers, None, "/", &c, "api.mail.test").unwrap().is_empty());
+        let out = Plan::of("POST", &basic, None, "/", &c, "api.mail.test").unwrap().apply(&basic, None, &c, &secrets(&[(&mail, "key-real")]));
+        assert!(Plan::of("POST", &out.headers, None, "/", &c, "api.mail.test").unwrap().is_empty());
     }
 
     #[test]
     fn at_most_four_placeholders_a_request() {
         let c = Catalog::parse(
-            &json!([{ "name": "p", "kind": "operator", "hosts": ["a.test"], "placements": [{ "header": "x-a" }, { "header": "x-b" }, { "header": "x-c" }, { "header": "x-d" }], "env": ["P_KEY"], "price": { "micros": 1, "per": 1 } }, { "name": "q", "kind": "operator", "hosts": ["a.test"], "placements": [{ "header": "x-e" }], "env": ["Q_KEY"], "price": { "micros": 1, "per": 1 } }]).to_string(),
+            &json!([{ "name": "p", "kind": "own", "hosts": ["a.test"], "placements": [{ "header": "x-a" }, { "header": "x-b" }, { "header": "x-c" }, { "header": "x-d" }], "env": ["P_KEY"] }, { "name": "q", "kind": "own", "hosts": ["a.test"], "placements": [{ "header": "x-e" }], "env": ["Q_KEY"] }]).to_string(),
         )
         .unwrap();
         let agents = ["a.paul", "b.paul", "c.paul", "d.paul", "e.paul"];
         let mut headers = vec![];
         for (i, header) in ["x-a", "x-b", "x-c", "x-d"].iter().enumerate() {
-            headers.push((header.to_string(), ph(Kind::Operator, "p", agents[i]).text()));
+            headers.push((header.to_string(), ph(Kind::Own, "p", agents[i]).text()));
         }
-        assert_eq!(Plan::of(&headers, None, "/", &c, "a.test").unwrap().wanted.len(), 4);
-        headers.push(("x-e".into(), ph(Kind::Operator, "q", agents[4]).text()));
-        assert_eq!(Plan::of(&headers, None, "/", &c, "a.test"), Err(SwapError::TooMany(5)));
+        assert_eq!(Plan::of("POST", &headers, None, "/", &c, "a.test").unwrap().wanted.len(), 4);
+        headers.push(("x-e".into(), ph(Kind::Own, "q", agents[4]).text()));
+        assert_eq!(Plan::of("POST", &headers, None, "/", &c, "a.test"), Err(SwapError::TooMany(5)));
     }
 
     #[test]
@@ -710,7 +722,7 @@ mod tests {
         let c = catalog();
         let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
         let headers = h(&[("authorization", &p.text())]);
-        Plan::of(&headers, None, "/", &c, "api.perplexity.ai").unwrap().apply(&headers, None, &c, &BTreeMap::new());
+        Plan::of("POST", &headers, None, "/search", &c, "api.perplexity.ai").unwrap().apply(&headers, None, &c, &BTreeMap::new());
     }
 
     #[test]
@@ -719,7 +731,7 @@ mod tests {
         let c = catalog();
         let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
         let headers = h(&[("authorization", &p.text())]);
-        Plan::of(&headers, None, "/", &c, "api.perplexity.ai").unwrap().apply(&headers, None, &c, &secrets(&[(&p, "a\r\nx-evil: 1")]));
+        Plan::of("POST", &headers, None, "/search", &c, "api.perplexity.ai").unwrap().apply(&headers, None, &c, &secrets(&[(&p, "a\r\nx-evil: 1")]));
     }
 
     /// Valid: a request's placeholders are found before any catalog is
@@ -735,27 +747,27 @@ mod tests {
         let found = found(&headers, Some(&format!("k={}", mail.text())), "/v1").expect("found");
         assert_eq!(found, vec![linear.clone(), mail.clone()]);
         // not offered by the catalog alone, planned once the Vault's row is beside it
-        assert!(matches!(Plan::of(&h(&[("authorization", &format!("Bearer {}", linear.text()))]), None, "/", &catalog(), "api.linear.app"), Err(SwapError::NotOffered { .. })));
+        assert!(matches!(Plan::of("POST", &h(&[("authorization", &format!("Bearer {}", linear.text()))]), None, "/", &catalog(), "api.linear.app"), Err(SwapError::NotOffered { .. })));
         let row = crate::vault::row("linear", vec!["api.linear.app".into()], Placement::Header { name: "authorization".into(), format: "Bearer {}".into() });
         let with = catalog().with(vec![row]);
         let headers = h(&[("authorization", &format!("Bearer {}", linear.text()))]);
-        let plan = Plan::of(&headers, None, "/", &with, "api.linear.app").expect("planned");
+        let plan = Plan::of("POST", &headers, None, "/", &with, "api.linear.app").expect("planned");
         assert_eq!(plan.wanted, vec![linear.clone()]);
         let out = plan.apply(&headers, None, &with, &secrets(&[(&linear, "lin_api_x")]));
         assert_eq!(out.headers, h(&[("authorization", "Bearer lin_api_x")]));
         // toward another host it is refused, as a catalog row's is
-        assert!(matches!(Plan::of(&headers, None, "/", &with, "evil.example"), Err(SwapError::WrongHost { .. })));
+        assert!(matches!(Plan::of("POST", &headers, None, "/", &with, "evil.example"), Err(SwapError::WrongHost { .. })));
         // a signature replaces the guest's header whole
         let signing = crate::vault::Placing::Nip98.placement();
         let with = catalog().with(vec![crate::vault::row("nostr-ada", vec!["finite.site".into()], signing)]);
         let headers = h(&[("authorization", &format!("Bearer {}", nostr.text()))]);
-        let plan = Plan::of(&headers, None, "/", &with, "finite.site").expect("planned");
+        let plan = Plan::of("POST", &headers, None, "/", &with, "finite.site").expect("planned");
         let out = plan.apply(&headers, None, &with, &secrets(&[(&nostr, "eyJldmVudCI6MX0")]));
         assert_eq!(out.headers, h(&[("authorization", "Nostr eyJldmVudCI6MX0")]));
         // a request to that host carrying no placeholder (git's own basic
         // auth, as finite.site mints it) plans nothing and goes as it came
         let git = h(&[("authorization", "Basic Z2l0OmZzX21pbnRlZA=="), ("git-protocol", "version=2")]);
-        let plan = Plan::of(&git, Some("service=git-upload-pack"), "/a/b.git/info/refs", &with, "finite.site").expect("nothing to plan");
+        let plan = Plan::of("POST", &git, Some("service=git-upload-pack"), "/a/b.git/info/refs", &with, "finite.site").expect("nothing to plan");
         assert!(plan.is_empty());
         let out = plan.apply(&git, Some("service=git-upload-pack"), &with, &BTreeMap::new());
         assert_eq!((out.headers, out.query.as_deref()), (git, Some("service=git-upload-pack")));
@@ -777,14 +789,14 @@ mod tests {
         let connected = ph(Kind::Connection, "linear", "ada--k3x9");
         let with = c.with(vec![crate::vault::row("linear", vec!["linear.example".into()], Placement::Header { name: "x-linear-key".into(), format: "{}".into() })]);
         let mine = h(&[("x-linear-key", &vaulted.text())]);
-        let plan = Plan::of(&mine, None, "/", &with, "linear.example").expect("the Vault's");
+        let plan = Plan::of("POST", &mine, None, "/", &with, "linear.example").expect("the Vault's");
         assert_eq!(plan.apply(&mine, None, &with, &secrets(&[(&vaulted, "lin_api_x")])).headers, h(&[("x-linear-key", "lin_api_x")]), "in the Vault's place");
         let theirs = h(&[("authorization", &format!("Bearer {}", connected.text()))]);
-        let plan = Plan::of(&theirs, None, "/", &with, "api.linear.app").expect("the connection's");
+        let plan = Plan::of("POST", &theirs, None, "/", &with, "api.linear.app").expect("the connection's");
         assert_eq!(plan.apply(&theirs, None, &with, &secrets(&[(&connected, "pipes-token")])).headers, h(&[("authorization", "Bearer pipes-token")]));
-        assert!(matches!(Plan::of(&mine, None, "/", &with, "api.linear.app"), Err(SwapError::WrongHost { .. })), "the Vault's toward the connection's host");
-        assert!(matches!(Plan::of(&theirs, None, "/", &with, "linear.example"), Err(SwapError::WrongHost { .. })), "the connection's toward the Vault's host");
-        assert!(matches!(Plan::of(&mine, None, "/", &c, "linear.example"), Err(SwapError::WrongKind { .. })), "no Vault row beside it: the wrong kind, as before");
+        assert!(matches!(Plan::of("POST", &mine, None, "/", &with, "api.linear.app"), Err(SwapError::WrongHost { .. })), "the Vault's toward the connection's host");
+        assert!(matches!(Plan::of("POST", &theirs, None, "/", &with, "linear.example"), Err(SwapError::WrongHost { .. })), "the connection's toward the Vault's host");
+        assert!(matches!(Plan::of("POST", &mine, None, "/", &c, "linear.example"), Err(SwapError::WrongKind { .. })), "no Vault row beside it: the wrong kind, as before");
     }
 
     /// One request carrying a connection's placeholder and a Vault
@@ -800,7 +812,7 @@ mod tests {
         let with = c.with(vec![crate::vault::row("google", vec!["www.googleapis.com".into()], Placement::Query { name: "key".into() })]);
         let headers = h(&[("authorization", &format!("Bearer {}", connected.text()))]);
         let query = format!("key={}", vaulted.text());
-        let plan = Plan::of(&headers, Some(&query), "/drive/v3/files", &with, "www.googleapis.com").expect("both planned");
+        let plan = Plan::of("POST", &headers, Some(&query), "/drive/v3/files", &with, "www.googleapis.com").expect("both planned");
         assert_eq!(plan.wanted.len(), 2);
         // matched by name and tag alone (#1206's first cut), the Computer's
         // answer, first, filled the Vault's placeholder with the connection's token
@@ -825,5 +837,60 @@ mod tests {
         let headers: Vec<(String, String)> = many.iter().enumerate().map(|(i, p)| (format!("x-k{i}"), p.clone())).collect();
         assert_eq!(found(&headers, None, "/"), Err(SwapError::TooMany(5)));
         assert_eq!(found(&h(&[("accept", "*/*")]), None, "/"), Ok(vec![]));
+    }
+
+    /// Invalid: an operator key is the platform's one shared key at its
+    /// vendor, lent only for the calls the platform's features make
+    /// (`operator_routes`): an account-wide path, by any method, is refused
+    /// before its key goes anywhere, the refusal never naming the tag; a
+    /// feature's own call is planned. The swap refuses a wrong host or
+    /// place first, as before.
+    #[test]
+    fn an_operator_key_is_lent_only_for_its_features_calls() {
+        // the operator rows as deploy/example.jsonc names them
+        let c = Catalog::parse(
+            &json!([
+                { "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"], "placements": [{ "header": "xi-api-key" }], "env": ["ELEVENLABS_API_KEY"] },
+                { "name": "browser-use", "kind": "operator", "hosts": ["api.browser-use.com"], "placements": [{ "header": "x-browser-use-api-key" }], "env": ["BROWSER_USE_API_KEY"] },
+                { "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"], "placements": [{ "header": "authorization", "format": "Key {}" }], "env": ["FAL_KEY"] },
+                { "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["FIRECRAWL_API_KEY"] },
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        // (provider, header, format, host, account-wide path; a GET or a DELETE alike)
+        let account_wide = [
+            ("elevenlabs", "xi-api-key", "{}", "api.elevenlabs.io", "/v1/history"),
+            ("elevenlabs", "xi-api-key", "{}", "api.elevenlabs.io", "/v1/user"),
+            ("elevenlabs", "xi-api-key", "{}", "api.elevenlabs.io", "/v1/voices"),
+            ("elevenlabs", "xi-api-key", "{}", "api.elevenlabs.io", "/v1/history/some-other-tenants-item"),
+            ("browser-use", "x-browser-use-api-key", "{}", "api.browser-use.com", "/api/v2/tasks"),
+            ("browser-use", "x-browser-use-api-key", "{}", "api.browser-use.com", "/api/v2/sessions"),
+            ("browser-use", "x-browser-use-api-key", "{}", "api.browser-use.com", "/api/v2/browsers"),
+            ("fal", "authorization", "Key {}", "queue.fal.run", "/fal-ai/flux-2/requests"),
+            ("fal", "authorization", "Key {}", "rest.fal.ai", "/tokens/"),
+            ("firecrawl", "authorization", "Bearer {}", "api.firecrawl.dev", "/v1/team/credit-usage"),
+        ];
+        let mut lent = vec![];
+        for (provider, header, format, host, path) in account_wide {
+            let p = ph(Kind::Operator, provider, "juniper--k3x9");
+            let headers = h(&[(header, &format.replacen("{}", &p.text(), 1))]);
+            for method in ["GET", "DELETE", "POST", "PATCH"] {
+                match Plan::of(method, &headers, None, path, &c, host) {
+                    Err(e @ SwapError::NotLent { .. }) => assert!(e.code() == ErrorCode::Forbidden && e.to_string().contains(&format!("not {method} {path}")) && !e.to_string().contains(&p.tag), "{e}"),
+                    other => lent.push(format!("{method} {host}{path}: {other:?}")),
+                }
+            }
+        }
+        assert!(lent.is_empty(), "the operator's shared key is lent for account-wide paths: {lent:?}");
+        // a feature's own call is planned, its method its own
+        let p = ph(Kind::Operator, "elevenlabs", "juniper--k3x9");
+        let headers = h(&[("xi-api-key", &p.text())]);
+        assert_eq!(Plan::of("POST", &headers, None, "/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb", &c, "api.elevenlabs.io").unwrap().wanted, vec![p.clone()]);
+        assert!(matches!(Plan::of("GET", &headers, None, "/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb", &c, "api.elevenlabs.io"), Err(SwapError::NotLent { .. })));
+        // a wrong host is still that refusal, not this one
+        assert!(matches!(Plan::of("GET", &headers, None, "/v1/history", &c, "api.perplexity.ai"), Err(SwapError::WrongHost { .. })));
+        // a request with no placeholder goes on as it came, whatever its path
+        assert!(Plan::of("DELETE", &h(&[("xi-api-key", "sk_own")]), None, "/v1/history/x", &c, "api.elevenlabs.io").unwrap().is_empty());
     }
 }
