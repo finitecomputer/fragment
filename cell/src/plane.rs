@@ -70,6 +70,11 @@ pub(crate) struct TreeRow {
     pub last_commit: String,
 }
 
+/// The `meta` key of a manifest's read mark (`title_read`), and how many
+/// are kept: an older CLI renames within a read or two.
+const TITLE_READ: &str = "titleRead";
+const TITLE_READS_MAX: usize = 4;
+
 /// A live commit's code as read: `app.mjs`, its `applib/` modules by path,
 /// and its identity.
 type LiveCode = (String, BTreeMap<String, String>, String);
@@ -444,11 +449,13 @@ impl FragmentCell {
             ("main", Some(sha)) => {
                 let repo = self.must(MetaKey::Repo)?;
                 self.read_manifest(&repo, sha).await?;
-                self.read_picture(&repo).await?;
+                self.read_picture(&repo, self.face_now()?.kind).await?;
+                self.show_picture()?;
             }
             ("main", None) => {
                 self.del_meta(MetaKey::ManifestMain)?;
-                self.read_picture("").await?;
+                self.read_picture("", self.face_now()?.kind).await?;
+                self.show_picture()?;
             }
             (_, live) => {
                 self.install_code(live).await?;
@@ -616,6 +623,11 @@ impl FragmentCell {
                 }
             }
         };
+        // an agent's avatar.png at main, read when it is one (one become an
+        // agent since main last moved included)
+        if let (FragmentKind::Agent, Some((_, repo))) = (manifest.kind(), repo) {
+            self.read_picture(repo, FragmentKind::Agent).await?;
+        }
         // Installed triggers start their runs in the step that installs, so
         // the owner's standing (which blocks them past the overdraft) is
         // read before it, and only when there are any.
@@ -785,14 +797,16 @@ impl FragmentCell {
 
     /// An agent's picture: its `avatar.png` at main (`face::AGENT_PICTURE`),
     /// checked as a write of it is (docs/api.md, "An agent's name and
-    /// picture"), read as main moves, so it shows with no deploy, and only
-    /// when the file changed (`MetaKey::Picture`: `<sha256> <type>
-    /// <commit>`, the commit that last changed it, where its bytes are
-    /// served from: runs_on.rs `picture`). One gone, or one that is no
-    /// picture (a sync's: the files route refuses one), is none.
-    async fn read_picture(&self, repo: &str) -> CellResult<()> {
+    /// picture"), read as main moves and at an agent's install, so it shows
+    /// with no deploy, and only when the file changed since it was kept
+    /// (`MetaKey::Picture`: `<sha256> <type> <commit>`, the commit that
+    /// last changed it, where its bytes are served from: runs_on.rs
+    /// `picture`). One gone, or one that is no picture (a sync's: the files
+    /// route refuses one), is none. Read only of an agent (`kind`): any
+    /// other fragment's install lets it go.
+    async fn read_picture(&self, repo: &str, kind: FragmentKind) -> CellResult<()> {
         let path = face::AGENT_PICTURE;
-        if self.face_now()?.kind != FragmentKind::Agent {
+        if kind != FragmentKind::Agent {
             return Ok(());
         }
         let row = self.tree_row("main", path)?;
@@ -821,11 +835,52 @@ impl FragmentCell {
             }
         };
         match &picture {
-            Some(p) => self.set_meta(MetaKey::Picture, p)?,
-            None => self.del_meta(MetaKey::Picture)?,
+            Some(p) => self.set_meta(MetaKey::Picture, p),
+            None => self.del_meta(MetaKey::Picture),
         }
+    }
+
+    /// Its face shows its picture as kept now (`picture_shown`).
+    fn show_picture(&self) -> CellResult<()> {
         let now = self.face_now()?;
         self.face_is(now.kind, now.title.as_deref(), now.role.as_deref(), self.picture_shown(now.kind)?.as_deref())
+    }
+
+    /// A mark for an editor's read of its manifest that showed `title`
+    /// (`""`: none), kept with it (`MetaKey::TitleRead`, the newest
+    /// `TITLE_READS_MAX`).
+    fn title_read(&self, title: &str) -> CellResult<String> {
+        let mark = js::random_hex::<8>();
+        let mut reads: Vec<Value> = self.meta(MetaKey::TitleRead)?.and_then(|r| crate::json_text::<Value>(&r).ok()).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        reads.push(json!([mark, title]));
+        let from = reads.len().saturating_sub(TITLE_READS_MAX);
+        self.set_meta(MetaKey::TitleRead, &Value::Array(reads[from..].to_vec()).to_string())?;
+        Ok(mark)
+    }
+
+    /// A write of `fragment.json` naming a mark `GET manifest` gave
+    /// (`title_read`), its title another than the one that read showed: an
+    /// older CLI renaming it (`fragment rename`, `fragment agent --name`;
+    /// the debt ledger), whether or not git's bytes changed (a title git
+    /// holds already included). Taken as its title while its face is still
+    /// the one shown (a rename since wins); each mark is taken once, so the
+    /// same write again, a deploy, or the file written as git holds it
+    /// renames nothing. Whether it renamed it.
+    pub(crate) fn title_from_read(&self, bytes: &[u8], by: &str) -> CellResult<bool> {
+        let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return Ok(false) };
+        let Some(mark) = v["meta"][TITLE_READ].as_str() else { return Ok(false) };
+        let mut reads: Vec<Value> = self.meta(MetaKey::TitleRead)?.and_then(|r| crate::json_text::<Value>(&r).ok()).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let Some(at) = reads.iter().position(|r| r[0] == mark) else { return Ok(false) };
+        let shown = reads.remove(at)[1].as_str().unwrap_or_default().to_string();
+        self.set_meta(MetaKey::TitleRead, &Value::Array(reads).to_string())?;
+        let Some(title) = v["meta"]["title"].as_str().map(str::trim).filter(|t| face::change(Some(t), None, false).is_ok()) else { return Ok(false) };
+        let now = self.face_now()?;
+        if title == shown || now.title.as_deref().unwrap_or_default() != shown {
+            return Ok(false);
+        }
+        self.face_is(now.kind, Some(title), now.role.as_deref(), now.picture.as_deref())?;
+        self.event("face.changed", &format!("its name is {title:?}, as an older CLI wrote it"), json!({ "title": title, "by": by, "from": "fragment.json" }));
+        Ok(true)
     }
 
     fn code_refused(&self, sha: &str, why: &str) -> CellResult<()> {
@@ -1070,12 +1125,13 @@ impl FragmentCell {
     }
 
     /// `GET manifest`: main's `fragment.json`, its `meta.title` its face's
-    /// (when it has one): what an older CLI reads to rename an agent
-    /// (publish.rs `write_files_api`; the debt ledger). A blessed fragment
+    /// (when it has one), and to an editor a mark of the read
+    /// (`title_read`): what an older CLI reads, changes and writes back to
+    /// rename it (`title_from_read`; the debt ledger). A blessed fragment
     /// before its first file answers the one its seed will commit
     /// (`blessed_manifest_bytes`), so such a write is that first file.
     pub(crate) fn manifest(&self, caller: &Caller) -> CellResult<Response> {
-        self.require(caller, false, Role::Viewer)?;
+        let role = self.require(caller, false, Role::Viewer)?;
         let mut manifest = match (self.meta(MetaKey::ManifestMain)?, self.meta(MetaKey::TemplatePending)?) {
             (Some(text), _) => crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?,
             // a blessed template's alone: a copied one's first commit is its own files
@@ -1084,12 +1140,22 @@ impl FragmentCell {
             }
             _ => return Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")),
         };
-        if let (Some(title), Some(fields)) = (self.face_now()?.title, manifest.as_object_mut()) {
+        let title = self.face_now()?.title;
+        let mark = match role >= Role::Editor {
+            true => Some(self.title_read(title.as_deref().unwrap_or_default())?),
+            false => None,
+        };
+        if let Some(fields) = manifest.as_object_mut() {
             let meta = fields.entry("meta").or_insert_with(|| json!({}));
             if !meta.is_object() {
                 *meta = json!({});
             }
-            meta["title"] = title.into();
+            if let Some(title) = title {
+                meta["title"] = title.into();
+            }
+            if let Some(mark) = mark {
+                meta[TITLE_READ] = mark.into();
+            }
         }
         json_response(&manifest)
     }

@@ -244,10 +244,14 @@ its history; the same change again writes none. `fragment rename` and
 in its job, in the same request and before its face: each whole-word
 mention of its title or of the name its first job gave it in its
 `SOUL.md` at main as the new one (`fragment_core::face::job_renamed`), a
-commit over the job it read (an edit meanwhile: 409, nothing renamed). A
-rename that fails there changes neither; one whose commit lands with its
-answer lost is looked for at main, and goes on when it is there. A job
-past `face::JOB_RENAME_MAX_BYTES` is left as it is.
+commit over the job it read (an edit meanwhile: 409, nothing renamed),
+the new name kept whole where the job says it already. A rename that
+fails there changes neither its job nor its name; one whose commit lands
+with its answer lost is looked for at main, and goes on when it is there,
+and one not found there is kept (`meta` `renaming`, with the job it
+wrote) so the next rename, whatever it asks, says its name for it while
+the job is that one. A job past `face::JOB_RENAME_MAX_BYTES` is left as it
+is.
 
 **Changing a picture** is writing `avatar.png` (`POST
 /api/f/{agent}/files`; `fragment agent --picture FILE | --no-picture`,
@@ -258,13 +262,17 @@ none (`picture.refused`). **Served** at `GET
 person's is: the bytes main's read checked, at an address naming them
 (`?v=`, the first 12 hex of their SHA-256).
 
-An **older CLI** (the one in a computer's image, which can lag for days)
-renames an agent by writing its `fragment.json`'s `meta.title` and
-deploying. Until those are gone (the debt ledger), `GET manifest` answers
-a fragment's title as its face's, and an agent's `fragment.json` written
-through the files route with another title is its rename
-(`face.changed`, `from` `fragment.json`). Any other `fragment.json` names
-no face.
+An **older CLI** (the one in a computer's image, which can lag for days:
+`fragment rename`, `fragment agent --name`) renames a fragment by reading
+`GET manifest`, writing its `fragment.json` back with a new `meta.title`,
+and deploying. Until those are gone (the debt ledger), `GET manifest`
+answers its title as its face's and, to an editor, a mark of that read
+(`meta.titleRead`): a files write of `fragment.json` naming the mark, its
+title another than the one shown, is its title at once while its face is
+still that one (`face.changed`, `from` `fragment.json`; a title git holds
+already included). Each mark is taken once, so the same write again, a
+deploy, or the file written as git holds it renames nothing; one at a
+time with the face route's renames. Older iOS builds are not served.
 
 ## Names (docs/cloudflare-v1.md, decision 47)
 

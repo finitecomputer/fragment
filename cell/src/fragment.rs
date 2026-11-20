@@ -378,6 +378,16 @@ pub(crate) enum MetaKey {
     /// <type> <commit>`, plane.rs `read_picture`): what `calls::Picture`
     /// answers.
     Picture,
+    /// An agent's rename whose job commit's answer was lost, and the
+    /// renames before it the job may hold: a JSON array of `[name, sha256
+    /// of the job it wrote]`. The next takes a name for an old one only
+    /// while its job is the one that rename wrote (members.rs `job_says`).
+    Renaming,
+    /// The marks `GET manifest` gave its editors with the title each read
+    /// showed (a JSON array of `[mark, title]`, at most `TITLE_READS_MAX`,
+    /// newest last): a write of `fragment.json` naming one is an older CLI
+    /// renaming it (plane.rs `title_from_read`; the debt ledger).
+    TitleRead,
     /// The channels that list records, their kinds, fields and read
     /// roles, as the rows last carried them (listed.rs `listed_fence`).
     Listed,
@@ -536,6 +546,8 @@ impl MetaKey {
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
+            MetaKey::Renaming => "renaming",
+            MetaKey::TitleRead => "title_read",
             MetaKey::Listed => "listed",
             MetaKey::ListedSentAt => "listed_sent_at",
             MetaKey::ListedDue => "listed_due",
