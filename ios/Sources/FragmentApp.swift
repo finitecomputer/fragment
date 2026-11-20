@@ -514,6 +514,9 @@ struct FragmentRoot: View {
     @State private var showingConnection = false
     @State private var page = ShellPage.launcher
     @State private var sidebar = false
+    /// Every notice fanned out over the app (`NoticesFan`), from the band's stack.
+    @State private var noticesFanned = false
+    @Namespace private var noticesSpace
     @State private var showingApps = false
     @State private var openedApp: FragmentSummary?
     /// The page's height, of which the notices take at most a share.
@@ -560,39 +563,20 @@ struct FragmentRoot: View {
             VStack(spacing: 0) {
                 // its notices glass, as iOS's banners are, over what the page
                 // beneath has (below: Home's wallpaper meets it without a seam)
-                NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4)
+                // Home's alone: elsewhere Settings' Notices row counts them and
+                // opens them (a page's own top fade can't reach up under a band)
+                if page == .launcher && !showingApps {
+                    NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4, fanned: $noticesFanned, space: noticesSpace)
+                        // its glass's shadow over the page's top, not under it
+                        .zIndex(1)
+                }
                     // Your Apps is pushed onto the page it was opened from, so
                     // Back (and swiping back) returns to that chat or page.
                     NavigationStack {
                         content(api)
                             .navigationTitle(title)
                             .navigationBarTitleDisplayMode(.inline)
-                            .toolbar {
-                                ToolbarItem(placement: .topBarLeading) {
-                                    Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
-                                }
-                                // Home's name is a glass button, as its neighbors are: Settings
-                                if page == .launcher {
-                                    ToolbarItem(placement: .principal) {
-                                        // the center gets no toolbar glass of its own: drawn as its neighbors'
-                                        Button { page = .settings } label: {
-                                            Text(title).font(.headline).padding(.horizontal, 16).frame(height: 44)
-                                                .glassEffect(.regular.interactive(), in: .capsule)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .accessibilityHint("Opens Settings").accessibilityIdentifier("homeSettings")
-                                    }
-                                }
-                                ToolbarItemGroup(placement: .topBarTrailing) {
-                                    // a chat has no New chat of its own: the sidebar's starts one
-                                    if page == .history || page == .settings {
-                                        Button("Search or start a new chat", systemImage: "square.and.pencil") { page = .launcher }.accessibilityIdentifier("launcher")
-                                    }
-                                    if page != .apps {
-                                        Button("Your Apps", systemImage: "square.grid.2x2") { showingApps = true }.accessibilityIdentifier("yourApps")
-                                    }
-                                }
-                            }
+                            .toolbar { topBar }
                             .navigationDestination(isPresented: $showingApps) {
                                 AppsLibraryView(library: library, api: api, open: { openedApp = $0 }, startApp: { startApp() })
                                     .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
@@ -602,12 +586,22 @@ struct FragmentRoot: View {
             // behind the notices and the page alike: on Home the whole window's
             // wallpaper, which Home's own lines up with, so it shows behind them
             .background {
-                if page == .launcher { DesktopWallpaper() } else { FragmentStyle.background.ignoresSafeArea() }
+                if page == .launcher || page == .apps || showingApps { DesktopWallpaper() } else { FragmentStyle.background.ignoresSafeArea() }
             }
-            .accessibilityHidden(sidebar)
+            .accessibilityHidden(sidebar || noticesFanned)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
             SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api) { destination in
                 page = destination; showingApps = false; toggleSidebar()
+            }
+            // over everything: its cards fly from the band's stack, and back
+            // (the cards grow from the stack, unfaded; the wallpaper and title fade around them)
+            if noticesFanned {
+                NoticesFanBackdrop().transition(.opacity).zIndex(2)
+                // in, at once from the stack; out, kept as they fly back into it
+                // (from Settings' row there's no stack to grow from: they fade in)
+                NoticesFan(library: library, api: api, space: noticesSpace) { noticesFanned = false }
+                    .transition(.asymmetric(insertion: page == .launcher ? .identity : .opacity, removal: .opacity)).zIndex(3)
+                NoticesFanHeader(library: library) { noticesFanned = false }.transition(.opacity).zIndex(4)
             }
         }
         .sheet(item: $openedApp) { app in
@@ -654,7 +648,7 @@ struct FragmentRoot: View {
     @ViewBuilder private func content(_ api: FragmentAPI) -> some View {
         switch page {
         case .launcher:
-            HomeView(library: library, api: api, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) }, covered: sidebar || openedApp != nil)
+            HomeView(library: library, api: api, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) }, covered: sidebar || openedApp != nil || noticesFanned)
         // a message on its way to a chat not made yet: the launcher is already left
         case .startingChat: ChatLoadingView()
         case .chat(let name):
@@ -672,7 +666,9 @@ struct FragmentRoot: View {
             }
         case .history: HistoryView(library: library, api: api, open: { open($0) })
         case .apps: AppsLibraryView(library: library, api: api, open: { openedApp = $0 }, startApp: { startApp() })
-        case .settings: SettingsView(library: library, api: api, connect: { showingConnection = true }, open: { open($0) })
+        case .settings:
+            SettingsView(library: library, api: api, connect: { showingConnection = true }, open: { open($0) },
+                         showNotices: { withAnimation(reduceMotion ? nil : .snappy(duration: 0.3)) { noticesFanned = true } })
         }
     }
     private var title: String {
@@ -687,6 +683,35 @@ struct FragmentRoot: View {
     }
     private func dismissKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+    /// The page's top bar: the sidebar, Home's name (Settings), New chat and
+    /// Your Apps. Its own builder, so the
+    /// shell's body type-checks in time.
+    @ToolbarContentBuilder private var topBar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
+        }
+        // Home's name is a glass button, as its neighbors are: Settings
+        if page == .launcher {
+            ToolbarItem(placement: .principal) {
+                // the center gets no toolbar glass of its own: drawn as its neighbors'
+                Button { page = .settings } label: {
+                    Text(title).font(.headline).padding(.horizontal, 16).frame(height: 44)
+                        .glassEffect(.regular.interactive(), in: .capsule)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens Settings").accessibilityIdentifier("homeSettings")
+            }
+        }
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            // a chat has no New chat of its own: the sidebar's starts one
+            if page == .history || page == .settings {
+                Button("Search or start a new chat", systemImage: "square.and.pencil") { page = .launcher }.accessibilityIdentifier("launcher")
+            }
+            if page != .apps {
+                Button("Your Apps", systemImage: "square.grid.2x2") { showingApps = true }.accessibilityIdentifier("yourApps")
+            }
+        }
     }
     private func toggleSidebar() {
         if !sidebar { dismissKeyboard() }

@@ -73,6 +73,8 @@ struct ChatView: View {
             .accessibilityIdentifier("timeline")
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(.top, for: .alignment)
+            // the top bar's glass gradient, never a hard edge and line
+            .scrollEdgeEffectStyle(.soft, for: .top)
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 geometry.contentSize.height - geometry.visibleRect.maxY < 100
             } action: { _, nearBottom in

@@ -59,10 +59,11 @@ final class GlassTilt {
 private struct GlassLogoEffect: ViewModifier {
     let size: CGFloat
     let y: CGFloat?
+    let paused: Bool
     @State private var tilt = GlassTilt()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
-    private var still: Bool { reduceMotion || scenePhase != .active }
+    private var still: Bool { reduceMotion || paused || scenePhase != .active }
 
     func body(content: Content) -> some View {
         TimelineView(.animation(paused: still)) { timeline in
@@ -90,7 +91,8 @@ private struct GlassLogoEffect: ViewModifier {
 extension View {
     /// The Finite logo as glass refracting this view, turning with the phone.
     /// `y` places its center in global coordinates; it waits for one.
-    func glassLogo(size: CGFloat, y: CGFloat?) -> some View {
-        modifier(GlassLogoEffect(size: size, y: y))
+    /// `paused` (covered): it holds still, so it draws no frames under what covers it.
+    func glassLogo(size: CGFloat, y: CGFloat?, paused: Bool = false) -> some View {
+        modifier(GlassLogoEffect(size: size, y: y, paused: paused))
     }
 }
