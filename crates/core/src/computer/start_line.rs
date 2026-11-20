@@ -36,8 +36,9 @@ pub enum Full {
     Restart,
     /// A newer save would not restore: it falls back to an older one.
     Unusable,
-    /// An operator set its newer saves aside, choosing an older one for its
-    /// next start (`Saves::choose`).
+    /// Its newer saves were set aside: an operator chose an older one for
+    /// its next start (`Saves::choose`), or they did not fit its disk
+    /// (`Saves::too_big`).
     Aside,
     /// Its snapshot is of another image (a deploy, or a pin).
     Image,
@@ -104,6 +105,8 @@ pub enum Failed {
     Dead,
     /// Its save would not restore.
     Unusable,
+    /// Its save's restore found no room on its disk (`Saves::too_big`).
+    NoRoom,
     /// Its container stopped before it came up.
     Exit,
     /// It did not come up within `START_DEADLINE_MS`.
@@ -121,6 +124,7 @@ impl Failed {
             Failed::Snapshot => "snapshot",
             Failed::Dead => "dead",
             Failed::Unusable => "unusable",
+            Failed::NoRoom => "no_room",
             Failed::Exit => "exit",
             Failed::Deadline => "deadline",
             Failed::Blocked => "blocked",

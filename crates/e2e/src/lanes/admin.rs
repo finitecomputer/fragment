@@ -316,31 +316,8 @@ fn start_from_checks(s: &mut Suite, api: &Api, operator: &Keys, home: &Path, key
         json!({ "cli": format!("{again:?}"), "logged": logged }),
     );
     // its owner's export: the newest save, the one set aside
-    let pressed = api.signed(&una, "POST", "/api/export", None)?;
-    let mut export = Value::Null;
-    let built = s.eventually(Duration::from_secs(120), || {
-        export = api.signed(&una, "GET", "/api/export", None).map(|r| r.body["export"].clone()).unwrap_or(Value::Null);
-        export["state"] != "building"
-    });
-    let download = api.signed(&una, "GET", &format!("/api/export/{}/download", export["id"].as_str().unwrap_or("")), None)?;
-    let mut files = std::collections::BTreeMap::new();
-    for entry in tar::Archive::new(download.bytes.as_slice()).entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.to_string_lossy().to_string();
-        let mut bytes = vec![];
-        entry.read_to_end(&mut bytes)?;
-        files.insert(path, bytes);
-    }
-    let root = fragment_core::export::ROOT;
-    let hex = id.strip_prefix("computer:").unwrap_or("");
-    let meta: Value = files.get(&format!("{root}/computers/{hex}/meta.json")).and_then(|b| serde_json::from_slice(b).ok()).unwrap_or(Value::Null);
-    let records = newest["records"].as_array().cloned().unwrap_or_default();
-    let stored = records.iter().all(|r| files.get(&fragment_core::export::save_path(&id, r["dir"].as_str().unwrap_or("/data"))).is_some_and(|b| fragment_core::blob::sha256_hex(b) == r["sha256"].as_str().unwrap_or("-")));
-    s.ok(
-        START_FROM_CHECKS[5],
-        pressed.status == 200 && built && export["state"] == "ready" && meta["save"]["id"] == newest["id"] && !records.is_empty() && stored,
-        json!({ "export": export, "save": meta["save"], "records": records.len() }),
-    );
+    let exported = exported_save(s, api, &una, &id, &newest)?;
+    s.ok(START_FROM_CHECKS[5], exported["ok"] == true, &exported);
     // its next wake: from save 1, a rollback, told
     let _ = wake();
     let back = awake(s);
@@ -353,6 +330,34 @@ fn start_from_checks(s: &mut Suite, api: &Api, operator: &Keys, home: &Path, key
     );
     let _ = lever_with(api, &id, json!({ "op": "fail-restore", "save": 0 }));
     Ok(())
+}
+
+/// `keys`' export, made and read: whether its computer `id`'s save is
+/// `save` (as the `saves` lever lists it), each of its records as stored
+/// (`{ok, export, save, records}`).
+pub(super) fn exported_save(s: &Suite, api: &Api, keys: &Keys, id: &str, save: &Value) -> Result<Value> {
+    let pressed = api.signed(keys, "POST", "/api/export", None)?;
+    let mut export = Value::Null;
+    let built = s.eventually(Duration::from_secs(120), || {
+        export = api.signed(keys, "GET", "/api/export", None).map(|r| r.body["export"].clone()).unwrap_or(Value::Null);
+        export["state"] != "building"
+    });
+    let download = api.signed(keys, "GET", &format!("/api/export/{}/download", export["id"].as_str().unwrap_or("")), None)?;
+    let mut files = std::collections::BTreeMap::new();
+    for entry in tar::Archive::new(download.bytes.as_slice()).entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_string_lossy().to_string();
+        let mut bytes = vec![];
+        entry.read_to_end(&mut bytes)?;
+        files.insert(path, bytes);
+    }
+    let root = fragment_core::export::ROOT;
+    let hex = id.strip_prefix("computer:").unwrap_or("");
+    let meta: Value = files.get(&format!("{root}/computers/{hex}/meta.json")).and_then(|b| serde_json::from_slice(b).ok()).unwrap_or(Value::Null);
+    let records = save["records"].as_array().cloned().unwrap_or_default();
+    let stored = records.iter().all(|r| files.get(&fragment_core::export::save_path(id, r["dir"].as_str().unwrap_or("/data"))).is_some_and(|b| fragment_core::blob::sha256_hex(b) == r["sha256"].as_str().unwrap_or("-")));
+    let ok = pressed.status == 200 && built && export["state"] == "ready" && meta["save"]["id"] == save["id"] && !records.is_empty() && stored;
+    Ok(json!({ "ok": ok, "export": export, "save": meta["save"], "records": records.len() }))
 }
 
 /// The admin's page (`/admin`) in Chrome, with an operator's own session:

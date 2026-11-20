@@ -26,6 +26,19 @@ pub const DISK_CLEAR_USED_PCT: u64 = 70;
 pub const DISK_CLEAR_FREE_MIN: u64 = 6_000_000_000;
 const _: () = assert!(DISK_CLEAR_USED_PCT < DISK_TOLD_USED_PCT && DISK_CLEAR_FREE_MIN > DISK_TOLD_FREE_MAX, "it clears only past where it is told");
 
+/// Whether a restore's failure `why` is for want of room on its disk, by
+/// its words, and nothing else: the sandbox runtime's guard, which stops a
+/// restore that would leave less than its floor free ("restore stopped
+/// with ~203 MB free, below the 268435456 byte floor": production,
+/// 2026-11-20), or its disk filling under it, `ENOSPC` (the cell's host
+/// names a restore's `SandboxFileError` by its code) or the system's words
+/// for it. A restore that failed any other way (a transfer, a timeout, an
+/// archive gone) is not.
+pub fn restore_found_no_room(why: &str) -> bool {
+    let guard = why.contains("restore stopped with") && why.contains("free, below the") && why.contains("byte floor");
+    guard || why.contains("ENOSPC") || why.contains("No space left on device")
+}
+
 /// Whether a disk of `total` bytes with `free` left is used past
 /// `DISK_TOLD_USED_PCT`, with at most `DISK_TOLD_FREE_MAX` free: its owner
 /// is told.
@@ -187,6 +200,37 @@ mod tests {
         assert_eq!(disk_of_df(busybox, T, 3).map(|d| d.free), Some(536_427_945_984));
         for bad in ["", "overlay 10 5 5 50% /", "Filesystem 1-blocks Used Available Capacity Mounted on", "Filesystem x\noverlay ten 5 five 50% /", "Filesystem x\noverlay 10 0 11 0% /", "Filesystem x\noverlay 0 0 0 0% /"] {
             assert_eq!(disk_of_df(bad, T, 3), None, "{bad:?}");
+        }
+    }
+
+    /// Goal (production, 2026-11-20): a restore that stopped for want of
+    /// room is told from every other failure by its words alone, narrowly:
+    /// the sandbox runtime's guard, as the cell hears it (alone, or under
+    /// the host's `restore '<dir>':`, or the lever's), and a disk that
+    /// filled (`ENOSPC`). Invalid: a transfer, a timeout, an archive gone,
+    /// a near miss of the guard's words, and a disk read's own.
+    #[test]
+    fn a_restore_that_found_no_room_is_told_by_its_words() {
+        let guard = "restore stopped with ~203 MB free, below the 268435456 byte floor";
+        for yes in [
+            guard.to_string(),
+            format!("restore '/data/work': {guard}"),
+            format!("{guard} (the test lever's fail-restore of save 2)"),
+            "ENOSPC: restore '/data/work': write failed".to_string(),
+            "restore '/data': No space left on device (os error 28)".to_string(),
+        ] {
+            assert!(restore_found_no_room(&yes), "{yes}");
+        }
+        for no in [
+            "BACKUP_TRANSFER: the download stopped",
+            "the restore of /data/work: no answer within 540000 ms",
+            "BACKUP_NOT_FOUND: no object",
+            "restore stopped with an error",
+            "restore '/data': EXDEV: cross-device link",
+            "the disk is 91% used",
+            "",
+        ] {
+            assert!(!restore_found_no_room(no), "{no}");
         }
     }
 }

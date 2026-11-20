@@ -51,11 +51,17 @@ pub struct Save {
     /// the image's check of what it restored did: no start uses it again.
     #[serde(default)]
     pub unusable: bool,
-    /// When it was set aside (ms; `Saves::choose`): kept, and its owner's
-    /// export reads it, but no start restores it, and it is let go of
-    /// `SET_ASIDE_KEPT_MS` after this. Set on the saves set aside alone.
+    /// When it was set aside (ms), by an operator's choice of an older save
+    /// (`Saves::choose`) or as too big for its disk (`Saves::too_big`):
+    /// kept, and its owner's export reads it, but no start restores it, and
+    /// it is let go of `SET_ASIDE_KEPT_MS` after this. Set on the saves set
+    /// aside alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_aside_ms: Option<i64>,
+    /// It was set aside because its restore found no room on its disk
+    /// (`Saves::too_big`), not by an operator: its owner is told so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub too_big: bool,
 }
 
 impl Save {
@@ -215,6 +221,11 @@ pub struct WentBack {
     /// was kept: told as a change lost.
     #[serde(default)]
     pub unchanged: bool,
+    /// It went back because a newer save did not fit its disk, set aside
+    /// since that life ended (`Saves::too_big`): kept, and its owner may
+    /// still export it.
+    #[serde(default)]
+    pub too_big: bool,
 }
 
 /// Why a life's work since its last save is in no save, from how it ended
@@ -475,11 +486,11 @@ impl Saves {
         // its owner is told of it until they say they saw it (`notices`),
         // unless it lost nothing (read before this start's `restored`
         // replaces the lost life's)
-        let told = ended.filter(|e| rollback && !self.lost_nothing(e, restored_save)).map(|e| (e, self.unchanged(&e, restored_save)));
+        let told = ended.filter(|e| rollback && !self.lost_nothing(e, restored_save)).map(|e| (e, self.unchanged(&e, restored_save), self.too_big_since(&e, restored_save)));
         self.rollbacks += u64::from(rollback);
         self.restored = Some(restored.clone());
-        if let Some((e, unchanged)) = told {
-            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number), unchanged });
+        if let Some((e, unchanged, too_big)) = told {
+            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number), unchanged, too_big });
         }
         // a restart's start is fresh; the starts after it may use a snapshot again
         self.fresh = false;
@@ -506,7 +517,7 @@ impl Saves {
             self.snapshot = None;
         }
         self.numbered += 1;
-        self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, seq: Some(seq), held, records, unusable: false, set_aside_ms: None });
+        self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, seq: Some(seq), held, records, unusable: false, set_aside_ms: None, too_big: false });
         let mut dropped = if self.saves.len() > SAVES_KEPT { self.saves.split_off(SAVES_KEPT) } else { vec![] };
         // the save its running life came up from is kept past the newest: one
         // a start restored and came up from, the last to fall back to
@@ -567,6 +578,7 @@ impl Saves {
             };
             if restored {
                 s.set_aside_ms = None;
+                s.too_big = false;
                 restorable.push(s);
             } else {
                 s.set_aside_ms.get_or_insert(now_ms);
@@ -587,6 +599,38 @@ impl Saves {
         assert_eq!(self.current().map(|s| s.id.as_str()), Some(id.as_str()), "its next start restores the save chosen");
         assert!(self.saves.len() <= SAVES_KEPT + 1 && self.aside.len() <= SET_ASIDE_MAX, "bounded");
         Ok(self.let_go(dropped.into_iter().flat_map(|s| s.records).collect()))
+    }
+
+    /// The save `id`'s restore found no room on its disk
+    /// (`restore_found_no_room`), as one that grew past what its disk holds
+    /// once restored does (Paul, 2026-11-20: "rollback is preferred to
+    /// being stuck"). With an older save left to restore, it is set aside,
+    /// as an operator's choice of the newest such would (`choose`): kept,
+    /// exportable, never restored by a start, and its next start, owed at
+    /// once, restores that one, no strike (`Event::RestoreFailed`). Answers
+    /// what letting go of those set aside past their time or bound pushed
+    /// out unforgotten. None, nothing changed, with no older save left (or
+    /// `id` not the current save): its failure is a strike, so a computer
+    /// none of whose saves fit ends `wont_wake`, never started with nothing.
+    pub fn too_big(&mut self, id: &str, now_ms: i64) -> Option<Vec<Value>> {
+        if self.current().is_none_or(|c| c.id != id) {
+            return None;
+        }
+        let older = self.saves.iter().skip_while(|s| s.id != id).skip(1).find(|s| !s.unusable)?.number;
+        let lost = self.choose(older, now_ms).expect("an older save kept, not found unusable");
+        if let Some(s) = self.aside.iter_mut().find(|s| s.id == id) {
+            s.too_big = true;
+        }
+        assert!(self.current().is_some_and(|c| c.number == older), "its next start restores the save before it");
+        Some(lost)
+    }
+
+    /// Whether a save newer than `back_to` was set aside as too big for its
+    /// disk since the life `e` ended: the start going back to `back_to`
+    /// went back because of it.
+    fn too_big_since(&self, e: &Ended, back_to: Option<&Save>) -> bool {
+        let newer = |s: &Save| back_to.is_none_or(|b| s.number > b.number);
+        self.aside.iter().any(|s| s.too_big && newer(s) && s.set_aside_ms.is_some_and(|at| at >= e.at_ms))
     }
 
     /// Takes out the saves set aside that are let go of at `now_ms`: each
@@ -1200,6 +1244,94 @@ mod tests {
         c.saves.saved(g, rec("c6"), 0, chose_at + SET_ASIDE_KEPT_MS, true);
         assert!(c.saves.aside().is_empty(), "{:?}", numbers(&c.saves));
         assert!(["b4", "b3", "b2"].iter().all(|id| c.saves.forgetting().iter().any(|r| r["id"] == *id)), "let go of, to delete");
+    }
+
+    /// Goal (Paul, 2026-11-20: "rollback is preferred to being stuck"): a
+    /// start whose save found no room on its disk sets that save aside and
+    /// starts again at once from the save before it, no strike, past each
+    /// that does not fit either; the start that comes up is a rollback its
+    /// owner is told was for want of room, with where it went back to, the
+    /// newer kept outside the rotation. Invalid: with no older save left,
+    /// nothing is set aside: a strike, its save tried again, so it ends
+    /// `wont_wake` as before, never started with nothing; a save not the
+    /// current one changes nothing. Replay: the same too-big report again
+    /// sets nothing more aside. Restart: stored and read back; one stored
+    /// before reads as not too big. Method: the lifecycle and its saves, as
+    /// the DO drives them.
+    #[test]
+    fn a_save_too_big_for_its_disk_is_set_aside_and_it_starts_from_the_one_before() {
+        let rules = Rules::default();
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        c.wake();
+        c.turn_saved("b2");
+        c.sleep(Some("b3"));
+        let life = c.life.generation();
+        let s = c.apply(Event::Wake { why: Wake::Record });
+        let Some(Action::Start { generation: mut g }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        // b3, then b2, do not fit: each set aside, the one before at once
+        for (big, next) in [("b3", "b2"), ("b2", "b1")] {
+            assert_eq!(c.saves.current().map(|s| s.id.as_str()), Some(big));
+            let lost = c.saves.too_big(big, c.now);
+            assert_eq!(lost, Some(vec![]), "set aside, nothing let go of");
+            let replayed = c.saves.clone();
+            assert_eq!(c.saves.too_big(big, c.now + 1), None, "again: no longer the current save");
+            assert_eq!(c.saves, replayed);
+            let s = c.apply(Event::RestoreFailed { generation: g, why: format!("restore stopped with ~203 MB free, below the 268435456 byte floor ({big})"), older: true });
+            let s = c.owed(&s);
+            assert_eq!((s.actions, c.life.failures()), (vec![Action::Start { generation: g + 1 }], 0), "at once, no strike");
+            assert_eq!(c.saves.current().map(|s| s.id.as_str()), Some(next));
+            g += 1;
+        }
+        assert_eq!(c.saves.full_why(Some(IMAGE), false), Some(Full::Aside));
+        let r = c.come_up(g);
+        assert_eq!((r.save.as_deref(), r.rollback), (Some("b1"), true));
+        let told = notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        assert!(matches!(told, Some(ComputerNotice::WentBack { life: l, save: Some(1), too_big: true, pending: false, .. }) if l == life), "{told:?}");
+        assert!(c.saves.aside().iter().all(|s| s.too_big && s.set_aside_ms.is_some()) && c.saves.aside().len() == 2 && !c.saves.all().iter().any(|s| s.too_big));
+        // its saves after it keep them, outside the rotation
+        for id in ["c1", "c2", "c3", "c4"] {
+            c.turn_saved(id);
+        }
+        assert!(["b3", "b2"].iter().all(|id| c.saves.aside().iter().any(|s| s.id == *id && s.too_big)), "kept for their time");
+        // restart: read back the same; one stored before reads as not too big
+        let back: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
+        assert_eq!(back, c.saves);
+        let mut stored = serde_json::to_value(&c.saves).unwrap();
+        assert!(stored["wentBack"].as_object_mut().unwrap().remove("tooBig").is_some());
+        stored["aside"].as_array_mut().unwrap().iter_mut().for_each(|s| drop(s.as_object_mut().unwrap().remove("tooBig")));
+        let older: Saves = serde_json::from_value(stored).unwrap();
+        assert!(older.aside().iter().all(|s| !s.too_big) && older.went_back().is_some_and(|w| !w.too_big));
+        // a start of an operator's choice is told as any rollback, not as
+        // one too big for its disk
+        let mut chosen = Computer::new();
+        chosen.wake();
+        chosen.sleep(Some("b1"));
+        chosen.wake();
+        chosen.sleep(Some("b2"));
+        assert_eq!(chosen.saves.choose(1, chosen.now), Ok(vec![]));
+        chosen.wake();
+        assert!(chosen.saves.went_back().is_some_and(|w| !w.too_big));
+        // invalid: no older save left: nothing set aside, a strike, the save
+        // tried again, never nothing; won't wake as before
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        let s = c.apply(Event::Wake { why: Wake::Record });
+        let mut next = s.actions.first().cloned();
+        while let Some(Action::Start { generation }) = next {
+            let unchanged = c.saves.clone();
+            assert_eq!(c.saves.too_big("b1", c.now), None);
+            assert_eq!(c.saves, unchanged, "nothing set aside");
+            assert_eq!((c.saves.current().map(|s| s.id.as_str()), c.saves.plan(Some(IMAGE))), (Some("b1"), Plan::Backup), "never started with nothing");
+            let s = c.apply(Event::RestoreFailed { generation, why: "restore stopped with ~203 MB free, below the 268435456 byte floor".into(), older: false });
+            next = s.alarm_ms.and_then(|at| {
+                c.now = at - 1_000;
+                c.apply(Event::Alarm).actions.first().cloned()
+            });
+        }
+        assert!(matches!(c.life.phase, Phase::Failed { .. }) && c.saves.aside().is_empty(), "{:?}", c.life.phase);
     }
 
     /// Goal (Codex on this PR): a life's work is in the save it ended with,
