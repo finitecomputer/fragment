@@ -251,7 +251,7 @@ impl Saves {
     /// lists and its owner's export reads.
     pub fn every_save(&self) -> Vec<&Save> {
         let mut all: Vec<&Save> = self.saves.iter().chain(&self.aside).collect();
-        all.sort_by(|a, b| b.number.cmp(&a.number));
+        all.sort_by_key(|s| std::cmp::Reverse(s.number));
         all
     }
 
@@ -573,13 +573,13 @@ impl Saves {
                 self.aside.push(s);
             }
         }
-        restorable.sort_by(|a, b| b.number.cmp(&a.number));
+        restorable.sort_by_key(|s| std::cmp::Reverse(s.number));
         for mut s in restorable.split_off(restorable.len().min(SAVES_KEPT + 1)) {
             s.set_aside_ms = Some(now_ms);
             self.aside.push(s);
         }
         self.saves = restorable;
-        self.aside.sort_by(|a, b| b.number.cmp(&a.number));
+        self.aside.sort_by_key(|s| std::cmp::Reverse(s.number));
         if self.snapshot.as_ref().is_some_and(|s| s.save != id) {
             self.snapshot = None;
         }
