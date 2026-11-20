@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
@@ -478,6 +478,9 @@ enum Unstarted {
     Failed(CellError),
     /// The save it restored never will (its archive is gone or altered).
     Unusable(String),
+    /// The save's restore found no room on its disk
+    /// (`fragment_core::computer::restore_found_no_room`).
+    NoRoom(String),
     /// It came up, and its guest never read its view within its wait: a
     /// container Cloudflare restored from a snapshot dead (#362), answered
     /// as a snapshot that would not start.
@@ -1350,7 +1353,7 @@ impl ComputerCell {
     /// before this one, which would have reported its end), as asleep.
     async fn adopt(&self) -> CellResult<Option<Event>> {
         let life = self.lifecycle()?;
-        if let Phase::Starting { generation, destroying: true, .. } = life.phase {
+        if let Phase::Starting { generation, since_ms, destroying: true } = life.phase {
             // a start that failed was destroying what it started when its
             // isolate went, and its own report (why, and whether it is a
             // strike) went with it: its container destroyed, one failure.
@@ -1365,6 +1368,13 @@ impl ComputerCell {
             self.lever_wait(MetaKey::StallTakeOver, STALL_FAILING_START_MAX_MS).await;
             if self.lever_take(MetaKey::FailTakeOverDestroys) || !self.destroy(0, "its start failed").await? {
                 return Err(CellError::host(format!("start {generation}'s container still runs {}s after its destroy", DESTROY_MS / 1000)));
+            }
+            // one that set its save aside as too big for its disk (stored
+            // before its destroy) fell back: the save before it is next, no
+            // strike, as its own report would have said (Codex on the
+            // no-room PR)
+            if self.saves()?.set_aside_too_big_since(since_ms) {
+                return Ok(Some(Event::RestoreFailed { generation, why: "its save did not fit its disk, and the isolate that saw it went before it said so".into(), older: true }));
             }
             return Ok(Some(Event::StartFailed { generation, why: "its start failed, and the isolate that saw why went before it said so".into() }));
         }
@@ -1843,6 +1853,22 @@ impl ComputerCell {
                 let _ = self.destroy(generation, "its save would not restore").await;
                 Event::RestoreFailed { generation, why, older }
             }
+            Err(Unstarted::NoRoom(why)) => {
+                // Paul, 2026-11-20: "rollback is preferred to being stuck".
+                // It is set aside, kept and exportable, and the save before
+                // it is next, at once and no strike; with none older, a
+                // strike as any failed start, its save kept current
+                self.starts.borrow_mut().failing(generation, start_line::Failed::NoRoom);
+                let id = save_id.expect("only a start from a save restores one");
+                let set = self.update_saves(|s| s.too_big(&id, js::now_ms()));
+                let older = matches!(set, Ok(Some(_)));
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": "no_room", "id": id, "generation": generation, "why": why, "setAside": older }));
+                for record in set.ok().flatten().unwrap_or_default() {
+                    console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unforgotten": record["id"] }));
+                }
+                let _ = self.destroy(generation, "its save did not fit its disk").await;
+                Event::RestoreFailed { generation, why, older }
+            }
             Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {
                 self.starts.borrow_mut().failing(generation, start_line::Failed::Snapshot);
                 // forgotten before the destroy: any start after it restores
@@ -1992,18 +2018,30 @@ impl ComputerCell {
                 let save = planned.save.as_ref().expect("a start from the save has its records");
                 // the lever's `fail-restore`: a restore of this save stops for
                 // want of room, as the sandbox runtime's guard stops one on a
-                // disk it no longer fits (2026-11-20), a failure that may pass
-                if self.meta(MetaKey::FailRestore)?.is_some_and(|n| n == save.number.to_string()) {
-                    return Err(CellError::host(format!("restore stopped with ~203 MB free, below the 268435456 byte floor (the test lever's fail-restore of save {})", save.number)).into());
-                }
+                // disk it no longer fits (2026-11-20), heard as that is
+                let lever = self.meta(MetaKey::FailRestore)?.is_some_and(|n| n == save.number.to_string());
                 // a directory's record before any inside it, as it was taken;
                 // together within `RESTORE_MS`, each given what is left
                 let until = js::now_ms() + RESTORE_MS;
                 for record in &save.records {
                     let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
-                    let answer = js::from_js(&self.call("restore", &[g.clone(), js::to_js(record), left]).await?).map_err(CellError::host)?;
+                    let restored = match lever {
+                        true => Err(CellError::host(format!("restore stopped with ~203 MB free, below the 268435456 byte floor (the test lever's fail-restore of save {})", save.number))),
+                        false => self.call("restore", &[g.clone(), js::to_js(record), left]).await,
+                    };
+                    let of = |why: &str| format!("save {}'s {}: {why}", save.number, record["dir"].as_str().unwrap_or("?"));
+                    // a save that no longer fits its disk (the host's typed
+                    // `ENOSPC`, or the runtime's guard in its words), told
+                    // from every other failure, which may pass
+                    let answer = match restored {
+                        Err(e) if restore_found_no_room(&e.message) => return Err(Unstarted::NoRoom(of(&e.message))),
+                        r => js::from_js(&r?).map_err(CellError::host)?,
+                    };
+                    if let Some(why) = answer["noRoom"].as_str() {
+                        return Err(Unstarted::NoRoom(of(why)));
+                    }
                     if let Some(why) = answer["unusable"].as_str() {
-                        return Err(Unstarted::Unusable(format!("save {}'s {}: {why}", save.number, record["dir"].as_str().unwrap_or("?"))));
+                        return Err(Unstarted::Unusable(of(why)));
                     }
                 }
                 // the image's check, behind the gate: nothing reads /data yet
@@ -3418,9 +3456,12 @@ impl ComputerCell {
                 let b: ExportAsk = body_json(&mut req).await?;
                 self.owned_by(&b.owner)?;
                 let saves = self.saves()?;
-                // set aside or not: a save set aside holds its newest work
-                let save = saves.every_save().into_iter().find(|s| !s.unusable);
-                json_response(&json!({ "save": save.map(|s| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records })) }))
+                // and, beside it, the newest set aside: its files may be
+                // newer, and the computer never goes back to it
+                let of = |s: &Save| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records });
+                let save = saves.all().iter().find(|s| !s.unusable);
+                let set_aside = saves.aside().iter().find(|s| !s.unusable);
+                json_response(&json!({ "save": save.map(of), "setAside": set_aside.map(of) }))
             }
             "computer/export-read" => {
                 let b: ExportRead = body_json(&mut req).await?;
@@ -3666,7 +3707,7 @@ impl ComputerCell {
             (Method::Put, ["image"]) => json_response(&self.pin(&image_named(&req.bytes().await?)?).await?),
             (Method::Post, ["notices", "seen"]) => {
                 let b: NoticeSeen = body_json(&mut req).await?;
-                if !self.update_saves(|s| s.saw(b.life))? {
+                if !self.update_saves(|s| s.saw_notice(b.life, b.too_big))? {
                     return Err(CellError::invalid(format!("no notice told here names start {}: read the computer again", b.life)));
                 }
                 // its owner's other pages read it again, and tell it no more
