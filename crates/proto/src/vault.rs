@@ -129,6 +129,23 @@ pub enum AskState {
     Expired,
 }
 
+impl AskState {
+    /// Its name, as the wire and the Vault's rows say it.
+    pub fn name(self) -> &'static str {
+        match self {
+            AskState::Waiting => "waiting",
+            AskState::Saved => "saved",
+            AskState::Declined => "declined",
+            AskState::Expired => "expired",
+        }
+    }
+
+    /// The state `name` names (`name`'s inverse).
+    pub fn named(name: &str) -> Option<AskState> {
+        [AskState::Waiting, AskState::Saved, AskState::Declined, AskState::Expired].into_iter().find(|s| s.name() == name)
+    }
+}
+
 /// An ask, as its agent and its person read it: never a value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

@@ -1542,6 +1542,7 @@ pub(super) const VAULT_ASK_CHECKS: &[&str] = &[
     "a Decline ends an ask: the agent's CLI is told, and nothing is put in the Vault",
     "asked to send one it keeps somewhere new, its person allows with no value (no field on that card), and the stand-in works there too",
     "no value pasted is in any answer, in the agent's view, or in a node log",
+    "a secret named `asks` is still its person's to set and remove: the asks' routes take only a POST or an id",
 ];
 
 /// The person's waiting card for `name` (a `vault_ask` notice), once
@@ -1652,8 +1653,10 @@ pub(super) fn vault_ask_checks(
     let logs = super::vault::logs(s);
     s.ok(VAULT_ASK_CHECKS[8], !said.iter().any(|t| t.contains(&value)) && !view.text.contains(&value) && !logs.contains(&value), json!({ "said": said }));
     // the run's other checks find the Vault as they left it
-    for gone in [name] {
-        api.signed(w.owner, "DELETE", &format!("/api/vault/{gone}"), None)?;
-    }
+    api.signed(w.owner, "DELETE", &format!("/api/vault/{name}"), None)?;
+
+    let set = api.signed(w.owner, "PUT", "/api/vault/asks", Some(&json!({ "value": "asks-e2e", "hosts": [], "agents": [w.agent] })))?;
+    let gone = api.signed(w.owner, "DELETE", "/api/vault/asks", None)?;
+    s.ok(VAULT_ASK_CHECKS[9], set.status == 200 && gone.status == 200 && gone.body["removed"] == true, json!({ "set": set.body, "removed": gone.body }));
     Ok(5)
 }

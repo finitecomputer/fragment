@@ -1170,6 +1170,8 @@ fn vault_ask(c: &api::Client, j: bool, ask: fragment_proto::vault::AskSecret) ->
     #[derive(serde::Deserialize, Serialize, Clone)]
     struct Credential {
         provider: String,
+        // a Vault secret's is `own`; a connection of the same name's is not
+        kind: String,
         placeholder: String,
         #[serde(default)]
         hosts: Vec<String>,
@@ -1177,7 +1179,7 @@ fn vault_ask(c: &api::Client, j: bool, ask: fragment_proto::vault::AskSecret) ->
     let given = match at.state {
         AskState::Saved => {
             let view: View = c.call_as(c.get("/api/computer")?).context("reading this computer's view for the stand-in")?;
-            view.agents.into_iter().find(|a| a.fragment == me).and_then(|a| a.credentials.into_iter().find(|c| c.provider == name))
+            view.agents.into_iter().find(|a| a.fragment == me).and_then(|a| a.credentials.into_iter().find(|c| c.provider == name && c.kind == "own"))
         }
         _ => None,
     };

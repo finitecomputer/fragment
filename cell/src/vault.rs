@@ -320,7 +320,9 @@ pub(crate) async fn delete(env: &Env, person: &str, name: &str) -> CellResult<Ve
 /// router finds their Vault, hands it the body as it came, and passes its
 /// answer on.
 pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
-    if rest.first() == Some(&"asks") {
+    // an ask's routes are a POST, or under an id: `PUT` and `DELETE
+    // /api/vault/asks` stay a secret named `asks`'
+    if rest.first() == Some(&"asks") && (method == Method::Post || rest.len() > 1) {
         return asks(env, signed, method, &rest[1..], body).await;
     }
     if signed.identity.kind != IdentityKind::Person {
@@ -494,10 +496,10 @@ impl VaultCell {
         }
         self.schema.ready()?;
         let answer = match path.trim_start_matches('/').split('/').collect::<Vec<_>>()[..] {
-            ["vault", "put", name] => self.put(name, &crate::json_body(&req.bytes().await?)?, None).await?,
+            ["vault", "put", name] => self.put(name, &crate::json_body(&req.bytes().await?)?, None, None).await?,
             ["vault", "handoff", name] => {
                 let HandOff(receipt, put) = crate::json_body(&req.bytes().await?)?;
-                self.put(name, &put, Some(&receipt)).await?
+                self.put(name, &put, Some(&receipt), None).await?
             }
             ["vault", "list"] => self.list()?,
             ["vault", "delete", name] => self.delete(name)?,
@@ -536,7 +538,7 @@ impl VaultCell {
     /// turn (two writes with no wait between, which the object commits
     /// together); again, it puts nothing and answers `{}`. Nor does it take
     /// the name of a secret bound to other agents.
-    async fn put(&self, name: &str, put: &PutSecret, receipt: Option<&str>) -> CellResult<String> {
+    async fn put(&self, name: &str, put: &PutSecret, receipt: Option<&str>, still: Option<&dyn Fn() -> CellResult<()>>) -> CellResult<String> {
         let wiped = || CellError::new(ErrorCode::Forbidden, "this person was wiped: their vault keeps nothing");
         if self.wiped.get() {
             return Err(wiped());
@@ -562,6 +564,10 @@ impl VaultCell {
         let sealed = crate::keys::seal(&self.env, &self.scope(), value.as_bytes()).await?;
         if self.wiped.get() {
             return Err(wiped());
+        }
+        // what its caller read before the wait, read again in the turn that writes
+        if let Some(still) = still {
+            still()?;
         }
         let existing = self.rows("SELECT secret FROM secrets WHERE name = ?", vec![name.into()])?;
         if let Some(r) = receipt {
@@ -905,7 +911,7 @@ impl VaultCell {
         self.expire(now)?;
         let Some(row) = self.rows("SELECT ask, expires, state FROM asks WHERE id = ?", vec![id.into()])?.into_iter().next() else { return Ok(None) };
         let asked: Asked = crate::json_text(row["ask"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored ask: {e}")))?;
-        let state: AskState = serde_json::from_value(row["state"].clone()).map_err(|e| CellError::host(format!("a stored ask's state: {e}")))?;
+        let state = row["state"].as_str().and_then(AskState::named).ok_or_else(|| CellError::host(format!("a stored ask's state: {}", row["state"])))?;
         Ok(Some((asked, row["expires"].as_i64().unwrap_or(0), state)))
     }
 
@@ -923,9 +929,13 @@ impl VaultCell {
             return Err(CellError::new(ErrorCode::Forbidden, "this person was wiped: their vault keeps nothing"));
         }
         let Asked(agent, _, _, a) = &asked;
-        rules::ask_ok(a, self.held(&a.name)?.as_ref(), &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
+        rules::ask_ok(a, agent, self.held(&a.name)?.as_ref(), &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
         let now = js::now_ms();
         self.expire(now)?;
+        let kept = self.rows("SELECT COUNT(*) AS n FROM asks", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
+        if kept >= rules::ASKS_KEPT_MAX as u64 {
+            return Err(CellError::new(ErrorCode::RateLimited, format!("your person's vault keeps {} asks: wait an hour for the ended ones to go", rules::ASKS_KEPT_MAX)));
+        }
         let mut waiting = 0;
         for row in self.rows("SELECT id, ask FROM asks WHERE state = 'waiting'", vec![])? {
             let Asked(by, _, _, other) = crate::json_text(row["ask"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored ask: {e}")))?;
@@ -959,15 +969,30 @@ impl VaultCell {
     /// Its person's answer to the ask `id`: what they pasted (or Allow),
     /// put under the Vault's own rules (`rules::answered`, then `put`), and
     /// the ask saved. One that ended is refused (409), and a put refused
-    /// leaves it waiting, its card saying why.
+    /// leaves it waiting, its card saying why. The put's seal may yield, so
+    /// the ask still waiting and the secret held as it was read are checked
+    /// again in the turn that writes both (a Decline, an expiry, an ask
+    /// again or another answer meanwhile: 409, nothing written).
     async fn answer(&self, id: &str, a: AnswerAsk) -> CellResult<String> {
-        let ended = |state: AskState| CellError::new(ErrorCode::Conflict, format!("this ask is {}: ask your agent to ask again", serde_json::to_value(state).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()));
+        let ended = |state: AskState| CellError::new(ErrorCode::Conflict, format!("this ask is {}: ask your agent to ask again", state.name()));
         let (Asked(agent, _, _, ask), expires, state) = self.ask_row(id)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no ask {id}")))?;
         if state != AskState::Waiting {
             return Err(ended(state));
         }
-        let put = rules::answered(&ask, &agent, self.held(&ask.name)?.as_ref(), a.value).map_err(|e| CellError::invalid(e.to_string()))?;
-        self.put(&ask.name, &put, None).await?;
+        let held = self.held(&ask.name)?;
+        let put = rules::answered(&ask, &agent, held.as_ref(), a.value).map_err(|e| CellError::invalid(e.to_string()))?;
+        let still = || -> CellResult<()> {
+            match self.ask_row(id)? {
+                Some((_, _, AskState::Waiting)) => {}
+                Some((_, _, state)) => return Err(ended(state)),
+                None => return Err(CellError::new(ErrorCode::NotFound, format!("no ask {id}"))),
+            }
+            match self.held(&ask.name)? == held {
+                true => Ok(()),
+                false => Err(CellError::new(ErrorCode::Conflict, format!("{} changed as you answered: answer again", ask.name))),
+            }
+        };
+        self.put(&ask.name, &put, None, Some(&still)).await?;
         self.sql().exec("UPDATE asks SET state = 'saved' WHERE id = ?", vec![id.into()])?;
         Self::ask_text(id, &ask.name, AskState::Saved, expires)
     }
@@ -990,9 +1015,9 @@ impl VaultCell {
         let rows = self.rows("SELECT id, ask, expires FROM asks WHERE state = 'waiting' AND expires > ? ORDER BY at", vec![SqlStorageValue::Integer(now)])?;
         let mut notices = Vec::with_capacity(rows.len());
         for row in rows {
-            let Asked(_, title, picture, ask) = crate::json_text(row["ask"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored ask: {e}")))?;
-            let held = self.held(&ask.name)?.is_some();
-            notices.push(rules::ask_notice(row["id"].as_str().unwrap_or_default(), &ask, &title, picture, row["expires"].as_i64().unwrap_or(0), held));
+            let Asked(by, title, picture, ask) = crate::json_text(row["ask"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored ask: {e}")))?;
+            let held = self.held(&ask.name)?;
+            notices.push(rules::ask_notice(row["id"].as_str().unwrap_or_default(), &ask, &by, &title, picture, row["expires"].as_i64().unwrap_or(0), held.as_ref()));
         }
         serde_json::to_string(&fragment_proto::notice::NoticeList { notices }).map_err(|e| CellError::host(e.to_string()))
     }
