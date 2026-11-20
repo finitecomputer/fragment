@@ -581,8 +581,8 @@ pub(crate) fn picture_refused(r: fragment_core::face::Refused, what: &str) -> Ce
 
 /// `GET /api/identities/<npub>/picture`: anyone may see an identity's
 /// picture (a page shows it beside their name). A person's is the
-/// registry's; an agent's is its agent fragment's icon, which that
-/// fragment answers (docs/api.md, "A fragment's name and an agent's picture").
+/// registry's; an agent's is its agent fragment's `avatar.png` at live,
+/// which that fragment answers (docs/api.md, "An agent's name and picture").
 async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
     if !npub::is_identity(identity) {
         return Err(CellError::new(ErrorCode::NotFound, format!("{identity:?} is no identity")));
@@ -592,7 +592,7 @@ async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
         let named = ask_registry(env, &calls::Profiles { ids: vec![identity.to_string()], emails_of: vec![] }).await?;
         let agent = named.profiles.get(identity).filter(|p| p.kind == IdentityKind::Agent);
         let fragment = agent.and_then(|p| p.fragment.clone()).ok_or_else(none)?;
-        return fragment::pass(env, &fragment, &fragment::calls::Picture { identity: identity.to_string() }).await;
+        return fragment::pass(env, &fragment, &fragment::calls::Picture {}).await;
     };
     let blob = js::blob_get(env, js::BLOBS, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
     let headers = Headers::new();

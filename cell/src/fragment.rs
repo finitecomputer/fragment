@@ -55,7 +55,7 @@ use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::npub;
 use fragment_core::seed;
 use fragment_proto::{
-    limits, search, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentKind, FragmentStatus, IdentityKind, Pins, Role, Urls,
+    limits, search, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, Pins, Role, Urls,
     Visibility,
 };
 use fragment_templates::blessed;
@@ -374,26 +374,10 @@ pub(crate) enum MetaKey {
     /// picture?}`): its title and an agent's role are kept here alone, set
     /// at its making and through its face route (members.rs `face_put`).
     Face,
-    /// An agent's picture as a release before kept it (`<sha256> <type>
-    /// <commit>`, its `avatar.png` there), until taken as its icon
-    /// (runs_on.rs `take_picture`; the debt ledger).
+    /// An agent fragment's picture as main's last move read it (`<sha256>
+    /// <type> <commit>`, plane.rs `read_picture`): what `calls::Picture`
+    /// answers.
     Picture,
-    /// An agent's renames since its last that ended whose commit's answer
-    /// was lost or refused (a JSON array of `[name, sha256 of the job it
-    /// wrote]`): the next reads a name as an old one only while the job is
-    /// the one that rename wrote (members.rs `job_says`).
-    Renaming,
-    /// The title its own `fragment.json` said at its last install (`""`:
-    /// none), and its `avatar.png` there (`<last commit> <sha256>`, an
-    /// agent's): how an install tells a client from before the face
-    /// renaming it (plane.rs `face_from_git`; the debt ledger).
-    TitleSeen,
-    PictureSeen,
-    /// The marks `GET manifest` gave its editors with the title it showed
-    /// (a JSON array of `[mark, title]`, at most `TITLE_READS_MAX`, newest
-    /// last): a write of `fragment.json` naming one is a client from before
-    /// the face renaming it (plane.rs `title_from_read`; the debt ledger).
-    TitleRead,
     /// The channels that list records, their kinds, fields and read
     /// roles, as the rows last carried them (listed.rs `listed_fence`).
     Listed,
@@ -480,8 +464,6 @@ pub(crate) enum MetaKey {
     DoorTemplate,
     /// Its owner's row was told its reach (`Sharing.reach`, reach.rs).
     ReachTold,
-    /// The next time a page may pre-wake the computers its channels wake.
-    PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
     /// call was paid and kept (`fail-after-paid`), so the step is retried.
     TestFailAfterPaid,
@@ -554,10 +536,6 @@ impl MetaKey {
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
-            MetaKey::Renaming => "renaming",
-            MetaKey::TitleSeen => "title_seen",
-            MetaKey::PictureSeen => "picture_seen",
-            MetaKey::TitleRead => "title_read",
             MetaKey::Listed => "listed",
             MetaKey::ListedSentAt => "listed_sent_at",
             MetaKey::ListedDue => "listed_due",
@@ -589,7 +567,6 @@ impl MetaKey {
             MetaKey::InboxSecret => "inbox_secret",
             MetaKey::DoorTemplate => "door_template",
             MetaKey::ReachTold => "reach_told",
-            MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestLoseVideoAnswers => "test_lose_video_answers",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
@@ -1066,10 +1043,7 @@ impl FragmentCell {
                 self.test_countdown(MetaKey::TestFailSigninVisibility, "its visibility was not read")?;
                 reply::<VisibilityOf>(self.facts().map(|f| f.visibility))
             }
-            Picture::PATH => {
-                let asked: Picture = decode(body)?;
-                self.picture(&asked.identity).await
-            }
+            Picture::PATH => self.picture().await,
             DoorCheck::PATH => reply::<DoorCheck>(self.door_check(decode(body)?)),
             DoorActor::PATH => reply::<DoorActor>(self.door_actor(decode(body)?)),
             FaceOf::PATH => reply::<FaceOf>(self.face_of()),
@@ -1412,22 +1386,22 @@ impl FragmentCell {
                 }
                 None => None,
             };
-            // its face from the start, its own from then on (docs/api.md, "A
-            // fragment's name and an agent's picture"): the title given, else
-            // its blessed template's; that template's kind, so the owner's
-            // list says it is a chat or an agent at once. A copied template's
-            // (an app), or a blessed one whose manifest did not read, is an
-            // app's until its install says, and its title, if none was given,
-            // the install's default. An agent's own is made shared with no one
-            // (alone.rs): refused before anything is made
+            // its face from the start, its own from then on (docs/api.md, "An
+            // agent's name and picture"): the title given, else its blessed
+            // template's; that template's kind, so the owner's list says it is
+            // a chat or an agent at once. A copied template's (an app), or a
+            // blessed one whose manifest did not read, is an app's until its
+            // install says, its title, if none was given, the install's
+            // default. An agent's own is made shared with no one (alone.rs):
+            // refused before anything is made
             let face = match body.template.as_deref() {
                 Some(t) => {
                     let blessed = crate::assets::blessed_manifest(&self.env, t).await.ok().and_then(Result::ok);
-                    if blessed.as_ref().is_some_and(|m| m.kind() == FragmentKind::Agent) && body.visibility.is_some_and(|v| v != Visibility::Members) {
+                    if blessed.as_ref().is_some_and(|m| m.kind() == fragment_proto::FragmentKind::Agent) && body.visibility.is_some_and(|v| v != Visibility::Members) {
                         return Err(CellError::new(ErrorCode::Forbidden, crate::alone::AGENT));
                     }
                     laps.lap("manifest");
-                    let (kind, title) = blessed.as_ref().map_or((FragmentKind::App, None), |m| (m.kind(), m.title()));
+                    let (kind, title) = blessed.as_ref().map_or((fragment_proto::FragmentKind::App, None), |m| (m.kind(), m.title()));
                     Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None))
                 }
                 None => None,
@@ -1733,10 +1707,6 @@ impl FragmentCell {
             self.trim_writes()?;
             if self.pins_may_lag()? {
                 self.poll().await;
-            }
-            // before the blobs' collection: the picture it takes is one of them
-            if let Err(e) = self.take_picture().await {
-                self.event("picture.take-failed", &e.message, json!({ "code": e.code }));
             }
             if let Err(e) = self.collect_blobs().await {
                 self.event("blobs.collect-failed", &e.message, json!({ "code": e.code }));

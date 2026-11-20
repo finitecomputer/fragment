@@ -773,20 +773,6 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "pollAt": now })
             }
-            Some("legacy-picture") => {
-                // an agent's picture as a release before kept it, its row
-                // (`<sha256> <type> <commit>`), its face showing it, and no
-                // icon (or, `icon: true`, the one it kept from before it was
-                // an agent): what runs_on.rs `take_picture` takes
-                let row = body["row"].as_str().ok_or_else(|| CellError::invalid("legacy-picture names its row: <sha256> <type> <commit>"))?;
-                self.set_meta(MetaKey::Picture, row)?;
-                if body["icon"] != true {
-                    self.del_meta(MetaKey::Icon)?;
-                }
-                let now = self.face_now()?;
-                self.face_is(now.kind, now.title.as_deref(), now.role.as_deref())?;
-                json!({ "picture": self.icon_shown(now.kind)? })
-            }
             Some("hold-rows") => {
                 // while on, the alarm sends no list row (`on_alarm`): a row
                 // a list shows was sent by a request's own flush or its
@@ -801,7 +787,7 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, hold-woke, woke-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, legacy-picture, hold-rows, or ended")),
+ hold-advances, advance-held, hold-woke, woke-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, hold-rows, or ended")),
         })
     }
 }

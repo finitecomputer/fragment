@@ -4,8 +4,8 @@
 //! collection keeps), served to its viewers, and shown in its members'
 //! lists as its picture. One with none of its own shows the icon of the
 //! blessed template it runs, when that carries one (a brain's), read from
-//! the release. An agent's picture is its own icon, shown at its
-//! identity's address to whoever sees the agent (runs_on.rs `picture`).
+//! the release. An agent fragment's picture is its avatar (crate::plane),
+//! never an icon.
 //!
 //! A making runs in the request that asks for it: a subject, then
 //! `icon::CANDIDATES` drawings at once, each cut out, examined, fitted and
@@ -39,7 +39,7 @@ const ICON_CACHE: &str = "private, max-age=86400";
 fn refused(r: Refusal) -> CellError {
     let code = match r {
         Refusal::Busy => ErrorCode::RateLimited,
-        Refusal::Hint | Refusal::NotAnImage => ErrorCode::InvalidRequest,
+        Refusal::Hint | Refusal::NotAnImage | Refusal::Agent => ErrorCode::InvalidRequest,
     };
     CellError::new(code, r.message())
 }
@@ -59,7 +59,7 @@ fn operation(started_ms: i64) -> String {
 
 /// The icon a fragment shows: its own, one of its blobs, or its blessed
 /// template's (blessed.rs `icon`), a file of the release.
-pub(crate) enum Shown {
+enum Shown {
     Own(String),
     Release(&'static File),
 }
@@ -87,20 +87,11 @@ impl FragmentCell {
         }
     }
 
-    /// The type of the icon it shows: a PNG, but an agent's picture's,
-    /// which is kept as its upload was when it is a picture (`icon_put`).
-    fn icon_type(&self, shown: &Shown) -> CellResult<String> {
-        Ok(match shown {
-            Shown::Own(sha) => self.blob_mime(sha)?.unwrap_or_else(|| icon::MEDIA_TYPE.into()),
-            Shown::Release(_) => icon::MEDIA_TYPE.into(),
-        })
-    }
-
     /// The bytes of the icon it shows, streamed (never held whole), tagged
-    /// by its SHA-256 as a blob's are, typed as kept (`icon_type`).
-    pub(crate) async fn icon_body(&self, shown: &Shown) -> CellResult<Response> {
+    /// by its SHA-256 as a blob's are.
+    async fn icon_body(&self, shown: &Shown) -> CellResult<Response> {
         match shown {
-            Shown::Own(sha) => self.stream_blob(sha, &self.icon_type(shown)?, None).await,
+            Shown::Own(sha) => self.stream_blob(sha, icon::MEDIA_TYPE, None).await,
             Shown::Release(f) => {
                 let headers = Headers::new();
                 headers.set("content-type", icon::MEDIA_TYPE)?;
@@ -110,30 +101,39 @@ impl FragmentCell {
         }
     }
 
-    /// Where its lists show its icon, when it has one: an agent's, its
-    /// own alone, at its identity's address (`face::picture_path`), which
-    /// whoever sees the agent may fetch; any other's at its own.
+    /// Where its lists show its icon, when it has one and is no agent.
     pub(crate) fn icon_shown(&self, kind: FragmentKind) -> CellResult<Option<String>> {
         if kind == FragmentKind::Agent {
-            // its picture from before it was its icon, until taken
-            // (`take_picture`): an icon beside it is one it kept from
-            // before it was an agent, never shown as its picture
-            let sha = self.picture_untaken()?.map(|(sha, _, _)| sha).or(self.icon_sha()?);
-            return sha.map(|sha| Ok(face::picture_path(&self.must(MetaKey::Npub)?, &sha))).transpose();
+            return Ok(None);
         }
         let Some(shown) = self.icon_now()? else { return Ok(None) };
         Ok(Some(icon::icon_path(&self.name()?, shown.sha())))
     }
 
+    /// Its kind and title as its lists show them now (`MetaKey::Face`):
+    /// an app's, untitled, before its first install.
+    fn shown_as(&self) -> CellResult<(FragmentKind, Option<String>)> {
+        let face: Value = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok()).unwrap_or(Value::Null);
+        let kind = face["kind"].as_str().and_then(FragmentKind::parse).unwrap_or_default();
+        Ok((kind, face["title"].as_str().map(str::to_string)))
+    }
+
     /// Its lists show its icon as it is now, sent in this request (a
-    /// row that fails waits for the alarm, as any index change's). An
-    /// agent's picture kept before it was its icon goes: this one is.
+    /// row that fails waits for the alarm, as any index change's).
     async fn show_icon(&self) -> CellResult<()> {
-        self.del_meta(MetaKey::Picture)?;
-        let now = self.face_now()?;
-        self.face_is(now.kind, now.title.as_deref(), now.role.as_deref())?;
+        let (kind, title) = self.shown_as()?;
+        // an icon is never an agent's (`icon_taker`), and a role is an agent's alone
+        self.face_is(kind, title.as_deref(), None, self.icon_shown(kind)?.as_deref())?;
         self.flush_index().await;
         Ok(())
+    }
+
+    /// Refuses an agent fragment: its picture is its avatar.
+    fn icon_taker(&self) -> CellResult<()> {
+        match self.shown_as()?.0 {
+            FragmentKind::Agent => Err(refused(Refusal::Agent)),
+            _ => Ok(()),
+        }
     }
 
     /// One meter row of a making (`op`, `operation`), on the owner's
@@ -152,6 +152,7 @@ impl FragmentCell {
     pub(crate) async fn icon_make(&self, caller: &Caller, body: Value) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         let hint = icon::hint(&body).map_err(refused)?;
+        self.icon_taker()?;
         let owner = self.must(MetaKey::Owner)?;
         // asked as a job's AI step is: a guest's fragment makes none, nor
         // one at its cap for anyone but its owner and their agents
@@ -193,7 +194,7 @@ impl FragmentCell {
         let meta: Value = self.meta(MetaKey::MetaLive)?.and_then(|m| crate::json_text(&m).ok()).unwrap_or(Value::Null);
         let name = self.name()?;
         let label = fragment_proto::split_fragment_name(&name).map_or(name.as_str(), |(label, _)| label).to_string();
-        let title = self.title()?.unwrap_or(label);
+        let title = self.shown_as()?.1.or(meta["title"].as_str().map(str::to_string)).unwrap_or(label);
         let input = icon::subject_input(&title, meta["description"].as_str(), hint);
         let named = match crate::models::run(&self.env, icon::SUBJECT_MODEL, &input, owner, None).await {
             Ok((200, bytes, _)) => {
@@ -263,39 +264,32 @@ impl FragmentCell {
     /// `PUT /api/f/{name}/icon` (editors and up): the image its body is
     /// becomes the icon. A `SIZE` PNG within `ICON_MAX_BYTES` (a making's
     /// candidate) is kept as it is; any other image is fitted inside
-    /// `SIZE` by Images, its padding transparent. An agent's is its
-    /// picture, kept as it is when it is one (`face::check_picture`, a
-    /// person's rule), else cropped by Images to fill `SIZE` (it is shown
-    /// round), a JPEG. A write: refused while the owner's fragments are
-    /// read-only, before anything is fitted. Answers where its lists show it.
+    /// `SIZE` by Images, its padding transparent. A write: refused while
+    /// the owner's fragments are read-only, before anything is fitted.
     pub(crate) async fn icon_put(&self, caller: &Caller, req: &mut Request) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        self.icon_taker()?;
         self.writable().await?;
         let bytes = crate::read_body(req, icon::UPLOAD_MAX_BYTES).await?;
-        let mime = face::picture_type(&bytes).ok_or_else(|| refused(Refusal::NotAnImage))?;
-        let kind = self.face_now()?.kind;
-        let agent = kind == FragmentKind::Agent;
-        let whole = match agent {
-            true => face::check_picture(&bytes).is_ok(),
-            false => bytes.len() <= icon::ICON_MAX_BYTES && matches!(icon::alpha_of(&bytes), Ok((w, h, _)) if w == icon::SIZE && h == icon::SIZE),
-        };
-        let (kept, mime) = if whole {
-            (bytes, mime)
+        face::picture_type(&bytes).ok_or_else(|| refused(Refusal::NotAnImage))?;
+        let whole = bytes.len() <= icon::ICON_MAX_BYTES && matches!(icon::alpha_of(&bytes), Ok((w, h, _)) if w == icon::SIZE && h == icon::SIZE);
+        let png = if whole {
+            bytes
         } else {
-            let (steps, made) = if agent { (icon::cover(), "image/jpeg") } else { (icon::fit(None), icon::MEDIA_TYPE) };
-            let fitted = js::images(self.env.as_ref(), &bytes, &steps, made).await.map_err(|e| CellError::invalid(format!("the image could not be read: {}", e.message)))?;
+            let fitted = js::images(self.env.as_ref(), &bytes, &icon::fit(None), icon::MEDIA_TYPE).await.map_err(|e| CellError::invalid(format!("the image could not be read: {}", e.message)))?;
             self.icon_charge(&self.meter_key()?, &operation(js::now_ms()), "upload", Usage::Images { count: 1 });
-            (fitted, made)
+            fitted
         };
-        if kept.len() > icon::ICON_MAX_BYTES {
-            return Err(CellError::too_large("an icon, fitted,", kept.len(), icon::ICON_MAX_BYTES));
+        if png.len() > icon::ICON_MAX_BYTES {
+            return Err(CellError::too_large("an icon, fitted,", png.len(), icon::ICON_MAX_BYTES));
         }
-        let (sha, size) = (blob::sha256_hex(&kept), kept.len());
-        self.put_blob_typed(&sha, kept, Some(mime)).await?;
+        let (sha, size) = (blob::sha256_hex(&png), png.len());
+        self.put_blob_typed(&sha, png, Some(icon::MEDIA_TYPE)).await?;
         self.set_meta(MetaKey::Icon, &sha)?;
         self.show_icon().await?;
         self.event("icon.set", &format!("a new icon ({size} bytes)"), json!({ "sha256": sha, "fitted": !whole }));
-        Ok(Response::from_json(&json!({ "icon": self.icon_shown(kind)?, "sha256": sha, "size": size }))?)
+        let path = icon::icon_path(&self.name()?, &sha);
+        Ok(Response::from_json(&json!({ "icon": path, "sha256": sha, "size": size }))?)
     }
 
     /// `DELETE /api/f/{name}/icon` (editors and up): no icon of its own;
@@ -305,12 +299,12 @@ impl FragmentCell {
     pub(crate) async fn icon_delete(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         self.writable().await?;
-        if self.icon_sha()?.is_some() || self.picture_untaken()?.is_some() {
+        if self.icon_sha()?.is_some() {
             self.del_meta(MetaKey::Icon)?;
             self.show_icon().await?;
             self.event("icon.removed", "the icon was removed", json!({}));
         }
-        Ok(Response::from_json(&json!({ "icon": self.icon_shown(self.face_now()?.kind)? }))?)
+        Ok(Response::from_json(&json!({ "icon": self.icon_shown(self.shown_as()?.0)? }))?)
     }
 
     /// `favicon.ico` on the fragment's own origin, which a browser asks of
@@ -328,7 +322,7 @@ impl FragmentCell {
         }
         let mut resp = if head { Response::empty()? } else { self.icon_body(&shown).await? };
         let h = resp.headers_mut();
-        h.set("content-type", &self.icon_type(&shown)?)?;
+        h.set("content-type", icon::MEDIA_TYPE)?;
         h.set("etag", &etag)?;
         h.set("cache-control", cache)?;
         h.set("x-content-type-options", "nosniff")?;

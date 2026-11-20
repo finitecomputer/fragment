@@ -167,7 +167,7 @@ struct FragmentAPI: Sendable {
 
     /// A title set exactly as given, as the web's `retitle` sets it: its
     /// face's (`PUT /api/f/{name}/face`), at once, with no commit and no
-    /// deploy (docs/api.md, "A fragment's name and an agent's picture").
+    /// deploy (docs/api.md, "An agent's name and picture").
     /// With `was`, only while its title is that: refused (409) once it is
     /// renamed, so a rename made meanwhile keeps its name.
     func retitle(_ fragment: FragmentSummary, exactly title: String, was: String? = nil) async throws {

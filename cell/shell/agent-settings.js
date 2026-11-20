@@ -94,14 +94,14 @@ export function editTenancy(current) {
 }
 
 export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, retitle, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
-  // ---- an agent's name and picture (docs/api.md, "A fragment's name and
-  // an agent's picture"): its face, set at once (its title, `retitle`) and
-  // its icon, which the platform keeps as it is when it is a picture. Every
-  // page shows it by them; the rows here follow the list. ----
-  // What the platform keeps as it is (fragment_core::face): a PNG, JPEG,
-  // WebP or GIF of at most 256 KiB. A larger one (a phone's photo is past
-  // what a request carries), or any other image the browser reads, is drawn
-  // again at most PICTURE_PX square: a PNG, else a JPEG, that fits.
+  // ---- an agent's name and picture (docs/api.md, "An agent's name and
+  // picture"): its face's title (`retitle`) and its avatar.png, a commit to
+  // main, which shows it with no deploy. Every page and the platform show
+  // it by them; the rows here follow the list. ----
+  const AGENT_PICTURE = "avatar.png";
+  // What the platform takes (fragment_core::face): a PNG, JPEG, WebP or GIF
+  // of at most 256 KiB. A larger one, or any other image the browser reads,
+  // is drawn again at most PICTURE_PX square: a PNG, else a JPEG, that fits.
   const PICTURE_MAX_BYTES = 256 * 1024;
   const PICTURE_PX = 512;
   async function pictureOf(file) {
@@ -123,9 +123,16 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     }
     throw new Error("That picture stays over 256 KiB however it is drawn: choose a smaller one.");
   }
+  async function base64Of(blob) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let text = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(text);
+  }
+  // The agent's picture from `file`, or none (null).
   async function setPicture(agent, file) {
-    if (file) await api("PUT", `/api/f/${seg(agent)}/icon`, await pictureOf(file));
-    else await api("DELETE", `/api/f/${seg(agent)}/icon`);
+    const write = file ? { path: AGENT_PICTURE, base64: await base64Of(await pictureOf(file)) } : { path: AGENT_PICTURE, delete: true };
+    await api("POST", `/api/f/${seg(agent)}/files`, { message: file ? "its picture" : "no picture", files: [write] });
   }
   // An agent removed (FIN-250): the chats it is the last live agent of are
   // archived first, so they are in History, read and continued with another
@@ -312,8 +319,9 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
   const setRole = (agent, role) => api("PUT", `/api/f/${seg(agent)}/face`, { role });
   // ---- an agent's name and picture in its Edit dialog, written as they
   // change, as its other fields are: its name its face's title (as Rename
-  // sets it: fragment-title.js `retitle`), none or as it was changing
-  // nothing; its picture chosen there, or taken away (`setPicture`). Neither is said in its summary, which its card's
+  // sets it: fragment-title.js `retitle`), none or as it was
+  // changing nothing; its picture chosen there, or taken away
+  // (`setPicture`). Neither is said in its summary, which its card's
   // header shows ----
   function nameField(a, said) {
     const field = el("input", "agent-name-field");

@@ -853,14 +853,20 @@ const DEPLOY_KEPT_BYTES: usize = 1 << 20;
 /// registry has are skipped. Only a deploy that builds an image pushes one.
 const PUSH_TIMEOUT: &str = "timeout awaiting response headers";
 
+/// Wrangler's (4.145), when it uploaded the Worker and then could not
+/// apply its Durable Object-managed Container application settings (it
+/// reads the new version back first, which Cloudflare may answer "not
+/// ready" for longer than wrangler asks: 2026-10-24); its next sentence
+/// says to run the same `wrangler deploy` again.
+const SETTINGS_UNAPPLIED: &str = "The Worker version was deployed, but Wrangler could not finish applying its Durable Object-managed Container application settings.";
+
 /// How a `wrangler deploy` that ended with `status` and printed `output`
 /// ended (rollout.rs): done; an image's push that timed out (Docker's words
 /// on a line that names the registry: before any upload, so worth running
-/// again); or failed, as wrangler's `[ERROR]` said it. Whether a failed one
-/// left the Worker live is read from its deployments, never from its words
-/// (on 2026-10-24 it was: "The Worker version was deployed, but Wrangler
-/// could not finish applying its Durable Object-managed Container
-/// application settings").
+/// again); the container settings not applied (`SETTINGS_UNAPPLIED`, the
+/// error it ended on: worth running again, as wrangler says); or failed, as
+/// wrangler's `[ERROR]` said it. Whether a failed one left the Worker live
+/// is read from its deployments, never from its words.
 fn wrangled(status: ExitStatus, output: &str) -> crate::rollout::Wrangled {
     use crate::rollout::Wrangled;
     if status.success() {
@@ -876,7 +882,10 @@ fn wrangled(status: ExitStatus, output: &str) -> crate::rollout::Wrangled {
         let error = lines[at..].iter().take_while(|l| !l.trim().is_empty()).map(|l| l.trim()).collect::<Vec<_>>().join(" ");
         error.split_once("[ERROR]").map_or(error.clone(), |(_, e)| e.trim().to_string())
     });
-    Wrangled::Failed(said.unwrap_or_else(|| format!("wrangler deploy failed: {status}")))
+    match said {
+        Some(said) if said.contains(SETTINGS_UNAPPLIED) => Wrangled::SettingsUnapplied(said),
+        said => Wrangled::Failed(said.unwrap_or_else(|| format!("wrangler deploy failed: {status}"))),
+    }
 }
 
 /// `text` without its terminal escapes (wrangler colours its errors where
@@ -1601,20 +1610,24 @@ mod tests {
         ExitStatus::from_raw(code << 8)
     }
 
-    /// How a `wrangler deploy` ended, for rollout.rs: only the registry's
-    /// push timeout is worth running again (before any upload); every
-    /// other failure is said as wrangler said it (in CI's colours, or
+    /// How a `wrangler deploy` ended, for rollout.rs: the registry's push
+    /// timeout (before any upload) and the container settings wrangler
+    /// could not apply (it says to run it again) are worth running again;
+    /// every failure is said as wrangler said it (in CI's colours, or
     /// plain and wrapped as a terminal wraps it), and rollout.rs reads the
     /// Worker's deployments to know whether it left the Worker live. A
-    /// timeout from any host but the registry is no push timeout.
+    /// timeout from any host but the registry is no push timeout, and the
+    /// settings' words are read only as the error wrangler ended on.
     #[test]
     fn a_deploy_s_end_is_read_as_wrangler_says_it() {
         use crate::rollout::Wrangled;
         assert_eq!(wrangled(exited(0), "Current Version ID: 13f90f05"), Wrangled::Done);
         let applying = "The Worker version was deployed, but Wrangler could not finish applying its Durable Object-managed Container application settings. Re-run the same `wrangler deploy` command to retry and finish deployment.";
-        assert_eq!(wrangled(exited(1), CONTAINER_APPLY_CI), Wrangled::Failed(applying.into()));
+        assert_eq!(wrangled(exited(1), CONTAINER_APPLY_CI), Wrangled::SettingsUnapplied(applying.into()));
         let wrapped = "✘ [ERROR] The Worker version was deployed, but Wrangler could not finish\n  applying its Durable Object-managed Container application settings.\n  Re-run the same `wrangler deploy` command to retry and finish deployment.\n";
-        assert_eq!(wrangled(exited(1), wrapped), Wrangled::Failed(applying.into()));
+        assert_eq!(wrangled(exited(1), wrapped), Wrangled::SettingsUnapplied(applying.into()));
+        let then_other = format!("{applying}\n\n✘ [ERROR] Docker command exited with code: 1\n");
+        assert_eq!(wrangled(exited(1), &then_other), Wrangled::Failed("Docker command exited with code: 1".into()), "only the error it ended on");
         let preparing = "├ Preparing hermes for Cloudflare Containers\n\n\x1b[31m✘ \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mTimed out while preparing the container image on Cloudflare's network.\x1b[0m\n\n";
         assert_eq!(wrangled(exited(1), preparing), Wrangled::Failed("Timed out while preparing the container image on Cloudflare's network.".into()));
         assert_eq!(wrangled(exited(1), PUSH_TIMEOUT_HAND), Wrangled::PushTimedOut);

@@ -829,7 +829,7 @@
           },
           "picture": {
             "default": null,
-            "description": "Its picture, its icon, as the address on the platform that serves\nit: an agent fragment's at its agent's identity's\n(`/api/identities/<npub>/picture?v=…`), any other's at its own\n(`/api/f/<name>/icon?v=…`, docs/api.md, Icons).",
+            "description": "Its picture, as the address on the platform that serves it: an\nagent fragment's `avatar.png` at main (its agent's identity's\n`/api/identities/<npub>/picture?v=…`), any other's icon\n(`/api/f/<name>/icon?v=…`, docs/api.md, Icons).",
             "type": [
               "string",
               "null"

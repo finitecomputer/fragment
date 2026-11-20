@@ -14,8 +14,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Meta {
     /// The title a template's fragment starts with, and a page's Open
-    /// Graph title until its face names one (docs/api.md, "A fragment's
-    /// name and an agent's picture"): never its face itself.
+    /// Graph title until its face names one (docs/api.md, "An agent's
+    /// name and picture"): never its face itself.
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<String>,

@@ -118,13 +118,10 @@ impl Call for VisibilityOf {
     type Answer = Visibility;
 }
 
-/// An agent fragment's picture, for `GET /api/identities/<npub>/picture`
-/// of its agent `identity`: its bytes, as the fragment streams them
-/// (runs_on.rs `picture`).
+/// An agent fragment's picture, for `GET /api/identities/<npub>/picture`:
+/// its bytes, as the fragment streams them (runs_on.rs `picture`).
 #[derive(Serialize, Deserialize)]
-pub(crate) struct Picture {
-    pub identity: String,
-}
+pub(crate) struct Picture {}
 
 impl Call for Picture {
     const PATH: &'static str = "/call/picture";

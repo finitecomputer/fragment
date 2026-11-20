@@ -442,7 +442,7 @@ enum Cmd {
     /// Show or set who can see a fragment: public | link | members
     Visibility { name: String, value: Option<String> },
     /// Show or change an agent's name and picture, as every page shows it:
-    /// its agent fragment's title and its icon, set at once
+    /// its agent fragment's title and its avatar.png, set at once
     Agent {
         /// The agent fragment (`juniper--k3x9`); an agent on a computer
         /// names itself by leaving it out
@@ -450,7 +450,7 @@ enum Cmd {
         /// Its new name
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
-        /// Its picture: a PNG, JPEG, WebP or GIF (one past 256 KiB is cropped to fit)
+        /// Its picture: a PNG, JPEG, WebP or GIF of at most 256 KiB
         #[arg(long, value_name = "FILE", conflicts_with = "no_picture")]
         picture: Option<PathBuf>,
         /// Take its picture away
@@ -3054,44 +3054,39 @@ fn refused_live(c: &api::Client, name: &str, live_tip: &str) -> Result<FragmentS
     Ok(st)
 }
 
-/// What `fragment agent` changes of an agent (docs/api.md, "A fragment's
-/// name and an agent's picture"): a new name, its face's title, said in its
-/// job (`SOUL.md`, a commit beside it) wherever the job said an old one as
-/// a word; a new picture, its icon, which the platform checks; or none. Each
-/// is set at once, with no deploy. Whether it asked for any change.
+/// What `fragment agent` changes of an agent (docs/api.md, "An agent's
+/// name and picture"): a new name, its face's title (its cell says it in
+/// its job too); a new picture, its `avatar.png`, or none, a commit (main
+/// shows it, with no deploy). Its picture is checked as the platform
+/// checks it before anything is sent, so a bad file changes nothing.
+/// Whether it asked for any change.
 fn agent_face(c: &api::Client, agent: &str, name: Option<&str>, picture: Option<&Path>, no_picture: bool) -> Result<bool> {
     let name = name.map(str::trim);
     if name.is_some_and(|n| n.is_empty() || n.chars().count() > fragment_proto::limits::TITLE_MAX_CHARS) {
         return Err(usage(format!("a name is 1 to {} characters", fragment_proto::limits::TITLE_MAX_CHARS)));
     }
-    // its picture read and checked before anything is written, so a bad
-    // file changes nothing: one of the four types, within a request's body
-    let picture = match picture {
+    let at = fragment_core::face::AGENT_PICTURE;
+    let write = match picture {
         Some(path) => {
             let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            if fragment_core::face::picture_type(&bytes).is_none() {
-                return Err(usage(fragment_core::face::Refused::NotAnImage.message(&path.display().to_string())));
-            }
-            if bytes.len() > fragment_proto::limits::BODY_MAX_BYTES {
-                return Err(usage(format!("{} is {} bytes; a picture is sent in at most {}: make it smaller", path.display(), bytes.len(), fragment_proto::limits::BODY_MAX_BYTES)));
-            }
-            Some(bytes)
+            fragment_core::face::check_picture(&bytes).map_err(|r| usage(r.message(&path.display().to_string())))?;
+            Some(json!({ "path": at, "base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes) }))
         }
+        None if no_picture => Some(json!({ "path": at, "delete": true })),
         None => None,
     };
-    let asked = name.is_some() || picture.is_some() || no_picture;
     if let Some(name) = name {
-        // its cell says its new name in its job as well (members.rs `face_put`)
         let change = fragment_proto::FaceChange { title: Some(name.to_string()), ..Default::default() };
         c.call_as::<Value>(c.put_json(&format!("/api/f/{agent}/face"), &change)?)?;
     }
-    let done = if name.is_some() { "its name was changed" } else { "nothing was changed" };
-    if let Some(bytes) = picture {
-        c.call_as::<Value>(c.put_bytes(&format!("/api/f/{agent}/icon"), bytes)?).with_context(|| format!("{done}; its picture was not"))?;
-    } else if no_picture {
-        c.call_as::<Value>(c.delete(&format!("/api/f/{agent}/icon"))?).with_context(|| format!("{done}; its picture stays"))?;
+    if let Some(write) = &write {
+        // one key a change: its retries commit nothing twice, and a later
+        // change back to this picture commits again
+        let key = format!("agent-picture-{:032x}", rand::random::<u128>());
+        let done = if name.is_some() { "its name was changed; its picture was not" } else { "its picture was not changed" };
+        c.call_as::<Value>(c.post_json(&format!("/api/f/{agent}/files"), &json!({ "files": [write], "message": "its picture", "key": key }))?).context(done)?;
     }
-    Ok(asked)
+    Ok(name.is_some() || write.is_some())
 }
 
 fn writer_id(c: &api::Client) -> String {
@@ -3311,8 +3306,9 @@ mod tests {
     /// Goal: `fragment agent` refuses what the platform would before
     /// anything is sent (the host here answers nothing), so a bad picture
     /// never leaves a rename half done: a blank name, one past 120
-    /// characters, a picture file that is no image, missing, or past a
-    /// request's body, each usage (exit 2) or an error, naming why.
+    /// characters, a picture file that is no image, missing, or past 256
+    /// KiB (`face::check_picture`), each usage (exit 2) or an error,
+    /// naming why.
     #[test]
     fn an_agents_name_and_picture_are_checked_before_anything_is_sent() {
         let c = api::Client::new("http://127.0.0.1:9", auth::fixed(7));
@@ -3326,8 +3322,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let (text, big) = (dir.join("me.txt"), dir.join("big.png"));
         std::fs::write(&text, "not a picture").unwrap();
-        std::fs::write(&big, [&b"\x89PNG"[..], &vec![0u8; fragment_proto::limits::BODY_MAX_BYTES]].concat()).unwrap();
-        for (file, said) in [(&text, "is not a picture"), (&big, "make it smaller")] {
+        std::fs::write(&big, [&b"\x89PNG"[..], &vec![0u8; fragment_proto::limits::PICTURE_MAX_BYTES]].concat()).unwrap();
+        for (file, said) in [(&text, "is not a picture"), (&big, "a picture is at most 262144")] {
             let err = agent_face(&c, "j--k3x9", Some("Frank"), Some(file), false).unwrap_err();
             assert_eq!(classify_err(&err), Code::InvalidUsage, "{}", file.display());
             assert!(err.to_string().contains(&file.display().to_string()) && err.to_string().contains(said), "{err}");

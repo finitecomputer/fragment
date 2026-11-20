@@ -583,7 +583,7 @@ out. A fragment the signer holds a role on: a row of `GET /api/fragments` (and o
 | `listed` | `array` of [`ListedRecord`](#listedrecord) | optional | What its members are doing, as its channels that declare `listed` last said (each member's newest such record, the newest first, at most `limits::LISTED_POSTERS_MAX`): only those of channels this row's role may read; none when there are none. |
 | `name` | `string` | required |  |
 | `owned` | `boolean` | optional | An agent's list `for` someone: whether that someone owns it (beside the role the agent acts with there), as no name says any more. |
-| `picture` | `string` or `null` | optional | Its picture, its icon, as the address on the platform that serves it: an agent fragment's at its agent's identity's (`/api/identities/<npub>/picture?v=…`), any other's at its own (`/api/f/<name>/icon?v=…`, docs/api.md, Icons). |
+| `picture` | `string` or `null` | optional | Its picture, as the address on the platform that serves it: an agent fragment's `avatar.png` at main (its agent's identity's `/api/identities/<npub>/picture?v=…`), any other's icon (`/api/f/<name>/icon?v=…`, docs/api.md, Icons). |
 | `pinned` | `boolean` | optional | The signer pinned it: their own view, not the fragment's (`PUT /api/fragments/{name}/pinned`; the shell's sidebar shows it first in its section). Left out while false, so a row from an older platform reads as not pinned. |
 | `preview` | `string` or `null` | optional | A chat's newest message, its first line (at most `limits::LISTED_PREVIEW_MAX_BYTES`), as the signer's search holds it (none when it holds none: docs/api.md, Search). |
 | `previewAt` | `integer` or `null` | optional | With `preview`: when its message was said (ms), so a list can put its chats newest first. |

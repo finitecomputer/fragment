@@ -1127,8 +1127,9 @@ read whatever it can read (as a viewer), but you never act through it.
 fragment members add my-thing <agent id> --role editor   # now it can call my-thing's operations
 ```
 
-An agent's name and picture are its agent fragment's face: its title and
-its icon. Every page shows the agent by them (your shell, its chats, the
+An agent's name is its agent fragment's own title, and its picture that
+fragment's `avatar.png` (a PNG, JPEG, WebP or GIF of at most 256 KiB) on
+main. Every page shows the agent by them (your shell, its chats, the
 share sheet, push notifications), and so does its runtime (its teammates
 are told it), within seconds of a change:
 
@@ -1138,12 +1139,12 @@ fragment agent juniper--k3x9 --picture frank.jpg   # its picture (--no-picture t
 fragment agent juniper--k3x9                       # what they are now
 ```
 
-`fragment agent` sets them at once, deploying nothing; an agent on a
-computer leaves its own name out. A new name is said in its job too
-(`SOUL.md`), in a commit beside it, wherever the job said its old one as
-a word. A picture (a PNG, JPEG, WebP or GIF of at most 256 KiB) is kept
-as it is; a larger image is cropped to a square; a file that is no
-picture is refused. Its `fragment.json` and an `avatar.png` name neither.
+`fragment agent` sets them at once, deploying nothing: its name, and its
+picture as a commit to main; an agent on a computer leaves its own name
+out. A new name is said in its job too (`SOUL.md`), in a commit beside
+it, wherever the job said its old one as a word. A picture too large or
+that is no picture is refused before anything is written; one committed
+by hand is shown as none, and `fragment events` says why.
 Its `@name`, the word that mentions it, stays its label. Its runtime's
 own files (Hermes' `profile.yaml`) are written from its name: never edit
 them to rename it.

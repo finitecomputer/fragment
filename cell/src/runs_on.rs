@@ -8,8 +8,9 @@
 //! - **A wake subscription** (`{channel, wake: true}` from a computer's
 //!   guest, which only its egress can ask for) is a subscription whose URL
 //!   is `computer:<id>`: each new record on the channel wakes it, and the
-//!   guest reads the channel itself. A page opening the fragment, which a
-//!   computer may be about to hear from, wakes it early (a pre-wake).
+//!   guest reads the channel itself. A page opening the fragment, or
+//!   anything its presence says, wakes none: a page acts on its own, and
+//!   only its person's shell pre-wakes their computer (docs/computers.md).
 //! - **An agent added as a member** (Paul, 2026-10-03: agents are woken
 //!   eagerly, and no template must remember a convention): the platform
 //!   tells its agent, and the agent its computer. The membership's write
@@ -25,10 +26,9 @@
 
 use fragment_core::grants::Grants;
 use fragment_core::{connectors::Action, door, npub};
-use fragment_proto::{limits, valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
+use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
@@ -37,8 +37,6 @@ use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 use crate::registry::calls::{self, By};
 
-/// At most one pre-wake a computer from one fragment this often.
-const PREWAKE_EVERY_MS: i64 = 30_000;
 /// The agent fragment's channel its computer follows for its routines and
 /// its new fragments (docs/chat-records.md, `tasks`).
 pub(crate) const TASKS: &str = "tasks";
@@ -107,84 +105,22 @@ impl FragmentCell {
         policy.authorize(&owner, &agent, door, action).map_err(|why| CellError::new(ErrorCode::Forbidden, format!("door {door} {why}")))
     }
 
-    /// `calls::Picture`: an agent's picture, for `GET
-    /// /api/identities/<npub>/picture`: its own icon (icon.rs), its bytes
-    /// as kept. One kept before its picture was its icon is taken first
-    /// (`take_picture`). Only this life's agent's, while it is an agent:
-    /// any other fragment's icon is its viewers' alone (an app a computer
-    /// once ran, a name made again since, a kind changed since).
-    pub(crate) async fn picture(&self, identity: &str) -> CellResult<Response> {
+    /// `calls::Picture`: an agent fragment's picture, for `GET
+    /// /api/identities/<npub>/picture`: its bytes from the commit live's
+    /// install checked them at (`MetaKey::Picture`: `<sha256> <type>
+    /// <commit>`), so a later commit never serves bytes no install checked.
+    pub(crate) async fn picture(&self) -> CellResult<Response> {
         let none = || CellError::new(ErrorCode::NotFound, "this agent has no picture");
         self.must(MetaKey::CreatedAt).map_err(|_| none())?;
-        let agent = || -> CellResult<bool> { Ok(self.meta(MetaKey::AgentIdentity)?.as_deref() == Some(identity) && self.face_now()?.kind == fragment_proto::FragmentKind::Agent) };
-        if !agent()? {
-            return Err(none());
-        }
-        self.take_picture().await?;
-        // asked again after the await, with the icon read in the same turn:
-        // a deploy or a life made again meanwhile shows none
-        if !agent()? {
-            return Err(none());
-        }
-        let sha = self.meta(MetaKey::Icon)?.ok_or_else(none)?;
-        let mut resp = self.icon_body(&crate::icon::Shown::Own(sha)).await?;
-        let h = resp.headers_mut();
-        h.set("cache-control", "public, max-age=300")?;
-        h.set("x-content-type-options", "nosniff")?;
-        Ok(resp)
-    }
-
-    /// An agent's picture as a release before kept it, until taken
-    /// (`MetaKey::Picture`: `<sha256> <type> <commit>`, its `avatar.png`
-    /// at that commit, which that install checked).
-    pub(crate) fn picture_untaken(&self) -> CellResult<Option<(String, String, String)>> {
-        let Some(stored) = self.meta(MetaKey::Picture)? else { return Ok(None) };
-        match stored.splitn(3, ' ').collect::<Vec<_>>()[..] {
-            [sha, mime, commit] if fragment_core::blob::valid_sha(sha) => Ok(Some((sha.into(), mime.into(), commit.into()))),
-            _ => Err(CellError::host(format!("its stored picture {stored:?} is not `<sha256> <type> <commit>`"))),
-        }
-    }
-
-    /// Takes an agent's picture kept as a release before kept it, once:
-    /// its bytes, read at the commit its install checked, kept as one of
-    /// its blobs and named as its icon, its row gone, an `events` row
-    /// saying so; its face's address names the same bytes, so it does not
-    /// move. Asked by its picture's fetch and by the alarm's daily pass, so
-    /// every row is taken within a day of this release (the debt ledger).
-    /// Asked twice at once, or again after a restart cut it short, it takes
-    /// it once: a blob is put by its hash, and the row is read again,
-    /// unchanged, after the awaits. Bytes git no longer holds as checked
-    /// are said and let go: there is nothing else to take. A fragment no
-    /// longer an agent lets its row go, as the release before's install of
-    /// any other kind did: its picture is its icon, never that avatar.
-    pub(crate) async fn take_picture(&self) -> CellResult<()> {
-        let Some(untaken) = self.picture_untaken()? else { return Ok(()) };
-        if self.face_now()?.kind != fragment_proto::FragmentKind::Agent {
-            return self.del_meta(MetaKey::Picture);
-        }
-        let (sha, mime, commit) = &untaken;
-        let read = self.cs()?.read(&self.must(MetaKey::Repo)?, commit, fragment_core::face::AGENT_PICTURE, limits::PICTURE_MAX_BYTES).await?;
-        let kept = read.filter(|b| hex::encode(Sha256::digest(b)) == *sha && fragment_core::blob::served_type(mime) == Some(mime.as_str()));
-        let found = kept.is_some();
-        if let Some(bytes) = kept {
-            self.put_blob_typed(sha, bytes, Some(mime)).await?;
-        }
-        // taken meanwhile (another ask, a new icon or none), or no agent
-        // since (its next take lets the row go): nothing more
-        if self.picture_untaken()?.as_ref() != Some(&untaken) || self.face_now()?.kind != fragment_proto::FragmentKind::Agent {
-            return Ok(());
-        }
-        self.del_meta(MetaKey::Picture)?;
-        if !found {
-            self.event("picture.lost", "its avatar.png from before its picture was its icon is no longer in git as checked: it has no picture", json!({ "sha256": sha, "commit": commit }));
-            let now = self.face_now()?;
-            return self.face_is(now.kind, now.title.as_deref(), now.role.as_deref());
-        }
-        // its picture, whatever icon it kept from before it was an agent
-        // (one set since would have let the row go: icon.rs `show_icon`)
-        self.set_meta(MetaKey::Icon, sha)?;
-        self.event("picture.taken", "its picture is its icon now, taken from its avatar.png", json!({ "sha256": sha, "commit": commit }));
-        Ok(())
+        let stored = self.meta(MetaKey::Picture)?.ok_or_else(none)?;
+        let [_, mime, commit] = stored.splitn(3, ' ').collect::<Vec<_>>()[..] else { return Err(CellError::host(format!("its stored picture {stored:?} is not `<sha256> <type> <commit>`"))) };
+        let upstream = self.cs()?.stream(&self.must(MetaKey::Repo)?, commit, fragment_core::face::AGENT_PICTURE).await?;
+        let headers = Headers::new();
+        headers.set("content-type", mime)?;
+        headers.set("cache-control", "public, max-age=300")?;
+        headers.set("x-content-type-options", "nosniff")?;
+        let (_, body) = upstream.into_parts();
+        Ok(Response::from_body(body)?.with_headers(headers))
     }
 
     /// `computer/grants`: what this agent may use of its owner's
@@ -509,7 +445,7 @@ impl FragmentCell {
     /// Sends the due notices, oldest first: each agent's own fragment (as
     /// the registry names it, one ask a flush) posts `joined` and names the
     /// computer it runs on, which is then woken on its own, so the member's
-    /// change never waits for a start (as a pre-wake does not). A row goes
+    /// change never waits for a start. A row goes
     /// once the agent answered, or for good when trying again cannot help
     /// (the agent runs nowhere, or is gone); a passing failure waits,
     /// doubling, and after its last try goes with an event (never
@@ -622,43 +558,5 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Forbidden, "this agent does not run on that computer"));
         }
         Ok(())
-    }
-
-    /// The computers `principal`'s socket on this fragment pre-wakes: those
-    /// its channels wake, but none that `principal`'s own wake subscriptions
-    /// name (`fragment_core::computer::prewoken`; at most `SUBS_MAX` rows).
-    pub(crate) fn woken_computers(&self, principal: &str) -> CellResult<Vec<String>> {
-        let rows = self.rows("SELECT principal, url FROM subs WHERE url LIKE 'computer:%' ORDER BY id", vec![])?;
-        let subs: Vec<(&str, &str)> = rows.iter().filter_map(|r| Some((r["principal"].as_str()?, r["url"].as_str()?))).collect();
-        Ok(fragment_core::computer::prewoken(&subs, principal).into_iter().map(|u| format!("computer:{}", u.trim_start_matches("computer:"))).collect())
-    }
-
-    /// A page opened this fragment (`principal`'s socket): the computers its
-    /// channels wake may hear from it soon, so each starts now (decision 39),
-    /// at most every `PREWAKE_EVERY_MS`. Each wake runs on its own, so the
-    /// page's socket never waits for a start; a failed pre-wake costs only
-    /// the wait. An agent's own socket (its guest following this fragment,
-    /// opened as it boots and again after one drops) pre-wakes no computer
-    /// it runs on: one opened as that computer goes to sleep would start it
-    /// again at once.
-    pub(crate) fn prewake(&self, principal: &str) {
-        let now = crate::js::now_ms();
-        let due = self.meta(MetaKey::PrewakeAt).ok().flatten().and_then(|v| v.parse::<i64>().ok()).is_none_or(|at| now >= at);
-        if !due {
-            return;
-        }
-        let Ok(computers) = self.woken_computers(principal) else { return };
-        if computers.is_empty() {
-            return;
-        }
-        let _ = self.set_meta(MetaKey::PrewakeAt, &(now + PREWAKE_EVERY_MS).to_string());
-        for c in computers {
-            let env = self.env.clone();
-            worker::wasm_bindgen_futures::spawn_local(async move {
-                if let Err(e) = crate::computer::ask(&env, &c, "computer/wake", &json!({ "why": "presence" })).await {
-                    console_log!("{{\"fragment\":\"prewake\",\"computer\":{},\"error\":{}}}", json!(c), json!(e.message));
-                }
-            });
-        }
     }
 }
